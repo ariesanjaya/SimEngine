@@ -45,22 +45,36 @@ public:
         }
     }
 
-    TextureHandle Request(const Uuid& guid, const std::filesystem::path& path) override {
+    TextureHandle Request(const Uuid& guid, const std::filesystem::path& path,
+                          uint64_t contentTag) override {
         const auto it = entries_.find(guid);
         if (it != entries_.end()) {
+            // Isi berkasnya berganti sejak terakhir didekode: jadwalkan ulang,
+            // tapi tetap kembalikan gambar lama sampai yang baru siap.
+            if (it->second.tag != contentTag && !it->second.refreshing) {
+                it->second.refreshing = true;
+                Schedule(guid, path, contentTag);
+            }
             return it->second.handle;
         }
 
         // Dicatat sebagai "sedang dikerjakan" sebelum tugasnya diantre, supaya
         // permintaan di frame berikutnya tidak menjadwalkan pekerjaan yang sama
         // berulang kali selama gambarnya belum datang.
-        entries_.emplace(guid, Entry{});
-        tasks_.Submit([this, guid, path]() {
+        Entry entry;
+        entry.tag = contentTag;
+        entry.refreshing = true;
+        entries_.emplace(guid, std::move(entry));
+        Schedule(guid, path, contentTag);
+        return kInvalidTexture;
+    }
+
+    void Schedule(const Uuid& guid, const std::filesystem::path& path, uint64_t contentTag) {
+        tasks_.Submit([this, guid, path, contentTag]() {
             assets::ThumbnailImage image = assets::MakeThumbnail(path, cacheDir_, size_);
             const std::lock_guard<std::mutex> lock(readyMutex_);
-            ready_.push_back({guid, std::move(image)});
+            ready_.push_back({guid, contentTag, std::move(image)});
         });
-        return kInvalidTexture;
     }
 
     void Update() override {
@@ -79,9 +93,10 @@ public:
             if (it == entries_.end()) {
                 continue;
             }
-            // Berkas yang bukan gambar tetap disimpan sebagai entri kosong.
-            // Tanpa itu, setiap frame akan menjadwalkan dekode ulang untuk
-            // berkas yang sudah pasti gagal.
+            it->second.refreshing = false;
+            // Tag dicatat walau dekodenya gagal. Berkas yang bukan gambar tidak
+            // boleh dijadwalkan ulang tiap frame hanya untuk gagal lagi.
+            it->second.tag = decoded.tag;
             if (!decoded.image.IsValid()) {
                 continue;
             }
@@ -89,6 +104,11 @@ public:
             if (!texture.CreateFromRgba(device_, decoded.image.width, decoded.image.height,
                                         decoded.image.rgba.data())) {
                 continue;
+            }
+            // Handle lama dilepas setelah yang baru dibuat, bukan sebelumnya:
+            // di antara keduanya panel masih menggambar dengan yang lama.
+            if (it->second.handle != kInvalidTexture) {
+                textures_.Release(it->second.handle);
             }
             it->second.handle = textures_.Acquire(texture.View(), texture.Sampler());
             it->second.texture = std::move(texture);
@@ -101,9 +121,12 @@ private:
     struct Entry {
         rhi::Texture2D texture;
         TextureHandle handle = kInvalidTexture;
+        uint64_t tag = 0;
+        bool refreshing = false;
     };
     struct Decoded {
         Uuid guid;
+        uint64_t tag = 0;
         assets::ThumbnailImage image;
     };
 

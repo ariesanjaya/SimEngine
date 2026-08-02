@@ -419,8 +419,12 @@ private:
         if (!HasPreview(context, record)) {
             return;
         }
+        // Penanda isi: ukuran dan waktu ubah. Cukup untuk menyadari berkasnya
+        // ditimpa dari luar editor, tanpa perlu membaca isinya lagi di sini.
+        const uint64_t contentTag = (static_cast<uint64_t>(record.fileSize) * 1099511628211ull) ^
+                                    static_cast<uint64_t>(record.modifiedSeconds);
         const render::TextureHandle handle =
-            context.thumbnails->Request(record.guid, db.AbsolutePath(record));
+            context.thumbnails->Request(record.guid, db.AbsolutePath(record), contentTag);
         if (handle == render::kInvalidTexture) {
             // Belum siap: ikon tipe tetap digambar sebagai pengganti, sehingga
             // grid tidak berkedip antara kosong dan terisi.

@@ -30,7 +30,17 @@ public:
     /// Panggilan pertama menjadwalkan pembuatannya di thread latar dan langsung
     /// kembali — panel menggambar ikon pengganti sampai gambarnya datang. Aman
     /// dipanggil tiap frame untuk aset yang sama.
-    virtual TextureHandle Request(const Uuid& guid, const std::filesystem::path& path) = 0;
+    ///
+    /// `contentTag` harus berubah ketika ISI berkasnya berubah. GUID saja tidak
+    /// cukup, dan justru tidak boleh cukup: GUID sengaja bertahan saat berkas
+    /// diganti nama maupun ditimpa, sehingga cache yang berkunci GUID saja akan
+    /// terus menampilkan gambar lama selamanya. Nilai yang wajar adalah campuran
+    /// ukuran dan waktu ubah berkas.
+    ///
+    /// Selama gambar baru sedang didekode, handle LAMA tetap dikembalikan —
+    /// mengosongkannya lebih dulu hanya menghasilkan kedipan.
+    virtual TextureHandle Request(const Uuid& guid, const std::filesystem::path& path,
+                                  uint64_t contentTag) = 0;
 
     /// Mengunggah thumbnail yang sudah selesai didekode. Dipanggil sekali per
     /// frame dari main thread — unggahan Vulkan tidak boleh dari thread lain.
