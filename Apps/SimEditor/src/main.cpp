@@ -229,12 +229,15 @@ int main(int /*argc*/, char** /*argv*/) {
         while (SDL_PollEvent(&event)) {
             imguiLayer.ProcessEvent(event);
             switch (event.type) {
+                // Menutup jendela adalah permintaan, bukan perintah: kalau ada
+                // perubahan yang belum disimpan, editor bertanya lebih dulu.
+                // Jalur keluar hanya satu, lewat EditorApp.
                 case SDL_EVENT_QUIT:
-                    running = false;
+                    app.RequestExit();
                     break;
                 case SDL_EVENT_WINDOW_CLOSE_REQUESTED:
                     if (event.window.windowID == window.Id()) {
-                        running = false;
+                        app.RequestExit();
                     }
                     break;
                 case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:

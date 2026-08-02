@@ -262,10 +262,29 @@ PropertyGridResult DrawField(const FieldDesc& field, void* object) {
     return result;
 }
 
-PropertyGridResult DrawProperties(const reflect::TypeDesc& type, void* object) {
+PropertyGridResult DrawProperties(const reflect::TypeDesc& type, void* object,
+                                  std::span<const std::string> mixedFields) {
     PropertyGridResult result;
     for (const FieldDesc& field : type.fields) {
+        const bool mixed =
+            std::find(mixedFields.begin(), mixedFields.end(), field.name) != mixedFields.end();
+
+        // Field bernilai campuran ditulis redup dan diberi keterangan "—".
+        // Nilainya sendiri tetap ditampilkan dan tetap bisa disunting: yang
+        // perlu diberitahu adalah bahwa angka itu belum berlaku untuk semua.
+        if (mixed) {
+            ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.6f);
+        }
         const PropertyGridResult single = DrawField(field, object);
+        if (mixed) {
+            ImGui::PopStyleVar();
+            ImGui::SameLine();
+            ImGui::TextDisabled("—");
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
+                ImGui::SetTooltip("Different values across the selection");
+            }
+        }
+
         result.edited |= single.edited;
         result.finished |= single.finished;
     }

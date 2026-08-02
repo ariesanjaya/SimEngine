@@ -74,4 +74,23 @@ std::string SerializeComponent(const reflect::TypeDesc& type, const void* compon
 void DeserializeComponent(const reflect::TypeDesc& type, void* component,
                           const std::string& text);
 
+/// Nama field yang berbeda antara dua cuplikan komponen.
+///
+/// Dipakai penyuntingan banyak objek sekaligus: Inspector perlu tahu field mana
+/// yang baru saja diubah pengguna agar hanya field itu yang diteruskan ke objek
+/// lain — menyalin seluruh komponen akan menyeragamkan nilai yang tidak pernah
+/// disentuh.
+std::vector<std::string> DiffComponentFields(const std::string& first, const std::string& second);
+
+/// Menyalin sebagian field dari `source` ke atas `target`.
+std::string MergeComponentFields(const std::string& target, const std::string& source,
+                                 const std::vector<std::string>& fields);
+
+/// True bila `text` masuk akal sebagai cuplikan komponen bertipe `type`.
+///
+/// Dipakai menu Paste untuk menonaktifkan dirinya ketika papan klip berisi teks
+/// lain. Mencoba lalu gagal diam-diam lebih membingungkan daripada menu yang
+/// jujur terlihat tidak tersedia.
+bool IsComponentSnapshot(const reflect::TypeDesc& type, const std::string& text);
+
 }  // namespace sim::scene

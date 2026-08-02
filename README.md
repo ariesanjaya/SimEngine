@@ -15,7 +15,8 @@ konsekuensinya ada di [docs/ROADMAP.md](docs/ROADMAP.md).
 | E1 | Platform SDL3, RHI Vulkan, shell ImGui docking/multi-monitor | ✅ |
 | E2 | Editor framework: command/undo, seleksi, shortcut, widget | ✅ |
 | E3 | Reflection, scene EnTT, serialisasi `.simlevel`, prefab, project | ✅ |
-| E4–E7 | Level editor, asset browser, Lua, editor khusus | ⏳ |
+| E4 | Level editor: gizmo, picking, box-select, outliner, multi-edit | ✅ |
+| E5–E7 | Asset browser, Lua, editor khusus | ⏳ |
 | A0–A4 | Engine sebagai MCP server untuk agentic AI | ⏳ |
 | E8–E9 | Renderer PBR, runtime, packaging | ⏳ |
 
@@ -65,7 +66,25 @@ Hapus `layout.ini` untuk kembali ke tata letak bawaan (atau **View → Reset Lay
 | Terbang | **tahan klik kanan** lalu **W/A/S/D**, **Q/E** turun-naik |
 | Kecepatan terbang | **roda** sambil klik kanan ditahan |
 | Cepat / pelan | **Shift** (4×) / **Ctrl** (¼×) sambil terbang |
-| Kembali ke titik asal | **F** |
+| Focus ke seleksi | **F** |
+| Pilih objek | **klik kiri** |
+| Tambah / kurangi seleksi | **Ctrl** atau **Shift** + klik |
+| Seleksi kotak | **drag kiri** di ruang kosong |
+| Alat: pilih / pindah / putar / skala | **Q** / **W** / **E** / **R** |
+| Ruang world ↔ local | **X** |
+| Snapping | tombol magnet di bilah kiri; **klik kanan** padanya untuk mengatur kelipatan |
+
+Menyeret gizmo — berapa pun frame yang dilaluinya — menghasilkan **tepat satu
+entri undo**. Dengan snapping menyala, yang dibulatkan adalah nilai akhirnya,
+bukan selisih seretan, sehingga hasilnya selalu kelipatan persis dan galat tidak
+pernah menumpuk. Hanya sumbu yang benar-benar digerakkan yang dibulatkan.
+
+### Menyunting banyak objek sekaligus
+
+Inspector menampilkan komponen yang dimiliki **seluruh** seleksi. Field yang
+nilainya berbeda antar objek ditandai `—`; menyuntingnya berlaku untuk semuanya,
+tetapi hanya field yang benar-benar disentuh yang ikut berubah — sepuluh lampu
+berwarna berbeda tetap berbeda warnanya ketika intensitasnya diseragamkan.
 
 Viewport terkunci di dockspace dan tidak bisa dilepas menjadi jendela tersendiri.
 Panel yang dilepas mendapat swapchain dan present sendiri; untuk gambar seukuran

@@ -39,7 +39,12 @@ public:
     void DrawFrame(float deltaSeconds);
 
     bool WantsExit() const { return wantsExit_; }
-    void RequestExit() { wantsExit_ = true; }
+
+    /// Meminta editor berhenti. Bila ada perubahan yang belum disimpan, sebuah
+    /// dialog muncul lebih dulu dan WantsExit() tetap false sampai pengguna
+    /// memilih. Inilah satu-satunya jalur keluar, termasuk untuk tombol tutup
+    /// jendela — kalau ada jalur lain, akan ada cara kehilangan pekerjaan.
+    void RequestExit() { exitRequested_ = true; }
 
     /// Judul jendela, ikut menandai perubahan yang belum disimpan.
     std::string WindowTitle() const;
@@ -65,6 +70,11 @@ private:
     void InstallCrashHandler();
     void CreateEntityAction();
     void DeleteSelectionAction();
+    void DuplicateSelectionAction();
+    void PasteAction(bool asChild);
+
+    /// GUID entity terpilih yang leluhurnya tidak ikut terpilih.
+    std::vector<Uuid> SelectedRoots() const;
 
     // Urutan deklarasi menentukan urutan penghancuran (terbalik). panels_
     // dideklarasikan sebelum history_ supaya history — yang command-nya bisa
@@ -78,8 +88,26 @@ private:
     EditorShell shell_;
     EditorContext context_;
 
+    /// Sub-pohon hasil Copy, dalam format teks level. Disimpan di sini dan
+    /// bukan di papan klip sistem: papan klip sistem berisi teks, dan menempel
+    /// level ke dalam editor teks lain (atau sebaliknya) bukan alur yang
+    /// diinginkan siapa pun.
+    std::vector<std::string> clipboard_;
+
+    enum class Dialog { None, SaveAs, Open };
+
+    void DrawLevelDialogs();
+    void DrawExitPrompt();
+    void UpdateAutosave(float deltaSeconds);
+
+    std::string saveAsName_;
+    Dialog pendingDialog_ = Dialog::None;
+    bool focusSaveAsField_ = false;
+
     std::filesystem::path configDir_;
     std::filesystem::path levelPath_;
+    float autosaveTimer_ = 0.0f;
+    bool exitRequested_ = false;
     bool wantsExit_ = false;
     bool initialized_ = false;
 };

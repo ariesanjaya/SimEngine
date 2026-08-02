@@ -62,7 +62,7 @@ belum PBR.
 | E1 | Platform (SDL3) + RHI minimal (Vulkan) + shell ImGui docking/multi-monitor | ✅ |
 | E2 | Editor framework: panel, layout, command/undo, seleksi, shortcut, console | ✅ |
 | E3 | Reflection + scene model (EnTT) + serialisasi + project system | ✅ |
-| E4 | **Level Editor**: outliner, inspector, viewport, gizmo, picking, prefab | ⏳ |
+| E4 | **Level Editor**: outliner, inspector, viewport, gizmo, picking, prefab | ✅ |
 | E5 | **Asset Browser** + asset database (GUID, .meta, thumbnail, import) | ⏳ |
 | E6 | Runtime Lua: sol2, script component, hot reload, konsol REPL, editor scripting | ⏳ |
 | E7 | **Material / Particle / Terrain / Vegetation / Animation Editor** | ⏳ |

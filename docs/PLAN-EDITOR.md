@@ -356,6 +356,41 @@ hapus — semuanya bisa di-undo dan tersimpan.
 4. Picking akurat pada objek yang saling menutupi; box-select memilih apa yang di dalam kotak.
 5. Snapping menghasilkan nilai yang persis kelipatan (tidak ada error akumulasi float).
 
+**Yang berbeda dari rencana**
+
+- **Ikon entity tidak digambar renderer.** Rencana awal menaruh `BillboardIcon`
+  di `ViewportScene`. Itu memaksa renderer mengenali tipe komponen untuk memilih
+  gambar — "entity ini lampu, jadi gambarkan bohlam" adalah pengetahuan editor.
+  Ikon sekarang digambar panel sebagai glyph dari font ikon yang sudah dimuat:
+  tajam di skala DPI mana pun, nol aset tambahan, dan ikonnya sama persis dengan
+  yang dipakai Outliner untuk entity yang sama. `BillboardIcon` dihapus dari
+  antarmuka renderer.
+- **Snapping tidak diserahkan ke ImGuizmo.** Pustaka itu membulatkan *selisih*
+  seretan, sehingga objek yang posisi awalnya bukan kelipatan akan tetap bukan
+  kelipatan selamanya dan sisa pecahannya menumpuk. Pembungkus kita membulatkan
+  nilai akhirnya, dan hanya pada sumbu yang benar-benar digerakkan — membulatkan
+  ketiganya akan melompatkan Y dan Z ketika pengguna hanya menggeser X.
+- **`Device::SubmitTransient` mengembalikan nomor submit, bukan fence.** Fence
+  milik Device didaur ulang; pemanggil yang menyimpannya untuk ditunggu belakangan
+  bisa menunggu submit yang justru sedang direkam saat itu — dan editor menggantung.
+  Nomor submit tidak pernah dipakai ulang.
+- **Open dan Save As memakai daftar berkas sendiri, bukan dialog OS.** Menambah
+  pustaka dialog berkas sekarang berarti satu dependensi untuk sesuatu yang akan
+  digantikan Asset Browser di E5. Sementara ini level dipilih dari folder editor.
+- **Prefab: instansiasi dan "Save as Prefab" ada; override per-field belum.**
+  Penanda override dan "revert to prefab" butuh konsep aset dengan identitas
+  stabil, yang baru lahir di E5. Dipindahkan ke sana.
+
+**Bukti kriteria terima**
+
+| # | Bukti |
+|---|---|
+| 1 | `LevelEditorTests`: 17 entity, hierarki 3 tingkat, simpan→muat→simpan byte-identik |
+| 2 | 40 frame seretan gizmo → 1 entri undo; diverifikasi juga lewat UI: seret sumbu Y, satu Ctrl+Z mengembalikannya |
+| 3 | 120 frame × 100 entity = **0,162 ms per frame** (1% dari anggaran 16,6 ms) |
+| 4 | Test ray-vs-AABB memilih kotak terdepan dan berbalik saat sinar dari arah lain; objek diputar 45° diklik tepat pada bentuknya, bukan AABB dunia. Box-select lewat UI memilih 5 dari 6 entity — yang di luar kotak tidak ikut |
+| 5 | Seret bersnap menghasilkan X = 2,5 persis sementara Y dan Z tak tersentuh; 100 langkah berturut-turut tetap kelipatan persis |
+
 ---
 
 ## E5 — Asset Browser + Asset Database · ~5 sesi

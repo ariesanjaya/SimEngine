@@ -5,6 +5,7 @@
 #include "Sim/Editor/PanelRegistry.h"
 #include "Sim/Editor/Notifications.h"
 #include "Sim/Editor/PropertyGrid.h"
+#include "Sim/Editor/SceneCommands.h"
 #include "Sim/Editor/Selection.h"
 #include "Sim/Editor/Widgets.h"
 #include "Sim/Scene/ComponentRegistry.h"
@@ -13,70 +14,13 @@
 
 #include <imgui.h>
 
+#include <algorithm>
 #include <string>
 #include <utility>
+#include <vector>
 
 namespace sim::editor {
 namespace {
-
-/// Undo untuk perubahan komponen apa pun.
-///
-/// Menyimpan cuplikan komponen sebagai JSON, bukan salinan byte: komponen memuat
-/// std::string dan std::vector, sehingga memcpy akan merusak. Harganya satu
-/// serialisasi kecil per suntingan, dan imbalannya nol command khusus per tipe —
-/// komponen baru langsung bisa di-undo tanpa satu baris pun ditambahkan di sini.
-class SetComponentCommand final : public ICommand {
-public:
-    SetComponentCommand(scene::World* world, scene::Entity entity, const scene::ComponentOps* ops,
-                        std::string before, std::string after)
-        : world_(world),
-          entity_(entity),
-          ops_(ops),
-          before_(std::move(before)),
-          after_(std::move(after)) {}
-
-    void Do() override { Apply(after_); }
-    void Undo() override { Apply(before_); }
-
-    std::string Name() const override {
-        return "Edit " + ops_->type->name + " on " + world_->NameOf(entity_);
-    }
-
-    bool MergeWith(const ICommand& next) override {
-        const auto* other = dynamic_cast<const SetComponentCommand*>(&next);
-        if (other == nullptr || other->world_ != world_ || other->entity_ != entity_ ||
-            other->ops_ != ops_) {
-            return false;
-        }
-        after_ = other->after_;
-        return true;
-    }
-
-    std::size_t MemoryCost() const override {
-        return sizeof(SetComponentCommand) + before_.capacity() + after_.capacity();
-    }
-
-private:
-    void Apply(const std::string& text) {
-        if (!world_->IsAlive(entity_)) {
-            return;
-        }
-        void* data = ops_->tryGet(world_->Registry(), scene::World::ToEntt(entity_));
-        if (data == nullptr) {
-            return;
-        }
-        scene::DeserializeComponent(*ops_->type, data, text);
-        // Transform yang berubah harus merambat ke keturunannya. Memanggilnya
-        // untuk komponen lain pun tidak berbahaya dan menghindari pengecualian.
-        world_->MarkTransformDirty(entity_);
-    }
-
-    scene::World* world_;
-    scene::Entity entity_;
-    const scene::ComponentOps* ops_;
-    std::string before_;
-    std::string after_;
-};
 
 class AddComponentCommand final : public ICommand {
 public:
@@ -130,27 +74,41 @@ public:
             ImGui::TextDisabled("Nothing selected.");
             return;
         }
-        if (selection->Count() > 1) {
-            // Penyuntingan banyak objek sekaligus masuk di E4 bersama gizmo,
-            // karena keduanya butuh keputusan yang sama soal nilai campuran.
-            ImGui::TextDisabled("%zu entities selected.", selection->Count());
-            ImGui::TextDisabled("Multi-edit arrives in E4.");
-            return;
+        // Entity terpilih yang masih hidup. Yang utama ditaruh di depan: ia
+        // yang datanya digambar, dan yang lain mengikuti suntingannya.
+        std::vector<scene::Entity> entities;
+        const scene::Entity primary = ToEntity(selection->Primary());
+        if (world->IsAlive(primary)) {
+            entities.push_back(primary);
         }
-
-        const scene::Entity entity = ToEntity(selection->Primary());
-        if (!world->IsAlive(entity)) {
+        for (const uint64_t id : selection->Items()) {
+            const scene::Entity entity = ToEntity(id);
+            if (entity != primary && world->IsAlive(entity)) {
+                entities.push_back(entity);
+            }
+        }
+        if (entities.empty()) {
             ImGui::TextDisabled("Selection no longer exists.");
             return;
         }
 
-        DrawHeader(context, *world, entity);
+        DrawHeader(context, *world, entities);
         ImGui::Separator();
-        DrawComponents(context, *world, entity);
+        DrawComponents(context, *world, entities);
     }
 
 private:
-    void DrawHeader(EditorContext& context, scene::World& world, scene::Entity entity) {
+    void DrawHeader(EditorContext& context, scene::World& world,
+                    const std::vector<scene::Entity>& entities) {
+        if (entities.size() > 1) {
+            ImGui::TextDisabled("%zu entities selected", entities.size());
+            ImGui::TextDisabled("Editing applies to all of them");
+            ImGui::Spacing();
+            DrawAddComponent(context, world, entities);
+            return;
+        }
+        const scene::Entity entity = entities.front();
+
         widgets::PropertyLabel("Entity ID", ImGui::GetFontSize() * 5.5f);
         const std::string guid = world.GuidOf(entity).ToString();
         ImGui::TextDisabled("%s", guid.c_str());
@@ -165,10 +123,11 @@ private:
         }
 
         ImGui::Spacing();
-        DrawAddComponent(context, world, entity);
+        DrawAddComponent(context, world, entities);
     }
 
-    void DrawAddComponent(EditorContext& context, scene::World& world, scene::Entity entity) {
+    void DrawAddComponent(EditorContext& context, scene::World& world,
+                          const std::vector<scene::Entity>& entities) {
         const std::string label = std::string(icons::kAdd) + "  Add Component";
         if (ImGui::Button(label.c_str(), ImVec2(-widgets::kPanelRightMargin, 0.0f))) {
             ImGui::OpenPopup("##addcomponent");
@@ -181,15 +140,25 @@ private:
             if (!ops.addable) {
                 continue;
             }
-            const bool present =
-                ops.tryGet(world.Registry(), scene::World::ToEntt(entity)) != nullptr;
-            if (present) {
+            // Ditawarkan bila ada satu saja entity terpilih yang belum
+            // memilikinya; yang sudah punya dilewati saat perintah dijalankan.
+            const bool anyMissing = std::any_of(
+                entities.begin(), entities.end(), [&](scene::Entity entity) {
+                    return ops.tryGet(world.Registry(), scene::World::ToEntt(entity)) == nullptr;
+                });
+            if (!anyMissing) {
                 continue;
             }
             anyAvailable = true;
             if (ImGui::MenuItem(ops.type->name.c_str()) && context.history != nullptr) {
                 context.history->CloseMergeGroup();
-                context.history->Execute<AddComponentCommand>(&world, entity, &ops);
+                context.history->BeginTransaction("Add " + ops.type->name);
+                for (const scene::Entity entity : entities) {
+                    if (ops.tryGet(world.Registry(), scene::World::ToEntt(entity)) == nullptr) {
+                        context.history->Execute<AddComponentCommand>(&world, entity, &ops);
+                    }
+                }
+                context.history->EndTransaction();
             }
         }
         if (!anyAvailable) {
@@ -198,30 +167,49 @@ private:
         ImGui::EndPopup();
     }
 
-    void DrawComponents(EditorContext& context, scene::World& world, scene::Entity entity) {
+    void DrawComponents(EditorContext& context, scene::World& world,
+                        const std::vector<scene::Entity>& entities) {
+        const scene::Entity primary = entities.front();
+
         for (const scene::ComponentOps& ops : scene::ComponentRegistry::Get().All()) {
-            void* data = ops.tryGet(world.Registry(), scene::World::ToEntt(entity));
+            void* data = ops.tryGet(world.Registry(), scene::World::ToEntt(primary));
             if (data == nullptr) {
                 continue;
             }
+            // Hanya komponen yang dimiliki seluruh seleksi yang ditampilkan.
+            // Menampilkan yang hanya dimiliki sebagian akan membuat suntingan
+            // diam-diam tidak berlaku untuk sebagian objek.
+            const bool sharedByAll =
+                std::all_of(entities.begin(), entities.end(), [&](scene::Entity entity) {
+                    return ops.tryGet(world.Registry(), scene::World::ToEntt(entity)) != nullptr;
+                });
+            if (!sharedByAll) {
+                continue;
+            }
+
             ImGui::PushID(ops.type->name.c_str());
 
+            // Cuplikan seluruh seleksi diambil sebelum widget menyentuh datanya,
+            // supaya command punya keadaan "sebelum" yang benar untuk setiap
+            // objek — bukan hanya untuk yang datanya kebetulan digambar.
+            std::vector<SetComponentsCommand::Item> items;
+            items.reserve(entities.size());
+            for (const scene::Entity entity : entities) {
+                void* other = ops.tryGet(world.Registry(), scene::World::ToEntt(entity));
+                items.push_back({world.GuidOf(entity), scene::SerializeComponent(*ops.type, other),
+                                 std::string{}});
+            }
+
+            const std::vector<std::string> mixed = MixedFields(items);
             const bool open = widgets::ComponentHeader(IconForComponent(ops.type->name),
                                                        ops.type->name.c_str());
-            DrawComponentMenu(context, world, entity, ops, data);
+            DrawComponentMenu(context, world, entities, ops, items);
 
             if (open) {
-                // Cuplikan diambil sebelum widget menyentuh datanya, supaya
-                // command punya keadaan "sebelum" yang benar.
-                const std::string before = scene::SerializeComponent(*ops.type, data);
-                const PropertyGridResult result = DrawProperties(*ops.type, data);
+                const PropertyGridResult result = DrawProperties(*ops.type, data, mixed);
 
                 if (result.edited && context.history != nullptr) {
-                    const std::string after = scene::SerializeComponent(*ops.type, data);
-                    if (after != before) {
-                        context.history->Execute<SetComponentCommand>(&world, entity, &ops, before,
-                                                                      after);
-                    }
+                    ApplyEdit(context, world, ops, items, data);
                 }
                 if (result.finished && context.history != nullptr) {
                     context.history->CloseMergeGroup();
@@ -231,20 +219,102 @@ private:
         }
     }
 
-    void DrawComponentMenu(EditorContext& context, scene::World& world, scene::Entity entity,
-                           const scene::ComponentOps& ops, void* data) {
-        if (!ops.removable) {
+    /// Field yang nilainya tidak seragam di seluruh seleksi.
+    static std::vector<std::string> MixedFields(
+        const std::vector<SetComponentsCommand::Item>& items) {
+        std::vector<std::string> mixed;
+        for (std::size_t i = 1; i < items.size(); ++i) {
+            for (const std::string& field :
+                 scene::DiffComponentFields(items.front().before, items[i].before)) {
+                if (std::find(mixed.begin(), mixed.end(), field) == mixed.end()) {
+                    mixed.push_back(field);
+                }
+            }
+        }
+        return mixed;
+    }
+
+    /// Meneruskan suntingan pada objek utama ke seluruh seleksi.
+    void ApplyEdit(EditorContext& context, scene::World& world, const scene::ComponentOps& ops,
+                   std::vector<SetComponentsCommand::Item>& items, void* primaryData) {
+        const std::string after = scene::SerializeComponent(*ops.type, primaryData);
+        // Hanya field yang benar-benar berubah yang diteruskan. Menyalin
+        // seluruh komponen akan menyeragamkan field yang tidak pernah
+        // disentuh — sepuluh lampu dengan warna berbeda akan mendadak seragam
+        // hanya karena intensitas salah satunya digeser.
+        const std::vector<std::string> changed =
+            scene::DiffComponentFields(items.front().before, after);
+        if (changed.empty()) {
             return;
         }
+
+        items.front().after = after;
+        for (std::size_t i = 1; i < items.size(); ++i) {
+            items[i].after = scene::MergeComponentFields(items[i].before, after, changed);
+        }
+        context.history->Execute<SetComponentsCommand>(&world, &ops, items);
+    }
+
+    void DrawComponentMenu(EditorContext& context, scene::World& world,
+                           const std::vector<scene::Entity>& entities,
+                           const scene::ComponentOps& ops,
+                           const std::vector<SetComponentsCommand::Item>& items) {
         if (!ImGui::BeginPopupContextItem("##componentmenu")) {
             return;
         }
-        if (ImGui::MenuItem("Remove") && context.history != nullptr) {
-            context.history->CloseMergeGroup();
-            context.history->Execute<RemoveComponentCommand>(
-                &world, entity, &ops, scene::SerializeComponent(*ops.type, data));
+        if (ImGui::MenuItem("Copy")) {
+            ImGui::SetClipboardText(items.front().before.c_str());
+            context.notifications->Info("Copied " + ops.type->name);
+        }
+        const char* clipboard = ImGui::GetClipboardText();
+        const bool pasteable =
+            clipboard != nullptr && scene::IsComponentSnapshot(*ops.type, clipboard);
+        if (ImGui::MenuItem("Paste", nullptr, false, pasteable)) {
+            PasteInto(context, world, ops, items, clipboard);
+        }
+        if (ImGui::MenuItem("Reset")) {
+            ResetToDefault(context, world, ops, items);
+        }
+        if (ops.removable) {
+            ImGui::Separator();
+            if (ImGui::MenuItem("Remove")) {
+                context.history->CloseMergeGroup();
+                context.history->BeginTransaction("Remove " + ops.type->name);
+                for (std::size_t i = 0; i < entities.size(); ++i) {
+                    context.history->Execute<RemoveComponentCommand>(&world, entities[i], &ops,
+                                                                     items[i].before);
+                }
+                context.history->EndTransaction();
+            }
         }
         ImGui::EndPopup();
+    }
+
+    void PasteInto(EditorContext& context, scene::World& world, const scene::ComponentOps& ops,
+                   std::vector<SetComponentsCommand::Item> items, const char* clipboard) {
+        for (auto& item : items) {
+            item.after = clipboard;
+        }
+        context.history->CloseMergeGroup();
+        context.history->Execute<SetComponentsCommand>(&world, &ops, std::move(items));
+    }
+
+    void ResetToDefault(EditorContext& context, scene::World& world,
+                        const scene::ComponentOps& ops,
+                        std::vector<SetComponentsCommand::Item> items) {
+        // Nilai bawaan diambil dari instance yang baru dibuat, bukan dari daftar
+        // konstanta terpisah: satu sumber kebenaran, dan mustahil basi ketika
+        // nilai awal di struct komponennya berubah.
+        scene::World scratch;
+        const scene::Entity temporary = scratch.Create("default");
+        void* fresh = ops.emplace(scratch.Registry(), scene::World::ToEntt(temporary));
+        const std::string defaults = scene::SerializeComponent(*ops.type, fresh);
+
+        for (auto& item : items) {
+            item.after = defaults;
+        }
+        context.history->CloseMergeGroup();
+        context.history->Execute<SetComponentsCommand>(&world, &ops, std::move(items));
     }
 
     static const char* IconForComponent(const std::string& name) {

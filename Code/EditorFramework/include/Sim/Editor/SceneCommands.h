@@ -2,6 +2,7 @@
 
 #include "Sim/Core/Uuid.h"
 #include "Sim/Editor/Command.h"
+#include "Sim/Scene/ComponentRegistry.h"
 #include "Sim/Scene/Components.h"
 #include "Sim/Scene/World.h"
 
@@ -45,6 +46,37 @@ private:
     scene::World* world_;
     std::vector<Item> items_;
     std::string label_;
+};
+
+/// Menyunting satu jenis komponen pada sejumlah entity sekaligus.
+///
+/// Dipakai Inspector untuk seleksi tunggal maupun jamak — satu jalur kode, jadi
+/// perilaku undo-nya tidak mungkin berbeda antara keduanya. Nilai disimpan
+/// sebagai cuplikan JSON, bukan salinan byte, karena komponen memuat std::string
+/// dan std::vector.
+class SetComponentsCommand final : public ICommand {
+public:
+    struct Item {
+        Uuid guid;
+        std::string before;
+        std::string after;
+    };
+
+    SetComponentsCommand(scene::World* world, const scene::ComponentOps* ops,
+                         std::vector<Item> items);
+
+    void Do() override;
+    void Undo() override;
+    std::string Name() const override;
+    bool MergeWith(const ICommand& next) override;
+    std::size_t MemoryCost() const override;
+
+private:
+    void Apply(bool useAfter);
+
+    scene::World* world_;
+    const scene::ComponentOps* ops_;
+    std::vector<Item> items_;
 };
 
 class RenameEntityCommand final : public ICommand {

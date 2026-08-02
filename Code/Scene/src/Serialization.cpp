@@ -450,6 +450,76 @@ LevelIoResult LoadLevelFromFile(World& world, const std::filesystem::path& path)
     return LoadLevelFromString(world, buffer.str());
 }
 
+std::vector<std::string> DiffComponentFields(const std::string& first, const std::string& second) {
+    std::vector<std::string> different;
+    Json a;
+    Json b;
+    try {
+        a = Json::parse(first);
+        b = Json::parse(second);
+    } catch (const nlohmann::json::exception&) {
+        return different;
+    }
+    if (!a.is_object() || !b.is_object()) {
+        return different;
+    }
+    for (auto it = a.begin(); it != a.end(); ++it) {
+        const auto other = b.find(it.key());
+        if (other == b.end() || *other != it.value()) {
+            different.push_back(it.key());
+        }
+    }
+    // Field yang hanya ada di salah satu cuplikan juga terhitung berbeda —
+    // bisa terjadi bila komponennya ditulis oleh versi skema yang berbeda.
+    for (auto it = b.begin(); it != b.end(); ++it) {
+        if (a.find(it.key()) == a.end()) {
+            different.push_back(it.key());
+        }
+    }
+    return different;
+}
+
+std::string MergeComponentFields(const std::string& target, const std::string& source,
+                                 const std::vector<std::string>& fields) {
+    Json result;
+    Json from;
+    try {
+        result = Json::parse(target);
+        from = Json::parse(source);
+    } catch (const nlohmann::json::exception&) {
+        return target;
+    }
+    if (!result.is_object() || !from.is_object()) {
+        return target;
+    }
+    for (const std::string& field : fields) {
+        const auto it = from.find(field);
+        if (it != from.end()) {
+            result[field] = *it;
+        }
+    }
+    return result.dump();
+}
+
+bool IsComponentSnapshot(const reflect::TypeDesc& type, const std::string& text) {
+    Json document;
+    try {
+        document = Json::parse(text);
+    } catch (const nlohmann::json::exception&) {
+        return false;
+    }
+    if (!document.is_object()) {
+        return false;
+    }
+    // Cukup satu field yang dikenal. Menuntut seluruh field cocok akan menolak
+    // cuplikan dari versi skema yang lebih lama, padahal itu justru salah satu
+    // hal yang berguna untuk ditempel.
+    return std::any_of(type.fields.begin(), type.fields.end(),
+                       [&](const reflect::FieldDesc& field) {
+                           return document.contains(field.name);
+                       });
+}
+
 std::string RemapGuids(const std::string& text, std::string* outRootGuid) {
     Json document;
     try {

@@ -68,6 +68,72 @@ std::size_t SetTransformsCommand::MemoryCost() const {
     return sizeof(SetTransformsCommand) + items_.capacity() * sizeof(Item) + label_.capacity();
 }
 
+// --- SetComponentsCommand ---------------------------------------------------
+
+SetComponentsCommand::SetComponentsCommand(scene::World* world, const scene::ComponentOps* ops,
+                                           std::vector<Item> items)
+    : world_(world), ops_(ops), items_(std::move(items)) {}
+
+void SetComponentsCommand::Do() {
+    Apply(true);
+}
+
+void SetComponentsCommand::Undo() {
+    Apply(false);
+}
+
+void SetComponentsCommand::Apply(bool useAfter) {
+    for (const Item& item : items_) {
+        const scene::Entity entity = Resolve(*world_, item.guid);
+        if (!scene::IsValid(entity)) {
+            continue;
+        }
+        void* data = ops_->tryGet(world_->Registry(), scene::World::ToEntt(entity));
+        if (data == nullptr) {
+            continue;
+        }
+        scene::DeserializeComponent(*ops_->type, data, useAfter ? item.after : item.before);
+        // Transform yang berubah harus merambat ke keturunannya. Memanggilnya
+        // untuk komponen lain pun tidak berbahaya dan menghindari pengecualian.
+        world_->MarkTransformDirty(entity);
+    }
+}
+
+bool SetComponentsCommand::MergeWith(const ICommand& next) {
+    const auto* other = dynamic_cast<const SetComponentsCommand*>(&next);
+    if (other == nullptr || other->world_ != world_ || other->ops_ != ops_ ||
+        other->items_.size() != items_.size()) {
+        return false;
+    }
+    for (std::size_t i = 0; i < items_.size(); ++i) {
+        if (items_[i].guid != other->items_[i].guid) {
+            return false;
+        }
+    }
+    for (std::size_t i = 0; i < items_.size(); ++i) {
+        items_[i].after = other->items_[i].after;
+    }
+    return true;
+}
+
+std::string SetComponentsCommand::Name() const {
+    if (items_.size() == 1) {
+        const scene::Entity entity = Resolve(*world_, items_.front().guid);
+        if (scene::IsValid(entity)) {
+            return "Edit " + ops_->type->name + " on " + world_->NameOf(entity);
+        }
+    }
+    return "Edit " + ops_->type->name + " on " + std::to_string(items_.size()) + " entities";
+}
+
+std::size_t SetComponentsCommand::MemoryCost() const {
+    std::size_t bytes = sizeof(SetComponentsCommand);
+    for (const Item& item : items_) {
+        bytes += item.before.capacity() + item.after.capacity();
+    }
+    return bytes;
+}
+
 // --- RenameEntityCommand ----------------------------------------------------
 
 RenameEntityCommand::RenameEntityCommand(scene::World* world, Uuid guid, std::string before,
