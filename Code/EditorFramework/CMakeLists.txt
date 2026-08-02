@@ -15,6 +15,7 @@ sim_add_library(EditorFramework
         src/Selection.cpp
         src/Widgets.cpp
     PUBLIC_DEPS
+        Sim::Assets
         Sim::Core
         Sim::Render
         Sim::Scene

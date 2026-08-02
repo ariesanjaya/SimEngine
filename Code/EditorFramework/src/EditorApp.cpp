@@ -4,6 +4,7 @@
 #include "Sim/Editor/Gizmo.h"
 #include "Sim/Editor/Icons.h"
 #include "Sim/Editor/PanelRegistry.h"
+#include "Sim/Editor/PropertyGrid.h"
 #include "Sim/Editor/SceneCommands.h"
 #include "Sim/Scene/Serialization.h"
 
@@ -49,6 +50,18 @@ bool EditorApp::Initialize(const Config& config) {
     context_.lockedFps = config.lockedFps;
     context_.frameLockReason = config.frameLockReason;
     context_.prefabDir = (configDir_ / "Prefabs").string();
+
+    // Folder aset untuk sementara berada di folder konfigurasi editor. Begitu
+    // konsep proyek matang, akarnya pindah mengikuti project.simproj.
+    assets_.Initialize({configDir_ / "Assets", &tasks_, 1.0f});
+    context_.assets = &assets_;
+
+    // PropertyGrid menampilkan nama aset, bukan GUID mentah, lewat kait ini.
+    SetAssetNameResolver([this](const Uuid& guid) -> std::string {
+        const assets::AssetRecord* record = assets_.Find(guid);
+        return record == nullptr ? std::string{} : record->name;
+    });
+
     context_.requestExit = [this]() { RequestExit(); };
     context_.requestResetLayout = [this]() { shell_.RequestResetLayout(); };
 
@@ -378,13 +391,13 @@ void EditorApp::CreateStarterLevel() {
 
     const scene::Entity ground = world_.Create("Ground", environment);
     world_.Add<scene::MeshRendererComponent>(
-        ground, scene::MeshRendererComponent{"ground_plane", "default", false, true});
+        ground, scene::MeshRendererComponent{{}, {}, false, true});
     world_.Add<scene::StaticFlagComponent>(ground, scene::StaticFlagComponent{true});
 
     const scene::Entity ball = world_.Create("Shader Ball", environment);
     world_.TryGet<scene::TransformComponent>(ball)->position = Vec3(0.0f, 1.0f, 0.0f);
     world_.Add<scene::MeshRendererComponent>(
-        ball, scene::MeshRendererComponent{"shaderball_default_1m", "default", true, true});
+        ball, scene::MeshRendererComponent{{}, {}, true, true});
 
     const scene::Entity sun = world_.Create("Sun", environment);
     auto& sunLight = world_.Add<scene::LightComponent>(sun);
@@ -447,6 +460,10 @@ bool EditorApp::LoadLevel(const std::filesystem::path& path) {
 
 void EditorApp::DrawFrame(float deltaSeconds) {
     context_.deltaSeconds = deltaSeconds;
+
+    // Mendahului panel: hasil pemindaian latar diterapkan di sini, sehingga
+    // seluruh panel dalam frame ini melihat daftar aset yang sama.
+    assets_.Update(deltaSeconds);
 
     // Harus mendahului panel mana pun: Viewport memakai gizmo, dan keadaan
     // per-frame-nya hanya direset di sini.

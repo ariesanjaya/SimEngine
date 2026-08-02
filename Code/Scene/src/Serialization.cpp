@@ -311,6 +311,44 @@ bool ReadEntities(World& world, const Json& array, Entity fallbackParent) {
     return true;
 }
 
+/// Menaikkan berkas versi 2 ke versi 3: rujukan mesh/material dari nama menjadi
+/// GUID.
+///
+/// Migrasi ini **kehilangan data**, dan itu tidak bisa dihindari: versi 2
+/// menyimpan nama seperti "shaderball_default_1m", dan tidak ada cara memetakan
+/// nama itu ke GUID tanpa daftar aset dari zaman berkas itu ditulis — yang
+/// memang tidak pernah ada, karena AssetDatabase baru lahir di E5. Nama yang
+/// hilang dicatat di Console supaya bisa dipasang ulang, bukan dibuang diam-diam.
+void MigrateV2ToV3(Json& root) {
+    for (Json& entity : root["entities"]) {
+        const auto components = entity.find("components");
+        if (components == entity.end()) {
+            continue;
+        }
+        const auto renderer = components->find("MeshRenderer");
+        if (renderer == components->end()) {
+            continue;
+        }
+        for (const char* field : {"mesh", "material"}) {
+            const auto it = renderer->find(field);
+            if (it == renderer->end() || !it->is_string()) {
+                continue;
+            }
+            const std::string name = it->get<std::string>();
+            // Yang sudah berupa GUID dibiarkan: berkas bisa saja setengah jalan
+            // kalau pernah disunting tangan.
+            if (Uuid::Parse(name).IsValid()) {
+                continue;
+            }
+            if (!name.empty()) {
+                SIM_WARN("Scene", "Dropping asset name \"{}\" on {} — reassign it in the Inspector",
+                         name, field);
+            }
+            *it = Uuid{}.ToString();
+        }
+    }
+}
+
 /// Menaikkan berkas versi 1 ke versi 2: rotasi Euler derajat menjadi quaternion.
 void MigrateV1ToV2(Json& root) {
     for (Json& entity : root["entities"]) {
@@ -386,10 +424,18 @@ LevelIoResult LoadLevelFromString(World& world, const std::string& text) {
         return result;
     }
 
-    if (result.sourceVersion < 2) {
+    if (result.sourceVersion < kLevelSchemaVersion) {
         SIM_WARN("Scene", "Level uses schema {} — migrating to {}", result.sourceVersion,
                  kLevelSchemaVersion);
-        MigrateV1ToV2(root);
+        // Berurutan, bukan bercabang: berkas versi 1 harus melewati kedua
+        // langkah. Melompat langsung ke yang terakhir akan melewatkan konversi
+        // rotasi dan menghasilkan quaternion dari angka derajat.
+        if (result.sourceVersion < 2) {
+            MigrateV1ToV2(root);
+        }
+        if (result.sourceVersion < 3) {
+            MigrateV2ToV3(root);
+        }
         result.migrated = true;
     }
 

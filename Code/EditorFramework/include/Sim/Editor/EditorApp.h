@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Sim/Assets/AssetDatabase.h"
+#include "Sim/Core/TaskPool.h"
 #include "Sim/Editor/Actions.h"
 #include "Sim/Editor/Command.h"
 #include "Sim/Editor/EditorContext.h"
@@ -81,6 +83,11 @@ private:
     // menunjuk data milik panel — dihancurkan lebih dulu.
     PanelManager panels_;
     scene::World world_;
+    // Kolam dideklarasikan sebelum database supaya ia dihancurkan belakangan:
+    // database menjadwalkan tugas ke kolam ini, dan kolam yang mati lebih dulu
+    // akan meninggalkan tugas yang menunjuk objek yang sudah tiada.
+    TaskPool tasks_;
+    assets::AssetDatabase assets_;
     CommandHistory history_;
     Selection selection_;
     ActionRegistry actions_;

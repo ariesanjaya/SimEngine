@@ -10,6 +10,10 @@ namespace sim {
 class FrameLimiter;
 }
 
+namespace sim::assets {
+class AssetDatabase;
+}
+
 namespace sim::editor {
 
 /// Menjembatani Entity dan SelectionId.
@@ -44,6 +48,10 @@ struct EditorContext {
 
     /// Dunia yang sedang disunting. Dimiliki EditorApp.
     scene::World* world = nullptr;
+
+    /// Indeks aset. Dimiliki EditorApp. Referensinya hanya sah dalam satu
+    /// frame: isinya ditukar utuh saat pemindaian latar selesai.
+    assets::AssetDatabase* assets = nullptr;
 
     render::IViewportRenderer* viewportRenderer = nullptr;
     const FrameLimiter* frameLimiter = nullptr;

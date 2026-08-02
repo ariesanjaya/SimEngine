@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Sim/Core/AssetRef.h"
 #include "Sim/Core/Math.h"
 #include "Sim/Core/Uuid.h"
 
@@ -70,8 +71,10 @@ struct StaticFlagComponent {
 };
 
 struct MeshRendererComponent {
-    std::string mesh;
-    std::string material;
+    /// Rujukan berisi GUID, bukan nama berkas. Itulah yang membuat mengganti
+    /// nama atau memindahkan mesh tidak menyentuh satu pun berkas level.
+    AssetRef mesh;
+    AssetRef material;
     bool castShadows = true;
     bool receiveShadows = true;
     /// Menggeser pemilihan tingkat detail: negatif memilih mesh yang lebih

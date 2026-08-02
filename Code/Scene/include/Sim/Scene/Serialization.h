@@ -14,11 +14,12 @@ namespace sim::scene {
 /// Riwayat:
 ///   1 — rotasi disimpan sebagai sudut Euler derajat [x, y, z]
 ///   2 — rotasi disimpan sebagai quaternion [w, x, y, z]
+///   3 — rujukan mesh/material berupa GUID aset, bukan nama berkas
 ///
 /// Naikkan setiap kali bentuk data berubah, dan tambahkan langkahnya di
 /// Migrate(). Berkas lama harus tetap bisa dibuka: level adalah hasil kerja
 /// pengguna, bukan artefak build.
-inline constexpr int kLevelSchemaVersion = 2;
+inline constexpr int kLevelSchemaVersion = 3;
 
 struct LevelIoResult {
     bool ok = false;

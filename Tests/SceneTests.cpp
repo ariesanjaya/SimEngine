@@ -24,8 +24,7 @@ std::size_t BuildTree(World& world, int roots, int depth, int branch) {
     std::vector<Entity> current;
     for (int r = 0; r < roots; ++r) {
         const Entity entity = world.Create("Root" + std::to_string(r));
-        world.Add<MeshRendererComponent>(entity, MeshRendererComponent{"mesh_" + std::to_string(r),
-                                                                      "material", true, false});
+        world.Add<MeshRendererComponent>(entity, MeshRendererComponent{{}, {}, true, false});
         current.push_back(entity);
         ++created;
     }
@@ -239,9 +238,13 @@ TEST_CASE("Berkas skema versi 1 dimigrasikan, bukan ditolak") {
     CHECK(rotated.x == doctest::Approx(1.0f).epsilon(0.001));
     CHECK(rotated.z == doctest::Approx(0.0f).epsilon(0.001));
 
-    // Menyimpan ulang harus memakai skema terbaru.
+    // Menyimpan ulang harus memakai skema terbaru. Versinya diambil dari
+    // konstantanya, bukan ditulis sebagai angka: uji ini tentang "berkas lama
+    // naik ke versi terbaru", dan mematoknya ke satu angka membuatnya gagal
+    // setiap kali skema berubah karena alasan yang sama sekali tidak terkait.
     const std::string saved = SaveLevelToString(world);
-    CHECK(saved.find("\"schemaVersion\": 2") != std::string::npos);
+    CHECK(saved.find("\"schemaVersion\": " + std::to_string(kLevelSchemaVersion)) !=
+          std::string::npos);
 }
 
 TEST_CASE("Berkas rusak ditolak dengan pesan, bukan crash") {
@@ -280,7 +283,7 @@ TEST_CASE("Prefab dibuat ulang dengan GUID baru tapi struktur sama") {
     World source;
     const Entity root = source.Create("Turret");
     source.TryGet<TransformComponent>(root)->position = Vec3(0.0f, 1.0f, 0.0f);
-    source.Add<MeshRendererComponent>(root, MeshRendererComponent{"turret_base", "metal"});
+    source.Add<MeshRendererComponent>(root, MeshRendererComponent{});
     const Entity barrel = source.Create("Barrel", root);
     source.TryGet<TransformComponent>(barrel)->position = Vec3(0.0f, 0.5f, 0.0f);
     source.Add<LightComponent>(barrel);
@@ -306,7 +309,8 @@ TEST_CASE("Prefab dibuat ulang dengan GUID baru tapi struktur sama") {
     const Entity copiedBarrel = target.ChildrenOf(first).front();
     CHECK(target.NameOf(copiedBarrel) == "Barrel");
     CHECK(target.TryGet<LightComponent>(copiedBarrel) != nullptr);
-    CHECK(target.TryGet<MeshRendererComponent>(first)->mesh == "turret_base");
+    CHECK(target.TryGet<MeshRendererComponent>(first)->mesh ==
+          source.TryGet<MeshRendererComponent>(root)->mesh);
     CHECK(target.ParentOf(first) == host);
 
     std::filesystem::remove(path);

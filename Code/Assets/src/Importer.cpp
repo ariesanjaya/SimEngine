@@ -10,8 +10,11 @@
 #define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
+#include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <utility>
+#include <vector>
 
 namespace sim::assets {
 namespace {
@@ -71,7 +74,10 @@ public:
 
         nlohmann::json document;
         try {
-            document = nlohmann::json::parse(buffer.str());
+            // Kedalaman parse dibatasi. Berkas aset datang dari disk dan bisa
+            // saja rusak atau dibuat jahat; parser rekursif-turun akan
+            // meruntuhkan stack jauh sebelum menemukan JSON yang tidak sah.
+            document = nlohmann::json::parse(buffer.str(), nullptr, true, false);
         } catch (const nlohmann::json::exception& exception) {
             result.error = exception.what();
             return result;
@@ -83,18 +89,40 @@ public:
     }
 
 private:
-    static void CollectGuids(const nlohmann::json& node, std::vector<Uuid>& out) {
-        if (node.is_string()) {
-            const Uuid guid = Uuid::Parse(node.get<std::string>());
-            if (guid.IsValid() &&
-                std::find(out.begin(), out.end(), guid) == out.end()) {
-                out.push_back(guid);
+    /// Batas kedalaman penelusuran.
+    ///
+    /// Level terdalam yang masuk akal hanya beberapa tingkat: entity →
+    /// components → satu komponen → field. Enam puluh empat sudah jauh di atas
+    /// itu, sekaligus menutup berkas yang nestingnya dibuat dalam-dalam untuk
+    /// meruntuhkan proses.
+    static constexpr int kMaxDepth = 64;
+
+    /// Ditelusuri dengan tumpukan eksplisit, bukan rekursi.
+    ///
+    /// Rekursi di sini berarti kedalaman berkas menentukan kedalaman stack
+    /// proses — satu berkas dengan ribuan kurung bersarang cukup untuk
+    /// menjatuhkan editor. Tumpukan eksplisit memindahkan biaya itu ke heap,
+    /// dan batas kedalaman menghentikannya jauh sebelum menjadi masalah.
+    static void CollectGuids(const nlohmann::json& root, std::vector<Uuid>& out) {
+        std::vector<std::pair<const nlohmann::json*, int>> stack;
+        stack.emplace_back(&root, 0);
+
+        while (!stack.empty()) {
+            const auto [node, depth] = stack.back();
+            stack.pop_back();
+
+            if (node->is_string()) {
+                const Uuid guid = Uuid::Parse(node->get<std::string>());
+                if (guid.IsValid() && std::find(out.begin(), out.end(), guid) == out.end()) {
+                    out.push_back(guid);
+                }
+                continue;
             }
-            return;
-        }
-        if (node.is_object() || node.is_array()) {
-            for (const auto& child : node) {
-                CollectGuids(child, out);
+            if (depth >= kMaxDepth || !(node->is_object() || node->is_array())) {
+                continue;
+            }
+            for (const auto& child : *node) {
+                stack.emplace_back(&child, depth + 1);
             }
         }
     }
