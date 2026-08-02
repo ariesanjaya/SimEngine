@@ -367,10 +367,15 @@ void NodeCatalog::AddCoreTypes() {
     add({"sim.forward", "Forward", "Engine", true, "Sumbu depan dunia",
          {Out("value", PinKind::Vec3, "value")}});
 
-    // --- Komentar ----------------------------------------------------------
+    // --- Komentar dan grup -------------------------------------------------
     //
-    // Tanpa pin sama sekali: ia tidak ikut dikompilasi, hanya ikut tersimpan.
+    // Tanpa pin sama sekali: keduanya tidak ikut dikompilasi, hanya ikut
+    // tersimpan. Grup memindahkan node yang berada di dalamnya ketika digeser;
+    // keanggotaannya ditentukan letak, bukan daftar, jadi tidak ada yang perlu
+    // diperbarui ketika node ditambah atau dipindahkan.
     add({"comment", "Comment", "Misc", true, "Catatan di kanvas", {}});
+    add({"group", "Group", "Misc", true,
+         "Kotak yang memindahkan seluruh node di dalamnya", {}});
 }
 
 void NodeCatalog::AddComponentTypes() {

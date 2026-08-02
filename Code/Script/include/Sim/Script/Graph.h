@@ -74,6 +74,11 @@ struct GraphNode {
     /// Kunci di katalog node, mis. "component.get" atau "flow.branch".
     std::string type;
     Vec2 position{0.0f, 0.0f};
+    /// Ukuran kotak, hanya berarti untuk node grup — node biasa menentukan
+    /// ukurannya sendiri dari isinya. Nol berarti "tidak ditentukan", dan tidak
+    /// ikut ditulis ke berkas supaya graph tanpa grup tetap menghasilkan teks
+    /// yang sama persis seperti sebelum bidang ini ada.
+    Vec2 size{0.0f, 0.0f};
     /// Konfigurasi node; makna kuncinya ditentukan tipe node-nya. std::map,
     /// bukan unordered_map, supaya urutan penulisannya sama setiap kali.
     std::map<std::string, std::string> settings;

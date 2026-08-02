@@ -141,6 +141,9 @@ std::string SaveGraphToString(const Graph& graph) {
         entry["guid"] = node.guid.ToString();
         entry["type"] = node.type;
         entry["position"] = Json::array({node.position.x, node.position.y});
+        if (node.size.x > 0.0f || node.size.y > 0.0f) {
+            entry["size"] = Json::array({node.size.x, node.size.y});
+        }
         if (!node.settings.empty()) {
             entry["settings"] = WriteSettings(node.settings);
         }
@@ -224,6 +227,11 @@ GraphIoResult LoadGraphFromString(Graph& graph, const std::string& text) {
                 position != entry.end() && position->is_array() && position->size() >= 2) {
                 node.position.x = (*position)[0].get<float>();
                 node.position.y = (*position)[1].get<float>();
+            }
+            if (const auto size = entry.find("size");
+                size != entry.end() && size->is_array() && size->size() >= 2) {
+                node.size.x = (*size)[0].get<float>();
+                node.size.y = (*size)[1].get<float>();
             }
             if (const auto settings = entry.find("settings"); settings != entry.end()) {
                 ReadSettings(*settings, node.settings);

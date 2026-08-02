@@ -426,7 +426,10 @@ PureValue Compiler::BuildPure(const GraphNode& node) {
             "sim.axis_angle(" + input("axis") + ", " + input("radians") + ")";
         return value;
     }
-    if (key == "comment") {
+    // Komentar dan grup tidak menghasilkan apa pun. Keduanya tidak punya pin,
+    // jadi penelusuran tidak akan pernah sampai ke sini lewat koneksi — cabang
+    // ini menjaga graph yang menyebutnya secara langsung tetap terkompilasi.
+    if (key == "comment" || key == "group") {
         return value;
     }
 

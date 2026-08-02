@@ -45,6 +45,24 @@ public:
     void BeginNode(uint64_t id);
     void EndNode();
 
+    /// Node grup: kotak berlatar tembus pandang yang **memindahkan seluruh node
+    /// di dalamnya** ketika digeser, dan bisa diubah ukurannya dari tepinya.
+    ///
+    /// Keanggotaannya ditentukan letak, bukan daftar: apa pun yang berada di
+    /// dalam kotak ikut terbawa. Itu yang membuat grup tetap benar setelah node
+    /// ditambah atau dipindahkan tanpa ada yang perlu memperbarui daftar
+    /// anggota — dan tidak ada keadaan tersembunyi yang bisa bertentangan
+    /// dengan apa yang terlihat di kanvas.
+    ///
+    /// Urutan: BeginGroupNode() → isi judul → GroupArea() → EndGroupNode().
+    void BeginGroupNode(uint64_t id, const Vec4& color);
+    /// Luas kotak grup. Dipanggil setelah judulnya digambar.
+    void GroupArea(const Vec2& size);
+    void EndGroupNode();
+
+    Vec2 GetNodeSize(uint64_t id) const;
+    void SetGroupSize(uint64_t id, const Vec2& size);
+
     /// Pin masukan (kiri) dan keluaran (kanan). Isi visualnya digambar pemanggil
     /// dengan ImGui biasa di antara Begin dan End.
     void BeginInputPin(uint64_t id);
@@ -84,6 +102,16 @@ public:
     /// Menempatkan seluruh isi graph di dalam layar.
     void FitToContent();
     void CenterOnNode(uint64_t id);
+
+    /// True pada frame ketika pengguna meminta menu konteks di latar kanvas.
+    ///
+    /// Ditanyakan ke pustaka, bukan disimpulkan dari `IsMouseReleased` +
+    /// `IsWindowHovered`: kanvas menangani tombol kanan sendiri (pan), jadi
+    /// menebaknya dari keadaan mouse mentah menghasilkan menu yang tidak pernah
+    /// muncul — atau muncul di tengah gerakan pan.
+    ///
+    /// Hanya sah di antara Suspend() dan Resume().
+    bool RequestedBackgroundMenu();
 
     /// Menangguhkan kanvas supaya popup ImGui bisa digambar di koordinat layar
     /// biasa. Tanpa ini, popup ikut ter-zoom bersama kanvas dan menjadi tidak

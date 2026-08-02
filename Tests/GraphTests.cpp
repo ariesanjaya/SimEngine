@@ -123,6 +123,44 @@ TEST_CASE(".simgraph bolak-balik tanpa kehilangan apa pun") {
     CHECK(loaded.FindNode(Id(3))->Setting("variable") == "speed");
 }
 
+TEST_CASE("Node grup bertahan lewat berkas dan tidak mempengaruhi kompilasi") {
+    scene::RegisterCoreComponents();
+    NodeCatalog::Rebuild();
+
+    Graph graph = SpinGraph();
+    const std::string withoutGroup = CompileGraph(graph, "spin.simgraph").lua;
+
+    GraphNode group = Node(90, "group");
+    group.position = Vec2(-40.0f, -60.0f);
+    group.size = Vec2(320.0f, 240.0f);
+    group.settings["text"] = "Rotasi";
+    graph.nodes.push_back(std::move(group));
+
+    const std::string text = SaveGraphToString(graph);
+    Graph loaded;
+    REQUIRE(LoadGraphFromString(loaded, text).ok);
+    CHECK(SaveGraphToString(loaded) == text);
+
+    const GraphNode* restored = loaded.FindNode(Id(90));
+    REQUIRE(restored != nullptr);
+    CHECK(restored->size.x == doctest::Approx(320.0f));
+    CHECK(restored->size.y == doctest::Approx(240.0f));
+    CHECK(restored->Setting("text") == "Rotasi");
+
+    // Grup murni tata letak: Lua yang dihasilkan harus sama persis seperti
+    // sebelum grupnya ada. Kalau tidak, memindahkan kotak di kanvas akan
+    // mengubah perilaku permainan.
+    const CompileResult after = CompileGraph(loaded, "spin.simgraph");
+    INFO(FirstError(after));
+    REQUIRE(after.ok);
+    CHECK(after.lua == withoutGroup);
+
+    // Node tanpa ukuran tidak menuliskan bidang "size" sama sekali, jadi graph
+    // yang tidak memakai grup menghasilkan teks yang sama seperti sebelum
+    // bidang itu ada.
+    CHECK(SaveGraphToString(SpinGraph()).find("\"size\"") == std::string::npos);
+}
+
 TEST_CASE("Koneksi yang menunjuk node yang hilang dibuang saat dimuat") {
     Graph graph = SpinGraph();
     // Node dihapus dari berkas, misalnya karena disunting di luar editor.

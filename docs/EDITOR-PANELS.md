@@ -241,6 +241,13 @@ Sumber log ditandai kategori (`[Asset]`, `[Lua]`, `[RHI]`).
   Breakpoint menahan **Play** pada frame berikutnya; frame yang sedang berjalan
   tetap diselesaikan, karena menghentikan Lua di tengah tumpukan panggilan
   menuntut debug hook yang belum ada.
+  **Ctrl+G** membungkus node terpilih dengan sebuah grup — kotak yang membawa
+  serta seluruh isinya ketika digeser dari judulnya, dan bisa diubah ukurannya
+  dari tepinya. Keanggotaannya ditentukan letak, bukan daftar: apa pun yang
+  berada di dalam kotak ikut terbawa, jadi tidak ada daftar tersembunyi yang
+  bisa bertentangan dengan apa yang terlihat. **Klik ganda** judulnya untuk
+  menamainya ulang. Grup murni tata letak dan tidak mengubah satu baris pun
+  Lua yang dihasilkan.
 - **Asset References** — graf pemakaian aset.
 - **Profiler** — waktu frame per bagian (dipakai serius mulai E8).
 - **Statistics** — jumlah entity, memori, jumlah aset termuat.

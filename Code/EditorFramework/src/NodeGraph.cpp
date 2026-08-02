@@ -104,6 +104,38 @@ void NodeCanvas::EndNode() {
     ed::EndNode();
 }
 
+void NodeCanvas::BeginGroupNode(uint64_t id, const Vec4& color) {
+    // Latar dan bingkainya dibuat tembus pandang. Pustaka menggambar grup
+    // sebelum node biasa, jadi ia memang berada di belakang — tapi latar yang
+    // pekat tetap membuat kanvas terbaca sebagai "kotak besar berisi kotak
+    // kecil" alih-alih sebagai penanda wilayah.
+    ImVec4 fill = ToImGui(color);
+    fill.w *= 0.25f;
+    ed::PushStyleColor(ed::StyleColor_NodeBg, fill);
+    ed::PushStyleColor(ed::StyleColor_NodeBorder, ToImGui(color));
+    ed::BeginNode(ed::NodeId(id));
+}
+
+void NodeCanvas::GroupArea(const Vec2& size) {
+    ed::Group(ToImGui(size));
+}
+
+void NodeCanvas::EndGroupNode() {
+    ed::EndNode();
+    ed::PopStyleColor(2);
+}
+
+Vec2 NodeCanvas::GetNodeSize(uint64_t id) const {
+    const ScopedEditor scoped(impl_->context);
+    const ImVec2 size = ed::GetNodeSize(ed::NodeId(id));
+    return Vec2(size.x, size.y);
+}
+
+void NodeCanvas::SetGroupSize(uint64_t id, const Vec2& size) {
+    const ScopedEditor scoped(impl_->context);
+    ed::SetGroupSize(ed::NodeId(id), ToImGui(size));
+}
+
 void NodeCanvas::BeginInputPin(uint64_t id) {
     ed::BeginPin(ed::PinId(id), ed::PinKind::Input);
 }
@@ -249,6 +281,10 @@ void NodeCanvas::CenterOnNode(uint64_t id) {
     const ScopedEditor scoped(impl_->context);
     ed::SelectNode(ed::NodeId(id), false);
     ed::NavigateToSelection();
+}
+
+bool NodeCanvas::RequestedBackgroundMenu() {
+    return ed::ShowBackgroundContextMenu();
 }
 
 void NodeCanvas::Suspend() {
