@@ -176,18 +176,41 @@ public:
         // Urutan sebaliknya membuat dua hal salah sekaligus: tombolnya tidak
         // bereaksi, dan kliknya ikut terhitung sebagai klik pada scene sehingga
         // seleksi terhapus.
-        DrawOverlays(context, imagePos, size, *renderer);
-        // Sejauh ini baru tombol overlay yang diajukan, jadi nilai ini benar-
-        // benar berarti "kursor sedang di atas tombol overlay".
-        const bool overlayHovered = ImGui::IsAnyItemHovered();
+        // Hover overlay dilaporkan oleh widget-nya sendiri, bukan ditanyakan ke
+        // ImGui::IsAnyItemHovered().
+        //
+        // Fungsi itu ikut memeriksa hover frame SEBELUMNYA
+        // (`HoveredIdPreviousFrame`), dan permukaan viewport di bawah ini adalah
+        // sebuah item juga. Begitu kursor masuk ke viewport — persis keadaan
+        // ketika gizmo dipakai — jawabannya selalu "ya", gizmo diberi
+        // `interactive = false`, dan menyeretnya tidak menggerakkan apa pun.
+        const bool overlayHovered = DrawOverlays(context, imagePos, size, *renderer);
 
         // Permukaan viewport sebagai item sungguhan, bukan status mouse mentah:
         // dengan begitu ImGui sendiri yang memutuskan klik ini milik siapa.
-        ImGui::SetCursorScreenPos(imagePos);
-        ImGui::InvisibleButton("##viewport_surface", size, ImGuiButtonFlags_MouseButtonLeft);
-        const bool surfacePressed = ImGui::IsItemActivated();
-        const bool surfaceHeld = ImGui::IsItemActive();
-        HandleAssetDrop(context, imagePos, size, desc.camera);
+        //
+        // Kecuali ketika gizmo yang memegang kursor. ImGuizmo menolak memulai
+        // manipulasi selama `IsAnyItemHovered()` atau `IsAnyItemActive()` benar
+        // — dan permukaan ini menutupi seluruh viewport, jadi selama ia diajukan
+        // gizmo TIDAK PERNAH bisa dipakai. Yang menentukan keadaan frame lalu,
+        // karena gizmo baru digambar setelah baris ini; jeda satu frame itu
+        // tidak terasa, sedangkan urutan sebaliknya mustahil: keduanya
+        // saling menunggu.
+        //
+        // Tidak menyerah saat seretan lain sedang berlangsung — seleksi kotak
+        // yang kebetulan melewati gizmo tidak boleh putus di tengah jalan, dan
+        // aset yang sedang diseret tetap butuh sasaran jatuh.
+        const bool yieldToGizmo = gizmoOwnsPointer_ && !boxSelecting_ &&
+                                  ImGui::GetDragDropPayload() == nullptr;
+        bool surfacePressed = false;
+        bool surfaceHeld = false;
+        if (!yieldToGizmo) {
+            ImGui::SetCursorScreenPos(imagePos);
+            ImGui::InvisibleButton("##viewport_surface", size, ImGuiButtonFlags_MouseButtonLeft);
+            surfacePressed = ImGui::IsItemActivated();
+            surfaceHeld = ImGui::IsItemActive();
+            HandleAssetDrop(context, imagePos, size, desc.camera);
+        }
 
         const float aspect = size.x / size.y;
         const Mat4 view = desc.camera.View();
@@ -201,6 +224,7 @@ public:
         // tahu apa pun tentang item ImGui.
         const bool gizmoBusy =
             DrawGizmoAndApply(context, imagePos, size, view, projection, !overlayHovered);
+        gizmoOwnsPointer_ = gizmoBusy;
         HandleSelectionInput(context, imagePos, size, view, projection, gizmoBusy, surfacePressed,
                              surfaceHeld);
         HandleShortcuts(context);
@@ -709,18 +733,33 @@ private:
 
     // --- overlay ------------------------------------------------------------
 
-    void DrawOverlays(const EditorContext& context, const ImVec2& imagePos, const ImVec2& size,
+    /// Menggambar overlay viewport, dan melaporkan apakah kursor sedang berada
+    /// di atas salah satunya.
+    ///
+    /// Jawabannya dikumpulkan dari tiap widget tepat setelah diajukan. Itu
+    /// bukan gaya penulisan melainkan syarat kebenaran: satu-satunya pertanyaan
+    /// yang boleh dijawab di sini adalah "kursor di atas overlay?", dan cara
+    /// mana pun yang menanyakannya ke keadaan global ImGui akan ikut menghitung
+    /// item lain — termasuk permukaan viewport itu sendiri.
+    bool DrawOverlays(const EditorContext& context, const ImVec2& imagePos, const ImVec2& size,
                       const render::IViewportRenderer& renderer) {
         const float pad = 10.0f;
         const float button = ImGui::GetFrameHeight() * widgets::kViewportButtonScale;
+
+        bool hovered = false;
+        const auto track = [&hovered]() { hovered = hovered || ImGui::IsItemHovered(); };
 
         // (D1) alat transform di kiri-atas.
         ImGui::SetCursorScreenPos(ImVec2(imagePos.x + pad, imagePos.y + pad));
         ImGui::BeginGroup();
         OperationButton(icons::kSelect, "Select (Q)", GizmoOperation::None);
+        track();
         OperationButton(icons::kMove, "Move (W)", GizmoOperation::Translate);
+        track();
         OperationButton(icons::kRotate, "Rotate (E)", GizmoOperation::Rotate);
+        track();
         OperationButton(icons::kScale, "Scale (R)", GizmoOperation::Scale);
+        track();
 
         ImGui::Spacing();
         const bool local = space_ == GizmoSpace::Local;
@@ -728,7 +767,8 @@ private:
                                     local ? "Local space (X)" : "World space (X)")) {
             space_ = local ? GizmoSpace::World : GizmoSpace::Local;
         }
-        DrawSnapControl();
+        track();
+        hovered = DrawSnapControl() || hovered;
         ImGui::EndGroup();
 
         // (D2) mode tampilan di kanan-atas.
@@ -738,15 +778,18 @@ private:
                                     orthographic_ ? "Orthographic" : "Perspective")) {
             orthographic_ = !orthographic_;
         }
+        track();
         const bool wireframe = drawMode_ == render::DrawMode::Wireframe;
         if (widgets::ViewportButton(wireframe ? icons::kShadingWireframe : icons::kShadingLit,
                                     wireframe ? "Wireframe" : "Lit")) {
             drawMode_ = wireframe ? render::DrawMode::Lit : render::DrawMode::Wireframe;
         }
+        track();
         if (widgets::ViewportButton(icons::kGrid, showGrid_ ? "Hide grid" : "Show grid",
                                     showGrid_)) {
             showGrid_ = !showGrid_;
         }
+        track();
         ImGui::EndGroup();
 
         // Label renderer di kiri-bawah. Selama masih stub, ini penting: tanpa
@@ -765,6 +808,7 @@ private:
         ImGui::SetCursorScreenPos(
             ImVec2(imagePos.x + pad, imagePos.y + size.y - infoSize.y - pad));
         ImGui::TextDisabled("%s", info);
+        return hovered;
     }
 
     void OperationButton(const char* icon, const char* tooltip, GizmoOperation operation) {
@@ -773,7 +817,12 @@ private:
         }
     }
 
-    void DrawSnapControl() {
+    /// True bila kursor berada di atas tombolnya, atau popup setelannya terbuka.
+    ///
+    /// Popup ikut dihitung karena gizmo membaca mouse langsung dan tidak tahu
+    /// apa-apa tentang jendela ImGui: tanpa ini, menyeret slider "Move (m)" yang
+    /// kebetulan berada di atas gizmo akan ikut menggeser entity.
+    bool DrawSnapControl() {
         // Penandaan aktif diserahkan ke widget, bukan diurus di sini dengan
         // push/pop sendiri. Versi sebelumnya membaca ulang snap_.enabled setelah
         // tombolnya membalik nilai itu, sehingga push dan pop tidak berpasangan
@@ -783,9 +832,11 @@ private:
                                     snap_.enabled)) {
             snap_.enabled = !snap_.enabled;
         }
+        bool hovered = ImGui::IsItemHovered();
         // Klik kanan pada tombol yang sama membuka nilainya. Menaruhnya di popup
         // terpisah menjaga bilah alat tetap sempit tanpa menyembunyikan setelan.
         if (ImGui::BeginPopupContextItem("##snap")) {
+            hovered = true;
             ImGui::TextDisabled("Snap increments");
             ImGui::Separator();
             ImGui::SetNextItemWidth(120.0f);
@@ -796,6 +847,7 @@ private:
             ImGui::DragFloat("Scale", &snap_.scale, 0.01f, 0.001f, 10.0f, "%.3f");
             ImGui::EndPopup();
         }
+        return hovered;
     }
 
     /// Keadaan satu entity saat seretan gizmo dimulai.
@@ -819,6 +871,9 @@ private:
     bool flying_ = false;
     bool dragging_ = false;
     bool boxSelecting_ = false;
+    /// Gizmo sedang ditunjuk atau dipakai pada frame LALU. Dipakai memutuskan
+    /// apakah permukaan viewport diajukan sebagai item ImGui frame ini.
+    bool gizmoOwnsPointer_ = false;
     bool orthographic_ = false;
     bool showGrid_ = true;
 };
