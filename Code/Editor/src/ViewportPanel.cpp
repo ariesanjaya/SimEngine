@@ -1,9 +1,11 @@
+#include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Core/Log.h"
 #include "Sim/Core/Math.h"
 #include "Sim/Editor/Command.h"
 #include "Sim/Editor/EditorContext.h"
 #include "Sim/Editor/Gizmo.h"
 #include "Sim/Editor/Icons.h"
+#include "Sim/Editor/Notifications.h"
 #include "Sim/Editor/Panel.h"
 #include "Sim/Editor/PanelIds.h"
 #include "Sim/Editor/PanelRegistry.h"
@@ -185,6 +187,7 @@ public:
         ImGui::InvisibleButton("##viewport_surface", size, ImGuiButtonFlags_MouseButtonLeft);
         const bool surfacePressed = ImGui::IsItemActivated();
         const bool surfaceHeld = ImGui::IsItemActive();
+        HandleAssetDrop(context, imagePos, size, desc.camera);
 
         const float aspect = size.x / size.y;
         const Mat4 view = desc.camera.View();
@@ -305,6 +308,81 @@ private:
             speed *= 0.25f;
         }
         camera_.Fly(move, speed, deltaSeconds);
+    }
+
+    // --- menjatuhkan aset ---------------------------------------------------
+
+    /// Menerima aset yang diseret dari Asset Browser dan membuat entity untuknya.
+    void HandleAssetDrop(EditorContext& context, const ImVec2& imagePos, const ImVec2& size,
+                         const render::Camera& camera) {
+        if (!ImGui::BeginDragDropTarget()) {
+            return;
+        }
+        const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("SIM_ASSET");
+        if (payload == nullptr || payload->DataSize != sizeof(Uuid)) {
+            ImGui::EndDragDropTarget();
+            return;
+        }
+        const Uuid guid = *static_cast<const Uuid*>(payload->Data);
+        ImGui::EndDragDropTarget();
+
+        const assets::AssetRecord* record =
+            context.assets != nullptr ? context.assets->Find(guid) : nullptr;
+        if (record == nullptr) {
+            return;
+        }
+        // Hanya mesh yang bisa dijatuhkan ke scene. Menjatuhkan tekstur di sini
+        // tidak punya arti yang jelas — tekstur dipasang ke field material,
+        // bukan berdiri sendiri sebagai objek.
+        if (record->type != assets::AssetType::Mesh) {
+            context.notifications->Warning(std::string("Cannot place a ") +
+                                           assets::ToString(record->type) + " in the scene");
+            return;
+        }
+
+        const ImVec2 mouse = ImGui::GetMousePos();
+        const Vec3 position = GroundPointUnderCursor(
+            camera, size, Vec2(mouse.x - imagePos.x, mouse.y - imagePos.y));
+
+        context.history->CloseMergeGroup();
+        const Uuid entityGuid = Uuid::Generate();
+        const std::string name = record->name;
+        context.history->Execute(std::make_unique<LambdaCommand>(
+            "Place " + name,
+            [world = context.world, selection = context.selection, entityGuid, guid, position,
+             name]() {
+                const scene::Entity entity = world->CreateWithGuid(entityGuid, name);
+                world->TryGet<scene::TransformComponent>(entity)->position = position;
+                world->MarkTransformDirty(entity);
+                scene::MeshRendererComponent renderer;
+                renderer.mesh.guid = guid;
+                world->Add<scene::MeshRendererComponent>(entity, renderer);
+                selection->SelectOnly(ToSelectionId(entity));
+            },
+            [world = context.world, selection = context.selection, entityGuid]() {
+                world->Destroy(world->FindByGuid(entityGuid));
+                selection->Clear();
+            }));
+    }
+
+    /// Titik pada bidang tanah (y = 0) di bawah kursor.
+    ///
+    /// Kalau sinarnya menjauh dari tanah — kamera menengadah — objek diletakkan
+    /// beberapa meter di depan kamera. Menolak menempatkan apa pun dalam
+    /// keadaan itu terasa seperti seretan yang gagal tanpa sebab.
+    static Vec3 GroundPointUnderCursor(const render::Camera& camera, const ImVec2& size,
+                                       const Vec2& point) {
+        const float aspect = size.x / size.y;
+        const Ray ray = ScreenPointToRay(camera.View(), camera.Projection(aspect),
+                                         Vec2(size.x, size.y), point);
+        constexpr float kMinSlope = 1e-4f;
+        if (ray.direction.y < -kMinSlope) {
+            const float distance = -ray.origin.y / ray.direction.y;
+            if (distance > 0.0f) {
+                return ray.origin + ray.direction * distance;
+            }
+        }
+        return ray.origin + ray.direction * 10.0f;
     }
 
     // --- ikon entity --------------------------------------------------------

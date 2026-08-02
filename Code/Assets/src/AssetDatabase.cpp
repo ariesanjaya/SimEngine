@@ -110,7 +110,7 @@ void AssetDatabase::Shutdown() {
 }
 
 void AssetDatabase::ScanNow() {
-    Apply(Scan(root_));
+    Apply(Scan(root_, snapshot_));
 }
 
 void AssetDatabase::Update(float deltaSeconds) {
@@ -148,8 +148,10 @@ void AssetDatabase::Update(float deltaSeconds) {
     if (!scanInFlight_.compare_exchange_strong(expected, true)) {
         return;
     }
-    tasks_->Submit([this]() {
-        ScanResult result = Scan(root_);
+    // Cuplikan diambil di main thread, bukan di dalam tugas: menyalin pointernya
+    // di sini menjamin tugas memegang versi yang sah walau indeksnya ditukar.
+    tasks_->Submit([this, previous = snapshot_]() {
+        ScanResult result = Scan(root_, previous);
         {
             const std::lock_guard<std::mutex> lock(handoffMutex_);
             pendingResult_ = std::move(result);
@@ -159,7 +161,8 @@ void AssetDatabase::Update(float deltaSeconds) {
     });
 }
 
-AssetDatabase::ScanResult AssetDatabase::Scan(const std::filesystem::path& root) {
+AssetDatabase::ScanResult AssetDatabase::Scan(const std::filesystem::path& root,
+                                             const SnapshotPtr& previous) {
     ScanResult result;
     std::error_code error;
     if (!std::filesystem::exists(root, error)) {
@@ -193,6 +196,19 @@ AssetDatabase::ScanResult AssetDatabase::Scan(const std::filesystem::path& root)
         record.type = TypeFromExtension(entry.path().extension().string());
         record.fileSize = entry.file_size(error);
         record.modifiedSeconds = ModifiedSeconds(entry);
+
+        // Berkas yang ukuran dan waktu ubahnya sama persis dengan pemindaian
+        // sebelumnya dipakai ulang apa adanya. Inilah yang membuat pemindaian
+        // mantap hanya sebiaya satu stat() per berkas.
+        if (previous != nullptr) {
+            const auto cached = previous->find(record.relativePath);
+            if (cached != previous->end() &&
+                cached->second.fileSize == record.fileSize &&
+                cached->second.modifiedSeconds == record.modifiedSeconds) {
+                result.records.push_back(cached->second);
+                continue;
+            }
+        }
 
         bool created = false;
         record.guid = ReadOrCreateMeta(entry.path(), created);
@@ -248,6 +264,13 @@ void AssetDatabase::Apply(ScanResult&& result) {
     records_ = std::move(result.records);
     folders_ = std::move(result.folders);
     Reindex();
+
+    auto snapshot = std::make_shared<Snapshot>();
+    snapshot->reserve(records_.size());
+    for (const AssetRecord& record : records_) {
+        snapshot->emplace(record.relativePath, record);
+    }
+    snapshot_ = std::move(snapshot);
     ++version_;
 }
 

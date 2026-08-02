@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <filesystem>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
@@ -89,7 +90,20 @@ private:
         std::vector<std::string> folders;
     };
 
-    static ScanResult Scan(const std::filesystem::path& root);
+    /// Cuplikan hasil pemindaian sebelumnya, hanya-baca.
+    ///
+    /// Diserahkan ke thread pemindai supaya berkas yang ukuran dan waktu
+    /// ubahnya tidak berubah bisa dipakai ulang apa adanya — tanpa membuka
+    /// `.meta` dan tanpa menjalankan importer. Tanpa ini, folder berisi 10.000
+    /// aset membakar satu inti CPU penuh setiap detik hanya untuk menyimpulkan
+    /// bahwa tidak ada yang berubah.
+    ///
+    /// shared_ptr ke objek immutable: pemindai memegang cuplikan lama dengan
+    /// aman walau main thread sudah menukar yang baru.
+    using Snapshot = std::unordered_map<std::string, AssetRecord>;
+    using SnapshotPtr = std::shared_ptr<const Snapshot>;
+
+    static ScanResult Scan(const std::filesystem::path& root, const SnapshotPtr& previous);
     void Apply(ScanResult&& result);
     void Reindex();
 
@@ -103,6 +117,7 @@ private:
     std::unordered_map<Uuid, std::size_t> byGuid_;
     std::unordered_map<std::string, std::size_t> byPath_;
     uint64_t version_ = 0;
+    SnapshotPtr snapshot_ = std::make_shared<Snapshot>();
 
     // Kotak serah-terima antara thread pemindai dan main thread. Mutexnya hanya
     // melindungi kotak ini, bukan indeksnya — indeks tidak pernah disentuh

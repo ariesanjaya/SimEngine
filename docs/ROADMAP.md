@@ -64,7 +64,7 @@ belum PBR.
 | E3 | Reflection + scene model (EnTT) + serialisasi + project system | ✅ |
 | E4 | **Level Editor**: outliner, inspector, viewport, gizmo, picking, prefab | ✅ |
 | E5 | **Asset Browser** + asset database (GUID, .meta, thumbnail, import) | ⏳ |
-| E6 | Runtime Lua: sol2, script component, hot reload, konsol REPL, editor scripting | ⏳ |
+| E6 | Runtime Lua + **visual scripting** (graph dikompilasi ke Lua), hot reload, editor scripting | ⏳ |
 | E7 | **Material / Particle / Terrain / Vegetation / Animation Editor** | ⏳ |
 
 ### Fase 2 — Rendering & runtime (E8 → E9)

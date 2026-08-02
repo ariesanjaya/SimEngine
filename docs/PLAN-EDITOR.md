@@ -462,7 +462,7 @@ diseret ke level.
 
 ---
 
-## E6 — Runtime Lua + editor scripting · ~4 sesi
+## E6 — Runtime Lua + visual scripting + editor scripting · ~6 sesi
 
 **Tujuan.** Lua jadi bahasa gameplay, dan editor bisa diperluas dengan Lua.
 
@@ -484,6 +484,51 @@ diseret ke level.
   ter-bind terbatas: `sim.ui.button`, `sim.ui.text`, dst), memproses aset secara
   batch, dan mendaftarkan command yang ikut sistem undo.
 
+### E6.5 — Visual scripting yang dikompilasi ke Lua
+
+**Kenapa dikompilasi, bukan ditafsirkan.** Alternatifnya adalah mesin graph yang
+menelusuri node satu per satu saat runtime. Itu berarti dua jalur eksekusi yang
+harus dijaga sama perilakunya — satu untuk Lua tulis-tangan, satu untuk graph —
+dan yang kedua selalu lebih lambat sekaligus lebih sulit di-debug. Dengan
+mengompilasi graph menjadi sumber Lua, yang berjalan hanya satu runtime: graph
+adalah *penulis kode*, bukan penafsir. Efek sampingnya besar dan gratis: profiler,
+traceback, hot reload, dan sandbox yang sudah ada langsung berlaku untuk graph.
+
+- **Format `.simgraph`** (JSON, berversi seperti `.simlevel`): daftar node, pin,
+  dan koneksi. Node menyimpan GUID sendiri sehingga koneksi tidak putus ketika
+  node dipindah atau diberi nama baru.
+- **Katalog node dibangkitkan dari `Reflect`**, bukan didaftarkan tangan. Setiap
+  komponen dan fungsi yang sudah terjangkau Lua otomatis muncul sebagai node —
+  satu sumber kebenaran, dan komponen baru tidak menuntut pekerjaan tambahan.
+  Node inti: event (`OnStart`, `OnUpdate`, `OnCollision`), alur (branch, loop,
+  sequence), variabel (get/set, lokal & graph), matematika, panggilan fungsi,
+  dan komentar.
+- **Compiler graph → Lua** (`Code/Script/GraphCompiler`):
+  - urutan eksekusi dari penelusuran topologis pin *exec*; pin *data* ditarik
+    malas saat dibutuhkan, seperti pemanggilan fungsi biasa;
+  - siklus pada pin data ditolak dengan pesan yang menunjuk node penyebabnya,
+    bukan menggantung;
+  - keluarannya Lua yang **bisa dibaca manusia**, dengan komentar `-- node <id>`
+    di tiap blok. Ini bukan kemewahan: ia yang membuat graph bisa di-debug
+    dengan alat yang sama seperti script biasa, dan membuat pengguna bisa
+    lulus dari visual scripting ke Lua tanpa jurang.
+  - **peta sumber** node ↔ baris Lua, supaya error runtime menyorot node yang
+    salah di editor, bukan baris di berkas yang tidak pernah dilihat pengguna.
+- **Kompilasi saat runtime maupun saat impor.** Importer `.simgraph` menghasilkan
+  `.lua` di cache aset (jalur normal, nol biaya saat memuat level), sementara
+  editor mengompilasi ulang di memori setiap graph disunting sehingga Play bisa
+  ditekan tanpa langkah build. Keduanya memanggil compiler yang sama persis —
+  hasil yang berbeda antara editor dan runtime adalah kelas bug yang tidak boleh
+  dibuka.
+- **Panel Graph Editor** memakai `imgui-node-editor` (dependensi yang sudah
+  direncanakan untuk E7.1, ditarik lebih awal ke sini): kanvas dengan pan/zoom,
+  node dari katalog lewat pencarian, koneksi bertipe yang menolak sambungan tak
+  masuk akal, breakpoint per node, dan panel "Compiled Lua" berdampingan yang
+  memperlihatkan hasil kompilasinya secara langsung.
+- **`GraphComponent`** merujuk aset `.simgraph` lewat `AssetRef`, sejajar dengan
+  `ScriptComponent`. Properti yang diekspos graph muncul di Inspector lewat jalur
+  reflection yang sama.
+
 **Kriteria terima**
 
 1. Script Lua yang memutar sebuah entity berjalan saat **Play** ditekan, berhenti
@@ -494,6 +539,16 @@ diseret ke level.
 4. Script editor Lua bisa membuat sebuah panel baru dan menambah menu item, dan
    perubahan yang dilakukannya bisa di-undo dari sistem undo utama.
 5. Properti yang diekspos script muncul di Inspector dan tersimpan bersama level.
+6. Graph "putar entity saat OnUpdate" menghasilkan Lua yang bisa dibaca, dan
+   perilakunya **identik** dengan script tulis-tangan yang setara — dibandingkan
+   dengan menjalankan keduanya dan mencocokkan transform tiap frame.
+7. Error runtime di dalam graph menyorot node penyebabnya di Graph Editor, bukan
+   sekadar mencetak nomor baris berkas yang tidak pernah dilihat pengguna.
+8. Graph dengan siklus pada pin data ditolak saat kompilasi dengan pesan yang
+   menunjuk node penyebabnya; editor tidak menggantung dan tidak crash.
+9. Level yang memakai graph dimuat tanpa mengompilasi apa pun — `.lua` hasil
+   impor yang dipakai — dan menyunting graph di editor langsung berlaku saat
+   Play ditekan tanpa langkah build manual.
 
 ---
 

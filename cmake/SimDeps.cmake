@@ -272,7 +272,8 @@ add_library(Stb::Stb ALIAS stb)
 
 # ---------------------------------------------------------------------------
 # Ditambahkan pada milestone berikutnya (lihat docs/DEPENDENCIES.md):
-#   E7.1 imgui-node-editor        graph material & state machine animasi
+#   E6.5 imgui-node-editor        graph visual scripting (dipakai lagi di E7.1
+#                                untuk graph material & state machine animasi)
 #   A0   cpp-httplib              transport HTTP untuk MCP server
 #   E8   ufbx, cgltf, meshoptimizer
 # ---------------------------------------------------------------------------

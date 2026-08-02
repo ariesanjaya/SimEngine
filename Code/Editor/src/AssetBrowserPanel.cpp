@@ -125,6 +125,9 @@ public:
         }
 
         DrawDeletePrompt(context, *db);
+        // Dijalankan setelah seluruh pohon digambar: memindahkan berkas memicu
+        // pemindaian ulang yang mengganti daftar folder yang sedang ditelusuri.
+        ResolvePendingMove(context, *db);
     }
 
 private:
@@ -185,6 +188,7 @@ private:
         if (ImGui::Selectable(rootLabel.c_str(), currentFolder_.empty())) {
             currentFolder_.clear();
         }
+        DrawFolderDropTarget("");
         DrawFolderContextMenu("");
 
         // Daftar folder sudah terurut menurut abjad, jadi induk selalu mendahului
@@ -202,11 +206,28 @@ private:
             if (ImGui::Selectable(label.c_str(), selected)) {
                 currentFolder_ = folder;
             }
+            DrawFolderDropTarget(folder);
             DrawFolderContextMenu(folder);
             ImGui::PopID();
 
             ImGui::Unindent((depth + 1.0f) * ImGui::GetFontSize());
         }
+    }
+
+    /// Menjatuhkan aset ke sebuah folder memindahkan berkasnya.
+    ///
+    /// GUID tidak ikut berubah dan `.meta` berpindah bersamanya, jadi tidak ada
+    /// level yang perlu disunting — sama seperti mengganti nama.
+    void DrawFolderDropTarget(const std::string& folder) {
+        if (!ImGui::BeginDragDropTarget()) {
+            return;
+        }
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("SIM_ASSET")) {
+            if (payload->DataSize == sizeof(Uuid)) {
+                pendingMove_ = {*static_cast<const Uuid*>(payload->Data), folder, true};
+            }
+        }
+        ImGui::EndDragDropTarget();
     }
 
     void DrawFolderContextMenu(const std::string& folder) {
@@ -268,36 +289,73 @@ private:
         const bool searching = !search_.empty();
         const std::vector<const AssetRecord*> items = db.InFolder(currentFolder_, searching);
 
-        int shown = 0;
-        if (gridMode_) {
-            const float cell = thumbnailSize_ + ImGui::GetStyle().ItemSpacing.x;
-            const auto columns = std::max(1, static_cast<int>(
-                                                 ImGui::GetContentRegionAvail().x / cell));
-            if (ImGui::BeginTable("##grid", columns)) {
-                for (const AssetRecord* record : items) {
-                    if (!Matches(*record)) {
-                        continue;
-                    }
-                    ImGui::TableNextColumn();
-                    DrawGridItem(context, db, *record);
-                    ++shown;
-                }
-                ImGui::EndTable();
-            }
-        } else {
-            for (const AssetRecord* record : items) {
-                if (!Matches(*record)) {
-                    continue;
-                }
-                DrawListItem(context, db, *record);
-                ++shown;
+        visible_.clear();
+        for (const AssetRecord* record : items) {
+            if (Matches(*record)) {
+                visible_.push_back(record);
             }
         }
-
-        if (shown == 0) {
+        if (visible_.empty()) {
             ImGui::TextDisabled(searching ? "No assets match the search."
                                           : "This folder is empty.");
+            return;
         }
+
+        // Hanya baris yang benar-benar terlihat yang diajukan ke ImGui.
+        //
+        // Tanpa ini, folder berisi 10.000 aset mengajukan 10.000 widget setiap
+        // frame — terukur lebih dari satu inti CPU penuh hanya untuk menggulir,
+        // padahal yang terlihat di layar tidak sampai lima puluh. ImGuiListClipper
+        // menuntut tinggi baris yang seragam, dan itulah alasan nama berkas
+        // dipotong menjadi satu baris alih-alih dibiarkan membungkus.
+        const auto count = static_cast<int>(visible_.size());
+        if (gridMode_) {
+            const float cell = thumbnailSize_ + ImGui::GetStyle().ItemSpacing.x;
+            const int columns =
+                std::max(1, static_cast<int>(ImGui::GetContentRegionAvail().x / cell));
+            const int rows = (count + columns - 1) / columns;
+            const float rowHeight =
+                thumbnailSize_ + ImGui::GetTextLineHeightWithSpacing() +
+                ImGui::GetStyle().ItemSpacing.y;
+
+            ImGuiListClipper clipper;
+            clipper.Begin(rows, rowHeight);
+            while (clipper.Step()) {
+                for (int row = clipper.DisplayStart; row < clipper.DisplayEnd; ++row) {
+                    for (int column = 0; column < columns; ++column) {
+                        const int index = row * columns + column;
+                        if (index >= count) {
+                            break;
+                        }
+                        if (column > 0) {
+                            ImGui::SameLine();
+                        }
+                        DrawGridItem(context, db, *visible_[static_cast<std::size_t>(index)]);
+                    }
+                }
+            }
+        } else {
+            ImGuiListClipper clipper;
+            clipper.Begin(count, ImGui::GetTextLineHeightWithSpacing());
+            while (clipper.Step()) {
+                for (int index = clipper.DisplayStart; index < clipper.DisplayEnd; ++index) {
+                    DrawListItem(context, db, *visible_[static_cast<std::size_t>(index)]);
+                }
+            }
+        }
+    }
+
+    /// Memotong teks agar muat dalam `width`, dengan elipsis bila perlu.
+    static std::string Ellipsize(const std::string& text, float width) {
+        if (ImGui::CalcTextSize(text.c_str()).x <= width) {
+            return text;
+        }
+        std::string result = text;
+        while (!result.empty() &&
+               ImGui::CalcTextSize((result + "...").c_str()).x > width) {
+            result.pop_back();
+        }
+        return result + "...";
     }
 
     void DrawGridItem(EditorContext& context, assets::AssetDatabase& db,
@@ -326,10 +384,13 @@ private:
             ImGui::SetNextItemWidth(thumbnailSize_);
             DrawRenameField(context, db, record);
         } else {
-            // Nama dipotong agar tidak melebar melewati sel dan merusak kolom.
-            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + thumbnailSize_);
-            ImGui::TextUnformatted(record.name.c_str());
-            ImGui::PopTextWrapPos();
+            // Satu baris, dipotong dengan elipsis. Membungkus ke baris kedua
+            // membuat tinggi sel tidak seragam, dan ImGuiListClipper — yang
+            // membuat folder besar tetap mulus — menuntut tinggi yang tetap.
+            ImGui::TextUnformatted(Ellipsize(record.name, thumbnailSize_).c_str());
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
+                ImGui::SetTooltip("%s", record.name.c_str());
+            }
         }
 
         ImGui::EndGroup();
@@ -591,12 +652,50 @@ private:
         ImGui::EndPopup();
     }
 
+    void ResolvePendingMove(EditorContext& context, assets::AssetDatabase& db) {
+        if (!pendingMove_.valid) {
+            return;
+        }
+        const PendingMove move = pendingMove_;
+        pendingMove_ = {};
+
+        const AssetRecord* record = db.Find(move.guid);
+        if (record == nullptr) {
+            return;
+        }
+        // Menjatuhkan ke folder asalnya sendiri bukan kesalahan, hanya tidak
+        // ada yang perlu dikerjakan.
+        const std::size_t slash = record->relativePath.find_last_of('/');
+        const std::string currentParent =
+            slash == std::string::npos ? std::string{} : record->relativePath.substr(0, slash);
+        if (currentParent == move.folder) {
+            return;
+        }
+
+        std::string error;
+        if (db.Move(move.guid, move.folder, error)) {
+            context.notifications->Success("Moved to " +
+                                           (move.folder.empty() ? "Assets" : move.folder));
+        } else {
+            context.notifications->Error("Move failed: " + error);
+        }
+    }
+
     static void DetailRow(const char* label, const char* value) {
         ImGui::TextDisabled("%s", label);
         ImGui::TextWrapped("%s", value);
         ImGui::Spacing();
     }
 
+    /// Pemindahan yang diminta lewat seret-lepas, dijalankan setelah traversal.
+    struct PendingMove {
+        Uuid guid;
+        std::string folder;
+        bool valid = false;
+    };
+
+    std::vector<const AssetRecord*> visible_;
+    PendingMove pendingMove_;
     std::string search_;
     std::string currentFolder_;
     std::string renameBuffer_;
