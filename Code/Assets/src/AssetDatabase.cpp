@@ -108,12 +108,23 @@ bool AssetDatabase::Initialize(Config config) {
     }
 
     ImporterRegistry::RegisterBuiltIn();
+    pollInterval_ = config.pollIntervalSeconds;
+    safetyNet_ = config.safetyNetSeconds;
     ScanNow();
+
+    // Dipasang setelah pemindaian pertama: memasangnya lebih dulu berarti
+    // menumpuk event untuk berkas yang toh sudah terbaca pemindaian itu.
+    if (!watcher_.Watch(root_)) {
+        SIM_INFO("Assets",
+                 "File watcher unavailable; falling back to polling every {:.1f}s",
+                 pollInterval_);
+    }
     SIM_INFO("Assets", "Asset database ready: {} assets in {}", records_.size(), root_.string());
     return true;
 }
 
 void AssetDatabase::Shutdown() {
+    watcher_.Stop();
     records_.clear();
     folders_.clear();
     byGuid_.clear();
@@ -142,8 +153,19 @@ void AssetDatabase::Update(float deltaSeconds) {
         Apply(std::move(ready));
     }
 
+    // Pemantau berkas menggantikan polling sebagai mekanisme utama. Yang
+    // tersisa hanyalah jaring pengaman berjeda panjang, karena kedua platform
+    // sama-sama bisa kehilangan event dan diam-diam ketinggalan.
+    bool changed = false;
+    if (watcher_.IsWatching()) {
+        watcherEvents_.clear();
+        const bool complete = watcher_.Poll(watcherEvents_);
+        changed = !complete || !watcherEvents_.empty();
+    }
+
     sinceLastScan_ += deltaSeconds;
-    if (sinceLastScan_ < pollInterval_) {
+    const float interval = watcher_.IsWatching() ? safetyNet_ : pollInterval_;
+    if (!changed && sinceLastScan_ < interval) {
         return;
     }
     sinceLastScan_ = 0.0f;

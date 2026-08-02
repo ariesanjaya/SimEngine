@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Sim/Assets/AssetTypes.h"
+#include "Sim/Core/FileWatcher.h"
 
 #include <atomic>
 #include <chrono>
@@ -35,8 +36,11 @@ public:
         /// Kolam untuk pemindaian dan impor. Boleh null: tanpa kolam, semua
         /// berjalan sinkron di dalam Update() — dipakai test.
         TaskPool* tasks = nullptr;
-        /// Jeda antar pemindaian ulang.
+        /// Jeda pemindaian penuh ketika pemantau berkas TIDAK tersedia.
         float pollIntervalSeconds = 1.0f;
+        /// Jeda pemindaian penuh ketika pemantau tersedia — murni jaring
+        /// pengaman untuk perubahan yang lolos, jadi boleh jarang.
+        float safetyNetSeconds = 30.0f;
     };
 
     bool Initialize(Config config);
@@ -110,7 +114,14 @@ private:
     std::filesystem::path root_;
     TaskPool* tasks_ = nullptr;
     float pollInterval_ = 1.0f;
+    float safetyNet_ = 30.0f;
     float sinceLastScan_ = 0.0f;
+
+    /// Pemantau perubahan berkas. Bila aktif, pemindaian penuh hanya berjalan
+    /// ketika ia melaporkan sesuatu — atau ketika ia melaporkan bahwa ada event
+    /// yang hilang, yang memang bisa terjadi di kedua platform.
+    FileWatcher watcher_;
+    std::vector<FileWatcher::Event> watcherEvents_;
 
     std::vector<AssetRecord> records_;
     std::vector<std::string> folders_;

@@ -286,13 +286,21 @@ private:
         // Pencarian berlaku untuk seluruh sub-pohon, bukan hanya folder ini.
         // Mencari sesuatu lalu tidak menemukannya karena ia satu tingkat lebih
         // dalam adalah kegagalan yang tidak terlihat sebagai kegagalan.
+        // Daftar yang terlihat disusun ulang hanya ketika ada yang berubah,
+        // bukan tiap frame. InFolder() menelusuri seluruh indeks; pada 10.000
+        // aset itu 600.000 pemeriksaan per detik untuk menghasilkan daftar yang
+        // sama persis enam puluh kali berturut-turut. Inilah gunanya
+        // AssetDatabase::Version() — ia naik hanya saat isinya benar-benar
+        // berubah.
         const bool searching = !search_.empty();
-        const std::vector<const AssetRecord*> items = db.InFolder(currentFolder_, searching);
-
-        visible_.clear();
-        for (const AssetRecord* record : items) {
-            if (Matches(*record)) {
-                visible_.push_back(record);
+        const ViewKey key{db.Version(), currentFolder_, search_, typeFilter_};
+        if (key != viewKey_) {
+            viewKey_ = key;
+            visible_.clear();
+            for (const AssetRecord* record : db.InFolder(currentFolder_, searching)) {
+                if (Matches(*record)) {
+                    visible_.push_back(record);
+                }
             }
         }
         if (visible_.empty()) {
@@ -694,6 +702,21 @@ private:
         bool valid = false;
     };
 
+    /// Penentu apakah daftar terlihat perlu disusun ulang.
+    struct ViewKey {
+        uint64_t version = 0;
+        std::string folder;
+        std::string search;
+        int typeFilter = -1;
+
+        friend bool operator==(const ViewKey& a, const ViewKey& b) {
+            return a.version == b.version && a.folder == b.folder && a.search == b.search &&
+                   a.typeFilter == b.typeFilter;
+        }
+        friend bool operator!=(const ViewKey& a, const ViewKey& b) { return !(a == b); }
+    };
+
+    ViewKey viewKey_{0, {}, {}, -1};
     std::vector<const AssetRecord*> visible_;
     PendingMove pendingMove_;
     std::string search_;

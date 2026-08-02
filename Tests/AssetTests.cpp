@@ -2,6 +2,7 @@
 
 #include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Assets/Importer.h"
+#include "Sim/Core/FileWatcher.h"
 #include "Sim/Core/TaskPool.h"
 
 #include <doctest/doctest.h>
@@ -203,6 +204,61 @@ TEST_CASE("berkas baru dari luar editor muncul lewat pemindaian latar") {
     }
     CHECK(db.All().size() == 2);
     CHECK(db.FindByRelativePath("second.txt") != nullptr);
+}
+
+TEST_CASE("pemantau berkas melaporkan berkas baru tanpa pemindaian penuh") {
+    TempDir temp;
+    WriteFile(temp.Path() / "sudah_ada.txt", "1");
+
+    FileWatcher watcher;
+    if (!watcher.Watch(temp.Path())) {
+        MESSAGE("pemantau berkas tidak tersedia di platform ini; uji dilewati");
+        return;
+    }
+    REQUIRE(watcher.IsWatching());
+
+    std::vector<FileWatcher::Event> events;
+    // Sebelum ada perubahan, tidak ada yang dilaporkan dan tidak ada yang hilang.
+    CHECK(watcher.Poll(events));
+    CHECK(events.empty());
+
+    WriteFile(temp.Path() / "baru.txt", "2");
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    bool seen = false;
+    while (!seen && std::chrono::steady_clock::now() < deadline) {
+        events.clear();
+        watcher.Poll(events);
+        for (const FileWatcher::Event& event : events) {
+            if (event.path == "baru.txt") {
+                seen = true;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    CHECK(seen);
+}
+
+TEST_CASE("pemantau meminta pemindaian ulang saat direktori baru muncul") {
+    TempDir temp;
+    FileWatcher watcher;
+    if (!watcher.Watch(temp.Path())) {
+        return;
+    }
+
+    // Berkas bisa masuk ke direktori baru sebelum watch-nya sempat terpasang,
+    // dan itu tidak akan pernah terlaporkan. Satu-satunya jawaban jujur adalah
+    // meminta pemindaian ulang — Poll() harus mengembalikan false.
+    std::filesystem::create_directories(temp.Path() / "Sub");
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    bool askedForRescan = false;
+    while (!askedForRescan && std::chrono::steady_clock::now() < deadline) {
+        std::vector<FileWatcher::Event> events;
+        askedForRescan = !watcher.Poll(events);
+        std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    }
+    CHECK(askedForRescan);
 }
 
 TEST_CASE("versi hanya naik ketika isinya benar-benar berubah") {
