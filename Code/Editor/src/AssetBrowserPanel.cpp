@@ -319,10 +319,15 @@ private:
 
         HandleItemInteraction(context, db, record);
 
-        // Nama dipotong agar tidak melebar melewati sel dan merusak kolom.
-        ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + thumbnailSize_);
-        ImGui::TextUnformatted(record.name.c_str());
-        ImGui::PopTextWrapPos();
+        if (renaming_ == record.guid) {
+            ImGui::SetNextItemWidth(thumbnailSize_);
+            DrawRenameField(context, db, record);
+        } else {
+            // Nama dipotong agar tidak melebar melewati sel dan merusak kolom.
+            ImGui::PushTextWrapPos(ImGui::GetCursorPosX() + thumbnailSize_);
+            ImGui::TextUnformatted(record.name.c_str());
+            ImGui::PopTextWrapPos();
+        }
 
         ImGui::EndGroup();
         ImGui::PopID();
@@ -331,6 +336,12 @@ private:
     void DrawListItem(EditorContext& context, assets::AssetDatabase& db,
                       const AssetRecord& record) {
         ImGui::PushID(record.relativePath.c_str());
+
+        if (renaming_ == record.guid) {
+            DrawRenameField(context, db, record);
+            ImGui::PopID();
+            return;
+        }
 
         const bool selected = selected_ == record.guid;
         const std::string label = std::string(IconFor(record.type)) + "  " + record.name;
@@ -385,11 +396,10 @@ private:
             return;
         }
 
-        if (renaming_ == record->guid) {
-            DrawRenameField(context, db, *record);
-        } else {
-            ImGui::TextUnformatted(record->name.c_str());
-        }
+        // Nama diganti di itemnya sendiri, bukan di sini: panel detail
+        // menghilang pada panel sempit, dan menaruh kotak teksnya di sana
+        // membuat menu "Rename" tampak tidak melakukan apa pun.
+        ImGui::TextUnformatted(record->name.c_str());
         ImGui::TextDisabled("%s", assets::ToString(record->type));
         ImGui::Separator();
 
