@@ -130,6 +130,96 @@ void LuaToField(const sol::object& value, const FieldDesc& field, void* data) {
     }
 }
 
+/// Pustaka matematika, ditulis dalam Lua dan bukan sebagai usertype C++.
+///
+/// Alasannya bukan kemalasan. `sim.get_component` mengembalikan tabel biasa
+/// `{x=, y=, z=}`, dan sebuah usertype akan menjadi tipe KEDUA yang harus
+/// dikonversi bolak-balik di setiap perbatasan — persis kelas bug yang paling
+/// mudah dibuat dan paling sulit dilihat. Dengan operasi yang bekerja pada
+/// tabel yang sama, nilai yang dibaca dari komponen bisa langsung dihitung dan
+/// langsung ditulis kembali.
+///
+/// Metatable dipasang hanya oleh konstruktor. Tabel hasil `get_component` tetap
+/// polos, jadi `+` padanya gagal dengan pesan Lua yang biasa alih-alih diam
+/// menghasilkan angka yang salah.
+constexpr const char* kMathPrelude = R"LUA(
+local vec3_mt = {}
+vec3_mt.__index = vec3_mt
+
+local function vec3(x, y, z)
+    return setmetatable({ x = x or 0.0, y = y or 0.0, z = z or 0.0 }, vec3_mt)
+end
+
+function vec3_mt.__add(a, b) return vec3(a.x + b.x, a.y + b.y, a.z + b.z) end
+function vec3_mt.__sub(a, b) return vec3(a.x - b.x, a.y - b.y, a.z - b.z) end
+function vec3_mt.__unm(a) return vec3(-a.x, -a.y, -a.z) end
+function vec3_mt.__eq(a, b) return a.x == b.x and a.y == b.y and a.z == b.z end
+function vec3_mt.__tostring(a)
+    return string.format("vec3(%.3f, %.3f, %.3f)", a.x, a.y, a.z)
+end
+
+-- Perkalian menerima skalar di sisi mana pun: `2 * v` sama sahnya dengan `v * 2`.
+function vec3_mt.__mul(a, b)
+    if type(a) == "number" then a, b = b, a end
+    if type(b) == "number" then return vec3(a.x * b, a.y * b, a.z * b) end
+    return vec3(a.x * b.x, a.y * b.y, a.z * b.z)
+end
+
+function vec3_mt:dot(b) return self.x * b.x + self.y * b.y + self.z * b.z end
+function vec3_mt:length() return math.sqrt(self:dot(self)) end
+function vec3_mt:cross(b)
+    return vec3(self.y * b.z - self.z * b.y,
+                self.z * b.x - self.x * b.z,
+                self.x * b.y - self.y * b.x)
+end
+function vec3_mt:normalized()
+    local n = self:length()
+    -- Vektor nol dikembalikan apa adanya. Membaginya menghasilkan nan yang
+    -- menjalar diam-diam ke transform dan baru terlihat sebagai objek hilang.
+    if n < 1e-8 then return vec3(0, 0, 0) end
+    return vec3(self.x / n, self.y / n, self.z / n)
+end
+
+local quat_mt = {}
+quat_mt.__index = quat_mt
+
+local function quat(w, x, y, z)
+    return setmetatable({ w = w or 1.0, x = x or 0.0, y = y or 0.0, z = z or 0.0 }, quat_mt)
+end
+
+function quat_mt.__mul(a, b)
+    return quat(a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z,
+                a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+                a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+                a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w)
+end
+function quat_mt.__tostring(a)
+    return string.format("quat(%.3f, %.3f, %.3f, %.3f)", a.w, a.x, a.y, a.z)
+end
+
+-- Memutar sebuah vektor: v' = q * v * q⁻¹, ditulis dalam bentuk yang sudah
+-- disederhanakan supaya tidak membuat dua quaternion sementara tiap panggilan.
+function quat_mt:rotate(v)
+    local u = vec3(self.x, self.y, self.z)
+    local s = self.w
+    return u * (2.0 * u:dot(v)) + v * (s * s - u:dot(u)) + u:cross(v) * (2.0 * s)
+end
+
+local function axis_angle(axis, radians)
+    local a = axis:normalized()
+    local half = radians * 0.5
+    local s = math.sin(half)
+    return quat(math.cos(half), a.x * s, a.y * s, a.z * s)
+end
+
+sim.vec3 = vec3
+sim.quat = quat
+sim.axis_angle = axis_angle
+sim.up = function() return vec3(0, 1, 0) end
+sim.right = function() return vec3(1, 0, 0) end
+sim.forward = function() return vec3(0, 0, -1) end
+)LUA";
+
 }  // namespace
 
 /// Satu skrip yang menempel pada satu entity.
@@ -227,6 +317,17 @@ void ScriptRuntime::RegisterBindings() {
                          // Transform yang berubah harus merambat ke keturunannya.
                          world_->MarkTransformDirty(entity);
                      });
+
+    // Waktu sejak Play ditekan. `dt` sudah diberikan ke OnUpdate; yang ini
+    // untuk skrip yang butuh waktu absolut tanpa menghitungnya sendiri di
+    // `self.state` — dan yang perlu nilai yang sama di seluruh skrip pada frame
+    // yang sama, bukan akumulasi masing-masing yang perlahan menyimpang.
+    sim.set_function("time", [this]() { return elapsed_; });
+
+    const std::string error = vm_->RunString(kMathPrelude, "=(sim.math)");
+    if (!error.empty()) {
+        SIM_ERROR("Lua", "Math prelude failed: {}", error);
+    }
 }
 
 void ScriptRuntime::LoadFor(scene::Entity entity, const Uuid& guid) {
@@ -295,6 +396,7 @@ void ScriptRuntime::Start() {
         component->loaded = instances_.size() > before;
     }
 
+    elapsed_ = 0.0f;
     running_ = true;
     for (const auto& instance : instances_) {
         const sol::protected_function start = instance->self["OnStart"];
@@ -315,6 +417,7 @@ void ScriptRuntime::Update(float deltaSeconds) {
     if (!running_) {
         return;
     }
+    elapsed_ += deltaSeconds;
     for (const auto& instance : instances_) {
         if (instance->failed || !world_->IsAlive(instance->entity)) {
             continue;

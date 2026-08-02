@@ -98,6 +98,8 @@ private:
     scene::World* world_ = nullptr;
     assets::AssetDatabase* assets_ = nullptr;
     std::vector<std::unique_ptr<Instance>> instances_;
+    /// Detik sejak Play ditekan, dibaca skrip lewat `sim.time()`.
+    float elapsed_ = 0.0f;
     bool running_ = false;
 };
 

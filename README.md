@@ -125,6 +125,17 @@ dan daftarnya dibangkitkan dari reflection, jadi komponen baru ikut terjangkau
 tanpa menambah satu baris pun di sisi Lua. Panel **Lua Console** menyediakan REPL
 di state yang sama, lengkap dengan riwayat, pelengkapan **Tab**, dan traceback.
 
+`sim.vec3` dan `sim.quat` bekerja pada **bentuk tabel yang sama** dengan yang
+dikembalikan `get_component`, jadi nilai yang dibaca dari komponen bisa langsung
+dihitung dan langsung ditulis kembali — tidak ada tipe kedua yang harus
+dikonversi bolak-balik di perbatasan.
+
+```lua
+local t = sim.get_component(self.entity, "Transform")
+t.rotation = sim.axis_angle(sim.up(), sim.time() * 1.5)
+sim.set_component(self.entity, "Transform", t)
+```
+
 ### Kunci laju frame
 
 Editor mengunci laju frame ke **refresh rate terendah** di antara semua monitor

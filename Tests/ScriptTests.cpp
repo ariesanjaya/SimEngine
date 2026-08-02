@@ -220,3 +220,38 @@ TEST_CASE("hot reload memakai kode baru dan mempertahankan state instance") {
 
     runtime.Stop();
 }
+
+TEST_CASE("Pustaka vec3 dan quat bekerja pada tabel yang sama dengan komponen") {
+    sim::script::ScriptRuntime runtime;
+    sim::scene::World world;
+    REQUIRE(runtime.Initialize(world, nullptr));
+
+    auto eval = [&runtime](const char* code) {
+        const sim::script::EvalResult result = runtime.Evaluate(code);
+        REQUIRE(result.ok);
+        REQUIRE_FALSE(result.values.empty());
+        return result.values[0].value;
+    };
+
+    CHECK(eval("tostring(sim.vec3(1, 2, 3) + sim.vec3(1, 1, 1))") == "vec3(2.000, 3.000, 4.000)");
+    CHECK(eval("tostring(sim.vec3(1, 2, 3) * 2)") == "vec3(2.000, 4.000, 6.000)");
+    // Skalar di kiri harus sah juga; menuntut urutan tertentu adalah jebakan
+    // yang hanya terlihat saat skrip dijalankan.
+    CHECK(eval("tostring(2 * sim.vec3(1, 2, 3))") == "vec3(2.000, 4.000, 6.000)");
+    CHECK(eval("sim.vec3(3, 4, 0):length()") == "5.0");
+    CHECK(eval("tostring(sim.vec3(1, 0, 0):cross(sim.vec3(0, 1, 0)))") ==
+          "vec3(0.000, 0.000, 1.000)");
+    // Vektor nol tidak boleh menghasilkan nan.
+    CHECK(eval("tostring(sim.vec3(0, 0, 0):normalized())") == "vec3(0.000, 0.000, 0.000)");
+
+    // Setengah putaran mengelilingi Y membalik sumbu X. Dibandingkan dengan
+    // toleransi, bukan lewat teksnya: hasilnya melewati sin/cos, dan komponen
+    // yang secara matematis nol bisa keluar sebagai -0.
+    CHECK(eval("local v = sim.axis_angle(sim.up(), math.pi):rotate(sim.vec3(1, 0, 0))\n"
+               "return math.abs(v.x + 1) < 1e-6 and math.abs(v.y) < 1e-6 and "
+               "math.abs(v.z) < 1e-6") == "true");
+
+    // Hasilnya berbentuk tabel {x,y,z} biasa, jadi bisa langsung ditulis
+    // kembali ke komponen tanpa konversi.
+    CHECK(eval("sim.vec3(1, 2, 3).y") == "2");
+}
