@@ -1,0 +1,485 @@
+#include "Sim/RHI/Device.h"
+
+#include "Sim/Core/Assert.h"
+
+#include <SDL3/SDL_error.h>
+#include <SDL3/SDL_vulkan.h>
+
+#include <algorithm>
+#include <cstring>
+
+namespace sim::rhi {
+namespace {
+
+constexpr const char* kValidationLayer = "VK_LAYER_KHRONOS_validation";
+
+VKAPI_ATTR VkBool32 VKAPI_CALL DebugCallback(VkDebugUtilsMessageSeverityFlagBitsEXT severity,
+                                             VkDebugUtilsMessageTypeFlagsEXT /*types*/,
+                                             const VkDebugUtilsMessengerCallbackDataEXT* data,
+                                             void* /*userData*/) {
+    const char* message = data->pMessage != nullptr ? data->pMessage : "(kosong)";
+    if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT) != 0) {
+        SIM_ERROR("RHI", "[validation] {}", message);
+    } else if ((severity & VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT) != 0) {
+        SIM_WARN("RHI", "[validation] {}", message);
+    } else {
+        SIM_DEBUG_LOG("RHI", "[validation] {}", message);
+    }
+    // Selalu VK_FALSE: mengembalikan VK_TRUE akan membatalkan panggilan yang
+    // memicunya, yang membuat perilaku Debug berbeda dari Release.
+    return VK_FALSE;
+}
+
+bool HasLayer(const char* name) {
+    uint32_t count = 0;
+    vkEnumerateInstanceLayerProperties(&count, nullptr);
+    std::vector<VkLayerProperties> layers(count);
+    vkEnumerateInstanceLayerProperties(&count, layers.data());
+    return std::any_of(layers.begin(), layers.end(), [name](const VkLayerProperties& layer) {
+        return std::strcmp(layer.layerName, name) == 0;
+    });
+}
+
+bool HasInstanceExtension(const char* name) {
+    uint32_t count = 0;
+    vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr);
+    std::vector<VkExtensionProperties> extensions(count);
+    vkEnumerateInstanceExtensionProperties(nullptr, &count, extensions.data());
+    return std::any_of(extensions.begin(), extensions.end(),
+                       [name](const VkExtensionProperties& extension) {
+                           return std::strcmp(extension.extensionName, name) == 0;
+                       });
+}
+
+VkDebugUtilsMessengerCreateInfoEXT MakeDebugMessengerInfo() {
+    VkDebugUtilsMessengerCreateInfoEXT info{};
+    info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
+    info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
+                           VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT;
+    info.messageType = VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT |
+                       VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT |
+                       VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
+    info.pfnUserCallback = DebugCallback;
+    return info;
+}
+
+}  // namespace
+
+std::string_view ResultToString(VkResult result) {
+    switch (result) {
+        case VK_SUCCESS: return "VK_SUCCESS";
+        case VK_NOT_READY: return "VK_NOT_READY";
+        case VK_TIMEOUT: return "VK_TIMEOUT";
+        case VK_INCOMPLETE: return "VK_INCOMPLETE";
+        case VK_SUBOPTIMAL_KHR: return "VK_SUBOPTIMAL_KHR";
+        case VK_ERROR_OUT_OF_HOST_MEMORY: return "VK_ERROR_OUT_OF_HOST_MEMORY";
+        case VK_ERROR_OUT_OF_DEVICE_MEMORY: return "VK_ERROR_OUT_OF_DEVICE_MEMORY";
+        case VK_ERROR_INITIALIZATION_FAILED: return "VK_ERROR_INITIALIZATION_FAILED";
+        case VK_ERROR_DEVICE_LOST: return "VK_ERROR_DEVICE_LOST";
+        case VK_ERROR_MEMORY_MAP_FAILED: return "VK_ERROR_MEMORY_MAP_FAILED";
+        case VK_ERROR_LAYER_NOT_PRESENT: return "VK_ERROR_LAYER_NOT_PRESENT";
+        case VK_ERROR_EXTENSION_NOT_PRESENT: return "VK_ERROR_EXTENSION_NOT_PRESENT";
+        case VK_ERROR_FEATURE_NOT_PRESENT: return "VK_ERROR_FEATURE_NOT_PRESENT";
+        case VK_ERROR_INCOMPATIBLE_DRIVER: return "VK_ERROR_INCOMPATIBLE_DRIVER";
+        case VK_ERROR_SURFACE_LOST_KHR: return "VK_ERROR_SURFACE_LOST_KHR";
+        case VK_ERROR_OUT_OF_DATE_KHR: return "VK_ERROR_OUT_OF_DATE_KHR";
+        default: return "unknown VkResult";
+    }
+}
+
+Device::~Device() {
+    Destroy();
+}
+
+bool Device::Create(const DeviceDesc& desc) {
+    if (!CreateInstance(desc)) {
+        return false;
+    }
+    if (!SelectPhysicalDevice()) {
+        return false;
+    }
+    if (!CreateLogicalDevice()) {
+        return false;
+    }
+
+    VmaAllocatorCreateInfo allocatorInfo{};
+    allocatorInfo.physicalDevice = physicalDevice_;
+    allocatorInfo.device = device_;
+    allocatorInfo.instance = instance_;
+    allocatorInfo.vulkanApiVersion = apiVersion_;
+    SIM_VK_CHECK(vmaCreateAllocator(&allocatorInfo, &allocator_));
+
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    poolInfo.queueFamilyIndex = graphicsQueueFamily_;
+    SIM_VK_CHECK(vkCreateCommandPool(device_, &poolInfo, nullptr, &oneShotPool_));
+
+    VkPipelineCacheCreateInfo cacheInfo{};
+    cacheInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    SIM_VK_CHECK(vkCreatePipelineCache(device_, &cacheInfo, nullptr, &pipelineCache_));
+
+    return true;
+}
+
+bool Device::CreateInstance(const DeviceDesc& desc) {
+    // Ditaut langsung ke loader, jadi simbolnya selalu ada (Vulkan 1.1+).
+    apiVersion_ = VK_API_VERSION_1_0;
+    SIM_VK_CHECK(vkEnumerateInstanceVersion(&apiVersion_));
+    // Loader boleh lebih baru dari header yang kita compile; membatasi ke
+    // VK_HEADER_VERSION_COMPLETE mencegah kita meminta versi yang struct-nya
+    // tidak kita kenal.
+    apiVersion_ = std::min(apiVersion_, static_cast<uint32_t>(VK_HEADER_VERSION_COMPLETE));
+
+    VkApplicationInfo appInfo{};
+    appInfo.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO;
+    appInfo.pApplicationName = desc.applicationName.c_str();
+    appInfo.applicationVersion = VK_MAKE_VERSION(0, 1, 0);
+    appInfo.pEngineName = "SimEngine";
+    appInfo.engineVersion = VK_MAKE_VERSION(0, 1, 0);
+    appInfo.apiVersion = apiVersion_;
+
+    std::vector<const char*> extensions = desc.instanceExtensions;
+    std::vector<const char*> layers;
+
+    validationEnabled_ = desc.enableValidation && HasLayer(kValidationLayer) &&
+                         HasInstanceExtension(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    if (desc.enableValidation && !validationEnabled_) {
+        SIM_WARN("RHI", "Validation layer requested but unavailable; running without validation");
+    }
+    if (validationEnabled_) {
+        layers.push_back(kValidationLayer);
+        extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
+    }
+    if (HasInstanceExtension(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
+        extensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
+    }
+
+    VkInstanceCreateInfo instanceInfo{};
+    instanceInfo.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO;
+    instanceInfo.pApplicationInfo = &appInfo;
+    instanceInfo.enabledLayerCount = static_cast<uint32_t>(layers.size());
+    instanceInfo.ppEnabledLayerNames = layers.data();
+    instanceInfo.enabledExtensionCount = static_cast<uint32_t>(extensions.size());
+    instanceInfo.ppEnabledExtensionNames = extensions.data();
+
+    // Messenger dipasang lewat pNext supaya error selama vkCreateInstance
+    // sendiri ikut tertangkap — messenger biasa baru hidup setelah instance ada.
+    VkDebugUtilsMessengerCreateInfoEXT debugInfo = MakeDebugMessengerInfo();
+    if (validationEnabled_) {
+        instanceInfo.pNext = &debugInfo;
+    }
+
+    const VkResult result = vkCreateInstance(&instanceInfo, nullptr, &instance_);
+    if (result != VK_SUCCESS) {
+        SIM_CRITICAL("RHI", "vkCreateInstance failed: {}", ResultToString(result));
+        return false;
+    }
+
+    if (validationEnabled_) {
+        auto create = reinterpret_cast<PFN_vkCreateDebugUtilsMessengerEXT>(
+            vkGetInstanceProcAddr(instance_, "vkCreateDebugUtilsMessengerEXT"));
+        if (create != nullptr) {
+            SIM_VK_CHECK(create(instance_, &debugInfo, nullptr, &debugMessenger_));
+        }
+    }
+
+    SIM_INFO("RHI", "Vulkan instance {}.{}.{}{}", VK_VERSION_MAJOR(apiVersion_),
+             VK_VERSION_MINOR(apiVersion_), VK_VERSION_PATCH(apiVersion_),
+             validationEnabled_ ? " (validation on)" : "");
+    return true;
+}
+
+bool Device::SelectPhysicalDevice() {
+    uint32_t count = 0;
+    SIM_VK_CHECK(vkEnumeratePhysicalDevices(instance_, &count, nullptr));
+    if (count == 0) {
+        SIM_CRITICAL("RHI", "No Vulkan device found");
+        return false;
+    }
+    std::vector<VkPhysicalDevice> devices(count);
+    SIM_VK_CHECK(vkEnumeratePhysicalDevices(instance_, &count, devices.data()));
+
+    auto scoreOf = [](VkPhysicalDevice device) {
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(device, &properties);
+        switch (properties.deviceType) {
+            case VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU: return 3;
+            case VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU: return 2;
+            case VK_PHYSICAL_DEVICE_TYPE_VIRTUAL_GPU: return 1;
+            default: return 0;  // CPU/llvmpipe hanya dipakai kalau tidak ada lain
+        }
+    };
+
+    physicalDevice_ = *std::max_element(
+        devices.begin(), devices.end(),
+        [&scoreOf](VkPhysicalDevice a, VkPhysicalDevice b) { return scoreOf(a) < scoreOf(b); });
+
+    VkPhysicalDeviceProperties properties{};
+    vkGetPhysicalDeviceProperties(physicalDevice_, &properties);
+    deviceName_ = properties.deviceName;
+    apiVersion_ = std::min(apiVersion_, properties.apiVersion);
+    supportsVulkan13_ = properties.apiVersion >= VK_API_VERSION_1_3;
+    SIM_INFO("RHI", "GPU: {} (driver {}.{}.{})", deviceName_,
+             VK_VERSION_MAJOR(properties.driverVersion), VK_VERSION_MINOR(properties.driverVersion),
+             VK_VERSION_PATCH(properties.driverVersion));
+
+    uint32_t familyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice_, &familyCount, nullptr);
+    std::vector<VkQueueFamilyProperties> families(familyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice_, &familyCount, families.data());
+
+    for (uint32_t i = 0; i < familyCount; ++i) {
+        if ((families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0) {
+            graphicsQueueFamily_ = i;
+            break;
+        }
+    }
+    if (graphicsQueueFamily_ == UINT32_MAX) {
+        SIM_CRITICAL("RHI", "No graphics-capable queue family");
+        return false;
+    }
+    return true;
+}
+
+bool Device::CreateLogicalDevice() {
+    const float priority = 1.0f;
+    VkDeviceQueueCreateInfo queueInfo{};
+    queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+    queueInfo.queueFamilyIndex = graphicsQueueFamily_;
+    queueInfo.queueCount = 1;
+    queueInfo.pQueuePriorities = &priority;
+
+    std::vector<const char*> deviceExtensions{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+
+    VkPhysicalDeviceFeatures features{};
+    features.fillModeNonSolid = VK_TRUE;  // wireframe di viewport editor
+    features.wideLines = VK_TRUE;         // garis gizmo & grid
+
+    VkPhysicalDeviceFeatures supported{};
+    vkGetPhysicalDeviceFeatures(physicalDevice_, &supported);
+    features.fillModeNonSolid &= supported.fillModeNonSolid;
+    features.wideLines &= supported.wideLines;
+
+    // Fitur Vulkan 1.3 yang kita aktifkan sejak sekarang:
+    //   - shaderDemoteToHelperInvocation: dibutuhkan segera, karena glslc
+    //     menerjemahkan `discard` menjadi OpDemoteToHelperInvocation saat
+    //     --target-env=vulkan1.3, dan shader grid memakai discard.
+    //   - dynamicRendering & synchronization2: belum dipakai di E1, tapi
+    //     mengaktifkannya sekarang membuat E8 tidak perlu menyentuh pembuatan
+    //     device lagi.
+    VkPhysicalDeviceVulkan13Features supported13{};
+    supported13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    VkPhysicalDeviceFeatures2 supported2{};
+    supported2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    supported2.pNext = &supported13;
+    if (supportsVulkan13_) {
+        vkGetPhysicalDeviceFeatures2(physicalDevice_, &supported2);
+    }
+
+    VkPhysicalDeviceVulkan13Features enable13{};
+    enable13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    enable13.shaderDemoteToHelperInvocation = supported13.shaderDemoteToHelperInvocation;
+    enable13.dynamicRendering = supported13.dynamicRendering;
+    enable13.synchronization2 = supported13.synchronization2;
+
+    VkPhysicalDeviceFeatures2 enable2{};
+    enable2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
+    enable2.pNext = &enable13;
+    enable2.features = features;
+
+    VkDeviceCreateInfo deviceInfo{};
+    deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
+    deviceInfo.queueCreateInfoCount = 1;
+    deviceInfo.pQueueCreateInfos = &queueInfo;
+    deviceInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
+    deviceInfo.ppEnabledExtensionNames = deviceExtensions.data();
+    // Fitur diberikan lewat pNext (features2) atau lewat pEnabledFeatures —
+    // tidak boleh keduanya sekaligus.
+    if (supportsVulkan13_) {
+        deviceInfo.pNext = &enable2;
+    } else {
+        deviceInfo.pEnabledFeatures = &features;
+    }
+
+    const VkResult result = vkCreateDevice(physicalDevice_, &deviceInfo, nullptr, &device_);
+    if (result != VK_SUCCESS) {
+        SIM_CRITICAL("RHI", "vkCreateDevice failed: {}", ResultToString(result));
+        return false;
+    }
+    vkGetDeviceQueue(device_, graphicsQueueFamily_, 0, &graphicsQueue_);
+    SIM_INFO("RHI", "Device ready (Vulkan 1.3: {}, dynamic rendering: {}, sync2: {})",
+             supportsVulkan13_ ? "yes" : "no", enable13.dynamicRendering != 0 ? "yes" : "no",
+             enable13.synchronization2 != 0 ? "yes" : "no");
+    return true;
+}
+
+void Device::Destroy() {
+    if (device_ != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(device_);
+    }
+    for (TransientSubmit& slot : transients_) {
+        vkDestroyFence(device_, slot.fence, nullptr);
+        vkDestroyCommandPool(device_, slot.pool, nullptr);
+    }
+    transients_.clear();
+    if (pipelineCache_ != VK_NULL_HANDLE) {
+        vkDestroyPipelineCache(device_, pipelineCache_, nullptr);
+        pipelineCache_ = VK_NULL_HANDLE;
+    }
+    if (oneShotPool_ != VK_NULL_HANDLE) {
+        vkDestroyCommandPool(device_, oneShotPool_, nullptr);
+        oneShotPool_ = VK_NULL_HANDLE;
+    }
+    if (allocator_ != VK_NULL_HANDLE) {
+        vmaDestroyAllocator(allocator_);
+        allocator_ = VK_NULL_HANDLE;
+    }
+    if (device_ != VK_NULL_HANDLE) {
+        vkDestroyDevice(device_, nullptr);
+        device_ = VK_NULL_HANDLE;
+    }
+    if (debugMessenger_ != VK_NULL_HANDLE) {
+        auto destroy = reinterpret_cast<PFN_vkDestroyDebugUtilsMessengerEXT>(
+            vkGetInstanceProcAddr(instance_, "vkDestroyDebugUtilsMessengerEXT"));
+        if (destroy != nullptr) {
+            destroy(instance_, debugMessenger_, nullptr);
+        }
+        debugMessenger_ = VK_NULL_HANDLE;
+    }
+    if (instance_ != VK_NULL_HANDLE) {
+        vkDestroyInstance(instance_, nullptr);
+        instance_ = VK_NULL_HANDLE;
+    }
+}
+
+VkSurfaceKHR Device::CreateSurface(SDL_Window* window) const {
+    VkSurfaceKHR surface = VK_NULL_HANDLE;
+    if (!SDL_Vulkan_CreateSurface(window, instance_, nullptr, &surface)) {
+        SIM_CRITICAL("RHI", "SDL_Vulkan_CreateSurface failed: {}", SDL_GetError());
+        return VK_NULL_HANDLE;
+    }
+    return surface;
+}
+
+void Device::DestroySurface(VkSurfaceKHR surface) const {
+    if (surface != VK_NULL_HANDLE) {
+        SDL_Vulkan_DestroySurface(instance_, surface, nullptr);
+    }
+}
+
+VkCommandBuffer Device::BeginOneShot() const {
+    VkCommandBufferAllocateInfo allocateInfo{};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocateInfo.commandPool = oneShotPool_;
+    allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocateInfo.commandBufferCount = 1;
+
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    SIM_VK_CHECK(vkAllocateCommandBuffers(device_, &allocateInfo, &commandBuffer));
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    SIM_VK_CHECK(vkBeginCommandBuffer(commandBuffer, &beginInfo));
+    return commandBuffer;
+}
+
+void Device::EndOneShot(VkCommandBuffer commandBuffer) const {
+    SIM_VK_CHECK(vkEndCommandBuffer(commandBuffer));
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+    SIM_VK_CHECK(vkQueueSubmit(graphicsQueue_, 1, &submitInfo, VK_NULL_HANDLE));
+    // Setup jarang terjadi dan selalu di luar frame, jadi menunggu queue idle
+    // di sini lebih sederhana daripada mengelola fence sekali pakai.
+    SIM_VK_CHECK(vkQueueWaitIdle(graphicsQueue_));
+    vkFreeCommandBuffers(device_, oneShotPool_, 1, &commandBuffer);
+}
+
+Device::TransientSubmit Device::CreateTransient() const {
+    TransientSubmit slot;
+
+    VkCommandPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_TRANSIENT_BIT;
+    poolInfo.queueFamilyIndex = graphicsQueueFamily_;
+    SIM_VK_CHECK(vkCreateCommandPool(device_, &poolInfo, nullptr, &slot.pool));
+
+    VkCommandBufferAllocateInfo allocateInfo{};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+    allocateInfo.commandPool = slot.pool;
+    allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocateInfo.commandBufferCount = 1;
+    SIM_VK_CHECK(vkAllocateCommandBuffers(device_, &allocateInfo, &slot.commandBuffer));
+
+    VkFenceCreateInfo fenceInfo{};
+    fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
+    SIM_VK_CHECK(vkCreateFence(device_, &fenceInfo, nullptr, &slot.fence));
+    return slot;
+}
+
+VkCommandBuffer Device::BeginTransient() const {
+    TransientSubmit* slot = nullptr;
+    for (TransientSubmit& candidate : transients_) {
+        if (!candidate.pending) {
+            slot = &candidate;
+            break;
+        }
+        // vkGetFenceStatus tidak memblokir: slot yang GPU-nya sudah selesai
+        // langsung bisa dipakai ulang, yang belum dilewati begitu saja.
+        if (vkGetFenceStatus(device_, candidate.fence) == VK_SUCCESS) {
+            SIM_VK_CHECK(vkResetFences(device_, 1, &candidate.fence));
+            SIM_VK_CHECK(vkResetCommandPool(device_, candidate.pool, 0));
+            candidate.pending = false;
+            slot = &candidate;
+            break;
+        }
+    }
+
+    if (slot == nullptr) {
+        // Kolam tumbuh sampai sebanyak submit yang bisa in-flight sekaligus,
+        // biasanya berhenti di 2-3. Batas ini murni jaring pengaman kalau ada
+        // kebocoran: tanpa itu, submit yang fence-nya tak pernah di-signal akan
+        // menambah slot tiap frame sampai kehabisan memori.
+        SIM_VERIFY(transients_.size() < 64, "Transient command buffer pool grew unbounded");
+        transients_.push_back(CreateTransient());
+        slot = &transients_.back();
+    }
+
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    SIM_VK_CHECK(vkBeginCommandBuffer(slot->commandBuffer, &beginInfo));
+    return slot->commandBuffer;
+}
+
+void Device::SubmitTransient(VkCommandBuffer commandBuffer) const {
+    TransientSubmit* slot = nullptr;
+    for (TransientSubmit& candidate : transients_) {
+        if (candidate.commandBuffer == commandBuffer) {
+            slot = &candidate;
+            break;
+        }
+    }
+    SIM_VERIFY(slot != nullptr, "SubmitTransient called with a foreign command buffer");
+
+    SIM_VK_CHECK(vkEndCommandBuffer(commandBuffer));
+
+    VkSubmitInfo submitInfo{};
+    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submitInfo.commandBufferCount = 1;
+    submitInfo.pCommandBuffers = &commandBuffer;
+    SIM_VK_CHECK(vkQueueSubmit(graphicsQueue_, 1, &submitInfo, slot->fence));
+    slot->pending = true;
+}
+
+void Device::WaitIdle() const {
+    if (device_ != VK_NULL_HANDLE) {
+        SIM_VK_CHECK(vkDeviceWaitIdle(device_));
+    }
+}
+
+}  // namespace sim::rhi

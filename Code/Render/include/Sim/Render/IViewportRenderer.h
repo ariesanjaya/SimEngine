@@ -1,0 +1,47 @@
+#pragma once
+
+#include "Sim/Render/Types.h"
+
+#include <cstdint>
+
+namespace sim::render {
+
+/// Batas antara editor dan rendering (seam #1 di docs/ARCHITECTURE.md).
+///
+/// Panel Viewport hanya melihat antarmuka ini. Sampai E8 implementasinya adalah
+/// StubRenderer (clear + grid prosedural); setelah E8 diganti VulkanRenderer
+/// tanpa satu baris pun panel berubah. Header ini sengaja tidak meng-include
+/// apa pun dari Vulkan — kalau suatu saat ia perlu, berarti ada seam yang bocor.
+class IViewportRenderer {
+public:
+    virtual ~IViewportRenderer() = default;
+
+    /// Menyesuaikan ukuran target render. Aman dipanggil tiap frame dengan
+    /// ukuran yang sama — implementasi yang membangun ulang setiap panggilan
+    /// akan membuat panel berkedip saat diseret.
+    virtual void Resize(uint32_t width, uint32_t height) = 0;
+
+    virtual void Render(const ViewportDesc& desc, const ViewportScene& scene) = 0;
+
+    /// Handle tekstur hasil render terakhir, siap dilempar ke ImGui::Image().
+    /// Bisa berubah setelah Resize().
+    virtual TextureHandle ColorTarget() const = 0;
+
+    /// Koordinat tekstur pojok kanan-bawah dari bagian yang benar-benar
+    /// digambar.
+    ///
+    /// Tidak selalu (1,1): implementasi boleh mengalokasikan gambar lebih besar
+    /// daripada yang diminta agar tidak perlu mengalokasi ulang setiap panel
+    /// digeser sedikit. UI wajib memakai nilai ini saat menggambar, kalau tidak
+    /// bagian gambar yang belum diisi ikut terlihat.
+    virtual Vec2 ColorTargetUvMax() const = 0;
+
+    virtual uint32_t Width() const = 0;
+    virtual uint32_t Height() const = 0;
+
+    /// Name implementasi, ditampilkan di pojok viewport supaya jelas bahwa yang
+    /// terlihat masih preview stub, bukan hasil rendering sungguhan.
+    virtual const char* Name() const = 0;
+};
+
+}  // namespace sim::render

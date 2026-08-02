@@ -1,0 +1,77 @@
+cmake_minimum_required(VERSION 3.25)
+
+project(SimEngine
+    VERSION 0.1.0
+    DESCRIPTION "Game engine 3D dengan editor Dear ImGui dan runtime Lua"
+    LANGUAGES C CXX)
+
+if(PROJECT_SOURCE_DIR STREQUAL PROJECT_BINARY_DIR)
+    message(FATAL_ERROR "Build in-source dilarang. Pakai: cmake --preset linux-clang-debug")
+endif()
+
+list(APPEND CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
+
+set(CMAKE_C_STANDARD 11)
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+if(NOT CMAKE_RUNTIME_OUTPUT_DIRECTORY)
+    set(CMAKE_RUNTIME_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
+endif()
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
+
+# --- Opsi -------------------------------------------------------------------
+option(SIM_BUILD_EDITOR     "Bangun aplikasi editor"                    ON)
+option(SIM_BUILD_TESTS      "Bangun unit test (doctest)"                ON)
+option(SIM_WITH_LUA         "Bangun runtime scripting Lua"              ON)
+option(SIM_WERROR           "Perlakukan warning sebagai error"          OFF)
+option(SIM_STRICT_WARNINGS  "Aktifkan -Wconversion dan kawan-kawannya"  OFF)
+
+# Build sanitizer mematikan ini. Alasannya: clang hanya menautkan runtime
+# sanitizer secara statis ke executable, tidak ke shared library, sedangkan SDL
+# menautkan dirinya dengan --no-undefined — hasilnya seluruh simbol __asan_*
+# menjadi undefined dan link gagal. Menautkan SDL secara statis menghilangkan
+# masalahnya tanpa perlu -shared-libasan beserta urusan LD_LIBRARY_PATH-nya.
+option(SIM_SDL_SHARED       "Bangun SDL3 sebagai shared library"        ON)
+
+include(SimTargets)
+include(SimVulkan)
+include(SimDeps)
+include(SimShaders)
+
+# --- Modul ------------------------------------------------------------------
+add_subdirectory(Code/Core)
+add_subdirectory(Code/Reflect)
+add_subdirectory(Code/Scene)
+add_subdirectory(Code/Platform)
+add_subdirectory(Code/RHI)
+add_subdirectory(Code/ImGuiIntegration)
+add_subdirectory(Code/Render)
+if(SIM_WITH_LUA)
+    add_subdirectory(Code/Script)
+endif()
+add_subdirectory(Code/EditorFramework)
+add_subdirectory(Code/Editor)
+
+if(SIM_BUILD_EDITOR)
+    add_subdirectory(Apps/SimEditor)
+endif()
+
+if(SIM_BUILD_TESTS)
+    enable_testing()
+    add_subdirectory(Tests)
+endif()
+
+# --- Ringkasan konfigurasi --------------------------------------------------
+message(STATUS "")
+message(STATUS "SimEngine ${PROJECT_VERSION}")
+message(STATUS "  compiler     : ${CMAKE_CXX_COMPILER_ID} ${CMAKE_CXX_COMPILER_VERSION}")
+message(STATUS "  build type   : ${CMAKE_BUILD_TYPE}")
+message(STATUS "  vulkan       : ${Vulkan_VERSION} (${Vulkan_LIBRARY})")
+message(STATUS "  editor       : ${SIM_BUILD_EDITOR}")
+message(STATUS "  lua          : ${SIM_WITH_LUA}")
+message(STATUS "  tests        : ${SIM_BUILD_TESTS}")
+message(STATUS "")

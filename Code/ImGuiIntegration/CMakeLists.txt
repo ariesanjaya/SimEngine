@@ -1,0 +1,12 @@
+sim_add_library(ImGuiIntegration
+    SOURCES
+        src/ImGuiLayer.cpp
+        src/TextureBridge.cpp
+        src/Theme.cpp
+    PUBLIC_DEPS
+        Sim::Core
+        Sim::RHI
+        ImGui::Backend
+    PRIVATE_DEPS
+        Sim::Platform
+        SDL3::SDL3)

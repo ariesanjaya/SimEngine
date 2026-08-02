@@ -1,0 +1,12 @@
+sim_add_library(RHI
+    SOURCES
+        src/Device.cpp
+        src/RenderTarget.cpp
+        src/Swapchain.cpp
+        src/VmaImplementation.cpp
+    PUBLIC_DEPS
+        Sim::Core
+        Vulkan::Vulkan
+        GPUOpen::VMA
+    PRIVATE_DEPS
+        SDL3::SDL3)
