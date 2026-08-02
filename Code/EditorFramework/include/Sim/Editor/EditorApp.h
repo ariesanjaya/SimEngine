@@ -37,6 +37,7 @@ public:
         // yang boleh melihat RHI, dan EditorFramework bukan tempat itu.
         TaskPool* tasks = nullptr;
         render::IThumbnailCache* thumbnails = nullptr;
+        script::ScriptRuntime* scripts = nullptr;
     };
 
     bool Initialize(const Config& config);
@@ -62,6 +63,13 @@ public:
     scene::World& GetWorld() { return world_; }
 
     /// Membuat level contoh saat editor dibuka tanpa berkas apa pun.
+    /// Menjalankan skrip. Keadaan scene dicuplik lebih dulu supaya Stop bisa
+    /// mengembalikannya persis seperti sebelum Play — tanpa itu, mencoba sesuatu
+    /// berarti kehilangan penataan level yang sedang dikerjakan.
+    void Play();
+    void Stop();
+    bool IsPlaying() const { return playing_; }
+
     void CreateStarterLevel();
     bool SaveLevel(const std::filesystem::path& path);
     bool LoadLevel(const std::filesystem::path& path);
@@ -115,6 +123,9 @@ private:
 
     std::filesystem::path configDir_;
     std::filesystem::path levelPath_;
+    /// Cuplikan level sesaat sebelum Play, dipakai Stop untuk mengembalikannya.
+    std::string playSnapshot_;
+    bool playing_ = false;
     float autosaveTimer_ = 0.0f;
     bool exitRequested_ = false;
     bool wantsExit_ = false;

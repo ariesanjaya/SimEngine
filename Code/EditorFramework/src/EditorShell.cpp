@@ -188,13 +188,27 @@ void EditorShell::DrawMenuBar(EditorContext& context, PanelManager& panels) {
     // Kontrol Play didorong ke kanan menu bar, seperti pada tata letak acuan.
     const float playControlsWidth = ImGui::GetFontSize() * 7.0f;
     ImGui::SameLine(ImGui::GetWindowWidth() - playControlsWidth);
-    ImGui::BeginDisabled();
-    ImGui::SmallButton(icons::kPlay);
-    ImGui::SameLine();
-    ImGui::SmallButton(icons::kPause);
-    ImGui::SameLine();
-    ImGui::SmallButton(icons::kStop);
+    const bool playing = context.playing;
+    ImGui::BeginDisabled(playing || context.scripts == nullptr);
+    if (ImGui::SmallButton(icons::kPlay) && context.requestPlay) {
+        context.requestPlay();
+    }
     ImGui::EndDisabled();
+    widgets::Tooltip(context.scripts == nullptr ? "Lua is not built in" : "Play");
+
+    ImGui::SameLine();
+    // Pause masih menunggu pemisahan waktu simulasi dari waktu editor (E9).
+    ImGui::BeginDisabled();
+    ImGui::SmallButton(icons::kPause);
+    ImGui::EndDisabled();
+
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!playing);
+    if (ImGui::SmallButton(icons::kStop) && context.requestStop) {
+        context.requestStop();
+    }
+    ImGui::EndDisabled();
+    widgets::Tooltip("Stop and restore the scene");
 
     ImGui::EndMenuBar();
 }

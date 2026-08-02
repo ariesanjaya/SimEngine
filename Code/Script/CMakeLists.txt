@@ -1,6 +1,10 @@
 sim_add_library(Script
     SOURCES
         src/LuaVM.cpp
+        src/ScriptRuntime.cpp
     PUBLIC_DEPS
         Sim::Core
-        Sol2::Sol2)
+        Sim::Scene
+        Sol2::Sol2
+    PRIVATE_DEPS
+        Sim::Assets)

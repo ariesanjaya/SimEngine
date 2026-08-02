@@ -75,6 +75,14 @@ void RegisterCoreComponents() {
             .Range(-4.0f, 4.0f);
         components.Register<MeshRendererComponent>();
 
+        types.Type<ScriptComponent>("Script")
+            .Field<&ScriptComponent::script>("script")
+            .Label("Script Asset")
+            .Field<&ScriptComponent::loaded>("loaded")
+            .Label("Loaded")
+            .ReadOnly();
+        components.Register<ScriptComponent>();
+
         types.Type<LightComponent>("Light")
             .Field<&LightComponent::type>("type")
             .EnumNames({"Directional", "Point", "Spot"})

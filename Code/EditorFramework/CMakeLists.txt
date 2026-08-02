@@ -29,3 +29,13 @@ sim_add_library(EditorFramework
         # yang dipakai di baliknya.
         ImGuizmo::ImGuizmo
         nlohmann_json::nlohmann_json)
+
+# Lua bersifat opsional, dan EditorApp punya jalur Play/Stop yang memerlukannya.
+# Definisinya dipasang di sini, bukan hanya di executable: tanpa ini Play()
+# terkompilasi menjadi fungsi kosong di dalam modul ini sementara pemanggilnya
+# di executable terlihat baik-baik saja — kesalahan yang tidak menghasilkan satu
+# pun peringatan kompilasi.
+if(SIM_WITH_LUA)
+    target_link_libraries(SimEditorFramework PUBLIC Sim::Script)
+    target_compile_definitions(SimEditorFramework PUBLIC SIM_WITH_LUA=1)
+endif()

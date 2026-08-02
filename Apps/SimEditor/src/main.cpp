@@ -19,7 +19,7 @@
 #include "Sim/Render/ThumbnailCache.h"
 
 #if SIM_WITH_LUA
-#include "Sim/Script/LuaVM.h"
+#include "Sim/Script/ScriptRuntime.h"
 #endif
 
 #include <imgui.h>
@@ -206,9 +206,7 @@ int main(int /*argc*/, char** /*argv*/) {
         device, imguiLayer.Textures(), tasks, configDir / "ThumbnailCache");
 
 #if SIM_WITH_LUA
-    script::LuaVM lua;
-    lua.Initialize();
-    lua.RunString("print('Lua runtime connected to the editor console')");
+    script::ScriptRuntime scripts;
 #endif
 
     FrameLock frameLock = ComputeFrameLock();
@@ -224,9 +222,18 @@ int main(int /*argc*/, char** /*argv*/) {
     appConfig.frameLockReason = frameLock.reason;
     appConfig.tasks = &tasks;
     appConfig.thumbnails = thumbnails.get();
+#if SIM_WITH_LUA
+    appConfig.scripts = &scripts;
+#endif
     if (!app.Initialize(appConfig)) {
         return 1;
     }
+
+#if SIM_WITH_LUA
+    // Setelah app.Initialize(): runtime butuh World dan AssetDatabase yang baru
+    // dibuat di dalamnya.
+    scripts.Initialize(app.GetWorld(), app.Context().assets);
+#endif
 
     bool running = true;
     std::string windowTitle;
@@ -338,7 +345,6 @@ int main(int /*argc*/, char** /*argv*/) {
 
     renderer.reset();
 #if SIM_WITH_LUA
-    lua.Shutdown();
 #endif
     imguiLayer.Shutdown();
     swapchain.Destroy();

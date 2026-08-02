@@ -8,6 +8,10 @@
 #include "Sim/Editor/SceneCommands.h"
 #include "Sim/Scene/Serialization.h"
 
+#if SIM_WITH_LUA
+#include "Sim/Script/ScriptRuntime.h"
+#endif
+
 #include <imgui.h>
 #include <imgui_stdlib.h>
 
@@ -47,6 +51,7 @@ bool EditorApp::Initialize(const Config& config) {
     context_.world = &world_;
     context_.viewportRenderer = config.viewportRenderer;
     context_.thumbnails = config.thumbnails;
+    context_.scripts = config.scripts;
     context_.frameLimiter = config.frameLimiter;
     context_.lockedFps = config.lockedFps;
     context_.frameLockReason = config.frameLockReason;
@@ -65,6 +70,8 @@ bool EditorApp::Initialize(const Config& config) {
 
     context_.requestExit = [this]() { RequestExit(); };
     context_.requestResetLayout = [this]() { shell_.RequestResetLayout(); };
+    context_.requestPlay = [this]() { Play(); };
+    context_.requestStop = [this]() { Stop(); };
 
     history_.SetMemoryBudget(64u * 1024u * 1024u);
 
@@ -202,6 +209,22 @@ void EditorApp::RegisterCoreActions() {
                                  notifications_.Info("New level");
                              },
                              {}});
+
+    actions_.Register(Action{"play.start",
+                             "Play",
+                             "Run",
+                             icons::kPlay,
+                             ImGuiKey_F5,
+                             [this]() { Play(); },
+                             [this]() { return !playing_ && context_.scripts != nullptr; }});
+
+    actions_.Register(Action{"play.stop",
+                             "Stop",
+                             "Run",
+                             icons::kStop,
+                             ImGuiMod_Shift | ImGuiKey_F5,
+                             [this]() { Stop(); },
+                             [this]() { return playing_; }});
 
     actions_.Register(Action{"entity.create",
                              "Create Empty Entity",
@@ -468,6 +491,11 @@ void EditorApp::DrawFrame(float deltaSeconds) {
     if (context_.thumbnails != nullptr) {
         context_.thumbnails->Update();
     }
+#if SIM_WITH_LUA
+    if (playing_ && context_.scripts != nullptr) {
+        context_.scripts->Update(deltaSeconds);
+    }
+#endif
 
     // Harus mendahului panel mana pun: Viewport memakai gizmo, dan keadaan
     // per-frame-nya hanya direset di sini.
@@ -648,6 +676,51 @@ void EditorApp::UpdateAutosave(float deltaSeconds) {
     } else {
         SIM_WARN("Editor", "Autosave failed: {}", result.error);
     }
+}
+
+void EditorApp::Play() {
+#if SIM_WITH_LUA
+    if (playing_ || context_.scripts == nullptr) {
+        return;
+    }
+    // Cuplikan diambil sebelum satu baris skrip pun berjalan. Ini yang membuat
+    // Play aman dicoba kapan saja: apa pun yang dilakukan skrip terhadap scene
+    // — memindahkan, menghapus, membuat entity — hilang seluruhnya saat Stop.
+    playSnapshot_ = scene::SaveLevelToString(world_);
+    selection_.Clear();
+    history_.CloseMergeGroup();
+
+    context_.scripts->Start();
+    playing_ = true;
+    context_.playing = true;
+    notifications_.Info("Play");
+#endif
+}
+
+void EditorApp::Stop() {
+#if SIM_WITH_LUA
+    if (!playing_) {
+        return;
+    }
+    context_.scripts->Stop();
+    selection_.Clear();
+
+    const scene::LevelIoResult result = scene::LoadLevelFromString(world_, playSnapshot_);
+    if (!result.ok) {
+        // Kegagalan di sini berarti pekerjaan pengguna hilang, jadi ia harus
+        // terdengar keras — bukan tercatat diam-diam di log.
+        SIM_ERROR("Editor", "Cannot restore scene after Stop: {}", result.error);
+        notifications_.Error("Scene could not be restored: " + result.error);
+    }
+    playSnapshot_.clear();
+    playing_ = false;
+    context_.playing = false;
+
+    // Riwayat undo dibersihkan: entri di dalamnya menunjuk keadaan scene sebelum
+    // Play, sedangkan scene baru saja dibangun ulang dari nol. Membiarkannya
+    // berarti Ctrl+Z menerapkan perubahan ke entity yang sudah tidak sama.
+    history_.Clear();
+#endif
 }
 
 std::string EditorApp::WindowTitle() const {

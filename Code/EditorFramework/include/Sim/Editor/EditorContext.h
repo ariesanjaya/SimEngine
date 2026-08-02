@@ -15,6 +15,10 @@ namespace sim::assets {
 class AssetDatabase;
 }
 
+namespace sim::script {
+class ScriptRuntime;
+}
+
 namespace sim::editor {
 
 /// Menjembatani Entity dan SelectionId.
@@ -54,6 +58,13 @@ struct EditorContext {
     /// frame: isinya ditukar utuh saat pemindaian latar selesai.
     assets::AssetDatabase* assets = nullptr;
 
+    /// Runtime Lua. Null bila editor dibangun tanpa Lua — panel yang
+    /// memakainya wajib memeriksa.
+    script::ScriptRuntime* scripts = nullptr;
+    /// True selama Play berjalan. Panel memakainya untuk menonaktifkan
+    /// penyuntingan yang akan hilang begitu Stop ditekan.
+    bool playing = false;
+
     render::IViewportRenderer* viewportRenderer = nullptr;
     /// Pratinjau aset untuk Asset Browser. Dimiliki pemanggil EditorApp.
     render::IThumbnailCache* thumbnails = nullptr;
@@ -77,6 +88,8 @@ struct EditorContext {
     std::function<void()> requestExit;
     /// Diisi shell; meminta layout dock dikembalikan ke bawaan.
     std::function<void()> requestResetLayout;
+    std::function<void()> requestPlay;
+    std::function<void()> requestStop;
 
     // E5: AssetDatabase* assets
 };

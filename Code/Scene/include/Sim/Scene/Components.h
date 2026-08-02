@@ -88,6 +88,17 @@ enum class LightType : uint8_t {
     Spot = 2,
 };
 
+/// Menautkan entity ke sebuah skrip Lua.
+///
+/// Rujukannya AssetRef, sama seperti mesh dan material: mengganti nama berkas
+/// skrip tidak boleh memutus entity mana pun.
+struct ScriptComponent {
+    AssetRef script;
+    /// True saat skripnya sudah dimuat dan siap dipanggil. Diisi runtime, bukan
+    /// pengguna — karena itu ditandai ReadOnly di Inspector.
+    bool loaded = false;
+};
+
 struct LightComponent {
     LightType type = LightType::Point;
     Vec3 color{1.0f, 1.0f, 1.0f};
