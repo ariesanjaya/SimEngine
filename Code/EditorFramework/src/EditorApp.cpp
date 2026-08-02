@@ -6,6 +6,7 @@
 #include "Sim/Editor/PanelRegistry.h"
 #include "Sim/Editor/PropertyGrid.h"
 #include "Sim/Editor/SceneCommands.h"
+#include "Sim/Scene/AssetUsage.h"
 #include "Sim/Scene/Serialization.h"
 
 #if SIM_WITH_LUA
@@ -18,6 +19,8 @@
 
 #include <algorithm>
 #include <csignal>
+#include <fstream>
+#include <sstream>
 #include <cstdlib>
 #include <vector>
 
@@ -72,6 +75,9 @@ bool EditorApp::Initialize(const Config& config) {
         return record == nullptr ? std::string{} : record->name;
     });
 
+    context_.findExternalAssetUsers = [this](const Uuid& guid) {
+        return FindExternalAssetUsers(guid);
+    };
     context_.requestExit = [this]() { RequestExit(); };
     context_.requestResetLayout = [this]() { shell_.RequestResetLayout(); };
     context_.requestPlay = [this]() { Play(); };
@@ -722,6 +728,79 @@ void EditorApp::UpdateAutosave(float deltaSeconds) {
     } else {
         SIM_WARN("Editor", "Autosave failed: {}", result.error);
     }
+}
+
+std::vector<std::string> EditorApp::FindExternalAssetUsers(const Uuid& guid) const {
+    std::vector<std::string> users;
+    if (!guid.IsValid()) {
+        return users;
+    }
+
+    // Scene yang sedang dibuka lebih dulu, dan bukan sekadar karena urutan:
+    // ia satu-satunya pemakai yang isinya belum tentu ada di disk. Pengguna
+    // yang baru saja memasang tekstur ini ke sebuah entity — dan belum
+    // menyimpan — harus tetap diperingatkan.
+    const std::vector<scene::Entity> entities = scene::EntitiesUsingAsset(world_, guid);
+    const bool usedByOpenScene = !entities.empty();
+    if (usedByOpenScene) {
+        std::string names;
+        // Tiga nama saja. Yang dibutuhkan pengguna adalah tahu bahwa scene-nya
+        // ikut terdampak dan kira-kira di mana; menumpahkan lima puluh nama ke
+        // dalam dialog justru membuat pesannya tidak terbaca.
+        const std::size_t shown = std::min<std::size_t>(entities.size(), 3);
+        for (std::size_t i = 0; i < shown; ++i) {
+            names += (i == 0 ? "" : ", ") + world_.NameOf(entities[i]);
+        }
+        if (entities.size() > shown) {
+            names += ", +" + std::to_string(entities.size() - shown);
+        }
+        users.push_back("Scene \"" + context_.levelName + "\" (open): " + names);
+    }
+
+    // Berkas level milik editor. Folder ini berada DI LUAR akar aset, jadi
+    // AssetDatabase tidak mengindeksnya dan UsersOf() tidak akan pernah
+    // menyebutnya — padahal justru di sinilah level pengguna disimpan.
+    const std::filesystem::path levels = configDir_ / "Levels";
+    std::error_code error;
+    if (!std::filesystem::is_directory(levels, error)) {
+        return users;
+    }
+    const std::string needle = guid.ToString();
+    std::vector<std::filesystem::path> files;
+    for (const auto& entry : std::filesystem::directory_iterator(levels, error)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".simlevel") {
+            files.push_back(entry.path());
+        }
+    }
+    // Diurutkan supaya daftarnya sama setiap kali dialog dibuka.
+    std::sort(files.begin(), files.end());
+
+    for (const std::filesystem::path& file : files) {
+        // Berkas level yang sedang dibuka dilewati HANYA bila scene di memori
+        // juga memakainya — di situ ia cuma pengulangan.
+        //
+        // Kalau scene tidak lagi memakainya sementara berkasnya masih, keduanya
+        // memang berbeda, dan yang di disk tetap akan rusak selama belum
+        // disimpan ulang. Melewatkannya karena "yang di memori lebih benar"
+        // berarti menyembunyikan satu-satunya pemakai yang tersisa.
+        if (usedByOpenScene && !levelPath_.empty() &&
+            std::filesystem::equivalent(file, levelPath_, error)) {
+            continue;
+        }
+        std::ifstream stream(file, std::ios::binary);
+        if (!stream) {
+            continue;
+        }
+        std::ostringstream buffer;
+        buffer << stream.rdbuf();
+        // Pencocokan teks, sama seperti yang dipakai importer dokumen: GUID
+        // ditulis sebagai string di berkas level, dan menguraikan seluruh level
+        // hanya untuk menjawab "dipakai atau tidak" jauh lebih mahal.
+        if (buffer.str().find(needle) != std::string::npos) {
+            users.push_back("Levels/" + file.filename().string());
+        }
+    }
+    return users;
 }
 
 void EditorApp::ReloadChangedScripts() {

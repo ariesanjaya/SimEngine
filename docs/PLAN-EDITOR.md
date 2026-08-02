@@ -526,18 +526,40 @@ diseret ke level.
 5. Dialognya menyebut kedua pemakainya per nama beserta akibatnya; Cancel
    menahan berkasnya, Delete membuang berkas dan `.meta`-nya.
 
-**Satu celah yang baru terlihat saat memeriksa ulang nomor 5.** Peringatan itu
-hanya menghitung pemakai yang **terindeks sebagai aset**, sedangkan `SaveLevel`
-menulis ke `~/.simengine/Levels` — di luar akar aset `~/.simengine/Assets`.
-Level yang disimpan lewat editor karena itu tidak pernah muncul sebagai pemakai,
-dan menghapus aset yang dipakai level yang sedang dibuka akan lolos tanpa
-peringatan sama sekali. Verifikasi E5 dahulu memakai level yang kebetulan berada
-di dalam folder aset, jadi celah ini tidak terlihat.
+**Satu celah yang baru terlihat saat memeriksa ulang nomor 5, dan sudah
+ditutup.** Peringatan itu semula hanya menghitung pemakai yang **terindeks
+sebagai aset**, sedangkan `SaveLevel` menulis ke `~/.simengine/Levels` — di luar
+akar aset `~/.simengine/Assets`. Dua pemakai terpenting karena itu tidak pernah
+disebut: berkas level milik editor, dan **scene yang sedang dibuka** — yang
+bahkan belum tentu ada di disk. Menghapus tekstur yang baru saja dipasang ke
+sebuah entity lolos tanpa peringatan sama sekali. Verifikasi E5 dahulu memakai
+level yang kebetulan berada di dalam folder aset, jadi celahnya tidak terlihat.
 
-Sengaja belum diperbaiki di sini: menaruh level di dalam akar aset adalah
-keputusan tentang tata letak proyek, dan akar itu memang ditandai sementara
-sampai `project.simproj` matang. Yang harus diselesaikan bersamaan dengan
-pekerjaan itu, bukan ditambal dengan mengubah satu path.
+Perbaikannya tidak dengan memindahkan folder level — itu keputusan tentang tata
+letak proyek, dan akarnya memang ditandai sementara sampai `project.simproj`
+matang. Yang dibetulkan adalah pertanyaannya: "siapa memakai aset ini" punya
+lebih dari satu sumber jawaban, dan Asset Browser tidak boleh menganggap indeks
+aset satu-satunya. `EditorContext::findExternalAssetUsers` menambahkan dua
+sumber, diisi `EditorApp`:
+
+- **Scene yang sedang dibuka**, ditelusuri `scene::EntitiesUsingAsset()` yang
+  dituntun reflection — setiap field `AssetRef`, termasuk yang bersarang di
+  dalam struct dan vektor. Daftar komponen yang ditulis tangan akan diam-diam
+  ketinggalan, dan yang bergantung padanya adalah sebuah peringatan keselamatan.
+- **Berkas `.simlevel`** di folder level editor, dicocokkan sebagai teks — sama
+  seperti importer dokumen, karena GUID memang ditulis sebagai string.
+
+Berkas level yang sedang dibuka dilewati hanya bila scene di memori juga
+memakainya; di situ ia cuma pengulangan. Kalau scene sudah tidak memakainya
+sementara berkasnya masih — misalnya setelah undo yang belum disimpan — keduanya
+memang berbeda, dan yang di disk tetap akan rusak. Melewatkannya dengan alasan
+"yang di memori lebih benar" justru menyembunyikan satu-satunya pemakai yang
+tersisa.
+
+Diverifikasi lewat XTEST untuk kedua sumber secara terpisah: tekstur yang hanya
+dipakai scene yang belum disimpan memunculkan `Scene "untitled" (open): Ground`,
+dan tekstur yang hanya dipakai berkas level memunculkan
+`Levels/untitled.simlevel`. Keduanya sebelumnya tidak memunculkan apa pun.
 
 **Yang berbeda dari rencana**
 

@@ -1,5 +1,6 @@
 sim_add_library(Scene
     SOURCES
+        src/AssetUsage.cpp
         src/Components.cpp
         src/Project.cpp
         src/Serialization.cpp

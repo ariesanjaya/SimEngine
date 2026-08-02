@@ -6,6 +6,7 @@
 
 #include <functional>
 #include <string>
+#include <vector>
 
 namespace sim {
 class FrameLimiter;
@@ -93,6 +94,17 @@ struct EditorContext {
     /// Isi menu Scripts, diisi EditorApp dari registrasi Lua. Null bila editor
     /// dibangun tanpa Lua.
     std::function<void()> drawScriptMenu;
+
+    /// Pemakai sebuah aset yang **tidak terindeks sebagai aset**, dalam bentuk
+    /// deskripsi siap tampil.
+    ///
+    /// `AssetDatabase::UsersOf` hanya tahu tentang isi folder aset, sedangkan
+    /// dua pemakai terpenting berada di luarnya: scene yang sedang dibuka —
+    /// yang bahkan belum tentu ada di disk — dan berkas level milik editor.
+    /// Tanpa keduanya, peringatan "aset ini masih dipakai" bisa berkata "tidak
+    /// ada yang memakai" tepat ketika yang memakainya adalah pekerjaan yang
+    /// sedang dibuka pengguna.
+    std::function<std::vector<std::string>(const Uuid&)> findExternalAssetUsers;
 
     // E5: AssetDatabase* assets
 };

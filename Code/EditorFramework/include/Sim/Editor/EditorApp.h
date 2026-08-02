@@ -89,6 +89,10 @@ private:
     /// gameplay lewat ScriptRuntime, skrip editor lewat EditorScripting.
     void ReloadChangedScripts();
 
+    /// Pemakai sebuah aset yang berada di luar indeks aset: scene yang sedang
+    /// dibuka, dan berkas level di folder editor.
+    std::vector<std::string> FindExternalAssetUsers(const Uuid& guid) const;
+
     void InstallCrashHandler();
     void CreateEntityAction();
     void DeleteSelectionAction();

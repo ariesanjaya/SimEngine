@@ -2,6 +2,7 @@
 
 #include "Sim/Core/Uuid.h"
 #include "Sim/Reflect/TypeRegistry.h"
+#include "Sim/Scene/AssetUsage.h"
 #include "Sim/Scene/ComponentRegistry.h"
 #include "Sim/Scene/Project.h"
 #include "Sim/Scene/Serialization.h"
@@ -9,6 +10,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <string>
 #include <vector>
 
@@ -367,4 +369,46 @@ TEST_CASE("properti terekspos script ikut tersimpan bersama level") {
     CHECK(after->properties[1].kind == ScriptPropertyKind::Bool);
     CHECK(after->properties[1].flag);
     CHECK(after->properties[2].text == "patrol");
+}
+
+TEST_CASE("Pemakai aset ditemukan lewat reflection, termasuk yang bersarang") {
+    RegisterCoreComponents();
+    World world;
+
+    const Uuid texture = Uuid::Generate();
+    const Uuid unused = Uuid::Generate();
+
+    const Entity plain = world.Create("Plain");
+    const Entity user = world.Create("User");
+    world.Add<MeshRendererComponent>(user).material = AssetRef{texture};
+    const Entity child = world.Create("Child", user);
+    world.Add<MeshRendererComponent>(child).mesh = AssetRef{texture};
+
+    // Bersarang di dalam vektor struct: ScriptComponent::properties tidak
+    // memuat AssetRef, jadi yang diuji di sini adalah bahwa penelusurannya
+    // menembus vektor tanpa tersandung.
+    const Entity scripted = world.Create("Scripted");
+    auto& script = world.Add<ScriptComponent>(scripted);
+    script.script = AssetRef{unused};
+    script.properties = {{"speed", ScriptPropertyKind::Number, 1.0f, false, {}}};
+
+    const std::vector<Entity> users = EntitiesUsingAsset(world, texture);
+    REQUIRE(users.size() == 2);
+    // Urutannya mengikuti penelusuran hierarki dari akar, jadi induk lebih dulu.
+    CHECK(world.NameOf(users[0]) == "User");
+    CHECK(world.NameOf(users[1]) == "Child");
+
+    // Yang tidak memakainya tidak ikut terbawa.
+    CHECK(std::find(users.begin(), users.end(), plain) == users.end());
+    CHECK(std::find(users.begin(), users.end(), scripted) == users.end());
+
+    // Aset lain tetap ketemu lewat jalur yang sama.
+    const std::vector<Entity> others = EntitiesUsingAsset(world, unused);
+    REQUIRE(others.size() == 1);
+    CHECK(world.NameOf(others[0]) == "Scripted");
+
+    // GUID kosong tidak boleh cocok dengan AssetRef kosong milik entity mana
+    // pun — kalau tidak, menanyakan "siapa memakai aset tak-valid" akan
+    // menjawab "hampir semuanya".
+    CHECK(EntitiesUsingAsset(world, Uuid{}).empty());
 }

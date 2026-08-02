@@ -511,6 +511,14 @@ private:
             if (ImGui::MenuItem("Delete")) {
                 pendingDelete_ = record.guid;
                 deleteUsers_ = db.UsersOf(record.guid);
+                // Pemakai di luar indeks aset — scene yang sedang dibuka dan
+                // berkas level milik editor — ditanyakan ke EditorApp. Tanpa
+                // ini, dialognya bisa berkata "tidak ada yang memakai" tepat
+                // ketika yang memakainya adalah level yang sedang disunting.
+                deleteExternalUsers_.clear();
+                if (context.findExternalAssetUsers) {
+                    deleteExternalUsers_ = context.findExternalAssetUsers(record.guid);
+                }
             }
             ImGui::EndPopup();
         }
@@ -554,7 +562,10 @@ private:
         // ingin diketahui bukan hanya "ini memakai apa" tapi terutama "siapa
         // yang akan rusak kalau ini hilang".
         ImGui::Separator();
-        DrawReferenceList("Used by", db.UsersOf(record->guid), db);
+        DrawReferenceList("Used by", db.UsersOf(record->guid), db,
+                          context.findExternalAssetUsers
+                              ? context.findExternalAssetUsers(record->guid)
+                              : std::vector<std::string>{});
         DrawReferenceList("Uses", record->dependencies, db);
     }
 
@@ -585,8 +596,14 @@ private:
     }
 
     void DrawReferenceList(const char* title, const std::vector<Uuid>& guids,
-                           const assets::AssetDatabase& db) {
-        ImGui::TextDisabled("%s (%zu)", title, guids.size());
+                           const assets::AssetDatabase& db,
+                           const std::vector<std::string>& external = {}) {
+        ImGui::TextDisabled("%s (%zu)", title, guids.size() + external.size());
+        // Pemakai di luar indeks aset tidak bisa diklik — ia bukan aset, jadi
+        // tidak ada yang bisa dipilih di panel ini.
+        for (const std::string& user : external) {
+            ImGui::BulletText("%s", user.c_str());
+        }
         if (guids.empty()) {
             return;
         }
@@ -628,13 +645,19 @@ private:
         }
 
         ImGui::Text("Delete \"%s\"?", record->name.c_str());
-        if (!deleteUsers_.empty()) {
+        const std::size_t userCount = deleteUsers_.size() + deleteExternalUsers_.size();
+        if (userCount > 0) {
             // Daftar pemakainya ditampilkan, bukan sekadar jumlahnya. "3 aset
             // memakai ini" tidak cukup untuk memutuskan apa pun; yang dibutuhkan
             // adalah tahu aset mana, supaya bisa diperiksa lebih dulu.
             ImGui::Spacing();
             ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.35f, 1.0f),
-                               "Still used by %zu asset(s):", deleteUsers_.size());
+                               "Still used in %zu place(s):", userCount);
+            // Yang di luar indeks lebih dulu: scene yang sedang dibuka adalah
+            // pemakai yang paling mungkin membuat pengguna membatalkan.
+            for (const std::string& user : deleteExternalUsers_) {
+                ImGui::BulletText("%s", user.c_str());
+            }
             for (const Uuid& guid : deleteUsers_) {
                 const AssetRecord* user = db.Find(guid);
                 if (user != nullptr) {
@@ -729,6 +752,8 @@ private:
     std::string renameBuffer_;
     std::vector<std::string> favourites_;
     std::vector<Uuid> deleteUsers_;
+    /// Pemakai di luar indeks aset, sudah berbentuk teks siap tampil.
+    std::vector<std::string> deleteExternalUsers_;
     Uuid selected_;
     Uuid renaming_;
     Uuid pendingDelete_;
