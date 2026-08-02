@@ -256,13 +256,21 @@ GraphIoResult LoadGraphFromString(Graph& graph, const std::string& text) {
             // Koneksi yang menunjuk node yang tidak ada dibuang saat dimuat,
             // bukan dibiarkan untuk digagalkan kompiler. Yang tersisa setelah
             // sebuah node dihapus di luar editor adalah berkas yang masih utuh.
-            if (graph.FindNode(link.fromNode) != nullptr &&
-                graph.FindNode(link.toNode) != nullptr) {
-                if (!link.guid.IsValid()) {
-                    link.guid = Uuid::Generate();
-                }
-                graph.links.push_back(std::move(link));
+            if (graph.FindNode(link.fromNode) == nullptr ||
+                graph.FindNode(link.toNode) == nullptr) {
+                continue;
             }
+            // Sebuah pin input hanya boleh punya satu sumber. Yang kedua dibuang
+            // alih-alih diam-diam dikalahkan yang pertama: berkas hasil suntingan
+            // tangan yang memuat keduanya akan berperilaku menurut urutan
+            // penyimpanannya — sesuatu yang tidak terlihat sama sekali di kanvas.
+            if (graph.LinkInto(link.toNode, link.toPin) != nullptr) {
+                continue;
+            }
+            if (!link.guid.IsValid()) {
+                link.guid = Uuid::Generate();
+            }
+            graph.links.push_back(std::move(link));
         }
     }
 

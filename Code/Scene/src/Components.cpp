@@ -100,6 +100,18 @@ void RegisterCoreComponents() {
             .Hidden();
         components.Register<ScriptComponent>();
 
+        types.Type<GraphComponent>("Graph")
+            .Field<&GraphComponent::graph>("graph")
+            .Label("Graph Asset")
+            .Field<&GraphComponent::loaded>("loaded")
+            .Label("Loaded")
+            .ReadOnly()
+            .Field<&GraphComponent::properties>("properties")
+            // Alasan yang sama dengan ScriptComponent: bentuk daftarnya
+            // ditentukan variabel graph, bukan pengguna.
+            .Hidden();
+        components.Register<GraphComponent>();
+
         types.Type<LightComponent>("Light")
             .Field<&LightComponent::type>("type")
             .EnumNames({"Directional", "Point", "Spot"})

@@ -232,7 +232,12 @@ int main(int /*argc*/, char** /*argv*/) {
 #if SIM_WITH_LUA
     // Setelah app.Initialize(): runtime butuh World dan AssetDatabase yang baru
     // dibuat di dalamnya.
-    scripts.Initialize(app.GetWorld(), app.Context().assets);
+    //
+    // Cache graph berada di luar folder Assets, dan itu disengaja: `.lua` hasil
+    // kompilasi bukan aset yang dikarang pengguna, dan menaruhnya di Assets akan
+    // membuatnya muncul di Asset Browser, ikut mendapat GUID, dan ikut masuk
+    // kontrol versi sebagai berkas turunan.
+    scripts.Initialize(app.GetWorld(), app.Context().assets, configDir / "GraphCache");
 #endif
 
     bool running = true;

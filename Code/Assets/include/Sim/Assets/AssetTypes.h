@@ -20,6 +20,8 @@ enum class AssetType : uint8_t {
     Mesh,
     Material,
     Script,
+    /// Graph visual scripting (`.simgraph`), dikompilasi menjadi Lua.
+    Graph,
     Level,
     Prefab,
     Text,

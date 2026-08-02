@@ -283,6 +283,9 @@ struct ScriptRuntime::Instance {
     scene::Entity entity = scene::kNullEntity;
     Uuid guid;
     sol::table self;
+    /// Berasal dari GraphComponent, bukan ScriptComponent. Dua komponen yang
+    /// bentuknya sama tapi berbeda tempat menyimpan properti dan flag `loaded`.
+    bool fromGraph = false;
     /// Dimatikan setelah melempar kesalahan. Instance yang gagal tiap frame
     /// akan membanjiri Console enam puluh kali per detik dengan pesan yang sama,
     /// dan pesan pertama — satu-satunya yang berguna — tenggelam seketika.
@@ -294,9 +297,13 @@ ScriptRuntime::~ScriptRuntime() {
     Shutdown();
 }
 
-bool ScriptRuntime::Initialize(scene::World& world, assets::AssetDatabase* assets) {
+bool ScriptRuntime::Initialize(scene::World& world, assets::AssetDatabase* assets,
+                               std::filesystem::path graphCacheDir) {
     world_ = &world;
     assets_ = assets;
+    if (!graphCacheDir.empty()) {
+        graphs_.Initialize(std::move(graphCacheDir));
+    }
     if (!vm_->Initialize()) {
         return false;
     }
@@ -386,19 +393,49 @@ void ScriptRuntime::RegisterBindings() {
     }
 }
 
-void ScriptRuntime::LoadFor(scene::Entity entity, const Uuid& guid) {
+std::filesystem::path ScriptRuntime::ResolveChunk(const Uuid& guid, std::string& chunkName,
+                                                 bool& fromGraph) {
     if (assets_ == nullptr) {
-        return;
+        return {};
     }
     const assets::AssetRecord* record = assets_->Find(guid);
     if (record == nullptr) {
-        SIM_WARN("Lua", "Script asset {} is missing", guid.ToString());
-        return;
+        SIM_WARN("Lua", "Asset {} is missing", guid.ToString());
+        return {};
+    }
+    const std::filesystem::path source = assets_->AbsolutePath(*record);
+
+    if (record->type != assets::AssetType::Graph) {
+        fromGraph = false;
+        chunkName = record->relativePath;
+        return source;
     }
 
-    std::ifstream stream(assets_->AbsolutePath(*record));
+    // Graph tidak dijalankan langsung; yang dijalankan adalah hasil
+    // kompilasinya. EnsureCompiled hanya mengompilasi bila hasil lamanya sudah
+    // usang, sehingga memuat level yang graph-nya tidak disunting tidak
+    // mengompilasi apa pun.
+    fromGraph = true;
+    chunkName = GraphCache::ChunkName(record->relativePath);
+    return graphs_.EnsureCompiled(guid, source);
+}
+
+void ScriptRuntime::LoadFor(scene::Entity entity, const Uuid& guid) {
+    std::string chunkName;
+    bool fromGraph = false;
+    const std::filesystem::path file = ResolveChunk(guid, chunkName, fromGraph);
+    if (file.empty()) {
+        return;
+    }
+    LoadChunk(entity, guid, file, chunkName, fromGraph);
+}
+
+void ScriptRuntime::LoadChunk(scene::Entity entity, const Uuid& guid,
+                              const std::filesystem::path& file, const std::string& chunkName,
+                              bool fromGraph) {
+    std::ifstream stream(file);
     if (!stream) {
-        SIM_WARN("Lua", "Cannot open script {}", record->relativePath);
+        SIM_WARN("Lua", "Cannot open {}", chunkName);
         return;
     }
     std::ostringstream buffer;
@@ -409,21 +446,21 @@ void ScriptRuntime::LoadFor(scene::Entity entity, const Uuid& guid) {
     // sehingga traceback menyebut "arena.lua:12" alih-alih menyalin seluruh
     // sumbernya ke dalam pesan kesalahan.
     const sol::protected_function_result loaded =
-        lua.safe_script(buffer.str(), sol::script_pass_on_error,
-                        "@" + record->relativePath);
+        lua.safe_script(buffer.str(), sol::script_pass_on_error, "@" + chunkName);
     if (!loaded.valid()) {
         const sol::error error = loaded;
-        SIM_ERROR("Lua", "{}: {}", record->relativePath, error.what());
+        SIM_ERROR("Lua", "{}: {}", chunkName, error.what());
         return;
     }
     if (loaded.get_type() != sol::type::table) {
-        SIM_WARN("Lua", "{} did not return a table; nothing to run", record->relativePath);
+        SIM_WARN("Lua", "{} did not return a table; nothing to run", chunkName);
         return;
     }
 
     auto instance = std::make_unique<Instance>();
     instance->entity = entity;
     instance->guid = guid;
+    instance->fromGraph = fromGraph;
     // Tabel yang dikembalikan berkas dipakai langsung sebagai `self`. Dua entity
     // yang memakai skrip sama tetap terpisah karena berkasnya dijalankan ulang
     // untuk masing-masing, menghasilkan tabel baru tiap kali.
@@ -441,9 +478,17 @@ void ScriptRuntime::LoadFor(scene::Entity entity, const Uuid& guid) {
     for (const scene::ScriptProperty& declared : ReadDeclaration(instance->self)) {
         props[declared.name] = ToLuaValue(lua, declared);
     }
-    if (const auto* component = world_->TryGet<scene::ScriptComponent>(entity)) {
-        for (const scene::ScriptProperty& stored : component->properties) {
-            props[stored.name] = ToLuaValue(lua, stored);
+    const std::vector<scene::ScriptProperty>* stored = nullptr;
+    if (fromGraph) {
+        if (const auto* component = world_->TryGet<scene::GraphComponent>(entity)) {
+            stored = &component->properties;
+        }
+    } else if (const auto* component = world_->TryGet<scene::ScriptComponent>(entity)) {
+        stored = &component->properties;
+    }
+    if (stored != nullptr) {
+        for (const scene::ScriptProperty& value : *stored) {
+            props[value.name] = ToLuaValue(lua, value);
         }
     }
     instance->self["props"] = props;
@@ -452,22 +497,21 @@ void ScriptRuntime::LoadFor(scene::Entity entity, const Uuid& guid) {
 }
 
 std::vector<scene::ScriptProperty> ScriptRuntime::DeclaredProperties(const Uuid& scriptGuid) {
-    if (assets_ == nullptr) {
+    std::string chunkName;
+    bool fromGraph = false;
+    const std::filesystem::path file = ResolveChunk(scriptGuid, chunkName, fromGraph);
+    if (file.empty()) {
         return {};
     }
-    const assets::AssetRecord* record = assets_->Find(scriptGuid);
-    if (record == nullptr) {
-        return {};
-    }
-    std::ifstream stream(assets_->AbsolutePath(*record));
+    std::ifstream stream(file);
     if (!stream) {
         return {};
     }
     std::ostringstream buffer;
     buffer << stream.rdbuf();
 
-    const sol::protected_function_result loaded = vm_->State()->safe_script(
-        buffer.str(), sol::script_pass_on_error, "@" + record->relativePath);
+    const sol::protected_function_result loaded =
+        vm_->State()->safe_script(buffer.str(), sol::script_pass_on_error, "@" + chunkName);
     if (!loaded.valid() || loaded.get_type() != sol::type::table) {
         return {};
     }
@@ -488,6 +532,19 @@ void ScriptRuntime::Start() {
         }
         const std::size_t before = instances_.size();
         LoadFor(entity, component->script.guid);
+        component->loaded = instances_.size() > before;
+    }
+
+    // Graph menempuh jalur yang sama persis: yang berbeda hanya berkas yang
+    // dijalankan — hasil kompilasinya, bukan aset yang dirujuk.
+    for (const auto raw : world_->Registry().view<scene::GraphComponent>()) {
+        const auto entity = static_cast<scene::Entity>(raw);
+        auto* component = world_->TryGet<scene::GraphComponent>(entity);
+        if (component == nullptr || !component->graph.IsValid()) {
+            continue;
+        }
+        const std::size_t before = instances_.size();
+        LoadFor(entity, component->graph.guid);
         component->loaded = instances_.size() > before;
     }
 
@@ -532,17 +589,23 @@ void ScriptRuntime::Update(float deltaSeconds) {
 
 void ScriptRuntime::Stop() {
     for (const auto& instance : instances_) {
-        if (world_->IsAlive(instance->entity)) {
-            if (auto* component = world_->TryGet<scene::ScriptComponent>(instance->entity)) {
+        if (!world_->IsAlive(instance->entity)) {
+            continue;
+        }
+        if (instance->fromGraph) {
+            if (auto* component = world_->TryGet<scene::GraphComponent>(instance->entity)) {
                 component->loaded = false;
             }
+        } else if (auto* component =
+                       world_->TryGet<scene::ScriptComponent>(instance->entity)) {
+            component->loaded = false;
         }
     }
     instances_.clear();
     running_ = false;
 }
 
-void ScriptRuntime::Reload(const Uuid& scriptGuid) {
+void ScriptRuntime::Reload(const Uuid& assetGuid) {
     if (!running_) {
         return;
     }
@@ -551,7 +614,7 @@ void ScriptRuntime::Reload(const Uuid& scriptGuid) {
     // saja dengan memulai ulang permainan.
     std::vector<std::pair<scene::Entity, sol::table>> preserved;
     for (auto it = instances_.begin(); it != instances_.end();) {
-        if ((*it)->guid == scriptGuid) {
+        if ((*it)->guid == assetGuid) {
             preserved.emplace_back((*it)->entity, (*it)->self["state"]);
             it = instances_.erase(it);
         } else {
@@ -564,7 +627,7 @@ void ScriptRuntime::Reload(const Uuid& scriptGuid) {
 
     for (const auto& [entity, state] : preserved) {
         const std::size_t before = instances_.size();
-        LoadFor(entity, scriptGuid);
+        LoadFor(entity, assetGuid);
         if (instances_.size() > before) {
             instances_.back()->self["state"] = state;
             const sol::protected_function start = instances_.back()->self["OnStart"];

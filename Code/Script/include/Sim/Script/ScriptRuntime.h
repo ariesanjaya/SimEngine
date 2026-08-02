@@ -3,7 +3,9 @@
 #include "Sim/Core/Uuid.h"
 #include "Sim/Scene/Components.h"
 #include "Sim/Scene/World.h"
+#include "Sim/Script/GraphCache.h"
 
+#include <filesystem>
 #include <functional>
 #include <memory>
 #include <string>
@@ -57,10 +59,15 @@ public:
     ScriptRuntime(const ScriptRuntime&) = delete;
     ScriptRuntime& operator=(const ScriptRuntime&) = delete;
 
-    bool Initialize(scene::World& world, assets::AssetDatabase* assets);
+    /// `graphCacheDir` adalah tempat hasil kompilasi `.simgraph` disimpan.
+    /// Kosong berarti GraphComponent diabaikan — dipakai test yang hanya
+    /// menguji skrip.
+    bool Initialize(scene::World& world, assets::AssetDatabase* assets,
+                    std::filesystem::path graphCacheDir = {});
     void Shutdown();
 
-    /// Memuat seluruh skrip di world dan memanggil OnStart. Dipanggil saat Play.
+    /// Memuat seluruh skrip dan graph di world lalu memanggil OnStart.
+    /// Dipanggil saat Play.
     void Start();
 
     /// Memanggil OnUpdate untuk setiap instance yang masih hidup.
@@ -71,9 +78,13 @@ public:
 
     bool IsRunning() const { return running_; }
 
-    /// Memuat ulang satu skrip tanpa menghentikan permainan, mempertahankan
-    /// tabel `state` tiap instance.
-    void Reload(const Uuid& scriptGuid);
+    /// Memuat ulang satu skrip atau graph tanpa menghentikan permainan,
+    /// mempertahankan tabel `state` tiap instance.
+    void Reload(const Uuid& assetGuid);
+
+    /// Cache hasil kompilasi graph. Panel Graph Editor memakainya untuk
+    /// mengompilasi ulang saat graph disunting dan untuk membaca peta sumbernya.
+    GraphCache& Graphs() { return graphs_; }
 
     /// Menjalankan potongan kode di state yang sama dengan skrip. Dipakai REPL.
     ///
@@ -105,6 +116,10 @@ public:
     ///
     /// Kosong bila berkasnya tidak ada, gagal dimuat, atau tidak
     /// mendeklarasikan apa pun.
+    ///
+    /// Menerima GUID skrip maupun graph. Untuk graph, yang dibaca adalah hasil
+    /// kompilasinya — di mana variabel yang diekspos sudah berbentuk deklarasi
+    /// `properties` biasa, jadi tidak ada jalur kedua di sini.
     std::vector<scene::ScriptProperty> DeclaredProperties(const Uuid& scriptGuid);
 
     LuaVM& VM() { return *vm_; }
@@ -112,12 +127,21 @@ public:
 private:
     struct Instance;
 
+    /// Memuat aset — skrip atau graph — untuk sebuah entity.
     void LoadFor(scene::Entity entity, const Uuid& guid);
+    /// Menjalankan sebuah berkas Lua dan memasangnya sebagai instance.
+    void LoadChunk(scene::Entity entity, const Uuid& guid, const std::filesystem::path& file,
+                   const std::string& chunkName, bool fromGraph);
+    /// Berkas Lua yang harus dijalankan untuk sebuah aset: berkasnya sendiri
+    /// bila skrip, hasil kompilasi bila graph. Kosong bila tidak tersedia.
+    std::filesystem::path ResolveChunk(const Uuid& guid, std::string& chunkName,
+                                       bool& fromGraph);
     void RegisterBindings();
 
     std::unique_ptr<LuaVM> vm_;
     scene::World* world_ = nullptr;
     assets::AssetDatabase* assets_ = nullptr;
+    GraphCache graphs_;
     std::vector<std::unique_ptr<Instance>> instances_;
     /// Detik sejak Play ditekan, dibaca skrip lewat `sim.time()`.
     float elapsed_ = 0.0f;

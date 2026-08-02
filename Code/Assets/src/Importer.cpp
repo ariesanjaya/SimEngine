@@ -59,7 +59,8 @@ public:
     const char* Name() const override { return "Document"; }
     bool Handles(AssetType type) const override {
         return type == AssetType::Level || type == AssetType::Prefab ||
-               type == AssetType::Material || type == AssetType::Json;
+               type == AssetType::Material || type == AssetType::Graph ||
+               type == AssetType::Json;
     }
 
     ImportResult Import(const std::filesystem::path& path) const override {

@@ -4,6 +4,7 @@
 #include "Sim/Core/TaskPool.h"
 #include "Sim/Scene/Components.h"
 #include "Sim/Script/Graph.h"
+#include "Sim/Script/GraphCache.h"
 #include "Sim/Script/GraphCompiler.h"
 #include "Sim/Script/NodeCatalog.h"
 #include "Sim/Script/ScriptRuntime.h"
@@ -11,8 +12,10 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <unistd.h>
 
@@ -263,6 +266,131 @@ TEST_CASE("Graph dan skrip tulis tangan menghasilkan transform yang sama tiap fr
     }
 
     runtime.Stop();
+}
+
+TEST_CASE("Level yang memakai graph dimuat tanpa mengompilasi ulang") {
+    scene::RegisterCoreComponents();
+    NodeCatalog::Rebuild();
+
+    TempDir assetsDir;
+    TempDir cacheDir;
+    REQUIRE(SaveGraphToFile(SpinGraph(), assetsDir.path / "spin.simgraph").ok);
+
+    GraphCache cache;
+    cache.Initialize(cacheDir.path);
+    const Uuid guid = Id(42);
+    const std::filesystem::path source = assetsDir.path / "spin.simgraph";
+
+    const std::filesystem::path first = cache.EnsureCompiled(guid, source);
+    REQUIRE_FALSE(first.empty());
+    REQUIRE(std::filesystem::exists(first));
+    const auto compiledAt = std::filesystem::last_write_time(first);
+
+    // Kriteria terima E6.5 nomor 9, bagian pertama: memuat level yang memakai
+    // graph tidak mengompilasi apa pun. Yang dipakai adalah `.lua` yang sudah
+    // ada, persis seperti aset lain yang sudah diimpor.
+    const std::filesystem::path again = cache.EnsureCompiled(guid, source);
+    CHECK(again == first);
+    CHECK(std::filesystem::last_write_time(first) == compiledAt);
+
+    // Bagian kedua: menyunting graph langsung berlaku, tanpa langkah build
+    // manual. Waktu ubah disetel maju secara eksplisit — resolusi jam berkas
+    // terlalu kasar untuk dipercaya dalam rentang beberapa milidetik.
+    Graph edited = SpinGraph();
+    edited.variables[0].defaultValue = "9.5";
+    REQUIRE(SaveGraphToFile(edited, source).ok);
+    std::filesystem::last_write_time(source, compiledAt + std::chrono::seconds(2));
+
+    const std::filesystem::path rebuilt = cache.EnsureCompiled(guid, source);
+    REQUIRE_FALSE(rebuilt.empty());
+    std::ifstream stream(rebuilt);
+    const std::string lua((std::istreambuf_iterator<char>(stream)),
+                          std::istreambuf_iterator<char>());
+    CHECK(lua.find("speed = 9.5,") != std::string::npos);
+}
+
+TEST_CASE("Kompilasi yang gagal tidak menimpa hasil yang masih baik") {
+    scene::RegisterCoreComponents();
+    NodeCatalog::Rebuild();
+
+    TempDir assetsDir;
+    TempDir cacheDir;
+    const std::filesystem::path source = assetsDir.path / "spin.simgraph";
+    REQUIRE(SaveGraphToFile(SpinGraph(), source).ok);
+
+    GraphCache cache;
+    cache.Initialize(cacheDir.path);
+    const Uuid guid = Id(43);
+    const std::filesystem::path output = cache.EnsureCompiled(guid, source);
+    REQUIRE_FALSE(output.empty());
+
+    // Graph disunting menjadi tidak bisa dikompilasi: 4 → 6 → 4, siklus pada
+    // pin data.
+    Graph broken = SpinGraph();
+    broken.links.erase(std::remove_if(broken.links.begin(), broken.links.end(),
+                                      [](const GraphLink& link) {
+                                          return link.toNode == Id(4) && link.toPin == "a";
+                                      }),
+                       broken.links.end());
+    Link(broken, 6, "value", 4, "a");
+    REQUIRE(SaveGraphToFile(broken, source).ok);
+
+    CHECK(cache.Rebuild(guid, source).empty());
+    // Berkas lama tetap utuh. Menimpanya dengan hasil setengah jadi akan
+    // membuat Play berikutnya gagal dengan kesalahan Lua yang tidak ada
+    // hubungannya dengan yang sebenarnya salah.
+    std::ifstream stream(output);
+    const std::string lua((std::istreambuf_iterator<char>(stream)),
+                          std::istreambuf_iterator<char>());
+    CHECK(lua.find("function Graph:OnUpdate(dt)") != std::string::npos);
+
+    const CompileResult* last = cache.LastResult(guid);
+    REQUIRE(last != nullptr);
+    CHECK_FALSE(last->ok);
+}
+
+TEST_CASE("GraphComponent berjalan lewat jalur yang sama dengan ScriptComponent") {
+    scene::RegisterCoreComponents();
+    NodeCatalog::Rebuild();
+
+    TempDir assetsDir;
+    TempDir cacheDir;
+    REQUIRE(SaveGraphToFile(SpinGraph(), assetsDir.path / "spin.simgraph").ok);
+
+    TaskPool pool(2);
+    assets::AssetDatabase db;
+    REQUIRE(db.Initialize({assetsDir.path, &pool, 0.05f}));
+    const assets::AssetRecord* record = db.FindByRelativePath("spin.simgraph");
+    REQUIRE(record != nullptr);
+    CHECK(record->type == assets::AssetType::Graph);
+
+    scene::World world;
+    const scene::Entity entity = world.Create("Spinner");
+    world.Add<scene::GraphComponent>(entity).graph = AssetRef{record->guid};
+
+    ScriptRuntime runtime;
+    REQUIRE(runtime.Initialize(world, &db, cacheDir.path));
+
+    // Properti yang diekspos graph terbaca lewat jalur yang sama dengan skrip —
+    // itulah yang membuat Inspector menampilkannya tanpa kode khusus.
+    const std::vector<scene::ScriptProperty> declared =
+        runtime.DeclaredProperties(record->guid);
+    REQUIRE(declared.size() == 1);
+    CHECK(declared[0].name == "speed");
+    CHECK(declared[0].number == doctest::Approx(1.5f));
+
+    runtime.Start();
+    CHECK(world.TryGet<scene::GraphComponent>(entity)->loaded);
+    for (int i = 0; i < 5; ++i) {
+        runtime.Update(0.016f);
+    }
+    const auto* transform = world.TryGet<scene::TransformComponent>(entity);
+    REQUIRE(transform != nullptr);
+    // Sudah berputar: rotasinya bukan lagi identitas.
+    CHECK(transform->rotation.y != doctest::Approx(0.0f));
+
+    runtime.Stop();
+    CHECK_FALSE(world.TryGet<scene::GraphComponent>(entity)->loaded);
 }
 
 TEST_CASE("Siklus pada pin data ditolak dengan pesan yang menunjuk node penyebabnya") {

@@ -1,6 +1,7 @@
 sim_add_library(Script
     SOURCES
         src/Graph.cpp
+        src/GraphCache.cpp
         src/GraphCompiler.cpp
         src/LuaVM.cpp
         src/NodeCatalog.cpp

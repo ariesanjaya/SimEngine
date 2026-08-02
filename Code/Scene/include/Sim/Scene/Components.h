@@ -129,6 +129,20 @@ struct ScriptComponent {
     std::vector<ScriptProperty> properties;
 };
 
+/// Menautkan entity ke sebuah graph visual scripting.
+///
+/// Sejajar dengan ScriptComponent, dan itu bukan kebetulan: graph dikompilasi
+/// menjadi Lua yang bentuknya sama persis dengan skrip tulis tangan, jadi yang
+/// membedakan keduanya hanya berkas yang dirujuk. Propertinya pun menempuh
+/// jalur yang sama — kompiler membangkitkan deklarasi `properties` biasa dari
+/// variabel graph yang diekspos.
+struct GraphComponent {
+    AssetRef graph;
+    /// True saat graph-nya sudah dikompilasi dan dimuat. Diisi runtime.
+    bool loaded = false;
+    std::vector<ScriptProperty> properties;
+};
+
 struct LightComponent {
     LightType type = LightType::Point;
     Vec3 color{1.0f, 1.0f, 1.0f};

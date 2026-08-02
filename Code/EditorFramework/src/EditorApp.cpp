@@ -721,7 +721,20 @@ void EditorApp::ReloadChangedScripts() {
     bool editorScriptChanged = false;
     for (const Uuid& guid : assets_.ChangedThisUpdate()) {
         const assets::AssetRecord* record = assets_.Find(guid);
-        if (record == nullptr || record->type != assets::AssetType::Script) {
+        if (record == nullptr) {
+            continue;
+        }
+        // Graph yang berubah dikompilasi ulang lebih dulu, baru instance-nya
+        // dimuat ulang lewat jalur yang sama dengan skrip.
+        if (record->type == assets::AssetType::Graph) {
+            context_.scripts->Graphs().Rebuild(guid, assets_.AbsolutePath(*record));
+            if (playing_) {
+                context_.scripts->Reload(guid);
+                notifications_.Info("Reloaded " + record->name);
+            }
+            continue;
+        }
+        if (record->type != assets::AssetType::Script) {
             continue;
         }
         if (record->relativePath.starts_with(prefix)) {
