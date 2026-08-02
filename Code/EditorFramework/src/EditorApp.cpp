@@ -510,6 +510,18 @@ void EditorApp::DrawFrame(float deltaSeconds) {
         // editor ikut terbawa ke build permainan.
         scripting_.Initialize(context_.scripts, &context_, &panels_,
                               configDir_ / "Assets" / kEditorScriptFolder);
+        // Breakpoint graph menahan Play, bukan menghentikannya: scene tetap
+        // seperti apa adanya saat node itu tercapai, dan Stop tetap satu-satunya
+        // yang mengembalikannya. Yang tertahan adalah frame BERIKUTNYA — frame
+        // yang sedang berjalan tetap diselesaikan, karena menghentikan Lua di
+        // tengah tumpukan panggilan butuh debug hook yang belum ada.
+        context_.scripts->SetBreakpointHandler([this](const std::string& node) {
+            if (pausedAtBreakpoint_) {
+                return;
+            }
+            pausedAtBreakpoint_ = true;
+            notifications_.Info("Paused at graph node " + node.substr(0, 6));
+        });
         context_.drawScriptMenu = [this]() { scripting_.DrawMenu(); };
         scriptingReady_ = true;
     }
@@ -517,7 +529,7 @@ void EditorApp::DrawFrame(float deltaSeconds) {
     // sini, di luar penelusuran daftar panel.
     scripting_.FlushPending();
     ReloadChangedScripts();
-    if (playing_ && context_.scripts != nullptr) {
+    if (playing_ && !pausedAtBreakpoint_ && context_.scripts != nullptr) {
         context_.scripts->Update(deltaSeconds);
     }
 #endif
@@ -775,6 +787,7 @@ void EditorApp::Play() {
 
     context_.scripts->Start();
     playing_ = true;
+    pausedAtBreakpoint_ = false;
     context_.playing = true;
     notifications_.Info("Play");
 #endif
@@ -797,6 +810,7 @@ void EditorApp::Stop() {
     }
     playSnapshot_.clear();
     playing_ = false;
+    pausedAtBreakpoint_ = false;
     context_.playing = false;
 
     // Riwayat undo dibersihkan: entri di dalamnya menunjuk keadaan scene sebelum

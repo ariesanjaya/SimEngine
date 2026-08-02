@@ -67,8 +67,20 @@ struct CompileResult {
 /// graph bisa di-debug dengan alat yang sama seperti skrip biasa, dan membuat
 /// pengguna bisa lulus dari visual scripting ke Lua tanpa jurang.
 ///
+/// Pilihan kompilasi.
+struct CompileOptions {
+    /// Node yang diberi breakpoint. Sebelum pernyataan masing-masing,
+    /// kompilernya menyisipkan `sim.breakpoint("<guid>")`.
+    ///
+    /// Panggilan itu tidak melakukan apa-apa kecuali ada yang memasang
+    /// penanganya — jadi `.lua` yang memuatnya tetap berjalan normal di runtime
+    /// tanpa editor, alih-alih gagal dengan "fungsi tidak dikenal".
+    std::vector<Uuid> breakpoints;
+};
+
 /// `chunkName` hanya masuk komentar kepala berkas; nama chunk yang dipakai Lua
 /// ditentukan pemanggil saat menjalankannya.
-CompileResult CompileGraph(const Graph& graph, std::string_view chunkName = {});
+CompileResult CompileGraph(const Graph& graph, std::string_view chunkName = {},
+                           const CompileOptions& options = {});
 
 }  // namespace sim::script

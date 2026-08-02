@@ -12,6 +12,7 @@ inline constexpr const char* kViewport = "viewport";
 inline constexpr const char* kConsole = "console";
 inline constexpr const char* kLuaConsole = "luaconsole";
 inline constexpr const char* kScriptEditor = "scripteditor";
+inline constexpr const char* kGraphEditor = "grapheditor";
 inline constexpr const char* kStatistics = "statistics";
 inline constexpr const char* kHistory = "history";
 inline constexpr const char* kPreferences = "preferences";

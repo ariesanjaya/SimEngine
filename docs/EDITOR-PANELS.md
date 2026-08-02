@@ -231,6 +231,16 @@ Sumber log ditandai kategori (`[Asset]`, `[Lua]`, `[RHI]`).
   pernah bisa berbohong tentang apa yang ada. **Ctrl+S** menyimpan, dan
   perubahannya sampai ke skrip yang berjalan lewat pemantau berkas yang sama
   dengan editor teks luar — satu jalur, satu perilaku.
+- **Graph Editor** — kanvas visual scripting: daftar `.simgraph` di kiri, kanvas
+  di tengah, dan **Compiled Lua** di kanan. Klik kanan membuka palet node yang
+  bisa dicari; koneksi bertipe menolak sambungan yang tidak masuk akal *selagi
+  masih diseret*, bukan setelah terlanjur terbentuk. Node yang gagal dikompilasi
+  berbingkai merah, yang diberi breakpoint berbingkai jingga.
+  Memilih sebuah node menyorot baris Lua yang dihasilkannya — itulah yang
+  membuat pengguna bisa lulus dari visual scripting ke Lua tanpa jurang.
+  Breakpoint menahan **Play** pada frame berikutnya; frame yang sedang berjalan
+  tetap diselesaikan, karena menghentikan Lua di tengah tumpukan panggilan
+  menuntut debug hook yang belum ada.
 - **Asset References** — graf pemakaian aset.
 - **Profiler** — waktu frame per bagian (dipakai serius mulai E8).
 - **Statistics** — jumlah entity, memori, jumlah aset termuat.

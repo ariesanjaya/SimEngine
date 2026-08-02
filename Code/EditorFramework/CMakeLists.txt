@@ -7,6 +7,7 @@ sim_add_library(EditorFramework
         src/EditorScripting.cpp
         src/EditorShell.cpp
         src/Gizmo.cpp
+        src/NodeGraph.cpp
         src/Notifications.cpp
         src/SceneCommands.cpp
         src/SceneView.cpp
@@ -29,6 +30,9 @@ sim_add_library(EditorFramework
         # membocorkan satu pun tipe ImGuizmo — jadi panel tetap tidak tahu apa
         # yang dipakai di baliknya.
         ImGuizmo::ImGuizmo
+        # Alasan yang sama: hanya NodeGraph.cpp yang memakainya, dan
+        # NodeGraph.h tidak membocorkan satu pun tipe pustaka itu.
+        ImGuiNodeEditor::ImGuiNodeEditor
         nlohmann_json::nlohmann_json)
 
 # Lua bersifat opsional, dan EditorApp punya jalur Play/Stop yang memerlukannya.

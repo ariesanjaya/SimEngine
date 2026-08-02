@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 namespace sim::script {
 
@@ -47,6 +48,15 @@ public:
     /// Peta sumbernya inilah yang dipakai menyorot node saat runtime gagal.
     const CompileResult* LastResult(const Uuid& guid) const;
 
+    /// Node yang diberi breakpoint pada sebuah graph.
+    ///
+    /// Disimpan di sini, bukan di panel, supaya SETIAP jalur kompilasi memakai
+    /// daftar yang sama — termasuk kompilasi ulang yang dipicu pemantau berkas,
+    /// yang tidak tahu-menahu tentang panel mana pun. Breakpoint yang hilang
+    /// begitu berkasnya disimpan adalah breakpoint yang tidak bisa dipercaya.
+    void SetBreakpoints(const Uuid& guid, std::vector<Uuid> nodes);
+    const std::vector<Uuid>& Breakpoints(const Uuid& guid) const;
+
     /// Nama chunk yang dipakai Lua untuk graph ini, mis. "spin.simgraph.lua".
     /// Traceback menyebut nama ini, dan dari sanalah node penyebabnya dicari.
     static std::string ChunkName(const std::filesystem::path& source);
@@ -59,6 +69,7 @@ private:
 
     std::filesystem::path directory_;
     std::unordered_map<Uuid, CompileResult> results_;
+    std::unordered_map<Uuid, std::vector<Uuid>> breakpoints_;
 };
 
 }  // namespace sim::script

@@ -77,8 +77,8 @@ struct PureValue {
 
 class Compiler {
 public:
-    Compiler(const Graph& graph, std::string_view chunkName)
-        : graph_(graph), chunkName_(chunkName) {}
+    Compiler(const Graph& graph, std::string_view chunkName, const CompileOptions& options)
+        : graph_(graph), chunkName_(chunkName), options_(options) {}
 
     CompileResult Run();
 
@@ -160,6 +160,7 @@ private:
 
     const Graph& graph_;
     std::string chunkName_;
+    CompileOptions options_;
     CompileResult result_;
     std::vector<std::string> lines_;
     int indent_ = 0;
@@ -445,6 +446,14 @@ void Compiler::EmitNode(const GraphNode& node) {
         Fail(node.guid, "execution pins form a loop through '" + type->label +
                             "'; use a For Loop or While Loop instead");
         return;
+    }
+
+    // Breakpoint disisipkan sebagai pemanggilan biasa, bukan mekanisme runtime
+    // tersendiri. Konsekuensinya menyenangkan: berkas yang memuatnya tetap
+    // berjalan apa adanya di runtime yang tidak memasang penangan apa pun.
+    if (std::find(options_.breakpoints.begin(), options_.breakpoints.end(), node.guid) !=
+        options_.breakpoints.end()) {
+        Emit("sim.breakpoint(" + Quote(node.guid.ToString()) + ")");
     }
 
     const std::vector<GraphPin> pins = PinsOf(graph_, node);
@@ -770,8 +779,9 @@ int CompileResult::LineOfNode(const Uuid& node) const {
     return 0;
 }
 
-CompileResult CompileGraph(const Graph& graph, std::string_view chunkName) {
-    Compiler compiler(graph, chunkName);
+CompileResult CompileGraph(const Graph& graph, std::string_view chunkName,
+                           const CompileOptions& options) {
+    Compiler compiler(graph, chunkName, options);
     return compiler.Run();
 }
 

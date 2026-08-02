@@ -29,6 +29,16 @@ const CompileResult* GraphCache::LastResult(const Uuid& guid) const {
     return it == results_.end() ? nullptr : &it->second;
 }
 
+void GraphCache::SetBreakpoints(const Uuid& guid, std::vector<Uuid> nodes) {
+    breakpoints_[guid] = std::move(nodes);
+}
+
+const std::vector<Uuid>& GraphCache::Breakpoints(const Uuid& guid) const {
+    static const std::vector<Uuid> kNone;
+    const auto it = breakpoints_.find(guid);
+    return it == breakpoints_.end() ? kNone : it->second;
+}
+
 std::filesystem::path GraphCache::EnsureCompiled(const Uuid& guid,
                                                  const std::filesystem::path& source) {
     if (directory_.empty()) {
@@ -73,7 +83,9 @@ std::filesystem::path GraphCache::Compile(const Uuid& guid,
         return {};
     }
 
-    CompileResult result = CompileGraph(graph, source.filename().string());
+    CompileOptions options;
+    options.breakpoints = Breakpoints(guid);
+    CompileResult result = CompileGraph(graph, source.filename().string(), options);
     if (!result.ok) {
         // Berkas lama sengaja TIDAK ditimpa saat kompilasi gagal. Menimpanya
         // dengan hasil setengah jadi akan membuat Play berikutnya gagal dengan

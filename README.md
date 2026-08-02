@@ -17,7 +17,8 @@ konsekuensinya ada di [docs/ROADMAP.md](docs/ROADMAP.md).
 | E3 | Reflection, scene EnTT, serialisasi `.simlevel`, prefab, project | ✅ |
 | E4 | Level editor: gizmo, picking, box-select, outliner, multi-edit | ✅ |
 | E5 | Asset database (GUID stabil), Asset Browser, thumbnail, drag-drop | ✅ |
-| E6–E7 | Lua + visual scripting, editor khusus | ⏳ |
+| E6 | Lua + visual scripting (graph dikompilasi ke Lua) | ✅ |
+| E7 | Editor khusus: material, particle, terrain, vegetation, animation | ⏳ |
 | A0–A4 | Engine sebagai MCP server untuk agentic AI | ⏳ |
 | E8–E9 | Renderer PBR, runtime, packaging | ⏳ |
 
@@ -202,6 +203,51 @@ Lua alih-alih menggambar ke jendela sembarang. Menyimpan berkasnya memuat ulang
 seluruh skrip editor tanpa restart: item menu yang dihapus dari berkasnya ikut
 hilang, sementara panel dengan judul yang sama dipakai ulang beserta posisi
 dock dan keadaan buka/tutupnya.
+
+### Visual scripting
+
+`GraphComponent` merujuk sebuah `.simgraph` — daftar node, pin, dan koneksi
+dalam JSON berversi seperti `.simlevel`. Yang berjalan saat Play bukan graph-nya,
+melainkan **Lua hasil kompilasinya**.
+
+Itu pilihan yang menentukan. Alternatifnya mesin graph yang menelusuri node satu
+per satu saat runtime: dua jalur eksekusi yang harus dijaga sama perilakunya, dan
+yang kedua selalu lebih lambat sekaligus lebih sulit di-debug. Dengan
+mengompilasi, yang berjalan hanya satu runtime — graph adalah *penulis kode*,
+bukan penafsir. Profiler, traceback, hot reload, sandbox, dan properti-di-
+Inspector yang sudah ada langsung berlaku, tanpa satu baris pun kode khusus.
+
+Katalog node-nya **dibangkitkan dari reflection**: setiap komponen terdaftar
+menghasilkan sepasang node Get/Set dengan satu pin per field. Komponen baru — atau
+field baru pada komponen lama — langsung muncul di palet tanpa pekerjaan tambahan.
+
+Keluarannya sengaja layak dibaca. Graph "putar entity saat OnUpdate" di atas
+menjadi:
+
+```lua
+function Graph:OnUpdate(dt)
+    self:__ensure()
+    -- node a3f19c (Set Transform)
+    sim.set_component(self.entity, "Transform",
+        { rotation = sim.axis_angle(sim.up(), (sim.time() * self.state.speed)) })
+end
+```
+
+Bukan kemewahan: itulah yang membuat graph bisa di-debug dengan alat yang sama
+seperti skrip biasa, dan membuat pengguna bisa lulus dari visual scripting ke Lua
+tanpa jurang. Peta sumber node ↔ baris membuat error runtime menyorot node
+penyebabnya di kanvas, bukan menyerahkan nomor baris di berkas yang tidak pernah
+ia lihat.
+
+Memuat level yang memakai graph **tidak mengompilasi apa pun** — yang dipakai
+`.lua` yang sudah ada di cache. Menyunting graph di editor langsung berlaku saat
+Play berikutnya, tanpa langkah build manual. Keduanya memanggil compiler yang
+sama persis; hasil yang berbeda antara editor dan runtime adalah kelas bug yang
+tidak boleh dibuka.
+
+Siklus pada pin data dan lingkar pada pin exec ditolak saat kompilasi dengan
+pesan yang menunjuk node penyebabnya — dan kompilernya **kembali**, bukan
+menggantung membawa serta editor.
 
 ### Kunci laju frame
 

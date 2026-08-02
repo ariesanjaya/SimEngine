@@ -32,6 +32,19 @@ struct EvalNode {
     std::vector<EvalNode> children;
 };
 
+/// Kesalahan runtime terakhir sebuah aset skrip atau graph.
+///
+/// Disimpan, bukan sekadar dicatat ke log, karena satu pemakainya menuntut lebih
+/// dari teks: panel Graph Editor menerjemahkan `line` kembali menjadi node lewat
+/// peta sumber, lalu menyorotnya di kanvas. Tanpa nomor baris yang tersimpan,
+/// yang bisa diberikan editor kepada pengguna graph hanyalah nomor baris di
+/// berkas yang tidak pernah ia lihat.
+struct RuntimeFailure {
+    /// Baris di dalam chunk, 0 bila tidak bisa dibaca dari pesannya.
+    int line = 0;
+    std::string message;
+};
+
 struct EvalResult {
     bool ok = true;
     /// Terisi saat gagal — pesan beserta traceback.
@@ -86,6 +99,19 @@ public:
     /// mengompilasi ulang saat graph disunting dan untuk membaca peta sumbernya.
     GraphCache& Graphs() { return graphs_; }
 
+    /// Kesalahan runtime terakhir sebuah aset, atau null bila belum ada.
+    const RuntimeFailure* LastFailure(const Uuid& assetGuid) const;
+
+    /// Dipanggil ketika sebuah node ber-breakpoint dijalankan; argumennya GUID
+    /// node itu dalam bentuk teks.
+    ///
+    /// Tanpa penangan, `sim.breakpoint` tidak melakukan apa pun. Itu yang
+    /// membuat `.lua` hasil kompilasi tetap sah dijalankan runtime tanpa editor
+    /// alih-alih gagal karena memanggil fungsi yang tidak ada.
+    void SetBreakpointHandler(std::function<void(const std::string&)> handler) {
+        onBreakpoint_ = std::move(handler);
+    }
+
     /// Menjalankan potongan kode di state yang sama dengan skrip. Dipakai REPL.
     ///
     /// Kode dicoba dulu sebagai **ekspresi** (`return <kode>`), baru sebagai
@@ -137,11 +163,17 @@ private:
     std::filesystem::path ResolveChunk(const Uuid& guid, std::string& chunkName,
                                        bool& fromGraph);
     void RegisterBindings();
+    /// Mencatat kegagalan sebuah instance, beserta nomor barisnya bila pesannya
+    /// menyebutkannya.
+    void RecordFailure(const Instance& instance, std::string_view message);
 
     std::unique_ptr<LuaVM> vm_;
     scene::World* world_ = nullptr;
     assets::AssetDatabase* assets_ = nullptr;
     GraphCache graphs_;
+    std::function<void(const std::string&)> onBreakpoint_;
+    /// Kesalahan runtime terakhir per aset. Dibersihkan setiap Play dimulai.
+    std::unordered_map<Uuid, RuntimeFailure> failures_;
     std::vector<std::unique_ptr<Instance>> instances_;
     /// Detik sejak Play ditekan, dibaca skrip lewat `sim.time()`.
     float elapsed_ = 0.0f;

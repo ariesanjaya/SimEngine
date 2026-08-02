@@ -133,6 +133,9 @@ private:
     /// Cuplikan level sesaat sebelum Play, dipakai Stop untuk mengembalikannya.
     std::string playSnapshot_;
     bool playing_ = false;
+    /// Play sedang tertahan sebuah breakpoint graph. Scene tetap tergambar,
+    /// yang berhenti hanyalah OnUpdate.
+    bool pausedAtBreakpoint_ = false;
     float autosaveTimer_ = 0.0f;
     bool exitRequested_ = false;
     bool wantsExit_ = false;

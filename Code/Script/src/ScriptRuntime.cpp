@@ -283,6 +283,8 @@ struct ScriptRuntime::Instance {
     scene::Entity entity = scene::kNullEntity;
     Uuid guid;
     sol::table self;
+    /// Nama chunk yang dipakai Lua, dan yang muncul di traceback.
+    std::string chunkName;
     /// Berasal dari GraphComponent, bukan ScriptComponent. Dua komponen yang
     /// bentuknya sama tapi berbeda tempat menyimpan properti dan flag `loaded`.
     bool fromGraph = false;
@@ -387,6 +389,14 @@ void ScriptRuntime::RegisterBindings() {
     // yang sama, bukan akumulasi masing-masing yang perlahan menyimpang.
     sim.set_function("time", [this]() { return elapsed_; });
 
+    // Disisipkan kompiler graph di depan node yang diberi breakpoint. Tanpa
+    // penangan ia tidak melakukan apa pun — lihat SetBreakpointHandler().
+    sim.set_function("breakpoint", [this](const std::string& node) {
+        if (onBreakpoint_) {
+            onBreakpoint_(node);
+        }
+    });
+
     const std::string error = vm_->RunString(kMathPrelude, "=(sim.math)");
     if (!error.empty()) {
         SIM_ERROR("Lua", "Math prelude failed: {}", error);
@@ -460,6 +470,7 @@ void ScriptRuntime::LoadChunk(scene::Entity entity, const Uuid& guid,
     auto instance = std::make_unique<Instance>();
     instance->entity = entity;
     instance->guid = guid;
+    instance->chunkName = chunkName;
     instance->fromGraph = fromGraph;
     // Tabel yang dikembalikan berkas dipakai langsung sebagai `self`. Dua entity
     // yang memakai skrip sama tetap terpisah karena berkasnya dijalankan ulang
@@ -518,8 +529,37 @@ std::vector<scene::ScriptProperty> ScriptRuntime::DeclaredProperties(const Uuid&
     return ReadDeclaration(loaded);
 }
 
+const RuntimeFailure* ScriptRuntime::LastFailure(const Uuid& assetGuid) const {
+    const auto it = failures_.find(assetGuid);
+    return it == failures_.end() ? nullptr : &it->second;
+}
+
+void ScriptRuntime::RecordFailure(const Instance& instance, std::string_view message) {
+    RuntimeFailure failure;
+    failure.message = std::string(message);
+    // Lua melaporkan "<chunk>:<baris>: <pesan>". Nomor barisnya dicari setelah
+    // nama chunk, bukan setelah titik dua pertama: nama berkas boleh memuat
+    // titik dua, dan memotong di yang pertama akan menghasilkan angka ngawur.
+    const std::size_t at = failure.message.find(instance.chunkName + ":");
+    if (at != std::string::npos) {
+        const std::size_t start = at + instance.chunkName.size() + 1;
+        std::size_t end = start;
+        while (end < failure.message.size() && failure.message[end] >= '0' &&
+               failure.message[end] <= '9') {
+            ++end;
+        }
+        if (end > start) {
+            failure.line = std::stoi(failure.message.substr(start, end - start));
+        }
+    }
+    failures_[instance.guid] = std::move(failure);
+}
+
 void ScriptRuntime::Start() {
     instances_.clear();
+    // Kegagalan lama dibuang: yang ditampilkan editor harus milik sesi Play ini,
+    // bukan sisa dari yang sebelumnya.
+    failures_.clear();
     if (world_ == nullptr) {
         return;
     }
@@ -559,6 +599,7 @@ void ScriptRuntime::Start() {
         if (!result.valid()) {
             const sol::error error = result;
             SIM_ERROR("Lua", "OnStart failed: {}", error.what());
+            RecordFailure(*instance, error.what());
             instance->failed = true;
         }
     }
@@ -582,6 +623,7 @@ void ScriptRuntime::Update(float deltaSeconds) {
         if (!result.valid()) {
             const sol::error error = result;
             SIM_ERROR("Lua", "OnUpdate failed: {}", error.what());
+            RecordFailure(*instance, error.what());
             instance->failed = true;
         }
     }
@@ -636,6 +678,7 @@ void ScriptRuntime::Reload(const Uuid& assetGuid) {
                 if (!result.valid()) {
                     const sol::error error = result;
                     SIM_ERROR("Lua", "OnStart failed after reload: {}", error.what());
+                    RecordFailure(*instances_.back(), error.what());
                     instances_.back()->failed = true;
                 }
             }

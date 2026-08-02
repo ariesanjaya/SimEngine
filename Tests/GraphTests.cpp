@@ -393,6 +393,123 @@ TEST_CASE("GraphComponent berjalan lewat jalur yang sama dengan ScriptComponent"
     CHECK_FALSE(world.TryGet<scene::GraphComponent>(entity)->loaded);
 }
 
+TEST_CASE("Breakpoint memanggil penangan dan menyebut node-nya") {
+    scene::RegisterCoreComponents();
+    NodeCatalog::Rebuild();
+
+    Graph graph;
+    graph.nodes.push_back(Node(1, "event.start"));
+    graph.nodes.push_back(Node(2, "sim.log"));
+    graph.nodes.back().pinValues["message"] = "\"halo\"";
+    Link(graph, 1, "then", 2, "in");
+
+    CompileOptions options;
+    options.breakpoints.push_back(Id(2));
+    const CompileResult result = CompileGraph(graph, "break.simgraph", options);
+    INFO(FirstError(result));
+    REQUIRE(result.ok);
+    CHECK(result.lua.find("sim.breakpoint(") != std::string::npos);
+
+    ScriptRuntime runtime;
+    scene::World world;
+    REQUIRE(runtime.Initialize(world, nullptr));
+
+    // Tanpa penangan, `sim.breakpoint` tidak boleh menggagalkan apa pun: berkas
+    // yang sama harus tetap berjalan di runtime tanpa editor.
+    const EvalResult silent =
+        runtime.Evaluate("local g = (function()\n" + result.lua + "end)()\n" +
+                         "g.state = {} g.entity = 0 g:OnStart()\n");
+    INFO(silent.error);
+    CHECK(silent.ok);
+
+    std::vector<std::string> hits;
+    runtime.SetBreakpointHandler([&hits](const std::string& node) { hits.push_back(node); });
+    const EvalResult caught =
+        runtime.Evaluate("local g = (function()\n" + result.lua + "end)()\n" +
+                         "g.state = {} g.entity = 0 g:OnStart()\n");
+    INFO(caught.error);
+    REQUIRE(caught.ok);
+    REQUIRE(hits.size() == 1);
+    // GUID penuh, bukan potongan: editor mencocokkannya dengan node di kanvas.
+    CHECK(hits[0] == Id(2).ToString());
+}
+
+TEST_CASE("Kesalahan runtime di dalam graph menunjuk node penyebabnya") {
+    scene::RegisterCoreComponents();
+    NodeCatalog::Rebuild();
+
+    Graph graph;
+    graph.nodes.push_back(Node(1, "event.start"));
+    graph.nodes.push_back(Node(2, "sim.log"));
+    // Nilai pin diisi ekspresi Lua yang gagal saat dijalankan, bukan saat dimuat.
+    graph.nodes.back().pinValues["message"] = "error(\"boom\")";
+    Link(graph, 1, "then", 2, "in");
+
+    const CompileResult result = CompileGraph(graph, "runtime.simgraph");
+    REQUIRE(result.ok);
+
+    ScriptRuntime runtime;
+    scene::World world;
+    REQUIRE(runtime.Initialize(world, nullptr));
+    const EvalResult run =
+        runtime.Evaluate("local g = (function()\n" + result.lua + "end)()\n" +
+                         "g.state = {} g.entity = 0 g:OnStart()\n");
+    REQUIRE_FALSE(run.ok);
+
+    // Kriteria terima E6.5 nomor 7: nomor baris dari traceback diterjemahkan
+    // kembali menjadi node, sehingga editor menyorot node — bukan menyerahkan
+    // nomor baris di berkas yang tidak pernah dilihat pengguna.
+    const int line = result.LineOfNode(Id(2));
+    REQUIRE(line > 0);
+    const std::vector<Uuid> suspects = result.NodesAtLine(line);
+    CHECK(std::find(suspects.begin(), suspects.end(), Id(2)) != suspects.end());
+    CHECK(result.NodeAtLine(line) == Id(2));
+}
+
+TEST_CASE("Kegagalan saat Play tercatat beserta nomor barisnya") {
+    scene::RegisterCoreComponents();
+    NodeCatalog::Rebuild();
+
+    TempDir assetsDir;
+    TempDir cacheDir;
+
+    // Graph yang gagal saat DIJALANKAN, bukan saat dikompilasi.
+    Graph graph;
+    graph.nodes.push_back(Node(1, "event.start"));
+    graph.nodes.push_back(Node(2, "sim.log"));
+    graph.nodes.back().pinValues["message"] = "error(\"boom\")";
+    Link(graph, 1, "then", 2, "in");
+    REQUIRE(SaveGraphToFile(graph, assetsDir.path / "broken.simgraph").ok);
+
+    TaskPool pool(2);
+    assets::AssetDatabase db;
+    REQUIRE(db.Initialize({assetsDir.path, &pool, 0.05f}));
+    const assets::AssetRecord* record = db.FindByRelativePath("broken.simgraph");
+    REQUIRE(record != nullptr);
+
+    scene::World world;
+    const scene::Entity entity = world.Create("Broken");
+    world.Add<scene::GraphComponent>(entity).graph = AssetRef{record->guid};
+
+    ScriptRuntime runtime;
+    REQUIRE(runtime.Initialize(world, &db, cacheDir.path));
+    runtime.Start();
+
+    const RuntimeFailure* failure = runtime.LastFailure(record->guid);
+    REQUIRE(failure != nullptr);
+    CHECK(failure->message.find("boom") != std::string::npos);
+    REQUIRE(failure->line > 0);
+
+    // Baris itu menunjuk kembali ke node penyebabnya lewat peta sumber yang
+    // disimpan cache — jalur persis yang dipakai panel untuk menyorotnya.
+    const CompileResult* compiled = runtime.Graphs().LastResult(record->guid);
+    REQUIRE(compiled != nullptr);
+    const std::vector<Uuid> suspects = compiled->NodesAtLine(failure->line);
+    CHECK(std::find(suspects.begin(), suspects.end(), Id(2)) != suspects.end());
+
+    runtime.Stop();
+}
+
 TEST_CASE("Siklus pada pin data ditolak dengan pesan yang menunjuk node penyebabnya") {
     scene::RegisterCoreComponents();
     NodeCatalog::Rebuild();
