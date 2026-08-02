@@ -428,37 +428,109 @@ yang jelas dari membaca kode:
 
 ---
 
-## E5 — Asset Browser + Asset Database · ~5 sesi
+## E5 — Asset Browser + Asset Database · ~5 sesi · ✅ SELESAI (2 Agustus 2026)
 
 **Tujuan.** Aset punya identitas stabil, bisa dicari, dilihat thumbnail-nya, dan
 diseret ke level.
 
 **Pekerjaan**
 
-- `AssetDatabase`: pemindaian direktori aset, file `.meta` berisi GUID + setting
-  import, indeks GUID → path, deteksi perubahan lewat `FileWatcher`, reimport
-  otomatis, graf ketergantungan antar-aset.
-- `Importer` registry: satu importer per ekstensi, berjalan di job system,
-  menghasilkan aset "compiled" di cache. Untuk fase editor cukup: tekstur (stb_image),
-  teks/Lua, JSON, dan pass-through untuk mesh (metadata saja; parsing penuh di E8).
-- **Asset Browser** (posisi C pada acuan): panel kiri pohon folder, panel kanan grid
-  thumbnail dengan slider ukuran, mode daftar/grid, breadcrumb, pencarian dengan
-  filter tipe, favorit, panel detail (nama, ukuran, dimensi, format, GUID) seperti acuan.
-- Thumbnail: cache di disk berbasis hash isi, dibuat di thread latar, placeholder
-  saat belum siap.
-- Drag & drop: aset → viewport (buat entity), aset → field Inspector (assign
-  referensi), aset → Asset Browser (pindah file).
-- Operasi file yang aman: rename/move memperbarui `.meta` dan tidak memutus referensi
-  (karena referensi memakai GUID); delete memperingatkan pemakaian yang ada.
-- Panel **Asset References**: siapa memakai aset ini, aset ini memakai siapa.
+- `AssetDatabase`: pemindaian direktori, berkas `.meta` berisi GUID, indeks
+  GUID → path, deteksi perubahan lewat `FileWatcher`, impor ulang otomatis, dan
+  graf ketergantungan antar-aset dua arah.
+- `Core::FileWatcher`: inotify di Linux, `ReadDirectoryChangesW` di Windows.
+- `Core::TaskPool`: kolam thread untuk impor dan thumbnail.
+- `Importer` registry per tipe aset. Tekstur hanya membaca kepala berkas;
+  dokumen (level/prefab/material) dipindai untuk GUID yang dirujuknya; mesh,
+  skrip, dan teks pass-through — mesh baru benar-benar diurai di E8.
+- **Asset Browser**: pohon folder, breadcrumb yang tiap ruasnya bisa diklik,
+  mode grid/daftar, slider ukuran thumbnail, pencarian, filter tipe, favorit,
+  dan panel detail (nama, tipe, path, ukuran, dimensi, GUID).
+- Thumbnail: cache disk berbasis hash isi, dibuat di thread latar, ikon tipe
+  sebagai pengganti selama belum siap, dan unggah GPU dibatasi empat per frame.
+- Drag & drop: aset → viewport (membuat entity di titik tembus bidang tanah),
+  aset → field Inspector (menetapkan `AssetRef`), aset → folder (memindahkan
+  berkas).
+- Operasi file yang aman: rename/move memindahkan `.meta` bersama asetnya
+  sehingga GUID bertahan; delete memperingatkan dengan daftar pemakainya.
+- **Rujukan aset memakai GUID**: `MeshRendererComponent::mesh` dan `::material`
+  berubah dari `std::string` berisi nama menjadi `AssetRef`. Skema level naik
+  ke versi 3.
 
-**Kriteria terima**
+**Kriteria terima** — 15 test di `Tests/AssetTests.cpp`, plus verifikasi UI.
 
-1. Menambah file ke folder aset dari luar editor → muncul di browser < 2 detik tanpa restart.
-2. Rename aset yang direferensikan level → level tetap utuh setelah dimuat ulang.
-3. Folder berisi 10.000 aset tetap bisa di-scroll mulus (thumbnail dimuat malas).
-4. Menyeret tekstur ke field material di Inspector menetapkan referensinya, dan bisa di-undo.
-5. Hapus aset yang masih dipakai → dialog peringatan berisi daftar pemakai.
+1. ✅ Berkas yang ditulis dari luar editor muncul di bawah dua detik tanpa
+   restart, lengkap dengan `.meta`-nya. Diuji di editor sungguhan maupun di test.
+2. ✅ Mengganti nama aset yang dirujuk level tidak memutus apa pun.
+   `DamagedHelmet.glb` diseret ke field Mesh Asset, lalu diganti nama jadi
+   `helmet-v2.glb` lewat panel; GUID di berkas level tetap sama persis dengan
+   GUID di `.meta` yang sudah berpindah nama. Berlaku sama untuk pemindahan
+   antar folder.
+3. ✅ Folder berisi 10.044 aset tidak lagi berbiaya apa pun saat diam. CPU
+   editor per dua detik: **123 jiffies** (polling + pemindaian penuh) → **80-113**
+   (pemantau berkas) → **46-47** (pemantau + cache tampilan), sama dengan editor
+   yang hanya berisi 44 aset.
+4. ✅ Menyeret tekstur ke field Inspector menetapkan GUID-nya — cocok persis
+   dengan isi `.meta` — dan satu Ctrl+Z mengosongkannya, Ctrl+Shift+Z
+   mengembalikannya.
+5. ✅ Menghapus aset yang masih dipakai memunculkan dialog berisi **daftar**
+   pemakainya (`Levels/arena.simlevel`, `Levels/lobby.simlevel`), bukan sekadar
+   jumlahnya, beserta akibatnya. Cancel menahan berkasnya; Delete membuangnya
+   bersama `.meta`.
+
+**Yang berbeda dari rencana**
+
+- **Panel Asset References tidak dibuat terpisah.** Fungsinya — "siapa memakai
+  aset ini, aset ini memakai siapa" — ada di panel detail Asset Browser, tempat
+  informasi itu justru dibutuhkan: saat memutuskan menghapus atau memindahkan.
+  Panel tersendiri berarti dua tempat yang menampilkan hal sama.
+- **`FileWatcher` ada di `Core`, bukan `Platform`**, walau isinya kode khusus
+  sistem operasi. `Platform` mengekspor SDL3 secara publik dan pemantau ini
+  tidak menyentuh SDL sama sekali; menaruhnya di sana akan menyeret SDL ke modul
+  Assets beserta seluruh binari test-nya.
+- **Pemindaian penuh tidak dihapus, hanya turun peran.** Kedua platform bisa
+  kehilangan event (`IN_Q_OVERFLOW`, `ERROR_NOTIFY_ENUM_DIR`), jadi `Poll()`
+  mengembalikan bool dan pemindaian berjeda 30 detik tetap ada sebagai jalur
+  pemulihan.
+- **Jalur Windows belum pernah dijalankan.** Mesin pengembangan hanya Linux. Ia
+  ditulis mengikuti dokumentasi dan ditandai di kodenya sebagai wajib diuji
+  sebelum build Windows E9 dianggap selesai.
+- **Migrasi skema 2 → 3 kehilangan data**, dan itu tidak terhindarkan: versi 2
+  menyimpan nama seperti `"shaderball_default_1m"`, dan tidak ada cara
+  memetakannya ke GUID tanpa daftar aset dari zaman berkas itu ditulis — yang
+  memang tidak pernah ada. Nama yang dilepas dicatat di Console agar bisa
+  dipasang ulang.
+- **Impor mesh masih pass-through.** Dimensi dan isi geometri baru dibaca di E8;
+  yang diindeks sekarang hanya identitas, ukuran, dan waktu ubahnya.
+
+**Tiga temuan kinerja, semuanya lewat pengukuran dan bukan tebakan**
+
+1. **`std::filesystem::relative()` memakan 95% waktu pemindaian.** Pada pohon
+   10.000 berkas: jalan-jalan direktori saja 15 ms, ditambah `relative()` jadi
+   284 ms, ditambah pemotongan prefiks string 14 ms. Membagi versi lama ke empat
+   thread hanya akan sampai ~70 ms — masih lima kali lebih lambat daripada satu
+   thread yang memanggil fungsi yang benar. Ini yang membuat "pemindaian
+   multi-thread" jadi jawaban yang salah untuk masalah ini.
+2. **Sebuah optimasi dibuang lagi setelah diukur.** Sidik jari isi folder untuk
+   memutus lebih awal ketika tidak ada yang berubah: 134 vs 123 jiffies, di
+   dalam batas derau. Biaya yang tersisa ada di *mengumpulkan* datanya, bukan di
+   apa yang terjadi sesudahnya. Kode yang ditambahkan demi kinerja tapi tidak
+   terbukti mempercepat apa pun tidak layak disimpan.
+3. **Penyebab dominan berpindah tempat setelah tiap perbaikan.** Setelah
+   pemindaian murah, yang menonjol adalah panel memanggil `InFolder()` tiap
+   frame — 10.000 pemeriksaan × 60 fps untuk daftar yang sama persis. Diperbaiki
+   dengan menyusun ulang daftar hanya saat `AssetDatabase::Version()`, folder,
+   pencarian, atau filter berubah.
+
+**Satu bug yang hanya muncul saat ditanya**
+
+Menimpa tekstur dari luar editor memperbarui metadata tapi **tidak**
+thumbnail-nya: mengganti gambar merah 256×256 dengan biru 512×128 membuat
+bentuknya berubah jadi memanjang sementara warnanya tetap merah. Separuh benar,
+sehingga tampak berfungsi. Penyebabnya cache thumbnail berkunci GUID saja — dan
+GUID memang sengaja tidak berubah saat berkas ditimpa, karena justru itu inti
+seluruh sistem aset. `Request()` kini menerima `contentTag` dari ukuran dan waktu
+ubah berkas, dengan handle lama tetap dipakai sampai gambar baru siap.
 
 ---
 

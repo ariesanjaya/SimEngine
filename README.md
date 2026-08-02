@@ -16,7 +16,8 @@ konsekuensinya ada di [docs/ROADMAP.md](docs/ROADMAP.md).
 | E2 | Editor framework: command/undo, seleksi, shortcut, widget | ✅ |
 | E3 | Reflection, scene EnTT, serialisasi `.simlevel`, prefab, project | ✅ |
 | E4 | Level editor: gizmo, picking, box-select, outliner, multi-edit | ✅ |
-| E5–E7 | Asset browser, Lua, editor khusus | ⏳ |
+| E5 | Asset database (GUID stabil), Asset Browser, thumbnail, drag-drop | ✅ |
+| E6–E7 | Lua + visual scripting, editor khusus | ⏳ |
 | A0–A4 | Engine sebagai MCP server untuk agentic AI | ⏳ |
 | E8–E9 | Renderer PBR, runtime, packaging | ⏳ |
 
@@ -53,6 +54,8 @@ Berkas yang ditulis editor saat berjalan:
 | `~/.simengine/panels.json` | panel mana yang terbuka |
 | `~/.simengine/shortcuts.json` | pintasan yang diubah dari bawaannya |
 | `~/.simengine/Logs/editor.log` | log lengkap sesi terakhir |
+| `~/.simengine/Assets/` | folder aset yang dipantau editor |
+| `~/.simengine/ThumbnailCache/` | thumbnail hasil dekode, berkunci hash isi berkas |
 
 Hapus `layout.ini` untuk kembali ke tata letak bawaan (atau **View → Reset Layout**).
 
@@ -90,6 +93,21 @@ Viewport terkunci di dockspace dan tidak bisa dilepas menjadi jendela tersendiri
 Panel yang dilepas mendapat swapchain dan present sendiri; untuk gambar seukuran
 viewport penuh biayanya jauh di atas panel berisi teks.
 
+### Aset
+
+Setiap berkas di `~/.simengine/Assets` mendapat berkas `.meta` di sebelahnya
+berisi **GUID**. Level menyimpan GUID itu, bukan nama berkas — sehingga mengganti
+nama atau memindahkan aset tidak menyentuh satu pun level. Berkas `.meta` wajib
+ikut masuk kontrol versi bersama asetnya; kehilangannya memberi aset identitas
+baru dan memutus semua yang merujuknya.
+
+Perubahan dari luar editor terdeteksi lewat pemantau sistem berkas (inotify di
+Linux, `ReadDirectoryChangesW` di Windows) dan muncul di bawah dua detik tanpa
+restart — termasuk ketika berkas ditimpa, yang ikut menyegarkan thumbnail-nya.
+
+Menyeret aset: ke **viewport** membuat entity, ke **field Inspector** menetapkan
+rujukannya (bisa di-undo), ke **folder** memindahkan berkasnya.
+
 ### Kunci laju frame
 
 Editor mengunci laju frame ke **refresh rate terendah** di antara semua monitor
@@ -103,7 +121,7 @@ monitor penyebabnya ditampilkan di status bar.
 ## Struktur
 
 ```
-Code/          modul engine (Core, Reflect, Scene, Platform, RHI,
+Code/          modul engine (Core, Reflect, Scene, Assets, Platform, RHI,
                ImGuiIntegration, Render, EditorFramework, Editor, Script)
 Apps/          entry point (SimEditor)
 Shaders/       sumber GLSL/Slang, dikompilasi ke SPIR-V saat build
