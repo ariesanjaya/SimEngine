@@ -11,6 +11,8 @@ sim_add_library(Render
 sim_compile_shaders(SimShadersGrid
     SOURCES
         ${CMAKE_SOURCE_DIR}/Shaders/grid.vert
-        ${CMAKE_SOURCE_DIR}/Shaders/grid.frag)
+        ${CMAKE_SOURCE_DIR}/Shaders/grid.frag
+        ${CMAKE_SOURCE_DIR}/Shaders/line.vert
+        ${CMAKE_SOURCE_DIR}/Shaders/line.frag)
 
 add_dependencies(SimRender SimShadersGrid)

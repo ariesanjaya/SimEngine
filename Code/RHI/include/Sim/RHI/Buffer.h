@@ -1,0 +1,51 @@
+#pragma once
+
+#include "Sim/RHI/Device.h"
+
+#include <cstddef>
+
+namespace sim::rhi {
+
+/// Buffer GPU yang isinya ditulis ulang tiap frame dari CPU.
+///
+/// Dipakai geometri yang berubah terus dan jumlahnya tidak diketahui di muka:
+/// garis grid, wireframe seleksi, gizmo bantu. Memorinya host-visible dan
+/// dipetakan sekali lalu dibiarkan terpetakan — memetakan ulang tiap frame
+/// hanya menambah biaya tanpa manfaat, dan VMA memang menyarankan pemetaan
+/// persisten untuk pola tulis-sekali-baca-sekali seperti ini.
+///
+/// Bukan buffer untuk data statis. Mesh yang tidak berubah akan mendapat
+/// buffer device-local dengan staging di E8.
+class DynamicBuffer {
+public:
+    DynamicBuffer() = default;
+    ~DynamicBuffer();
+
+    DynamicBuffer(const DynamicBuffer&) = delete;
+    DynamicBuffer& operator=(const DynamicBuffer&) = delete;
+
+    bool Create(Device& device, VkBufferUsageFlags usage, VkDeviceSize initialBytes);
+    void Destroy();
+
+    /// Memastikan kapasitas cukup. Membuat ulang buffer bila perlu, jadi tidak
+    /// boleh dipanggil saat frame yang masih memakainya belum selesai.
+    /// Mengembalikan false bila pembuatan gagal.
+    bool Reserve(VkDeviceSize bytes);
+
+    /// Menyalin data ke buffer. Mengembalikan false bila tidak muat.
+    bool Write(const void* data, VkDeviceSize bytes);
+
+    VkBuffer Handle() const { return buffer_; }
+    VkDeviceSize Capacity() const { return capacity_; }
+    bool IsValid() const { return buffer_ != VK_NULL_HANDLE; }
+
+private:
+    Device* device_ = nullptr;
+    VkBufferUsageFlags usage_ = 0;
+    VkBuffer buffer_ = VK_NULL_HANDLE;
+    VmaAllocation allocation_ = VK_NULL_HANDLE;
+    void* mapped_ = nullptr;
+    VkDeviceSize capacity_ = 0;
+};
+
+}  // namespace sim::rhi

@@ -53,6 +53,17 @@ std::string SaveSubtreeToString(const World& world, Entity root);
 /// `parentGuid` tidak valid berarti dipasang sebagai akar.
 bool RestoreSubtree(World& world, const std::string& text, Uuid parentGuid);
 
+/// Mengganti seluruh GUID di dalam teks sub-pohon dengan yang baru.
+///
+/// Dipakai duplikasi dan instansiasi prefab: keduanya butuh salinan yang bisa
+/// hidup berdampingan dengan aslinya, dan GUID adalah satu-satunya pembeda yang
+/// bertahan lintas-sesi. Penggantiannya konsisten dalam satu teks sehingga
+/// hubungan induk-anak di dalamnya tetap utuh; rujukan induk yang menunjuk ke
+/// luar teks dibuang, karena penempatan akarnya ditentukan pemanggil.
+///
+/// Mengembalikan teks kosong bila `text` bukan sub-pohon yang sah.
+std::string RemapGuids(const std::string& text, std::string* outRootGuid = nullptr);
+
 /// Menyalin satu komponen ke/dari teks JSON.
 ///
 /// Dipakai undo generik di editor: menyimpan cuplikan sebelum dan sesudah

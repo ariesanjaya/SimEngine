@@ -1,17 +1,25 @@
 #include "Sim/Core/Log.h"
 #include "Sim/Core/Math.h"
+#include "Sim/Editor/Command.h"
+#include "Sim/Editor/EditorContext.h"
+#include "Sim/Editor/Gizmo.h"
 #include "Sim/Editor/Icons.h"
 #include "Sim/Editor/Panel.h"
 #include "Sim/Editor/PanelIds.h"
 #include "Sim/Editor/PanelRegistry.h"
+#include "Sim/Editor/SceneCommands.h"
+#include "Sim/Editor/SceneView.h"
+#include "Sim/Editor/Selection.h"
 #include "Sim/Editor/Widgets.h"
 #include "Sim/Render/IViewportRenderer.h"
+#include "Sim/Scene/Components.h"
 
 #include <imgui.h>
 
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
+#include <vector>
 
 namespace sim::editor {
 namespace {
@@ -20,12 +28,23 @@ constexpr float kLookSensitivity = 0.005f;
 constexpr float kFlySpeedMin = 0.05f;
 constexpr float kFlySpeedMax = 500.0f;
 
+/// Jarak seret (piksel) yang membedakan klik dari seleksi kotak. Di bawah ini
+/// tetap dianggap klik, supaya tangan yang sedikit bergeser saat mengklik tidak
+/// tiba-tiba membuka kotak seleksi.
+constexpr float kDragThreshold = 4.0f;
+
+/// Besar glyph ikon entity terhadap ukuran font teks.
+constexpr float kIconScale = 1.6f;
+
+/// Warna entity terpilih, sama dengan yang dipakai renderer untuk wireframe.
+constexpr Vec4 kSelectionColor{1.0f, 0.62f, 0.20f, 1.0f};
+
 /// Kamera editor bergaya orbit + fly.
 ///
 /// Orbit disimpan sebagai yaw/pitch/jarak terhadap titik fokus, bukan sebagai
 /// matriks. Alasannya: pengguna berpikir dalam "berputar mengelilingi objek"
 /// dan "mendekat", dan menyimpan keadaan dalam bentuk itu membuat pembatasan
-/// pitch, snapping sudut, dan perintah "focus ke seleksi" (E4) jadi sepele.
+/// pitch, snapping sudut, dan perintah "focus ke seleksi" jadi sepele.
 ///
 /// Gerakan terbang menggeser `focus`, bukan posisi kamera secara langsung.
 /// Karena posisi kamera diturunkan dari focus, keduanya bergerak bersama —
@@ -105,7 +124,7 @@ public:
 
     void OnDraw(EditorContext& context) override {
         render::IViewportRenderer* renderer = context.viewportRenderer;
-        if (renderer == nullptr) {
+        if (renderer == nullptr || context.world == nullptr || context.selection == nullptr) {
             ImGui::TextDisabled("No renderer.");
             return;
         }
@@ -119,7 +138,8 @@ public:
         const auto height = static_cast<uint32_t>(size.y);
         renderer->Resize(width, height);
 
-        HandleInput();
+        sceneView_.Build(*context.world, *context.selection);
+        HandleCameraInput();
 
         render::ViewportDesc desc;
         desc.width = width;
@@ -130,8 +150,7 @@ public:
         desc.camera.orthographic = orthographic_;
         desc.camera.orthoHeight = camera_.distance;
 
-        const render::ViewportScene scene;
-        renderer->Render(desc, scene);
+        renderer->Render(desc, sceneView_.Scene());
 
         const ImVec2 imagePos = ImGui::GetCursorScreenPos();
         const render::TextureHandle texture = renderer->ColorTarget();
@@ -146,11 +165,48 @@ public:
             ImGui::Dummy(size);
         }
 
-        DrawOverlays(imagePos, size, *renderer);
+        // Urutan pengajuan item di bawah ini menentukan siapa yang berhak atas
+        // sebuah klik, dan itu bukan detail yang bisa ditukar-tukar.
+        //
+        // Tombol overlay diajukan lebih dulu di antara item interaktif. ImGui
+        // memberikan klik kepada item terhovering yang diajukan paling awal,
+        // jadi tombol Rotate menang atas permukaan viewport yang menaunginya.
+        // Urutan sebaliknya membuat dua hal salah sekaligus: tombolnya tidak
+        // bereaksi, dan kliknya ikut terhitung sebagai klik pada scene sehingga
+        // seleksi terhapus.
+        DrawOverlays(context, imagePos, size, *renderer);
+        // Sejauh ini baru tombol overlay yang diajukan, jadi nilai ini benar-
+        // benar berarti "kursor sedang di atas tombol overlay".
+        const bool overlayHovered = ImGui::IsAnyItemHovered();
+
+        // Permukaan viewport sebagai item sungguhan, bukan status mouse mentah:
+        // dengan begitu ImGui sendiri yang memutuskan klik ini milik siapa.
+        ImGui::SetCursorScreenPos(imagePos);
+        ImGui::InvisibleButton("##viewport_surface", size, ImGuiButtonFlags_MouseButtonLeft);
+        const bool surfacePressed = ImGui::IsItemActivated();
+        const bool surfaceHeld = ImGui::IsItemActive();
+
+        const float aspect = size.x / size.y;
+        const Mat4 view = desc.camera.View();
+        const Mat4 projection = desc.camera.Projection(aspect);
+
+        // Ikon digambar sebelum gizmo supaya gizmo selalu di atasnya.
+        DrawEntityIcons(projection * view, imagePos, size);
+
+        // Gizmo tetap tergambar walau kursor sedang di atas tombol overlay, tapi
+        // tidak boleh ikut merespons kliknya: ia membaca mouse langsung dan tidak
+        // tahu apa pun tentang item ImGui.
+        const bool gizmoBusy =
+            DrawGizmoAndApply(context, imagePos, size, view, projection, !overlayHovered);
+        HandleSelectionInput(context, imagePos, size, view, projection, gizmoBusy, surfacePressed,
+                             surfaceHeld);
+        HandleShortcuts(context);
     }
 
 private:
-    void HandleInput() {
+    // --- kamera -------------------------------------------------------------
+
+    void HandleCameraInput() {
         ImGuiIO& io = ImGui::GetIO();
         const bool hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
 
@@ -197,10 +253,6 @@ private:
             const ImVec2 delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Middle);
             ImGui::ResetMouseDragDelta(ImGuiMouseButton_Middle);
             camera_.Pan(delta.x, delta.y);
-        }
-        if (ImGui::IsKeyPressed(ImGuiKey_F, false)) {
-            camera_.focus = Vec3(0.0f);
-            camera_.distance = 12.0f;
         }
     }
 
@@ -255,50 +307,381 @@ private:
         camera_.Fly(move, speed, deltaSeconds);
     }
 
-    void DrawOverlays(const ImVec2& imagePos, const ImVec2& size,
+    // --- ikon entity --------------------------------------------------------
+
+    /// Menggambar penanda lampu, kamera, dan node kosong sebagai glyph.
+    ///
+    /// Memakai font ikon yang sudah dimuat editor, bukan tekstur billboard.
+    /// Hasilnya tajam di skala DPI mana pun, tidak menambah satu pun aset, dan
+    /// ikonnya sama persis dengan yang dipakai Outliner untuk entity yang sama.
+    void DrawEntityIcons(const Mat4& viewProjection, const ImVec2& imagePos, const ImVec2& size) {
+        const auto& icons = sceneView_.Icons();
+        if (icons.empty()) {
+            return;
+        }
+
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        ImFont* font = ImGui::GetFont();
+        const float glyphSize = ImGui::GetFontSize() * kIconScale;
+
+        // Dipotong ke area gambar: tanpa ini ikon di luar tepi viewport akan
+        // tergambar menumpuk panel tetangga.
+        draw->PushClipRect(imagePos, ImVec2(imagePos.x + size.x, imagePos.y + size.y), true);
+        for (const SceneView::EntityIcon& icon : icons) {
+            Vec2 screen;
+            if (!WorldToScreen(viewProjection, Vec2(imagePos.x, imagePos.y), Vec2(size.x, size.y),
+                               icon.position, screen)) {
+                continue;
+            }
+            const Vec4 color = icon.selected ? kSelectionColor : icon.color;
+            const ImU32 packed = ImGui::ColorConvertFloat4ToU32(
+                ImVec4(color.r, color.g, color.b, color.a));
+            const ImVec2 extent = font->CalcTextSizeA(glyphSize, FLT_MAX, 0.0f, icon.glyph);
+            const ImVec2 at(screen.x - extent.x * 0.5f, screen.y - extent.y * 0.5f);
+
+            // Bayangan tipis di belakang glyph. Ikon melayang di atas grid dan
+            // wireframe yang warnanya berdekatan; tanpa ini penanda gelap
+            // hilang di latar gelap.
+            draw->AddText(font, glyphSize, ImVec2(at.x + 1.0f, at.y + 1.0f),
+                          IM_COL32(0, 0, 0, 140), icon.glyph);
+            draw->AddText(font, glyphSize, at, packed, icon.glyph);
+        }
+        draw->PopClipRect();
+    }
+
+    // --- gizmo --------------------------------------------------------------
+
+    /// Entity terpilih yang tidak punya leluhur yang juga terpilih.
+    ///
+    /// Hanya entity ini yang digerakkan gizmo. Keturunannya ikut bergerak
+    /// dengan sendirinya lewat hierarki; menggerakkannya sekali lagi secara
+    /// langsung akan menggandakan perpindahannya.
+    std::vector<scene::Entity> TopLevelSelection(const EditorContext& context) const {
+        std::vector<scene::Entity> entities;
+        for (const uint64_t id : context.selection->Items()) {
+            const scene::Entity entity = ToEntity(id);
+            if (context.world->IsAlive(entity)) {
+                entities.push_back(entity);
+            }
+        }
+        std::vector<scene::Entity> result;
+        for (const scene::Entity entity : entities) {
+            const bool hasSelectedAncestor =
+                std::any_of(entities.begin(), entities.end(), [&](scene::Entity other) {
+                    return other != entity && context.world->IsDescendantOf(entity, other);
+                });
+            if (!hasSelectedAncestor) {
+                result.push_back(entity);
+            }
+        }
+        return result;
+    }
+
+    /// Menggambar gizmo dan menerapkan hasilnya. Mengembalikan true bila gizmo
+    /// sedang dipakai atau ditunjuk, sehingga klik tidak boleh dianggap seleksi.
+    bool DrawGizmoAndApply(EditorContext& context, const ImVec2& imagePos, const ImVec2& size,
+                           const Mat4& view, const Mat4& projection, bool interactive) {
+        if (operation_ == GizmoOperation::None) {
+            return false;
+        }
+        const scene::Entity primary = ToEntity(context.selection->Primary());
+        if (!context.world->IsAlive(primary)) {
+            return false;
+        }
+
+        const Mat4 pivot = context.world->WorldMatrix(primary);
+        const GizmoResult result =
+            DrawGizmo(Vec2(imagePos.x, imagePos.y), Vec2(size.x, size.y), view, projection,
+                      operation_, space_, snap_, pivot, interactive);
+
+        if (result.active && !dragging_) {
+            BeginDrag(context, pivot);
+        }
+        if (result.changed && dragging_) {
+            ApplyDrag(context, result.transform);
+        }
+        if (!result.active && dragging_) {
+            EndDrag(context);
+        }
+        return result.active || result.hovered;
+    }
+
+    void BeginDrag(const EditorContext& context, const Mat4& pivot) {
+        dragging_ = true;
+        pivotAtDragStart_ = pivot;
+        dragItems_.clear();
+
+        for (const scene::Entity entity : TopLevelSelection(context)) {
+            const auto* transform = context.world->TryGet<scene::TransformComponent>(entity);
+            if (transform == nullptr) {
+                continue;
+            }
+            DragItem item;
+            item.guid = context.world->GuidOf(entity);
+            item.entity = entity;
+            item.before = *transform;
+            item.worldAtDragStart = context.world->WorldMatrix(entity);
+            dragItems_.push_back(item);
+        }
+    }
+
+    void ApplyDrag(EditorContext& context, const Mat4& newPivot) {
+        if (dragItems_.empty()) {
+            return;
+        }
+        // Selisih dihitung terhadap keadaan awal seretan, bukan terhadap frame
+        // sebelumnya. Menumpuk selisih per frame akan menumpuk galat pembulatan
+        // juga, dan hasil snapping tidak akan pernah persis kelipatan.
+        const Mat4 delta = newPivot * glm::inverse(pivotAtDragStart_);
+
+        std::vector<SetTransformsCommand::Item> items;
+        items.reserve(dragItems_.size());
+
+        for (const DragItem& drag : dragItems_) {
+            if (!context.world->IsAlive(drag.entity)) {
+                continue;
+            }
+            const Mat4 newWorld = delta * drag.worldAtDragStart;
+
+            // Hasil gizmo selalu dalam ruang dunia, sedangkan yang disimpan
+            // komponen adalah transform lokal. Untuk entity yang punya induk,
+            // keduanya berbeda — dan melewatkan langkah ini membuat anak
+            // melompat begitu induknya tidak di titik nol.
+            const scene::Entity parent = context.world->ParentOf(drag.entity);
+            const Mat4 local = context.world->IsAlive(parent)
+                                   ? glm::inverse(context.world->WorldMatrix(parent)) * newWorld
+                                   : newWorld;
+
+            SetTransformsCommand::Item item;
+            item.guid = drag.guid;
+            item.before = drag.before;
+            item.after = drag.before;
+            DecomposeTransform(local, item.after.position, item.after.rotation, item.after.scale);
+            items.push_back(item);
+        }
+        if (items.empty()) {
+            return;
+        }
+
+        context.history->Execute(std::make_unique<SetTransformsCommand>(
+            context.world, std::move(items), OperationLabel()));
+    }
+
+    void EndDrag(EditorContext& context) {
+        dragging_ = false;
+        dragItems_.clear();
+        // Menutup grup merge di sini adalah yang membuat satu seretan menjadi
+        // tepat satu entri undo: selama tombol ditahan setiap frame digabung ke
+        // entri yang sama, dan begitu dilepas entri berikutnya berdiri sendiri.
+        context.history->CloseMergeGroup();
+    }
+
+    std::string OperationLabel() const {
+        switch (operation_) {
+            case GizmoOperation::Translate:
+                return "Move";
+            case GizmoOperation::Rotate:
+                return "Rotate";
+            case GizmoOperation::Scale:
+                return "Scale";
+            case GizmoOperation::None:
+                break;
+        }
+        return "Transform";
+    }
+
+    // --- seleksi ------------------------------------------------------------
+
+    void HandleSelectionInput(EditorContext& context, const ImVec2& imagePos, const ImVec2& size,
+                              const Mat4& view, const Mat4& projection, bool gizmoBusy,
+                              bool surfacePressed, bool surfaceHeld) {
+        if (flying_ || ImGui::GetIO().KeyAlt) {
+            return;  // tombol kiri sedang milik kamera
+        }
+
+        if (surfacePressed && !gizmoBusy) {
+            boxSelecting_ = true;
+            boxStart_ = ImGui::GetMousePos();
+        }
+        if (!boxSelecting_) {
+            return;
+        }
+        if (!surfaceHeld) {
+            FinishSelection(context, imagePos, size, view, projection);
+            boxSelecting_ = false;
+            return;
+        }
+
+        const ImVec2 current = ImGui::GetMousePos();
+        const float dragged = std::max(std::abs(current.x - boxStart_.x),
+                                       std::abs(current.y - boxStart_.y));
+        if (dragged > kDragThreshold) {
+            // Kotak digambar di foreground drawlist supaya tetap terlihat di
+            // atas gambar viewport tanpa mengganggu urutan widget lain.
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            draw->AddRectFilled(boxStart_, current, IM_COL32(255, 158, 51, 40));
+            draw->AddRect(boxStart_, current, IM_COL32(255, 158, 51, 220));
+        }
+    }
+
+    void FinishSelection(EditorContext& context, const ImVec2& imagePos, const ImVec2& size,
+                         const Mat4& view, const Mat4& projection) {
+        ImGuiIO& io = ImGui::GetIO();
+        const ImVec2 release = ImGui::GetMousePos();
+        const float dragged =
+            std::max(std::abs(release.x - boxStart_.x), std::abs(release.y - boxStart_.y));
+
+        const bool additive = io.KeyCtrl || io.KeyShift;
+        if (!additive) {
+            context.selection->Clear();
+        }
+
+        if (dragged <= kDragThreshold) {
+            // Ikon diuji lebih dulu dan menang atas geometri di belakangnya.
+            // Ikon berukuran tetap dan kecil; kalau kalah dengan mesh besar
+            // yang kebetulan menaunginya, lampu di dalam ruangan jadi mustahil
+            // dipilih lewat viewport.
+            const float radius = ImGui::GetFontSize() * kIconScale * 0.5f;
+            scene::Entity hit =
+                sceneView_.PickIcon(projection * view, Vec2(imagePos.x, imagePos.y),
+                                    Vec2(size.x, size.y), Vec2(release.x, release.y), radius);
+            if (!scene::IsValid(hit)) {
+                const Ray ray =
+                    ScreenPointToRay(view, projection, Vec2(size.x, size.y),
+                                     Vec2(release.x - imagePos.x, release.y - imagePos.y));
+                hit = sceneView_.Raycast(ray);
+            }
+            if (scene::IsValid(hit)) {
+                const uint64_t id = ToSelectionId(hit);
+                if (io.KeyCtrl && context.selection->Contains(id)) {
+                    context.selection->Remove(id);
+                } else {
+                    context.selection->Add(id);
+                }
+            }
+            return;
+        }
+
+        const ScreenRect rect =
+            ScreenRect::FromCorners(Vec2(boxStart_.x, boxStart_.y), Vec2(release.x, release.y));
+        const std::vector<scene::Entity> hits = sceneView_.RectSelect(
+            projection * view, Vec2(imagePos.x, imagePos.y), Vec2(size.x, size.y), rect);
+        for (const scene::Entity entity : hits) {
+            context.selection->Add(ToSelectionId(entity));
+        }
+    }
+
+    // --- pintasan -----------------------------------------------------------
+
+    void HandleShortcuts(EditorContext& context) {
+        if (flying_ || ImGui::GetIO().WantTextInput) {
+            return;
+        }
+        if (!ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && !IsFocused()) {
+            return;
+        }
+
+        // Q/W/E/R mengikuti kebiasaan editor lain. Tidak bentrok dengan WASD
+        // terbang karena terbang hanya aktif selama tombol kanan ditahan, dan
+        // jalur ini sudah keluar lebih awal saat itu terjadi.
+        if (ImGui::IsKeyPressed(ImGuiKey_Q, false)) {
+            operation_ = GizmoOperation::None;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_W, false)) {
+            operation_ = GizmoOperation::Translate;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_E, false)) {
+            operation_ = GizmoOperation::Rotate;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_R, false)) {
+            operation_ = GizmoOperation::Scale;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_X, false)) {
+            space_ = space_ == GizmoSpace::World ? GizmoSpace::Local : GizmoSpace::World;
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_F, false)) {
+            FocusSelection(context);
+        }
+    }
+
+    void FocusSelection(const EditorContext& context) {
+        std::vector<scene::Entity> entities;
+        for (const uint64_t id : context.selection->Items()) {
+            const scene::Entity entity = ToEntity(id);
+            if (context.world->IsAlive(entity)) {
+                entities.push_back(entity);
+            }
+        }
+
+        Vec3 boundsMin;
+        Vec3 boundsMax;
+        if (entities.empty() || !sceneView_.BoundsOf(entities, boundsMin, boundsMax)) {
+            camera_.focus = Vec3(0.0f);
+            camera_.distance = 12.0f;
+            return;
+        }
+
+        camera_.focus = (boundsMin + boundsMax) * 0.5f;
+        // Jarak dipilih agar seluruh kotak muat di layar dengan sedikit ruang
+        // sisa. Radius bola pembungkus dipakai, bukan sisi terpanjang, supaya
+        // objek pipih tetap muat dari arah pandang mana pun.
+        const float radius = glm::length(boundsMax - boundsMin) * 0.5f;
+        camera_.distance = std::max(radius * 2.5f, 0.5f);
+    }
+
+    // --- overlay ------------------------------------------------------------
+
+    void DrawOverlays(const EditorContext& context, const ImVec2& imagePos, const ImVec2& size,
                       const render::IViewportRenderer& renderer) {
         const float pad = 10.0f;
-        const float button = ImGui::GetFrameHeight();
+        const float button = ImGui::GetFrameHeight() * widgets::kViewportButtonScale;
 
         // (D1) alat transform di kiri-atas.
         ImGui::SetCursorScreenPos(ImVec2(imagePos.x + pad, imagePos.y + pad));
         ImGui::BeginGroup();
-        ImGui::BeginDisabled();
-        widgets::IconButton(icons::kSelect, "Select");
-        widgets::IconButton(icons::kMove, "Move");
-        widgets::IconButton(icons::kRotate, "Rotate");
-        widgets::IconButton(icons::kScale, "Scale");
-        ImGui::EndDisabled();
+        OperationButton(icons::kSelect, "Select (Q)", GizmoOperation::None);
+        OperationButton(icons::kMove, "Move (W)", GizmoOperation::Translate);
+        OperationButton(icons::kRotate, "Rotate (E)", GizmoOperation::Rotate);
+        OperationButton(icons::kScale, "Scale (R)", GizmoOperation::Scale);
+
+        ImGui::Spacing();
+        const bool local = space_ == GizmoSpace::Local;
+        if (widgets::ViewportButton(local ? icons::kSpaceLocal : icons::kSpaceWorld,
+                                    local ? "Local space (X)" : "World space (X)")) {
+            space_ = local ? GizmoSpace::World : GizmoSpace::Local;
+        }
+        DrawSnapControl();
         ImGui::EndGroup();
 
         // (D2) mode tampilan di kanan-atas.
         ImGui::SetCursorScreenPos(ImVec2(imagePos.x + size.x - button - pad, imagePos.y + pad));
         ImGui::BeginGroup();
-        if (widgets::IconButton(orthographic_ ? icons::kOrthographic : icons::kPerspective,
-                                orthographic_ ? "Orthographic" : "Perspective")) {
+        if (widgets::ViewportButton(orthographic_ ? icons::kOrthographic : icons::kPerspective,
+                                    orthographic_ ? "Orthographic" : "Perspective")) {
             orthographic_ = !orthographic_;
         }
         const bool wireframe = drawMode_ == render::DrawMode::Wireframe;
-        if (widgets::IconButton(wireframe ? icons::kShadingWireframe : icons::kShadingLit,
-                                wireframe ? "Wireframe" : "Lit")) {
+        if (widgets::ViewportButton(wireframe ? icons::kShadingWireframe : icons::kShadingLit,
+                                    wireframe ? "Wireframe" : "Lit")) {
             drawMode_ = wireframe ? render::DrawMode::Lit : render::DrawMode::Wireframe;
         }
-        if (widgets::IconButton(icons::kGrid, showGrid_ ? "Hide grid" : "Show grid")) {
+        if (widgets::ViewportButton(icons::kGrid, showGrid_ ? "Hide grid" : "Show grid",
+                                    showGrid_)) {
             showGrid_ = !showGrid_;
         }
         ImGui::EndGroup();
 
         // Label renderer di kiri-bawah. Selama masih stub, ini penting: tanpa
         // penanda, mudah mengira grid polos berarti rendering rusak.
-        char info[192];
+        char info[224];
         if (flying_) {
             std::snprintf(info, sizeof(info), "%s  |  %ux%u  |  fly %.1f m/s (WASD, Q/E, Shift)",
                           renderer.Name(), renderer.Width(), renderer.Height(),
                           static_cast<double>(flySpeed_));
         } else {
-            std::snprintf(info, sizeof(info), "%s  |  %ux%u  |  dist %.1f m", renderer.Name(),
-                          renderer.Width(), renderer.Height(),
-                          static_cast<double>(camera_.distance));
+            std::snprintf(info, sizeof(info), "%s  |  %ux%u  |  %zu selected  |  dist %.1f m",
+                          renderer.Name(), renderer.Width(), renderer.Height(),
+                          context.selection->Count(), static_cast<double>(camera_.distance));
         }
         const ImVec2 infoSize = ImGui::CalcTextSize(info);
         ImGui::SetCursorScreenPos(
@@ -306,10 +689,58 @@ private:
         ImGui::TextDisabled("%s", info);
     }
 
+    void OperationButton(const char* icon, const char* tooltip, GizmoOperation operation) {
+        if (widgets::ViewportButton(icon, tooltip, operation_ == operation)) {
+            operation_ = operation;
+        }
+    }
+
+    void DrawSnapControl() {
+        // Penandaan aktif diserahkan ke widget, bukan diurus di sini dengan
+        // push/pop sendiri. Versi sebelumnya membaca ulang snap_.enabled setelah
+        // tombolnya membalik nilai itu, sehingga push dan pop tidak berpasangan
+        // dan ImGui menggugurkan proses. Menyerahkannya ke widget membuat
+        // kesalahan seperti itu tidak mungkin terjadi lagi.
+        if (widgets::ViewportButton(icons::kSnap, snap_.enabled ? "Snapping on" : "Snapping off",
+                                    snap_.enabled)) {
+            snap_.enabled = !snap_.enabled;
+        }
+        // Klik kanan pada tombol yang sama membuka nilainya. Menaruhnya di popup
+        // terpisah menjaga bilah alat tetap sempit tanpa menyembunyikan setelan.
+        if (ImGui::BeginPopupContextItem("##snap")) {
+            ImGui::TextDisabled("Snap increments");
+            ImGui::Separator();
+            ImGui::SetNextItemWidth(120.0f);
+            ImGui::DragFloat("Move (m)", &snap_.translate, 0.05f, 0.001f, 100.0f, "%.3f");
+            ImGui::SetNextItemWidth(120.0f);
+            ImGui::DragFloat("Rotate (deg)", &snap_.rotateDegrees, 1.0f, 0.1f, 180.0f, "%.1f");
+            ImGui::SetNextItemWidth(120.0f);
+            ImGui::DragFloat("Scale", &snap_.scale, 0.01f, 0.001f, 10.0f, "%.3f");
+            ImGui::EndPopup();
+        }
+    }
+
+    /// Keadaan satu entity saat seretan gizmo dimulai.
+    struct DragItem {
+        Uuid guid;
+        scene::Entity entity = scene::kNullEntity;
+        scene::TransformComponent before;
+        Mat4 worldAtDragStart{1.0f};
+    };
+
     OrbitCamera camera_;
+    SceneView sceneView_;
     render::DrawMode drawMode_ = render::DrawMode::Lit;
+    GizmoOperation operation_ = GizmoOperation::Translate;
+    GizmoSpace space_ = GizmoSpace::World;
+    GizmoSnap snap_;
+    std::vector<DragItem> dragItems_;
+    Mat4 pivotAtDragStart_{1.0f};
+    ImVec2 boxStart_{0.0f, 0.0f};
     float flySpeed_ = 6.0f;
     bool flying_ = false;
+    bool dragging_ = false;
+    bool boxSelecting_ = false;
     bool orthographic_ = false;
     bool showGrid_ = true;
 };

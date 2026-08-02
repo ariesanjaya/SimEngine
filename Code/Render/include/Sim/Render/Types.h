@@ -3,6 +3,7 @@
 #include "Sim/Core/Math.h"
 
 #include <cstdint>
+#include <span>
 
 namespace sim::render {
 
@@ -61,15 +62,40 @@ struct ViewportDesc {
     float gridFadeDistance = 120.0f;
 };
 
+/// Satu objek yang bisa digambar, sudah dalam ruang dunia.
+///
+/// `boundsMin/boundsMax` adalah AABB dalam ruang lokal objek. Sampai mesh
+/// sungguhan bisa dimuat (E5/E8) nilainya kubus satuan, dan StubRenderer
+/// menggambar wireframe kotak itu. Renderer E8 akan memakai field yang sama
+/// untuk frustum culling dan mengabaikan bagian wireframe-nya.
+struct MeshInstance {
+    Mat4 transform{1.0f};
+    Vec3 boundsMin{-0.5f, -0.5f, -0.5f};
+    Vec3 boundsMax{0.5f, 0.5f, 0.5f};
+    Vec4 color{0.72f, 0.74f, 0.78f, 1.0f};
+    bool selected = false;
+};
+
+/// Garis dalam ruang dunia. Dipakai grid bantu, sumbu, dan penanda hubungan
+/// parent-child di outliner.
+struct LineSegment {
+    Vec3 a{0.0f};
+    Vec3 b{0.0f};
+    Vec4 color{1.0f};
+};
+
 /// Isi yang harus digambar frame ini.
 ///
-/// Kosong di E1 — bentuknya sudah ditetapkan sekarang supaya panel yang ditulis
-/// di E2/E3 tidak perlu berubah ketika mesh dan gizmo mulai ada di E4.
-/// Diisi ulang tiap frame; tidak menyimpan pointer ke objek scene.
+/// Diisi ulang tiap frame dan hanya menunjuk ke penyimpanan milik pemanggil —
+/// renderer tidak boleh menyimpan span ini melewati Render().
+///
+/// Tidak ada daftar ikon di sini, dan itu disengaja. Penanda lampu, kamera, dan
+/// node kosong adalah alat bantu editor, bukan isi scene: menaruhnya di sini
+/// akan memaksa renderer mengenali tipe komponen untuk memilih gambar yang
+/// tepat. Panel Viewport menggambarnya sendiri sebagai overlay 2D.
 struct ViewportScene {
-    // E4: std::span<const MeshInstance> meshes;
-    // E4: std::span<const LineSegment>  lines;
-    // E4: std::span<const BillboardIcon> icons;
+    std::span<const MeshInstance> meshes;
+    std::span<const LineSegment> lines;
 };
 
 }  // namespace sim::render

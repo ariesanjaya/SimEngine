@@ -434,6 +434,10 @@ VkCommandBuffer Device::BeginTransient() const {
             SIM_VK_CHECK(vkResetFences(device_, 1, &candidate.fence));
             SIM_VK_CHECK(vkResetCommandPool(device_, candidate.pool, 0));
             candidate.pending = false;
+            // Nomor submit lama dilepas di sini. Itulah yang membuat
+            // WaitTransient() aman: nomor yang tidak lagi ditemukan berarti
+            // pekerjaannya sudah selesai, bukan berarti belum pernah ada.
+            candidate.submitId = 0;
             slot = &candidate;
             break;
         }
@@ -456,7 +460,7 @@ VkCommandBuffer Device::BeginTransient() const {
     return slot->commandBuffer;
 }
 
-void Device::SubmitTransient(VkCommandBuffer commandBuffer) const {
+uint64_t Device::SubmitTransient(VkCommandBuffer commandBuffer) const {
     TransientSubmit* slot = nullptr;
     for (TransientSubmit& candidate : transients_) {
         if (candidate.commandBuffer == commandBuffer) {
@@ -474,6 +478,25 @@ void Device::SubmitTransient(VkCommandBuffer commandBuffer) const {
     submitInfo.pCommandBuffers = &commandBuffer;
     SIM_VK_CHECK(vkQueueSubmit(graphicsQueue_, 1, &submitInfo, slot->fence));
     slot->pending = true;
+    slot->submitId = nextSubmitId_++;
+    return slot->submitId;
+}
+
+void Device::WaitTransient(uint64_t submitId) const {
+    if (submitId == 0) {
+        return;
+    }
+    for (const TransientSubmit& candidate : transients_) {
+        if (candidate.submitId != submitId) {
+            continue;
+        }
+        if (candidate.pending) {
+            SIM_VK_CHECK(vkWaitForFences(device_, 1, &candidate.fence, VK_TRUE, UINT64_MAX));
+        }
+        return;
+    }
+    // Tidak ditemukan: slotnya sudah dipakai ulang, dan itu hanya terjadi
+    // setelah fence-nya di-signal. Pekerjaannya sudah selesai.
 }
 
 void Device::WaitIdle() const {

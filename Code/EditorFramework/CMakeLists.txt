@@ -5,7 +5,10 @@ sim_add_library(EditorFramework
         src/DockLayout.cpp
         src/EditorApp.cpp
         src/EditorShell.cpp
+        src/Gizmo.cpp
         src/Notifications.cpp
+        src/SceneCommands.cpp
+        src/SceneView.cpp
         src/PanelManager.cpp
         src/PropertyGrid.cpp
         src/PanelRegistry.cpp
@@ -20,4 +23,8 @@ sim_add_library(EditorFramework
         ImGui::ImGui
         IconFonts::Headers
     PRIVATE_DEPS
+        # Hanya Gizmo.cpp yang memakainya, dan header Gizmo.h sengaja tidak
+        # membocorkan satu pun tipe ImGuizmo — jadi panel tetap tidak tahu apa
+        # yang dipakai di baliknya.
+        ImGuizmo::ImGuizmo
         nlohmann_json::nlohmann_json)

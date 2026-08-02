@@ -143,6 +143,33 @@ target_compile_definitions(imgui PUBLIC IMGUI_DEFINE_MATH_OPERATORS)
 set_target_properties(imgui PROPERTIES FOLDER "ThirdParty")
 add_library(ImGui::ImGui ALIAS imgui)
 
+# ImGuizmo — gizmo translate/rotate/scale di dalam viewport.
+#
+# Hanya bergantung pada inti ImGui (menggambar lewat ImDrawList), jadi ikut
+# target `imgui` dan tidak melanggar aturan modul: Editor tetap tidak melihat
+# Vulkan. Dibungkus di Sim::EditorFramework (Gizmo.h) supaya panel tidak
+# memanggil ImGuizmo langsung — kalau suatu saat harus diganti, yang berubah
+# hanya satu berkas.
+FetchContent_Declare(imguizmo
+    GIT_REPOSITORY https://github.com/CedricGuillemet/ImGuizmo.git
+    # Dipatok ke commit, bukan tag: rilis bertag terakhir ImGuizmo (1.83) jauh
+    # lebih tua daripada ImGui 1.92 yang kita pakai. Commit ini sudah diuji
+    # kompilasi bersih terhadapnya.
+    GIT_TAG        5ab7676402ace03cdf930b2d972f59c7d03c6fa8
+    GIT_SHALLOW    FALSE
+    # Trik yang sama seperti VMA: SOURCE_SUBDIR diarahkan ke folder tanpa
+    # CMakeLists supaya FetchContent hanya mengunduh. CMakeLists bawaan
+    # ImGuizmo ikut membangun contoh berbasis GLFW dan mendefinisikan target
+    # bernama `imguizmo` juga, yang akan bentrok dengan target kita.
+    SOURCE_SUBDIR  src)
+FetchContent_MakeAvailable(imguizmo)
+
+add_library(imguizmo STATIC ${imguizmo_SOURCE_DIR}/src/ImGuizmo.cpp)
+target_include_directories(imguizmo SYSTEM PUBLIC ${imguizmo_SOURCE_DIR}/src)
+target_link_libraries(imguizmo PUBLIC imgui)
+set_target_properties(imguizmo PROPERTIES FOLDER "ThirdParty")
+add_library(ImGuizmo::ImGuizmo ALIAS imguizmo)
+
 add_library(imgui_backend STATIC
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp)

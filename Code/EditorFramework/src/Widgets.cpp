@@ -103,6 +103,30 @@ bool IconButton(const char* icon, const char* tooltip, bool active) {
     return pressed;
 }
 
+bool ViewportButton(const char* icon, const char* tooltip, bool active) {
+    // Lebih besar daripada IconButton biasa, dan itu disengaja. Tombol ini
+    // melayang di atas gambar 3D yang ramai, bukan di bilah alat berlatar rata:
+    // pada ukuran bilah alat, ikonnya tenggelam di antara garis grid dan
+    // wireframe. Glyph-nya ikut diperbesar, bukan hanya kotaknya — memperbesar
+    // kotak saja hanya menambah ruang kosong di sekeliling ikon yang tetap kecil.
+    const float size = ImGui::GetFrameHeight() * kViewportButtonScale;
+    ImGui::PushFont(nullptr, ImGui::GetFontSize() * kViewportIconScale);
+    ImGui::PushID(tooltip);
+    if (active) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+    }
+    const bool pressed = ImGui::Button(icon, ImVec2(size, size));
+    if (active) {
+        ImGui::PopStyleColor();
+    }
+    ImGui::PopID();
+    ImGui::PopFont();
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
+        ImGui::SetTooltip("%s", tooltip);
+    }
+    return pressed;
+}
+
 bool ToolbarButton(const char* icon, const char* tooltip, bool active) {
     const bool pressed = IconButton(icon, tooltip, active);
     ImGui::SameLine();

@@ -89,54 +89,24 @@ Entity InstantiatePrefab(World& world, const std::filesystem::path& path, Entity
     std::ostringstream buffer;
     buffer << stream.rdbuf();
 
-    // GUID di berkas prefab ditukar dengan yang baru sebelum dibangun, supaya
-    // dua salinan prefab yang sama tidak saling bertabrakan. Penukarannya
-    // konsisten dalam satu berkas, jadi hubungan induk-anak tetap utuh.
-    nlohmann::json document;
-    try {
-        document = nlohmann::json::parse(buffer.str());
-    } catch (const nlohmann::json::exception& exception) {
-        SIM_WARN("Scene", "Prefab {} is not valid JSON: {}", path.string(), exception.what());
+    // GUID ditukar dengan yang baru sebelum dibangun, supaya dua salinan prefab
+    // yang sama tidak saling bertabrakan. Penukarannya dipakai bersama dengan
+    // duplikasi entity di editor — satu implementasi, satu tempat yang bisa salah.
+    std::string rootGuid;
+    const std::string remapped = RemapGuids(buffer.str(), &rootGuid);
+    if (remapped.empty()) {
+        SIM_WARN("Scene", "Prefab {} is not a valid subtree", path.string());
         return kNullEntity;
-    }
-    if (!document.contains("entities") || !document["entities"].is_array()) {
-        return kNullEntity;
-    }
-
-    std::unordered_map<std::string, std::string> remap;
-    for (auto& record : document["entities"]) {
-        const std::string oldGuid = record.value("guid", std::string{});
-        if (oldGuid.empty()) {
-            continue;
-        }
-        const std::string newGuid = Uuid::Generate().ToString();
-        remap.emplace(oldGuid, newGuid);
-        record["guid"] = newGuid;
-    }
-    for (auto& record : document["entities"]) {
-        const auto it = record.find("parent");
-        if (it == record.end() || !it->is_string()) {
-            continue;
-        }
-        const auto mapped = remap.find(it->get<std::string>());
-        if (mapped != remap.end()) {
-            *it = mapped->second;
-        } else {
-            // Induk di luar prefab: entity ini adalah akarnya, dan induknya
-            // ditentukan pemanggil.
-            record.erase("parent");
-        }
     }
 
     const std::size_t before = world.Count();
-    if (!RestoreSubtree(world, document.dump(), world.GuidOf(parent))) {
+    if (!RestoreSubtree(world, remapped, world.GuidOf(parent))) {
         return kNullEntity;
     }
     if (world.Count() == before) {
         return kNullEntity;
     }
 
-    const std::string rootGuid = document["entities"].front().value("guid", std::string{});
     return world.FindByGuid(Uuid::Parse(rootGuid));
 }
 

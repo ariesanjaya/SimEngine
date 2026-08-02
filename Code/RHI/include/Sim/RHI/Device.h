@@ -59,7 +59,24 @@ public:
     /// ketergantungan memorinya diurus barrier/subpass dependency di pass yang
     /// bersangkutan — jadi tidak ada yang hilang dengan menghapus penungguan.
     VkCommandBuffer BeginTransient() const;
-    void SubmitTransient(VkCommandBuffer commandBuffer) const;
+
+    /// Mengembalikan nomor submit, bukan fence.
+    ///
+    /// Fence-nya milik Device dan didaur ulang: begitu sebuah slot selesai, ia
+    /// di-reset dan dipakai submit berikutnya. Pemanggil yang menyimpan fence
+    /// itu untuk ditunggu belakangan akan menunggu submit yang sama sekali
+    /// berbeda — dan bila slot tersebut sedang direkam untuk frame ini,
+    /// menunggunya berarti menunggu sesuatu yang belum di-submit sama sekali.
+    /// Nomor submit tidak pernah dipakai ulang, jadi tidak bisa salah sasaran.
+    uint64_t SubmitTransient(VkCommandBuffer commandBuffer) const;
+
+    /// Menunggu submit transient tertentu selesai.
+    ///
+    /// Langsung kembali bila submit itu memang sudah selesai — termasuk kalau
+    /// slotnya sudah dipakai ulang, karena Device hanya memakai ulang slot yang
+    /// fence-nya sudah di-signal. Dipakai pemanggil yang menulis ulang buffer
+    /// host-visible: tanpa ini GPU bisa membaca data yang sedang ditimpa.
+    void WaitTransient(uint64_t submitId) const;
 
     void WaitIdle() const;
 
@@ -86,6 +103,8 @@ private:
         VkCommandPool pool = VK_NULL_HANDLE;
         VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
         VkFence fence = VK_NULL_HANDLE;
+        /// Nomor submit yang sedang ditandai fence ini, 0 bila slot menganggur.
+        uint64_t submitId = 0;
         bool pending = false;
     };
 
@@ -94,6 +113,7 @@ private:
     // mutable: Begin/SubmitTransient dipanggil dari jalur render yang memegang
     // Device secara const, tapi keduanya memang mengubah kolam internal ini.
     mutable std::vector<TransientSubmit> transients_;
+    mutable uint64_t nextSubmitId_ = 1;
 
     VkInstance instance_ = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT debugMessenger_ = VK_NULL_HANDLE;

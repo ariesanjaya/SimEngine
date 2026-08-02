@@ -41,6 +41,16 @@ bool SearchField(const char* id, char* buffer, std::size_t bufferSize,
 /// tidak punya keterangan lebih buruk daripada teks biasa.
 bool IconButton(const char* icon, const char* tooltip, bool active = false);
 
+/// Perbesaran tombol overlay viewport terhadap tombol ikon biasa.
+inline constexpr float kViewportButtonScale = 1.45f;
+inline constexpr float kViewportIconScale = 1.35f;
+
+/// Tombol ikon untuk overlay di dalam viewport 3D.
+///
+/// Sama seperti IconButton tapi lebih besar, karena latarnya bukan panel polos
+/// melainkan gambar scene.
+bool ViewportButton(const char* icon, const char* tooltip, bool active = false);
+
 /// Tombol toolbar (ikon + tooltip) yang otomatis menyisakan kursor di baris
 /// yang sama untuk tombol berikutnya.
 bool ToolbarButton(const char* icon, const char* tooltip, bool active = false);

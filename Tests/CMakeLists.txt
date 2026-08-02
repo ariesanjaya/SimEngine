@@ -16,6 +16,12 @@ sim_add_test(SimEditorTests
     DEPS
         Sim::EditorFramework)
 
+sim_add_test(SimLevelEditorTests
+    SOURCES
+        LevelEditorTests.cpp
+    DEPS
+        Sim::EditorFramework)
+
 if(SIM_WITH_LUA)
     sim_add_test(SimScriptTests
         SOURCES

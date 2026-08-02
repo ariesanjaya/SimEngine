@@ -1,14 +1,18 @@
 #include "Sim/Editor/EditorApp.h"
 
 #include "Sim/Core/Log.h"
+#include "Sim/Editor/Gizmo.h"
 #include "Sim/Editor/Icons.h"
 #include "Sim/Editor/PanelRegistry.h"
+#include "Sim/Editor/SceneCommands.h"
 #include "Sim/Scene/Serialization.h"
 
 #include <imgui.h>
 
+#include <algorithm>
 #include <csignal>
 #include <cstdlib>
+#include <vector>
 
 namespace sim::editor {
 namespace {
@@ -228,50 +232,6 @@ private:
     scene::Entity entity_ = scene::kNullEntity;
 };
 
-/// Menghapus entity beserta keturunannya, bisa dibatalkan.
-///
-/// Seluruh sub-pohon disimpan sebagai teks level agar bisa dibangun ulang utuh
-/// — termasuk GUID, hierarki, dan seluruh komponennya.
-class DeleteEntityCommand final : public ICommand {
-public:
-    DeleteEntityCommand(scene::World* world, Selection* selection, scene::Entity entity,
-                        std::string snapshot, Uuid parentGuid)
-        : world_(world),
-          selection_(selection),
-          guid_(world->GuidOf(entity)),
-          snapshot_(std::move(snapshot)),
-          parentGuid_(parentGuid) {}
-
-    void Do() override {
-        const scene::Entity entity = world_->FindByGuid(guid_);
-        if (scene::IsValid(entity)) {
-            world_->Destroy(entity);
-        }
-        if (selection_ != nullptr) {
-            selection_->Clear();
-        }
-    }
-
-    void Undo() override {
-        scene::RestoreSubtree(*world_, snapshot_, parentGuid_);
-        const scene::Entity entity = world_->FindByGuid(guid_);
-        if (selection_ != nullptr && scene::IsValid(entity)) {
-            selection_->SelectOnly(ToSelectionId(entity));
-        }
-    }
-
-    std::string Name() const override { return "Delete Entity"; }
-    std::size_t MemoryCost() const override {
-        return sizeof(DeleteEntityCommand) + snapshot_.capacity();
-    }
-
-private:
-    scene::World* world_;
-    Selection* selection_;
-    Uuid guid_;
-    std::string snapshot_;
-    Uuid parentGuid_;
-};
 
 }  // namespace
 
@@ -286,14 +246,33 @@ void EditorApp::DeleteSelectionAction() {
     if (selection_.Empty()) {
         return;
     }
-    const scene::Entity entity = ToEntity(selection_.Primary());
-    if (!world_.IsAlive(entity)) {
+
+    // Seluruh seleksi, bukan hanya yang utama. Entity yang leluhurnya ikut
+    // terpilih dilewati: sub-pohon leluhurnya sudah memuatnya, dan menghapusnya
+    // dua kali akan membuat cuplikan undo yang kedua kosong.
+    std::vector<Uuid> guids;
+    std::vector<scene::Entity> entities;
+    for (const uint64_t id : selection_.Items()) {
+        const scene::Entity entity = ToEntity(id);
+        if (world_.IsAlive(entity)) {
+            entities.push_back(entity);
+        }
+    }
+    for (const scene::Entity entity : entities) {
+        const bool coveredByAncestor =
+            std::any_of(entities.begin(), entities.end(), [&](scene::Entity other) {
+                return other != entity && world_.IsDescendantOf(entity, other);
+            });
+        if (!coveredByAncestor) {
+            guids.push_back(world_.GuidOf(entity));
+        }
+    }
+    if (guids.empty()) {
         return;
     }
+
     history_.CloseMergeGroup();
-    history_.Execute<DeleteEntityCommand>(&world_, &selection_, entity,
-                                          scene::SaveSubtreeToString(world_, entity),
-                                          world_.GuidOf(world_.ParentOf(entity)));
+    history_.Execute<DeleteEntitiesCommand>(&world_, &selection_, std::move(guids));
 }
 
 void EditorApp::CreateStarterLevel() {
@@ -375,6 +354,10 @@ bool EditorApp::LoadLevel(const std::filesystem::path& path) {
 
 void EditorApp::DrawFrame(float deltaSeconds) {
     context_.deltaSeconds = deltaSeconds;
+
+    // Harus mendahului panel mana pun: Viewport memakai gizmo, dan keadaan
+    // per-frame-nya hanya direset di sini.
+    BeginGizmoFrame();
 
     // Pintasan diproses sebelum panel menggambar, supaya aksi yang mengubah UI
     // (undo, reset layout) sudah berlaku pada frame yang sama — kalau tidak,

@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <fstream>
 #include <sstream>
+#include <unordered_map>
 
 namespace sim::scene {
 namespace {
@@ -447,6 +448,50 @@ LevelIoResult LoadLevelFromFile(World& world, const std::filesystem::path& path)
     std::ostringstream buffer;
     buffer << file.rdbuf();
     return LoadLevelFromString(world, buffer.str());
+}
+
+std::string RemapGuids(const std::string& text, std::string* outRootGuid) {
+    Json document;
+    try {
+        document = Json::parse(text);
+    } catch (const nlohmann::json::exception& exception) {
+        SIM_WARN("Scene", "RemapGuids received invalid JSON: {}", exception.what());
+        return {};
+    }
+    if (!document.contains("entities") || !document["entities"].is_array() ||
+        document["entities"].empty()) {
+        return {};
+    }
+
+    std::unordered_map<std::string, std::string> remap;
+    for (auto& record : document["entities"]) {
+        const std::string oldGuid = record.value("guid", std::string{});
+        if (oldGuid.empty()) {
+            continue;
+        }
+        const std::string newGuid = Uuid::Generate().ToString();
+        remap.emplace(oldGuid, newGuid);
+        record["guid"] = newGuid;
+    }
+    for (auto& record : document["entities"]) {
+        const auto it = record.find("parent");
+        if (it == record.end() || !it->is_string()) {
+            continue;
+        }
+        const auto mapped = remap.find(it->get<std::string>());
+        if (mapped != remap.end()) {
+            *it = mapped->second;
+        } else {
+            // Induk di luar teks ini: entity tersebut adalah akar salinan, dan
+            // penempatannya ditentukan pemanggil.
+            record.erase("parent");
+        }
+    }
+
+    if (outRootGuid != nullptr) {
+        *outRootGuid = document["entities"].front().value("guid", std::string{});
+    }
+    return document.dump();
 }
 
 }  // namespace sim::scene

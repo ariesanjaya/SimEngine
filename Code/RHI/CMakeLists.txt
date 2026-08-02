@@ -1,5 +1,6 @@
 sim_add_library(RHI
     SOURCES
+        src/Buffer.cpp
         src/Device.cpp
         src/RenderTarget.cpp
         src/Swapchain.cpp
