@@ -367,6 +367,30 @@ void NodeCatalog::AddCoreTypes() {
     add({"sim.forward", "Forward", "Engine", true, "Sumbu depan dunia",
          {Out("value", PinKind::Vec3, "value")}});
 
+    // --- Subgraph ----------------------------------------------------------
+    //
+    // Pin ketiganya dibangkitkan dari antarmuka graph, bukan didaftarkan di
+    // sini: `graph.input`/`graph.output` dari graph yang memuatnya, dan
+    // `graph.call` dari graph yang dirujuknya. Lihat PinsOf().
+    add({"graph.input",
+         "Input",
+         "Subgraph",
+         false,
+         "Tempat subgraph mulai berjalan, beserta parameternya",
+         {Exec("then", PinDirection::Output)}});
+    add({"graph.output",
+         "Output",
+         "Subgraph",
+         false,
+         "Hasil yang dikembalikan subgraph",
+         {Exec("in", PinDirection::Input)}});
+    add({"graph.call",
+         "Call Graph",
+         "Subgraph",
+         false,
+         "Menjalankan graph lain sebagai satu langkah",
+         {Exec("in", PinDirection::Input), Exec("then", PinDirection::Output)}});
+
     // --- Komentar dan grup -------------------------------------------------
     //
     // Tanpa pin sama sekali: keduanya tidak ikut dikompilasi, hanya ikut
@@ -423,12 +447,46 @@ void NodeCatalog::AddComponentTypes() {
     }
 }
 
-std::vector<GraphPin> PinsOf(const Graph& graph, const GraphNode& node) {
+std::vector<GraphPin> PinsOf(const Graph& graph, const GraphNode& node,
+                             const GraphLibrary* library) {
     const NodeType* type = NodeCatalog::Get().Find(node.type);
     if (type == nullptr) {
         return {};
     }
     std::vector<GraphPin> pins = type->pins;
+
+    // Antarmuka graph muncul terbalik di kedua ujungnya: parameter adalah
+    // KELUARAN pada node Input — di situlah nilainya mengalir masuk ke graph —
+    // dan hasil adalah MASUKAN pada node Output.
+    if (node.type == "graph.input") {
+        for (const GraphPort& port : graph.inputs) {
+            pins.push_back(Out(port.name, port.kind, port.name));
+        }
+        return pins;
+    }
+    if (node.type == "graph.output") {
+        for (const GraphPort& port : graph.outputs) {
+            pins.push_back(In(port.name, port.kind, {}, port.name));
+        }
+        return pins;
+    }
+    if (node.type == "graph.call") {
+        // Pin pemanggil dibaca dari graph yang dirujuk. Tanpa pustaka — mis. di
+        // test yang hanya menguji graph tunggal — node ini hanya punya pin exec,
+        // dan kompilernya yang melaporkan bahwa rujukannya tidak bisa dibuka.
+        const Graph* target =
+            library != nullptr ? library->Find(Uuid::Parse(node.Setting("graph"))) : nullptr;
+        if (target == nullptr) {
+            return pins;
+        }
+        for (const GraphPort& port : target->inputs) {
+            pins.push_back(In(port.name, port.kind, port.defaultValue, port.name));
+        }
+        for (const GraphPort& port : target->outputs) {
+            pins.push_back(Out(port.name, port.kind, port.name));
+        }
+        return pins;
+    }
 
     if (node.type == "flow.sequence") {
         // Dua keluaran bawaan sudah ada di katalog; sisanya ditambahkan di sini.

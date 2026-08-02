@@ -52,6 +52,13 @@ struct CompileResult {
 
     /// Baris pertama yang dihasilkan sebuah node, atau 0.
     int LineOfNode(const Uuid& node) const;
+
+    /// Graph lain yang ikut disisipkan ke hasil ini.
+    ///
+    /// Dipakai cache untuk tahu kapan hasil kompilasi menjadi usang: menyunting
+    /// sebuah subgraph harus membuat setiap pemakainya ikut dikompilasi ulang,
+    /// dan tanpa daftar ini yang berubah hanya berkas yang disunting.
+    std::vector<Uuid> referencedGraphs;
 };
 
 /// Mengompilasi graph menjadi sumber Lua yang bisa dibaca manusia.
@@ -76,6 +83,11 @@ struct CompileOptions {
     /// penanganya — jadi `.lua` yang memuatnya tetap berjalan normal di runtime
     /// tanpa editor, alih-alih gagal dengan "fungsi tidak dikenal".
     std::vector<Uuid> breakpoints;
+
+    /// Sumber graph yang dirujuk node `graph.call`. Null berarti graph ini
+    /// tidak boleh memanggil graph lain, dan percobaannya dilaporkan sebagai
+    /// kesalahan alih-alih diam-diam menghasilkan Lua yang tidak lengkap.
+    const GraphLibrary* library = nullptr;
 };
 
 /// `chunkName` hanya masuk komentar kepala berkas; nama chunk yang dipakai Lua

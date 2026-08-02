@@ -78,7 +78,7 @@ struct PureValue {
 class Compiler {
 public:
     Compiler(const Graph& graph, std::string_view chunkName, const CompileOptions& options)
-        : graph_(graph), chunkName_(chunkName), options_(options) {}
+        : graph_(&graph), chunkName_(chunkName), options_(options) {}
 
     CompileResult Run();
 
@@ -137,6 +137,13 @@ private:
     void EmitNode(const GraphNode& node);
     void EmitEnsure();
 
+    // --- subgraph ----------------------------------------------------------
+    /// Nama fungsi Lua untuk sebuah subgraph, mengeluarkannya bila belum ada.
+    /// Kosong berarti gagal — alasannya sudah masuk daftar kesalahan.
+    std::string EmitSubgraphFunction(const Uuid& guid);
+    /// Memeriksa bahwa sebuah graph memang sah dipakai sebagai subgraph.
+    bool ValidateSubgraph(const Graph& target, const Uuid& guid, const GraphNode*& entry);
+
     // --- data --------------------------------------------------------------
     /// Ekspresi Lua untuk sebuah pin input, entah dari koneksi atau literal.
     std::string InputExpr(const GraphNode& node, const GraphPin& pin);
@@ -158,7 +165,7 @@ private:
         return Sanitize(hint) + "_" + std::to_string(++localCounter_);
     }
 
-    const Graph& graph_;
+    const Graph* graph_ = nullptr;
     std::string chunkName_;
     CompileOptions options_;
     CompileResult result_;
@@ -176,11 +183,16 @@ private:
     std::unordered_set<Uuid> execStack_;
     /// Ekspresi pengganti untuk pin keluaran tertentu, mis. variabel loop.
     std::map<std::pair<Uuid, std::string>, std::string> overrides_;
+
+    /// Subgraph yang sudah dikeluarkan sebagai fungsi: GUID → nama fungsinya.
+    std::map<Uuid, std::string> subgraphs_;
+    /// Graph yang sedang dikeluarkan, untuk menolak lingkar antar-graph.
+    std::vector<Uuid> graphStack_;
 };
 
 int Compiler::OutgoingCount(const Uuid& node) const {
     int count = 0;
-    for (const GraphLink& link : graph_.links) {
+    for (const GraphLink& link : graph_->links) {
         if (link.fromNode == node) {
             ++count;
         }
@@ -189,13 +201,13 @@ int Compiler::OutgoingCount(const Uuid& node) const {
 }
 
 std::string Compiler::InputExpr(const GraphNode& node, const GraphPin& pin) {
-    if (const GraphLink* link = graph_.LinkInto(node.guid, pin.name)) {
-        const GraphNode* source = graph_.FindNode(link->fromNode);
+    if (const GraphLink* link = graph_->LinkInto(node.guid, pin.name)) {
+        const GraphNode* source = graph_->FindNode(link->fromNode);
         if (source == nullptr) {
             Fail(node.guid, "input '" + pin.name + "' comes from a node that no longer exists");
             return "nil";
         }
-        const std::vector<GraphPin> sourcePins = PinsOf(graph_, *source);
+        const std::vector<GraphPin> sourcePins = PinsOf(*graph_, *source, options_.library);
         const auto it = std::find_if(
             sourcePins.begin(), sourcePins.end(),
             [link](const GraphPin& candidate) { return candidate.name == link->fromPin; });
@@ -264,7 +276,7 @@ PureValue Compiler::BuildPure(const GraphNode& node) {
         Fail(node.guid, "unknown node type '" + node.type + "'");
         return value;
     }
-    const std::vector<GraphPin> pins = PinsOf(graph_, node);
+    const std::vector<GraphPin> pins = PinsOf(*graph_, node, options_.library);
     const auto input = [&](const char* name) -> std::string {
         const auto it = std::find_if(pins.begin(), pins.end(), [name](const GraphPin& pin) {
             return pin.name == name && pin.direction == PinDirection::Input;
@@ -327,7 +339,7 @@ PureValue Compiler::BuildPure(const GraphNode& node) {
 
     if (key == "variable.get") {
         const std::string name = node.Setting("variable");
-        if (graph_.FindVariable(name) == nullptr) {
+        if (graph_->FindVariable(name) == nullptr) {
             Fail(node.guid, "no graph variable named '" + name + "'");
             return value;
         }
@@ -432,9 +444,136 @@ PureValue Compiler::BuildPure(const GraphNode& node) {
     if (key == "comment" || key == "group") {
         return value;
     }
+    // Nilai pin keluaran node Input dan Call disediakan lewat override — nama
+    // parameter fungsi dan local hasil panggilan. Sampai di sini berarti
+    // override-nya tidak ada, dan itu selalu berarti graph-nya belum utuh.
+    if (key == "graph.input") {
+        Fail(node.guid, "this Input pin is not part of the subgraph interface");
+        return value;
+    }
 
     Fail(node.guid, "node type '" + key + "' cannot be used as a value");
     return value;
+}
+
+bool Compiler::ValidateSubgraph(const Graph& target, const Uuid& guid,
+                                const GraphNode*& entry) {
+    const std::string name = options_.library->NameOf(guid);
+    entry = nullptr;
+    for (const GraphNode& node : target.nodes) {
+        if (node.type == "graph.input") {
+            if (entry != nullptr) {
+                Fail(Uuid{}, "subgraph '" + name + "' has more than one Input node");
+                return false;
+            }
+            entry = &node;
+        }
+        // Sebuah graph berjalan ketika dipanggil ATAU ketika sebuah event
+        // menyala, tidak keduanya. Membiarkan keduanya berarti event-nya
+        // diabaikan diam-diam saat graph itu dipanggil — perbedaan perilaku
+        // yang tidak terlihat di kanvas mana pun.
+        if (node.type == "event.start" || node.type == "event.update") {
+            Fail(Uuid{}, "subgraph '" + name +
+                             "' also has an event node; a graph either runs when called "
+                             "or when an event fires, not both");
+            return false;
+        }
+    }
+    if (entry == nullptr) {
+        Fail(Uuid{}, "'" + name + "' has no Input node, so there is nowhere to start");
+        return false;
+    }
+    // Variabel graph adalah keadaan yang bertahan antar frame. Di dalam sesuatu
+    // yang dipanggil dari beberapa tempat, "bertahan milik siapa" tidak punya
+    // jawaban yang bisa dipertahankan — jadi ditolak, bukan ditebak.
+    if (!target.variables.empty()) {
+        Fail(Uuid{}, "subgraph '" + name +
+                         "' declares variables; pass values through its Input and Output "
+                         "pins instead");
+        return false;
+    }
+    return true;
+}
+
+std::string Compiler::EmitSubgraphFunction(const Uuid& guid) {
+    if (const auto known = subgraphs_.find(guid); known != subgraphs_.end()) {
+        return known->second;
+    }
+    if (options_.library == nullptr) {
+        Fail(Uuid{}, "this graph calls another graph, but no graph library was provided");
+        return {};
+    }
+    if (std::find(graphStack_.begin(), graphStack_.end(), guid) != graphStack_.end()) {
+        // Lingkar antar-graph: A memanggil B yang memanggil A. Ditolak dengan
+        // menyebut graph-nya, bukan node-nya — yang salah adalah rujukannya.
+        Fail(Uuid{}, "graph '" + options_.library->NameOf(guid) +
+                         "' calls itself, directly or through another graph");
+        return {};
+    }
+    const Graph* target = options_.library->Find(guid);
+    if (target == nullptr) {
+        Fail(Uuid{}, "cannot open the graph this node refers to");
+        return {};
+    }
+    const GraphNode* entry = nullptr;
+    if (!ValidateSubgraph(*target, guid, entry)) {
+        return {};
+    }
+
+    const std::string name = "sub_" + Sanitize(options_.library->NameOf(guid)) + "_" +
+                             std::to_string(subgraphs_.size() + 1);
+
+    // Keadaan penelusuran milik graph yang sedang dikerjakan. Disimpan dan
+    // dikembalikan supaya menyisipkan subgraph di tengah tidak mengacaukan
+    // cache, override, dan deteksi lingkar milik pemanggilnya.
+    const Graph* outerGraph = graph_;
+    auto outerPure = std::move(pureCache_);
+    auto outerEvaluating = std::move(evaluating_);
+    auto outerExec = std::move(execStack_);
+    auto outerOverrides = std::move(overrides_);
+    const int outerIndent = indent_;
+
+    graph_ = target;
+    pureCache_.clear();
+    evaluating_.clear();
+    execStack_.clear();
+    overrides_.clear();
+    indent_ = 0;
+    graphStack_.push_back(guid);
+
+    // Fungsi bersarang milik subgraph ini dikeluarkan lebih dulu: Lua menuntut
+    // sebuah local sudah ada sebelum dipakai.
+    for (const GraphNode& node : target->nodes) {
+        if (node.type == "graph.call") {
+            EmitSubgraphFunction(Uuid::Parse(node.Setting("graph")));
+        }
+    }
+
+    std::string parameters = "self";
+    for (const GraphPort& port : target->inputs) {
+        const std::string local = Sanitize(port.name);
+        parameters += ", " + local;
+        overrides_[{entry->guid, port.name}] = local;
+    }
+
+    EmitBlank();
+    EmitRaw("-- Subgraph: " + options_.library->NameOf(guid));
+    EmitRaw("local function " + name + "(" + parameters + ")");
+    ++indent_;
+    EmitExecFrom(*entry, "then");
+    --indent_;
+    EmitRaw("end");
+
+    graphStack_.pop_back();
+    graph_ = outerGraph;
+    pureCache_ = std::move(outerPure);
+    evaluating_ = std::move(outerEvaluating);
+    execStack_ = std::move(outerExec);
+    overrides_ = std::move(outerOverrides);
+    indent_ = outerIndent;
+
+    subgraphs_.emplace(guid, name);
+    return name;
 }
 
 void Compiler::EmitNode(const GraphNode& node) {
@@ -459,7 +598,7 @@ void Compiler::EmitNode(const GraphNode& node) {
         Emit("sim.breakpoint(" + Quote(node.guid.ToString()) + ")");
     }
 
-    const std::vector<GraphPin> pins = PinsOf(graph_, node);
+    const std::vector<GraphPin> pins = PinsOf(*graph_, node, options_.library);
     const auto input = [&](const char* name) -> std::string {
         const auto it = std::find_if(pins.begin(), pins.end(), [name](const GraphPin& pin) {
             return pin.name == name && pin.direction == PinDirection::Input;
@@ -477,8 +616,8 @@ void Compiler::EmitNode(const GraphNode& node) {
         ++indent_;
         EmitExecFrom(node, "true");
         --indent_;
-        if (graph_.LinkInto(node.guid, "false") != nullptr ||
-            !graph_.LinksFrom(node.guid, "false").empty()) {
+        if (graph_->LinkInto(node.guid, "false") != nullptr ||
+            !graph_->LinksFrom(node.guid, "false").empty()) {
             Emit("else");
             ++indent_;
             EmitExecFrom(node, "false");
@@ -529,13 +668,64 @@ void Compiler::EmitNode(const GraphNode& node) {
         EmitExecFrom(node, "completed");
     } else if (key == "variable.set") {
         const std::string name = node.Setting("variable");
-        if (graph_.FindVariable(name) == nullptr) {
+        if (graph_->FindVariable(name) == nullptr) {
             Fail(node.guid, "no graph variable named '" + name + "'");
         } else {
             const std::string expr = input("value");
             EmitComment("-- node " + ShortId(node.guid) + " (Set " + name + ")");
             Mark(node.guid);
             Emit("self.state." + Sanitize(name) + " = " + expr);
+            InvalidatePure();
+        }
+        EmitExecFrom(node, "then");
+    } else if (key == "graph.output") {
+        std::string values;
+        for (const GraphPort& port : graph_->outputs) {
+            const auto pin = std::find_if(pins.begin(), pins.end(), [&port](const GraphPin& p) {
+                return p.name == port.name && p.direction == PinDirection::Input;
+            });
+            values += (values.empty() ? "" : ", ");
+            values += pin == pins.end() ? "nil" : InputExpr(node, *pin);
+        }
+        EmitComment("-- node " + ShortId(node.guid) + " (Output)");
+        Mark(node.guid);
+        Emit(values.empty() ? "return" : "return " + values);
+        // Sengaja tidak menelusuri lebih jauh: `return` mengakhiri fungsinya,
+        // dan Lua menolak pernyataan apa pun sesudahnya di blok yang sama.
+    } else if (key == "graph.call") {
+        const Uuid target = Uuid::Parse(node.Setting("graph"));
+        const std::string function = EmitSubgraphFunction(target);
+        if (function.empty()) {
+            Fail(node.guid, "this Call Graph node does not refer to a usable graph");
+        } else {
+            std::string arguments = "self";
+            std::vector<std::string> results;
+            for (const GraphPin& pin : pins) {
+                if (pin.kind == PinKind::Exec) {
+                    continue;
+                }
+                if (pin.direction == PinDirection::Input) {
+                    arguments += ", " + InputExpr(node, pin);
+                } else {
+                    const std::string local = NextLocal(pin.name);
+                    overrides_[{node.guid, pin.name}] = local;
+                    results.push_back(local);
+                }
+            }
+            EmitComment("-- node " + ShortId(node.guid) + " (Call " +
+                        (options_.library != nullptr ? options_.library->NameOf(target)
+                                                     : std::string("graph")) +
+                        ")");
+            Mark(node.guid);
+            std::string call = function + "(" + arguments + ")";
+            if (!results.empty()) {
+                std::string names;
+                for (std::size_t i = 0; i < results.size(); ++i) {
+                    names += (i == 0 ? "" : ", ") + results[i];
+                }
+                call = "local " + names + " = " + call;
+            }
+            Emit(call);
             InvalidatePure();
         }
         EmitExecFrom(node, "then");
@@ -558,7 +748,7 @@ void Compiler::EmitNode(const GraphNode& node) {
                 pin.name == "entity") {
                 continue;
             }
-            const bool connected = graph_.LinkInto(node.guid, pin.name) != nullptr;
+            const bool connected = graph_->LinkInto(node.guid, pin.name) != nullptr;
             const auto explicitValue = node.pinValues.find(pin.name);
             const bool hasLiteral =
                 explicitValue != node.pinValues.end() && !explicitValue->second.empty();
@@ -589,7 +779,7 @@ void Compiler::EmitNode(const GraphNode& node) {
 }
 
 void Compiler::EmitExecFrom(const GraphNode& node, std::string_view pin) {
-    const std::vector<const GraphLink*> links = graph_.LinksFrom(node.guid, pin);
+    const std::vector<const GraphLink*> links = graph_->LinksFrom(node.guid, pin);
     if (links.empty()) {
         return;
     }
@@ -600,7 +790,7 @@ void Compiler::EmitExecFrom(const GraphNode& node, std::string_view pin) {
         Fail(node.guid, "execution pin '" + std::string(pin) +
                             "' has more than one connection; use a Sequence node");
     }
-    const GraphNode* target = graph_.FindNode(links.front()->toNode);
+    const GraphNode* target = graph_->FindNode(links.front()->toNode);
     if (target != nullptr) {
         EmitNode(*target);
     }
@@ -611,7 +801,7 @@ void Compiler::EmitEvent(const GraphNode& node, const char* method, const char* 
     Mark(node.guid);
     EmitRaw(std::string("function Graph:") + method + "(" + parameters + ")");
     ++indent_;
-    if (!graph_.variables.empty()) {
+    if (!graph_->variables.empty()) {
         Emit("self:__ensure()");
     }
     InvalidatePure();
@@ -625,7 +815,7 @@ void Compiler::EmitEvent(const GraphNode& node, const char* method, const char* 
 }
 
 void Compiler::EmitEnsure() {
-    if (graph_.variables.empty()) {
+    if (graph_->variables.empty()) {
         return;
     }
     EmitBlank();
@@ -640,7 +830,7 @@ void Compiler::EmitEnsure() {
     Emit("end");
     Emit("self.state.__ready = true");
     Emit("local props = self.props or {}");
-    for (const GraphVariable& variable : graph_.variables) {
+    for (const GraphVariable& variable : graph_->variables) {
         const std::string name = Sanitize(variable.name);
         const std::string fallback =
             variable.defaultValue.empty() ? NeutralLiteral(variable.kind) : variable.defaultValue;
@@ -673,7 +863,7 @@ CompileResult Compiler::Run() {
     // serialisasi level, dan undo berlaku untuk graph tanpa satu baris pun kode
     // khusus di sisi editor.
     std::vector<const GraphVariable*> exposed;
-    for (const GraphVariable& variable : graph_.variables) {
+    for (const GraphVariable& variable : graph_->variables) {
         if (variable.exposed) {
             exposed.push_back(&variable);
         }
@@ -692,6 +882,15 @@ CompileResult Compiler::Run() {
         EmitRaw("}");
     }
 
+    // Subgraph dikeluarkan sebagai fungsi lokal SEBELUM handler mana pun:
+    // Lua menuntut sebuah local sudah ada sebelum dipakai, dan handler-lah yang
+    // memakainya.
+    for (const GraphNode& node : graph_->nodes) {
+        if (node.type == "graph.call") {
+            EmitSubgraphFunction(Uuid::Parse(node.Setting("graph")));
+        }
+    }
+
     EmitEnsure();
 
     // Urutan tetap: OnStart lebih dulu, lalu OnUpdate. Dua graph dengan isi sama
@@ -708,7 +907,7 @@ CompileResult Compiler::Run() {
 
     for (const EventKind& event : kEvents) {
         int seen = 0;
-        for (const GraphNode& node : graph_.nodes) {
+        for (const GraphNode& node : graph_->nodes) {
             if (node.type != event.type) {
                 continue;
             }
@@ -719,6 +918,19 @@ CompileResult Compiler::Run() {
             }
             EmitEvent(node, event.method, event.parameters);
         }
+    }
+
+    // Sebuah subgraph yang dikompilasi sendirian sah dan memang tidak punya
+    // handler: ia berjalan ketika dipanggil. Dikatakan di berkasnya supaya
+    // tidak terbaca sebagai hasil kompilasi yang gagal separuh.
+    if (graph_->IsSubgraph()) {
+        EmitBlank();
+        EmitRaw("-- Graph ini sebuah subgraph: ia berjalan ketika dipanggil graph lain,");
+        EmitRaw("-- jadi ia sengaja tidak punya OnStart maupun OnUpdate.");
+    }
+
+    for (const auto& [guid, function] : subgraphs_) {
+        result_.referencedGraphs.push_back(guid);
     }
 
     EmitBlank();

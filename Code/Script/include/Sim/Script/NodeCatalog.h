@@ -80,7 +80,13 @@ private:
 /// Kompiler dan panel memanggil fungsi yang sama supaya yang digambar di kanvas
 /// tidak pernah berbeda dari yang dikompilasi.
 ///
+/// `library` dibutuhkan node `graph.call`, yang pin-nya berasal dari antarmuka
+/// graph LAIN. Null berarti pemanggil tidak memakai subgraph; node itu lalu
+/// hanya punya pin exec, dan kompilernya yang melaporkan rujukan yang tak
+/// terbaca — bukan katalog yang diam-diam menghilangkan pin.
+///
 /// Kosong bila tipe node-nya tidak ada di katalog.
-std::vector<GraphPin> PinsOf(const Graph& graph, const GraphNode& node);
+std::vector<GraphPin> PinsOf(const Graph& graph, const GraphNode& node,
+                             const GraphLibrary* library = nullptr);
 
 }  // namespace sim::script

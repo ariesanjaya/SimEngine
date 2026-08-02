@@ -33,6 +33,33 @@ constexpr std::array<PinKindName, 8> kPinKindNames{{
     {PinKind::Any, "any"},
 }};
 
+Json WritePorts(const std::vector<GraphPort>& ports) {
+    Json array = Json::array();
+    for (const GraphPort& port : ports) {
+        Json entry;
+        entry["name"] = port.name;
+        entry["kind"] = ToString(port.kind);
+        entry["default"] = port.defaultValue;
+        array.push_back(std::move(entry));
+    }
+    return array;
+}
+
+void ReadPorts(const Json& array, std::vector<GraphPort>& ports) {
+    if (!array.is_array()) {
+        return;
+    }
+    for (const Json& entry : array) {
+        GraphPort port;
+        port.name = entry.value("name", std::string{});
+        port.kind = PinKindFromString(entry.value("kind", std::string("number")));
+        port.defaultValue = entry.value("default", std::string{});
+        if (!port.name.empty()) {
+            ports.push_back(std::move(port));
+        }
+    }
+}
+
 Json WriteSettings(const std::map<std::string, std::string>& values) {
     Json object = Json::object();
     for (const auto& [key, value] : values) {
@@ -124,6 +151,16 @@ std::string SaveGraphToString(const Graph& graph) {
     Json root;
     root["version"] = kGraphSchemaVersion;
 
+    // Antarmuka ditulis lebih dulu dan hanya bila terisi: graph yang bukan
+    // subgraph menghasilkan teks yang sama persis seperti sebelum konsep ini
+    // ada, jadi menaikkan versi skema tidak membuat setiap berkas ikut berubah.
+    if (!graph.inputs.empty()) {
+        root["inputs"] = WritePorts(graph.inputs);
+    }
+    if (!graph.outputs.empty()) {
+        root["outputs"] = WritePorts(graph.outputs);
+    }
+
     Json variables = Json::array();
     for (const GraphVariable& variable : graph.variables) {
         Json entry;
@@ -203,6 +240,13 @@ GraphIoResult LoadGraphFromString(Graph& graph, const std::string& text) {
     }
 
     graph = Graph{};
+
+    if (const auto inputs = root.find("inputs"); inputs != root.end()) {
+        ReadPorts(*inputs, graph.inputs);
+    }
+    if (const auto outputs = root.find("outputs"); outputs != root.end()) {
+        ReadPorts(*outputs, graph.outputs);
+    }
 
     if (const auto variables = root.find("variables");
         variables != root.end() && variables->is_array()) {

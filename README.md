@@ -245,6 +245,27 @@ Play berikutnya, tanpa langkah build manual. Keduanya memanggil compiler yang
 sama persis; hasil yang berbeda antara editor dan runtime adalah kelas bug yang
 tidak boleh dibuka.
 
+**Graph bisa dipakai ulang sebagai template.** Beri sebuah graph daftar Input
+dan Output, dan graph lain bisa memakainya sebagai satu node. Compiler
+menyisipkannya sebagai fungsi Lua:
+
+```lua
+-- Subgraph: Skala
+local function sub_skala_1(self, amount)
+    return (amount * 2)
+end
+
+function Graph:OnUpdate(dt)
+    local scaled_1 = sub_skala_1(self, self.state.speed)
+    ...
+end
+```
+
+Satu definisi berapa pun kali dipanggil — dan karena yang tersimpan adalah
+rujukan, bukan salinan, memperbaiki template memperbaiki setiap pemakainya.
+Menyunting template membuat hasil kompilasi pemakainya usang, jadi Play
+berikutnya menjalankan yang baru tanpa ada yang perlu diingat.
+
 Siklus pada pin data dan lingkar pada pin exec ditolak saat kompilasi dengan
 pesan yang menunjuk node penyebabnya — dan kompilernya **kembali**, bukan
 menggantung membawa serta editor.

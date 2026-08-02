@@ -116,6 +116,10 @@ public:
             return;
         }
         canvas_.Initialize();
+        // Pustaka graph dipegang cache milik runtime — sumber yang sama dengan
+        // yang dipakai compiler saat Play, sehingga pin yang digambar di kanvas
+        // tidak pernah berbeda dari pin yang dikompilasi.
+        library_ = &context.scripts->Graphs();
 
         RefreshRuntimeFailure(context);
         DrawToolbar(context);
@@ -306,7 +310,7 @@ private:
         ImGui::TextUnformatted(type != nullptr ? type->label.c_str() : node.type.c_str());
         ImGui::Dummy(ImVec2(0.0f, 2.0f));
 
-        const std::vector<GraphPin> pins = PinsOf(graph_, node);
+        const std::vector<GraphPin> pins = PinsOf(graph_, node, library_);
         std::vector<std::size_t> inputs;
         std::vector<std::size_t> outputs;
         for (std::size_t i = 0; i < pins.size(); ++i) {
@@ -491,8 +495,8 @@ private:
         if (from == nullptr || to == nullptr) {
             return;
         }
-        const std::vector<GraphPin> fromPins = PinsOf(graph_, *from);
-        const std::vector<GraphPin> toPins = PinsOf(graph_, *to);
+        const std::vector<GraphPin> fromPins = PinsOf(graph_, *from, library_);
+        const std::vector<GraphPin> toPins = PinsOf(graph_, *to, library_);
         const std::size_t fromIndex = IndexOf(fromPins, link.fromPin);
         const std::size_t toIndex = IndexOf(toPins, link.toPin);
         if (fromIndex == fromPins.size() || toIndex == toPins.size()) {
@@ -619,7 +623,7 @@ private:
         canvas_.Resume();
     }
 
-    void DrawPalette(EditorContext& /*context*/) {
+    void DrawPalette(EditorContext& context) {
         if (!ImGui::BeginPopup("##palette")) {
             return;
         }
@@ -633,6 +637,11 @@ private:
 
         if (ImGui::BeginChild("##list", ImVec2(ImGui::GetFontSize() * 16.0f,
                                                ImGui::GetFontSize() * 18.0f))) {
+            // Graph lain di proyek muncul sebagai node siap pakai, bukan lewat
+            // dialog terpisah: memakai ulang sebuah graph harus semudah
+            // memasang node biasa, atau ia tidak akan dipakai.
+            DrawSubgraphPalette(context);
+
             std::string category;
             for (const NodeType& type : NodeCatalog::Get().All()) {
                 if (!Matches(type)) {
@@ -656,6 +665,69 @@ private:
         }
         ImGui::EndChild();
         ImGui::EndPopup();
+    }
+
+    /// Graph lain yang bisa dipanggil dari graph ini.
+    void DrawSubgraphPalette(EditorContext& context) {
+        if (context.assets == nullptr) {
+            return;
+        }
+        bool heading = false;
+        for (const assets::AssetRecord& record : context.assets->All()) {
+            if (record.type != assets::AssetType::Graph || record.guid == openGuid_) {
+                continue;
+            }
+            // Hanya graph yang punya antarmuka. Yang tanpa Input tidak bisa
+            // dipanggil, dan menawarkannya berarti menjanjikan sesuatu yang
+            // pasti gagal saat dikompilasi.
+            const Graph* target = library_ != nullptr ? library_->Find(record.guid) : nullptr;
+            if (target == nullptr || !target->IsSubgraph()) {
+                continue;
+            }
+            if (!MatchesText(record.name)) {
+                continue;
+            }
+            if (!heading) {
+                ImGui::TextColored(kHintColor, "Graphs");
+                heading = true;
+            }
+            ImGui::Indent();
+            if (ImGui::Selectable((std::string(icons::kNodeGraph) + "  " + record.name).c_str())) {
+                AddSubgraphCall(record);
+                ImGui::CloseCurrentPopup();
+            }
+            if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
+                ImGui::SetTooltip("%s", record.relativePath.c_str());
+            }
+            ImGui::Unindent();
+        }
+    }
+
+    void AddSubgraphCall(const assets::AssetRecord& record) {
+        GraphNode node;
+        node.guid = Uuid::Generate();
+        node.type = "graph.call";
+        node.settings["graph"] = record.guid.ToString();
+        node.position = Vec2(nextSpawn_, nextSpawn_);
+        nextSpawn_ += 24.0f;
+        if (nextSpawn_ > 260.0f) {
+            nextSpawn_ = 40.0f;
+        }
+        graph_.nodes.push_back(std::move(node));
+        Touch();
+    }
+
+    bool MatchesText(std::string_view label) const {
+        if (paletteFilter_.empty()) {
+            return true;
+        }
+        const auto lower = [](std::string text) {
+            std::transform(text.begin(), text.end(), text.begin(), [](unsigned char c) {
+                return static_cast<char>(std::tolower(c));
+            });
+            return text;
+        };
+        return lower(std::string(label)).find(lower(paletteFilter_)) != std::string::npos;
     }
 
     bool Matches(const NodeType& type) const {
@@ -820,9 +892,79 @@ private:
     }
 
     void DrawDetails(EditorContext& context) {
+        DrawInterface();
+        ImGui::Separator();
         DrawVariables();
         ImGui::Separator();
         DrawSelectedNode(context);
+    }
+
+    /// Antarmuka graph: parameter masuk dan hasil keluar.
+    ///
+    /// Menambah satu di sini adalah satu-satunya yang dibutuhkan untuk membuat
+    /// sebuah graph bisa dipakai ulang — begitu ia punya antarmuka, ia muncul di
+    /// palet graph lain sebagai node siap pasang.
+    void DrawInterface() {
+        ImGui::TextColored(kHintColor, "Interface (makes this graph reusable)");
+        DrawPortList("Input", graph_.inputs, true);
+        DrawPortList("Output", graph_.outputs, false);
+        if (graph_.IsSubgraph() && !HasNode("graph.input")) {
+            ImGui::TextColored(kErrorColor, "%s  Add an Input node to start from",
+                               icons::kLogError);
+        }
+    }
+
+    bool HasNode(std::string_view type) const {
+        return std::any_of(graph_.nodes.begin(), graph_.nodes.end(),
+                           [type](const GraphNode& node) { return node.type == type; });
+    }
+
+    void DrawPortList(const char* label, std::vector<GraphPort>& ports, bool withDefault) {
+        ImGui::PushID(label);
+        if (ImGui::Button((std::string("Add ") + label).c_str())) {
+            GraphPort port;
+            port.name = std::string(label) + std::to_string(ports.size() + 1);
+            port.kind = PinKind::Number;
+            port.defaultValue = withDefault ? "0" : "";
+            ports.push_back(std::move(port));
+            Touch();
+        }
+        for (std::size_t i = 0; i < ports.size(); ++i) {
+            GraphPort& port = ports[i];
+            ImGui::PushID(static_cast<int>(i));
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.0f);
+            if (ImGui::InputText("##name", &port.name)) {
+                Touch();
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5.0f);
+            if (ImGui::BeginCombo("##kind", ToString(port.kind))) {
+                for (const PinKind kind : {PinKind::Number, PinKind::Bool, PinKind::String,
+                                           PinKind::Vec3, PinKind::Quat, PinKind::Entity}) {
+                    if (ImGui::Selectable(ToString(kind), port.kind == kind)) {
+                        port.kind = kind;
+                        Touch();
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            if (withDefault) {
+                ImGui::SameLine();
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 4.0f);
+                if (ImGui::InputText("##default", &port.defaultValue)) {
+                    Touch();
+                }
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton("x")) {
+                ports.erase(ports.begin() + static_cast<std::ptrdiff_t>(i));
+                Touch();
+                ImGui::PopID();
+                break;
+            }
+            ImGui::PopID();
+        }
+        ImGui::PopID();
     }
 
     void DrawVariables() {
@@ -1100,6 +1242,7 @@ private:
     void Recompile() {
         CompileOptions options;
         options.breakpoints = breakpoints_;
+        options.library = library_;
         compiled_ = CompileGraph(graph_, openName_, options);
         errorNodes_.clear();
         for (const CompileError& error : compiled_.errors) {
@@ -1181,7 +1324,7 @@ private:
         if (node == nullptr) {
             return nullptr;
         }
-        const std::vector<GraphPin> pins = PinsOf(graph_, *node);
+        const std::vector<GraphPin> pins = PinsOf(graph_, *node, library_);
         const std::size_t index = PinIndexOf(pinId);
         if (index >= pins.size()) {
             return nullptr;
@@ -1191,6 +1334,7 @@ private:
     }
 
     NodeCanvas canvas_;
+    const GraphLibrary* library_ = nullptr;
     Graph graph_;
     CompileResult compiled_;
 

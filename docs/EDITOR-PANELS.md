@@ -241,6 +241,14 @@ Sumber log ditandai kategori (`[Asset]`, `[Lua]`, `[RHI]`).
   Breakpoint menahan **Play** pada frame berikutnya; frame yang sedang berjalan
   tetap diselesaikan, karena menghentikan Lua di tengah tumpukan panggilan
   menuntut debug hook yang belum ada.
+  **Graph sebagai template.** Beri sebuah graph *Interface* di tab Details —
+  daftar Input dan Output — dan ia langsung muncul di palet graph lain sebagai
+  satu node siap pasang. Compiler menyisipkannya sebagai fungsi Lua: satu
+  definisi berapa pun kali dipanggil, dan memperbaiki template memperbaiki
+  setiap pemakainya. Subgraph tidak boleh punya node event maupun variabel —
+  ia berjalan ketika dipanggil, dan "keadaan yang bertahan milik siapa" tidak
+  punya jawaban yang bisa dipertahankan di sesuatu yang dipanggil dari banyak
+  tempat. Lingkar antar-graph ditolak saat kompilasi.
   **Ctrl+G** membungkus node terpilih dengan sebuah grup — kotak yang membawa
   serta seluruh isinya ketika digeser dari judulnya, dan bisa diubah ukurannya
   dari tepinya. Keanggotaannya ditentukan letak, bukan daftar: apa pun yang

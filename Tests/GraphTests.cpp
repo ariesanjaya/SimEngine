@@ -16,6 +16,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <map>
 #include <string>
 #include <unistd.h>
 
@@ -159,6 +160,239 @@ TEST_CASE("Node grup bertahan lewat berkas dan tidak mempengaruhi kompilasi") {
     // yang tidak memakai grup menghasilkan teks yang sama seperti sebelum
     // bidang itu ada.
     CHECK(SaveGraphToString(SpinGraph()).find("\"size\"") == std::string::npos);
+}
+
+namespace {
+
+/// Pustaka graph dari memori, untuk test yang tidak menyentuh disk.
+class MemoryLibrary final : public GraphLibrary {
+public:
+    void Add(const Uuid& guid, std::string name, Graph graph) {
+        names_[guid] = std::move(name);
+        graphs_[guid] = std::move(graph);
+    }
+    const Graph* Find(const Uuid& guid) const override {
+        const auto it = graphs_.find(guid);
+        return it == graphs_.end() ? nullptr : &it->second;
+    }
+    std::string NameOf(const Uuid& guid) const override {
+        const auto it = names_.find(guid);
+        return it == names_.end() ? guid.ToString() : it->second;
+    }
+
+private:
+    std::map<Uuid, Graph> graphs_;
+    std::map<Uuid, std::string> names_;
+};
+
+/// Subgraph "Skala": mengalikan sebuah angka dengan dua, lalu mengembalikannya.
+Graph ScaleSubgraph() {
+    Graph graph;
+    graph.inputs.push_back({"amount", PinKind::Number, "0"});
+    graph.outputs.push_back({"scaled", PinKind::Number, {}});
+
+    graph.nodes.push_back(Node(50, "graph.input"));
+    graph.nodes.push_back(Node(51, "math.multiply"));
+    graph.nodes.back().pinValues["b"] = "2";
+    graph.nodes.push_back(Node(52, "graph.output"));
+
+    Link(graph, 50, "amount", 51, "a");
+    Link(graph, 51, "result", 52, "scaled");
+    Link(graph, 50, "then", 52, "in");
+    return graph;
+}
+
+}  // namespace
+
+TEST_CASE("Graph bisa dipakai ulang sebagai subgraph oleh graph lain") {
+    scene::RegisterCoreComponents();
+    NodeCatalog::Rebuild();
+
+    const Uuid templateGuid = Id(500);
+    MemoryLibrary library;
+    library.Add(templateGuid, "Skala", ScaleSubgraph());
+
+    Graph caller;
+    caller.variables.push_back({"speed", PinKind::Number, "3", true});
+    caller.nodes.push_back(Node(1, "event.start"));
+    caller.nodes.push_back(Node(2, "graph.call"));
+    caller.nodes.back().settings["graph"] = templateGuid.ToString();
+    caller.nodes.push_back(Node(3, "variable.get"));
+    caller.nodes.back().settings["variable"] = "speed";
+    caller.nodes.push_back(Node(4, "sim.log"));
+
+    Link(caller, 1, "then", 2, "in");
+    Link(caller, 3, "value", 2, "amount");
+    Link(caller, 2, "then", 4, "in");
+    Link(caller, 2, "scaled", 4, "message");
+
+    CompileOptions options;
+    options.library = &library;
+    const CompileResult result = CompileGraph(caller, "caller.simgraph", options);
+    INFO(FirstError(result));
+    REQUIRE(result.ok);
+
+    // Subgraph menjadi sebuah fungsi Lua, bukan salinan node yang ditempel di
+    // tengah handler: satu definisi, berapa pun kali dipanggil.
+    CHECK(result.lua.find("local function sub_skala_1(self, amount)") != std::string::npos);
+    CHECK(result.lua.find("sub_skala_1(self,") != std::string::npos);
+
+    // Rujukannya dilaporkan supaya cache tahu kapan hasil ini menjadi usang.
+    REQUIRE(result.referencedGraphs.size() == 1);
+    CHECK(result.referencedGraphs[0] == templateGuid);
+
+    // Dan yang terpenting: hasilnya benar-benar berjalan.
+    ScriptRuntime runtime;
+    scene::World world;
+    REQUIRE(runtime.Initialize(world, nullptr));
+    const EvalResult run =
+        runtime.Evaluate("local g = (function()\n" + result.lua + "end)()\n" +
+                         "g.state = {} g.props = { speed = 21 } g.entity = 0\n"
+                         "kHasil = nil\n"
+                         "local log = sim.log\n"
+                         "sim.log = function(m) kHasil = m end\n"
+                         "g:OnStart()\n"
+                         "sim.log = log\n");
+    INFO(run.error);
+    REQUIRE(run.ok);
+    CHECK(runtime.Evaluate("kHasil").values.at(0).value == "42");
+}
+
+TEST_CASE("Subgraph yang sama dipanggil dua kali hanya didefinisikan sekali") {
+    scene::RegisterCoreComponents();
+    NodeCatalog::Rebuild();
+
+    const Uuid templateGuid = Id(500);
+    MemoryLibrary library;
+    library.Add(templateGuid, "Skala", ScaleSubgraph());
+
+    Graph caller;
+    caller.nodes.push_back(Node(1, "event.start"));
+    caller.nodes.push_back(Node(2, "graph.call"));
+    caller.nodes.back().settings["graph"] = templateGuid.ToString();
+    caller.nodes.push_back(Node(3, "graph.call"));
+    caller.nodes.back().settings["graph"] = templateGuid.ToString();
+    Link(caller, 1, "then", 2, "in");
+    Link(caller, 2, "then", 3, "in");
+
+    CompileOptions options;
+    options.library = &library;
+    const CompileResult result = CompileGraph(caller, "caller.simgraph", options);
+    INFO(FirstError(result));
+    REQUIRE(result.ok);
+
+    // Definisinya satu, panggilannya dua. Menempelkan salinan node akan
+    // menggandakan kodenya dan membuat memperbaiki template tidak ada gunanya.
+    const std::string definition = "local function sub_skala_1";
+    CHECK(result.lua.find(definition) == result.lua.rfind(definition));
+    CHECK(result.referencedGraphs.size() == 1);
+}
+
+TEST_CASE("Lingkar antar-graph ditolak, bukan ditelusuri selamanya") {
+    scene::RegisterCoreComponents();
+    NodeCatalog::Rebuild();
+
+    const Uuid aGuid = Id(600);
+    const Uuid bGuid = Id(601);
+
+    Graph a;
+    a.inputs.push_back({"value", PinKind::Number, "0"});
+    a.nodes.push_back(Node(60, "graph.input"));
+    a.nodes.push_back(Node(61, "graph.call"));
+    a.nodes.back().settings["graph"] = bGuid.ToString();
+    Link(a, 60, "then", 61, "in");
+
+    Graph b;
+    b.inputs.push_back({"value", PinKind::Number, "0"});
+    b.nodes.push_back(Node(70, "graph.input"));
+    b.nodes.push_back(Node(71, "graph.call"));
+    b.nodes.back().settings["graph"] = aGuid.ToString();
+    Link(b, 70, "then", 71, "in");
+
+    MemoryLibrary library;
+    library.Add(aGuid, "A", a);
+    library.Add(bGuid, "B", b);
+
+    Graph caller;
+    caller.nodes.push_back(Node(1, "event.start"));
+    caller.nodes.push_back(Node(2, "graph.call"));
+    caller.nodes.back().settings["graph"] = aGuid.ToString();
+    Link(caller, 1, "then", 2, "in");
+
+    CompileOptions options;
+    options.library = &library;
+    const CompileResult result = CompileGraph(caller, "caller.simgraph", options);
+    // Yang penting bukan hanya bahwa ia gagal, tapi bahwa ia KEMBALI.
+    CHECK_FALSE(result.ok);
+    REQUIRE_FALSE(result.errors.empty());
+    const std::string message = FirstError(result);
+    CHECK(message.find("calls itself") != std::string::npos);
+}
+
+TEST_CASE("Subgraph menolak variabel dan node event") {
+    scene::RegisterCoreComponents();
+    NodeCatalog::Rebuild();
+
+    const Uuid guid = Id(700);
+
+    SUBCASE("variabel") {
+        Graph sub = ScaleSubgraph();
+        sub.variables.push_back({"n", PinKind::Number, "0", false});
+        MemoryLibrary library;
+        library.Add(guid, "Skala", sub);
+
+        Graph caller;
+        caller.nodes.push_back(Node(1, "event.start"));
+        caller.nodes.push_back(Node(2, "graph.call"));
+        caller.nodes.back().settings["graph"] = guid.ToString();
+        Link(caller, 1, "then", 2, "in");
+
+        CompileOptions options;
+        options.library = &library;
+        const CompileResult result = CompileGraph(caller, "caller.simgraph", options);
+        CHECK_FALSE(result.ok);
+        CHECK(FirstError(result).find("declares variables") != std::string::npos);
+    }
+
+    SUBCASE("node event") {
+        Graph sub = ScaleSubgraph();
+        sub.nodes.push_back(Node(59, "event.update"));
+        MemoryLibrary library;
+        library.Add(guid, "Skala", sub);
+
+        Graph caller;
+        caller.nodes.push_back(Node(1, "event.start"));
+        caller.nodes.push_back(Node(2, "graph.call"));
+        caller.nodes.back().settings["graph"] = guid.ToString();
+        Link(caller, 1, "then", 2, "in");
+
+        CompileOptions options;
+        options.library = &library;
+        const CompileResult result = CompileGraph(caller, "caller.simgraph", options);
+        CHECK_FALSE(result.ok);
+        CHECK(FirstError(result).find("event node") != std::string::npos);
+    }
+}
+
+TEST_CASE("Antarmuka subgraph bertahan lewat berkas") {
+    Graph sub = ScaleSubgraph();
+    const std::string text = SaveGraphToString(sub);
+
+    Graph loaded;
+    REQUIRE(LoadGraphFromString(loaded, text).ok);
+    CHECK(SaveGraphToString(loaded) == text);
+    REQUIRE(loaded.inputs.size() == 1);
+    CHECK(loaded.inputs[0].name == "amount");
+    CHECK(loaded.inputs[0].kind == PinKind::Number);
+    REQUIRE(loaded.outputs.size() == 1);
+    CHECK(loaded.outputs[0].name == "scaled");
+    CHECK(loaded.IsSubgraph());
+
+    // Graph biasa tidak menuliskan kedua daftar itu sama sekali, jadi berkas
+    // yang tidak memakai subgraph tidak ikut berubah bentuknya.
+    const std::string plain = SaveGraphToString(SpinGraph());
+    CHECK(plain.find("\"inputs\"") == std::string::npos);
+    CHECK(plain.find("\"outputs\"") == std::string::npos);
 }
 
 TEST_CASE("Koneksi yang menunjuk node yang hilang dibuang saat dimuat") {
@@ -345,6 +579,68 @@ TEST_CASE("Level yang memakai graph dimuat tanpa mengompilasi ulang") {
     const std::string lua((std::istreambuf_iterator<char>(stream)),
                           std::istreambuf_iterator<char>());
     CHECK(lua.find("speed = 9.5,") != std::string::npos);
+}
+
+TEST_CASE("Menyunting template membuat hasil kompilasi pemakainya usang") {
+    scene::RegisterCoreComponents();
+    NodeCatalog::Rebuild();
+
+    TempDir assetsDir;
+    TempDir cacheDir;
+    const std::filesystem::path subPath = assetsDir.path / "Skala.simgraph";
+    const std::filesystem::path mainPath = assetsDir.path / "Main.simgraph";
+    const Uuid subGuid = Id(800);
+    const Uuid mainGuid = Id(801);
+
+    REQUIRE(SaveGraphToFile(ScaleSubgraph(), subPath).ok);
+
+    Graph main;
+    main.nodes.push_back(Node(1, "event.start"));
+    main.nodes.push_back(Node(2, "graph.call"));
+    main.nodes.back().settings["graph"] = subGuid.ToString();
+    main.nodes.back().pinValues["amount"] = "10";
+    main.nodes.push_back(Node(3, "sim.log"));
+    Link(main, 1, "then", 2, "in");
+    Link(main, 2, "then", 3, "in");
+    Link(main, 2, "scaled", 3, "message");
+    REQUIRE(SaveGraphToFile(main, mainPath).ok);
+
+    GraphCache cache;
+    cache.Initialize(cacheDir.path);
+    cache.SetSourceResolver([&](const Uuid& guid) -> std::filesystem::path {
+        if (guid == subGuid) {
+            return subPath;
+        }
+        return guid == mainGuid ? mainPath : std::filesystem::path{};
+    });
+
+    const std::filesystem::path output = cache.EnsureCompiled(mainGuid, mainPath);
+    REQUIRE_FALSE(output.empty());
+    const auto readAll = [](const std::filesystem::path& path) {
+        std::ifstream stream(path);
+        return std::string((std::istreambuf_iterator<char>(stream)),
+                           std::istreambuf_iterator<char>());
+    };
+    CHECK(readAll(output).find("amount * 2") != std::string::npos);
+
+    // Memanggil ulang tanpa perubahan tidak mengompilasi apa pun.
+    const auto compiledAt = std::filesystem::last_write_time(output);
+    CHECK(cache.EnsureCompiled(mainGuid, mainPath) == output);
+    CHECK(std::filesystem::last_write_time(output) == compiledAt);
+
+    // Templatenya disunting — dan HANYA templatenya. Main tidak disentuh.
+    Graph edited = ScaleSubgraph();
+    edited.nodes[1].pinValues["b"] = "3";
+    REQUIRE(SaveGraphToFile(edited, subPath).ok);
+    std::filesystem::last_write_time(subPath, compiledAt + std::chrono::seconds(2));
+
+    // Inilah yang membuat "reusable" berarti sesuatu: memperbaiki template
+    // memperbaiki setiap pemakainya. Membandingkan waktu ubah berkas Main saja
+    // akan membuatnya menjalankan hasil kompilasi lama tanpa satu pun tanda.
+    REQUIRE_FALSE(cache.EnsureCompiled(mainGuid, mainPath).empty());
+    const std::string after = readAll(output);
+    CHECK(after.find("amount * 3") != std::string::npos);
+    CHECK(after.find("amount * 2") == std::string::npos);
 }
 
 TEST_CASE("Kompilasi yang gagal tidak menimpa hasil yang masih baik") {

@@ -3,7 +3,10 @@
 #include "Sim/Core/Uuid.h"
 #include "Sim/Script/GraphCompiler.h"
 
+#include "Sim/Script/Graph.h"
+
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -28,9 +31,17 @@ namespace sim::script {
 /// yang dilihat pengguna di panel "Compiled Lua" berasal dari fungsi yang sama
 /// persis. Hasil yang berbeda antara editor dan runtime adalah kelas bug yang
 /// tidak boleh dibuka.
-class GraphCache {
+class GraphCache final : public GraphLibrary {
 public:
     void Initialize(std::filesystem::path directory);
+
+    /// Cara menemukan berkas `.simgraph` dari GUID-nya. Diisi editor dari
+    /// AssetDatabase; tanpa ini, graph tidak bisa memanggil graph lain.
+    void SetSourceResolver(std::function<std::filesystem::path(const Uuid&)> resolver);
+
+    // --- GraphLibrary ---
+    const Graph* Find(const Uuid& guid) const override;
+    std::string NameOf(const Uuid& guid) const override;
 
     /// Berkas `.lua` untuk sebuah graph, dikompilasi ulang bila sudah usang.
     ///
@@ -66,10 +77,24 @@ public:
 private:
     std::filesystem::path PathFor(const Uuid& guid) const;
     std::filesystem::path Compile(const Uuid& guid, const std::filesystem::path& source);
+    /// Waktu ubah terbaru di antara sebuah graph dan seluruh graph yang
+    /// dipanggilnya, langsung maupun tidak langsung.
+    ///
+    /// Menyunting sebuah template harus membuat setiap pemakainya ikut usang.
+    /// Membandingkan berkasnya sendiri saja akan membuat pemakainya menjalankan
+    /// hasil kompilasi lama — dan perbedaan antara yang dilihat di editor dan
+    /// yang berjalan saat Play adalah kelas bug yang paling mahal di sini.
+    std::filesystem::file_time_type NewestSourceTime(const Uuid& guid,
+                                                     const std::filesystem::path& source,
+                                                     std::vector<Uuid>& seen) const;
 
     std::filesystem::path directory_;
+    std::function<std::filesystem::path(const Uuid&)> sourceResolver_;
     std::unordered_map<Uuid, CompileResult> results_;
     std::unordered_map<Uuid, std::vector<Uuid>> breakpoints_;
+    /// Graph yang sudah diurai, supaya memanggil graph yang sama dari beberapa
+    /// tempat tidak membaca berkasnya berulang kali.
+    mutable std::unordered_map<Uuid, Graph> parsed_;
 };
 
 }  // namespace sim::script

@@ -15,10 +15,11 @@ namespace sim::script {
 ///
 /// Riwayat:
 ///   1 — bentuk awal: node, link, dan variabel
+///   2 — antarmuka subgraph: daftar `inputs` dan `outputs`
 ///
 /// Naikkan setiap kali bentuk data berubah. Berkas lama harus tetap bisa
 /// dibuka: graph adalah hasil kerja pengguna, bukan artefak build.
-inline constexpr int kGraphSchemaVersion = 1;
+inline constexpr int kGraphSchemaVersion = 2;
 
 /// Jenis data yang mengalir lewat sebuah pin.
 ///
@@ -108,7 +109,23 @@ struct GraphVariable {
     bool exposed = false;
 };
 
+/// Satu pin di **antarmuka** sebuah graph — parameter masuk atau hasil keluar.
+///
+/// Inilah yang membuat sebuah graph bisa dipakai ulang sebagai satu node di
+/// graph lain: yang dilihat pemanggil hanya daftar ini, bukan isi graph-nya.
+struct GraphPort {
+    std::string name;
+    PinKind kind = PinKind::Number;
+    /// Literal Lua yang dipakai pemanggil bila pin ini dibiarkan kosong.
+    /// Hanya berarti untuk parameter masuk.
+    std::string defaultValue;
+};
+
 struct Graph {
+    /// Parameter dan hasil, bila graph ini dipakai sebagai subgraph. Kosong
+    /// berarti ia graph biasa yang berjalan lewat node event.
+    std::vector<GraphPort> inputs;
+    std::vector<GraphPort> outputs;
     std::vector<GraphNode> nodes;
     std::vector<GraphLink> links;
     std::vector<GraphVariable> variables;
@@ -123,6 +140,26 @@ struct Graph {
     /// Seluruh link yang berangkat dari pin output tertentu. Pin output boleh
     /// bercabang ke banyak tujuan.
     std::vector<const GraphLink*> LinksFrom(const Uuid& node, std::string_view pin) const;
+
+    /// Graph ini dimaksudkan sebagai subgraph — ia punya antarmuka, jadi ia
+    /// berjalan ketika dipanggil, bukan ketika sebuah event menyala.
+    bool IsSubgraph() const { return !inputs.empty() || !outputs.empty(); }
+};
+
+/// Sumber graph lain yang dirujuk node `graph.call`.
+///
+/// Antarmuka, bukan pointer ke AssetDatabase: modul Script tidak boleh
+/// bergantung pada bagaimana editor menyimpan aset, dan test harus bisa
+/// menyediakan graph-nya dari memori tanpa satu berkas pun di disk.
+class GraphLibrary {
+public:
+    virtual ~GraphLibrary() = default;
+
+    /// Graph yang dirujuk GUID tertentu, atau null bila tidak ada.
+    virtual const Graph* Find(const Uuid& guid) const = 0;
+
+    /// Nama yang bisa dibaca manusia, untuk pesan kesalahan.
+    virtual std::string NameOf(const Uuid& guid) const = 0;
 };
 
 struct GraphIoResult {

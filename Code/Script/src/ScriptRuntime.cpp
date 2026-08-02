@@ -305,6 +305,17 @@ bool ScriptRuntime::Initialize(scene::World& world, assets::AssetDatabase* asset
     assets_ = assets;
     if (!graphCacheDir.empty()) {
         graphs_.Initialize(std::move(graphCacheDir));
+        // Cache-lah yang menjawab "graph mana yang dirujuk GUID ini" saat
+        // sebuah graph memanggil graph lain. Jalannya lewat AssetDatabase,
+        // sumber kebenaran yang sama dengan yang dipakai seluruh editor.
+        graphs_.SetSourceResolver([this](const Uuid& guid) -> std::filesystem::path {
+            if (assets_ == nullptr) {
+                return {};
+            }
+            const assets::AssetRecord* record = assets_->Find(guid);
+            return record == nullptr ? std::filesystem::path{}
+                                     : assets_->AbsolutePath(*record);
+        });
     }
     if (!vm_->Initialize()) {
         return false;
