@@ -340,3 +340,31 @@ TEST_CASE("Project bolak-balik lewat berkas") {
 
     std::filesystem::remove_all(dir);
 }
+
+TEST_CASE("properti terekspos script ikut tersimpan bersama level") {
+    World world;
+    const Entity entity = world.Create("Turret");
+    auto& component = world.Add<ScriptComponent>(entity);
+    component.script = AssetRef{Uuid::Generate()};
+    component.properties = {
+        {"speed", ScriptPropertyKind::Number, 9.0f, false, {}},
+        {"loop", ScriptPropertyKind::Bool, 0.0f, true, {}},
+        {"label", ScriptPropertyKind::Text, 0.0f, false, "patrol"},
+    };
+
+    const std::string text = SaveLevelToString(world);
+    World reloaded;
+    REQUIRE(LoadLevelFromString(reloaded, text).ok);
+
+    const Entity restored = reloaded.FindByGuid(world.GuidOf(entity));
+    REQUIRE(reloaded.IsAlive(restored));
+    const auto* after = reloaded.TryGet<ScriptComponent>(restored);
+    REQUIRE(after != nullptr);
+    REQUIRE(after->properties.size() == 3);
+    // Urutannya ikut dipertahankan: ia menentukan susunan di Inspector.
+    CHECK(after->properties[0].name == "speed");
+    CHECK(after->properties[0].number == doctest::Approx(9.0f));
+    CHECK(after->properties[1].kind == ScriptPropertyKind::Bool);
+    CHECK(after->properties[1].flag);
+    CHECK(after->properties[2].text == "patrol");
+}

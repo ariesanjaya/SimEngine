@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Sim/Core/Uuid.h"
+#include "Sim/Scene/Components.h"
 #include "Sim/Scene/World.h"
 
 #include <functional>
@@ -85,6 +86,18 @@ public:
     /// Nama yang berawalan `prefix`, untuk Tab di konsol. `prefix` boleh memuat
     /// titik: `sim.g` mencari di dalam tabel `sim`.
     std::vector<std::string> Complete(std::string_view prefix);
+
+    /// Properti yang dideklarasikan sebuah berkas skrip, beserta nilai bawaannya.
+    ///
+    /// Berkasnya dijalankan untuk membacanya — sebuah deklarasi `properties`
+    /// adalah tabel Lua biasa, dan tidak ada cara jujur membacanya tanpa
+    /// menjalankan berkasnya. Karena itu berkas skrip tidak boleh punya efek
+    /// samping di tingkat atas; yang berjalan saat Play adalah OnStart, bukan
+    /// badan berkasnya.
+    ///
+    /// Kosong bila berkasnya tidak ada, gagal dimuat, atau tidak
+    /// mendeklarasikan apa pun.
+    std::vector<scene::ScriptProperty> DeclaredProperties(const Uuid& scriptGuid);
 
     LuaVM& VM() { return *vm_; }
 

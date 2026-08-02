@@ -8,14 +8,21 @@
 #include "Sim/Editor/SceneCommands.h"
 #include "Sim/Editor/Selection.h"
 #include "Sim/Editor/Widgets.h"
+#include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Scene/ComponentRegistry.h"
 #include "Sim/Scene/Serialization.h"
 #include "Sim/Scene/World.h"
 
+#if SIM_WITH_LUA
+#include "Sim/Script/ScriptRuntime.h"
+#endif
+
 #include <imgui.h>
 
 #include <algorithm>
+#include <array>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -206,7 +213,12 @@ private:
             DrawComponentMenu(context, world, entities, ops, items);
 
             if (open) {
-                const PropertyGridResult result = DrawProperties(*ops.type, data, mixed);
+                PropertyGridResult result = DrawProperties(*ops.type, data, mixed);
+                if (ops.type->name == "Script") {
+                    const PropertyGridResult exposed = DrawExposedProperties(context, data);
+                    result.edited = result.edited || exposed.edited;
+                    result.finished = result.finished || exposed.finished;
+                }
 
                 if (result.edited && context.history != nullptr) {
                     ApplyEdit(context, world, ops, items, data);
@@ -218,6 +230,121 @@ private:
             ImGui::PopID();
         }
     }
+
+    /// Properti yang diekspos berkas skrip yang sedang dirujuk.
+    ///
+    /// Digambar di sini dan bukan lewat grid generik karena bentuknya bukan
+    /// milik pengguna: daftar ini ditentukan berkas skrip, dan tombol
+    /// tambah/hapus elemen — yang akan muncul sendiri untuk sebuah field vektor —
+    /// menjanjikan sesuatu yang tidak berlaku.
+    ///
+    /// Suntingannya menumpang jalur yang sama dengan field biasa: widget
+    /// menyentuh komponennya langsung, lalu DrawComponents yang membandingkan
+    /// dengan cuplikan sebelum-gambar dan menerbitkan satu command. Undo dan
+    /// multi-select karena itu berlaku tanpa kode tambahan.
+    PropertyGridResult DrawExposedProperties(EditorContext& context, void* data) {
+        PropertyGridResult result;
+#if SIM_WITH_LUA
+        auto* component = static_cast<scene::ScriptComponent*>(data);
+        if (context.scripts == nullptr || !component->script.IsValid()) {
+            return result;
+        }
+        SyncWithDeclaration(context, *component);
+        if (component->properties.empty()) {
+            return result;
+        }
+
+        ImGui::SeparatorText("Exposed");
+        for (scene::ScriptProperty& property : component->properties) {
+            ImGui::PushID(property.name.c_str());
+            ImGui::TextUnformatted(property.name.c_str());
+            ImGui::SameLine(ImGui::GetFontSize() * 9.0f);
+            ImGui::SetNextItemWidth(-1.0f);
+            switch (property.kind) {
+                case scene::ScriptPropertyKind::Bool:
+                    result.edited |= ImGui::Checkbox("##value", &property.flag);
+                    break;
+                case scene::ScriptPropertyKind::Text: {
+                    // Buffer sementara: InputText butuh penyangga yang bisa
+                    // ditulisi, dan std::string tidak menyediakannya tanpa
+                    // callback resize.
+                    std::array<char, 256> buffer{};
+                    const std::size_t length =
+                        std::min(property.text.size(), buffer.size() - 1);
+                    std::copy_n(property.text.begin(), length, buffer.begin());
+                    if (ImGui::InputText("##value", buffer.data(), buffer.size())) {
+                        property.text = buffer.data();
+                        result.edited = true;
+                    }
+                    break;
+                }
+                case scene::ScriptPropertyKind::Number:
+                    result.edited |= ImGui::DragFloat("##value", &property.number, 0.01f);
+                    break;
+            }
+            result.finished |= ImGui::IsItemDeactivatedAfterEdit();
+            ImGui::PopID();
+        }
+#else
+        (void)context;
+        (void)data;
+#endif
+        return result;
+    }
+
+#if SIM_WITH_LUA
+    /// Menyesuaikan daftar properti komponen dengan deklarasi skripnya:
+    /// yang hilang dibuang, yang baru diambil beserta bawaannya, dan yang
+    /// namanya masih ada mempertahankan nilai yang sudah disunting.
+    ///
+    /// Diterapkan langsung ke komponen tanpa melewati command, dengan sengaja.
+    /// Mengadopsi deklarasi skrip bukan suntingan pengguna — memperlakukannya
+    /// sebagai suntingan akan menaruh entri undo di riwayat hanya karena sebuah
+    /// entity kebetulan dipilih.
+    void SyncWithDeclaration(EditorContext& context, scene::ScriptComponent& component) {
+        const uint64_t version = context.assets != nullptr ? context.assets->Version() : 0;
+        if (version != declarationVersion_) {
+            // Berkas skripnya mungkin berubah. Menjalankan ulang chunk-nya tiap
+            // frame hanya untuk membaca tabel yang sama adalah pemborosan yang
+            // tidak terlihat sampai ada seratus entity berskrip.
+            declarations_.clear();
+            declarationVersion_ = version;
+        }
+        auto it = declarations_.find(component.script.guid);
+        if (it == declarations_.end()) {
+            it = declarations_
+                     .emplace(component.script.guid,
+                              context.scripts->DeclaredProperties(component.script.guid))
+                     .first;
+        }
+
+        std::vector<scene::ScriptProperty> merged;
+        merged.reserve(it->second.size());
+        for (const scene::ScriptProperty& declared : it->second) {
+            const auto stored =
+                std::find_if(component.properties.begin(), component.properties.end(),
+                             [&](const scene::ScriptProperty& candidate) {
+                                 return candidate.name == declared.name;
+                             });
+            // Tipe yang berganti di skrip mengalahkan nilai tersimpan: sebuah
+            // angka yang menjadi teks tidak punya nilai lama yang masuk akal.
+            merged.push_back(stored != component.properties.end() && stored->kind == declared.kind
+                                 ? *stored
+                                 : declared);
+        }
+        if (merged.size() != component.properties.size() ||
+            !std::equal(merged.begin(), merged.end(), component.properties.begin(),
+                        [](const scene::ScriptProperty& a, const scene::ScriptProperty& b) {
+                            return a.name == b.name && a.kind == b.kind && a.number == b.number &&
+                                   a.flag == b.flag && a.text == b.text;
+                        })) {
+            component.properties = std::move(merged);
+        }
+    }
+
+    std::unordered_map<Uuid, std::vector<scene::ScriptProperty>> declarations_;
+    uint64_t declarationVersion_ = 0;
+#endif
 
     /// Field yang nilainya tidak seragam di seluruh seleksi.
     static std::vector<std::string> MixedFields(

@@ -92,11 +92,41 @@ enum class LightType : uint8_t {
 ///
 /// Rujukannya AssetRef, sama seperti mesh dan material: mengganti nama berkas
 /// skrip tidak boleh memutus entity mana pun.
+enum class ScriptPropertyKind : uint8_t {
+    Number = 0,
+    Bool = 1,
+    Text = 2,
+};
+
+/// Satu properti yang diekspos sebuah skrip ke Inspector.
+///
+/// Ketiga nilainya disimpan berdampingan alih-alih dalam union: komponen ini
+/// diserialisasi lewat reflection, dan reflection tidak punya cara menyatakan
+/// "field mana yang sah tergantung field lain". Biayanya beberapa byte per
+/// properti; imbalannya adalah properti yang tipenya berubah di skrip tidak
+/// kehilangan nilai lamanya begitu saja ketika pengguna mengembalikannya.
+struct ScriptProperty {
+    std::string name;
+    ScriptPropertyKind kind = ScriptPropertyKind::Number;
+    float number = 0.0f;
+    bool flag = false;
+    std::string text;
+};
+
 struct ScriptComponent {
     AssetRef script;
     /// True saat skripnya sudah dimuat dan siap dipanggil. Diisi runtime, bukan
     /// pengguna — karena itu ditandai ReadOnly di Inspector.
     bool loaded = false;
+
+    /// Nilai properti yang diekspos skrip. Yang tersimpan di sini adalah nilai
+    /// untuk entity INI; bawaannya tetap tinggal di berkas skrip. Karena itu
+    /// mengubah bawaan di skrip tidak menyentuh entity yang sudah punya nilai
+    /// sendiri, dan entity yang belum pernah disunting ikut berubah.
+    ///
+    /// Digambar Inspector secara khusus, bukan lewat grid generik — daftar
+    /// struct yang bisa ditambah-kurangi bukan yang dibutuhkan di sini.
+    std::vector<ScriptProperty> properties;
 };
 
 struct LightComponent {

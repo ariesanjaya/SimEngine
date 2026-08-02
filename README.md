@@ -131,10 +131,26 @@ dihitung dan langsung ditulis kembali — tidak ada tipe kedua yang harus
 dikonversi bolak-balik di perbatasan.
 
 ```lua
-local t = sim.get_component(self.entity, "Transform")
-t.rotation = sim.axis_angle(sim.up(), sim.time() * 1.5)
-sim.set_component(self.entity, "Transform", t)
+local Spin = {}
+
+-- Muncul di Inspector. Tipenya disimpulkan dari nilai bawaannya, jadi tidak
+-- ada tipe yang dituliskan dua kali dan bisa bertentangan.
+Spin.properties = { speed = 1.5, clockwise = true, label = "spinner" }
+
+function Spin:OnUpdate(dt)
+    local t = sim.get_component(self.entity, "Transform")
+    t.rotation = sim.axis_angle(sim.up(), sim.time() * self.props.speed)
+    sim.set_component(self.entity, "Transform", t)
+end
+
+return Spin
 ```
+
+Yang tersimpan di entity hanyalah properti yang **benar-benar disunting**;
+sisanya membaca bawaan dari berkas skrip. Karena itu mengubah bawaan di skrip
+ikut berlaku untuk entity yang belum pernah disentuh, tanpa menyentuh yang sudah
+disesuaikan. Menyuntingnya bisa di-undo, berlaku untuk seluruh seleksi, dan ikut
+tersimpan ke berkas level.
 
 ### Kunci laju frame
 

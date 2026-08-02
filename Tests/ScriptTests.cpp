@@ -255,3 +255,78 @@ TEST_CASE("Pustaka vec3 dan quat bekerja pada tabel yang sama dengan komponen") 
     // kembali ke komponen tanpa konversi.
     CHECK(eval("sim.vec3(1, 2, 3).y") == "2");
 }
+
+TEST_CASE("Properti yang diekspos skrip terbaca, dan nilai entity menimpa bawaannya") {
+    TempScriptDir temp;
+    WriteScript(temp.path / "turret.lua",
+                "local T = {}\n"
+                "T.properties = { speed = 1.5, loop = true, label = \"idle\" }\n"
+                "function T:OnStart()\n"
+                "  kSpeed, kLoop, kLabel = self.props.speed, self.props.loop, self.props.label\n"
+                "end\n"
+                "return T\n");
+
+    sim::TaskPool pool(2);
+    sim::assets::AssetDatabase db;
+    REQUIRE(db.Initialize({temp.path, &pool, 0.05f}));
+    const sim::assets::AssetRecord* record = db.FindByRelativePath("turret.lua");
+    REQUIRE(record != nullptr);
+
+    sim::scene::World world;
+    const sim::scene::Entity entity = world.Create("Turret");
+    auto& component = world.Add<sim::scene::ScriptComponent>(entity);
+    component.script = sim::AssetRef{record->guid};
+
+    sim::script::ScriptRuntime runtime;
+    REQUIRE(runtime.Initialize(world, &db));
+
+    // Tipe disimpulkan dari nilai bawaannya, dan daftarnya diurutkan supaya
+    // Inspector tidak berganti susunan tiap kali skripnya dimuat ulang.
+    const std::vector<sim::scene::ScriptProperty> declared =
+        runtime.DeclaredProperties(record->guid);
+    REQUIRE(declared.size() == 3);
+    CHECK(declared[0].name == "label");
+    CHECK(declared[0].kind == sim::scene::ScriptPropertyKind::Text);
+    CHECK(declared[1].name == "loop");
+    CHECK(declared[1].kind == sim::scene::ScriptPropertyKind::Bool);
+    CHECK(declared[2].name == "speed");
+    CHECK(declared[2].kind == sim::scene::ScriptPropertyKind::Number);
+    CHECK(declared[2].number == doctest::Approx(1.5f));
+
+    // Entity ini menyimpan nilainya sendiri untuk satu properti saja.
+    sim::scene::ScriptProperty override;
+    override.name = "speed";
+    override.kind = sim::scene::ScriptPropertyKind::Number;
+    override.number = 9.0f;
+    world.TryGet<sim::scene::ScriptComponent>(entity)->properties = {override};
+
+    runtime.Start();
+
+    // Yang disunting memakai nilai entity; yang tidak disunting tetap memakai
+    // bawaan dari berkas skrip — itulah yang membuat mengubah bawaan di skrip
+    // ikut berlaku untuk entity yang belum pernah disentuh.
+    CHECK(runtime.Evaluate("kSpeed").values.at(0).value == "9.0");
+    CHECK(runtime.Evaluate("kLoop").values.at(0).value == "true");
+    CHECK(runtime.Evaluate("kLabel").values.at(0).value == "idle");
+
+    runtime.Stop();
+}
+
+TEST_CASE("Skrip tanpa deklarasi properties tidak menghasilkan apa-apa") {
+    TempScriptDir temp;
+    WriteScript(temp.path / "plain.lua", "return { properties = 5 }\n");
+
+    sim::TaskPool pool(2);
+    sim::assets::AssetDatabase db;
+    REQUIRE(db.Initialize({temp.path, &pool, 0.05f}));
+    const sim::assets::AssetRecord* record = db.FindByRelativePath("plain.lua");
+    REQUIRE(record != nullptr);
+
+    sim::scene::World world;
+    sim::script::ScriptRuntime runtime;
+    REQUIRE(runtime.Initialize(world, &db));
+
+    // `properties` yang bukan tabel diabaikan, bukan membuat runtime gagal.
+    CHECK(runtime.DeclaredProperties(record->guid).empty());
+    CHECK(runtime.DeclaredProperties(sim::Uuid::Generate()).empty());
+}

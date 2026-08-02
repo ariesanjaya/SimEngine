@@ -130,6 +130,62 @@ void LuaToField(const sol::object& value, const FieldDesc& field, void* data) {
     }
 }
 
+/// Membaca deklarasi `properties` sebuah skrip menjadi daftar C++.
+///
+/// Tipenya disimpulkan dari nilai bawaannya, bukan dituliskan terpisah.
+/// `properties = { speed = 1.5, loop = true }` sudah memuat keduanya, dan
+/// menuntut pengguna mengulang tipe di sebelah nilainya hanya membuka jalan
+/// bagi keduanya untuk bertentangan.
+std::vector<scene::ScriptProperty> ReadDeclaration(const sol::table& table) {
+    std::vector<scene::ScriptProperty> result;
+    const sol::object declared = table["properties"];
+    if (!declared.valid() || declared.get_type() != sol::type::table) {
+        return result;
+    }
+    for (const auto& [key, value] : declared.as<sol::table>()) {
+        if (key.get_type() != sol::type::string) {
+            continue;
+        }
+        scene::ScriptProperty property;
+        property.name = key.as<std::string>();
+        switch (value.get_type()) {
+            case sol::type::boolean:
+                property.kind = scene::ScriptPropertyKind::Bool;
+                property.flag = value.as<bool>();
+                break;
+            case sol::type::number:
+                property.kind = scene::ScriptPropertyKind::Number;
+                property.number = value.as<float>();
+                break;
+            case sol::type::string:
+                property.kind = scene::ScriptPropertyKind::Text;
+                property.text = value.as<std::string>();
+                break;
+            // Fungsi, tabel bersarang, dan userdata tidak punya widget yang
+            // masuk akal di Inspector, jadi dilewati tanpa keluhan — skrip
+            // boleh menaruh apa pun di tabelnya sendiri.
+            default: continue;
+        }
+        result.push_back(std::move(property));
+    }
+    // Urutan iterasi tabel Lua tidak ditentukan. Tanpa pengurutan, daftar di
+    // Inspector berganti susunan setiap kali skripnya dimuat ulang.
+    std::sort(result.begin(), result.end(),
+              [](const scene::ScriptProperty& a, const scene::ScriptProperty& b) {
+                  return a.name < b.name;
+              });
+    return result;
+}
+
+sol::object ToLuaValue(sol::state& lua, const scene::ScriptProperty& property) {
+    switch (property.kind) {
+        case scene::ScriptPropertyKind::Bool: return sol::make_object(lua, property.flag);
+        case scene::ScriptPropertyKind::Text: return sol::make_object(lua, property.text);
+        case scene::ScriptPropertyKind::Number: break;
+    }
+    return sol::make_object(lua, property.number);
+}
+
 /// Pustaka matematika, ditulis dalam Lua dan bukan sebagai usertype C++.
 ///
 /// Alasannya bukan kemalasan. `sim.get_component` mengembalikan tabel biasa
@@ -376,7 +432,46 @@ void ScriptRuntime::LoadFor(scene::Entity entity, const Uuid& guid) {
     if (!instance->self["state"].valid()) {
         instance->self["state"] = lua.create_table();
     }
+
+    // `self.props` berisi nilai yang BERLAKU: bawaan dari deklarasi skrip,
+    // ditimpa nilai yang disimpan entity ini. Skrip membacanya tanpa perlu tahu
+    // mana yang datang dari mana — dan entity yang belum pernah disunting ikut
+    // berubah ketika bawaan di skripnya diubah.
+    sol::table props = lua.create_table();
+    for (const scene::ScriptProperty& declared : ReadDeclaration(instance->self)) {
+        props[declared.name] = ToLuaValue(lua, declared);
+    }
+    if (const auto* component = world_->TryGet<scene::ScriptComponent>(entity)) {
+        for (const scene::ScriptProperty& stored : component->properties) {
+            props[stored.name] = ToLuaValue(lua, stored);
+        }
+    }
+    instance->self["props"] = props;
+
     instances_.push_back(std::move(instance));
+}
+
+std::vector<scene::ScriptProperty> ScriptRuntime::DeclaredProperties(const Uuid& scriptGuid) {
+    if (assets_ == nullptr) {
+        return {};
+    }
+    const assets::AssetRecord* record = assets_->Find(scriptGuid);
+    if (record == nullptr) {
+        return {};
+    }
+    std::ifstream stream(assets_->AbsolutePath(*record));
+    if (!stream) {
+        return {};
+    }
+    std::ostringstream buffer;
+    buffer << stream.rdbuf();
+
+    const sol::protected_function_result loaded = vm_->State()->safe_script(
+        buffer.str(), sol::script_pass_on_error, "@" + record->relativePath);
+    if (!loaded.valid() || loaded.get_type() != sol::type::table) {
+        return {};
+    }
+    return ReadDeclaration(loaded);
 }
 
 void ScriptRuntime::Start() {

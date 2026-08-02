@@ -75,12 +75,29 @@ void RegisterCoreComponents() {
             .Range(-4.0f, 4.0f);
         components.Register<MeshRendererComponent>();
 
+        // Didaftarkan supaya vektornya di ScriptComponent bisa diserialisasi dan
+        // dibandingkan lewat jalur reflection yang sudah ada — termasuk diff
+        // per-field yang dipakai undo dan multi-select.
+        types.Type<ScriptProperty>("ScriptProperty")
+            .Field<&ScriptProperty::name>("name")
+            .Field<&ScriptProperty::kind>("kind")
+            .EnumNames({"Number", "Bool", "Text"})
+            .Field<&ScriptProperty::number>("number")
+            .Field<&ScriptProperty::flag>("flag")
+            .Field<&ScriptProperty::text>("text");
+
         types.Type<ScriptComponent>("Script")
             .Field<&ScriptComponent::script>("script")
             .Label("Script Asset")
             .Field<&ScriptComponent::loaded>("loaded")
             .Label("Loaded")
-            .ReadOnly();
+            .ReadOnly()
+            .Field<&ScriptComponent::properties>("properties")
+            // Disembunyikan dari grid generik: sebagai daftar struct yang bisa
+            // ditambah dan dikurangi sendiri, isinya justru menyesatkan —
+            // bentuknya ditentukan berkas skrip, bukan pengguna. Inspector
+            // menggambarnya sebagai baris bertipe di tempat lain.
+            .Hidden();
         components.Register<ScriptComponent>();
 
         types.Type<LightComponent>("Light")
