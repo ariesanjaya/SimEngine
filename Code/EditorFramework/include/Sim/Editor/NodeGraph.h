@@ -73,10 +73,16 @@ public:
 
     /// Percobaan koneksi baru oleh pengguna.
     ///
-    /// Dipanggil berulang sampai mengembalikan false. Untuk setiap percobaan,
-    /// pemanggil memutuskan sendiri sah atau tidak lewat AcceptLink()/RejectLink()
-    /// — di situlah pemeriksaan tipe pin dilakukan, dan karena itu koneksi yang
-    /// tidak masuk akal tidak pernah sempat terbentuk.
+    /// **QueryNewLink() dipanggil SEKALI per frame, bukan diulang.** Yang
+    /// dilaporkan adalah satu calon koneksi yang sedang ditahan pengguna, dan
+    /// jawabannya tidak berubah sampai frame berikutnya — menanyakannya di
+    /// dalam `while` berputar selamanya begitu kedua ujungnya sah. Perhatikan
+    /// bahwa QueryDeletedLink()/QueryDeletedNode() di bawah justru kebalikannya:
+    /// keduanya antrean yang memang harus dikuras.
+    ///
+    /// Pemanggil memutuskan sendiri sah atau tidak lewat AcceptLink()/
+    /// RejectLink() — di situlah pemeriksaan tipe pin dilakukan, dan karena itu
+    /// koneksi yang tidak masuk akal tidak pernah sempat terbentuk.
     bool BeginCreate();
     bool QueryNewLink(uint64_t& fromPin, uint64_t& toPin);
     /// True pada frame ketika pengguna melepas mouse untuk menerima koneksinya.
@@ -84,6 +90,8 @@ public:
     void RejectLink();
     void EndCreate();
 
+    /// Penghapusan yang diminta pengguna. Antrean: dipanggil berulang sampai
+    /// mengembalikan false — lihat catatan di QueryNewLink() untuk kontrasnya.
     bool BeginDelete();
     bool QueryDeletedLink(uint64_t& id);
     bool QueryDeletedNode(uint64_t& id);

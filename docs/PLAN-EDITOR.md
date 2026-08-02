@@ -736,7 +736,16 @@ ubah berkas, dengan handle lama tetap dipakai sampai gambar baru siap.
    Tabel pin sekarang memakai `SizingFixedFit` + `NoHostExtendX`; yang kedua
    perlu karena tanpa itu lebar *luar* tabel tetap mengambil ruang yang tersedia
    walau kolomnya sudah menyesuaikan isi.
-7. **Menggeser node tidak menandai graph kotor**, sehingga tata letak yang baru
+7. **Menanyakan koneksi baru di dalam `while` membekukan editor.** Percobaan
+   koneksi bukan antrean: pustaka melaporkan calon yang SAMA setiap kali
+   ditanya, jadi loop yang mengurasnya berputar selamanya begitu kedua ujung
+   kabel sah. Gejalanya jauh dari penyebabnya — yang terlihat pengguna adalah
+   editor yang membeku persis saat kabel dijatuhkan ke sebuah pin, yang mudah
+   dibaca sebagai "kabel tidak bisa digambar". Penghapusan justru kebalikannya:
+   ia memang antrean dan memang harus dikuras. Asimetri itu kini tertulis di
+   header pembungkusnya, karena tidak ada apa pun pada nama fungsinya yang
+   memberi petunjuk.
+8. **Menggeser node tidak menandai graph kotor**, sehingga tata letak yang baru
    diatur tidak bisa disimpan sama sekali — tombol Save tetap padam. Posisi kini
    mengalir balik dari kanvas ke model begitu node digeser, dengan ambang
    setengah piksel supaya pembulatan pustaka tidak menandai kotor pada frame

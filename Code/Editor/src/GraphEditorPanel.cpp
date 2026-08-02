@@ -520,50 +520,64 @@ private:
         }
         uint64_t fromPinId = 0;
         uint64_t toPinId = 0;
-        while (canvas_.QueryNewLink(fromPinId, toPinId)) {
-            const GraphPin* fromPin = nullptr;
-            const GraphPin* toPin = nullptr;
-            const GraphNode* fromNode = ResolvePin(fromPinId, fromPin);
-            const GraphNode* toNode = ResolvePin(toPinId, toPin);
-            if (fromNode == nullptr || toNode == nullptr) {
-                canvas_.RejectLink();
-                continue;
-            }
-            // Pengguna boleh menyeret dari arah mana saja; yang disimpan selalu
-            // keluaran → masukan.
-            if (fromPin->direction == PinDirection::Input) {
-                std::swap(fromNode, toNode);
-                std::swap(fromPin, toPin);
-            }
-            if (fromPin->direction != PinDirection::Output ||
-                toPin->direction != PinDirection::Input || fromNode == toNode ||
-                !PinAccepts(toPin->kind, fromPin->kind)) {
-                // Ditolak sebelum terbentuk, bukan dilaporkan setelahnya:
-                // koneksi yang tidak masuk akal tidak pernah sempat ada di
-                // berkas, jadi tidak ada keadaan rusak yang harus dibereskan.
-                canvas_.RejectLink();
-                continue;
-            }
-            if (!canvas_.AcceptLink()) {
-                continue;
-            }
-            // Pin masukan hanya boleh punya satu sumber: yang lama diputus.
-            const std::string toPinName = toPin->name;
-            const Uuid toGuid = toNode->guid;
-            const Uuid fromGuid = fromNode->guid;
-            const std::string fromPinName = fromPin->name;
-            RemoveLinkInto(toGuid, toPinName);
-
-            GraphLink link;
-            link.guid = Uuid::Generate();
-            link.fromNode = fromGuid;
-            link.fromPin = fromPinName;
-            link.toNode = toGuid;
-            link.toPin = toPinName;
-            graph_.links.push_back(std::move(link));
-            Touch();
+        // SEKALI per frame, bukan diulang sampai habis. Percobaan koneksi baru
+        // bukan antrean: pustaka melaporkan calon yang SAMA setiap kali
+        // ditanya, jadi menanyakannya di dalam `while` berputar selamanya
+        // begitu kedua ujungnya sah — dan yang terlihat pengguna adalah editor
+        // yang membeku persis saat kabel dijatuhkan ke sebuah pin.
+        //
+        // Berbeda dengan penghapusan di bawah, yang memang antrean dan memang
+        // harus dikuras.
+        if (canvas_.QueryNewLink(fromPinId, toPinId)) {
+            TryConnect(fromPinId, toPinId);
         }
         canvas_.EndCreate();
+    }
+
+    /// Menilai satu percobaan koneksi, lalu menerima atau menolaknya.
+    void TryConnect(uint64_t fromPinId, uint64_t toPinId) {
+        GraphPin fromPin;
+        GraphPin toPin;
+        // Pin dikembalikan BY VALUE. Versi sebelumnya meminjamkan pointer ke
+        // satu penyangga bersama, sehingga panggilan kedua menimpa isi yang
+        // ditunjuk hasil panggilan pertama — pin asal dinilai memakai data pin
+        // tujuan, dan koneksi yang sah bisa tertolak tanpa sebab yang terlihat.
+        const GraphNode* fromNode = ResolvePin(fromPinId, fromPin);
+        const GraphNode* toNode = ResolvePin(toPinId, toPin);
+        if (fromNode == nullptr || toNode == nullptr) {
+            canvas_.RejectLink();
+            return;
+        }
+        // Pengguna boleh menyeret dari arah mana saja; yang disimpan selalu
+        // keluaran → masukan.
+        if (fromPin.direction == PinDirection::Input) {
+            std::swap(fromNode, toNode);
+            std::swap(fromPin, toPin);
+        }
+        if (fromPin.direction != PinDirection::Output ||
+            toPin.direction != PinDirection::Input || fromNode == toNode ||
+            !PinAccepts(toPin.kind, fromPin.kind)) {
+            // Ditolak sebelum terbentuk, bukan dilaporkan setelahnya: koneksi
+            // yang tidak masuk akal tidak pernah sempat ada di berkas, jadi
+            // tidak ada keadaan rusak yang harus dibereskan.
+            canvas_.RejectLink();
+            return;
+        }
+        if (!canvas_.AcceptLink()) {
+            return;
+        }
+
+        // Pin masukan hanya boleh punya satu sumber: yang lama diputus.
+        RemoveLinkInto(toNode->guid, toPin.name);
+
+        GraphLink link;
+        link.guid = Uuid::Generate();
+        link.fromNode = fromNode->guid;
+        link.fromPin = fromPin.name;
+        link.toNode = toNode->guid;
+        link.toPin = toPin.name;
+        graph_.links.push_back(std::move(link));
+        Touch();
     }
 
     void HandleDelete() {
@@ -1157,7 +1171,8 @@ private:
         return it == guids_.end() ? nullptr : &it->second;
     }
 
-    const GraphNode* ResolvePin(uint64_t pinId, const GraphPin*& outPin) {
+    /// Node dan pin yang ditunjuk sebuah id pin. Null bila id-nya sudah basi.
+    const GraphNode* ResolvePin(uint64_t pinId, GraphPin& outPin) const {
         const Uuid* guid = GuidOf(NodeOfPin(pinId));
         if (guid == nullptr) {
             return nullptr;
@@ -1166,12 +1181,12 @@ private:
         if (node == nullptr) {
             return nullptr;
         }
-        pinScratch_ = PinsOf(graph_, *node);
+        const std::vector<GraphPin> pins = PinsOf(graph_, *node);
         const std::size_t index = PinIndexOf(pinId);
-        if (index >= pinScratch_.size()) {
+        if (index >= pins.size()) {
             return nullptr;
         }
-        outPin = &pinScratch_[index];
+        outPin = pins[index];
         return node;
     }
 
@@ -1202,9 +1217,6 @@ private:
     std::unordered_map<Uuid, Vec2> groupInset_;
     uint64_t nextId_ = 1;
 
-    /// Penyangga pin sementara; dipegang supaya pointer yang dikembalikan
-    /// ResolvePin tetap sah sampai pemanggilnya selesai.
-    std::vector<GraphPin> pinScratch_;
 
     /// Grup yang judulnya sedang disunting di kanvas, dan penyangganya.
     Uuid renamingNode_;
