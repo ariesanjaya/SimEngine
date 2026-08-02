@@ -2,6 +2,7 @@
 
 #include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Core/TaskPool.h"
+#include "Sim/Render/ThumbnailCache.h"
 #include "Sim/Editor/Actions.h"
 #include "Sim/Editor/Command.h"
 #include "Sim/Editor/EditorContext.h"
@@ -31,6 +32,11 @@ public:
         const FrameLimiter* frameLimiter = nullptr;
         float lockedFps = 60.0f;
         std::string frameLockReason;
+
+        // Dimiliki pemanggil, bukan EditorApp. Keduanya perlu dibuat di tempat
+        // yang boleh melihat RHI, dan EditorFramework bukan tempat itu.
+        TaskPool* tasks = nullptr;
+        render::IThumbnailCache* thumbnails = nullptr;
     };
 
     bool Initialize(const Config& config);
@@ -83,10 +89,6 @@ private:
     // menunjuk data milik panel — dihancurkan lebih dulu.
     PanelManager panels_;
     scene::World world_;
-    // Kolam dideklarasikan sebelum database supaya ia dihancurkan belakangan:
-    // database menjadwalkan tugas ke kolam ini, dan kolam yang mati lebih dulu
-    // akan meninggalkan tugas yang menunjuk objek yang sudah tiada.
-    TaskPool tasks_;
     assets::AssetDatabase assets_;
     CommandHistory history_;
     Selection selection_;

@@ -46,6 +46,7 @@ bool EditorApp::Initialize(const Config& config) {
     context_.notifications = &notifications_;
     context_.world = &world_;
     context_.viewportRenderer = config.viewportRenderer;
+    context_.thumbnails = config.thumbnails;
     context_.frameLimiter = config.frameLimiter;
     context_.lockedFps = config.lockedFps;
     context_.frameLockReason = config.frameLockReason;
@@ -53,7 +54,7 @@ bool EditorApp::Initialize(const Config& config) {
 
     // Folder aset untuk sementara berada di folder konfigurasi editor. Begitu
     // konsep proyek matang, akarnya pindah mengikuti project.simproj.
-    assets_.Initialize({configDir_ / "Assets", &tasks_, 1.0f});
+    assets_.Initialize({configDir_ / "Assets", config.tasks, 1.0f});
     context_.assets = &assets_;
 
     // PropertyGrid menampilkan nama aset, bukan GUID mentah, lewat kait ini.
@@ -464,6 +465,9 @@ void EditorApp::DrawFrame(float deltaSeconds) {
     // Mendahului panel: hasil pemindaian latar diterapkan di sini, sehingga
     // seluruh panel dalam frame ini melihat daftar aset yang sama.
     assets_.Update(deltaSeconds);
+    if (context_.thumbnails != nullptr) {
+        context_.thumbnails->Update();
+    }
 
     // Harus mendahului panel mana pun: Viewport memakai gizmo, dan keadaan
     // per-frame-nya hanya direset di sini.

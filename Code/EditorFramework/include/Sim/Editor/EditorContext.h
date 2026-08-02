@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Sim/Render/IViewportRenderer.h"
+#include "Sim/Render/ThumbnailCache.h"
 #include "Sim/Scene/World.h"
 
 #include <functional>
@@ -54,6 +55,8 @@ struct EditorContext {
     assets::AssetDatabase* assets = nullptr;
 
     render::IViewportRenderer* viewportRenderer = nullptr;
+    /// Pratinjau aset untuk Asset Browser. Dimiliki pemanggil EditorApp.
+    render::IThumbnailCache* thumbnails = nullptr;
     const FrameLimiter* frameLimiter = nullptr;
 
     /// Laju frame yang sedang dikunci, dan alasannya (monitor terlambat).

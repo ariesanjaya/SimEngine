@@ -306,17 +306,20 @@ private:
         ImGui::BeginGroup();
 
         const bool selected = selected_ == record.guid;
-        // Thumbnail gambar sungguhan menyusul bersama jalur unggah tekstur di
-        // RHI. Sampai saat itu, ikon per tipe sudah membedakan isi folder
-        // dengan cukup jelas untuk bekerja.
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+
+        // Selectable digambar lebih dulu supaya ia yang menerima klik dan
+        // seretan; gambarnya ditumpangkan setelahnya lewat drawlist. Urutan
+        // sebaliknya membuat thumbnail menutupi daerah kliknya sendiri.
         ImGui::PushFont(nullptr, thumbnailSize_ * 0.45f);
-        if (ImGui::Selectable(IconFor(record.type), selected,
-                              ImGuiSelectableFlags_AllowDoubleClick,
+        const char* label = HasPreview(context, record) ? "##thumb" : IconFor(record.type);
+        if (ImGui::Selectable(label, selected, ImGuiSelectableFlags_AllowDoubleClick,
                               ImVec2(thumbnailSize_, thumbnailSize_))) {
             selected_ = record.guid;
         }
         ImGui::PopFont();
 
+        DrawPreview(context, db, record, origin);
         HandleItemInteraction(context, db, record);
 
         if (renaming_ == record.guid) {
@@ -331,6 +334,56 @@ private:
 
         ImGui::EndGroup();
         ImGui::PopID();
+    }
+
+    /// True bila aset ini punya (atau akan punya) gambar pratinjau.
+    ///
+    /// Hanya tekstur. Meminta thumbnail untuk berkas 3,6 MB yang bukan gambar
+    /// berarti membaca dan mem-hash seluruh isinya di thread latar hanya untuk
+    /// menyimpulkan bahwa ia memang bukan gambar.
+    static bool HasPreview(const EditorContext& context, const AssetRecord& record) {
+        return context.thumbnails != nullptr && record.type == AssetType::Texture;
+    }
+
+    void DrawPreview(EditorContext& context, const assets::AssetDatabase& db,
+                     const AssetRecord& record, const ImVec2& origin) {
+        if (!HasPreview(context, record)) {
+            return;
+        }
+        const render::TextureHandle handle =
+            context.thumbnails->Request(record.guid, db.AbsolutePath(record));
+        if (handle == render::kInvalidTexture) {
+            // Belum siap: ikon tipe tetap digambar sebagai pengganti, sehingga
+            // grid tidak berkedip antara kosong dan terisi.
+            ImDrawList* draw = ImGui::GetWindowDrawList();
+            const ImVec2 centre(origin.x + thumbnailSize_ * 0.5f,
+                                origin.y + thumbnailSize_ * 0.5f);
+            const float glyphSize = thumbnailSize_ * 0.45f;
+            const ImVec2 extent =
+                ImGui::GetFont()->CalcTextSizeA(glyphSize, FLT_MAX, 0.0f, IconFor(record.type));
+            draw->AddText(ImGui::GetFont(), glyphSize,
+                          ImVec2(centre.x - extent.x * 0.5f, centre.y - extent.y * 0.5f),
+                          ImGui::GetColorU32(ImGuiCol_TextDisabled), IconFor(record.type));
+            return;
+        }
+
+        // Proporsi gambar dijaga di dalam sel persegi. Meregangkannya penuh
+        // membuat tekstur panjang tampak gepeng — persis ciri yang dipakai
+        // untuk mengenalinya sekilas.
+        const float aspect = record.height > 0 ? static_cast<float>(record.width) /
+                                                     static_cast<float>(record.height)
+                                               : 1.0f;
+        float width = thumbnailSize_;
+        float height = thumbnailSize_;
+        if (aspect > 1.0f) {
+            height = thumbnailSize_ / aspect;
+        } else if (aspect > 0.0f) {
+            width = thumbnailSize_ * aspect;
+        }
+        const ImVec2 min(origin.x + (thumbnailSize_ - width) * 0.5f,
+                         origin.y + (thumbnailSize_ - height) * 0.5f);
+        ImGui::GetWindowDrawList()->AddImage(static_cast<ImTextureID>(handle), min,
+                                            ImVec2(min.x + width, min.y + height));
     }
 
     void DrawListItem(EditorContext& context, assets::AssetDatabase& db,

@@ -3,6 +3,7 @@ sim_add_library(Assets
         src/AssetDatabase.cpp
         src/AssetTypes.cpp
         src/Importer.cpp
+        src/Thumbnail.cpp
     PUBLIC_DEPS
         Sim::Core
     # PRIVATE: header publik Assets tidak membocorkan stb maupun nlohmann,

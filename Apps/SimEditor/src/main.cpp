@@ -14,7 +14,9 @@
 #include "Sim/Platform/Window.h"
 #include "Sim/RHI/Device.h"
 #include "Sim/RHI/Swapchain.h"
+#include "Sim/Core/TaskPool.h"
 #include "Sim/Render/RendererFactory.h"
+#include "Sim/Render/ThumbnailCache.h"
 
 #if SIM_WITH_LUA
 #include "Sim/Script/LuaVM.h"
@@ -196,6 +198,13 @@ int main(int /*argc*/, char** /*argv*/) {
         return 1;
     }
 
+    // Kolam dan cache dideklarasikan di sini, sebelum EditorApp, supaya
+    // keduanya dihancurkan belakangan: editor menjadwalkan pekerjaan ke kolam
+    // dan meminta thumbnail dari cache sepanjang hidupnya.
+    TaskPool tasks;
+    std::unique_ptr<render::IThumbnailCache> thumbnails = render::CreateThumbnailCache(
+        device, imguiLayer.Textures(), tasks, configDir / "ThumbnailCache");
+
 #if SIM_WITH_LUA
     script::LuaVM lua;
     lua.Initialize();
@@ -213,6 +222,8 @@ int main(int /*argc*/, char** /*argv*/) {
     appConfig.frameLimiter = &frameLimiter;
     appConfig.lockedFps = frameLock.hz;
     appConfig.frameLockReason = frameLock.reason;
+    appConfig.tasks = &tasks;
+    appConfig.thumbnails = thumbnails.get();
     if (!app.Initialize(appConfig)) {
         return 1;
     }
