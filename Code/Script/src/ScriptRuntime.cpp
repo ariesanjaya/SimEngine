@@ -9,6 +9,7 @@
 
 #include <sol/sol.hpp>
 
+#include <algorithm>
 #include <fstream>
 #include <sstream>
 
@@ -382,8 +383,131 @@ void ScriptRuntime::Reload(const Uuid& scriptGuid) {
     SIM_INFO("Lua", "Reloaded {} script instance(s)", preserved.size());
 }
 
-std::string ScriptRuntime::Evaluate(std::string_view code) {
-    return vm_->RunString(code, "=(repl)");
+namespace {
+
+/// Kedalaman maksimum saat memecah tabel untuk ditampilkan.
+///
+/// Tabel Lua boleh menunjuk dirinya sendiri, dan tanpa batas ini mengetik `_G`
+/// di konsol akan berputar sampai kehabisan memori.
+constexpr int kMaxTableDepth = 3;
+
+/// Teks satu nilai Lua, menghormati metamethod __tostring.
+std::string ToDisplayString(lua_State* L, int index) {
+    const int absolute = lua_absindex(L, index);
+    const char* text = luaL_tolstring(L, absolute, nullptr);
+    std::string result = text != nullptr ? text : "nil";
+    lua_pop(L, 1);
+    return result;
+}
+
+EvalNode DescribeValue(const sol::object& value, std::string label, int depth) {
+    EvalNode node;
+    node.label = std::move(label);
+    lua_State* L = value.lua_state();
+    value.push();
+    node.value = ToDisplayString(L, -1);
+    lua_pop(L, 1);
+
+    if (value.get_type() != sol::type::table || depth >= kMaxTableDepth) {
+        return node;
+    }
+    const sol::table table = value.as<sol::table>();
+    for (const auto& [key, entry] : table) {
+        key.push();
+        std::string keyText = ToDisplayString(L, -1);
+        lua_pop(L, 1);
+        node.children.push_back(DescribeValue(entry, std::move(keyText), depth + 1));
+    }
+    // Urutan iterasi tabel Lua tidak ditentukan; tanpa pengurutan, isi tabel
+    // yang sama tampil berbeda tiap kali dievaluasi.
+    std::sort(node.children.begin(), node.children.end(),
+              [](const EvalNode& a, const EvalNode& b) { return a.label < b.label; });
+    return node;
+}
+
+}  // namespace
+
+EvalResult ScriptRuntime::Evaluate(std::string_view code) {
+    EvalResult result;
+    sol::state& lua = *vm_->State();
+
+    sol::load_result chunk = lua.load("return " + std::string(code), "=(repl)");
+    if (!chunk.valid()) {
+        // Bukan ekspresi. Kesalahan dari percobaan pertama sengaja dibuang:
+        // yang dilihat pengguna harus kesalahan kodenya sendiri, bukan
+        // kesalahan sintaks dari `return` yang kita sisipkan.
+        chunk = lua.load(code, "=(repl)");
+    }
+    if (!chunk.valid()) {
+        const sol::error error = chunk;
+        result.ok = false;
+        result.error = error.what();
+        return result;
+    }
+
+    const sol::protected_function function = chunk;
+    const sol::protected_function_result call = function();
+    if (!call.valid()) {
+        const sol::error error = call;
+        result.ok = false;
+        result.error = error.what();
+        return result;
+    }
+
+    const int count = call.return_count();
+    for (int i = 0; i < count; ++i) {
+        const sol::object value = call.get<sol::object>(i);
+        result.values.push_back(DescribeValue(value, {}, 0));
+    }
+    return result;
+}
+
+std::vector<std::string> ScriptRuntime::Complete(std::string_view prefix) {
+    std::vector<std::string> matches;
+    sol::state& lua = *vm_->State();
+
+    // Bagian sebelum titik terakhir menentukan tabel yang ditelusuri, sisanya
+    // adalah awalan yang dicocokkan.
+    const std::size_t dot = prefix.rfind('.');
+    std::string_view partial = prefix;
+    sol::table scope = lua.globals();
+    if (dot != std::string_view::npos) {
+        sol::object current = lua.globals();
+        std::string_view path = prefix.substr(0, dot);
+        partial = prefix.substr(dot + 1);
+        std::size_t start = 0;
+        while (start <= path.size()) {
+            const std::size_t next = path.find('.', start);
+            const std::string_view part =
+                path.substr(start, next == std::string_view::npos ? path.size() - start
+                                                                  : next - start);
+            if (current.get_type() != sol::type::table) {
+                return matches;
+            }
+            current = current.as<sol::table>()[std::string(part)];
+            if (next == std::string_view::npos) {
+                break;
+            }
+            start = next + 1;
+        }
+        if (current.get_type() != sol::type::table) {
+            return matches;
+        }
+        scope = current.as<sol::table>();
+    }
+
+    const std::string head(prefix.substr(0, prefix.size() - partial.size()));
+    for (const auto& [key, value] : scope) {
+        if (key.get_type() != sol::type::string) {
+            continue;
+        }
+        const std::string name = key.as<std::string>();
+        if (name.compare(0, partial.size(), partial) == 0) {
+            matches.push_back(head + name);
+        }
+    }
+    std::sort(matches.begin(), matches.end());
+    return matches;
 }
 
 }  // namespace sim::script

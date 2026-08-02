@@ -47,6 +47,7 @@ inline constexpr const char* kPanelInspector = ICON_LC_SLIDERS_HORIZONTAL;
 inline constexpr const char* kPanelAssetBrowser = ICON_LC_FOLDER_TREE;
 inline constexpr const char* kPanelViewport = ICON_LC_MONITOR;
 inline constexpr const char* kPanelConsole = ICON_LC_TERMINAL;
+inline constexpr const char* kPanelLuaConsole = ICON_LC_SQUARE_TERMINAL;
 inline constexpr const char* kPanelStatistics = ICON_LC_ACTIVITY;
 
 // --- Tipe entity & komponen ------------------------------------------------

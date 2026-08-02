@@ -45,6 +45,7 @@ void BuildLevelLayout(ImGuiID dockspaceId) {
     Dock(panel_id::kAssetBrowser, leftBottom);
     Dock(panel_id::kInspector, right);
     Dock(panel_id::kConsole, bottom);
+    Dock(panel_id::kLuaConsole, bottom);
     Dock(panel_id::kStatistics, bottom);
     Dock(panel_id::kHistory, right);
     Dock(panel_id::kPreferences, right);
@@ -67,6 +68,7 @@ void BuildAuthoringLayout(ImGuiID dockspaceId) {
     Dock(panel_id::kInspector, right);
     Dock(panel_id::kHistory, right);
     Dock(panel_id::kConsole, bottom);
+    Dock(panel_id::kLuaConsole, bottom);
     Dock(panel_id::kViewport, center);
 
     ImGui::DockBuilderFinish(dockspaceId);
@@ -85,6 +87,7 @@ void BuildDebugLayout(ImGuiID dockspaceId) {
     Dock(panel_id::kOutliner, left);
     Dock(panel_id::kAssetBrowser, left);
     Dock(panel_id::kConsole, bottom);
+    Dock(panel_id::kLuaConsole, bottom);
     Dock(panel_id::kStatistics, bottomRight);
     Dock(panel_id::kHistory, bottomRight);
     Dock(panel_id::kPreferences, bottomRight);

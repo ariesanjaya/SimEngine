@@ -215,7 +215,12 @@ Sumber log ditandai kategori (`[Asset]`, `[Lua]`, `[RHI]`).
 - **History** — daftar command, klik untuk melompat ke titik tertentu. Command yang
   berasal dari agen diberi awalan `AI:` supaya mudah dibedakan.
 - **Preferences** — tema, font & skala, pintasan, path project, setting editor.
-- **Lua Console** — REPL.
+- **Lua Console** — REPL di state Lua yang sama dengan skrip yang berjalan.
+  Baris yang diketik dicoba dulu sebagai ekspresi, baru sebagai pernyataan,
+  sehingga `sim` menjawab tanpa perlu menulis `return`. Tabel ditampilkan
+  terlipat, **Tab** melengkapi nama (termasuk di dalam tabel: `sim.get_`), dan
+  **Panah Atas/Bawah** menelusuri riwayat. Kesalahan muncul lengkap dengan
+  traceback.
 - **Script Editor** — editor teks Lua dengan pewarnaan sintaks.
 - **Asset References** — graf pemakaian aset.
 - **Profiler** — waktu frame per bagian (dipakai serius mulai E8).

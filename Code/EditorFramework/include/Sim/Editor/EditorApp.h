@@ -83,6 +83,10 @@ public:
 
 private:
     void RegisterCoreActions();
+
+    /// Memuat ulang skrip yang berkasnya berubah sejak frame lalu.
+    void ReloadChangedScripts();
+
     void InstallCrashHandler();
     void CreateEntityAction();
     void DeleteSelectionAction();

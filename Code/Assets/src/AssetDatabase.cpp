@@ -136,6 +136,11 @@ void AssetDatabase::ScanNow() {
 }
 
 void AssetDatabase::Update(float deltaSeconds) {
+    // Daftar perubahan hanya berlaku untuk satu frame. Dikosongkan di sini —
+    // bukan di Apply — supaya frame yang tidak menerapkan apa pun tetap
+    // melaporkan "tidak ada yang berubah" alih-alih mengulang isi frame lalu.
+    changed_.clear();
+
     ScanResult ready;
     bool hasReady = false;
     {
@@ -295,6 +300,22 @@ void AssetDatabase::Apply(ScanResult&& result) {
     }
     if (sameFolders && sameRecords) {
         return;
+    }
+
+    // Dihitung selagi records_ masih memuat versi lama. Yang dicari bukan
+    // "daftarnya berbeda" melainkan berkas mana yang isinya berganti — path
+    // yang sama dengan ukuran atau waktu ubah yang bergeser, dan path yang baru
+    // muncul. Berkas yang cuma berpindah tempat tidak masuk: isinya sama, dan
+    // memuat ulang skrip yang tidak berubah hanya membuang state-nya.
+    for (const AssetRecord& fresh : result.records) {
+        const auto it = byPath_.find(fresh.relativePath);
+        if (it == byPath_.end()) {
+            changed_.push_back(fresh.guid);
+        } else if (const AssetRecord& previous = records_[it->second];
+                   previous.fileSize != fresh.fileSize ||
+                   previous.modifiedSeconds != fresh.modifiedSeconds) {
+            changed_.push_back(fresh.guid);
+        }
     }
 
     records_ = std::move(result.records);

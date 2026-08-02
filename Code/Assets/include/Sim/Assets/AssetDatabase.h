@@ -74,6 +74,16 @@ public:
     /// harus menyusun ulang tampilannya alih-alih membandingkan daftar.
     uint64_t Version() const { return version_; }
 
+    /// Aset yang ISI berkasnya berubah pada Update() terakhir: berkas baru,
+    /// berkas yang ditimpa, atau yang waktu ubahnya bergeser. Hanya sah sampai
+    /// Update() berikutnya.
+    ///
+    /// Version() saja tidak cukup untuk hot reload. Ia menjawab "ada yang
+    /// berubah", bukan "apa yang berubah" — dan memuat ulang seluruh skrip di
+    /// scene setiap kali satu berkas tersimpan akan membuang tabel `state`
+    /// setiap instance yang sebenarnya tidak tersentuh.
+    const std::vector<Uuid>& ChangedThisUpdate() const { return changed_; }
+
     // --- operasi berkas yang menjaga referensi tetap utuh ---
 
     /// Mengganti nama berkas beserta `.meta`-nya. GUID tidak berubah, sehingga
@@ -128,6 +138,7 @@ private:
     std::unordered_map<Uuid, std::size_t> byGuid_;
     std::unordered_map<std::string, std::size_t> byPath_;
     uint64_t version_ = 0;
+    std::vector<Uuid> changed_;
     SnapshotPtr snapshot_ = std::make_shared<Snapshot>();
 
     // Kotak serah-terima antara thread pemindai dan main thread. Mutexnya hanya

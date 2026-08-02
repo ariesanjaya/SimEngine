@@ -5,6 +5,30 @@
 #include <sol/sol.hpp>
 
 namespace sim::script {
+namespace {
+
+/// Penangan kesalahan yang menempelkan traceback ke pesannya.
+///
+/// Tanpa ini yang sampai ke Console hanya "arena.lua:12: attempt to index a nil
+/// value" — benar, tapi tidak menyebut siapa yang memanggil baris itu. Pada
+/// skrip yang memanggil helper-nya sendiri, jejak pemanggil justru yang paling
+/// dibutuhkan.
+///
+/// Ditulis sebagai lua_CFunction, bukan `debug.traceback`, supaya pustaka
+/// `debug` tidak perlu dibuka untuk skrip pengguna.
+int Traceback(lua_State* L) {
+    const char* message = lua_tostring(L, 1);
+    if (message == nullptr) {
+        // Skrip boleh melempar apa saja, termasuk tabel. luaL_traceback
+        // menuntut string, jadi objek non-string dijadikan keterangan singkat.
+        message = "(error object is not a string)";
+    }
+    // Level 1: bingkai yang melempar, bukan penangan ini sendiri.
+    luaL_traceback(L, L, message, 1);
+    return 1;
+}
+
+}  // namespace
 
 LuaVM::LuaVM() = default;
 
@@ -43,6 +67,13 @@ bool LuaVM::Initialize() {
         }
         SIM_INFO("Lua", "{}", line);
     });
+
+    // Berlaku untuk setiap sol::protected_function, termasuk OnStart/OnUpdate
+    // dan potongan yang diketik di Lua Console.
+    lua_State* L = state_->lua_state();
+    lua_pushcfunction(L, &Traceback);
+    sol::protected_function::set_default_handler(sol::object(L, -1));
+    lua_pop(L, 1);
 
     SIM_INFO("Lua", "{} ready", Version());
     return true;

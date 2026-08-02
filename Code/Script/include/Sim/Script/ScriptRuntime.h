@@ -17,6 +17,25 @@ namespace sim::script {
 
 class LuaVM;
 
+/// Satu nilai hasil evaluasi, sudah berbentuk teks.
+///
+/// Tabel dipecah menjadi `children` supaya panel bisa melipatnya. Bentuknya
+/// sengaja tidak memuat apa pun dari sol2: panel Editor hanya me-link inti
+/// ImGui, dan menyeret header Lua ke sana akan menembus aturan modul yang sama
+/// yang menjaga Vulkan tetap di luar EditorFramework.
+struct EvalNode {
+    std::string label;
+    std::string value;
+    std::vector<EvalNode> children;
+};
+
+struct EvalResult {
+    bool ok = true;
+    /// Terisi saat gagal — pesan beserta traceback.
+    std::string error;
+    std::vector<EvalNode> values;
+};
+
 /// Menjalankan skrip Lua yang menempel pada entity.
 ///
 /// **Kontrak skrip.** Sebuah berkas `.lua` mengembalikan tabel yang boleh
@@ -56,7 +75,16 @@ public:
     void Reload(const Uuid& scriptGuid);
 
     /// Menjalankan potongan kode di state yang sama dengan skrip. Dipakai REPL.
-    std::string Evaluate(std::string_view code);
+    ///
+    /// Kode dicoba dulu sebagai **ekspresi** (`return <kode>`), baru sebagai
+    /// pernyataan. Tanpa itu, mengetik `sim` di konsol tidak menghasilkan apa
+    /// pun — dan konsol yang tidak menjawab pertanyaan sederhana tidak dipakai
+    /// orang.
+    EvalResult Evaluate(std::string_view code);
+
+    /// Nama yang berawalan `prefix`, untuk Tab di konsol. `prefix` boleh memuat
+    /// titik: `sim.g` mencari di dalam tabel `sim`.
+    std::vector<std::string> Complete(std::string_view prefix);
 
     LuaVM& VM() { return *vm_; }
 

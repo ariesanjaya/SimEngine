@@ -492,6 +492,7 @@ void EditorApp::DrawFrame(float deltaSeconds) {
         context_.thumbnails->Update();
     }
 #if SIM_WITH_LUA
+    ReloadChangedScripts();
     if (playing_ && context_.scripts != nullptr) {
         context_.scripts->Update(deltaSeconds);
     }
@@ -657,6 +658,15 @@ void EditorApp::UpdateAutosave(float deltaSeconds) {
     // sedang disunting. Menimpanya akan menghapus versi tersimpan terakhir
     // dengan keadaan setengah jadi yang belum tentu diinginkan.
     constexpr float kIntervalSeconds = 120.0f;
+    // Tidak menyimpan apa pun selama Play. Yang ada di scene saat itu adalah
+    // keadaan permainan yang sedang berjalan — hasil skrip memindahkan dan
+    // membuat entity — bukan level yang sedang disunting pengguna. Menuliskannya
+    // ke autosave berarti satu-satunya jaring pengaman yang dimiliki pengguna
+    // berisi sesuatu yang tidak pernah ia susun. Penghitungnya sengaja tidak
+    // direset supaya penyimpanan menyusul segera setelah Stop.
+    if (playing_) {
+        return;
+    }
     if (!history_.IsDirty()) {
         autosaveTimer_ = 0.0f;
         return;
@@ -676,6 +686,28 @@ void EditorApp::UpdateAutosave(float deltaSeconds) {
     } else {
         SIM_WARN("Editor", "Autosave failed: {}", result.error);
     }
+}
+
+void EditorApp::ReloadChangedScripts() {
+#if SIM_WITH_LUA
+    if (context_.scripts == nullptr) {
+        return;
+    }
+    // Hanya berlaku selagi bermain. Di luar Play tidak ada instance yang bisa
+    // dimuat ulang, dan skrip yang baru disimpan akan dibaca apa adanya saat
+    // Play berikutnya ditekan.
+    if (!playing_) {
+        return;
+    }
+    for (const Uuid& guid : assets_.ChangedThisUpdate()) {
+        const assets::AssetRecord* record = assets_.Find(guid);
+        if (record == nullptr || record->type != assets::AssetType::Script) {
+            continue;
+        }
+        context_.scripts->Reload(guid);
+        notifications_.Info("Reloaded " + record->name);
+    }
+#endif
 }
 
 void EditorApp::Play() {

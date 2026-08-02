@@ -108,6 +108,23 @@ restart — termasuk ketika berkas ditimpa, yang ikut menyegarkan thumbnail-nya.
 Menyeret aset: ke **viewport** membuat entity, ke **field Inspector** menetapkan
 rujukannya (bisa di-undo), ke **folder** memindahkan berkasnya.
 
+### Skrip
+
+`ScriptComponent` merujuk sebuah `.lua` yang mengembalikan tabel berisi
+`OnStart(self)` dan `OnUpdate(self, dt)`. **F5** menjalankannya, **Shift+F5**
+berhenti — dan scene kembali persis seperti sebelum Play, karena keadaannya
+dicuplik sebelum satu baris skrip pun berjalan.
+
+Menyimpan berkas skrip selagi Play berlangsung memuat ulang skrip itu saja,
+**tanpa menghentikan permainan**. Tabel `self.state` tiap instance dipertahankan;
+kalau ikut hilang, memuat ulang skrip tidak ada bedanya dengan memulai ulang.
+Terukur 22 ms dari berkas ditulis sampai kode barunya berjalan.
+
+Komponen dijangkau lewat namanya — `sim.get_component(entity, "Transform")` —
+dan daftarnya dibangkitkan dari reflection, jadi komponen baru ikut terjangkau
+tanpa menambah satu baris pun di sisi Lua. Panel **Lua Console** menyediakan REPL
+di state yang sama, lengkap dengan riwayat, pelengkapan **Tab**, dan traceback.
+
 ### Kunci laju frame
 
 Editor mengunci laju frame ke **refresh rate terendah** di antara semua monitor

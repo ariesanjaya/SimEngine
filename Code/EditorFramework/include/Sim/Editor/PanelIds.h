@@ -10,6 +10,7 @@ inline constexpr const char* kInspector = "inspector";
 inline constexpr const char* kAssetBrowser = "assetbrowser";
 inline constexpr const char* kViewport = "viewport";
 inline constexpr const char* kConsole = "console";
+inline constexpr const char* kLuaConsole = "luaconsole";
 inline constexpr const char* kStatistics = "statistics";
 inline constexpr const char* kHistory = "history";
 inline constexpr const char* kPreferences = "preferences";

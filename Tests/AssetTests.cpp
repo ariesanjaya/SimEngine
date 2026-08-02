@@ -7,6 +7,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <filesystem>
@@ -317,4 +318,49 @@ TEST_CASE("tugas yang melempar pengecualian tidak mematikan worker") {
     // Kalau worker mati bersama pengecualiannya, tugas sesudahnya tidak akan
     // pernah selesai dan WaitIdle menggantung selamanya.
     CHECK(after.load() == 50);
+}
+
+TEST_CASE("berkas yang ditimpa dilaporkan sebagai berubah, yang diam tidak") {
+    TempDir temp;
+    WriteFile(temp.Path() / "spin.lua", "return {}");
+    WriteFile(temp.Path() / "diam.lua", "return {}");
+
+    TaskPool pool(2);
+    AssetDatabase db;
+    REQUIRE(db.Initialize({temp.Path(), &pool, 0.05f}));
+    REQUIRE(db.All().size() == 2);
+
+    const AssetRecord* spin = db.FindByRelativePath("spin.lua");
+    const AssetRecord* quiet = db.FindByRelativePath("diam.lua");
+    REQUIRE(spin != nullptr);
+    REQUIRE(quiet != nullptr);
+    const Uuid spinGuid = spin->guid;
+    const Uuid quietGuid = quiet->guid;
+
+    // Waktu ubah berkas bergranularitas detik di beberapa sistem berkas, jadi
+    // isinya dibuat berbeda panjang supaya ukurannya saja sudah cukup untuk
+    // membedakan — persis kondisi yang harus ditangani di dunia nyata ketika
+    // pengguna menyimpan dua kali dalam satu detik.
+    WriteFile(temp.Path() / "spin.lua", "return { OnUpdate = function() end }");
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    std::vector<Uuid> changed;
+    while (changed.empty() && std::chrono::steady_clock::now() < deadline) {
+        db.Update(0.1f);
+        changed = db.ChangedThisUpdate();
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+
+    REQUIRE(changed.size() == 1);
+    CHECK(changed[0] == spinGuid);
+    // Berkas yang tidak disentuh tidak boleh ikut dilaporkan: memuat ulang
+    // skrip yang tidak berubah membuang tabel `state`-nya tanpa alasan.
+    CHECK(std::find(changed.begin(), changed.end(), quietGuid) == changed.end());
+    // GUID-nya tidak berubah walau isinya diganti — identitas aset melekat pada
+    // berkas .meta, bukan pada isinya.
+    CHECK(db.FindByRelativePath("spin.lua")->guid == spinGuid);
+
+    // Daftar perubahan hanya berlaku satu frame.
+    db.Update(0.1f);
+    CHECK(db.ChangedThisUpdate().empty());
 }

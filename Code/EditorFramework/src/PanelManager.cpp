@@ -65,6 +65,16 @@ void PanelManager::Draw(EditorContext& context) {
             ImGui::SetNextWindowClass(&windowClass);
         }
 
+        // Ukuran bawaan hanya berlaku saat panel muncul pertama kali sebagai
+        // jendela mengambang — panel yang sudah punya tempat di layout dock
+        // mengabaikannya. Tanpa ini ImGui menyesuaikan ukuran jendela dengan
+        // isinya, dan panel yang justru mengisi ruang yang tersedia (transkrip
+        // setinggi sisa jendela) menjadi umpan balik: jendela membesar, isinya
+        // ikut membesar, dan begitu seterusnya tiap frame.
+        ImGui::SetNextWindowSize(ImVec2(ImGui::GetFontSize() * 34.0f,
+                                        ImGui::GetFontSize() * 20.0f),
+                                 ImGuiCond_FirstUseEver);
+
         const bool zeroPadding = panel->WantsZeroPadding();
         if (zeroPadding) {
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));

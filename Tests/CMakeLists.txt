@@ -33,5 +33,9 @@ if(SIM_WITH_LUA)
         SOURCES
             ScriptTests.cpp
         DEPS
-            Sim::Script)
+            Sim::Script
+            # Hot reload diuji lewat jalur yang dipakai editor: AssetDatabase
+            # yang melaporkan berkas mana yang berubah. Sim::Assets adalah
+            # dependensi privat Script, jadi test harus memintanya sendiri.
+            Sim::Assets)
 endif()
