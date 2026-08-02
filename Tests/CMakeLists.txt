@@ -38,4 +38,15 @@ if(SIM_WITH_LUA)
             # yang melaporkan berkas mana yang berubah. Sim::Assets adalah
             # dependensi privat Script, jadi test harus memintanya sendiri.
             Sim::Assets)
+
+    # Terpisah dari SimEditorTests karena hanya ada saat Lua ikut dibangun.
+    # Yang diuji di sini adalah jembatannya — menu, panel, dan command yang
+    # didaftarkan Lua — bukan `sim.ui`, yang menuntut konteks ImGui hidup.
+    sim_add_test(SimEditorScriptingTests
+        SOURCES
+            EditorScriptingTests.cpp
+        DEPS
+            Sim::EditorFramework
+            Sim::Script
+            Sim::Assets)
 endif()

@@ -123,6 +123,29 @@ TEST_CASE("Complete mencari nama global maupun isi tabel") {
     CHECK(runtime.Complete("bukan_tabel.apa").empty());
 }
 
+TEST_CASE("CheckSyntax melaporkan baris yang salah tanpa menjalankan apa pun") {
+    sim::script::ScriptRuntime runtime;
+    sim::scene::World world;
+    REQUIRE(runtime.Initialize(world, nullptr));
+
+    CHECK(runtime.CheckSyntax("local x = 1\nreturn x + 1\n", "ok.lua").empty());
+
+    const std::string error =
+        runtime.CheckSyntax("local x = 1\nif x then\n", "rusak.lua");
+    REQUIRE_FALSE(error.empty());
+    // Nama chunk ikut di pesannya; itulah yang dipakai panel untuk menunjukkan
+    // nomor barisnya di gutter.
+    CHECK(error.find("rusak.lua") != std::string::npos);
+
+    // Yang penting justru ini: berkas yang sedang diketik tidak boleh berjalan.
+    // Memeriksa dengan menjalankannya berarti setiap ketikan memicu efek samping
+    // yang tidak diminta siapa pun.
+    CHECK(runtime.CheckSyntax("SUDAH_JALAN = true", "efek.lua").empty());
+    const sim::script::EvalResult after = runtime.Evaluate("SUDAH_JALAN == nil");
+    REQUIRE(after.values.size() == 1);
+    CHECK(after.values[0].value == "true");
+}
+
 namespace {
 
 /// Folder sementara yang membersihkan dirinya sendiri.

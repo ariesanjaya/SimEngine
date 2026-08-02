@@ -154,6 +154,13 @@ void EditorShell::DrawMenuBar(EditorContext& context, PanelManager& panels) {
         ImGui::EndMenu();
     }
 
+    if (context.drawScriptMenu) {
+        if (ImGui::BeginMenu("Scripts")) {
+            context.drawScriptMenu();
+            ImGui::EndMenu();
+        }
+    }
+
     if (ImGui::BeginMenu("View")) {
         if (ImGui::BeginMenu("Workspace")) {
             constexpr std::array<Workspace, 3> kWorkspaces{Workspace::Level, Workspace::Authoring,

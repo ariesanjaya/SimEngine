@@ -27,6 +27,9 @@ public:
     /// ImGui menyimpan posisi dan ukuran jendela di imgui.ini, tapi tidak
     /// keadaan buka/tutupnya — itu milik kita (p_open). Tanpa ini, panel yang
     /// sengaja ditutup pengguna akan muncul lagi setiap editor dijalankan.
+    ///
+    /// Keadaan yang dibaca disimpan dan tetap berlaku untuk panel yang baru
+    /// didaftarkan sesudahnya, seperti panel yang dibuat skrip editor.
     bool SaveState(const std::filesystem::path& path) const;
     bool LoadState(const std::filesystem::path& path);
 
@@ -44,6 +47,9 @@ private:
     void EnforceViewportPlacement();
 
     std::vector<std::unique_ptr<Panel>> panels_;
+    /// Keadaan buka/tutup hasil LoadState, termasuk untuk id yang panelnya
+    /// belum ada saat itu.
+    std::unordered_map<std::string, bool> savedOpen_;
     /// Kunci: ImGuiID viewport. Entri dihapus begitu penempatannya stabil.
     std::unordered_map<unsigned int, ViewportPlacement> placements_;
 };

@@ -65,6 +65,8 @@ inline constexpr const char* kParticle = ICON_LC_SPARKLES;
 inline constexpr const char* kWater = ICON_LC_WAVES;
 inline constexpr const char* kTransform = ICON_LC_MOVE_3D;
 inline constexpr const char* kScript = ICON_LC_FILE_CODE;
+inline constexpr const char* kChevronUp = ICON_LC_CHEVRON_UP;
+inline constexpr const char* kChevronDown = ICON_LC_CHEVRON_DOWN;
 
 // --- Aset ------------------------------------------------------------------
 inline constexpr const char* kFolder = ICON_LC_FOLDER;

@@ -660,6 +660,16 @@ EvalResult ScriptRuntime::Evaluate(std::string_view code) {
     return result;
 }
 
+std::string ScriptRuntime::CheckSyntax(std::string_view code, std::string_view chunkName) {
+    const sol::load_result chunk =
+        vm_->State()->load(code, "@" + std::string(chunkName), sol::load_mode::text);
+    if (chunk.valid()) {
+        return {};
+    }
+    const sol::error error = chunk;
+    return error.what();
+}
+
 std::vector<std::string> ScriptRuntime::Complete(std::string_view prefix) {
     std::vector<std::string> matches;
     sol::state& lua = *vm_->State();

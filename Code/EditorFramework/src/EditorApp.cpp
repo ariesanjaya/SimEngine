@@ -9,6 +9,7 @@
 #include "Sim/Scene/Serialization.h"
 
 #if SIM_WITH_LUA
+#include "Sim/Script/LuaVM.h"
 #include "Sim/Script/ScriptRuntime.h"
 #endif
 
@@ -22,6 +23,9 @@
 
 namespace sim::editor {
 namespace {
+
+/// Nama folder skrip editor, relatif terhadap folder aset.
+constexpr std::string_view kEditorScriptFolder = "Editor";
 
 extern "C" void OnFatalSignal(int signal) {
     // Ini pelanggaran aturan async-signal-safety yang disengaja dan diketahui:
@@ -492,6 +496,26 @@ void EditorApp::DrawFrame(float deltaSeconds) {
         context_.thumbnails->Update();
     }
 #if SIM_WITH_LUA
+    // Dipasang di frame pertama, bukan di Initialize(). Runtime Lua baru
+    // di-Initialize SETELAH EditorApp — ia butuh World dan AssetDatabase yang
+    // dibuat di dalamnya — sehingga mendaftarkan binding di Initialize() berarti
+    // menyentuh state Lua yang belum ada. Menunggu di sini menghapus urutan yang
+    // harus diingat pemanggil, alih-alih mendokumentasikannya.
+    if (!scriptingReady_ && context_.scripts != nullptr &&
+        context_.scripts->VM().State() != nullptr) {
+        // Folder terpisah dari skrip gameplay, dan itu bukan sekadar kerapian:
+        // yang di sini berjalan di dalam editor dengan akses ke riwayat undo dan
+        // panel, sedangkan yang di Scripts berjalan saat Play. Mencampurnya
+        // berarti sebuah skrip gameplay bisa menambah menu, dan sebuah skrip
+        // editor ikut terbawa ke build permainan.
+        scripting_.Initialize(context_.scripts, &context_, &panels_,
+                              configDir_ / "Assets" / kEditorScriptFolder);
+        context_.drawScriptMenu = [this]() { scripting_.DrawMenu(); };
+        scriptingReady_ = true;
+    }
+    // Mendahului panel menggambar: panel yang didaftarkan Lua ditambahkan di
+    // sini, di luar penelusuran daftar panel.
+    scripting_.FlushPending();
     ReloadChangedScripts();
     if (playing_ && context_.scripts != nullptr) {
         context_.scripts->Update(deltaSeconds);
@@ -693,19 +717,33 @@ void EditorApp::ReloadChangedScripts() {
     if (context_.scripts == nullptr) {
         return;
     }
-    // Hanya berlaku selagi bermain. Di luar Play tidak ada instance yang bisa
-    // dimuat ulang, dan skrip yang baru disimpan akan dibaca apa adanya saat
-    // Play berikutnya ditekan.
-    if (!playing_) {
-        return;
-    }
+    const std::string prefix = std::string(kEditorScriptFolder) + '/';
+    bool editorScriptChanged = false;
     for (const Uuid& guid : assets_.ChangedThisUpdate()) {
         const assets::AssetRecord* record = assets_.Find(guid);
         if (record == nullptr || record->type != assets::AssetType::Script) {
             continue;
         }
+        if (record->relativePath.starts_with(prefix)) {
+            // Skrip editor dimuat ulang seluruhnya, bukan satu berkas: menu dan
+            // panel yang didaftarkan tidak menyebutkan berkas asalnya, jadi
+            // tidak ada cara membuang registrasi milik satu berkas saja.
+            editorScriptChanged = true;
+            continue;
+        }
+        // Skrip gameplay hanya punya instance selagi bermain. Di luar Play tidak
+        // ada yang bisa dimuat ulang, dan berkas yang baru disimpan akan dibaca
+        // apa adanya saat Play berikutnya ditekan.
+        if (!playing_) {
+            continue;
+        }
         context_.scripts->Reload(guid);
         notifications_.Info("Reloaded " + record->name);
+    }
+
+    if (editorScriptChanged) {
+        scripting_.ReloadAll();
+        notifications_.Info("Reloaded editor scripts");
     }
 #endif
 }
@@ -775,6 +813,9 @@ void EditorApp::Shutdown() {
     // History dibersihkan lebih dulu: command-nya bisa menunjuk data milik
     // panel, dan panel dihancurkan setelah ini.
     history_.Clear();
+    // Registrasi Lua memegang fungsi milik state Lua. Dilepas sebelum panel
+    // dihancurkan, karena panel Lua ikut memegangnya.
+    scripting_.Shutdown();
     actions_.Save(configDir_ / "shortcuts.json");
     panels_.SaveState(configDir_ / "panels.json");
     initialized_ = false;

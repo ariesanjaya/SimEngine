@@ -152,6 +152,57 @@ ikut berlaku untuk entity yang belum pernah disentuh, tanpa menyentuh yang sudah
 disesuaikan. Menyuntingnya bisa di-undo, berlaku untuk seluruh seleksi, dan ikut
 tersimpan ke berkas level.
 
+Panel **Script Editor** menyunting berkasnya di dalam editor: **Tab** melengkapi
+nama dari state Lua yang sungguh berjalan — bukan daftar yang ditulis tangan,
+jadi ia tidak pernah bisa berbohong tentang apa yang ada — dan sintaksnya
+diperiksa di setiap ketikan dengan *memuat* berkasnya, tidak menjalankannya.
+
+### Skrip editor
+
+Berkas `.lua` di `Assets/Editor` memperluas editornya sendiri. Folder terpisah
+dari `Assets/Scripts` bukan sekadar kerapian: yang di sini berjalan di dalam
+editor dengan akses ke riwayat undo dan panel, yang di sana berjalan saat Play.
+Mencampurnya berarti skrip gameplay bisa menambah menu, dan skrip editor ikut
+terbawa ke build permainan.
+
+```lua
+sim.editor.menu("Turunkan semua", function()
+    local sebelum = ambil_posisi()
+    -- Lewat riwayat yang sama dengan panel C++, jadi Ctrl+Z membatalkannya.
+    sim.editor.command("Turunkan semua",
+        function() pasang_posisi(sebelum - 1) end,
+        function() pasang_posisi(sebelum) end)
+end)
+
+sim.editor.panel("Catatan", function()
+    sim.ui.text("terpilih: " .. sim.editor.selection_count())
+    if sim.ui.button("Kerjakan") then ... end
+end)
+```
+
+`sim.editor.command` **wajib** lewat `CommandHistory` yang sama dengan panel
+C++ — satu jalur tulis yang lolos dari undo sudah cukup membuat Ctrl+Z tidak
+bisa dipercaya, dan pengguna tidak punya cara tahu perubahan mana yang aman.
+
+Pemrosesan aset secara batch memakai indeks yang sama dengan Asset Browser:
+
+```lua
+for _, aset in ipairs(sim.editor.assets("Texture")) do
+    sim.editor.rename_asset(aset.path, aset.name:gsub("^tmp_", ""))
+end
+```
+
+Mengganti nama dan memindahkan aset sengaja **tidak** lewat undo — sama seperti
+di Asset Browser. Yang berubah adalah berkas di disk, dan riwayat undo hanya
+menjanjikan pembatalan yang tidak bisa ditepatinya begitu berkas itu disentuh
+dari luar editor. GUID-nya tidak ikut berubah, jadi tidak ada level yang putus.
+
+`sim.ui.*` hanya sah di dalam callback panel; di luar itu ia melempar kesalahan
+Lua alih-alih menggambar ke jendela sembarang. Menyimpan berkasnya memuat ulang
+seluruh skrip editor tanpa restart: item menu yang dihapus dari berkasnya ikut
+hilang, sementara panel dengan judul yang sama dipakai ulang beserta posisi
+dock dan keadaan buka/tutupnya.
+
 ### Kunci laju frame
 
 Editor mengunci laju frame ke **refresh rate terendah** di antara semua monitor

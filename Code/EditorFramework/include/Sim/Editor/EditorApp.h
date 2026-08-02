@@ -6,6 +6,7 @@
 #include "Sim/Editor/Actions.h"
 #include "Sim/Editor/Command.h"
 #include "Sim/Editor/EditorContext.h"
+#include "Sim/Editor/EditorScripting.h"
 #include "Sim/Editor/EditorShell.h"
 #include "Sim/Editor/Notifications.h"
 #include "Sim/Editor/PanelManager.h"
@@ -84,7 +85,8 @@ public:
 private:
     void RegisterCoreActions();
 
-    /// Memuat ulang skrip yang berkasnya berubah sejak frame lalu.
+    /// Memuat ulang skrip yang berkasnya berubah sejak frame lalu — instance
+    /// gameplay lewat ScriptRuntime, skrip editor lewat EditorScripting.
     void ReloadChangedScripts();
 
     void InstallCrashHandler();
@@ -107,6 +109,7 @@ private:
     ActionRegistry actions_;
     Notifications notifications_;
     EditorShell shell_;
+    EditorScripting scripting_;
     EditorContext context_;
 
     /// Sub-pohon hasil Copy, dalam format teks level. Disimpan di sini dan
@@ -133,6 +136,7 @@ private:
     float autosaveTimer_ = 0.0f;
     bool exitRequested_ = false;
     bool wantsExit_ = false;
+    bool scriptingReady_ = false;
     bool initialized_ = false;
 };
 

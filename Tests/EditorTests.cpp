@@ -2,6 +2,7 @@
 
 #include "Sim/Editor/Actions.h"
 #include "Sim/Editor/Command.h"
+#include "Sim/Editor/PanelManager.h"
 #include "Sim/Editor/Selection.h"
 
 #include <doctest/doctest.h>
@@ -287,4 +288,44 @@ TEST_CASE("Aksi tidak aktif tidak bisa dipanggil") {
     allowed = true;
     CHECK(registry.Invoke("test.gated"));
     CHECK(calls == 1);
+}
+
+namespace {
+
+/// Panel uji: PanelManager tidak menggambarnya di test, jadi OnDraw kosong.
+class DummyPanel final : public Panel {
+public:
+    explicit DummyPanel(std::string id)
+        : Panel(std::move(id), "Dummy", PanelCategory::Authoring) {}
+    void OnDraw(EditorContext& /*context*/) override {}
+};
+
+}  // namespace
+
+TEST_CASE("Keadaan panel yang didaftarkan setelah LoadState tetap dipulihkan") {
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "simengine-test-panels.json";
+    std::filesystem::remove(path);
+
+    {
+        PanelManager panels;
+        panels.Add(std::make_unique<DummyPanel>("lua.notes"));
+        panels.Find("lua.notes")->SetOpen(false);
+        REQUIRE(panels.SaveState(path));
+    }
+    {
+        // Urutan yang sebenarnya terjadi di editor: keadaan dibaca saat
+        // startup, sementara panel Lua baru lahir di frame pertama — setelah
+        // berkas skripnya dijalankan.
+        PanelManager panels;
+        REQUIRE(panels.LoadState(path));
+        panels.Add(std::make_unique<DummyPanel>("lua.notes"));
+        CHECK_FALSE(panels.Find("lua.notes")->IsOpen());
+
+        // Yang tidak pernah tersimpan tetap lahir terbuka.
+        panels.Add(std::make_unique<DummyPanel>("lua.baru"));
+        CHECK(panels.Find("lua.baru")->IsOpen());
+    }
+
+    std::filesystem::remove(path);
 }

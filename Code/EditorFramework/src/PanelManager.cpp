@@ -32,6 +32,14 @@ Panel* PanelManager::Add(std::unique_ptr<Panel> panel) {
         SIM_WARN("Editor", "Panel id '{}' registered twice", panel->Id());
         return nullptr;
     }
+    // Keadaan tersimpan ikut berlaku untuk panel yang didaftarkan setelah
+    // LoadState. Panel Lua muncul baru pada frame pertama — setelah berkasnya
+    // dibaca — dan tanpa ini panel yang sengaja ditutup pengguna akan terbuka
+    // lagi setiap editor dijalankan.
+    const auto saved = savedOpen_.find(panel->Id());
+    if (saved != savedOpen_.end() && !panel->IsDockLocked()) {
+        panel->SetOpen(saved->second);
+    }
     panels_.push_back(std::move(panel));
     return panels_.back().get();
 }
@@ -144,10 +152,14 @@ bool PanelManager::LoadState(const std::filesystem::path& path) {
         return false;
     }
     for (const auto& [id, value] : open->items()) {
+        if (!value.is_boolean()) {
+            continue;
+        }
+        savedOpen_[id] = value.get<bool>();
         Panel* panel = Find(id);
         // Panel terkunci tidak boleh dipulihkan dalam keadaan tertutup: tombol
         // penutupnya sengaja dihilangkan, jadi tidak akan ada cara membukanya.
-        if (panel != nullptr && value.is_boolean() && !panel->IsDockLocked()) {
+        if (panel != nullptr && !panel->IsDockLocked()) {
             panel->SetOpen(value.get<bool>());
         }
     }

@@ -4,6 +4,7 @@ sim_add_library(EditorFramework
         src/Command.cpp
         src/DockLayout.cpp
         src/EditorApp.cpp
+        src/EditorScripting.cpp
         src/EditorShell.cpp
         src/Gizmo.cpp
         src/Notifications.cpp

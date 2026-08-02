@@ -71,6 +71,8 @@ Preset workspace lain (menu **View → Workspace**): *Level* (di atas), *Materia
 - **Entity** — Create Empty, Create Child, Create dari primitif, Save as Prefab
 - **Tools** — Material Editor, Particle Editor, Terrain Editor, Vegetation Editor,
   Animation Editor, Lua Console, Script Editor, Profiler
+- **Scripts** — item yang didaftarkan skrip editor lewat `sim.editor.menu`.
+  Isinya milik berkas `.lua` di `Assets/Editor`, bukan daftar tetap di C++.
 - **View** — Reset Layout, Workspace, Grid, Gizmo, Show/Hide overlay
 - **Window** — daftar panel (dibangkitkan otomatis oleh `PanelManager`)
 - **Help** — Dokumentasi, About
@@ -221,7 +223,14 @@ Sumber log ditandai kategori (`[Asset]`, `[Lua]`, `[RHI]`).
   terlipat, **Tab** melengkapi nama (termasuk di dalam tabel: `sim.get_`), dan
   **Panah Atas/Bawah** menelusuri riwayat. Kesalahan muncul lengkap dengan
   traceback.
-- **Script Editor** — editor teks Lua dengan pewarnaan sintaks.
+- **Script Editor** — daftar berkas `.lua` di kiri, penyunting di kanan.
+  Sintaks diperiksa di setiap ketikan dengan **memuat** berkasnya, bukan
+  menjalankannya — kode setengah jadi tidak boleh punya efek samping — dan
+  hasilnya muncul sebagai penanda beserta nomor baris di toolbar. **Tab**
+  melengkapi nama dari state Lua yang sungguh berjalan, jadi daftarnya tidak
+  pernah bisa berbohong tentang apa yang ada. **Ctrl+S** menyimpan, dan
+  perubahannya sampai ke skrip yang berjalan lewat pemantau berkas yang sama
+  dengan editor teks luar — satu jalur, satu perilaku.
 - **Asset References** — graf pemakaian aset.
 - **Profiler** — waktu frame per bagian (dipakai serius mulai E8).
 - **Statistics** — jumlah entity, memori, jumlah aset termuat.

@@ -87,6 +87,14 @@ public:
     /// titik: `sim.g` mencari di dalam tabel `sim`.
     std::vector<std::string> Complete(std::string_view prefix);
 
+    /// Memeriksa sintaks tanpa menjalankan apa pun. String kosong berarti
+    /// tidak ada kesalahan.
+    ///
+    /// Sengaja hanya memuat, tidak memanggil: berkas yang sedang diketik berisi
+    /// kode setengah jadi, dan menjalankannya di setiap ketikan berarti efek
+    /// samping yang tidak diminta siapa pun.
+    std::string CheckSyntax(std::string_view code, std::string_view chunkName);
+
     /// Properti yang dideklarasikan sebuah berkas skrip, beserta nilai bawaannya.
     ///
     /// Berkasnya dijalankan untuk membacanya — sebuah deklarasi `properties`

@@ -90,6 +90,9 @@ struct EditorContext {
     std::function<void()> requestResetLayout;
     std::function<void()> requestPlay;
     std::function<void()> requestStop;
+    /// Isi menu Scripts, diisi EditorApp dari registrasi Lua. Null bila editor
+    /// dibangun tanpa Lua.
+    std::function<void()> drawScriptMenu;
 
     // E5: AssetDatabase* assets
 };
