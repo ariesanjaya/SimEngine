@@ -39,6 +39,9 @@ bool SearchField(const char* id, char* buffer, std::size_t bufferSize,
 
 /// Tombol berisi ikon saja. Tooltip wajib: ikon yang tidak bisa ditebak dan
 /// tidak punya keterangan lebih buruk daripada teks biasa.
+/// Tooltip untuk item yang baru saja digambar.
+void Tooltip(const char* text);
+
 bool IconButton(const char* icon, const char* tooltip, bool active = false);
 
 /// Perbesaran tombol overlay viewport terhadap tombol ikon biasa.

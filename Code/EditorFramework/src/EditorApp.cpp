@@ -47,6 +47,7 @@ bool EditorApp::Initialize(const Config& config) {
     context_.frameLimiter = config.frameLimiter;
     context_.lockedFps = config.lockedFps;
     context_.frameLockReason = config.frameLockReason;
+    context_.prefabDir = (configDir_ / "Prefabs").string();
     context_.requestExit = [this]() { wantsExit_ = true; };
     context_.requestResetLayout = [this]() { shell_.RequestResetLayout(); };
 

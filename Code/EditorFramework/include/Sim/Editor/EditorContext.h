@@ -55,6 +55,10 @@ struct EditorContext {
     std::string projectPath;
     std::string levelName = "untitled";
 
+    /// Folder tempat "Save as Prefab" menulis. Diisi EditorApp; sampai ada
+    /// konsep proyek yang sesungguhnya (E5), isinya folder konfigurasi editor.
+    std::string prefabDir;
+
     /// Waktu frame terakhir, dipakai widget yang beranimasi.
     float deltaSeconds = 0.0f;
 

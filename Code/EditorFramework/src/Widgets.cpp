@@ -84,6 +84,12 @@ bool SearchField(const char* id, char* buffer, std::size_t bufferSize, const cha
     return changed;
 }
 
+void Tooltip(const char* text) {
+    if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
+        ImGui::SetTooltip("%s", text);
+    }
+}
+
 bool IconButton(const char* icon, const char* tooltip, bool active) {
     const float size = ImGui::GetFrameHeight();
     // PushID pada tooltip, bukan ikon: dua tombol berbeda sering memakai glyph
