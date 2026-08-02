@@ -9,6 +9,11 @@ include(FetchContent)
 set(FETCHCONTENT_QUIET FALSE)
 set(FETCHCONTENT_UPDATES_DISCONNECTED ON)
 
+# Dipakai FetchContent untuk mengambil sumber, dan oleh ApplyPatch.cmake untuk
+# menambal salah satunya. Diminta eksplisit supaya ketiadaannya dilaporkan di
+# sini, bukan sebagai kegagalan yang membingungkan di tengah langkah patch.
+find_package(Git REQUIRED)
+
 # ---------------------------------------------------------------------------
 # SDL3 — jendela, input, monitor, surface Vulkan
 # ---------------------------------------------------------------------------
@@ -170,6 +175,47 @@ target_link_libraries(imguizmo PUBLIC imgui)
 set_target_properties(imguizmo PROPERTIES FOLDER "ThirdParty")
 add_library(ImGuizmo::ImGuizmo ALIAS imguizmo)
 
+# imgui-node-editor — kanvas node untuk visual scripting (E6.5), dipakai lagi
+# untuk graph material (E7.1) dan state machine animasi (E7.5).
+#
+# Seperti ImGuizmo: hanya bergantung pada inti ImGui, jadi ikut target `imgui`
+# dan tidak melanggar aturan "Editor tidak melihat Vulkan". Dibungkus di
+# Sim::EditorFramework supaya panel tidak memanggilnya langsung.
+FetchContent_Declare(imgui_node_editor
+    GIT_REPOSITORY https://github.com/thedmd/imgui-node-editor.git
+    # Dipatok ke commit di master, bukan tag maupun develop. Rilis bertag
+    # terakhir (v0.9.1) dan HEAD develop sama-sama mendahului ImGui 1.92, yang
+    # membuang ImRect::Floor() dan ImGui::GetKeyIndex(); commit ini memuat
+    # penggantinya. Menaikkannya kembali ke develop berarti node editor tidak
+    # bisa dikompilasi sama sekali, bukan sekadar peringatan.
+    GIT_TAG        021aa0ea4da13fed864bafb2a92d4c5205076866
+    GIT_SHALLOW    FALSE
+    # CMakeLists bawaannya ikut membangun contoh berbasis GLFW/DX11 dan mencari
+    # dependensinya sendiri. Trik yang sama seperti VMA dan ImGuizmo: SOURCE_SUBDIR
+    # diarahkan ke folder tanpa CMakeLists supaya FetchContent hanya mengunduh.
+    SOURCE_SUBDIR  misc
+    # Satu patch kecil yang belum ada di hulu: imgui_extra_math mendefinisikan
+    # `operator*(float, ImVec2)` tanpa syarat, sedangkan ImGui 1.92 sudah
+    # mendefinisikannya sendiri di dalam blok IMGUI_DEFINE_MATH_OPERATORS.
+    # Penjaganya memakai IMGUI_DEFINE_MATH_OPERATORS_IMPLEMENTED — makro yang
+    # ditetapkan ImGui persis ketika ia menyediakan operator itu — jadi patch ini
+    # tidak perlu menebak nomor versi dan tetap benar setelah ImGui dinaikkan.
+    PATCH_COMMAND ${CMAKE_COMMAND}
+        -DGIT_EXECUTABLE=${GIT_EXECUTABLE}
+        -DPATCH_FILE=${CMAKE_CURRENT_LIST_DIR}/patches/imgui-node-editor-math-operators.patch
+        -P ${CMAKE_CURRENT_LIST_DIR}/ApplyPatch.cmake)
+FetchContent_MakeAvailable(imgui_node_editor)
+
+add_library(imgui_node_editor STATIC
+    ${imgui_node_editor_SOURCE_DIR}/imgui_node_editor.cpp
+    ${imgui_node_editor_SOURCE_DIR}/imgui_node_editor_api.cpp
+    ${imgui_node_editor_SOURCE_DIR}/imgui_canvas.cpp
+    ${imgui_node_editor_SOURCE_DIR}/crude_json.cpp)
+target_include_directories(imgui_node_editor SYSTEM PUBLIC ${imgui_node_editor_SOURCE_DIR})
+target_link_libraries(imgui_node_editor PUBLIC imgui)
+set_target_properties(imgui_node_editor PROPERTIES FOLDER "ThirdParty")
+add_library(ImGuiNodeEditor::ImGuiNodeEditor ALIAS imgui_node_editor)
+
 add_library(imgui_backend STATIC
     ${imgui_SOURCE_DIR}/backends/imgui_impl_sdl3.cpp
     ${imgui_SOURCE_DIR}/backends/imgui_impl_vulkan.cpp)
@@ -272,8 +318,6 @@ add_library(Stb::Stb ALIAS stb)
 
 # ---------------------------------------------------------------------------
 # Ditambahkan pada milestone berikutnya (lihat docs/DEPENDENCIES.md):
-#   E6.5 imgui-node-editor        graph visual scripting (dipakai lagi di E7.1
-#                                untuk graph material & state machine animasi)
 #   A0   cpp-httplib              transport HTTP untuk MCP server
 #   E8   ufbx, cgltf, meshoptimizer
 # ---------------------------------------------------------------------------

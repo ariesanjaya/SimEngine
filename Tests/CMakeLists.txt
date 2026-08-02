@@ -39,6 +39,16 @@ if(SIM_WITH_LUA)
             # dependensi privat Script, jadi test harus memintanya sendiri.
             Sim::Assets)
 
+    # Visual scripting: model graph, katalog node, dan compiler graph → Lua.
+    # Sim::Assets diminta sendiri dengan alasan yang sama seperti di atas —
+    # kriteria terimanya menjalankan Lua hasil kompilasi lewat AssetDatabase.
+    sim_add_test(SimGraphTests
+        SOURCES
+            GraphTests.cpp
+        DEPS
+            Sim::Script
+            Sim::Assets)
+
     # Terpisah dari SimEditorTests karena hanya ada saat Lua ikut dibangun.
     # Yang diuji di sini adalah jembatannya — menu, panel, dan command yang
     # didaftarkan Lua — bukan `sim.ui`, yang menuntut konteks ImGui hidup.

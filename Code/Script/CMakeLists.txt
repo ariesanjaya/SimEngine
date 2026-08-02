@@ -1,10 +1,14 @@
 sim_add_library(Script
     SOURCES
+        src/Graph.cpp
+        src/GraphCompiler.cpp
         src/LuaVM.cpp
+        src/NodeCatalog.cpp
         src/ScriptRuntime.cpp
     PUBLIC_DEPS
         Sim::Core
         Sim::Scene
         Sol2::Sol2
     PRIVATE_DEPS
-        Sim::Assets)
+        Sim::Assets
+        nlohmann_json::nlohmann_json)
