@@ -320,7 +320,7 @@ menggambarnya tanpa kode khusus per komponen.
 
 ---
 
-## E4 — Level Editor · ~6 sesi
+## E4 — Level Editor · ~6 sesi · ✅ SELESAI (2 Agustus 2026)
 
 **Tujuan.** Menyusun level nyata: pilih, pindah, putar, skala, parent, duplikat,
 hapus — semuanya bisa di-undo dan tersimpan.
@@ -328,33 +328,52 @@ hapus — semuanya bisa di-undo dan tersimpan.
 **Pekerjaan**
 
 - **Entity Outliner** (posisi B pada acuan): tree hierarki, cari + filter,
-  rename inline, drag untuk mengubah parent dan urutan, multi-select
-  (Ctrl/Shift), tombol visibility & lock per baris, menu konteks (Create Child,
-  Duplicate, Delete, Save as Prefab), ikon per tipe entity.
-- **Entity Inspector** (posisi E): header nama + status + Entity ID seperti acuan,
-  tombol **Add Component** dengan pencarian, komponen dalam header yang bisa
-  dilipat, menu per-komponen (Remove, Reset, Copy/Paste), PropertyGrid dari
-  reflection, penanganan multi-select (nilai berbeda ditampilkan sebagai "—").
+  rename inline (klik-ganda atau F2), drag untuk mengubah parent termasuk lepas
+  ke ruang kosong untuk menjadikan akar, multi-select (Ctrl per baris, Shift
+  untuk rentang), tombol visibility & lock per baris, menu konteks (Create
+  Child, Rename, Duplicate, Save as Prefab, Move to Root, Delete), ikon per
+  tipe entity yang diturunkan dari komponennya.
+- **Entity Inspector** (posisi E): header nama + Entity ID yang bisa disalin,
+  tombol **Add Component**, komponen dalam header yang bisa dilipat, menu
+  per-komponen (Copy, Paste, Reset, Remove), PropertyGrid dari reflection,
+  penanganan multi-select (nilai berbeda ditampilkan sebagai "—").
 - **Viewport** (posisi D): kamera fly (WASD + klik kanan) dan orbit (Alt+drag),
-  focus ke seleksi (F), grid adaptif, gizmo translate/rotate/scale dengan pilihan
-  world/local (overlay D1), snapping (grid/sudut/skala), kubus orientasi + tombol
-  perspective/ortho (overlay D2), picking klik dan seleksi kotak, tampilan
-  Lit/Unlit/Wireframe, statistik pojok.
-- Operasi level: New/Open/Save/Save As, dirty marker di judul jendela, prompt saat
-  keluar, autosave berkala ke lokasi terpisah.
-- Copy/paste/duplicate lintas-level, "paste as child".
-- Prefab: instansiasi, edit di tempat, override per-field dengan penanda dan
-  "revert to prefab".
+  focus ke seleksi (F), grid adaptif, wireframe per objek, ikon entity tanpa
+  geometri, gizmo translate/rotate/scale dengan pilihan world/local (overlay
+  D1), snapping (grid/sudut/skala) dengan kelipatan yang bisa diatur, tombol
+  perspective/ortho dan Lit/Wireframe (overlay D2), picking klik dan seleksi
+  kotak, statistik pojok.
+- Operasi level: New/Open/Save/Save As, dirty marker di judul jendela, prompt
+  saat keluar, autosave berkala ke lokasi terpisah.
+- Copy/paste/duplicate (Ctrl+C/V/D), "paste as child" (Ctrl+Shift+V).
+- Prefab: instansiasi dan "Save as Prefab". Override per-field dipindahkan ke
+  E5 — lihat catatan di bawah.
 
-**Kriteria terima**
+**Kriteria terima** — 15 test di `Tests/LevelEditorTests.cpp`, plus verifikasi UI
+lewat input sintetis.
 
-1. Menyusun sebuah level dari nol (10+ entity, hierarki 3 tingkat), simpan, tutup
-   editor, buka lagi → identik.
-2. Setiap operasi di atas bisa di-undo dan di-redo; menyeret gizmo menghasilkan
-   tepat satu entri undo.
-3. Multi-select 100 entity lalu memindahkannya tetap responsif (> 60 fps).
-4. Picking akurat pada objek yang saling menutupi; box-select memilih apa yang di dalam kotak.
-5. Snapping menghasilkan nilai yang persis kelipatan (tidak ada error akumulasi float).
+1. ✅ Level 17 entity dengan hierarki 3 tingkat: simpan → muat → simpan
+   menghasilkan teks yang sama persis. Diuji juga lewat UI — box-select seluruh
+   viewport lalu Delete menyisakan tepat entity yang berada di luar kotak, dan
+   satu undo mengembalikan kelimanya beserta hierarkinya.
+2. ✅ Satu seretan gizmo = **satu entri undo**, berapa pun frame yang dilaluinya.
+   Diuji dengan 40 perintah berturut-turut yang menyatu jadi satu entri, dan
+   lewat UI: menyeret sumbu Y dari 1,0 ke 2,76 lalu satu Ctrl+Z mengembalikannya
+   persis ke 1,0. Seretan atas seleksi yang berbeda sengaja **tidak** digabung —
+   kalau digabung, "sebelum" milik objek pertama akan dipakai membatalkan
+   perpindahan objek kedua.
+3. ✅ 120 frame × 100 entity memakan **0,162 ms per frame** — 1% dari anggaran
+   16,6 ms pada 60 Hz. Ambang testnya dipatok 1 ms, bukan 16,6 ms: anggaran satu
+   frame harus dibagi dengan menggambar seluruh UI dan scene, jadi batas yang
+   longgar akan lulus bahkan ketika kinerjanya sudah belasan kali lebih buruk.
+4. ✅ Picking diuji terhadap AABB dalam **ruang lokal** objek, bukan AABB dunia:
+   kubus yang diputar 45° tetap bisa diklik tepat pada bentuknya, dan sinar pada
+   x = 0,9 meleset seperti seharusnya. Dua objek segaris pandang memilih yang
+   terdepan, dan pemenangnya berbalik ketika sinar datang dari arah lain.
+   Box-select memilih apa yang di dalam kotak dan melewatkan yang di luar.
+5. ✅ Snapping menghasilkan kelipatan persis: menyeret sumbu X mendaratkan objek
+   di 2,5 tepat, sementara Y dan Z tidak tersentuh sama sekali. Seratus langkah
+   berturut-turut tetap kelipatan persis — tidak pernah muncul 2,4999998.
 
 **Yang berbeda dari rencana**
 
@@ -370,26 +389,42 @@ hapus — semuanya bisa di-undo dan tersimpan.
   kelipatan selamanya dan sisa pecahannya menumpuk. Pembungkus kita membulatkan
   nilai akhirnya, dan hanya pada sumbu yang benar-benar digerakkan — membulatkan
   ketiganya akan melompatkan Y dan Z ketika pengguna hanya menggeser X.
-- **`Device::SubmitTransient` mengembalikan nomor submit, bukan fence.** Fence
-  milik Device didaur ulang; pemanggil yang menyimpannya untuk ditunggu belakangan
-  bisa menunggu submit yang justru sedang direkam saat itu — dan editor menggantung.
-  Nomor submit tidak pernah dipakai ulang.
+- **ImGuizmo dipatok ke commit, bukan tag.** Rilis bertag terakhirnya (1.83)
+  jauh lebih tua daripada ImGui 1.92 yang kita pakai. Commit yang dipilih sudah
+  diuji kompilasi bersih tanpa satu pun API ImGui yang sudah dihapus.
+- **Semua perintah scene menyimpan GUID, bukan handle entity.** Undo
+  menghidupkan kembali entity yang sudah dihapus, dan entt boleh memakai ulang
+  nomor entity yang sama untuk objek yang sama sekali berbeda. GUID adalah
+  satu-satunya identitas yang bertahan melewati siklus hapus–undo.
 - **Open dan Save As memakai daftar berkas sendiri, bukan dialog OS.** Menambah
   pustaka dialog berkas sekarang berarti satu dependensi untuk sesuatu yang akan
   digantikan Asset Browser di E5. Sementara ini level dipilih dari folder editor.
-- **Prefab: instansiasi dan "Save as Prefab" ada; override per-field belum.**
-  Penanda override dan "revert to prefab" butuh konsep aset dengan identitas
-  stabil, yang baru lahir di E5. Dipindahkan ke sana.
+- **Override prefab per-field dipindahkan ke E5.** Penanda override dan "revert
+  to prefab" perlu membandingkan instance terhadap sumbernya, dan itu menuntut
+  aset dengan identitas yang stabil — yang baru lahir bersama AssetDatabase.
+  Mengerjakannya sekarang berarti membangunnya dua kali.
 
-**Bukti kriteria terima**
+**Tiga bug yang ditemukan saat pengujian**, dicatat karena penyebabnya bukan hal
+yang jelas dari membaca kode:
 
-| # | Bukti |
-|---|---|
-| 1 | `LevelEditorTests`: 17 entity, hierarki 3 tingkat, simpan→muat→simpan byte-identik |
-| 2 | 40 frame seretan gizmo → 1 entri undo; diverifikasi juga lewat UI: seret sumbu Y, satu Ctrl+Z mengembalikannya |
-| 3 | 120 frame × 100 entity = **0,162 ms per frame** (1% dari anggaran 16,6 ms) |
-| 4 | Test ray-vs-AABB memilih kotak terdepan dan berbalik saat sinar dari arah lain; objek diputar 45° diklik tepat pada bentuknya, bukan AABB dunia. Box-select lewat UI memilih 5 dari 6 entity — yang di luar kotak tidak ikut |
-| 5 | Seret bersnap menghasilkan X = 2,5 persis sementara Y dan Z tak tersentuh; 100 langkah berturut-turut tetap kelipatan persis |
+1. **Editor menggantung saat resize.** `StubRenderer` menyimpan `VkFence` milik
+   `Device` untuk ditunggu belakangan, padahal `Device` mendaur ulang fence itu
+   begitu submit-nya selesai. Yang ditunggu bisa jadi submit yang sedang direkam
+   saat itu juga — deadlock yang pasti terjadi, dan resize hanya mempercepatnya.
+   `SubmitTransient` sekarang mengembalikan nomor submit yang tidak pernah
+   dipakai ulang, dan `WaitTransient` langsung kembali bila nomornya sudah tidak
+   ada (yang berarti pekerjaannya memang sudah selesai).
+2. **Sumbu Y gizmo menunjuk ke bawah.** Proyeksi kita membalik `[1][1]` untuk
+   Vulkan, ImGuizmo mengasumsikan konvensi OpenGL dan membaliknya sekali lagi.
+   Pembalikannya dikembalikan khusus untuk ImGuizmo; matriks hasilnya tidak
+   terpengaruh karena yang berubah hanya cara memetakan dunia ke piksel.
+3. **Klik tombol overlay viewport menghapus seleksi, dan tombolnya tidak
+   bereaksi.** Status mouse dibaca sebelum tombolnya diajukan ke ImGui, sehingga
+   ImGui belum tahu ada tombol di bawah kursor. Urutan pengajuan item sekarang
+   yang menentukan siapa berhak atas sebuah klik: overlay diajukan lebih dulu,
+   permukaan viewport menjadi `InvisibleButton` sesudahnya. `ImGuizmo::Enable()`
+   dimatikan saat kursor di atas overlay, karena gizmo membaca mouse langsung
+   dan tidak tahu apa pun tentang item ImGui.
 
 ---
 
