@@ -534,93 +534,117 @@ ubah berkas, dengan handle lama tetap dipakai sampai gambar baru siap.
 
 ---
 
-## E6 — Runtime Lua + visual scripting + editor scripting · ~6 sesi
+## E6 — Runtime Lua + visual scripting + editor scripting · ~6 sesi · ✅ SELESAI (2 Agustus 2026)
 
 **Tujuan.** Lua jadi bahasa gameplay, dan editor bisa diperluas dengan Lua.
 
 **Pekerjaan**
 
-- `Script`: `LuaState` (sandbox per-project, batas memori, error handler dengan
-  traceback), integrasi sol2, `ScriptComponent` (path script + properti terekspos
+- `LuaVM` (sandbox per-project — `io` dan `os` dibuang, error handler dengan
+  traceback), integrasi sol2, `ScriptComponent` (path skrip + properti terekspos
   yang muncul di Inspector).
-- Binding engine: math (`vec3`, `quat`, `mat4`), `Entity`/`World` (cari, buat, hapus,
-  ambil/pasang komponen), input, waktu, log, event. Binding dibangkitkan dari
-  `Reflect` supaya komponen baru otomatis terjangkau dari Lua.
-- Hot reload: file watcher memicu reload script; state per-entity dipertahankan
-  lewat serialisasi tabel `state` sebelum reload.
-- **Lua Console** panel: REPL dengan riwayat, autocomplete sederhana, cetak tabel
-  yang bisa dilipat.
-- **Script Editor** panel: editor teks dengan pewarnaan sintaks Lua, tanda error
-  di gutter, jalankan-pilihan.
-- **Editor scripting API**: Lua bisa menambah item menu, panel kustom (ImGui
-  ter-bind terbatas: `sim.ui.button`, `sim.ui.text`, dst), memproses aset secara
-  batch, dan mendaftarkan command yang ikut sistem undo.
+- Binding engine: math (`vec3`, `quat`, `axis_angle`), `sim.get_component` /
+  `sim.set_component` yang **dituntun reflection** sehingga komponen baru
+  otomatis terjangkau, waktu, dan log.
+- Hot reload: `AssetDatabase` melaporkan GUID mana yang isinya berganti; tabel
+  `state` tiap instance dipertahankan menyeberangi reload.
+- **Lua Console**: REPL dengan riwayat, pelengkapan Tab, cetak tabel yang bisa
+  dilipat.
+- **Script Editor**: daftar `.lua`, pemeriksaan sintaks per ketikan (memuat,
+  tidak menjalankan), pelengkapan dari state Lua yang sungguh berjalan.
+- **Editor scripting API**: `sim.editor.menu/panel/command`, `sim.ui.*` terbatas,
+  dan pemrosesan aset batch (`assets`, `rename_asset`, `move_asset`).
+- **E6.5 visual scripting**: format `.simgraph`, katalog node dari `Reflect`,
+  compiler graph → Lua beserta peta sumber, `GraphCache`, `GraphComponent`, dan
+  panel **Graph Editor** di atas imgui-node-editor.
 
-### E6.5 — Visual scripting yang dikompilasi ke Lua
+**Kriteria terima** — 17 test di `Tests/GraphTests.cpp`, 12 di `ScriptTests.cpp`,
+5 di `EditorScriptingTests.cpp`, plus verifikasi di editor sungguhan.
 
-**Kenapa dikompilasi, bukan ditafsirkan.** Alternatifnya adalah mesin graph yang
-menelusuri node satu per satu saat runtime. Itu berarti dua jalur eksekusi yang
-harus dijaga sama perilakunya — satu untuk Lua tulis-tangan, satu untuk graph —
-dan yang kedua selalu lebih lambat sekaligus lebih sulit di-debug. Dengan
-mengompilasi graph menjadi sumber Lua, yang berjalan hanya satu runtime: graph
-adalah *penulis kode*, bukan penafsir. Efek sampingnya besar dan gratis: profiler,
-traceback, hot reload, dan sandbox yang sudah ada langsung berlaku untuk graph.
+1. ✅ Skrip yang memutar entity berjalan saat **Play**, berhenti saat **Stop**,
+   dan scene kembali persis ke keadaan sebelum Play — cuplikannya diambil
+   sebelum satu baris skrip pun berjalan.
+2. ✅ Menyunting skrip saat editor berjalan berlaku dalam **22 ms** dari berkas
+   ditulis sampai kode barunya jalan; kriterianya meminta di bawah satu detik.
+   Berlaku juga untuk skrip editor di `Assets/Editor`, yang dimuat ulang
+   seluruhnya karena registrasinya tidak menyebut berkas asalnya.
+3. ✅ Kesalahan Lua muncul di Console lengkap dengan traceback dan nomor baris.
+   Instance yang gagal dimatikan supaya tidak membanjiri Console enam puluh kali
+   per detik dan menenggelamkan pesan pertama — satu-satunya yang berguna.
+4. ✅ Skrip editor bisa menambah item menu dan panel, dan perubahannya masuk
+   `CommandHistory` yang sama dengan panel C++ sehingga Ctrl+Z membatalkannya.
+   Diuji lewat `sim.editor.command` yang naik-turunkan sebuah nilai, lalu
+   Undo/Redo dari riwayat utama.
+5. ✅ Properti yang diekspos skrip muncul di Inspector, bisa disunting untuk
+   seluruh seleksi sebagai satu entri undo, dan ikut tersimpan ke berkas level.
+   Yang tersimpan di entity hanyalah yang benar-benar disunting.
+6. ✅ Graph "putar entity saat OnUpdate" menghasilkan Lua yang bisa dibaca, dan
+   perilakunya identik dengan skrip tulis tangan yang setara — keduanya
+   dijalankan berdampingan dan transform-nya dicocokkan **tiap frame** selama 30
+   frame, bukan hanya di akhir: dua rotasi bisa berpapasan di nilai yang sama
+   pada satu titik waktu.
+7. ✅ Kesalahan runtime menyorot node penyebabnya. `ScriptRuntime` menyimpan
+   kegagalan terakhir per aset beserta nomor barisnya, dan peta sumber
+   menerjemahkannya kembali menjadi node. Seluruh node yang ikut menghasilkan
+   baris itu disorot — satu baris memang bisa memuat beberapa, karena node murni
+   disisipkan sebagai ekspresi ke dalam pernyataan yang memakainya.
+8. ✅ Siklus pada pin data ditolak saat kompilasi dengan pesan yang menunjuk
+   node penyebabnya, dan kompilernya **kembali** alih-alih menggantung. Berlaku
+   juga untuk lingkar pada pin exec, yang akan membuat penelusurannya tidak
+   pernah berhenti.
+9. ✅ Memuat level yang memakai graph tidak mengompilasi apa pun selama hasil
+   kompilasinya masih lebih baru daripada berkas graph-nya. Menyunting graph
+   membuat sumbernya lebih baru, dan Play berikutnya memakai hasil baru tanpa
+   langkah build manual. Keduanya memanggil `CompileGraph` yang sama persis.
 
-- **Format `.simgraph`** (JSON, berversi seperti `.simlevel`): daftar node, pin,
-  dan koneksi. Node menyimpan GUID sendiri sehingga koneksi tidak putus ketika
-  node dipindah atau diberi nama baru.
-- **Katalog node dibangkitkan dari `Reflect`**, bukan didaftarkan tangan. Setiap
-  komponen dan fungsi yang sudah terjangkau Lua otomatis muncul sebagai node —
-  satu sumber kebenaran, dan komponen baru tidak menuntut pekerjaan tambahan.
-  Node inti: event (`OnStart`, `OnUpdate`, `OnCollision`), alur (branch, loop,
-  sequence), variabel (get/set, lokal & graph), matematika, panggilan fungsi,
-  dan komentar.
-- **Compiler graph → Lua** (`Code/Script/GraphCompiler`):
-  - urutan eksekusi dari penelusuran topologis pin *exec*; pin *data* ditarik
-    malas saat dibutuhkan, seperti pemanggilan fungsi biasa;
-  - siklus pada pin data ditolak dengan pesan yang menunjuk node penyebabnya,
-    bukan menggantung;
-  - keluarannya Lua yang **bisa dibaca manusia**, dengan komentar `-- node <id>`
-    di tiap blok. Ini bukan kemewahan: ia yang membuat graph bisa di-debug
-    dengan alat yang sama seperti script biasa, dan membuat pengguna bisa
-    lulus dari visual scripting ke Lua tanpa jurang.
-  - **peta sumber** node ↔ baris Lua, supaya error runtime menyorot node yang
-    salah di editor, bukan baris di berkas yang tidak pernah dilihat pengguna.
-- **Kompilasi saat runtime maupun saat impor.** Importer `.simgraph` menghasilkan
-  `.lua` di cache aset (jalur normal, nol biaya saat memuat level), sementara
-  editor mengompilasi ulang di memori setiap graph disunting sehingga Play bisa
-  ditekan tanpa langkah build. Keduanya memanggil compiler yang sama persis —
-  hasil yang berbeda antara editor dan runtime adalah kelas bug yang tidak boleh
-  dibuka.
-- **Panel Graph Editor** memakai `imgui-node-editor` (dependensi yang sudah
-  direncanakan untuk E7.1, ditarik lebih awal ke sini): kanvas dengan pan/zoom,
-  node dari katalog lewat pencarian, koneksi bertipe yang menolak sambungan tak
-  masuk akal, breakpoint per node, dan panel "Compiled Lua" berdampingan yang
-  memperlihatkan hasil kompilasinya secara langsung.
-- **`GraphComponent`** merujuk aset `.simgraph` lewat `AssetRef`, sejajar dengan
-  `ScriptComponent`. Properti yang diekspos graph muncul di Inspector lewat jalur
-  reflection yang sama.
+**Yang berbeda dari rencana**
 
-**Kriteria terima**
+- **Node `OnCollision` tidak dibuat.** Fisika baru datang di E9, dan node yang
+  tidak pernah bisa menyala adalah janji yang tidak bisa ditepati katalog.
+- **Kompilasi graph tinggal di modul `Script`, bukan sebagai importer aset.**
+  `GraphCompiler` ada di `Script`, sedangkan `Script` bergantung pada `Assets`;
+  menaruhnya sebagai importer akan membalik arah ketergantungan itu dan menutup
+  jalan bagi runtime memakai `Assets` tanpa Lua. `GraphCache` menggantikannya,
+  dengan sifat yang diminta kriteria 9 tetap utuh.
+- **Suntingan graph tidak melewati `CommandHistory`**, sama seperti Script
+  Editor yang menyunting teks. Riwayat undo utama menjanjikan pembatalan
+  perubahan *scene*; menaruh suntingan dokumen di sana membuat Ctrl+Z melompat
+  bolak-balik antara dua hal yang tidak berhubungan.
+- **Breakpoint menahan frame berikutnya, bukan tumpukan panggilan.** Frame yang
+  sedang berjalan tetap diselesaikan; menghentikan Lua di tengah tumpukan
+  menuntut debug hook yang belum ada. Batas itu dinyatakan di tooltip-nya.
+- **`imgui-node-editor` dipatok ke `master`, bukan `develop`.** Keduanya
+  mendahului ImGui 1.92, tapi hanya `master` yang memuat pengganti
+  `ImRect::Floor()` dan `ImGui::GetKeyIndex()`. Satu tabrakan tersisa —
+  `operator*(float, ImVec2)` yang kini disediakan ImGui sendiri — ditutup patch
+  kecil di `cmake/patches/`, dengan penjaga berupa makro yang ditetapkan ImGui
+  persis ketika ia menyediakan operator itu, sehingga patch tidak menebak nomor
+  versi dan tetap benar setelah ImGui dinaikkan.
 
-1. Script Lua yang memutar sebuah entity berjalan saat **Play** ditekan, berhenti
-   saat **Stop**, dan scene kembali ke keadaan sebelum Play.
-2. Mengedit script saat editor berjalan → efeknya terlihat < 1 detik tanpa restart.
-3. Error di Lua muncul di Console lengkap dengan traceback dan nomor baris, tidak
-   membuat editor crash.
-4. Script editor Lua bisa membuat sebuah panel baru dan menambah menu item, dan
-   perubahan yang dilakukannya bisa di-undo dari sistem undo utama.
-5. Properti yang diekspos script muncul di Inspector dan tersimpan bersama level.
-6. Graph "putar entity saat OnUpdate" menghasilkan Lua yang bisa dibaca, dan
-   perilakunya **identik** dengan script tulis-tangan yang setara — dibandingkan
-   dengan menjalankan keduanya dan mencocokkan transform tiap frame.
-7. Error runtime di dalam graph menyorot node penyebabnya di Graph Editor, bukan
-   sekadar mencetak nomor baris berkas yang tidak pernah dilihat pengguna.
-8. Graph dengan siklus pada pin data ditolak saat kompilasi dengan pesan yang
-   menunjuk node penyebabnya; editor tidak menggantung dan tidak crash.
-9. Level yang memakai graph dimuat tanpa mengompilasi apa pun — `.lua` hasil
-   impor yang dipakai — dan menyunting graph di editor langsung berlaku saat
-   Play ditekan tanpa langkah build manual.
+**Temuan yang mengubah keputusan**
+
+1. **Pin setter komponen tidak boleh punya nilai bawaan.** `sim.set_component`
+   hanya menulis field yang ada di tabelnya. Kalau pin yang tidak tersambung
+   ikut mengirim nilai netral, menyetel posisi lewat graph akan diam-diam
+   mengembalikan rotasi dan skala entity — kelas bug yang sangat sulit dilacak
+   karena penyebabnya adalah field yang pengguna tidak sentuh sama sekali.
+2. **"Murni" berarti tanpa efek samping, bukan tetap.** Cache hasil node murni
+   harus dibuang setiap kali node yang punya efek samping berjalan; sebuah
+   `get_component` setelah `set_component` harus membaca yang baru.
+3. **Panel yang lahir setelah `LoadState` tidak pernah memulihkan keadaannya.**
+   Panel Lua selalu begitu — ia baru ada setelah berkas skripnya dijalankan —
+   sehingga panel yang sengaja ditutup pengguna muncul lagi setiap editor
+   dijalankan. `PanelManager` kini menyimpan keadaan yang dibacanya dan
+   menerapkannya juga pada panel yang didaftarkan belakangan.
+4. **Konteks global imgui-node-editor menjatuhkan editor, bukan sekadar salah.**
+   Beberapa fungsinya melakukan dereferensi tanpa memeriksa konteks aktif, jadi
+   memanggil "Fit" di luar `Begin()`/`End()` berarti segfault. Pembungkus
+   `Sim::NodeGraph` yang menanggungnya, bukan setiap panel yang memakainya.
+5. **Dua koneksi ke satu pin input** bisa muncul di berkas hasil suntingan
+   tangan, dan yang kedua diam-diam dikalahkan yang pertama — perilaku yang
+   ditentukan urutan penyimpanan dan tidak terlihat sama sekali di kanvas.
+   Sekarang dibuang saat dimuat, sejalan dengan koneksi yang menunjuk node yang
+   sudah tidak ada.
 
 ---
 
@@ -732,7 +756,7 @@ mempercepat pengerjaan E3 ke atas.
 
 | Risiko | Dampak | Penanganan |
 |---|---|---|
-| ImGuizmo / imgui-node-editor tidak kompatibel dengan ImGui 1.92 docking | E4/E7.1 tertahan | Keduanya dibungkus antarmuka sendiri (`Sim::Gizmo`, `Sim::NodeGraph`). Kalau pecah, ganti implementasi tanpa mengubah panel. Gizmo sendiri ≈ 600 baris kalau harus ditulis ulang. |
+| ImGuizmo / imgui-node-editor tidak kompatibel dengan ImGui 1.92 docking | E4/E7.1 tertahan | **Terjadi, dan sudah ditangani.** imgui-node-editor memang tidak bisa dikompilasi terhadap ImGui 1.92: patokannya dipindah ke `master` dan satu tabrakan sisa ditutup patch di `cmake/patches/` (lihat E6.5). Keduanya tetap dibungkus antarmuka sendiri (`Sim::Gizmo`, `Sim::NodeGraph`), jadi kalau pecah lagi yang berubah satu berkas — bukan setiap panel. Gizmo sendiri ≈ 600 baris kalau harus ditulis ulang. |
 | Rebuild atlas font saat pindah monitor merilis tekstur yang masih dipakai frame in-flight | Crash saat drag ke monitor lain | Semua rilis tekstur lewat antrian tunda `TextureBridge` (N frame). Diuji dengan ASan di kriteria terima E1. |
 | Reflection kurang ekspresif untuk kasus E7 (kurva, gradient, graph) | Inspector jadi penuh kode khusus | Sejak E3, `Attribute` mendukung "custom drawer" per-tipe; kurva/gradient/graph didaftarkan sebagai drawer, bukan pengecualian. |
 | Undo untuk operasi besar (brush terrain, sebar vegetasi) memakan memori | Editor kehabisan RAM | Command menyimpan patch/delta, bukan snapshot penuh; `CommandHistory` punya batas memori dan membuang entri terlama. |
