@@ -362,10 +362,13 @@ lewat input sintetis.
    persis ke 1,0. Seretan atas seleksi yang berbeda sengaja **tidak** digabung —
    kalau digabung, "sebelum" milik objek pertama akan dipakai membatalkan
    perpindahan objek kedua.
-3. ✅ 120 frame × 100 entity memakan **0,162 ms per frame** — 1% dari anggaran
-   16,6 ms pada 60 Hz. Ambang testnya dipatok 1 ms, bukan 16,6 ms: anggaran satu
-   frame harus dibagi dengan menggambar seluruh UI dan scene, jadi batas yang
-   longgar akan lulus bahkan ketika kinerjanya sudah belasan kali lebih buruk.
+3. ✅ 120 frame × 100 entity memakan **0,162 ms per frame** di build Debug —
+   1% dari anggaran 16,6 ms pada 60 Hz. Build Release: **0,0083 ms per frame**.
+   Angka tanpa menyebut build-nya menyesatkan; keduanya dicatat di sini supaya
+   pengukuran berikutnya membandingkan hal yang sama. Ambang testnya dipatok
+   1 ms, bukan 16,6 ms: anggaran satu frame harus dibagi dengan menggambar
+   seluruh UI dan scene, jadi batas yang longgar akan lulus bahkan ketika
+   kinerjanya sudah belasan kali lebih buruk.
 4. ✅ Picking diuji terhadap AABB dalam **ruang lokal** objek, bukan AABB dunia:
    kubus yang diputar 45° tetap bisa diklik tepat pada bentuknya, dan sinar pada
    x = 0,9 meleset seperti seharusnya. Dua objek segaris pandang memilih yang
@@ -426,6 +429,37 @@ yang jelas dari membaca kode:
    dimatikan saat kursor di atas overlay, karena gizmo membaca mouse langsung
    dan tidak tahu apa pun tentang item ImGui.
 
+   **Perbaikan itu sendiri mematikan gizmo, dan baru ketahuan di E6** — lihat
+   catatan pemeriksaan ulang di bawah.
+
+**Diperiksa ulang 3 Agustus 2026**, setelah E6 selesai, lewat input sungguhan
+(XTEST) di editor yang berjalan — bukan dengan membaca kode.
+
+Kriteria 1, 2, 4, dan 5 masih berlaku apa adanya: seleksi kotak atas enam entity
+lalu Delete mengosongkan outliner dan satu Ctrl+Z mengembalikan keenamnya
+lengkap dengan hierarkinya; menyeret panah X memberi Translate X = 2,821 dengan
+Y dan Z tetap 0; cincin Y memberi Rotate Y = 72,69°; dan dengan snapping menyala
+hasilnya 3,000 persis.
+
+Kriteria 2 dan 5 sempat **tidak berlaku sama sekali** di antara E4 dan
+pemeriksaan ini: gizmo tidak bisa menggeser apa pun. Dua sebab, keduanya
+berpangkal pada permukaan viewport yang diperkenalkan oleh perbaikan nomor 3 di
+atas — sebuah item ImGui yang menutupi seluruh area gizmo, sementara ImGuizmo
+membaca keadaan ImGui yang *global*:
+
+- `ImGui::IsAnyItemHovered()` ikut memeriksa hover frame sebelumnya
+  (`HoveredIdPreviousFrame`). Begitu kursor masuk ke viewport, permukaan itu
+  membuat jawabannya selalu "ya", gizmo menerima `interactive = false`, dan
+  ImGuizmo menggambarnya abu-abu.
+- `ImGuizmo::CanActivate()` mensyaratkan `!IsAnyItemHovered() && !IsAnyItemActive()`.
+  Selama permukaan itu diajukan, gizmo tidak akan pernah bisa memulai manipulasi.
+
+Pelajarannya bukan "ImGuizmo rewel" melainkan bahwa **verifikasi UI punya masa
+berlaku**: klaim nomor 2 dan 5 memang benar saat ditulis, dan yang
+membatalkannya adalah perubahan di berkas yang sama beberapa baris di atasnya.
+Test tidak menangkapnya karena yang rusak bukan logikanya melainkan perantara
+antara ImGui, ImGuizmo, dan panel.
+
 ---
 
 ## E5 — Asset Browser + Asset Database · ~5 sesi · ✅ SELESAI (2 Agustus 2026)
@@ -477,6 +511,33 @@ diseret ke level.
    pemakainya (`Levels/arena.simlevel`, `Levels/lobby.simlevel`), bukan sekadar
    jumlahnya, beserta akibatnya. Cancel menahan berkasnya; Delete membuangnya
    bersama `.meta`.
+
+**Diperiksa ulang 3 Agustus 2026**, setelah E6 selesai, lewat input sungguhan
+(XTEST) di editor yang berjalan. Kelimanya masih berlaku:
+
+1. Berkas yang disalin dari luar muncul di Asset Browser dalam **0,19 detik**
+   lengkap dengan thumbnail dan `.meta` — kriterianya meminta di bawah dua detik.
+3. 10.000 aset (20.000 berkas dengan `.meta`-nya) tidak berbiaya apa pun saat
+   diam: **28–30 jiffies per dua detik**, sama dengan editor berisi 8 aset
+   (28–29). Yang sesekali naik ke 37 adalah pemindaian penuh berjeda 30 detik
+   yang memang tetap ada sebagai jalur pemulihan.
+4. Menyeret tekstur ke field Material menetapkan GUID yang **cocok persis**
+   dengan isi `.meta`-nya; Ctrl+Z mengosongkannya, Ctrl+Shift+Z mengembalikannya.
+5. Dialognya menyebut kedua pemakainya per nama beserta akibatnya; Cancel
+   menahan berkasnya, Delete membuang berkas dan `.meta`-nya.
+
+**Satu celah yang baru terlihat saat memeriksa ulang nomor 5.** Peringatan itu
+hanya menghitung pemakai yang **terindeks sebagai aset**, sedangkan `SaveLevel`
+menulis ke `~/.simengine/Levels` — di luar akar aset `~/.simengine/Assets`.
+Level yang disimpan lewat editor karena itu tidak pernah muncul sebagai pemakai,
+dan menghapus aset yang dipakai level yang sedang dibuka akan lolos tanpa
+peringatan sama sekali. Verifikasi E5 dahulu memakai level yang kebetulan berada
+di dalam folder aset, jadi celah ini tidak terlihat.
+
+Sengaja belum diperbaiki di sini: menaruh level di dalam akar aset adalah
+keputusan tentang tata letak proyek, dan akar itu memang ditandai sementara
+sampai `project.simproj` matang. Yang harus diselesaikan bersamaan dengan
+pekerjaan itu, bukan ditambal dengan mengubah satu path.
 
 **Yang berbeda dari rencana**
 
