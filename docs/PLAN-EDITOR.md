@@ -728,6 +728,21 @@ ubah berkas, dengan handle lama tetap dipakai sampai gambar baru siap.
    ditentukan urutan penyimpanan dan tidak terlihat sama sekali di kanvas.
    Sekarang dibuang saat dimuat, sejalan dengan koneksi yang menunjuk node yang
    sudah tidak ada.
+6. **Kolom yang meregang di dalam node membuat node tidak bisa digeser.** Node
+   menentukan ukurannya sendiri dari isinya, sementara kolom tabel yang meregang
+   mengambil selebar ruang yang tersedia — dan di dalam node, "ruang yang
+   tersedia" adalah selebar kanvas. Keduanya saling memberi makan: setiap node
+   melebar sampai tepi kanvas, dan menyeretnya hanya melebarkannya lagi.
+   Tabel pin sekarang memakai `SizingFixedFit` + `NoHostExtendX`; yang kedua
+   perlu karena tanpa itu lebar *luar* tabel tetap mengambil ruang yang tersedia
+   walau kolomnya sudah menyesuaikan isi.
+7. **Menggeser node tidak menandai graph kotor**, sehingga tata letak yang baru
+   diatur tidak bisa disimpan sama sekali — tombol Save tetap padam. Posisi kini
+   mengalir balik dari kanvas ke model begitu node digeser, dengan ambang
+   setengah piksel supaya pembulatan pustaka tidak menandai kotor pada frame
+   pertama setelah graph dibuka. Pembacaan posisi di dalam Save() ikut dihapus:
+   dua mekanisme untuk satu hal berarti yang kedua diam-diam menang setiap kali
+   keduanya tidak sepakat.
 
 ---
 

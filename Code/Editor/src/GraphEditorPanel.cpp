@@ -19,6 +19,7 @@
 #include <imgui_stdlib.h>
 
 #include <algorithm>
+#include <cmath>
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -233,12 +234,27 @@ private:
         const uint64_t id = IdOf(node.guid);
 
         // Posisi berpindah dua arah: dari berkas ke kanvas saat graph dibuka,
-        // dan dari kanvas ke berkas saat pengguna menyeret node. Yang menentukan
-        // arahnya adalah `placed_` — tanpa itu, menyeret node akan langsung
-        // ditimpa balik oleh posisi yang tersimpan di berkas.
+        // dan dari kanvas ke berkas begitu pengguna menyeret node. Yang
+        // menentukan arahnya adalah `placed_` — tanpa itu, menyeret node akan
+        // langsung ditimpa balik oleh posisi yang tersimpan di berkas.
         if (!placed_.contains(node.guid)) {
             canvas_.SetNodePosition(id, node.position);
             placed_.insert(node.guid);
+        } else if (GraphNode* mutableNode = FindNode(node.guid)) {
+            // Ambang setengah piksel, bukan perbandingan persis: pustaka
+            // membulatkan posisi node ke bilangan bulat, dan perbandingan persis
+            // akan menandai graph kotor pada frame pertama setelah dibuka —
+            // tombol Save menyala tanpa pengguna menyentuh apa pun.
+            const Vec2 current = canvas_.GetNodePosition(id);
+            if (std::abs(current.x - mutableNode->position.x) > 0.5f ||
+                std::abs(current.y - mutableNode->position.y) > 0.5f) {
+                mutableNode->position = current;
+                // dirty_ langsung, bukan lewat Touch(): posisi node tidak
+                // mengubah satu baris pun Lua yang dihasilkan, dan mengompilasi
+                // ulang di setiap frame seretan adalah pekerjaan yang hasilnya
+                // dijamin sama.
+                dirty_ = true;
+            }
         }
 
         canvas_.BeginNode(id);
@@ -260,7 +276,20 @@ private:
 
         // Dua kolom: masukan di kiri, keluaran di kanan — bentuk yang dikenali
         // siapa pun yang pernah memakai graph editor lain.
-        if (ImGui::BeginTable("pins", 2, ImGuiTableFlags_SizingStretchProp)) {
+        //
+        // Kolomnya WAJIB menyesuaikan isi, bukan meregang. Sebuah node
+        // menentukan ukurannya sendiri dari isinya, sementara kolom yang
+        // meregang mengambil selebar ruang yang tersedia — dan di dalam node,
+        // "ruang yang tersedia" adalah selebar kanvas. Keduanya saling
+        // memberi makan: setiap node melebar sampai tepi kanvas, dan
+        // menyeretnya hanya melebarkannya lagi alih-alih memindahkannya.
+        //
+        // NoHostExtendX yang menutupnya: tanpa itu lebar luar tabel tetap
+        // mengambil ruang yang tersedia walau kolomnya sudah menyesuaikan isi,
+        // dan node tetap terukur selebar kanvas.
+        constexpr ImGuiTableFlags kPinTableFlags =
+            ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoHostExtendX;
+        if (ImGui::BeginTable("pins", 2, kPinTableFlags)) {
             const std::size_t rows = std::max(inputs.size(), outputs.size());
             for (std::size_t row = 0; row < rows; ++row) {
                 ImGui::TableNextRow();
@@ -811,12 +840,10 @@ private:
         if (openPath_.empty()) {
             return;
         }
-        // Posisi node dibaca balik dari kanvas tepat sebelum menyimpan. Membaca
-        // setiap frame akan menandai graph kotor hanya karena pustaka membulatkan
-        // koordinat, dan tombol Save tidak pernah padam.
-        for (GraphNode& node : graph_.nodes) {
-            node.position = canvas_.GetNodePosition(IdOf(node.guid));
-        }
+        // Posisi tidak dibaca ulang di sini: ia sudah mengalir balik dari kanvas
+        // ke model begitu node digeser — lihat DrawNode(). Membacanya lagi di
+        // sini berarti dua mekanisme untuk satu hal, dan yang kedua akan diam-
+        // diam menang setiap kali keduanya tidak sepakat.
         const GraphIoResult result = SaveGraphToFile(graph_, openPath_);
         if (!result.ok) {
             if (context.notifications != nullptr) {
