@@ -1,0 +1,66 @@
+#pragma once
+
+#include "Sim/Reflect/TypeRegistry.h"
+#include "Sim/Scene/World.h"
+
+#include <filesystem>
+#include <string>
+#include <vector>
+
+namespace sim::scene {
+
+/// Versi skema berkas `.simlevel` yang ditulis sekarang.
+///
+/// Riwayat:
+///   1 — rotasi disimpan sebagai sudut Euler derajat [x, y, z]
+///   2 — rotasi disimpan sebagai quaternion [w, x, y, z]
+///
+/// Naikkan setiap kali bentuk data berubah, dan tambahkan langkahnya di
+/// Migrate(). Berkas lama harus tetap bisa dibuka: level adalah hasil kerja
+/// pengguna, bukan artefak build.
+inline constexpr int kLevelSchemaVersion = 2;
+
+struct LevelIoResult {
+    bool ok = false;
+    std::string error;
+    /// Versi skema berkas sebelum migrasi. Sama dengan kLevelSchemaVersion bila
+    /// tidak ada migrasi yang berjalan.
+    int sourceVersion = kLevelSchemaVersion;
+    bool migrated = false;
+    std::size_t entityCount = 0;
+};
+
+/// Menulis seluruh dunia ke teks JSON.
+///
+/// Keluarannya deterministik: entity ditulis menurut penelusuran hierarki dari
+/// akar, dan komponen menurut urutan pendaftarannya. Dua kali menyimpan dunia
+/// yang sama menghasilkan byte yang sama persis — itu yang membuat berkas level
+/// ramah diff dan ramah git.
+std::string SaveLevelToString(const World& world);
+LevelIoResult SaveLevelToFile(const World& world, const std::filesystem::path& path);
+
+/// Mengganti isi `world` dengan isi berkas. Menjalankan migrasi bila perlu.
+LevelIoResult LoadLevelFromString(World& world, const std::string& text);
+LevelIoResult LoadLevelFromFile(World& world, const std::filesystem::path& path);
+
+/// Menyimpan satu entity beserta seluruh keturunannya sebagai teks level.
+///
+/// Dipakai undo penghapusan dan prefab: keduanya butuh membangun ulang sub-pohon
+/// persis seperti semula, lengkap dengan GUID-nya, bukan salinan yang mirip.
+std::string SaveSubtreeToString(const World& world, Entity root);
+
+/// Membangun ulang sub-pohon hasil SaveSubtreeToString di bawah induk tertentu.
+/// `parentGuid` tidak valid berarti dipasang sebagai akar.
+bool RestoreSubtree(World& world, const std::string& text, Uuid parentGuid);
+
+/// Menyalin satu komponen ke/dari teks JSON.
+///
+/// Dipakai undo generik di editor: menyimpan cuplikan sebelum dan sesudah
+/// sebuah suntingan tanpa perlu satu pun command khusus per tipe komponen.
+/// Menyalin byte mentah tidak bisa dipakai karena komponen memuat std::string
+/// dan std::vector.
+std::string SerializeComponent(const reflect::TypeDesc& type, const void* component);
+void DeserializeComponent(const reflect::TypeDesc& type, void* component,
+                          const std::string& text);
+
+}  // namespace sim::scene

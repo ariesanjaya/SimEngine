@@ -1,0 +1,12 @@
+sim_add_library(Scene
+    SOURCES
+        src/Components.cpp
+        src/Project.cpp
+        src/Serialization.cpp
+        src/World.cpp
+    PUBLIC_DEPS
+        Sim::Core
+        Sim::Reflect
+        EnTT::EnTT
+    PRIVATE_DEPS
+        nlohmann_json::nlohmann_json)
