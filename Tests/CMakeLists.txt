@@ -16,6 +16,12 @@ sim_add_test(SimEditorTests
     DEPS
         Sim::EditorFramework)
 
+sim_add_test(SimAssetTests
+    SOURCES
+        AssetTests.cpp
+    DEPS
+        Sim::Assets)
+
 sim_add_test(SimLevelEditorTests
     SOURCES
         LevelEditorTests.cpp

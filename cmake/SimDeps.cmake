@@ -253,9 +253,25 @@ target_include_directories(icon_font_headers SYSTEM INTERFACE
 add_library(IconFonts::Headers ALIAS icon_font_headers)
 
 # ---------------------------------------------------------------------------
+# stb — stb_image untuk dekode tekstur dan pembuatan thumbnail
+#
+# Header-only dan tanpa build system, jadi SOURCE_SUBDIR diarahkan ke folder
+# tanpa CMakeLists seperti VMA. STB_IMAGE_IMPLEMENTATION didefinisikan di satu
+# TU saja, di Code/Assets.
+# ---------------------------------------------------------------------------
+FetchContent_Declare(stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG        f0569113c93ad095470c54bf34a17b36646bbbb5
+    GIT_SHALLOW    FALSE
+    SOURCE_SUBDIR  deprecated)
+FetchContent_MakeAvailable(stb)
+
+add_library(stb INTERFACE)
+target_include_directories(stb SYSTEM INTERFACE ${stb_SOURCE_DIR})
+add_library(Stb::Stb ALIAS stb)
+
+# ---------------------------------------------------------------------------
 # Ditambahkan pada milestone berikutnya (lihat docs/DEPENDENCIES.md):
-#   E4   ImGuizmo                 gizmo viewport
-#   E5   stb                      stb_image untuk tekstur & thumbnail
 #   E7.1 imgui-node-editor        graph material & state machine animasi
 #   A0   cpp-httplib              transport HTTP untuk MCP server
 #   E8   ufbx, cgltf, meshoptimizer

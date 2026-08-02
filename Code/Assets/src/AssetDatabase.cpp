@@ -1,0 +1,414 @@
+#include "Sim/Assets/AssetDatabase.h"
+
+#include "Sim/Assets/Importer.h"
+#include "Sim/Core/Log.h"
+#include "Sim/Core/TaskPool.h"
+
+#include <nlohmann/json.hpp>
+
+#include <algorithm>
+#include <fstream>
+
+namespace sim::assets {
+namespace {
+
+constexpr const char* kMetaExtension = ".meta";
+constexpr int kMetaVersion = 1;
+
+/// Path relatif dengan '/' sebagai pemisah, apa pun platformnya.
+///
+/// Path disimpan sebagai teks dan ikut masuk ke berkas favorit serta indeks;
+/// membiarkan pemisah asli platform akan membuat berkas itu tidak bisa dibawa
+/// pindah dari Linux ke Windows.
+std::string ToRelativeString(const std::filesystem::path& root,
+                             const std::filesystem::path& path) {
+    std::error_code error;
+    std::filesystem::path relative = std::filesystem::relative(path, root, error);
+    if (error) {
+        return path.filename().string();
+    }
+    std::string text = relative.generic_string();
+    return text;
+}
+
+std::int64_t ModifiedSeconds(const std::filesystem::directory_entry& entry) {
+    std::error_code error;
+    const auto time = entry.last_write_time(error);
+    if (error) {
+        return 0;
+    }
+    return std::chrono::duration_cast<std::chrono::seconds>(time.time_since_epoch()).count();
+}
+
+/// Membaca GUID dari berkas `.meta`, atau membuatkan yang baru bila belum ada.
+///
+/// Berkas `.meta` inilah yang membuat identitas aset bertahan. Kalau hilang,
+/// aset mendapat GUID baru dan setiap level yang memakainya kehilangan
+/// rujukannya — karena itu berkas ini harus ikut masuk kontrol versi bersama
+/// asetnya, dan itu dicatat di dalam berkasnya sendiri.
+Uuid ReadOrCreateMeta(const std::filesystem::path& assetPath, bool& outCreated) {
+    const std::filesystem::path metaPath = assetPath.string() + kMetaExtension;
+    outCreated = false;
+
+    std::ifstream input(metaPath);
+    if (input) {
+        try {
+            nlohmann::json document;
+            input >> document;
+            const Uuid guid = Uuid::Parse(document.value("guid", std::string{}));
+            if (guid.IsValid()) {
+                return guid;
+            }
+        } catch (const nlohmann::json::exception& exception) {
+            SIM_WARN("Assets", "Damaged meta file {}: {}", metaPath.string(), exception.what());
+        }
+    }
+
+    const Uuid guid = Uuid::Generate();
+    nlohmann::ordered_json document;
+    document["version"] = kMetaVersion;
+    document["guid"] = guid.ToString();
+    document["note"] =
+        "Keep this file next to its asset and commit it. Losing it gives the asset a new "
+        "identity and breaks every level that references it.";
+
+    std::ofstream output(metaPath);
+    if (output) {
+        output << document.dump(2) << '\n';
+        outCreated = true;
+    } else {
+        SIM_WARN("Assets", "Cannot write meta file {}", metaPath.string());
+    }
+    return guid;
+}
+
+}  // namespace
+
+bool AssetDatabase::Initialize(Config config) {
+    root_ = config.root;
+    tasks_ = config.tasks;
+    pollInterval_ = config.pollIntervalSeconds;
+
+    std::error_code error;
+    std::filesystem::create_directories(root_, error);
+    if (error) {
+        SIM_ERROR("Assets", "Cannot create asset root {}: {}", root_.string(), error.message());
+        return false;
+    }
+
+    ImporterRegistry::RegisterBuiltIn();
+    ScanNow();
+    SIM_INFO("Assets", "Asset database ready: {} assets in {}", records_.size(), root_.string());
+    return true;
+}
+
+void AssetDatabase::Shutdown() {
+    records_.clear();
+    folders_.clear();
+    byGuid_.clear();
+    byPath_.clear();
+}
+
+void AssetDatabase::ScanNow() {
+    Apply(Scan(root_));
+}
+
+void AssetDatabase::Update(float deltaSeconds) {
+    ScanResult ready;
+    bool hasReady = false;
+    {
+        const std::lock_guard<std::mutex> lock(handoffMutex_);
+        if (hasPendingResult_) {
+            ready = std::move(pendingResult_);
+            hasPendingResult_ = false;
+            hasReady = true;
+        }
+    }
+    // Apply dijalankan di luar kunci. Ia hanya menyentuh indeks yang khusus
+    // main thread, dan menahan kunci selama itu cuma membuat pemindai
+    // berikutnya menunggu tanpa alasan.
+    if (hasReady) {
+        Apply(std::move(ready));
+    }
+
+    sinceLastScan_ += deltaSeconds;
+    if (sinceLastScan_ < pollInterval_) {
+        return;
+    }
+    sinceLastScan_ = 0.0f;
+
+    if (tasks_ == nullptr) {
+        ScanNow();
+        return;
+    }
+    // Satu pemindaian dalam satu waktu. Tanpa penjaga ini, folder besar yang
+    // pemindaiannya lebih lama daripada jeda poll akan menumpuk tugas sampai
+    // seluruh kolam thread terisi olehnya.
+    bool expected = false;
+    if (!scanInFlight_.compare_exchange_strong(expected, true)) {
+        return;
+    }
+    tasks_->Submit([this]() {
+        ScanResult result = Scan(root_);
+        {
+            const std::lock_guard<std::mutex> lock(handoffMutex_);
+            pendingResult_ = std::move(result);
+            hasPendingResult_ = true;
+        }
+        scanInFlight_.store(false);
+    });
+}
+
+AssetDatabase::ScanResult AssetDatabase::Scan(const std::filesystem::path& root) {
+    ScanResult result;
+    std::error_code error;
+    if (!std::filesystem::exists(root, error)) {
+        return result;
+    }
+
+    const ImporterRegistry& importers = ImporterRegistry::Get();
+    for (std::filesystem::recursive_directory_iterator it(root, error), end; it != end;
+         it.increment(error)) {
+        if (error) {
+            SIM_WARN("Assets", "Scan error under {}: {}", root.string(), error.message());
+            break;
+        }
+        const std::filesystem::directory_entry& entry = *it;
+
+        if (entry.is_directory(error)) {
+            result.folders.push_back(ToRelativeString(root, entry.path()));
+            continue;
+        }
+        if (!entry.is_regular_file(error)) {
+            continue;
+        }
+        // Berkas .meta adalah milik database, bukan aset tersendiri.
+        if (entry.path().extension() == kMetaExtension) {
+            continue;
+        }
+
+        AssetRecord record;
+        record.relativePath = ToRelativeString(root, entry.path());
+        record.name = entry.path().filename().string();
+        record.type = TypeFromExtension(entry.path().extension().string());
+        record.fileSize = entry.file_size(error);
+        record.modifiedSeconds = ModifiedSeconds(entry);
+
+        bool created = false;
+        record.guid = ReadOrCreateMeta(entry.path(), created);
+
+        if (const IImporter* importer = importers.Find(record.type)) {
+            const ImportResult imported = importer->Import(entry.path());
+            record.state = imported.ok ? ImportState::Ready : ImportState::Failed;
+            record.error = imported.error;
+            record.width = imported.width;
+            record.height = imported.height;
+            record.channels = imported.channels;
+            record.dependencies = imported.dependencies;
+        } else {
+            record.state = ImportState::Ready;
+        }
+
+        result.records.push_back(std::move(record));
+    }
+
+    // Urutan tetap: folder dulu menurut abjad, lalu berkas. Tanpa ini, urutan
+    // yang diberikan sistem berkas bisa berubah antar pemindaian dan panel akan
+    // terlihat mengacak isinya sendiri.
+    std::sort(result.folders.begin(), result.folders.end());
+    std::sort(result.records.begin(), result.records.end(),
+              [](const AssetRecord& a, const AssetRecord& b) {
+                  return a.relativePath < b.relativePath;
+              });
+    return result;
+}
+
+void AssetDatabase::Apply(ScanResult&& result) {
+    // Dibandingkan lebih dulu supaya Version() hanya naik ketika ada yang
+    // benar-benar berubah — panel memakainya untuk memutuskan menyusun ulang
+    // tampilan, dan menaikkannya tiap detik akan membuat itu percuma.
+    const bool sameFolders = folders_ == result.folders;
+    bool sameRecords = records_.size() == result.records.size();
+    if (sameRecords) {
+        for (std::size_t i = 0; i < records_.size(); ++i) {
+            const AssetRecord& a = records_[i];
+            const AssetRecord& b = result.records[i];
+            if (a.guid != b.guid || a.relativePath != b.relativePath ||
+                a.fileSize != b.fileSize || a.modifiedSeconds != b.modifiedSeconds ||
+                a.state != b.state) {
+                sameRecords = false;
+                break;
+            }
+        }
+    }
+    if (sameFolders && sameRecords) {
+        return;
+    }
+
+    records_ = std::move(result.records);
+    folders_ = std::move(result.folders);
+    Reindex();
+    ++version_;
+}
+
+void AssetDatabase::Reindex() {
+    byGuid_.clear();
+    byPath_.clear();
+    byGuid_.reserve(records_.size());
+    byPath_.reserve(records_.size());
+    for (std::size_t i = 0; i < records_.size(); ++i) {
+        byGuid_.emplace(records_[i].guid, i);
+        byPath_.emplace(records_[i].relativePath, i);
+    }
+
+    // Ketergantungan disaring di sini, bukan di importer: importer berjalan di
+    // thread latar dan tidak boleh melihat indeks. GUID yang tidak dikenal —
+    // termasuk GUID entity di dalam berkas level, yang bentuknya sama persis —
+    // dibuang pada tahap ini.
+    for (AssetRecord& record : records_) {
+        std::vector<Uuid> resolved;
+        for (const Uuid& guid : record.dependencies) {
+            if (guid != record.guid && byGuid_.find(guid) != byGuid_.end()) {
+                resolved.push_back(guid);
+            }
+        }
+        record.dependencies = std::move(resolved);
+    }
+}
+
+const AssetRecord* AssetDatabase::Find(const Uuid& guid) const {
+    const auto it = byGuid_.find(guid);
+    return it == byGuid_.end() ? nullptr : &records_[it->second];
+}
+
+const AssetRecord* AssetDatabase::FindByRelativePath(std::string_view relativePath) const {
+    const auto it = byPath_.find(std::string(relativePath));
+    return it == byPath_.end() ? nullptr : &records_[it->second];
+}
+
+std::vector<const AssetRecord*> AssetDatabase::InFolder(std::string_view folder,
+                                                        bool recursive) const {
+    std::vector<const AssetRecord*> result;
+    const std::string prefix = folder.empty() ? std::string{} : std::string(folder) + "/";
+
+    for (const AssetRecord& record : records_) {
+        if (!record.relativePath.starts_with(prefix)) {
+            continue;
+        }
+        if (!recursive) {
+            // Hanya isi langsung: sisa path setelah prefix tidak boleh
+            // mengandung pemisah lagi.
+            const std::string_view remainder(record.relativePath);
+            if (remainder.substr(prefix.size()).find('/') != std::string_view::npos) {
+                continue;
+            }
+        }
+        result.push_back(&record);
+    }
+    return result;
+}
+
+std::vector<Uuid> AssetDatabase::UsersOf(const Uuid& guid) const {
+    std::vector<Uuid> users;
+    for (const AssetRecord& record : records_) {
+        if (std::find(record.dependencies.begin(), record.dependencies.end(), guid) !=
+            record.dependencies.end()) {
+            users.push_back(record.guid);
+        }
+    }
+    return users;
+}
+
+std::filesystem::path AssetDatabase::AbsolutePath(const AssetRecord& record) const {
+    return root_ / std::filesystem::path(record.relativePath);
+}
+
+bool AssetDatabase::Rename(const Uuid& guid, std::string_view newName, std::string& error) {
+    const AssetRecord* record = Find(guid);
+    if (record == nullptr) {
+        error = "asset not found";
+        return false;
+    }
+    if (newName.empty() || newName.find('/') != std::string_view::npos) {
+        error = "invalid name";
+        return false;
+    }
+
+    const std::filesystem::path from = AbsolutePath(*record);
+    const std::filesystem::path to = from.parent_path() / std::filesystem::path(newName);
+    if (from == to) {
+        return true;
+    }
+    std::error_code code;
+    if (std::filesystem::exists(to, code)) {
+        error = "a file with that name already exists";
+        return false;
+    }
+
+    std::filesystem::rename(from, to, code);
+    if (code) {
+        error = code.message();
+        return false;
+    }
+    // Berkas .meta ikut berpindah. Kalau tertinggal, aset yang dinamai ulang
+    // akan dianggap baru pada pemindaian berikutnya dan mendapat GUID baru —
+    // memutus tepat referensi yang seharusnya dijaga utuh.
+    std::filesystem::rename(from.string() + kMetaExtension, to.string() + kMetaExtension, code);
+
+    ScanNow();
+    return true;
+}
+
+bool AssetDatabase::Move(const Uuid& guid, std::string_view newFolder, std::string& error) {
+    const AssetRecord* record = Find(guid);
+    if (record == nullptr) {
+        error = "asset not found";
+        return false;
+    }
+
+    const std::filesystem::path from = AbsolutePath(*record);
+    const std::filesystem::path targetDir =
+        newFolder.empty() ? root_ : root_ / std::filesystem::path(newFolder);
+    const std::filesystem::path to = targetDir / from.filename();
+    if (from == to) {
+        return true;
+    }
+
+    std::error_code code;
+    std::filesystem::create_directories(targetDir, code);
+    if (std::filesystem::exists(to, code)) {
+        error = "a file with that name already exists in the target folder";
+        return false;
+    }
+    std::filesystem::rename(from, to, code);
+    if (code) {
+        error = code.message();
+        return false;
+    }
+    std::filesystem::rename(from.string() + kMetaExtension, to.string() + kMetaExtension, code);
+
+    ScanNow();
+    return true;
+}
+
+bool AssetDatabase::Delete(const Uuid& guid, std::string& error) {
+    const AssetRecord* record = Find(guid);
+    if (record == nullptr) {
+        error = "asset not found";
+        return false;
+    }
+    const std::filesystem::path path = AbsolutePath(*record);
+
+    std::error_code code;
+    std::filesystem::remove(path, code);
+    if (code) {
+        error = code.message();
+        return false;
+    }
+    std::filesystem::remove(path.string() + kMetaExtension, code);
+
+    ScanNow();
+    return true;
+}
+
+}  // namespace sim::assets

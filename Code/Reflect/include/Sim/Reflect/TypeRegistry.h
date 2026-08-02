@@ -57,6 +57,11 @@ constexpr FieldKind KindOf() {
         return FieldKind::Quat;
     } else if constexpr (std::is_same_v<U, std::string>) {
         return FieldKind::String;
+    } else if constexpr (std::is_same_v<U, ::sim::AssetRef>) {
+        // Harus diperiksa sebelum Struct: AssetRef memang sebuah struct, dan
+        // tanpa cabang ini ia akan jatuh ke cabang terakhir lalu dicari-cari
+        // pendaftaran tipenya yang tidak pernah ada.
+        return FieldKind::AssetRef;
     } else if constexpr (std::is_same_v<U, ::sim::Uuid>) {
         return FieldKind::Uuid;
     } else if constexpr (IsVector<U>::value) {

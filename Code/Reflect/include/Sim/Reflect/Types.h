@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Sim/Core/Math.h"
+#include "Sim/Core/AssetRef.h"
 #include "Sim/Core/Uuid.h"
 
 #include <cstddef>
@@ -32,6 +33,10 @@ enum class FieldKind : uint8_t {
     Quat,
     String,
     Uuid,
+    /// Rujukan ke aset (`sim::AssetRef`). Dibedakan dari Uuid biasa karena
+    /// Inspector menggambarnya sebagai kotak yang menerima seretan dari Asset
+    /// Browser, lengkap dengan nama aset yang sedang dirujuk.
+    AssetRef,
     Enum,
     /// Struct yang juga terdaftar di TypeRegistry; digambar dan diserialisasi
     /// secara rekursif.

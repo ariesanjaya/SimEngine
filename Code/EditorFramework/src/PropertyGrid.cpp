@@ -195,6 +195,35 @@ PropertyGridResult DrawField(const FieldDesc& field, void* object) {
             ImGui::TextDisabled("%s", static_cast<const Uuid*>(data)->ToString().c_str());
             break;
         }
+        case FieldKind::AssetRef: {
+            widgets::PropertyLabel(label.c_str());
+            ApplyTooltip(field);
+            auto* ref = static_cast<AssetRef*>(data);
+
+            const std::string name = ResolveAssetName(ref->guid);
+            ImGui::Button(name.c_str(), ImVec2(-widgets::kPanelRightMargin, 0.0f));
+
+            // Kotaknya adalah sasaran lepas untuk seretan dari Asset Browser.
+            // Muatannya GUID, bukan path — path bisa berubah, GUID tidak.
+            if (ImGui::BeginDragDropTarget()) {
+                if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("SIM_ASSET")) {
+                    if (payload->DataSize == sizeof(Uuid)) {
+                        ref->guid = *static_cast<const Uuid*>(payload->Data);
+                        result.edited = true;
+                        result.finished = true;
+                    }
+                }
+                ImGui::EndDragDropTarget();
+            }
+            // Klik kanan mengosongkan rujukan. Tanpa ini, satu-satunya cara
+            // melepas aset adalah menyeret aset lain ke tempatnya.
+            if (ref->IsValid() && ImGui::IsItemClicked(ImGuiMouseButton_Right)) {
+                ref->Clear();
+                result.edited = true;
+                result.finished = true;
+            }
+            break;
+        }
         case FieldKind::Enum: {
             widgets::PropertyLabel(label.c_str());
             ApplyTooltip(field);
@@ -260,6 +289,30 @@ PropertyGridResult DrawField(const FieldDesc& field, void* object) {
     ImGui::EndDisabled();
     ImGui::PopID();
     return result;
+}
+
+namespace {
+AssetNameResolver g_assetNameResolver;
+}  // namespace
+
+void SetAssetNameResolver(AssetNameResolver resolver) {
+    g_assetNameResolver = std::move(resolver);
+}
+
+std::string ResolveAssetName(const Uuid& guid) {
+    if (!guid.IsValid()) {
+        return "None";
+    }
+    if (g_assetNameResolver) {
+        std::string name = g_assetNameResolver(guid);
+        if (!name.empty()) {
+            return name;
+        }
+    }
+    // Aset yang GUID-nya tidak dikenal database: berkasnya mungkin terhapus
+    // atau belum terpindai. Ditampilkan apa adanya supaya masih bisa dilacak,
+    // bukan disembunyikan jadi "None" yang menyesatkan.
+    return "Missing (" + guid.ToString().substr(0, 8) + ")";
 }
 
 PropertyGridResult DrawProperties(const reflect::TypeDesc& type, void* object,

@@ -1,11 +1,25 @@
 #pragma once
 
+#include "Sim/Core/Uuid.h"
 #include "Sim/Reflect/Types.h"
 
+#include <functional>
 #include <span>
 #include <string>
 
 namespace sim::editor {
+
+/// Menerjemahkan GUID aset menjadi nama yang bisa dibaca.
+///
+/// Dipasang editor sekali saat AssetDatabase siap. Sebuah kait, bukan parameter,
+/// karena ini murni urusan tampilan: tanpa penerjemah pun PropertyGrid tetap
+/// benar — field aset hanya menampilkan GUID mentah alih-alih nama berkas.
+/// Menjadikannya parameter berarti setiap pemanggil DrawField ikut menyeretnya.
+using AssetNameResolver = std::function<std::string(const Uuid&)>;
+void SetAssetNameResolver(AssetNameResolver resolver);
+
+/// Nama aset untuk sebuah GUID, atau teks pengganti bila tidak dikenal.
+std::string ResolveAssetName(const Uuid& guid);
 
 /// Hasil menggambar sekumpulan properti.
 struct PropertyGridResult {

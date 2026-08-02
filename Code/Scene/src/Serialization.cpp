@@ -61,6 +61,11 @@ Json WriteValue(reflect::FieldKind kind, const reflect::FieldDesc& field, const 
         }
         case FieldKind::String: return *static_cast<const std::string*>(data);
         case FieldKind::Uuid: return static_cast<const Uuid*>(data)->ToString();
+        // Ditulis sebagai GUID, sama seperti Uuid biasa. Itu sebabnya mengganti
+        // nama atau memindahkan berkas aset tidak menyentuh satu pun berkas
+        // level: yang tersimpan tidak pernah berupa path.
+        case FieldKind::AssetRef:
+            return static_cast<const AssetRef*>(data)->guid.ToString();
         case FieldKind::Enum: {
             // Enum ditulis sebagai nama, bukan angka: menyisipkan nilai baru di
             // tengah daftar tidak boleh mengubah arti berkas yang sudah ada.
@@ -148,6 +153,11 @@ void ReadValue(reflect::FieldKind kind, const reflect::FieldDesc& field, const J
         case FieldKind::Uuid:
             if (value.is_string()) {
                 *static_cast<Uuid*>(data) = Uuid::Parse(value.get<std::string>());
+            }
+            break;
+        case FieldKind::AssetRef:
+            if (value.is_string()) {
+                static_cast<AssetRef*>(data)->guid = Uuid::Parse(value.get<std::string>());
             }
             break;
         case FieldKind::Enum: {
