@@ -944,7 +944,7 @@ ketika dipakai. Satu langkah dari sana jatuh di E7.1 dan tidak menunggu E8:
 **topeng fitur di `MaterialCompileResult`**, yang memungkinkan permutasi shader
 dibangkitkan dari graph alih-alih cabang runtime.
 
-### E7.2 — Particle Editor · ~5 sesi
+### E7.2 — Particle Editor · ~5 sesi · 🔨 model data + simulasi selesai
 
 - Sistem berbasis modul: Spawn (rate/burst), Shape (point/sphere/box/cone/mesh),
   Initial (velocity, size, color, rotation, lifetime), Over-Lifetime (curve untuk
@@ -959,6 +959,36 @@ dibangkitkan dari graph alih-alih cabang runtime.
   bersifat deterministik (waktu yang sama → keadaan yang sama, karena RNG di-seed
   per waktu); menonaktifkan modul tidak menghapus datanya; preview berjalan pada
   100k partikel tanpa membekukan UI (simulasi CPU dulu, dibatasi anggaran).
+
+**Sudah ada** (12 test di `Tests/ParticleTests.cpp`): `Curve` dan `Gradient` di
+`Sim::Core`, modul `Sim::Particle` berisi model efek `.simfx` beserta I/O-nya,
+dan simulasi CPU. **Keempat kriteria terimanya sudah terpenuhi** — yang tersisa
+di E7.2 adalah panelnya.
+
+**Determinisme scrub datang dari dua keputusan, bukan dari satu.** Pertama, angka
+acak sebuah partikel diturunkan dari *nomor urutnya* lewat hash, bukan diambil
+dari aliran RNG yang berjalan; aliran yang berjalan membuat partikel ke-100
+bergantung pada berapa kali RNG dipanggil sebelumnya, sehingga menggeser timeline
+mundur lalu maju menghasilkan efek yang berbeda dan penulisnya kehilangan
+kepercayaan pada apa yang dilihatnya. Kedua, langkah waktunya tetap (1/60) dan
+dihitung dari nol, karena melangkah 0→1 detik sekaligus tidak sama dengan enam
+puluh langkah kecil. Menggeser maju melanjutkan; menggeser mundur memulai ulang;
+keduanya mendarat di keadaan yang sama karena melewati batas langkah yang sama.
+
+**Anggaran 100k partikel terukur 2,6 ms per langkah di Release**, 37 ms di Debug.
+Test-nya karena itu memakai anggaran berbeda per build: 8 ms di Release — separuh
+frame 60 Hz, menyisakan ruang untuk menggambarnya — dan 120 ms di Debug, longgar
+tapi tetap menangkap kemunduran algoritmik.
+
+`Curve` dan `Gradient` sengaja di `Sim::Core`, bukan di `Sim::Particle`: Terrain
+(E7.3) dan Animation (E7.5) memakai keduanya, dan runtime harus bisa
+mengevaluasinya tanpa menyeret ImGui. Serialisasinya untuk sementara masih di
+modul Particle — memindahkannya ke Core sekarang menuntut Core membocorkan
+nlohmann ke header publiknya, dan bentuk API yang benar baru terlihat ketika ada
+pemakai kedua yang nyata.
+
+**Belum ada:** panel Particle Editor, widget CurveEditor dan GradientEditor,
+timeline preview, dan statistik langsung.
 
 ### E7.3 — Terrain Editor · ~5 sesi
 

@@ -30,6 +30,13 @@ sim_add_test(SimMaterialTests
     DEPS
         Sim::Material)
 
+# Particle: model efek `.simfx`, kurva/gradient, dan simulasi CPU deterministik.
+sim_add_test(SimParticleTests
+    SOURCES
+        ParticleTests.cpp
+    DEPS
+        Sim::Particle)
+
 sim_add_test(SimLevelEditorTests
     SOURCES
         LevelEditorTests.cpp

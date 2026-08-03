@@ -1,5 +1,6 @@
 sim_add_library(Core
     SOURCES
+        src/Curve.cpp
         src/FileWatcher.cpp
         src/FrameLimiter.cpp
         src/Log.cpp

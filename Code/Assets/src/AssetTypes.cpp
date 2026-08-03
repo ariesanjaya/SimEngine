@@ -14,6 +14,7 @@ const char* ToString(AssetType type) {
         case AssetType::Mesh: return "Mesh";
         case AssetType::Material: return "Material";
         case AssetType::Script: return "Script";
+        case AssetType::Particle: return "Particle";
         case AssetType::Graph: return "Graph";
         case AssetType::Level: return "Level";
         case AssetType::Prefab: return "Prefab";
@@ -29,7 +30,7 @@ AssetType TypeFromExtension(std::string_view extension) {
     std::transform(lower.begin(), lower.end(), lower.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
-    static const std::array<std::pair<const char*, AssetType>, 19> kTable{{
+    static const std::array<std::pair<const char*, AssetType>, 20> kTable{{
         {".png", AssetType::Texture},
         {".jpg", AssetType::Texture},
         {".jpeg", AssetType::Texture},
@@ -43,6 +44,7 @@ AssetType TypeFromExtension(std::string_view extension) {
         {".glb", AssetType::Mesh},
         {".simmat", AssetType::Material},
         {".simmatinst", AssetType::Material},
+        {".simfx", AssetType::Particle},
         {".lua", AssetType::Script},
         {".simgraph", AssetType::Graph},
         {".simlevel", AssetType::Level},

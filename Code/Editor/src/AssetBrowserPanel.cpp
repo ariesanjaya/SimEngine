@@ -33,6 +33,7 @@ const char* IconFor(AssetType type) {
         case AssetType::Mesh: return icons::kAssetMesh;
         case AssetType::Material: return icons::kAssetMaterial;
         case AssetType::Script: return icons::kLua;
+        case AssetType::Particle: return icons::kParticle;
         case AssetType::Graph: return icons::kNodeGraph;
         case AssetType::Level: return icons::kAssetLevel;
         case AssetType::Prefab: return icons::kPrefab;

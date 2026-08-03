@@ -55,6 +55,8 @@ add_subdirectory(Code/Render)
 # Tidak bergantung pada Lua maupun editor — graph material dikompilasi menjadi
 # kode shader, bukan skrip.
 add_subdirectory(Code/Material)
+# Particle: modul efek, format `.simfx`, dan simulasi CPU deterministik (E7.2).
+add_subdirectory(Code/Particle)
 if(SIM_WITH_LUA)
     add_subdirectory(Code/Script)
 endif()
