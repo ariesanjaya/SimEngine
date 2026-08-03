@@ -30,6 +30,10 @@ namespace {
 /// Nama folder skrip editor, relatif terhadap folder aset.
 constexpr std::string_view kEditorScriptFolder = "Editor";
 
+/// Mesh yang dipakai entity "Shader Ball" di level contoh, relatif terhadap
+/// folder aset. Boleh tidak ada: level contoh tetap terbentuk tanpanya.
+constexpr std::string_view kStarterMeshPath = "Meshes/shaderBall.fbx";
+
 extern "C" void OnFatalSignal(int signal) {
     // Ini pelanggaran aturan async-signal-safety yang disengaja dan diketahui:
     // menulis log dan menyimpan layout memakai malloc. Alternatifnya adalah
@@ -430,8 +434,20 @@ void EditorApp::CreateStarterLevel() {
 
     const scene::Entity ball = world_.Create("Shader Ball", environment);
     world_.TryGet<scene::TransformComponent>(ball)->position = Vec3(0.0f, 1.0f, 0.0f);
-    world_.Add<scene::MeshRendererComponent>(
-        ball, scene::MeshRendererComponent{{}, {}, true, true});
+    scene::MeshRendererComponent ballMesh{{}, {}, true, true};
+    // Model shader ball bawaan, kalau proyeknya punya. Dicari lewat jalur, bukan
+    // GUID tetap: GUID lahir dari berkas `.meta` di samping asetnya, jadi
+    // menuliskannya di sini akan mengikat kode ke satu salinan berkas tertentu.
+    //
+    // Tidak ditemukan berarti rujukannya kosong, persis seperti sebelum ada
+    // baris ini — bukan kesalahan. Enginenya belum bisa menggambar mesh apa pun
+    // (renderer sungguhan baru datang di E8), jadi yang berubah di viewport
+    // memang belum ada; yang ada sekarang adalah rujukan yang benar, tersimpan
+    // di berkas level, dan siap dipakai begitu renderer-nya ada.
+    if (const assets::AssetRecord* record = assets_.FindByRelativePath(kStarterMeshPath)) {
+        ballMesh.mesh = AssetRef{record->guid};
+    }
+    world_.Add<scene::MeshRendererComponent>(ball, ballMesh);
 
     const scene::Entity sun = world_.Create("Sun", environment);
     auto& sunLight = world_.Add<scene::LightComponent>(sun);

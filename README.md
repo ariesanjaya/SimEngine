@@ -109,6 +109,20 @@ restart — termasuk ketika berkas ditimpa, yang ikut menyegarkan thumbnail-nya.
 Menyeret aset: ke **viewport** membuat entity, ke **field Inspector** menetapkan
 rujukannya (bisa di-undo), ke **folder** memindahkan berkasnya.
 
+Level contoh yang dibuat editor saat dijalankan tanpa level memasang
+`Meshes/shaderBall.fbx` pada entity **Shader Ball**, bila berkas itu ada di
+folder aset. Modelnya **tidak ikut di repo** — ia 11 MB dan belum ada yang bisa
+membacanya — jadi di mesin yang belum punya salinannya rujukan itu kosong, persis
+seperti sebelumnya. Salin sendiri ke `~/.simengine/Assets/Meshes/`; asetnya
+public domain (Unlicense), dibuat Mat Makin untuk
+[derkreature/ShaderBall](https://github.com/derkreature/ShaderBall).
+
+Sampai renderer mesh datang di E8, viewport tetap menggambarnya sebagai kotak
+kawat satuan: tidak ada importer yang membaca geometrinya, dan `SceneView`
+memakai AABB tetap untuk setiap mesh. Yang sudah benar sekarang adalah
+rujukannya — tersimpan sebagai GUID di berkas level, dan siap dipakai begitu
+renderer-nya ada.
+
 ### Skrip
 
 `ScriptComponent` merujuk sebuah `.lua` yang mengembalikan tabel berisi
