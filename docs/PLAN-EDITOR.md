@@ -1068,7 +1068,7 @@ terpisah memperbaiki seluruh golongan bug itu, bukan satu kejadiannya.
 **Belum ada:** modul Sub-emitter, dan penetapan material/mesh pada modul Render —
 keduanya menunggu sesuatu yang bisa menggambarnya.
 
-### E7.3 — Terrain Editor · ~5 sesi
+### E7.3 — Terrain Editor · ~5 sesi · 🔨 data, brush, undo, dan I/O selesai
 
 - Data terrain: heightmap ubin (tile) + layer material + peta bobot (splat) + peta
   hole, disimpan sebagai `.simterrain` + tekstur pendamping.
@@ -1082,6 +1082,94 @@ keduanya menunggu sesuatu yang bisa menggambarnya.
   data); undo satu goresan brush mengembalikan heightmap persis; terrain 4×4 km dengan
   heightmap 2048² per tile tetap bisa diedit tanpa lonjakan memori; import/export PNG
   16-bit round-trip tanpa kehilangan presisi.
+
+**Sudah ada** (18 test di `Tests/TerrainTests.cpp`): modul `Sim::Terrain` berisi
+penyimpanan heightmap berubin, brush sculpt, undo per goresan, dan I/O
+`.simterrain` + PNG 16-bit + RAW. **Keempat kriteria terimanya sudah terpenuhi**
+— yang tersisa di E7.3 adalah panelnya, layer material/splat, dan peta hole.
+
+Keempat kriteria itu bukan sekadar diuji belakangan; masing-masing memaksa satu
+keputusan bentuk, dan itu sebabnya semuanya bisa dipenuhi tanpa renderer.
+
+**Retakan di batas tile dicegah oleh bentuk penyimpanannya, bukan oleh
+kedisiplinan.** Sampel dialamati secara global dan setiap sampel hanya tinggal di
+satu tile: tile (tx,ty) memiliki rentang setengah terbuka `[tx·S, (tx+1)·S)`.
+Tidak ada baris tepi yang disalin ke tetangganya, jadi tidak ada dua salinan yang
+bisa berbeda. Engine yang menyimpan baris tepi di kedua tile harus menulis
+keduanya setiap kali, dan satu jalur kode yang lupa menghasilkan celah yang baru
+terlihat setelah di-render. Ongkosnya pindah ke pembuatan mesh — quad yang
+menyeberangi batas perlu satu baris dari tetangga, jadi mesh tile membaca
+`RawAt` alih-alih hanya array-nya sendiri. Itu pertukaran yang benar: membaca
+tetangga adalah operasi terlokalisasi, sedangkan menjaga dua salinan tetap sama
+adalah kewajiban yang tersebar ke setiap penulis. Test-nya menguncinya dengan
+pernyataan yang lebih kuat daripada "tidak ada lompatan di jahitan": **terrain
+4×4 ubin dan terrain satu ubin menghasilkan heightmap yang sama byte-per-byte
+untuk goresan yang sama** — pengubinan tidak terlihat sama sekali.
+
+**Undo menyalin blok 64², bukan tile.** Menyalin seluruh tile 2048² berarti 8 MB
+untuk satu sentuhan brush selebar sepuluh meter — persis lonjakan memori yang
+dilarang kriteria ketiga. Blok disalin sekali per goresan pada sentuhan pertama
+yang mengenainya, jadi menyeret brush bolak-balik di tempat yang sama tidak
+menyalin apa pun lagi. Satuan undo-nya **goresan**, bukan sentuhan: menyeret
+menghasilkan puluhan sentuhan, dan riwayat yang mencatat tiap sentuhan menuntut
+puluhan kali Ctrl+Z untuk membatalkan satu sapuan. Salinannya juga hanya satu
+arah — undo *menukar* isi blok dengan yang hidup, sehingga redo gratis dan
+memorinya separuh dari menyimpan sebelum-sesudah.
+
+**Tile dialokasikan saat pertama ditulis.** Terrain 4 km dengan ubin 2048² pada
+jarak sampel 0,25 m adalah 8×8 ubin = 512 MB kalau seluruhnya penghuni memori;
+yang dibayar hanyalah yang benar-benar disunting. `BytesResident()` melaporkannya
+apa adanya, jadi test menguji angka yang sama dengan yang akan dilihat panel —
+bukan RSS proses, yang bergoyang karena sebab yang tidak ada hubungannya.
+
+**PNG 16-bit round-trip tanpa kehilangan presisi adalah sifat penyimpanannya,
+bukan sifat importernya.** Dengan tinggi float32 di dalam, tidak ada importer
+yang bisa memenuhinya — setiap ekspor membulatkan. Karena itu tingginya `uint16`
+di dalam rentang `[minHeight, maxHeight]`, dan ekspor maupun impor sekadar
+menyalin. Konversi meter→sampel **membulatkan ke terdekat, bukan memotong**:
+dengan pemotongan, membaca lalu menulis kembali nilai yang sama menurunkannya
+satu langkah tiap kali, dan brush berkekuatan nol pun perlahan meratakan terrain.
+
+**Enkoder PNG-nya ditulis sendiri, bukan lewat dependensi baru.**
+`stbi_write_png` hanya menulis 8 bit — 256 tingkat tinggi, yaitu langkah empat
+meter pada terrain setinggi kilometer. Yang kurang darinya bukan kompresornya
+melainkan wadahnya: `stb_image_write` sudah memuat deflate lengkap, jadi yang
+perlu ditambahkan hanya header, satu CRC per chunk, dan satu filter per baris
+(±150 baris). Filternya adaptif per baris dengan heuristik yang dianjurkan
+spesifikasi PNG; tanpa filter, heightmap 16-bit nyaris tidak terkompresi dan PNG
+seukuran RAW tidak ada gunanya karena RAW sudah tersedia. Test menguncinya:
+berkas PNG harus lebih kecil dari RAW yang setara.
+
+Pembacaannya lewat `stbi_load_16`, **bukan dekoder tandingan buatan sendiri**.
+Menulis dan membaca dengan implementasi yang sama akan membuat round-trip lulus
+walaupun berkasnya bukan PNG yang sah — yang teruji hanya konsistensi dengan
+diri sendiri. Berkas keluarannya juga sudah diperiksa dengan Pillow di luar
+build: mode `I`, seluruh sampel cocok, seluruh CRC chunk sah.
+
+Implementasi stb kini dikompilasi **tepat sekali** di `Third-Party/stb/stb_impl.cpp`
+(target `Stb::Impl`). Selama hanya Assets yang memakai gambar, "tepat sekali"
+bisa dijaga dengan menaruh `#define ..._IMPLEMENTATION` di modul itu; begitu
+Terrain ikut memakainya, keduanya membawa definisi yang sama dan penautan gagal.
+`stbi_zlib_compress` dibungkus `stb_impl::Deflate` di TU yang sama, sehingga
+buffer hasil `malloc`-nya tidak pernah keluar dari kode yang tahu cara
+membebaskannya.
+
+Heightmap tinggal di **berkas pendamping**, bukan di dalam JSON `.simterrain`.
+Sebuah heightmap 4096² adalah 33 MB angka; sebagai teks JSON ia menjadi ratusan
+megabyte yang tidak bisa dibaca manusia, tidak berguna untuk di-diff, dan lambat
+diurai. Yang ada di `.simterrain` adalah yang memang ingin dibaca dan diubah
+orang: ukuran ubin, skala, rentang tinggi.
+
+Impor yang ukurannya tidak cocok **ditolak dengan pesan yang menyebut kedua
+ukuran**, bukan diskala diam-diam. Menskala ulang adalah cara paling halus untuk
+merusak peta seseorang: hasilnya terlihat masuk akal dan tetap salah.
+`ReadHeightmapPng` tetap tersedia untuk membaca ukurannya, supaya panel bisa
+menawarkan menyesuaikan terrain alih-alih sekadar menolak.
+
+**Belum ada:** panelnya, layer material + peta bobot (splat), peta hole, dan
+pengaturan LOD. Ketiganya yang pertama menunggu panel — alat paint tidak bisa
+dirancang tanpa tempat memilih layernya — sedangkan LOD baru berarti ketika ada
+yang menggambar terrainnya di E8.
 
 ### E7.4 — Vegetation Editor · ~4 sesi
 

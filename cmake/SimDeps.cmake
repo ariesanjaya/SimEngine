@@ -324,6 +324,17 @@ add_library(stb INTERFACE)
 target_include_directories(stb SYSTEM INTERFACE ${stb_SOURCE_DIR})
 add_library(Stb::Stb ALIAS stb)
 
+# Implementasinya dikompilasi tepat sekali, di sini. Lihat catatan panjangnya di
+# Third-Party/stb/stb_impl.cpp — singkatnya, dua modul yang sama-sama memakai
+# gambar akan membawa definisi ganda kalau masing-masing men-define makronya.
+add_library(stb_impl STATIC "${CMAKE_SOURCE_DIR}/Third-Party/stb/stb_impl.cpp")
+target_link_libraries(stb_impl PUBLIC stb)
+target_include_directories(stb_impl SYSTEM PUBLIC "${CMAKE_SOURCE_DIR}/Third-Party/stb")
+# Kode pihak ketiga, jadi peringatannya bukan urusan kita — dan -Werror proyek
+# ini akan menggagalkan build karenanya.
+target_compile_options(stb_impl PRIVATE -w)
+add_library(Stb::Impl ALIAS stb_impl)
+
 # ---------------------------------------------------------------------------
 # Ditambahkan pada milestone berikutnya (lihat docs/DEPENDENCIES.md):
 #   A0   cpp-httplib              transport HTTP untuk MCP server

@@ -21,7 +21,7 @@ berikutnya tidak menyentuh jaringan. Untuk build sepenuhnya offline setelah itu:
 | **nlohmann/json** | `v3.12.0` | serialisasi semua aset & level | format teks supaya ramah diff/git |
 | **EnTT** | `v3.16.0` | storage komponen scene | 3.x, bukan 4.0 — dokumentasi & contoh jauh lebih matang |
 | **doctest** | `v2.5.3` | unit test | header-only, kompilasi cepat |
-| **stb** | commit terkunci | `stb_image` untuk tekstur & thumbnail | header-only |
+| **stb** | commit terkunci | `stb_image` untuk tekstur & thumbnail, `stb_image_write` untuk kompresor deflate-nya, `stb_image_resize2` untuk thumbnail | header-only; implementasinya dikompilasi tepat sekali di `Third-Party/stb/stb_impl.cpp` (target `Stb::Impl`) |
 
 ## UI tambahan (E4 ke atas)
 

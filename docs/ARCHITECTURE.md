@@ -20,6 +20,9 @@ SimEngine/
 │   ├── Asset/                # database aset, GUID, .meta, importer, cache thumbnail
 │   ├── Scene/                # EnTT world, entity, hierarki transform, komponen, prefab
 │   ├── Script/               # Lua 5.4 + sol2, script component, hot reload
+│   ├── Material/             # graph `.simmat`, katalog node OpenPBR, kompilasi ke Slang
+│   ├── Particle/             # efek `.simfx`, emitter, simulasi CPU deterministik
+│   ├── Terrain/              # heightmap berubin, brush sculpt, undo per goresan, I/O PNG16/RAW
 │   ├── Render/               # IViewportRenderer + StubRenderer (E1..E7) → renderer nyata (E8)
 │   ├── EditorFramework/      # App, PanelManager, dock layout, Command/Undo, Selection, widget
 │   ├── AIBridge/             # MCP server (JSON-RPC/HTTP), ToolRegistry, MainThreadQueue, izin

@@ -57,6 +57,9 @@ add_subdirectory(Code/Render)
 add_subdirectory(Code/Material)
 # Particle: modul efek, format `.simfx`, dan simulasi CPU deterministik (E7.2).
 add_subdirectory(Code/Particle)
+# Terrain: heightmap berubin, brush sculpt, undo per goresan, dan I/O
+# heightmap PNG 16-bit/RAW (E7.3).
+add_subdirectory(Code/Terrain)
 if(SIM_WITH_LUA)
     add_subdirectory(Code/Script)
 endif()

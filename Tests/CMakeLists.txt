@@ -30,6 +30,14 @@ sim_add_test(SimMaterialTests
     DEPS
         Sim::Material)
 
+# Terrain: penyimpanan heightmap berubin, brush, undo per goresan, dan
+# round-trip heightmap PNG 16-bit/RAW.
+sim_add_test(SimTerrainTests
+    SOURCES
+        TerrainTests.cpp
+    DEPS
+        Sim::Terrain)
+
 # Particle: model efek `.simfx`, kurva/gradient, dan simulasi CPU deterministik.
 sim_add_test(SimParticleTests
     SOURCES

@@ -7,7 +7,6 @@
 // Jangan tambahkan STBI_NO_STDIO di sini: stb memeriksanya dengan #ifndef, jadi
 // mendefinisikannya bahkan bernilai 0 akan mematikan stbi_info() dan seluruh
 // jalur baca-dari-berkas.
-#define STB_IMAGE_IMPLEMENTATION
 #include <stb_image.h>
 
 #include <algorithm>

@@ -24,6 +24,8 @@ enum class AssetType : uint8_t {
     Particle,
     /// Graph visual scripting (`.simgraph`), dikompilasi menjadi Lua.
     Graph,
+    /// Terrain (`.simterrain`) — deskriptor; heightmapnya berkas pendamping.
+    Terrain,
     Level,
     Prefab,
     Text,
