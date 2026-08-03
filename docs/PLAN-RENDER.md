@@ -30,9 +30,14 @@ instanced, alpha-test) lewat spesialisasi konstanta. **Titik sambung:** Material
 Editor mulai menampilkan preview PBR sungguhan.
 
 ### E8.3 — Lighting & shadow
-PBR metallic-roughness, IBL (prefilter env + BRDF LUT), directional light dengan
-cascaded shadow map, point/spot dengan shadow atlas, clustered light culling untuk
-banyak lampu.
+Model shading **OpenPBR Surface v1.1** (`openpbr.slang`), IBL (prefilter env +
+DFG LUT), directional light dengan cascaded shadow map, point/spot dengan shadow
+atlas, clustered light culling untuk banyak lampu.
+
+`evalOpenPBR_IBL` menerima `prefilteredBase`, `prefilteredCoat`, dan
+`irradiance` terpisah. Ketiganya di sini datang dari probe statis — dan itu juga
+titik sambung untuk global illumination, yang mengganti sumbernya tanpa mengubah
+satu baris pun model shading-nya. Lihat catatan GI di bawah.
 
 ### E8.4 — Mesh & animasi
 Impor mesh (ufbx/cgltf) menggantikan importer pass-through E5, LOD dari
@@ -63,6 +68,32 @@ instance vegetasi, 20 lampu berbayang, karakter ber-animasi, dan tiga sistem par
 berjalan ≥ 60 fps pada GPU target, tanpa error validation layer, dan tampilan di
 Editor identik dengan tampilan di SimRuntime.
 
+## Global illumination
+
+**Belum masuk daftar pass di atas, dan itu disengaja sampai ada keputusan.**
+Rencana terpisah ada di `/home/arie/SDK/rencana-implementasi-gi.md`: screen probe
++ hash grid radiance cache di belakang satu antarmuka `ITraceBackend`, dengan dua
+implementasi — SDF clipmap untuk GPU tanpa RT core, ray query untuk yang punya.
+Anggarannya 3,0 ms per frame di 1080p, ±16 minggu untuk satu orang.
+
+Tiga hal yang perlu diputuskan sebelum ia masuk roadmap:
+
+- **Anggarannya belum didamaikan dengan kriteria terima E8.** 3,0 ms adalah 18%
+  dari frame 60 fps, sementara adegan uji E8 — terrain 2×2 km, 200 ribu instance
+  vegetasi, 20 lampu berbayang — sudah menuntut sisanya. Keduanya ditulis
+  terpisah dan belum pernah dijumlahkan.
+- **Ia bergantung pada E8.3, bukan hanya E8.1.** Milestone M6-nya menyambung ke
+  `evalOpenPBR_IBL`, yang menuntut prefilter env dan DFG LUT sudah ada.
+- **Baseline-nya tidak bisa diuji di mesin ini.** Mesin pengembangan punya RT
+  core (RTX 2060), yaitu tier atas rencana itu. Jalur SDF — yang justru harus
+  bekerja di semua GPU — hanya bisa diuji lewat override backend manual, jadi
+  override itu bukan kemudahan melainkan syarat.
+
+Kabar baiknya: **sisi shader M6 sudah selesai.** `evalOpenPBR_IBL` sudah
+menerima `irradiance` terpisah, sudah mengalikannya dengan `(1 - E_spec)`, dan
+sudah mengecualikan logam dari lobe difus lewat `lerp(..., metalness)`. Yang
+tersisa hanya menyambungkan sumbernya.
+
 ## E9 — Runtime & distribusi
 
 - **SimRuntime**: player tanpa editor yang memuat level + menjalankan Lua.
@@ -84,8 +115,15 @@ Dicatat supaya tidak diperdebatkan ulang saat E8:
    reversed-Z (near = 1.0) untuk presisi jarak jauh — penting karena ada terrain.
 2. **Warna**: seluruh perhitungan di ruang linear; sRGB hanya di titik input tekstur
    dan output akhir. Editor sudah menandai color space per tekstur sejak E5.
-3. **Material**: metallic-roughness (bukan specular-glossiness). Graph dari E7.1
-   sudah punya port output yang sesuai.
+3. **Material**: **OpenPBR Surface v1.1**, bukan metallic-roughness sederhana
+   maupun specular-glossiness. Node keluaran graph E7.1 sudah mencerminkan
+   `OpenPBRSurface` pin per pin, dengan nilai bawaan yang dikunci test terhadap
+   berkas normatif OpenPBR. `base_metalness` tetap ada di dalamnya — yang
+   bertambah adalah lapis specular terpisah, coat, dan fuzz.
+
+   Tiga kelompok parameter spesifikasi sengaja belum ada: `subsurface_*`,
+   `transmission_*`, `thin_film_*`. Tekniknya sudah dipilih di
+   [RENDER-OPENPBR.md](RENDER-OPENPBR.md).
 4. **Shader**: sumbernya Slang, dikompilasi lewat `slangc` dari Vulkan SDK. GLSL
    masih diterima untuk shader utilitas.
 5. **Vulkan 1.3** sebagai baseline (dynamic rendering, synchronization2,
