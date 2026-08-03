@@ -199,6 +199,65 @@ void ApplyRamp(Terrain& terrain, const Brush& brush, const Vec3& start, const Ve
     }
 }
 
+void BrushStroke::Begin(Terrain& terrain, float worldX, float worldZ) {
+    if (active_) {
+        return;
+    }
+    terrain.BeginStroke();
+    active_ = true;
+    lastX_ = worldX;
+    lastZ_ = worldZ;
+    accumulator_ = 0.0f;
+    dabs_ = 0;
+}
+
+void BrushStroke::Advance(Terrain& terrain, const Brush& brush, float worldX, float worldZ,
+                          float dt) {
+    if (!active_ || dt <= 0.0f) {
+        return;
+    }
+    accumulator_ += dt;
+    if (accumulator_ < kDabStep) {
+        // Posisi terakhir sengaja TIDAK diperbarui. Memperbaruinya akan membuang
+        // bagian lintasan yang dilewati kursor sebelum sentuhan berikutnya
+        // dipancarkan, dan seretan cepat meninggalkan rantai titik alih-alih
+        // garis.
+        return;
+    }
+    const float used = std::min(accumulator_, kMaxCatchUpSeconds);
+    accumulator_ = 0.0f;
+
+    // Sentuhan tambahan supaya seretan cepat tetap menghasilkan garis, bukan
+    // manik-manik. Jatah waktunya dibagi rata, jadi menyeret cepat menyebarkan
+    // material yang sama di sepanjang lintasan yang lebih panjang — bukan
+    // menumpuk lebih banyak.
+    const float dx = worldX - lastX_;
+    const float dz = worldZ - lastZ_;
+    const float distance = std::sqrt(dx * dx + dz * dz);
+    const float spacing = std::max(brush.radius * kDabSpacing, 1e-3f);
+    const int spanSteps = static_cast<int>(std::ceil(distance / spacing));
+    const int timeSteps = static_cast<int>(used / kDabStep);
+
+    const int dabs = std::clamp(std::max(timeSteps, spanSteps), 1, kMaxDabs);
+    const float share = used / static_cast<float>(dabs);
+    for (int i = 1; i <= dabs; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(dabs);
+        ApplyDab(terrain, brush, lastX_ + dx * t, lastZ_ + dz * t, share);
+    }
+    dabs_ += dabs;
+    lastX_ = worldX;
+    lastZ_ = worldZ;
+}
+
+void BrushStroke::End(Terrain& terrain) {
+    if (!active_) {
+        return;
+    }
+    terrain.EndStroke();
+    active_ = false;
+    accumulator_ = 0.0f;
+}
+
 void ApplyThermalErosion(Terrain& terrain, const SampleRect& area, int iterations,
                          float talusDegrees, float strength) {
     if (iterations <= 0 || area.Empty()) {

@@ -38,8 +38,16 @@ public:
     }
 
     /// Perkiraan memori yang ditahan command ini. Command yang menyimpan data
-    /// besar (patch heightmap di E7.3, sebaran vegetasi di E7.4) wajib
-    /// meng-override ini, kalau tidak batas memori history jadi tidak berarti.
+    /// besar — subtree entity pada DeleteEntitiesCommand dan PasteEntitiesCommand
+    /// — wajib meng-override ini, kalau tidak batas memori history jadi tidak
+    /// berarti.
+    ///
+    /// Sempat direncanakan bahwa patch heightmap E7.3 lewat sini juga. Ternyata
+    /// tidak bisa: terrain adalah dokumen yang dibuka dan ditutup, sedangkan
+    /// CommandHistory tidak punya cakupan dokumen. Membuka terrain lain akan
+    /// meninggalkan command yang membatalkan goresan pada heightmap yang sama
+    /// sekali berbeda. Karena itu Terrain menyimpan jurnalnya sendiri, sama
+    /// seperti Material, Graph, dan Script Editor.
     virtual std::size_t MemoryCost() const { return sizeof(ICommand) + 64; }
 };
 

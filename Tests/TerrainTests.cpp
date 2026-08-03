@@ -549,3 +549,170 @@ TEST_CASE("Tinggi dunia terinterpolasi bilinear di antara sampel") {
     CHECK(terrain.HeightAtWorld(1.0f, 0.0f) == doctest::Approx(20.0f).epsilon(0.01));
     CHECK(terrain.HeightAtWorld(2.0f, 0.0f) == doctest::Approx(40.0f).epsilon(0.01));
 }
+
+TEST_CASE("Goresan tidak bergantung laju frame") {
+    const TerrainDesc desc{64, 2, 2, 1.0f, 0.0f, 300.0f, 50.0f};
+    const Brush brush = RaiseBrush();
+
+    // Lintasan yang sama, dua laju frame: satu mesin melaporkan 30 frame per
+    // detik, satu lagi 60. Yang digores sama, jadi yang dihasilkan harus sama.
+    const auto paint = [&](int frames) {
+        Terrain terrain(desc);
+        BrushStroke stroke;
+        stroke.Begin(terrain, 20.0f, 64.0f);
+        const float dt = 0.5f / static_cast<float>(frames);
+        for (int i = 1; i <= frames; ++i) {
+            const float t = static_cast<float>(i) / static_cast<float>(frames);
+            stroke.Advance(terrain, brush, 20.0f + 60.0f * t, 64.0f, dt);
+        }
+        stroke.End(terrain);
+        return terrain;
+    };
+
+    const Terrain slow = paint(6);
+    const Terrain fast = paint(30);
+
+    // Mengalikan kekuatan brush dengan dt frame terdengar benar tapi tidak:
+    // setiap sentuhan dibulatkan ke sampel 16-bit, jadi jumlah sentuhan yang
+    // berbeda menghasilkan bukit yang berbeda — bukan berbeda sedikit.
+    CHECK(HashHeights(slow) == HashHeights(fast));
+    CHECK(slow.HeightAt(50, 64) > 51.0f);
+}
+
+TEST_CASE("Satu goresan tetap satu langkah undo, berapa pun sentuhannya") {
+    Terrain terrain(TerrainDesc{64, 2, 2, 1.0f, 0.0f, 300.0f, 50.0f});
+    const uint64_t before = HashHeights(terrain);
+
+    BrushStroke stroke;
+    stroke.Begin(terrain, 20.0f, 64.0f);
+    for (int i = 0; i < 40; ++i) {
+        stroke.Advance(terrain, RaiseBrush(), 20.0f + static_cast<float>(i) * 2.0f, 64.0f,
+                       1.0f / 60.0f);
+    }
+    stroke.End(terrain);
+
+    CHECK(stroke.Dabs() > 30);
+    REQUIRE(terrain.UndoDepth() == 1);
+    REQUIRE(terrain.Undo());
+    CHECK(HashHeights(terrain) == before);
+}
+
+TEST_CASE("Sendatan panjang dibatasi materialnya, bukan jumlah sentuhannya") {
+    const TerrainDesc desc{64, 2, 2, 1.0f, 0.0f, 300.0f, 50.0f};
+    const Brush brush = RaiseBrush();
+
+    Terrain stalled(desc);
+    BrushStroke stroke;
+    stroke.Begin(stalled, 64.0f, 64.0f);
+    // Satu frame yang tertahan satu detik penuh, kursor diam.
+    stroke.Advance(stalled, brush, 64.0f, 64.0f, 1.0f);
+    stroke.End(stalled);
+
+    // Yang dibatasi jumlah waktunya. Sedetik penuh di satu titik akan menggerus
+    // terrain jauh lebih dalam daripada yang diminta siapa pun; seperempat detik
+    // adalah yang benar-benar diterapkan.
+    const float rise = stalled.HeightAt(64, 64) - 50.0f;
+    INFO("naik ", rise, " m");
+    CHECK(rise == doctest::Approx(brush.strength * BrushStroke::kMaxCatchUpSeconds).epsilon(0.02));
+
+    // Dan goresan biasa pada mesin lambat TIDAK kehilangan materialnya: membatasi
+    // jumlah sentuhan akan memotongnya diam-diam di sini.
+    Terrain slow(desc);
+    BrushStroke slowStroke;
+    slowStroke.Begin(slow, 64.0f, 64.0f);
+    slowStroke.Advance(slow, brush, 64.0f, 64.0f, 0.2f);
+    slowStroke.End(slow);
+    CHECK(slow.HeightAt(64, 64) - 50.0f == doctest::Approx(brush.strength * 0.2f).epsilon(0.02));
+}
+
+TEST_CASE("Memuat heightmap tidak mewujudkan ubin yang seluruhnya datar") {
+    TempDir dir("sparse");
+    TerrainDesc desc{64, 4, 4, 1.0f, 0.0f, 500.0f, 100.0f};
+
+    Terrain source(desc);
+    // Satu bukit di pojok kiri atas saja; lima belas ubin lainnya tetap datar.
+    Brush brush = RaiseBrush();
+    brush.radius = 20.0f;
+    ApplyDab(source, brush, 30.0f, 30.0f, 0.2f);
+    REQUIRE(source.TilesResident() == 1);
+
+    const std::filesystem::path png = dir / "sparse.png";
+    REQUIRE(SaveHeightmapPng(source, png).ok);
+
+    Terrain loaded(desc);
+    REQUIRE(LoadHeightmapPng(loaded, png).ok);
+
+    // Berkas heightmap memuat seluruh peta, jadi tanpa penyaringan ini memuat
+    // terrain akan membatalkan seluruh guna alokasi malas: membuka terrain
+    // 4x4 km langsung menghuni memori sepenuhnya, padahal bagian yang datar
+    // tidak menyimpan apa pun yang belum diketahui.
+    CHECK(loaded.TilesResident() == 1);
+    CHECK(HashHeights(loaded) == HashHeights(source));
+
+    // Dan yang datar tetap terbaca sebagai tinggi dasar, bukan sebagai nol.
+    CHECK(SameHeight(loaded, loaded.HeightAt(200, 200), 100.0f));
+}
+
+TEST_CASE("Seretan cepat meninggalkan garis, bukan manik-manik") {
+    Terrain terrain(TerrainDesc{128, 2, 2, 1.0f, 0.0f, 300.0f, 50.0f});
+    Brush brush = RaiseBrush();
+    brush.radius = 8.0f;
+
+    // Satu frame saja, tapi kursornya melompat jauh melampaui jari-jari brush —
+    // persis yang terjadi saat menyeret cepat.
+    BrushStroke stroke;
+    stroke.Begin(terrain, 20.0f, 128.0f);
+    stroke.Advance(terrain, brush, 200.0f, 128.0f, 1.0f / 60.0f);
+    stroke.End(terrain);
+
+    // Yang diuji kesinambungannya, bukan besarnya: satu frame hanya membawa
+    // 1/60 detik material, dan itu memang tipis. Yang tidak boleh ada adalah
+    // celah — titik di sepanjang lintasan yang sama sekali tidak tersentuh.
+    float lowest = 1e9f;
+    float highest = -1e9f;
+    for (int x = 30; x <= 190; x += 2) {
+        const float rise = terrain.HeightAt(x, 128) - 50.0f;
+        lowest = std::min(lowest, rise);
+        highest = std::max(highest, rise);
+    }
+    INFO("terendah ", lowest, " tertinggi ", highest, " di sepanjang lintasan");
+    CHECK(highest > 0.0f);
+    // Tanpa penyebaran menurut jarak, titik di antara dua sentuhan tetap di
+    // tinggi dasar dan `lowest` menjadi nol.
+    CHECK(lowest > highest * 0.5f);
+
+    // Dan di luar lintasan tetap tidak tersentuh.
+    CHECK(SameHeight(terrain, terrain.HeightAt(100, 200), 50.0f));
+}
+
+TEST_CASE("Menyeret cepat tidak menumpuk lebih banyak material daripada pelan") {
+    const TerrainDesc desc{128, 2, 2, 1.0f, 0.0f, 300.0f, 50.0f};
+    Brush brush = RaiseBrush();
+    brush.radius = 8.0f;
+
+    const auto totalRise = [&](int frames) {
+        Terrain terrain(desc);
+        BrushStroke stroke;
+        stroke.Begin(terrain, 20.0f, 128.0f);
+        for (int i = 1; i <= frames; ++i) {
+            const float t = static_cast<float>(i) / static_cast<float>(frames);
+            stroke.Advance(terrain, brush, 20.0f + 180.0f * t, 128.0f, 0.5f / frames);
+        }
+        stroke.End(terrain);
+        double sum = 0.0;
+        for (int y = 100; y < 160; ++y) {
+            for (int x = 0; x < 220; ++x) {
+                sum += terrain.HeightAt(x, y) - 50.0;
+            }
+        }
+        return sum;
+    };
+
+    // Jatah waktu dibagi rata ke seluruh sentuhan, jadi lintasan dan durasi yang
+    // sama memindahkan material yang kira-kira sama — berapa pun frame yang
+    // sempat dilaporkan mesinnya.
+    const double coarse = totalRise(3);
+    const double fine = totalRise(30);
+    INFO("kasar ", coarse, " vs halus ", fine);
+    CHECK(coarse == doctest::Approx(fine).epsilon(0.05));
+}

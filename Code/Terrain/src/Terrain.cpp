@@ -167,7 +167,35 @@ void Terrain::WriteAll(const Sample* samples) {
     const int w = SamplesX();
     for (int ty = 0; ty < desc_.tilesY; ++ty) {
         for (int tx = 0; tx < desc_.tilesX; ++tx) {
-            Tile& tile = MaterializeTile(ty * desc_.tilesX + tx);
+            const int index = ty * desc_.tilesX + tx;
+
+            // Ubin yang seluruhnya bertinggi dasar tidak diwujudkan.
+            //
+            // Tanpa ini, memuat terrain membatalkan seluruh guna alokasi malas:
+            // berkas heightmap memuat seluruh peta, jadi membuka terrain 4×4 km
+            // langsung menghuni memori sepenuhnya — padahal bagian yang datar
+            // tidak menyimpan apa pun yang belum diketahui. Memindai lebih murah
+            // daripada mengalokasi, dan jauh lebih murah daripada menahannya.
+            if (tiles_[static_cast<std::size_t>(index)] == nullptr) {
+                bool uniform = true;
+                for (int row = 0; row < desc_.tileSamples && uniform; ++row) {
+                    const Sample* src = samples +
+                                        static_cast<std::size_t>(ty * desc_.tileSamples + row) *
+                                            static_cast<std::size_t>(w) +
+                                        static_cast<std::size_t>(tx * desc_.tileSamples);
+                    for (int col = 0; col < desc_.tileSamples; ++col) {
+                        if (src[col] != base_) {
+                            uniform = false;
+                            break;
+                        }
+                    }
+                }
+                if (uniform) {
+                    continue;
+                }
+            }
+
+            Tile& tile = MaterializeTile(index);
             for (int row = 0; row < desc_.tileSamples; ++row) {
                 const Sample* src = samples +
                                     static_cast<std::size_t>(ty * desc_.tileSamples + row) *

@@ -29,7 +29,8 @@ sim_add_library(EditorPanels
         # hasil kompilasinya. Publik karena tipenya muncul di header panel.
         Sim::Material
         # Panel Particle Editor menyunting `.simfx` dan menjalankan simulasinya.
-        Sim::Particle)
+        Sim::Particle
+        Sim::Terrain)
 
 list(LENGTH _sim_panel_sources _sim_panel_count)
 message(STATUS "  editor panels: ${_sim_panel_count} berkas")

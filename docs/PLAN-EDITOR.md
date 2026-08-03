@@ -1068,7 +1068,7 @@ terpisah memperbaiki seluruh golongan bug itu, bukan satu kejadiannya.
 **Belum ada:** modul Sub-emitter, dan penetapan material/mesh pada modul Render —
 keduanya menunggu sesuatu yang bisa menggambarnya.
 
-### E7.3 — Terrain Editor · ~5 sesi · 🔨 data, brush, undo, dan I/O selesai
+### E7.3 — Terrain Editor · ~5 sesi · 🔨 data, brush, undo, I/O, dan panel selesai
 
 - Data terrain: heightmap ubin (tile) + layer material + peta bobot (splat) + peta
   hole, disimpan sebagai `.simterrain` + tekstur pendamping.
@@ -1083,10 +1083,11 @@ keduanya menunggu sesuatu yang bisa menggambarnya.
   heightmap 2048² per tile tetap bisa diedit tanpa lonjakan memori; import/export PNG
   16-bit round-trip tanpa kehilangan presisi.
 
-**Sudah ada** (18 test di `Tests/TerrainTests.cpp`): modul `Sim::Terrain` berisi
+**Sudah ada** (24 test di `Tests/TerrainTests.cpp`): modul `Sim::Terrain` berisi
 penyimpanan heightmap berubin, brush sculpt, undo per goresan, dan I/O
-`.simterrain` + PNG 16-bit + RAW. **Keempat kriteria terimanya sudah terpenuhi**
-— yang tersisa di E7.3 adalah panelnya, layer material/splat, dan peta hole.
+`.simterrain` + PNG 16-bit + RAW, berikut panelnya. **Keempat kriteria terimanya
+sudah terpenuhi** — yang tersisa di E7.3 adalah layer material/splat, peta hole,
+dan penyambungan ke viewport 3D di E8.
 
 Keempat kriteria itu bukan sekadar diuji belakangan; masing-masing memaksa satu
 keputusan bentuk, dan itu sebabnya semuanya bisa dipenuhi tanpa renderer.
@@ -1166,10 +1167,84 @@ merusak peta seseorang: hasilnya terlihat masuk akal dan tetap salah.
 `ReadHeightmapPng` tetap tersedia untuk membaca ukurannya, supaya panel bisa
 menawarkan menyesuaikan terrain alih-alih sekadar menolak.
 
-**Belum ada:** panelnya, layer material + peta bobot (splat), peta hole, dan
-pengaturan LOD. Ketiganya yang pertama menunggu panel — alat paint tidak bisa
-dirancang tanpa tempat memilih layernya — sedangkan LOD baru berarti ketika ada
-yang menggambar terrainnya di E8.
+#### Panelnya
+
+**Preview-nya peta 2D dari atas, bukan viewport 3D.** Di viewport 3D-lah tempat
+memahat yang sebenarnya, dan ke situ panel ini akan tersambung begitu E8 bisa
+menggambar terrain — tapi sampai itu ada, kursor brush akan melayang di atas
+ruang kosong, dan alat yang tidak bisa dilihat hasilnya tidak bisa diuji maupun
+dipakai. Peta dari atas juga bukan sekadar penambal: untuk membaca *bentuk*
+terrain — di mana lembahnya, seberapa lebar punggungannya, apakah jalan yang
+dipahat lurus — pandangan dari atas lebih jujur daripada perspektif, dan itu
+sebabnya alat terrain mana pun menyediakannya berdampingan dengan viewport-nya.
+
+**Digambar sebagai kisi bervertex warna lewat draw list, bukan tekstur.** Panel
+tidak punya jalan untuk mengunggah buffer piksel: `EditorContext` tidak membuka
+`rhi::Device`, `Sim::RHI` adalah dependensi PRIVATE milik `Sim::Render`, dan
+satu-satunya penghasil `ImTextureID` yang terjangkau panel adalah
+`IViewportRenderer::ColorTarget()` dan `IThumbnailCache::Request()` — yang
+menerima *path berkas*, bukan buffer. Batas itu benar dan tidak layak ditembus
+demi sebuah preview. Kisi ber-shading digambar langsung dari terrain, jadi ia
+selalu sinkron dan tidak ada yang perlu diunggah ulang setiap sentuhan brush.
+
+**Gradasi warna dan bayangannya diskalakan ke rentang tinggi yang terlihat,
+bukan ke `minHeight`/`maxHeight` yang dikonfigurasi.** Ini ditemukan lewat
+pengujian XTEST, bukan dari membaca kode: terrain baru berentang seribu meter
+sementara goresan pertama baru setinggi dua meter, dan diukur terhadap rentang
+konfigurasi seluruh peta tetap satu warna rata — goresannya terjadi, tapi
+kesan pertamanya adalah alat yang rusak. Lerengnya pun dinyatakan dalam piksel
+layar, bukan meter, sehingga relief tetap terbaca pada peta dua kilometer maupun
+pada zoom sepuluh meter tanpa slider "vertical exaggeration" yang harus disetel
+ulang tiap berpindah skala. Yang dibayar adalah arti warnanya berubah saat
+digeser; itu dibayar balik dengan legenda yang menyebutkan meternya.
+
+**Sentuhan brush dipancarkan pada langkah waktu tetap DAN jarak tetap.**
+Mengalikan kekuatan brush dengan `dt` frame terdengar benar tapi tidak: pada
+mesin 144 Hz sebuah goresan menerima lebih dari empat kali lipat sentuhan
+dibanding mesin 30 Hz, dan karena tiap sentuhan dibulatkan ke sampel 16-bit,
+bukit yang sama digores dengan cara yang sama menjadi bukit yang berbeda.
+Langkah tetapnya sengaja angka yang sama dengan simulasi partikel.
+
+Langkah waktu saja ternyata belum cukup — juga terlihat lewat XTEST. Seretan
+cepat memindahkan kursor lebih jauh daripada satu jari-jari di antara dua
+sentuhan, dan yang tertinggal adalah rangkaian manik-manik alih-alih garis.
+Jumlah sentuhan karena itu diambil dari yang lebih besar antara langkah waktu
+dan langkah jarak, lalu **jatah waktunya dibagi rata** ke seluruhnya: menyeret
+cepat menyebarkan material yang sama di lintasan yang lebih panjang, bukan
+menumpuk lebih banyak.
+
+Batas susulannya membatasi **jumlah waktu**, bukan jumlah sentuhan. Versi
+pertamanya membatasi jumlah sentuhan, dan test memperlihatkan akibatnya: goresan
+biasa pada mesin lambat kehilangan seperlima materialnya diam-diam. Yang dibatasi
+harus yang memang ingin dibatasi — seperempat detik material, dibagi ke sebanyak
+apa pun sentuhan yang dibutuhkan untuk menutup lintasannya.
+
+**Memuat heightmap tidak mewujudkan ubin yang seluruhnya datar.** Juga temuan
+dari menjalankan panelnya: berkas heightmap memuat seluruh peta, jadi tanpa
+penyaringan ini membuka terrain membatalkan seluruh guna alokasi malas — terrain
+4×4 km langsung menghuni memori sepenuhnya, padahal bagian yang datar tidak
+menyimpan apa pun yang belum diketahui. Memindai lebih murah daripada
+mengalokasi, dan jauh lebih murah daripada menahannya.
+
+**Suntingan tidak melewati `CommandHistory`**, sama seperti Material, Graph, dan
+Script Editor. `Command.h` sempat merencanakan sebaliknya — patch heightmap
+disebut namanya di sana sebagai calon peng-override `MemoryCost()`. Ternyata
+tidak bisa: terrain adalah dokumen yang dibuka dan ditutup, sedangkan
+`CommandHistory` tidak punya cakupan dokumen, jadi membuka terrain lain akan
+meninggalkan command yang membatalkan goresan pada heightmap yang sama sekali
+berbeda. Catatannya di `Command.h` sudah dikoreksi. Ctrl+Z panel hanya berlaku
+saat panel ini fokus — dua pemilik untuk satu pintasan berarti satu di antaranya
+diam-diam kalah.
+
+Impor heightmap **mengosongkan riwayat goresan**. Impor bukan goresan, jadi
+riwayatnya tidak lagi cocok dengan apa yang ada di peta; membiarkannya berarti
+satu Ctrl+Z memasang kembali potongan heightmap lama di atas yang baru diimpor.
+
+**Belum ada:** layer material + peta bobot (splat), peta hole, pengaturan LOD,
+dan sculpt langsung di viewport 3D. Dua yang pertama sudah bisa dikerjakan
+sekarang; LOD dan viewport 3D baru berarti ketika ada yang menggambar terrainnya
+di E8. Alat brush-nya sendiri tidak perlu ditulis ulang saat itu — `BrushStroke`
+hanya menerima posisi dunia, dan dari mana posisi itu datang bukan urusannya.
 
 ### E7.4 — Vegetation Editor · ~4 sesi
 
