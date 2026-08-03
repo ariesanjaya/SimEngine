@@ -950,6 +950,8 @@ dibangkitkan dari graph alih-alih cabang runtime.
   Initial (velocity, size, color, rotation, lifetime), Over-Lifetime (curve untuk
   size/color/velocity/rotation), Force (gravity, drag, vortex, noise, point attractor),
   Collision, Sub-emitter, Renderer (billboard/stretched/mesh/ribbon, material, sorting).
+- Satu efek memuat **beberapa emitter** yang berjalan pada satu timeline; tiap
+  emitter punya tumpukan modul, benih, dan anggaran partikelnya sendiri.
 - Widget khusus: **CurveEditor** (bezier, banyak kurva, preset ease) dan
   **GradientEditor** (color stop + alpha stop) — dipakai ulang oleh Animation dan Terrain.
 - Timeline preview: play/pause/step/loop, scrub waktu, kontrol kecepatan, restart.
@@ -960,10 +962,47 @@ dibangkitkan dari graph alih-alih cabang runtime.
   per waktu); menonaktifkan modul tidak menghapus datanya; preview berjalan pada
   100k partikel tanpa membekukan UI (simulasi CPU dulu, dibatasi anggaran).
 
-**Sudah ada** (12 test di `Tests/ParticleTests.cpp`): `Curve` dan `Gradient` di
+**Sudah ada** (19 test di `Tests/ParticleTests.cpp`): `Curve` dan `Gradient` di
 `Sim::Core`, modul `Sim::Particle` berisi model efek `.simfx` beserta I/O-nya,
-dan simulasi CPU. **Keempat kriteria terimanya sudah terpenuhi** — yang tersisa
-di E7.2 adalah panelnya.
+simulasi CPU, dan panelnya. **Keempat kriteria terimanya sudah terpenuhi.**
+
+**Sebuah efek memuat beberapa emitter, bukan satu tumpukan modul.** Ini bentuk
+yang dipakai editor partikel mapan mana pun, dan alasannya bukan konvensi: api
+yang sungguhan adalah nyala inti, percikan yang melompat, asap yang naik pelan,
+dan bara yang jatuh — empat perilaku dengan bentuk, umur, dan gaya yang
+berbeda-beda. Memaksa keempatnya ke dalam satu tumpukan modul berarti setiap
+parameter harus bisa bercabang, dan tidak ada satu pun yang bisa disetel tanpa
+mengganggu tiga yang lain. Keragaman datang dari menggabungkan emitter, bukan
+dari menumpuk modul sejenis.
+
+Tiga hal yang membuat penggabungan itu aman, dan ketiganya dikunci test:
+
+1. **Menambah emitter kedua tidak menggeser satu partikel pun milik yang
+   pertama.** Kalau bisa, menyusun efek berlapis berubah jadi menebak: setiap
+   penambahan merusak apa yang sudah disetel sebelumnya.
+2. **Benihnya milik emitter, bukan turunan dari posisinya di daftar.** Menyusun
+   ulang emitter tidak boleh mengubah efek yang sudah jadi.
+3. **Anggaran partikel dihitung per emitter.** Anggaran bersama membuat emitter
+   yang lahir lebih dulu memakan seluruh jatah, dan emitter di bawahnya diam
+   tanpa alasan yang terlihat di panel — sementara pengaturannya sendiri terlihat
+   benar.
+
+Seluruh emitter berjalan pada **satu jam yang sama**. Itu yang membedakannya dari
+sekadar beberapa efek yang dijalankan berdampingan: ledakan yang kilatannya
+menyala pada 0,0 dtk, pecahannya melompat pada 0,05 dtk, dan asapnya membubung
+sesudahnya hanya terbaca sebagai satu kejadian kalau ketiganya membagi satu
+timeline — termasuk saat timeline itu digeser.
+
+Partikelnya membawa nomor emitter asalnya, bukan disimpan sebagai daftar terpisah
+per emitter, karena penggambaran harus mengurutkan seluruh partikel menurut jarak
+**lintas emitter**. Partikel yang dikelompokkan per emitter akan digambar
+berkelompok, dan asap dari emitter kedua akan selalu menutupi api dari emitter
+pertama walau letaknya di belakang.
+
+Skema `.simfx` naik ke **v2**: modul dibungkus di dalam daftar `emitters`. Berkas
+v1 — satu tumpukan modul di akar — tetap terbaca sebagai efek dengan satu emitter.
+Berkas yang sudah ada di cakram tidak boleh hilang hanya karena bentuk
+penyimpanannya berkembang.
 
 **Determinisme scrub datang dari dua keputusan, bukan dari satu.** Pertama, angka
 acak sebuah partikel diturunkan dari *nomor urutnya* lewat hash, bukan diambil
@@ -1013,6 +1052,18 @@ partikel terlihat berlubang.
 Simulasinya milik `Sim::Particle`, bukan panel: panel hanya menentukan waktu mana
 yang ingin dilihat. Itu yang membuat preview dijamin sama dengan yang dijalankan
 runtime nanti.
+
+Daftar emitter disusun sebagai **baris bertumpuk ke bawah**, bukan kolom
+berdampingan. Alasannya bukan selera: tumpukan modul di bawahnya panjang, dan
+daftar yang tumbuh ke arah yang sama dengan isinya bisa berbagi satu batang gulir
+— sementara kolom berdampingan memaksa memilih antara nama emitter yang terpotong
+atau lebar panel yang habis sebelum modulnya terlihat.
+
+**Isi modul mendapat lingkup ID sendiri** (`PushID("body")`). Tanpa itu, sebuah
+widget yang labelnya sama dengan nama modulnya — combo `"Shape"` di dalam modul
+`"Shape"` — berbagi ID dengan header di atasnya, dan ImGui mengirim kliknya ke
+salah satu saja: combonya tidak pernah terbuka, headernya yang menutup. Lingkup
+terpisah memperbaiki seluruh golongan bug itu, bukan satu kejadiannya.
 
 **Belum ada:** modul Sub-emitter, dan penetapan material/mesh pada modul Render —
 keduanya menunggu sesuatu yang bisa menggambarnya.

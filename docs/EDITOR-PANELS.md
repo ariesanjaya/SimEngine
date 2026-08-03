@@ -231,7 +231,7 @@ Sumber log ditandai kategori (`[Asset]`, `[Lua]`, `[RHI]`).
 | Panel | Susunan |
 |---|---|
 | **Material Editor** | kiri: palet node + daftar parameter · tengah: node graph · kanan: properti node terpilih · pojok: preview mesh |
-| **Particle Editor** | kiri: daftar emitter & modul · tengah: preview + timeline di bawahnya · kanan: properti modul (kurva & gradient inline) |
+| **Particle Editor** | kiri: daftar efek · tengah: preview + timeline + statistik di bawahnya · kanan: daftar emitter (baris bertumpuk, tiap baris punya sakelar dan jumlah partikelnya sendiri) lalu tumpukan modul emitter terpilih, dengan kurva & gradient inline |
 | **Terrain Editor** | kiri: daftar layer material · atas: pemilih alat (sculpt/paint/hole) · kanan: setting brush · viewport utama dipakai untuk melukis |
 | **Vegetation Editor** | kiri: daftar layer vegetasi · kanan: aturan penempatan + setting instance · toolbar: paint/erase/scatter |
 | **Animation Editor** | kiri: pohon skeleton · tengah-atas: preview · tengah-bawah: dope sheet / curve editor · kanan: properti keyframe/event · tab terpisah: state machine graph |

@@ -8,16 +8,17 @@
 
 #include <chrono>
 #include <string>
+#include <vector>
 
 using namespace sim;
 using namespace sim::particle;
 
 namespace {
 
-/// Efek dengan lima modul menyala dan tiga kurva yang benar-benar berbentuk —
+/// Emitter dengan lima modul menyala dan tiga kurva yang benar-benar berbentuk —
 /// bahan kriteria terima E7.2 nomor 1.
-ParticleEffect RichEffect() {
-    ParticleEffect effect;
+ParticleEmitter RichEmitter() {
+    ParticleEmitter effect;
     effect.name = "Percikan";
     effect.seed = 987;
     effect.maxParticles = 500;
@@ -60,6 +61,30 @@ ParticleEffect RichEffect() {
     effect.collision.enabled = true;
     effect.collision.bounce = 0.3f;
     return effect;
+}
+
+ParticleEffect RichEffect() {
+    ParticleEffect effect;
+    effect.name = "Percikan";
+    effect.emitters.push_back(RichEmitter());
+    return effect;
+}
+
+/// Emitter kedua yang berbeda jelas dari yang pertama: lebih lambat, lebih
+/// besar, naik pelan — asap di atas percikan.
+ParticleEmitter SmokeEmitter() {
+    ParticleEmitter emitter;
+    emitter.name = "Asap";
+    emitter.seed = 4242;
+    emitter.maxParticles = 200;
+    emitter.spawn.rate = 12.0f;
+    emitter.shape.shape = EmitterShape::Sphere;
+    emitter.shape.size = Vec3(0.8f, 0.8f, 0.8f);
+    emitter.initial.velocity = Vec3(0.0f, 0.7f, 0.0f);
+    emitter.initial.size = 0.8f;
+    emitter.initial.lifetime = 4.0f;
+    emitter.force.gravity = Vec3(0.0f, 0.4f, 0.0f);
+    return emitter;
 }
 
 }  // namespace
@@ -143,22 +168,25 @@ TEST_CASE("Efek dengan lima modul dan tiga kurva disimpan lalu dimuat identik") 
     CHECK(SaveEffectToString(loaded) == text);
 
     CHECK(loaded.name == "Percikan");
-    CHECK(loaded.seed == 987);
-    CHECK(loaded.spawn.burstCount == 20);
-    CHECK(loaded.shape.shape == EmitterShape::Cone);
-    CHECK(loaded.force.gravity.y == doctest::Approx(-6.0f));
+    REQUIRE(loaded.emitters.size() == 1);
+    const ParticleEmitter& emitter = loaded.emitters.front();
+    CHECK(emitter.name == "Percikan");
+    CHECK(emitter.seed == 987);
+    CHECK(emitter.spawn.burstCount == 20);
+    CHECK(emitter.shape.shape == EmitterShape::Cone);
+    CHECK(emitter.force.gravity.y == doctest::Approx(-6.0f));
 
-    REQUIRE(loaded.overLifetime.sizeOverLife.Keys().size() == 3);
-    CHECK(loaded.overLifetime.sizeOverLife.Keys()[0].outTangent == doctest::Approx(4.0f));
-    CHECK(loaded.overLifetime.rotationRate.Keys()[0].interpolation == Interpolation::Constant);
-    REQUIRE(loaded.overLifetime.colorOverLife.AlphaStops().size() == 3);
-    CHECK(loaded.overLifetime.colorOverLife.Evaluate(1.0f).w == doctest::Approx(0.0f));
+    REQUIRE(emitter.overLifetime.sizeOverLife.Keys().size() == 3);
+    CHECK(emitter.overLifetime.sizeOverLife.Keys()[0].outTangent == doctest::Approx(4.0f));
+    CHECK(emitter.overLifetime.rotationRate.Keys()[0].interpolation == Interpolation::Constant);
+    REQUIRE(emitter.overLifetime.colorOverLife.AlphaStops().size() == 3);
+    CHECK(emitter.overLifetime.colorOverLife.Evaluate(1.0f).w == doctest::Approx(0.0f));
 }
 
 TEST_CASE("Menonaktifkan modul tidak menghapus datanya") {
     ParticleEffect effect = RichEffect();
-    effect.SetEnabled(ModuleKind::Force, false);
-    effect.SetEnabled(ModuleKind::OverLifetime, false);
+    effect.emitters.front().SetEnabled(ModuleKind::Force, false);
+    effect.emitters.front().SetEnabled(ModuleKind::OverLifetime, false);
 
     ParticleEffect loaded;
     REQUIRE(LoadEffectFromString(loaded, SaveEffectToString(effect)).ok);
@@ -166,15 +194,37 @@ TEST_CASE("Menonaktifkan modul tidak menghapus datanya") {
     // Kriteria terima E7.2 nomor 3. Modul yang dimatikan tetap tertulis lengkap,
     // sehingga menyalakannya kembali mengembalikan efek yang sama persis — bukan
     // efek dengan nilai bawaan.
-    CHECK_FALSE(loaded.IsEnabled(ModuleKind::Force));
-    CHECK(loaded.force.gravity.y == doctest::Approx(-6.0f));
-    CHECK(loaded.force.drag == doctest::Approx(0.5f));
-    CHECK_FALSE(loaded.IsEnabled(ModuleKind::OverLifetime));
-    CHECK(loaded.overLifetime.sizeOverLife.Keys().size() == 3);
+    ParticleEmitter& emitter = loaded.emitters.front();
+    CHECK_FALSE(emitter.IsEnabled(ModuleKind::Force));
+    CHECK(emitter.force.gravity.y == doctest::Approx(-6.0f));
+    CHECK(emitter.force.drag == doctest::Approx(0.5f));
+    CHECK_FALSE(emitter.IsEnabled(ModuleKind::OverLifetime));
+    CHECK(emitter.overLifetime.sizeOverLife.Keys().size() == 3);
 
-    loaded.SetEnabled(ModuleKind::Force, true);
-    loaded.SetEnabled(ModuleKind::OverLifetime, true);
+    emitter.SetEnabled(ModuleKind::Force, true);
+    emitter.SetEnabled(ModuleKind::OverLifetime, true);
     CHECK(SaveEffectToString(loaded) == SaveEffectToString(RichEffect()));
+}
+
+TEST_CASE("Emitter yang dimatikan tidak melahirkan apa pun, tapi datanya utuh") {
+    ParticleEffect effect;
+    effect.emitters.push_back(RichEmitter());
+    effect.emitters.push_back(SmokeEmitter());
+    effect.emitters[1].enabled = false;
+
+    ParticleSystem system;
+    system.SetEffect(effect);
+    system.SimulateTo(1.0f);
+    CHECK(system.StatsFor(1).alive == 0);
+    CHECK(system.StatsFor(0).alive > 0);
+
+    // Aturan yang sama dengan modul: mematikan menyembunyikan, tidak menghapus.
+    ParticleEffect loaded;
+    REQUIRE(LoadEffectFromString(loaded, SaveEffectToString(effect)).ok);
+    REQUIRE(loaded.emitters.size() == 2);
+    CHECK_FALSE(loaded.emitters[1].enabled);
+    CHECK(loaded.emitters[1].initial.lifetime == doctest::Approx(4.0f));
+    CHECK(loaded.emitters[1].name == "Asap");
 }
 
 TEST_CASE("Scrub timeline deterministik: waktu yang sama, keadaan yang sama") {
@@ -222,7 +272,7 @@ TEST_CASE("Benih yang sama menghasilkan sebaran yang sama, benih lain tidak") {
     REQUIRE(a.Particles().size() == b.Particles().size());
     CHECK(a.Particles().front().position.x == doctest::Approx(b.Particles().front().position.x));
 
-    effect.seed = 555;
+    effect.emitters.front().seed = 555;
     ParticleSystem other;
     other.SetEffect(effect);
     other.SimulateTo(1.0f);
@@ -233,10 +283,11 @@ TEST_CASE("Benih yang sama menghasilkan sebaran yang sama, benih lain tidak") {
 
 TEST_CASE("Anggaran partikel ditahan, dan penahanannya dilaporkan") {
     ParticleEffect effect;
-    effect.spawn.rate = 100000.0f;
-    effect.initial.lifetime = 100.0f;
-    effect.initial.lifetimeJitter = 0.0f;
-    effect.maxParticles = 250;
+    ParticleEmitter& emitter = effect.emitters.emplace_back();
+    emitter.spawn.rate = 100000.0f;
+    emitter.initial.lifetime = 100.0f;
+    emitter.initial.lifetimeJitter = 0.0f;
+    emitter.maxParticles = 250;
 
     ParticleSystem system;
     system.SetEffect(effect);
@@ -250,12 +301,13 @@ TEST_CASE("Anggaran partikel ditahan, dan penahanannya dilaporkan") {
 
 TEST_CASE("Seratus ribu partikel disimulasikan dalam anggaran satu frame") {
     ParticleEffect effect;
-    effect.spawn.rate = 2000000.0f;
-    effect.initial.lifetime = 100.0f;
-    effect.initial.lifetimeJitter = 0.0f;
-    effect.maxParticles = 100000;
-    effect.force.enabled = true;
-    effect.overLifetime.enabled = true;
+    ParticleEmitter& emitter = effect.emitters.emplace_back();
+    emitter.spawn.rate = 2000000.0f;
+    emitter.initial.lifetime = 100.0f;
+    emitter.initial.lifetimeJitter = 0.0f;
+    emitter.maxParticles = 100000;
+    emitter.force.enabled = true;
+    emitter.overLifetime.enabled = true;
 
     ParticleSystem system;
     system.SetEffect(effect);
@@ -288,8 +340,8 @@ TEST_CASE("Seratus ribu partikel disimulasikan dalam anggaran satu frame") {
 
 TEST_CASE("Menggeser jauh ke depan tidak menggantungkan editor") {
     ParticleEffect effect = RichEffect();
-    effect.spawn.looping = true;
-    effect.spawn.duration = 0.0f;
+    effect.emitters.front().spawn.looping = true;
+    effect.emitters.front().spawn.duration = 0.0f;
 
     ParticleSystem system;
     system.SetEffect(effect);
@@ -303,4 +355,192 @@ TEST_CASE("Menggeser jauh ke depan tidak menggantungkan editor") {
     // Dibatasi lima menit simulasi susulan; tanpa batas itu, satu jam berarti
     // 216 ribu langkah dan editor berhenti menanggapi.
     CHECK(ms < 2000.0);
+}
+
+TEST_CASE("Beberapa emitter disimpan berurut dan dimuat utuh") {
+    ParticleEffect effect;
+    effect.name = "Ledakan";
+    effect.emitters.push_back(RichEmitter());
+    effect.emitters.push_back(SmokeEmitter());
+
+    const std::string text = SaveEffectToString(effect);
+    ParticleEffect loaded;
+    REQUIRE(LoadEffectFromString(loaded, text).ok);
+    CHECK(SaveEffectToString(loaded) == text);
+
+    REQUIRE(loaded.emitters.size() == 2);
+    // Urutannya bagian dari efeknya, bukan detail penyimpanan: penulis efek
+    // menyusun daftarnya, dan daftar yang berubah urutan sendiri setiap kali
+    // dibuka tidak bisa dipakai untuk apa pun.
+    CHECK(loaded.emitters[0].name == "Percikan");
+    CHECK(loaded.emitters[1].name == "Asap");
+    CHECK(loaded.emitters[1].seed == 4242);
+    CHECK(loaded.emitters[1].initial.size == doctest::Approx(0.8f));
+    CHECK(loaded.emitters[0].shape.shape == EmitterShape::Cone);
+}
+
+TEST_CASE("Berkas v1 dibaca sebagai efek dengan satu emitter") {
+    // Bentuk v1: modul langsung di akar, tanpa daftar `emitters`. Berkas yang
+    // sudah ada di cakram tidak boleh hilang hanya karena skemanya berkembang.
+    const std::string v1 = R"({
+  "version": 1,
+  "name": "Lama",
+  "seed": 777,
+  "maxParticles": 321,
+  "spawn": { "enabled": true, "rate": 33.0, "burstCount": 5 },
+  "shape": { "enabled": true, "shape": "box" },
+  "initial": { "enabled": true, "lifetime": 3.5 }
+})";
+
+    ParticleEffect loaded;
+    const EffectIoResult result = LoadEffectFromString(loaded, v1);
+    REQUIRE(result.ok);
+    CHECK(result.sourceVersion == 1);
+    CHECK(loaded.name == "Lama");
+
+    REQUIRE(loaded.emitters.size() == 1);
+    const ParticleEmitter& emitter = loaded.emitters.front();
+    CHECK(emitter.seed == 777);
+    CHECK(emitter.maxParticles == 321);
+    CHECK(emitter.spawn.rate == doctest::Approx(33.0f));
+    CHECK(emitter.spawn.burstCount == 5);
+    CHECK(emitter.shape.shape == EmitterShape::Box);
+    CHECK(emitter.initial.lifetime == doctest::Approx(3.5f));
+}
+
+TEST_CASE("Emitter tidak saling mengganggu: yang berdua sama dengan yang sendiri") {
+    ParticleEffect solo;
+    solo.emitters.push_back(RichEmitter());
+
+    ParticleEffect duo;
+    duo.emitters.push_back(RichEmitter());
+    duo.emitters.push_back(SmokeEmitter());
+
+    ParticleSystem alone;
+    alone.SetEffect(solo);
+    alone.SimulateTo(1.5f);
+
+    ParticleSystem together;
+    together.SetEffect(duo);
+    together.SimulateTo(1.5f);
+
+    // Inilah janji yang membuat menggabungkan emitter aman: menambah emitter
+    // kedua tidak boleh menggeser satu partikel pun milik yang pertama. Kalau
+    // bisa, menyusun efek berlapis berubah jadi menebak — setiap penambahan
+    // merusak apa yang sudah disetel sebelumnya.
+    std::vector<Particle> first;
+    for (const Particle& particle : together.Particles()) {
+        if (particle.emitter == 0) {
+            first.push_back(particle);
+        }
+    }
+    REQUIRE(first.size() == alone.Particles().size());
+    REQUIRE_FALSE(first.empty());
+    for (std::size_t i = 0; i < first.size(); ++i) {
+        INFO("partikel ke-", i);
+        CHECK(first[i].index == alone.Particles()[i].index);
+        CHECK(first[i].position.x == doctest::Approx(alone.Particles()[i].position.x));
+        CHECK(first[i].position.y == doctest::Approx(alone.Particles()[i].position.y));
+        CHECK(first[i].size == doctest::Approx(alone.Particles()[i].size));
+    }
+}
+
+TEST_CASE("Anggaran dihitung per emitter, bukan dibagi rata") {
+    ParticleEmitter hungry;
+    hungry.name = "Rakus";
+    hungry.spawn.rate = 100000.0f;
+    hungry.initial.lifetime = 100.0f;
+    hungry.initial.lifetimeJitter = 0.0f;
+    hungry.maxParticles = 50;
+
+    ParticleEmitter modest;
+    modest.name = "Tenang";
+    modest.seed = 31337;
+    modest.spawn.rate = 60.0f;
+    modest.initial.lifetime = 100.0f;
+    modest.initial.lifetimeJitter = 0.0f;
+    modest.maxParticles = 1000;
+
+    ParticleEffect effect;
+    effect.emitters.push_back(hungry);
+    effect.emitters.push_back(modest);
+
+    ParticleSystem system;
+    system.SetEffect(effect);
+    system.SimulateTo(1.0f);
+
+    // Pembandingnya emitter yang sama dijalankan sendirian, bukan angka yang
+    // ditulis tangan: yang sedang diuji adalah "tetangganya tidak berpengaruh",
+    // dan angka tetap akan ikut goyah setiap kali batas langkah bergeser satu.
+    ParticleEffect aloneEffect;
+    aloneEffect.emitters.push_back(modest);
+    ParticleSystem alone;
+    alone.SetEffect(aloneEffect);
+    alone.SimulateTo(1.0f);
+
+    // Emitter pertama mentok, yang kedua sama sekali tidak terpengaruh. Anggaran
+    // bersama akan membuat emitter di bawah diam tanpa alasan yang terlihat di
+    // panel — dan pengaturannya sendiri terlihat benar.
+    CHECK(system.StatsFor(0).alive == 50);
+    CHECK(system.StatsFor(0).atBudget);
+    CHECK(system.StatsFor(1).alive == alone.Particles().size());
+    CHECK(system.StatsFor(1).alive > 50);
+    CHECK_FALSE(system.StatsFor(1).atBudget);
+    CHECK(system.AtBudget());
+}
+
+TEST_CASE("Menyusun ulang emitter tidak mengubah partikelnya") {
+    ParticleEffect ordered;
+    ordered.emitters.push_back(RichEmitter());
+    ordered.emitters.push_back(SmokeEmitter());
+
+    ParticleEffect swapped;
+    swapped.emitters.push_back(SmokeEmitter());
+    swapped.emitters.push_back(RichEmitter());
+
+    ParticleSystem a;
+    a.SetEffect(ordered);
+    a.SimulateTo(1.5f);
+
+    ParticleSystem b;
+    b.SetEffect(swapped);
+    b.SimulateTo(1.5f);
+
+    // Benihnya milik emitter, bukan turunan dari posisinya. Kalau turunan,
+    // menggeser satu emitter ke atas akan mengubah efek yang sudah jadi.
+    const auto smokeFrom = [](const ParticleSystem& system, uint32_t which) {
+        std::vector<Particle> out;
+        for (const Particle& particle : system.Particles()) {
+            if (particle.emitter == which) {
+                out.push_back(particle);
+            }
+        }
+        return out;
+    };
+    const std::vector<Particle> before = smokeFrom(a, 1);
+    const std::vector<Particle> after = smokeFrom(b, 0);
+    REQUIRE(before.size() == after.size());
+    REQUIRE_FALSE(before.empty());
+    for (std::size_t i = 0; i < before.size(); ++i) {
+        INFO("partikel asap ke-", i);
+        CHECK(before[i].position.x == doctest::Approx(after[i].position.x));
+        CHECK(before[i].position.y == doctest::Approx(after[i].position.y));
+    }
+}
+
+TEST_CASE("Benih emitter berikutnya selalu berbeda dari yang sudah dipakai") {
+    ParticleEffect effect;
+    for (int i = 0; i < 4; ++i) {
+        ParticleEmitter& added = effect.emitters.emplace_back();
+        added.seed = effect.NextSeed();
+        // Dipanggil sesudah emitternya masuk daftar, jadi benihnya masih
+        // terlihat sebagai "sudah terpakai" pada panggilan berikutnya.
+        added.seed = effect.NextSeed();
+    }
+    for (std::size_t i = 0; i < effect.emitters.size(); ++i) {
+        for (std::size_t j = i + 1; j < effect.emitters.size(); ++j) {
+            INFO("emitter ", i, " vs ", j);
+            CHECK(effect.emitters[i].seed != effect.emitters[j].seed);
+        }
+    }
 }

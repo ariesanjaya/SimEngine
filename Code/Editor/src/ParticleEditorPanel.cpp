@@ -17,6 +17,7 @@
 #include <array>
 #include <cfloat>
 #include <cmath>
+#include <cstdio>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -126,11 +127,23 @@ private:
 
     /// Panjang satu putaran untuk timeline: durasi emitter ditambah umur
     /// terpanjang, sehingga partikel terakhir sempat mati sebelum diulang.
+    ///
+    /// Diambil dari emitter yang paling panjang, bukan dari emitter terpilih.
+    /// Timeline milik efeknya: memutar ulang begitu emitter terpendek selesai
+    /// akan memotong asap yang masih membubung dari emitter di sebelahnya.
     float LoopLength() const {
-        const ParticleEffect& effect = system_.Effect();
-        const float life = effect.initial.lifetime + std::abs(effect.initial.lifetimeJitter);
-        const float duration = effect.spawn.duration > 0.0f ? effect.spawn.duration : 2.0f;
-        return duration + life;
+        float longest = 0.1f;
+        for (const ParticleEmitter& emitter : system_.Effect().emitters) {
+            if (!emitter.enabled) {
+                continue;
+            }
+            const float life =
+                emitter.initial.lifetime + std::abs(emitter.initial.lifetimeJitter);
+            const float duration =
+                emitter.spawn.duration > 0.0f ? emitter.spawn.duration : 2.0f;
+            longest = std::max(longest, duration + life);
+        }
+        return longest;
     }
 
     // --- toolbar & daftar ----------------------------------------------------
@@ -318,14 +331,21 @@ private:
     }
 
     void DrawStats() {
-        ImGui::TextColored(kHintColor, "%zu alive   %.0f spawn/s   t=%.2fs",
-                           system_.Particles().size(),
-                           system_.Effect().spawn.enabled ? system_.Effect().spawn.rate : 0.0f,
+        const ParticleEffect& effect = system_.Effect();
+        float rate = 0.0f;
+        int live = 0;
+        for (const ParticleEmitter& emitter : effect.emitters) {
+            if (emitter.enabled && emitter.spawn.enabled) {
+                rate += emitter.spawn.rate;
+                ++live;
+            }
+        }
+        ImGui::TextColored(kHintColor, "%zu alive   %.0f spawn/s   %d/%zu emitters   t=%.2fs",
+                           system_.Particles().size(), rate, live, effect.emitters.size(),
                            system_.Time());
         if (system_.AtBudget()) {
             ImGui::SameLine();
-            ImGui::TextColored(kWarnColor, "%s  budget reached (%d)", icons::kLogWarn,
-                               system_.Effect().maxParticles);
+            ImGui::TextColored(kWarnColor, "%s  budget reached", icons::kLogWarn);
         }
     }
 
@@ -335,34 +355,14 @@ private:
         ParticleEffect effect = system_.Effect();
         bool changed = false;
 
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
-        changed |= ImGui::InputInt("Max particles", &effect.maxParticles);
-        ImGui::SameLine();
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
-        int seed = static_cast<int>(effect.seed);
-        if (ImGui::InputInt("Seed", &seed)) {
-            effect.seed = static_cast<uint32_t>(std::max(0, seed));
-            changed = true;
-        }
-        ImGui::Separator();
-
-        for (const ModuleKind kind : kModules) {
-            ImGui::PushID(static_cast<int>(kind));
-            bool enabled = effect.IsEnabled(kind);
-            if (ImGui::Checkbox("##enabled", &enabled)) {
-                effect.SetEnabled(kind, enabled);
-                changed = true;
-            }
-            widgets::Tooltip("Disabling a module keeps its settings");
-            ImGui::SameLine();
-            // Modul yang dimatikan tetap bisa dibuka dan disunting: itu bagian
-            // dari janji bahwa mematikannya tidak menghapus apa pun.
-            if (ImGui::CollapsingHeader(ToString(kind))) {
-                ImGui::Indent();
-                changed |= DrawModuleBody(kind, effect);
-                ImGui::Unindent();
-            }
-            ImGui::PopID();
+        changed |= DrawEmitterList(effect);
+        if (effect.emitters.empty()) {
+            ImGui::TextColored(kHintColor, "Add an emitter to start.");
+        } else {
+            emitterIndex_ =
+                std::min(emitterIndex_, static_cast<int>(effect.emitters.size()) - 1);
+            ImGui::Separator();
+            changed |= DrawEmitter(effect.emitters[static_cast<std::size_t>(emitterIndex_)]);
         }
 
         if (changed) {
@@ -375,7 +375,159 @@ private:
         }
     }
 
-    bool DrawModuleBody(ModuleKind kind, ParticleEffect& effect) {
+    /// Daftar emitter efek ini, dan tombol untuk menyusunnya.
+    ///
+    /// Disusun sebagai baris bertumpuk ke bawah, bukan kolom berdampingan.
+    /// Alasannya bukan selera: tumpukan modul di bawahnya panjang, dan daftar
+    /// yang tumbuh ke arah yang sama dengan isinya bisa berbagi satu batang
+    /// gulir — sementara kolom berdampingan memaksa memilih antara nama emitter
+    /// yang terpotong atau lebar panel yang habis sebelum modulnya terlihat.
+    bool DrawEmitterList(ParticleEffect& effect) {
+        bool changed = false;
+        const auto selected = static_cast<std::size_t>(std::max(emitterIndex_, 0));
+
+        if (ImGui::Button(icons::kAdd)) {
+            ParticleEmitter& added = effect.emitters.emplace_back();
+            added.name = "Emitter " + std::to_string(effect.emitters.size());
+            added.seed = effect.NextSeed();
+            SeedDefaultLook(added);
+            emitterIndex_ = static_cast<int>(effect.emitters.size()) - 1;
+            changed = true;
+        }
+        widgets::Tooltip("Add emitter");
+
+        ImGui::SameLine();
+        ImGui::BeginDisabled(effect.emitters.empty());
+        if (ImGui::Button(icons::kDuplicate)) {
+            ParticleEmitter copy = effect.emitters[selected];
+            copy.name += " Copy";
+            // Benihnya diganti. Salinan yang berbenih sama menghasilkan partikel
+            // yang bertumpuk tepat di atas aslinya — dan yang terlihat hanyalah
+            // satu emitter yang lebih terang, bukan dua.
+            copy.seed = effect.NextSeed();
+            effect.emitters.insert(effect.emitters.begin() +
+                                       static_cast<std::ptrdiff_t>(selected) + 1,
+                                   std::move(copy));
+            emitterIndex_ = static_cast<int>(selected) + 1;
+            changed = true;
+        }
+        widgets::Tooltip("Duplicate emitter");
+
+        ImGui::SameLine();
+        if (ImGui::Button(icons::kDelete)) {
+            effect.emitters.erase(effect.emitters.begin() +
+                                  static_cast<std::ptrdiff_t>(selected));
+            emitterIndex_ = std::max(0, static_cast<int>(selected) - 1);
+            changed = true;
+        }
+        widgets::Tooltip("Remove emitter");
+
+        ImGui::SameLine();
+        ImGui::BeginDisabled(selected == 0);
+        if (ImGui::ArrowButton("##up", ImGuiDir_Up)) {
+            std::swap(effect.emitters[selected], effect.emitters[selected - 1]);
+            emitterIndex_ = static_cast<int>(selected) - 1;
+            changed = true;
+        }
+        ImGui::EndDisabled();
+
+        ImGui::SameLine();
+        ImGui::BeginDisabled(selected + 1 >= effect.emitters.size());
+        if (ImGui::ArrowButton("##down", ImGuiDir_Down)) {
+            std::swap(effect.emitters[selected], effect.emitters[selected + 1]);
+            emitterIndex_ = static_cast<int>(selected) + 1;
+            changed = true;
+        }
+        ImGui::EndDisabled();
+        ImGui::EndDisabled();
+
+        // Tinggi daftar mengikuti isinya sampai enam baris, lalu menggulir.
+        // Daftar setinggi tetap membuang ruang pada efek satu emitter — yaitu
+        // bentuk yang paling sering disunting.
+        const float rows = std::clamp(static_cast<float>(effect.emitters.size()), 1.0f, 6.0f);
+        const ImVec2 listSize(0.0f, rows * ImGui::GetFrameHeightWithSpacing() +
+                                        ImGui::GetStyle().FramePadding.y * 2.0f);
+        if (ImGui::BeginChild("##emitters", listSize, ImGuiChildFlags_Borders)) {
+            for (std::size_t i = 0; i < effect.emitters.size(); ++i) {
+                ParticleEmitter& emitter = effect.emitters[i];
+                ImGui::PushID(static_cast<int>(i));
+
+                if (ImGui::Checkbox("##on", &emitter.enabled)) {
+                    changed = true;
+                }
+                widgets::Tooltip("Disabling an emitter keeps its settings");
+                ImGui::SameLine();
+
+                const ParticleSystem::EmitterStats stats = system_.StatsFor(i);
+                if (ImGui::Selectable(emitter.name.c_str(),
+                                      i == static_cast<std::size_t>(emitterIndex_),
+                                      ImGuiSelectableFlags_AllowOverlap)) {
+                    emitterIndex_ = static_cast<int>(i);
+                }
+
+                // Jumlah partikel per emitter, rata kanan. Pada efek berlapis,
+                // "sudah mentok" tanpa menyebut emitter mana tidak menolong.
+                char count[32];
+                std::snprintf(count, sizeof(count), "%u", stats.alive);
+                const float countWidth = ImGui::CalcTextSize(count).x;
+                ImGui::SameLine(ImGui::GetContentRegionAvail().x - countWidth);
+                ImGui::TextColored(stats.atBudget ? kWarnColor : kHintColor, "%s", count);
+
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndChild();
+        return changed;
+    }
+
+    bool DrawEmitter(ParticleEmitter& emitter) {
+        bool changed = false;
+
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+        changed |= ImGui::InputText("Name", &emitter.name);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5.0f);
+        changed |= ImGui::InputInt("Max", &emitter.maxParticles, 0);
+        widgets::Tooltip("Particle budget for this emitter");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5.0f);
+        int seed = static_cast<int>(emitter.seed);
+        if (ImGui::InputInt("Seed", &seed, 0)) {
+            emitter.seed = static_cast<uint32_t>(std::max(0, seed));
+            changed = true;
+        }
+        ImGui::Separator();
+
+        for (const ModuleKind kind : kModules) {
+            ImGui::PushID(static_cast<int>(kind));
+            bool enabled = emitter.IsEnabled(kind);
+            if (ImGui::Checkbox("##enabled", &enabled)) {
+                emitter.SetEnabled(kind, enabled);
+                changed = true;
+            }
+            widgets::Tooltip("Disabling a module keeps its settings");
+            ImGui::SameLine();
+            // Modul yang dimatikan tetap bisa dibuka dan disunting: itu bagian
+            // dari janji bahwa mematikannya tidak menghapus apa pun.
+            const bool open = ImGui::CollapsingHeader(ToString(kind));
+            if (open) {
+                // Isi modul mendapat lingkup ID sendiri. Tanpa ini, sebuah widget
+                // yang labelnya sama dengan nama modulnya — combo "Shape" di
+                // dalam modul "Shape" — berbagi ID dengan header di atasnya, dan
+                // ImGui mengirim kliknya ke salah satu saja: comboonya tidak
+                // pernah terbuka, headernya yang menutup.
+                ImGui::PushID("body");
+                ImGui::Indent();
+                changed |= DrawModuleBody(kind, emitter);
+                ImGui::Unindent();
+                ImGui::PopID();
+            }
+            ImGui::PopID();
+        }
+        return changed;
+    }
+
+    bool DrawModuleBody(ModuleKind kind, ParticleEmitter& effect) {
         bool changed = false;
         const float width = ImGui::GetFontSize() * 8.0f;
         switch (kind) {
@@ -515,6 +667,20 @@ private:
 
     // --- berkas ---------------------------------------------------------------
 
+    /// Rupa bawaan emitter baru: nyala hangat yang memudar dan mengecil.
+    ///
+    /// Emitter baru harus langsung terlihat. Nilai bawaan yang menghasilkan
+    /// partikel tak kasatmata membuat orang mengira editornya rusak, dan
+    /// menghabiskan menit pertama untuk mencari tahu kenapa layarnya kosong
+    /// alih-alih menyusun efeknya.
+    static void SeedDefaultLook(ParticleEmitter& emitter) {
+        emitter.overLifetime.colorOverLife.AddColorStop(0.0f, Vec3(1.0f, 0.95f, 0.8f));
+        emitter.overLifetime.colorOverLife.AddColorStop(1.0f, Vec3(1.0f, 0.4f, 0.1f));
+        emitter.overLifetime.colorOverLife.AddAlphaStop(0.0f, 1.0f);
+        emitter.overLifetime.colorOverLife.AddAlphaStop(1.0f, 0.0f);
+        widgets::ApplyPreset(emitter.overLifetime.sizeOverLife, widgets::CurvePreset::Spike);
+    }
+
     void CreateEffect(EditorContext& context) {
         const std::filesystem::path folder =
             std::filesystem::path(context.assets->Root()) / "Effects";
@@ -526,13 +692,7 @@ private:
 
         ParticleEffect fresh;
         fresh.name = path.stem().string();
-        // Gradient bawaan: putih memudar. Efek baru yang partikelnya tak terlihat
-        // sama sekali membuat orang mengira editornya rusak.
-        fresh.overLifetime.colorOverLife.AddColorStop(0.0f, Vec3(1.0f, 0.95f, 0.8f));
-        fresh.overLifetime.colorOverLife.AddColorStop(1.0f, Vec3(1.0f, 0.4f, 0.1f));
-        fresh.overLifetime.colorOverLife.AddAlphaStop(0.0f, 1.0f);
-        fresh.overLifetime.colorOverLife.AddAlphaStop(1.0f, 0.0f);
-        widgets::ApplyPreset(fresh.overLifetime.sizeOverLife, widgets::CurvePreset::Spike);
+        SeedDefaultLook(fresh.emitters.emplace_back());
 
         if (!SaveEffectToFile(fresh, path).ok) {
             if (context.notifications != nullptr) {
@@ -562,6 +722,7 @@ private:
             return;
         }
         system_.SetEffect(loaded);
+        emitterIndex_ = 0;
         openGuid_ = guid;
         openName_ = record->name;
         openPath_ = context.assets->AbsolutePath(*record);
@@ -602,6 +763,7 @@ private:
     bool playing_ = true;
     bool loop_ = true;
     float sideWidth_ = 0.0f;
+    int emitterIndex_ = 0;
 
     float yaw_ = 0.6f;
     float pitch_ = 0.25f;

@@ -86,7 +86,7 @@ const char* ToString(ModuleKind kind) {
     return "Unknown";
 }
 
-bool ParticleEffect::IsEnabled(ModuleKind kind) const {
+bool ParticleEmitter::IsEnabled(ModuleKind kind) const {
     switch (kind) {
         case ModuleKind::Spawn: return spawn.enabled;
         case ModuleKind::Shape: return shape.enabled;
@@ -99,7 +99,7 @@ bool ParticleEffect::IsEnabled(ModuleKind kind) const {
     return false;
 }
 
-void ParticleEffect::SetEnabled(ModuleKind kind, bool value) {
+void ParticleEmitter::SetEnabled(ModuleKind kind, bool value) {
     switch (kind) {
         case ModuleKind::Spawn: spawn.enabled = value; return;
         case ModuleKind::Shape: shape.enabled = value; return;
@@ -111,10 +111,29 @@ void ParticleEffect::SetEnabled(ModuleKind kind, bool value) {
     }
 }
 
-std::string SaveEffectToString(const ParticleEffect& effect) {
+uint32_t ParticleEffect::NextSeed() const {
+    uint32_t seed = 12345;
+    // Melangkah dengan bilangan prima besar, lalu memastikan hasilnya belum
+    // terpakai. Mencari benih terbesar lalu menambah satu akan mengulang benih
+    // yang sudah ada begitu sebuah emitter dihapus dari tengah daftar.
+    for (int attempt = 0; attempt < 1024; ++attempt) {
+        const bool taken = std::any_of(
+            emitters.begin(), emitters.end(),
+            [seed](const ParticleEmitter& emitter) { return emitter.seed == seed; });
+        if (!taken) {
+            break;
+        }
+        seed += 7919;
+    }
+    return seed;
+}
+
+namespace {
+
+Json WriteEmitter(const ParticleEmitter& effect) {
     Json root;
-    root["version"] = kEffectSchemaVersion;
     root["name"] = effect.name;
+    root["enabled"] = effect.enabled;
     root["seed"] = effect.seed;
     root["maxParticles"] = effect.maxParticles;
 
@@ -188,46 +207,13 @@ std::string SaveEffectToString(const ParticleEffect& effect) {
     render["stretchScale"] = effect.render.stretchScale;
     render["sortByDistance"] = effect.render.sortByDistance;
     root["render"] = std::move(render);
-
-    return root.dump(2) + "\n";
+    return root;
 }
 
-EffectIoResult SaveEffectToFile(const ParticleEffect& effect,
-                                const std::filesystem::path& path) {
-    EffectIoResult result;
-    std::error_code error;
-    std::filesystem::create_directories(path.parent_path(), error);
-
-    std::ofstream stream(path, std::ios::binary | std::ios::trunc);
-    if (!stream) {
-        result.error = "cannot open " + path.string();
-        return result;
-    }
-    stream << SaveEffectToString(effect);
-    result.ok = static_cast<bool>(stream);
-    if (!result.ok) {
-        result.error = "write failed: " + path.string();
-    }
-    return result;
-}
-
-EffectIoResult LoadEffectFromString(ParticleEffect& effect, const std::string& text) {
-    EffectIoResult result;
-    Json root;
-    try {
-        root = Json::parse(text);
-    } catch (const nlohmann::json::exception& error) {
-        result.error = error.what();
-        return result;
-    }
-    if (!root.is_object()) {
-        result.error = "root is not an object";
-        return result;
-    }
-
-    effect = ParticleEffect{};
-    result.sourceVersion = root.value("version", kEffectSchemaVersion);
-    effect.name = root.value("name", std::string{});
+void ReadEmitter(const Json& root, ParticleEmitter& effect) {
+    effect = ParticleEmitter{};
+    effect.name = root.value("name", std::string("Emitter"));
+    effect.enabled = root.value("enabled", true);
     effect.seed = root.value("seed", 12345u);
     effect.maxParticles = root.value("maxParticles", 10000);
 
@@ -301,6 +287,81 @@ EffectIoResult LoadEffectFromString(ParticleEffect& effect, const std::string& t
         effect.render.mesh = AssetRef{Uuid::Parse(it->value("mesh", std::string{}))};
         effect.render.stretchScale = it->value("stretchScale", 1.0f);
         effect.render.sortByDistance = it->value("sortByDistance", true);
+    }
+}
+
+}  // namespace
+
+std::string SaveEffectToString(const ParticleEffect& effect) {
+    Json root;
+    root["version"] = kEffectSchemaVersion;
+    root["name"] = effect.name;
+
+    Json emitters = Json::array();
+    for (const ParticleEmitter& emitter : effect.emitters) {
+        emitters.push_back(WriteEmitter(emitter));
+    }
+    root["emitters"] = std::move(emitters);
+
+    return root.dump(2) + "\n";
+}
+
+EffectIoResult SaveEffectToFile(const ParticleEffect& effect,
+                                const std::filesystem::path& path) {
+    EffectIoResult result;
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+
+    std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+    if (!stream) {
+        result.error = "cannot open " + path.string();
+        return result;
+    }
+    stream << SaveEffectToString(effect);
+    result.ok = static_cast<bool>(stream);
+    if (!result.ok) {
+        result.error = "write failed: " + path.string();
+    }
+    return result;
+}
+
+EffectIoResult LoadEffectFromString(ParticleEffect& effect, const std::string& text) {
+    EffectIoResult result;
+    Json root;
+    try {
+        root = Json::parse(text);
+    } catch (const nlohmann::json::exception& error) {
+        result.error = error.what();
+        return result;
+    }
+    if (!root.is_object()) {
+        result.error = "root is not an object";
+        return result;
+    }
+
+    effect = ParticleEffect{};
+    result.sourceVersion = root.value("version", kEffectSchemaVersion);
+    effect.name = root.value("name", std::string{});
+
+    if (const auto it = root.find("emitters"); it != root.end() && it->is_array()) {
+        for (const Json& entry : *it) {
+            if (!entry.is_object()) {
+                continue;
+            }
+            ReadEmitter(entry, effect.emitters.emplace_back());
+        }
+    } else {
+        // v1: satu tumpukan modul langsung di akar. Dibaca sebagai efek dengan
+        // satu emitter, bukan ditolak — berkas yang sudah ada di cakram tidak
+        // boleh hilang hanya karena bentuk penyimpanannya berkembang.
+        ReadEmitter(root, effect.emitters.emplace_back());
+        effect.emitters.front().name = "Emitter";
+    }
+
+    // Efek tanpa emitter tidak bisa disunting: panel tidak punya apa pun untuk
+    // ditampilkan, dan tidak ada tempat menaruh modul yang disetel penggunanya.
+    if (effect.emitters.empty()) {
+        effect.emitters.emplace_back();
     }
 
     result.ok = true;

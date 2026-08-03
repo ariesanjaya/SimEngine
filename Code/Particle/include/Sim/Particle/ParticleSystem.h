@@ -2,6 +2,7 @@
 
 #include "Sim/Particle/ParticleEffect.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -16,9 +17,15 @@ struct Particle {
     float rotation = 0.0f;
     float age = 0.0f;
     float lifetime = 1.0f;
-    /// Nomor urut kelahiran. Inilah yang menentukan seluruh angka acak partikel
-    /// ini — lihat catatan determinisme di ParticleSystem.
+    /// Nomor urut kelahiran di dalam emitternya. Inilah yang menentukan seluruh
+    /// angka acak partikel ini — lihat catatan determinisme di ParticleSystem.
     uint32_t index = 0;
+    /// Emitter asalnya. Dibawa oleh partikel, bukan disimpan sebagai daftar
+    /// terpisah per emitter, karena penggambaran harus mengurutkan seluruh
+    /// partikel menurut jarak — lintas emitter. Partikel yang dikelompokkan per
+    /// emitter akan digambar berkelompok, dan asap dari emitter kedua akan
+    /// selalu menutupi api dari emitter pertama walau letaknya di belakang.
+    uint32_t emitter = 0;
 
     float NormalizedAge() const { return lifetime > 0.0f ? age / lifetime : 1.0f; }
 };
@@ -41,6 +48,12 @@ struct Particle {
 /// Menggeser MAJU melanjutkan dari keadaan sekarang; menggeser MUNDUR memulai
 /// ulang dari nol. Keduanya mendarat di keadaan yang sama karena keduanya
 /// melewati batas langkah yang sama.
+///
+/// **Seluruh emitter berjalan pada satu jam yang sama.** Itu alasan sebuah efek
+/// memuat beberapa emitter dan bukan beberapa efek yang dijalankan berdampingan:
+/// ledakan yang kilatannya menyala pada 0,0 dtk, pecahannya melompat pada 0,05
+/// dtk, dan asapnya membubung sesudahnya hanya terbaca sebagai satu kejadian
+/// kalau ketiganya membagi satu timeline — termasuk saat timeline itu digeser.
 class ParticleSystem {
 public:
     /// Langkah simulasi tetap. Dipilih 1/60 detik: cukup halus untuk gerak yang
@@ -57,26 +70,44 @@ public:
 
     const std::vector<Particle>& Particles() const { return particles_; }
     float Time() const { return static_cast<float>(step_) * kFixedStep; }
-    /// Partikel yang lahir sejak awal, termasuk yang sudah mati. Dipakai
-    /// statistik panel.
-    uint32_t SpawnedTotal() const { return spawned_; }
-    /// True bila jumlah partikel tertahan `maxParticles`. Panel memakainya
+    /// Partikel yang lahir sejak awal di seluruh emitter, termasuk yang sudah
+    /// mati. Dipakai statistik panel.
+    uint32_t SpawnedTotal() const;
+    /// True bila ada emitter yang tertahan `maxParticles`. Panel memakainya
     /// untuk memperingatkan anggaran, bukan diam-diam melahirkan lebih sedikit.
-    bool AtBudget() const { return atBudget_; }
+    bool AtBudget() const;
+
+    /// Statistik satu emitter, untuk daftar emitter di panel. Emitter yang
+    /// menghabiskan anggarannya sendiri harus bisa ditunjuk — pada efek dengan
+    /// enam emitter, "sudah mentok" tanpa menyebut yang mana tidak menolong.
+    struct EmitterStats {
+        uint32_t alive = 0;
+        uint32_t spawned = 0;
+        bool atBudget = false;
+    };
+    EmitterStats StatsFor(std::size_t emitter) const;
 
 private:
+    /// Keadaan kelahiran satu emitter. Terpisah per emitter karena laju,
+    /// durasi, dan burst-nya terpisah — satu akumulator bersama akan membuat
+    /// emitter beranggaran besar mencuri jatah kelahiran emitter di sebelahnya.
+    struct EmitterState {
+        uint32_t spawned = 0;
+        /// Sisa pecahan partikel yang belum sempat lahir, supaya laju yang bukan
+        /// kelipatan langkah tetap tepat rata-ratanya.
+        float spawnAccumulator = 0.0f;
+        bool burstDone = false;
+        bool atBudget = false;
+        uint32_t alive = 0;
+    };
+
     void Step();
-    void Spawn(uint32_t index);
+    void Spawn(std::size_t emitterIndex, uint32_t index);
 
     ParticleEffect effect_;
     std::vector<Particle> particles_;
+    std::vector<EmitterState> emitters_;
     int64_t step_ = 0;
-    uint32_t spawned_ = 0;
-    /// Sisa pecahan partikel yang belum sempat lahir, supaya laju yang bukan
-    /// kelipatan langkah tetap tepat rata-ratanya.
-    float spawnAccumulator_ = 0.0f;
-    bool burstDone_ = false;
-    bool atBudget_ = false;
 };
 
 }  // namespace sim::particle

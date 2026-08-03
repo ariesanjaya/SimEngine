@@ -12,7 +12,10 @@
 namespace sim::particle {
 
 /// Versi skema berkas `.simfx` yang ditulis sekarang.
-inline constexpr int kEffectSchemaVersion = 1;
+///
+/// v2 membungkus modul di dalam daftar `emitters`. Berkas v1 — satu tumpukan
+/// modul di akar — tetap terbaca, sebagai efek dengan satu emitter.
+inline constexpr int kEffectSchemaVersion = 2;
 
 /// Bentuk ruang tempat partikel lahir.
 enum class EmitterShape {
@@ -136,19 +139,34 @@ struct RenderModule : ModuleBase {
     bool sortByDistance = true;
 };
 
-/// Satu efek partikel — isi berkas `.simfx`.
+/// Satu emitter: satu tumpukan modul yang melahirkan dan menggerakkan
+/// partikelnya sendiri.
 ///
-/// Modulnya field tetap, bukan daftar polimorfik. Sebuah efek selalu punya
+/// Modulnya field tetap, bukan daftar polimorfik. Sebuah emitter selalu punya
 /// ketujuhnya; yang berbeda hanya mana yang menyala. Daftar polimorfik akan
 /// menambah pertanyaan "bagaimana kalau ada dua modul Force" yang tidak ada
 /// jawabannya, dan membuat berkasnya berubah urutan setiap kali disunting.
-struct ParticleEffect {
-    std::string name;
-    /// Benih RNG. Efek yang sama dengan benih yang sama menghasilkan sebaran
-    /// yang sama persis, di mesin mana pun — lihat ParticleSystem.
+///
+/// **Keragaman datang dari menggabungkan emitter, bukan dari menumpuk modul
+/// sejenis.** Api yang sungguhan adalah nyala inti, percikan yang melompat,
+/// asap yang naik pelan, dan bara yang jatuh — empat perilaku dengan bentuk,
+/// umur, dan gaya yang berbeda-beda. Memaksa keempatnya ke dalam satu tumpukan
+/// modul berarti setiap parameter harus bisa bercabang, dan tidak ada satu pun
+/// yang bisa disetel tanpa mengganggu tiga yang lain.
+struct ParticleEmitter {
+    std::string name = "Emitter";
+    /// Emitter yang dimatikan tidak melahirkan apa pun, tapi datanya utuh —
+    /// aturan yang sama dengan modul.
+    bool enabled = true;
+    /// Benih RNG. Emitter dengan benih sama menghasilkan sebaran yang sama
+    /// persis di mesin mana pun — lihat ParticleSystem.
+    ///
+    /// Milik emitter, bukan diturunkan dari urutannya di daftar. Kalau
+    /// diturunkan dari urutan, menyusun ulang emitter akan mengubah efek yang
+    /// sudah jadi — perubahan yang tidak diminta siapa pun.
     uint32_t seed = 12345;
-    /// Batas atas jumlah partikel hidup. Simulasi berhenti melahirkan setelah
-    /// ini, bukan tumbuh tanpa batas sampai editor membeku.
+    /// Batas atas jumlah partikel hidup emitter ini. Simulasi berhenti
+    /// melahirkan setelah ini, bukan tumbuh tanpa batas sampai editor membeku.
     int maxParticles = 10000;
 
     SpawnModule spawn;
@@ -162,6 +180,22 @@ struct ParticleEffect {
     /// Modul menurut jenisnya, untuk panel yang menggambar daftarnya seragam.
     bool IsEnabled(ModuleKind kind) const;
     void SetEnabled(ModuleKind kind, bool enabled);
+};
+
+/// Satu efek partikel — isi berkas `.simfx`.
+///
+/// Sebuah efek adalah **beberapa emitter yang berjalan bersama** pada satu
+/// timeline. Itu bentuk yang dipakai editor partikel mapan mana pun, dan
+/// alasannya ada di catatan `ParticleEmitter` di atas.
+struct ParticleEffect {
+    std::string name;
+    std::vector<ParticleEmitter> emitters;
+
+    /// Benih bawaan untuk emitter berikutnya, dibuat berbeda dari yang sudah
+    /// ada. Dua emitter berbenih sama menghasilkan partikel yang bertumpuk
+    /// tepat, dan yang terlihat adalah satu emitter yang kelihatan lebih terang
+    /// — bukan dua.
+    uint32_t NextSeed() const;
 };
 
 struct EffectIoResult {

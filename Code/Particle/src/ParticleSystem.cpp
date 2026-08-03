@@ -54,11 +54,33 @@ void ParticleSystem::SetEffect(const ParticleEffect& effect) {
 
 void ParticleSystem::Reset() {
     particles_.clear();
+    emitters_.assign(effect_.emitters.size(), EmitterState{});
     step_ = 0;
-    spawned_ = 0;
-    spawnAccumulator_ = 0.0f;
-    burstDone_ = false;
-    atBudget_ = false;
+}
+
+uint32_t ParticleSystem::SpawnedTotal() const {
+    uint32_t total = 0;
+    for (const EmitterState& state : emitters_) {
+        total += state.spawned;
+    }
+    return total;
+}
+
+bool ParticleSystem::AtBudget() const {
+    for (const EmitterState& state : emitters_) {
+        if (state.atBudget) {
+            return true;
+        }
+    }
+    return false;
+}
+
+ParticleSystem::EmitterStats ParticleSystem::StatsFor(std::size_t emitter) const {
+    if (emitter >= emitters_.size()) {
+        return {};
+    }
+    const EmitterState& state = emitters_[emitter];
+    return EmitterStats{state.alive, state.spawned, state.atBudget};
 }
 
 void ParticleSystem::SimulateTo(float time) {
@@ -81,15 +103,19 @@ void ParticleSystem::SimulateTo(float time) {
     }
 }
 
-void ParticleSystem::Spawn(uint32_t index) {
-    const uint32_t seed = effect_.seed;
+void ParticleSystem::Spawn(std::size_t emitterIndex, uint32_t index) {
+    const ParticleEmitter& emitter = effect_.emitters[emitterIndex];
+    // Benihnya milik emitter, bukan turunan dari urutannya di daftar: menyusun
+    // ulang emitter tidak boleh mengubah efek yang sudah jadi.
+    const uint32_t seed = emitter.seed;
     Particle particle;
     particle.index = index;
+    particle.emitter = static_cast<uint32_t>(emitterIndex);
 
     // --- bentuk emitter ---
     Vec3 offset(0.0f);
     Vec3 direction(0.0f, 1.0f, 0.0f);
-    const ShapeModule& shape = effect_.shape;
+    const ShapeModule& shape = emitter.shape;
     if (shape.enabled) {
         const float u = Random01(seed, index, 1);
         const float v = Random01(seed, index, 2);
@@ -126,7 +152,7 @@ void ParticleSystem::Spawn(uint32_t index) {
     particle.position = offset;
 
     // --- nilai awal ---
-    const InitialModule& initial = effect_.initial;
+    const InitialModule& initial = emitter.initial;
     if (initial.enabled) {
         particle.velocity =
             initial.velocity + Vec3(RandomSigned(seed, index, 10) * initial.velocityJitter.x,
@@ -135,7 +161,7 @@ void ParticleSystem::Spawn(uint32_t index) {
         // Bentuk emitter membelokkan arah kecepatan awalnya, bukan
         // menggantikannya: kerucut yang menyemburkan ke atas tetap menyembur ke
         // atas walau sudutnya nol.
-        if (effect_.shape.enabled && effect_.shape.shape != EmitterShape::Point) {
+        if (emitter.shape.enabled && emitter.shape.shape != EmitterShape::Point) {
             particle.velocity = direction * glm::length(particle.velocity);
         }
         particle.size = std::max(0.0f, initial.size + RandomSigned(seed, index, 13) *
@@ -156,38 +182,67 @@ void ParticleSystem::Step() {
     const float dt = kFixedStep;
     const float now = static_cast<float>(step_) * dt;
 
-    // --- kelahiran ---
-    const SpawnModule& spawn = effect_.spawn;
-    const bool withinDuration =
-        !spawn.enabled ? false
-                       : (spawn.looping || spawn.duration <= 0.0f || now < spawn.duration);
-    if (spawn.enabled && withinDuration) {
-        spawnAccumulator_ += spawn.rate * dt;
+    // Daftar emitter bisa berubah panjang di antara langkah — panel menambah
+    // atau menghapus emitter tanpa memulai ulang efeknya. Partikel milik emitter
+    // yang baru saja dihapus ikut hilang: membiarkannya berarti setiap
+    // pembacaan modul di bawah harus memeriksa batas, untuk kasus yang hanya ada
+    // satu langkah lamanya.
+    if (effect_.emitters.size() < emitters_.size()) {
+        const auto limit = static_cast<uint32_t>(effect_.emitters.size());
+        particles_.erase(std::remove_if(particles_.begin(), particles_.end(),
+                                        [limit](const Particle& particle) {
+                                            return particle.emitter >= limit;
+                                        }),
+                         particles_.end());
     }
-    if (spawn.enabled && !burstDone_ && spawn.burstCount > 0 && now >= spawn.burstTime) {
-        spawnAccumulator_ += static_cast<float>(spawn.burstCount);
-        burstDone_ = true;
-    }
-    atBudget_ = false;
-    while (spawnAccumulator_ >= 1.0f) {
-        spawnAccumulator_ -= 1.0f;
-        if (static_cast<int>(particles_.size()) >= effect_.maxParticles) {
-            atBudget_ = true;
-            // Sisa pecahan dibuang, bukan ditumpuk: menumpuknya membuat efek
-            // meledak begitu ada partikel yang mati, jauh setelah anggarannya
-            // tercapai.
-            spawnAccumulator_ = 0.0f;
-            break;
+    emitters_.resize(effect_.emitters.size());
+
+    // --- kelahiran, per emitter ---
+    for (std::size_t e = 0; e < effect_.emitters.size(); ++e) {
+        const ParticleEmitter& emitter = effect_.emitters[e];
+        EmitterState& state = emitters_[e];
+        state.atBudget = false;
+        if (!emitter.enabled) {
+            continue;
         }
-        Spawn(spawned_++);
+
+        const SpawnModule& spawn = emitter.spawn;
+        const bool withinDuration =
+            !spawn.enabled ? false
+                           : (spawn.looping || spawn.duration <= 0.0f || now < spawn.duration);
+        if (spawn.enabled && withinDuration) {
+            state.spawnAccumulator += spawn.rate * dt;
+        }
+        if (spawn.enabled && !state.burstDone && spawn.burstCount > 0 &&
+            now >= spawn.burstTime) {
+            state.spawnAccumulator += static_cast<float>(spawn.burstCount);
+            state.burstDone = true;
+        }
+        // Anggarannya per emitter, dihitung dari partikel emitter itu sendiri.
+        // Anggaran bersama akan membuat emitter yang lahir lebih dulu memakan
+        // seluruh jatah, dan emitter di bawahnya diam tanpa alasan yang terlihat.
+        while (state.spawnAccumulator >= 1.0f) {
+            state.spawnAccumulator -= 1.0f;
+            if (static_cast<int>(state.alive) >= emitter.maxParticles) {
+                state.atBudget = true;
+                // Sisa pecahan dibuang, bukan ditumpuk: menumpuknya membuat efek
+                // meledak begitu ada partikel yang mati, jauh setelah anggarannya
+                // tercapai.
+                state.spawnAccumulator = 0.0f;
+                break;
+            }
+            Spawn(e, state.spawned++);
+            ++state.alive;
+        }
     }
 
     // --- gerak ---
-    const ForceModule& force = effect_.force;
-    const OverLifetimeModule& life = effect_.overLifetime;
-    const CollisionModule& collision = effect_.collision;
-
     for (Particle& particle : particles_) {
+        const ParticleEmitter& emitter = effect_.emitters[particle.emitter];
+        const ForceModule& force = emitter.force;
+        const OverLifetimeModule& life = emitter.overLifetime;
+        const CollisionModule& collision = emitter.collision;
+
         particle.age += dt;
         const float t = particle.NormalizedAge();
 
@@ -245,6 +300,16 @@ void ParticleSystem::Step() {
                                         return particle.age >= particle.lifetime;
                                     }),
                      particles_.end());
+
+    // Jumlah hidup dihitung ulang dari partikel yang tersisa, bukan dikurangi
+    // saat menghapus. Satu hitungan yang diturunkan dari kebenaran mengalahkan
+    // dua hitungan yang harus dijaga tetap sama.
+    for (EmitterState& state : emitters_) {
+        state.alive = 0;
+    }
+    for (const Particle& particle : particles_) {
+        ++emitters_[particle.emitter].alive;
+    }
 
     ++step_;
 }
