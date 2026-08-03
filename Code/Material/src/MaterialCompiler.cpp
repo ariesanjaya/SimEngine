@@ -399,8 +399,7 @@ MaterialCompileResult Emitter::Run() {
 
     // --- kepala modul -------------------------------------------------------
     std::ostringstream head;
-    head << "// Dihasilkan dari " << options_.moduleName
-         << ".simmat — jangan disunting tangan.\n";
+    head << "// Dihasilkan dari " << options_.moduleName << " — jangan disunting tangan.\n";
     head << "// Nilai permukaan mengikuti OpenPBR Surface v1.1 (openpbr.slang).\n";
     head << "import openpbr;\n\n";
 

@@ -1063,7 +1063,12 @@ private:
 
     void Recompile() {
         MaterialCompileOptions options;
-        options.moduleName = openName_.empty() ? "material" : openName_;
+        // Yang dikompilasi selalu graph INDUK, jadi yang disebut komentar kepala
+        // juga harus induknya — bukan nama instance yang kebetulan sedang
+        // dibuka. Kode yang menyebut berkas yang tidak memuatnya akan menyesatkan
+        // tepat ketika seseorang menelusuri balik dari shader ke sumbernya.
+        const std::string& source = instanceMode_ ? parentName_ : openName_;
+        options.moduleName = source.empty() ? "material.simmat" : source;
         compiled_ = CompileMaterial(graph_, options);
         types_ = MaterialTypes::Infer(graph_);
 

@@ -715,24 +715,33 @@ ubah berkas, dengan handle lama tetap dipakai sampai gambar baru siap.
   dinaikkan — dan area klik latar kanvas yang melewatkan tombol menu konteks,
   cacat yang tersembunyi selama tombol pan dan tombol menu kebetulan sama.
 
-**Yang belum terverifikasi di E7.1**
+**Panel Material Editor yang tidak menanggapi klik — tidak lagi terjadi, tanpa
+akar masalah yang terbukti**
 
-- **Daftar aset di panel Material Editor tidak menanggapi klik sintetis.**
-  Panel yang sama sempat menanggapi lebih awal di sesi yang sama (tombol "New
-  Material" bekerja dan membuat berkasnya), lalu berhenti — termasuk setelah
-  editor dijalankan ulang bersih. Menu dan panel lain tetap menanggapi klik yang
-  sama, jadi ini bukan input yang mati secara umum.
+Dicatat karena ia bisa kembali, dan karena apa yang SUDAH digugurkan menghemat
+waktu kalau itu terjadi.
 
-  Belum terpecahkan. Dugaan yang sudah DIGUGURKAN: `NodeCanvas::Initialize()`
-  yang dipanggil sekali alih-alih tiap frame (fungsinya early-return bila
-  konteksnya sudah ada, jadi keduanya setara), dan `BeginDisabled`/`BeginChild`
-  yang tidak berpasangan (jumlahnya seimbang).
+Gejalanya: daftar aset di panel tidak menanggapi klik sama sekali, sementara menu
+dan panel lain menanggapi klik yang sama. Sekarang tidak bisa direproduksi lagi —
+juga tidak dengan `SIM_ENABLE_VIEWPORTS=1`, sehingga **multi-viewport bukan
+penyebabnya**, meski itu dugaan pertama yang paling masuk akal.
 
-  Yang belum dicoba: mencatat `IsWindowHovered`/`IsItemHovered` dari dalam panel
-  untuk memastikan ImGui benar-benar melihat kursornya, dan menutup panel node
-  lain untuk menyingkirkan kemungkinan dua konteks imgui-node-editor saling
-  mengganggu. Sampai itu dilakukan, mode instance di panel harus dianggap belum
-  terbukti bekerja.
+Yang paling mungkin tersisa: `ClampFloatingWindow()`. Saat gejalanya muncul,
+panel Graph Editor punya ukuran tersimpan 1920×1080 dan, sebagai jendela
+mengambang di dalam viewport utama, menutupi seluruh jendela editor. Panel
+mengambang seukuran viewport yang berada di atas panel lain dalam urutan jendela
+ImGui memang menelan klik yang ditujukan ke panel di bawahnya — dan clamp itu
+membuat keadaan tersebut mustahil. Masuk akal, tapi tidak terbukti: gejalanya
+hilang sebelum sempat diinstrumentasi.
+
+Sudah digugurkan: `NodeCanvas::Initialize()` yang dipanggil sekali alih-alih tiap
+frame (fungsinya early-return bila konteksnya sudah ada, jadi keduanya setara),
+`BeginDisabled`/`BeginChild` yang tidak berpasangan (jumlahnya seimbang), dan
+multi-viewport.
+
+Kalau kembali: catat `ImGui::GetCurrentContext()->HoveredWindow->Name` dari dalam
+panel. Itu langsung menjawab jendela mana yang sebenarnya menerima kursornya,
+yang seharusnya dilakukan lebih dulu.
 
 **Temuan yang mengubah keputusan**
 
@@ -894,9 +903,11 @@ sama.
 
 **Belum ada:** preview.
 
-**Belum terverifikasi:** mode instance di panel — kodenya ada dan lulus
-kompilasi, tapi verifikasi UI-nya belum berhasil dilakukan. Lihat catatan di
-bawah.
+Mode instance di panel terverifikasi lewat XTEST: material dibuat, parameter
+ditambahkan dan disimpan, **New Instance** membuat `.simmatinst` yang membuka
+dengan daftar parameter induknya, menimpa satu nilai memunculkan penanda `*`
+beserta tombol *revert* dan menyalakan Save, berkas tersimpan hanya memuat
+timpaannya, induknya tidak tersentuh, dan *revert* mengembalikan nilai induk.
 
 **Tiga kelompok parameter OpenPBR sengaja belum ada di node keluaran** —
 `subsurface_*`, `transmission_*`, `thin_film_*`. Ketiganya bukan dilupakan:

@@ -49,9 +49,14 @@ struct MaterialCompileResult {
 };
 
 struct MaterialCompileOptions {
-    /// Nama modul Slang yang dihasilkan. Dipakai sebagai nama berkas dan
-    /// muncul di komentar kepala.
-    std::string moduleName = "material";
+    /// Nama yang muncul di komentar kepala, dipakai apa adanya.
+    ///
+    /// Pemanggil yang menentukan bentuknya — termasuk ekstensinya. Kompiler yang
+    /// menambahkan ".simmat" sendiri akan menghasilkan "Batu.simmat.simmat"
+    /// untuk pemanggil yang sudah menyertakannya, dan komentar kepala yang
+    /// menyebut berkas yang tidak ada adalah petunjuk yang menyesatkan tepat
+    /// ketika seseorang mencarinya.
+    std::string moduleName = "material.simmat";
 };
 
 /// Mengompilasi graph material menjadi sumber Slang.

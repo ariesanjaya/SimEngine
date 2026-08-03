@@ -370,6 +370,13 @@ TEST_CASE("Kompiler mengisi OpenPBRSurface, bukan menghitung cahaya") {
     REQUIRE(result.ok);
 
     CHECK(result.slang.find("import openpbr;") != std::string::npos);
+    // Nama sumbernya dipakai apa adanya. Kompiler yang menambahkan ".simmat"
+    // sendiri menghasilkan "Batu.simmat.simmat" untuk pemanggil yang sudah
+    // menyertakannya — komentar kepala yang menyebut berkas yang tidak ada.
+    MaterialCompileOptions named;
+    named.moduleName = "Batu.simmat";
+    CHECK(CompileMaterial(MinimalGraph(), named).slang.find("dari Batu.simmat —") !=
+          std::string::npos);
     CHECK(result.slang.find("MaterialSurface evalMaterial(MaterialInputs inputs)") !=
           std::string::npos);
     CHECK(result.slang.find("result.surface = OpenPBRSurface::defaults();") != std::string::npos);
