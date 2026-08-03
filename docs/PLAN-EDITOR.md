@@ -901,7 +901,32 @@ Dengan ini **kriteria terima keempat terpenuhi** dan terkunci test: membuat
 instance lalu mengubah satu parameter meninggalkan berkas induknya byte-per-byte
 sama.
 
-**Belum ada:** preview.
+**Frame/grup dan komentar ada di kanvas material**, disalin dari Graph Editor
+beserta seluruh jebakannya — jebakan itu milik pustaka kanvas, bukan milik salah
+satu panel. Yang paling mahal: yang DISETEL adalah luas kotaknya, yang DIBACA
+BALIK adalah ukuran node berikut judul dan bingkainya, dan menyimpan yang kedua
+ke tempat yang pertama membuat grup tumbuh sedikit tiap putaran simpan-buka.
+Diverifikasi tidak terjadi di sini: `[257, 145]` sebelum dan sesudah putaran
+penuh simpan → tutup → buka → simpan. Grup dibuat dari seleksi lewat tombol
+toolbar maupun **Ctrl+G**, dan judulnya diganti dengan klik ganda di tempat.
+
+**Belum ada: preview — dan ia terhalang, bukan sekadar belum dikerjakan.**
+`IViewportRenderer` adalah satu instance dengan satu target render, dipakai
+bersama panel Viewport. Preview material yang memanggil `Render()` akan menimpa
+gambar Viewport pada frame yang sama, karena keduanya menggambar
+`ImGui::Image(ColorTarget())` dari tekstur yang sama.
+
+Jalan keluarnya kecil dan sudah jelas: `render::CreateStubRenderer()` adalah
+pabrik, jadi composition root bisa membuat instance KEDUA khusus preview dan
+mengirimkannya lewat `EditorContext`. Itu juga bentuk yang benar untuk E8 —
+preview material memang "satu view lagi", bukan kasus khusus.
+
+Yang menahan bukan itu, melainkan gunanya: `StubRenderer` hanya menggambar grid
+dan wireframe AABB, sehingga preview sekarang tidak akan memperlihatkan apa pun
+tentang materialnya. Menuliskan evaluator OpenPBR kedua di CPU untuk mengisi
+kekosongan itu justru pelanggaran terhadap alasan yang dipegang seluruh E7.1 —
+model shading hanya boleh punya satu implementasi. Karena itu preview menunggu
+E8.2, yang memang menyebutnya sebagai titik sambungnya.
 
 Mode instance di panel terverifikasi lewat XTEST: material dibuat, parameter
 ditambahkan dan disimpan, **New Instance** membuat `.simmatinst` yang membuka

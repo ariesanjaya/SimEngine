@@ -33,6 +33,13 @@ using namespace sim::material;
 constexpr ImVec4 kErrorColor(0.94f, 0.45f, 0.42f, 1.0f);
 constexpr ImVec4 kOkColor(0.45f, 0.80f, 0.55f, 1.0f);
 constexpr ImVec4 kHintColor(0.55f, 0.57f, 0.60f, 1.0f);
+constexpr ImVec4 kGroupColor(0.45f, 0.55f, 0.70f, 1.0f);
+
+/// Ukuran grup baru, dan batas bawah yang masih bisa dipegang tepinya.
+constexpr float kDefaultGroupSize = 260.0f;
+constexpr float kMinGroupSize = 40.0f;
+/// Jarak antara tepi grup dan node terluar yang dibungkusnya.
+constexpr float kGroupPadding = 24.0f;
 
 /// Ruang id terpisah untuk node/link dan pin — alasannya sama persis dengan di
 /// Graph Editor: imgui-node-editor menyimpan ketiganya di satu ruang angka, dan
@@ -155,6 +162,19 @@ private:
         // Instance dibuat dari material yang sedang dibuka, bukan dari dialog
         // pemilih: "instance dari yang mana" adalah pertanyaan yang jawabannya
         // sudah ada di layar.
+        ImGui::SameLine();
+        const std::vector<uint64_t> selected =
+            openGuid_.IsValid() && !instanceMode_ ? canvas_.SelectedNodes()
+                                                  : std::vector<uint64_t>{};
+        ImGui::BeginDisabled(selected.empty());
+        if (ImGui::Button("Group selection")) {
+            GroupSelection(selected);
+        }
+        ImGui::EndDisabled();
+        if (!selected.empty() && ImGui::IsKeyChordPressed(ImGuiMod_Ctrl | ImGuiKey_G)) {
+            GroupSelection(selected);
+        }
+
         ImGui::SameLine();
         ImGui::BeginDisabled(!openGuid_.IsValid() || instanceMode_);
         if (ImGui::Button("New Instance")) {
@@ -409,6 +429,11 @@ private:
             }
         }
 
+        if (node.type == "group") {
+            DrawGroupNode(node, id);
+            return;
+        }
+
         canvas_.BeginNode(id);
         if (node.type == "comment") {
             ImGui::TextColored(kHintColor, "%s", node.Setting("text", "Comment").c_str());
@@ -452,6 +477,132 @@ private:
         if (Contains(errorNodes_, node.guid)) {
             canvas_.DrawNodeBackground(id, ToVec4(kErrorColor), 2.5f);
         }
+    }
+
+    /// Node grup: kotak yang membawa serta node di dalamnya ketika digeser.
+    ///
+    /// Disalin dari Graph Editor beserta seluruh jebakannya, karena jebakannya
+    /// milik pustaka kanvas — bukan milik salah satu panel. Yang paling mahal:
+    /// yang DISETEL adalah luas kotaknya, yang DIBACA BALIK adalah ukuran node
+    /// berikut judul dan bingkainya. Menyimpan yang kedua ke tempat yang pertama
+    /// membuat grup tumbuh sedikit setiap kali graph dibuka lalu disimpan.
+    ///
+    /// Selisihnya diukur sekali dari grup itu sendiri, bukan dipatok angka: ia
+    /// bergantung pada tinggi font dan gaya kanvas, dan angka yang ditulis
+    /// tangan akan salah begitu salah satunya berubah.
+    void DrawGroupNode(const MaterialNode& node, uint64_t id) {
+        Vec2 size = node.size;
+        if (size.x < kMinGroupSize || size.y < kMinGroupSize) {
+            size = Vec2(kDefaultGroupSize, kDefaultGroupSize * 0.66f);
+        }
+        const bool justPlaced = !sized_.contains(node.guid);
+        if (justPlaced) {
+            canvas_.SetGroupSize(id, size);
+            sized_.insert(node.guid);
+        }
+
+        canvas_.BeginGroupNode(id, ToVec4(kGroupColor));
+        DrawGroupTitle(node);
+        canvas_.GroupArea(size);
+        canvas_.EndGroupNode();
+
+        const Vec2 outer = canvas_.GetNodeSize(id);
+        if (outer.x <= 0.0f) {
+            return;
+        }
+        if (justPlaced) {
+            groupInset_[node.guid] = outer - size;
+            return;
+        }
+        const auto inset = groupInset_.find(node.guid);
+        if (inset == groupInset_.end()) {
+            return;
+        }
+        const Vec2 area = outer - inset->second;
+        if (MaterialNode* mutableNode = FindNode(node.guid)) {
+            if (std::abs(area.x - mutableNode->size.x) > 0.5f ||
+                std::abs(area.y - mutableNode->size.y) > 0.5f) {
+                mutableNode->size = area;
+                dirty_ = true;
+            }
+        }
+    }
+
+    /// Judul grup, bisa disunting di tempat lewat klik ganda — di tempat yang
+    /// sama dengan tempat ia terbaca, sehingga tidak ada yang perlu dicari.
+    void DrawGroupTitle(const MaterialNode& node) {
+        if (renamingNode_ != node.guid) {
+            ImGui::TextUnformatted(node.Setting("text", "Group").c_str());
+            if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left)) {
+                renamingNode_ = node.guid;
+                renameBuffer_ = node.Setting("text", "Group");
+                focusRename_ = true;
+            }
+            return;
+        }
+        if (focusRename_) {
+            ImGui::SetKeyboardFocusHere();
+            focusRename_ = false;
+        }
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+        const bool committed = ImGui::InputText("##rename", &renameBuffer_,
+                                                ImGuiInputTextFlags_EnterReturnsTrue);
+        // Selesai juga saat fokus berpindah, bukan hanya saat Enter: pengguna
+        // yang mengetik nama lalu mengklik kanvas jelas bermaksud menyimpannya.
+        if (!committed && !ImGui::IsItemDeactivated()) {
+            return;
+        }
+        if (MaterialNode* mutableNode = FindNode(node.guid)) {
+            const std::string trimmed = renameBuffer_.empty() ? "Group" : renameBuffer_;
+            if (mutableNode->Setting("text", "Group") != trimmed) {
+                mutableNode->settings["text"] = trimmed;
+                Touch();
+            }
+        }
+        renamingNode_ = Uuid{};
+    }
+
+    /// Membungkus node terpilih dengan sebuah grup baru.
+    void GroupSelection(const std::vector<uint64_t>& selected) {
+        bool any = false;
+        Vec2 min(0.0f, 0.0f);
+        Vec2 max(0.0f, 0.0f);
+        for (const uint64_t id : selected) {
+            const Uuid* guid = GuidOf(id);
+            const MaterialNode* node = guid != nullptr ? graph_.FindNode(*guid) : nullptr;
+            // Grup tidak membungkus grup: menyeret yang luar akan memindahkan
+            // yang dalam beserta isinya, dan menjelaskan mana yang membawa apa
+            // menjadi lebih rumit daripada gunanya.
+            if (node == nullptr || node->type == "group") {
+                continue;
+            }
+            const Vec2 position = canvas_.GetNodePosition(id);
+            const Vec2 size = canvas_.GetNodeSize(id);
+            if (!any) {
+                min = position;
+                max = position + size;
+                any = true;
+                continue;
+            }
+            min = Vec2(std::min(min.x, position.x), std::min(min.y, position.y));
+            max = Vec2(std::max(max.x, position.x + size.x),
+                       std::max(max.y, position.y + size.y));
+        }
+        if (!any) {
+            return;
+        }
+
+        MaterialNode group;
+        group.guid = Uuid::Generate();
+        group.type = "group";
+        group.settings["text"] = "Group";
+        // Ruang di atas disisakan lebih banyak: di situlah judul grup digambar,
+        // dan tanpa itu judulnya menindih node teratas.
+        group.position = Vec2(min.x - kGroupPadding, min.y - kGroupPadding * 2.0f);
+        group.size = Vec2(max.x - min.x + kGroupPadding * 2.0f,
+                          max.y - min.y + kGroupPadding * 3.0f);
+        graph_.nodes.push_back(std::move(group));
+        Touch();
     }
 
     /// Baris kedua judul, untuk node yang identitasnya ada di setelannya:
@@ -938,6 +1089,8 @@ private:
         openPath_ = context.assets->AbsolutePath(*record);
         dirty_ = false;
         placed_.clear();
+        sized_.clear();
+        groupInset_.clear();
         ids_.clear();
         guids_.clear();
         pendingFit_ = true;
@@ -1156,6 +1309,14 @@ private:
     float sideWidth_ = 0.0f;
     Vec2 spawnPosition_{0.0f, 0.0f};
     std::string paletteFilter_;
+
+    /// Grup yang ukurannya sudah dipasang ke kanvas, dan selisih ukur-balik
+    /// masing-masing. Lihat DrawGroupNode.
+    std::unordered_set<Uuid> sized_;
+    std::unordered_map<Uuid, Vec2> groupInset_;
+    Uuid renamingNode_;
+    std::string renameBuffer_;
+    bool focusRename_ = false;
 
     std::unordered_map<Uuid, uint64_t> ids_;
     std::unordered_map<uint64_t, Uuid> guids_;
