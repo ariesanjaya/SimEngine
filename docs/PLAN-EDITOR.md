@@ -831,9 +831,23 @@ benar-benar dikemudikan, sehingga nilai bawaan runtime tinggal di satu tempat �
 shader itu sendiri — dan kode yang keluar tetap pendek untuk material yang hanya
 menyentuh dua-tiga kanal, yaitu sebagian besarnya.
 
-**Belum ada:** panel Graph Editor untuk material, aset `.simmatinst`, panel
-parameter, dan preview. Kanvasnya akan memakai ulang `Sim::NodeGraph` dari E6.5 —
-pembungkus imgui-node-editor yang sudah menanggung seluruh jebakan pustakanya.
+**Panelnya ada**, di atas `Sim::NodeGraph` yang sama dengan Graph Editor —
+pembungkus imgui-node-editor dari E6.5 yang sudah menanggung seluruh jebakan
+pustakanya. Bentuknya sengaja sama pula: daftar aset di kiri, kanvas di tengah,
+Details dan hasil kompilasi sebagai tab di kanan, pemisah yang bisa digeser.
+Keduanya editor node, dan pengguna yang berpindah di antara keduanya tidak
+seharusnya perlu belajar dua kali.
+
+Warna pin memakai tipe yang **disimpulkan**, bukan yang dideklarasikan: sebuah
+Multiply yang diberi float3 memang menghasilkan float3, dan pin abu-abu yang
+tidak pernah berubah warna menyembunyikan justru informasi yang paling berguna
+saat menyambung. Lebar vektor dibedakan gradasi, bukan warna yang berjauhan —
+keempatnya saling bisa disambung lewat pelebaran skalar.
+
+Node keluaran tidak ada di palet dan tidak bisa dihapus: tepat satu boleh ada,
+dan material tanpanya tidak punya arti.
+
+**Belum ada:** aset `.simmatinst` beserta panel parameternya, dan preview.
 
 ### E7.2 — Particle Editor · ~5 sesi
 
