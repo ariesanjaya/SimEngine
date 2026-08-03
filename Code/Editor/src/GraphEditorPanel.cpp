@@ -133,7 +133,7 @@ public:
 
         ImGui::SameLine();
         if (openGuid_.IsValid()) {
-            const float sideWidth = ImGui::GetContentRegionAvail().x * 0.36f;
+            const float sideWidth = ImGui::GetContentRegionAvail().x * 0.45f;
             if (ImGui::BeginChild("##canvas", ImVec2(-sideWidth, 0.0f))) {
                 DrawCanvas(context);
             }
@@ -255,10 +255,15 @@ private:
         HandleCreate();
         HandleDelete();
         HandleRerouteInsert();
+        HandleNodeFocus();
         HandleContextMenus(context);
 
         canvas_.End();
 
+        if (pendingFocus_ != 0) {
+            canvas_.CenterOnNode(pendingFocus_);
+            pendingFocus_ = 0;
+        }
         if (pendingFit_) {
             // Ditunda satu frame: ukuran node baru diketahui pustaka setelah
             // digambar sekali, dan memanggilnya lebih awal memusatkan kanvas ke
@@ -609,6 +614,27 @@ private:
         Touch();
     }
 
+    /// Klik ganda pada sebuah node memusatkan pandangan ke node itu.
+    ///
+    /// Berguna justru ketika graph sudah besar: mencari satu node di antara
+    /// puluhan lebih mudah lewat daftar atau pesan kesalahan yang bisa diklik
+    /// daripada dengan menggeser kanvas mencari-cari.
+    void HandleNodeFocus() {
+        const uint64_t nodeId = canvas_.DoubleClickedNode();
+        if (nodeId == 0) {
+            return;
+        }
+        const Uuid* guid = GuidOf(nodeId);
+        const GraphNode* node = guid != nullptr ? graph_.FindNode(*guid) : nullptr;
+        // Pada grup, klik ganda sudah berarti "ganti nama". Satu gerakan yang
+        // berarti dua hal sekaligus membuat keduanya terasa tidak bisa dipercaya.
+        if (node == nullptr || node->type == "group") {
+            return;
+        }
+        // Ditunda sampai kanvas ditutup — lihat catatan di NodeCanvas::CenterOnNode.
+        pendingFocus_ = nodeId;
+    }
+
     /// Klik ganda pada sebuah kabel menyisipkan titik belok tepat di situ.
     ///
     /// Kabelnya dipecah, bukan ditambahi: A→B menjadi A→R dan R→B. Yang
@@ -899,19 +925,33 @@ private:
 
     // --- panel samping -----------------------------------------------------
 
+    /// Details di kiri, Compiled Lua di kanannya — berdampingan, bukan
+    /// bertumpuk sebagai tab.
+    ///
+    /// Keduanya dibaca bersamaan: yang disunting di Details langsung terlihat
+    /// akibatnya di Lua, dan itulah gunanya panel Lua ada di sini sama sekali.
+    /// Sebagai tab, salah satunya selalu tersembunyi tepat ketika ia paling
+    /// berguna.
     void DrawSidePanel(EditorContext& context) {
-        if (!ImGui::BeginTabBar("##side")) {
-            return;
-        }
-        if (ImGui::BeginTabItem("Compiled Lua")) {
-            DrawCompiledLua();
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Details")) {
+        const float detailsWidth = ImGui::GetContentRegionAvail().x * 0.44f;
+        if (ImGui::BeginChild("##detailspane", ImVec2(detailsWidth, 0.0f),
+                              ImGuiChildFlags_ResizeX | ImGuiChildFlags_Borders |
+                                  ImGuiChildFlags_AlwaysUseWindowPadding)) {
+            ImGui::TextColored(kHintColor, "Details");
+            ImGui::Separator();
             DrawDetails(context);
-            ImGui::EndTabItem();
         }
-        ImGui::EndTabBar();
+        ImGui::EndChild();
+
+        ImGui::SameLine();
+        if (ImGui::BeginChild("##luapane", ImVec2(0.0f, 0.0f),
+                              ImGuiChildFlags_Borders |
+                                  ImGuiChildFlags_AlwaysUseWindowPadding)) {
+            ImGui::TextColored(kHintColor, "Compiled Lua");
+            ImGui::Separator();
+            DrawCompiledLua();
+        }
+        ImGui::EndChild();
     }
 
     void DrawCompiledLua() {
@@ -1460,6 +1500,8 @@ private:
     std::filesystem::path openPath_;
     bool dirty_ = false;
     bool pendingFit_ = false;
+    /// Node yang akan dipusatkan setelah kanvas ditutup. 0 = tidak ada.
+    uint64_t pendingFocus_ = 0;
     float nextSpawn_ = 40.0f;
 
     std::vector<Uuid> errorNodes_;

@@ -28,7 +28,7 @@ berikutnya tidak menyentuh jaringan. Untuk build sepenuhnya offline setelah itu:
 | Paket | Versi | Untuk apa | Risiko |
 |---|---|---|---|
 | **ImGuizmo** | commit `5ab7676` (master) | gizmo translate/rotate/scale di viewport | Kompatibilitas dengan ImGui 1.92 belum terjamin. Dibungkus `Sim::Gizmo`; kalau pecah, tulis sendiri (≈600 baris). |
-| **imgui-node-editor** | commit `021aa0e` (master) + patch | graph visual scripting (E6.5), Material (E7.1) & Animation state machine (E7.5) | Dibungkus `Sim::NodeGraph`. Dipatok ke `master`, bukan `develop`: keduanya mendahului ImGui 1.92, tapi hanya `master` yang memuat penggantinya untuk `ImRect::Floor()` dan `ImGui::GetKeyIndex()`. Satu patch kecil di `cmake/patches/` menutup satu tabrakan yang tersisa — `operator*(float, ImVec2)` yang kini disediakan ImGui sendiri. |
+| **imgui-node-editor** | commit `021aa0e` (master) + patch | graph visual scripting (E6.5), Material (E7.1) & Animation state machine (E7.5) | Dibungkus `Sim::NodeGraph`. Dipatok ke `master`, bukan `develop`: keduanya mendahului ImGui 1.92, tapi hanya `master` yang memuat penggantinya untuk `ImRect::Floor()` dan `ImGui::GetKeyIndex()`. Dua patch kecil di `cmake/patches/`: `operator*(float, ImVec2)` yang kini disediakan ImGui sendiri, dan area klik latar kanvas yang melewatkan tombol menu konteks — cacat yang tersembunyi selama tombol pan dan tombol menu kebetulan sama. |
 | **IconFontCppHeaders** | vendored di `Third-Party/` | konstanta codepoint ikon | Di-vendor, bukan di-fetch: codepoint di header harus cocok persis dengan `.ttf` di `Resources/Fonts` |
 
 ## Aset yang dibundel (bukan lewat FetchContent)

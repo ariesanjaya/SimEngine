@@ -232,7 +232,15 @@ Sumber log ditandai kategori (`[Asset]`, `[Lua]`, `[RHI]`).
   perubahannya sampai ke skrip yang berjalan lewat pemantau berkas yang sama
   dengan editor teks luar — satu jalur, satu perilaku.
 - **Graph Editor** — kanvas visual scripting: daftar `.simgraph` di kiri, kanvas
-  di tengah, dan **Compiled Lua** di kanan. Klik kanan membuka palet node yang
+  di tengah, lalu **Details** dan **Compiled Lua** berdampingan di kanan.
+  Keduanya sengaja tidak jadi tab: yang disunting di Details langsung terlihat
+  akibatnya di Lua, dan sebagai tab salah satunya selalu tersembunyi tepat
+  ketika ia paling berguna.
+  **Drag tengah** menggeser kanvas, sama seperti pan di viewport 3D — dua panel
+  yang memakai tombol berbeda untuk gerakan yang sama adalah hal yang harus
+  diingat pengguna setiap kali ia berpindah. **Klik ganda sebuah node**
+  memusatkan pandangan ke node itu, yang mulai berarti begitu graph tidak lagi
+  muat di layar. Klik kanan membuka palet node yang
   bisa dicari; koneksi bertipe menolak sambungan yang tidak masuk akal *selagi
   masih diseret*, bukan setelah terlanjur terbentuk. Node yang gagal dikompilasi
   berbingkai merah, yang diberi breakpoint berbingkai jingga.

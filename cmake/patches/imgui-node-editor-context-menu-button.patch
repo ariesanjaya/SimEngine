@@ -1,0 +1,19 @@
+diff --git a/imgui_node_editor.cpp b/imgui_node_editor.cpp
+index 3ca9eb3..00a6499 100644
+--- a/imgui_node_editor.cpp
++++ b/imgui_node_editor.cpp
+@@ -2503,11 +2503,11 @@ ed::Control ed::EditorContext::BuildControl(bool allowOffscreen)
+         hotObject = FindLinkAt(mousePos);
+ 
+     ImGuiButtonFlags backgroundExtraFlags = ImGuiButtonFlags_None;
+-    if (m_Config.DragButtonIndex == 0 || m_Config.SelectButtonIndex == 0 || m_Config.NavigateButtonIndex == 0)
++    if (m_Config.DragButtonIndex == 0 || m_Config.SelectButtonIndex == 0 || m_Config.NavigateButtonIndex == 0 || m_Config.ContextMenuButtonIndex == 0)
+         backgroundExtraFlags |= ImGuiButtonFlags_MouseButtonLeft;
+-    if (m_Config.DragButtonIndex == 1 || m_Config.SelectButtonIndex == 1 || m_Config.NavigateButtonIndex == 1)
++    if (m_Config.DragButtonIndex == 1 || m_Config.SelectButtonIndex == 1 || m_Config.NavigateButtonIndex == 1 || m_Config.ContextMenuButtonIndex == 1)
+         backgroundExtraFlags |= ImGuiButtonFlags_MouseButtonRight;
+-    if (m_Config.DragButtonIndex == 2 || m_Config.SelectButtonIndex == 2 || m_Config.NavigateButtonIndex == 2)
++    if (m_Config.DragButtonIndex == 2 || m_Config.SelectButtonIndex == 2 || m_Config.NavigateButtonIndex == 2 || m_Config.ContextMenuButtonIndex == 2)
+         backgroundExtraFlags |= ImGuiButtonFlags_MouseButtonMiddle;
+ 
+     auto isMouseDoubleClickOverBackground = [doubleClickedObject, backgroundExtraFlags]() -> int

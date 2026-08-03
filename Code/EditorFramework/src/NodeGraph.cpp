@@ -73,6 +73,15 @@ void NodeCanvas::Initialize() {
     // tata letak tidak muncul di diff.
     config.SettingsFile = nullptr;
     config.EnableSmoothZoom = true;
+    // Geser kanvas dengan tombol TENGAH, sama seperti pan di viewport 3D.
+    // Bawaan pustaka adalah tombol kanan, dan dua panel yang memakai tombol
+    // berbeda untuk gerakan yang sama adalah hal yang harus diingat pengguna
+    // setiap kali ia berpindah panel.
+    //
+    // Tombol kanan lalu berarti satu hal saja di sini — membuka palet node.
+    // Sebelumnya ia berarti dua hal tergantung apakah tangan pengguna bergeser
+    // beberapa piksel, dan yang seperti itu sulit dilakukan dengan sengaja.
+    config.NavigateButtonIndex = 2;
     impl_->context = ed::CreateEditor(&config);
 }
 
@@ -279,6 +288,16 @@ void NodeCanvas::FitToContent() {
 
 void NodeCanvas::CenterOnNode(uint64_t id) {
     const ScopedEditor scoped(impl_->context);
+    // Yang digeser adalah PANDANGAN, bukan node-nya.
+    //
+    // Pustaka juga punya CenterNodeOnScreen(), dan namanya menjanjikan persis
+    // hal ini — tapi ia MEMINDAHKAN node ke tengah layar, bukan membawa layar
+    // ke node. Memakainya untuk "fokus" mengubah tata letak graph dan menandai
+    // berkasnya kotor, padahal pengguna hanya ingin melihat.
+    //
+    // Wajib dipanggil di luar Begin()/End(): perubahan seleksi baru berlaku
+    // setelah kanvas ditutup, jadi menavigasi di dalamnya akan menuju seleksi
+    // yang LAMA.
     ed::SelectNode(ed::NodeId(id), false);
     ed::NavigateToSelection();
 }
@@ -286,6 +305,11 @@ void NodeCanvas::CenterOnNode(uint64_t id) {
 uint64_t NodeCanvas::DoubleClickedLink() const {
     const ScopedEditor scoped(impl_->context);
     return ed::GetDoubleClickedLink().Get();
+}
+
+uint64_t NodeCanvas::DoubleClickedNode() const {
+    const ScopedEditor scoped(impl_->context);
+    return ed::GetDoubleClickedNode().Get();
 }
 
 bool NodeCanvas::RequestedBackgroundMenu() {

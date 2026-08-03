@@ -120,6 +120,9 @@ public:
     /// bisa dipakai apa adanya sebagai posisi node baru, tanpa konversi.
     uint64_t DoubleClickedLink() const;
 
+    /// Node yang baru saja diklik ganda, atau 0.
+    uint64_t DoubleClickedNode() const;
+
 
     /// True pada frame ketika pengguna meminta menu konteks di latar kanvas.
     ///

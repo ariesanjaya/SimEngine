@@ -194,15 +194,23 @@ FetchContent_Declare(imgui_node_editor
     # dependensinya sendiri. Trik yang sama seperti VMA dan ImGuizmo: SOURCE_SUBDIR
     # diarahkan ke folder tanpa CMakeLists supaya FetchContent hanya mengunduh.
     SOURCE_SUBDIR  misc
-    # Satu patch kecil yang belum ada di hulu: imgui_extra_math mendefinisikan
-    # `operator*(float, ImVec2)` tanpa syarat, sedangkan ImGui 1.92 sudah
-    # mendefinisikannya sendiri di dalam blok IMGUI_DEFINE_MATH_OPERATORS.
-    # Penjaganya memakai IMGUI_DEFINE_MATH_OPERATORS_IMPLEMENTED — makro yang
-    # ditetapkan ImGui persis ketika ia menyediakan operator itu — jadi patch ini
-    # tidak perlu menebak nomor versi dan tetap benar setelah ImGui dinaikkan.
+    # Dua patch kecil yang belum ada di hulu, di cmake/patches/:
+    #
+    # - math-operators: imgui_extra_math mendefinisikan `operator*(float, ImVec2)`
+    #   tanpa syarat, sedangkan ImGui 1.92 sudah mendefinisikannya sendiri di
+    #   dalam blok IMGUI_DEFINE_MATH_OPERATORS. Penjaganya memakai
+    #   IMGUI_DEFINE_MATH_OPERATORS_IMPLEMENTED — makro yang ditetapkan ImGui
+    #   persis ketika ia menyediakan operator itu — jadi patch ini tidak perlu
+    #   menebak nomor versi dan tetap benar setelah ImGui dinaikkan.
+    #
+    # - context-menu-button: area klik latar kanvas hanya mendaftarkan tombol
+    #   yang dipakai drag/select/navigate, dan MELEWATKAN tombol menu konteks.
+    #   Selama ketiganya kebetulan memakai tombol yang sama dengan menu konteks
+    #   ia bekerja; begitu keduanya dipisah — pan ke tombol tengah, menu tetap
+    #   di kanan — menu konteks latar berhenti muncul sama sekali.
     PATCH_COMMAND ${CMAKE_COMMAND}
         -DGIT_EXECUTABLE=${GIT_EXECUTABLE}
-        -DPATCH_FILE=${CMAKE_CURRENT_LIST_DIR}/patches/imgui-node-editor-math-operators.patch
+        -DPATCH_DIR=${CMAKE_CURRENT_LIST_DIR}/patches
         -P ${CMAKE_CURRENT_LIST_DIR}/ApplyPatch.cmake)
 FetchContent_MakeAvailable(imgui_node_editor)
 
