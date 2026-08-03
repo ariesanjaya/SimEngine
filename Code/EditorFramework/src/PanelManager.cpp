@@ -1,6 +1,7 @@
 #include "Sim/Editor/PanelManager.h"
 
 #include "Sim/Core/Log.h"
+#include "Sim/Editor/Icons.h"
 
 #include <nlohmann/json.hpp>
 
@@ -83,6 +84,19 @@ void PanelManager::Draw(EditorContext& context) {
                                         ImGui::GetFontSize() * 20.0f),
                                  ImGuiCond_FirstUseEver);
 
+        // Geometri dari tombol maksimalkan dipasang di sini, satu frame setelah
+        // tombolnya ditekan, bukan langsung saat ditekan. Mengubah posisi
+        // jendela di tengah frame membuat isinya digambar di koordinat baru
+        // sementara jendela platformnya masih di tempat lama — satu frame yang
+        // terlihat sebagai kedipan. Harus setelah SetNextWindowSize di atas:
+        // panggilan kedua menimpa yang pertama.
+        if (auto pending = maximized_.find(panel->Id());
+            pending != maximized_.end() && pending->second.hasPending) {
+            ImGui::SetNextWindowPos(pending->second.pendingPos);
+            ImGui::SetNextWindowSize(pending->second.pendingSize);
+            pending->second.hasPending = false;
+        }
+
         const bool zeroPadding = panel->WantsZeroPadding();
         if (zeroPadding) {
             ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
@@ -103,6 +117,7 @@ void PanelManager::Draw(EditorContext& context) {
         }
         const bool visible = ImGui::Begin(label.c_str(), openFlag, windowFlags);
         EnforceViewportPlacement();
+        DrawMaximizeButton(*panel, openFlag != nullptr);
 
         if (zeroPadding) {
             ImGui::PopStyleVar();
@@ -227,6 +242,107 @@ void PanelManager::EnforceViewportPlacement() {
     if (driftX > kToleranceInPixels || driftY > kToleranceInPixels) {
         ImGui::SetWindowPos(ImVec2(placement.wantedX, placement.wantedY));
     }
+}
+
+void PanelManager::DrawMaximizeButton(Panel& panel, bool hasCloseButton) {
+    // Panel yang menempel di dockspace tidak mendapat tombol ini: ukurannya
+    // diatur pemisah dock, sehingga "maksimalkan" tidak punya arti di sana — dan
+    // ia memang tidak punya title bar sendiri untuk ditempati, hanya tab.
+    //
+    // Yang dilayani adalah panel yang ditarik keluar menjadi jendela OS sendiri.
+    // ImGui menggambar title bar-nya sendiri tanpa dekorasi window manager, jadi
+    // tombol maksimalkan yang biasa disediakan OS tidak ada di sana sama sekali;
+    // satu-satunya cara membuatnya memenuhi layar adalah menyeret keempat
+    // sisinya.
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    if (!window->ViewportOwned || (window->Flags & ImGuiWindowFlags_NoTitleBar) != 0) {
+        maximized_.erase(panel.Id());
+        return;
+    }
+
+    MaximizeState& state = maximized_[panel.Id()];
+    const ImGuiPlatformMonitor* monitor = ImGui::GetViewportPlatformMonitor(window->Viewport);
+
+    // Menyeret atau mengubah ukuran jendela yang sedang maksimal membuatnya
+    // tidak maksimal lagi, dan tombolnya harus mengaku begitu — kalau tidak,
+    // "pulihkan" akan melompat ke geometri lama yang sudah tidak diminta siapa
+    // pun. Jeda beberapa frame karena geometri yang baru diminta belum sampai ke
+    // window manager.
+    constexpr float kTolerance = 2.0f;
+    if (state.settleFrames > 0) {
+        --state.settleFrames;
+    } else if (state.maximized && monitor != nullptr) {
+        const bool fillsMonitor = std::abs(window->Pos.x - monitor->WorkPos.x) < kTolerance &&
+                                  std::abs(window->Pos.y - monitor->WorkPos.y) < kTolerance &&
+                                  std::abs(window->SizeFull.x - monitor->WorkSize.x) < kTolerance &&
+                                  std::abs(window->SizeFull.y - monitor->WorkSize.y) < kTolerance;
+        state.maximized = fillsMonitor;
+    }
+
+    const ImGuiStyle& style = ImGui::GetStyle();
+    const ImRect titleBar = window->TitleBarRect();
+    const float buttonSize = ImGui::GetFontSize();
+    // Sejajar dengan tombol X milik ImGui, memakai perhitungan yang sama
+    // (RenderWindowTitleBarContents), lalu digeser satu tombol ke kiri.
+    float padRight = style.FramePadding.x;
+    if (hasCloseButton) {
+        padRight += buttonSize + style.ItemInnerSpacing.x;
+    }
+    const ImVec2 min(titleBar.Max.x - padRight - buttonSize,
+                     titleBar.Min.y + style.FramePadding.y);
+    const ImRect bb(min, ImVec2(min.x + buttonSize, min.y + buttonSize));
+
+    // Title bar berada di luar clip rect isi jendela. Tanpa membuka klip ke
+    // sana, tombolnya tidak tergambar sekaligus tidak bisa diklik — ItemAdd
+    // memakai clip rect yang sama untuk uji sentuh.
+    ImGui::PushClipRect(titleBar.Min, titleBar.Max, false);
+    const ImGuiID id = window->GetID("#SIM_MAXIMIZE");
+    ImGui::ItemAdd(bb, id);
+    bool hovered = false;
+    bool held = false;
+    const bool pressed = ImGui::ButtonBehavior(bb, id, &hovered, &held);
+
+    if (hovered || held) {
+        window->DrawList->AddRectFilled(
+            bb.Min, bb.Max,
+            ImGui::GetColorU32(held ? ImGuiCol_ButtonActive : ImGuiCol_ButtonHovered),
+            style.FrameRounding);
+    }
+    const char* glyph = state.maximized ? icons::kRestore : icons::kMaximize;
+    const ImVec2 glyphSize = ImGui::CalcTextSize(glyph);
+    window->DrawList->AddText(ImVec2(bb.Min.x + (buttonSize - glyphSize.x) * 0.5f,
+                                     bb.Min.y + (buttonSize - glyphSize.y) * 0.5f),
+                              ImGui::GetColorU32(ImGuiCol_Text), glyph);
+    ImGui::PopClipRect();
+
+    if (hovered) {
+        ImGui::SetTooltip("%s", state.maximized ? "Restore" : "Maximize");
+    }
+    if (!pressed) {
+        return;
+    }
+
+    if (state.maximized) {
+        state.pendingPos = state.restorePos;
+        state.pendingSize = state.restoreSize;
+        state.maximized = false;
+    } else {
+        if (monitor == nullptr) {
+            return;
+        }
+        // WorkPos/WorkSize, bukan seluruh monitor: taskbar dan panel desktop
+        // sudah dikurangkan di sana, sehingga jendela tidak berakhir sebagian
+        // tertutup olehnya.
+        state.restorePos = window->Pos;
+        state.restoreSize = window->SizeFull;
+        state.pendingPos = monitor->WorkPos;
+        state.pendingSize = monitor->WorkSize;
+        state.maximized = true;
+    }
+    state.hasPending = true;
+    // Cukup untuk satu putaran penuh: frame ini menandai, frame berikutnya
+    // memasang geometri, dan window manager membalas pada frame sesudahnya.
+    state.settleFrames = 4;
 }
 
 void PanelManager::DrawWindowMenu() {

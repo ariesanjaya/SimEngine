@@ -62,6 +62,19 @@ biasa.
 Preset workspace lain (menu **View → Workspace**): *Level* (di atas), *Material*,
 *Particle*, *Terrain*, *Animation* — masing-masing memunculkan panel yang relevan.
 
+**Panel yang berdiri sendiri.** Panel yang ditarik keluar dockspace menjadi
+jendela OS tersendiri, dan title bar-nya digambar ImGui, bukan window manager —
+jadi tombol maksimalkan yang biasa disediakan OS tidak ada di sana sama sekali.
+Karena itu `PanelManager` menambahkan sendiri satu tombol **maksimalkan /
+pulihkan** di sebelah tombol tutup; tanpanya, satu-satunya cara membuat panel
+memenuhi layar adalah menyeret keempat sisinya. Ia memakai *work area* monitor,
+bukan seluruh monitor, supaya jendelanya tidak berakhir sebagian tertutup
+taskbar. Menyeret atau mengubah ukuran jendela yang sedang maksimal
+mengembalikan tombolnya ke keadaan "maksimalkan" — kalau tidak, "pulihkan" akan
+melompat ke geometri lama yang sudah tidak diminta siapa pun. Panel yang
+menempel di dockspace tidak mendapat tombol ini: ukurannya diatur pemisah dock,
+dan ia tidak punya title bar sendiri untuk ditempati.
+
 ---
 
 ## (A) Menu bar & toolbar
@@ -232,10 +245,10 @@ Sumber log ditandai kategori (`[Asset]`, `[Lua]`, `[RHI]`).
   perubahannya sampai ke skrip yang berjalan lewat pemantau berkas yang sama
   dengan editor teks luar — satu jalur, satu perilaku.
 - **Graph Editor** — kanvas visual scripting: daftar `.simgraph` di kiri, kanvas
-  di tengah, lalu **Details** dan **Compiled Lua** berdampingan di kanan.
-  Keduanya sengaja tidak jadi tab: yang disunting di Details langsung terlihat
-  akibatnya di Lua, dan sebagai tab salah satunya selalu tersembunyi tepat
-  ketika ia paling berguna.
+  di tengah, dan **Details** / **Compiled Lua** sebagai tab di kanan.
+  Sempat dicoba berdampingan supaya keduanya terbaca sekaligus, tapi ongkosnya
+  diambil dari kanvas — dan kanvaslah tempat pekerjaan sebenarnya terjadi. Lua
+  paling sering dibuka sebentar untuk memastikan sesuatu, lalu ditinggalkan.
   **Drag tengah** menggeser kanvas, sama seperti pan di viewport 3D — dua panel
   yang memakai tombol berbeda untuk gerakan yang sama adalah hal yang harus
   diingat pengguna setiap kali ia berpindah. **Klik ganda sebuah node**

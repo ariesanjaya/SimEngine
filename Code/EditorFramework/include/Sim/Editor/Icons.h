@@ -101,6 +101,12 @@ inline constexpr const char* kFilter = ICON_LC_FUNNEL;
 inline constexpr const char* kRefresh = ICON_LC_REFRESH_CW;
 inline constexpr const char* kSettings = ICON_LC_SETTINGS;
 inline constexpr const char* kClose = ICON_LC_X;
+// Panah keluar/masuk, bukan kotak: kotak adalah lambang "maksimalkan" milik
+// dekorasi jendela OS, dan panel mengambang di sini digambar sendiri oleh ImGui
+// tanpa dekorasi itu. Panah menyatakan arah perubahannya, yang juga membuat
+// pasangan maksimalkan/pulihkan terbaca tanpa harus mengingat mana yang mana.
+inline constexpr const char* kMaximize = ICON_LC_MAXIMIZE_2;
+inline constexpr const char* kRestore = ICON_LC_MINIMIZE_2;
 
 // --- Keadaan ---------------------------------------------------------------
 inline constexpr const char* kVisible = ICON_LC_EYE;

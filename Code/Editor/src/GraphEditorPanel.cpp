@@ -133,7 +133,7 @@ public:
 
         ImGui::SameLine();
         if (openGuid_.IsValid()) {
-            const float sideWidth = ImGui::GetContentRegionAvail().x * 0.45f;
+            const float sideWidth = ImGui::GetContentRegionAvail().x * 0.36f;
             if (ImGui::BeginChild("##canvas", ImVec2(-sideWidth, 0.0f))) {
                 DrawCanvas(context);
             }
@@ -925,33 +925,27 @@ private:
 
     // --- panel samping -----------------------------------------------------
 
-    /// Details di kiri, Compiled Lua di kanannya — berdampingan, bukan
-    /// bertumpuk sebagai tab.
+    /// Details dan Compiled Lua sebagai tab, bukan berdampingan.
     ///
-    /// Keduanya dibaca bersamaan: yang disunting di Details langsung terlihat
-    /// akibatnya di Lua, dan itulah gunanya panel Lua ada di sini sama sekali.
-    /// Sebagai tab, salah satunya selalu tersembunyi tepat ketika ia paling
-    /// berguna.
+    /// Berdampingan memang membuat keduanya terbaca sekaligus, tapi ongkosnya
+    /// diambil dari kanvas — dan kanvaslah tempat pekerjaan sebenarnya terjadi.
+    /// Panel Lua paling sering dibuka sebentar untuk memastikan sesuatu, lalu
+    /// ditinggalkan; menukar lebar kanvas secara permanen demi itu adalah
+    /// pertukaran yang salah arah.
     void DrawSidePanel(EditorContext& context) {
-        const float detailsWidth = ImGui::GetContentRegionAvail().x * 0.44f;
-        if (ImGui::BeginChild("##detailspane", ImVec2(detailsWidth, 0.0f),
-                              ImGuiChildFlags_ResizeX | ImGuiChildFlags_Borders |
-                                  ImGuiChildFlags_AlwaysUseWindowPadding)) {
-            ImGui::TextColored(kHintColor, "Details");
-            ImGui::Separator();
+        if (!ImGui::BeginTabBar("##side")) {
+            return;
+        }
+        // Details lebih dulu: ia yang disunting, sementara Lua hanya dibaca.
+        if (ImGui::BeginTabItem("Details")) {
             DrawDetails(context);
+            ImGui::EndTabItem();
         }
-        ImGui::EndChild();
-
-        ImGui::SameLine();
-        if (ImGui::BeginChild("##luapane", ImVec2(0.0f, 0.0f),
-                              ImGuiChildFlags_Borders |
-                                  ImGuiChildFlags_AlwaysUseWindowPadding)) {
-            ImGui::TextColored(kHintColor, "Compiled Lua");
-            ImGui::Separator();
+        if (ImGui::BeginTabItem("Compiled Lua")) {
             DrawCompiledLua();
+            ImGui::EndTabItem();
         }
-        ImGui::EndChild();
+        ImGui::EndTabBar();
     }
 
     void DrawCompiledLua() {

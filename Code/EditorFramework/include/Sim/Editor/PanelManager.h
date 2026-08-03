@@ -2,6 +2,8 @@
 
 #include "Sim/Editor/Panel.h"
 
+#include <imgui.h>
+
 #include <filesystem>
 #include <memory>
 #include <unordered_map>
@@ -44,7 +46,23 @@ private:
         int framesRemaining = 0;
     };
 
+    /// Keadaan tombol maksimalkan sebuah panel yang berdiri sebagai jendela
+    /// sendiri.
+    struct MaximizeState {
+        bool maximized = false;
+        /// Tempat panel dikembalikan. Hanya berarti saat `maximized`.
+        ImVec2 restorePos{};
+        ImVec2 restoreSize{};
+        /// Geometri yang menunggu dipasang di awal frame berikutnya.
+        bool hasPending = false;
+        ImVec2 pendingPos{};
+        ImVec2 pendingSize{};
+        /// Frame yang disisakan sebelum posisi jendela dipercaya lagi.
+        int settleFrames = 0;
+    };
+
     void EnforceViewportPlacement();
+    void DrawMaximizeButton(Panel& panel, bool hasCloseButton);
 
     std::vector<std::unique_ptr<Panel>> panels_;
     /// Keadaan buka/tutup hasil LoadState, termasuk untuk id yang panelnya
@@ -52,6 +70,8 @@ private:
     std::unordered_map<std::string, bool> savedOpen_;
     /// Kunci: ImGuiID viewport. Entri dihapus begitu penempatannya stabil.
     std::unordered_map<unsigned int, ViewportPlacement> placements_;
+    /// Kunci: id panel. Entri dihapus saat panel kembali menempel di dockspace.
+    std::unordered_map<std::string, MaximizeState> maximized_;
 };
 
 }  // namespace sim::editor

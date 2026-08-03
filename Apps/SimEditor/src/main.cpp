@@ -263,8 +263,16 @@ int main(int /*argc*/, char** /*argv*/) {
                         app.RequestExit();
                     }
                     break;
+                // Hanya jendela utama. Panel yang ditarik keluar dockspace punya
+                // jendela — dan swapchain — sendiri yang diurus backend ImGui.
+                // Tanpa saringan ini, mengubah ukuran panel mengambang membangun
+                // ulang swapchain jendela utama pada ukuran yang sama persis:
+                // terukur 11 dan 27 ms hilang untuk pekerjaan yang hasilnya
+                // identik dengan yang sudah ada.
                 case SDL_EVENT_WINDOW_PIXEL_SIZE_CHANGED:
-                    swapchainDirty = true;
+                    if (event.window.windowID == window.Id()) {
+                        swapchainDirty = true;
+                    }
                     break;
                 // Konfigurasi monitor bisa berubah saat editor berjalan; kunci
                 // laju dihitung ulang supaya tetap mengikuti monitor terlambat
@@ -293,10 +301,27 @@ int main(int /*argc*/, char** /*argv*/) {
             continue;
         }
 
+        // Membangun ulang swapchain terukur 25–50 ms di mesin ini, hampir
+        // seluruhnya di dalam vkCreateSwapchainKHR — lebih lama dari satu frame,
+        // dan di luar jangkauan kita. Yang bisa kita kendalikan hanya seberapa
+        // sering ia dipanggil, jadi permintaan yang tidak mengubah apa pun
+        // dibuang di sini.
+        //
+        // Ukuran yang sudah cocok terjadi setelah present menjawab SUBOPTIMAL,
+        // dan sebelumnya juga setiap kali panel mengambang berubah ukuran.
+        //
+        // Yang sengaja TIDAK dilakukan: membatasi laju bangun-ulang selama
+        // seretan berlangsung. Terlihat masuk akal, tapi diukur justru lebih
+        // buruk — driver di sini menjawab OUT_OF_DATE, bukan SUBOPTIMAL, untuk
+        // swapchain yang ukurannya meleset, sehingga frame di antaranya tidak
+        // tergambar sama sekali: 21 dari 27 frame per 500 ms hilang, dibanding 2
+        // dari 26 tanpa pembatasan. Isi jendela membeku selama seretan.
         const UVec2 size = window.PixelSize();
         if (swapchainDirty && size.x > 0 && size.y > 0) {
-            swapchain.Resize(size.x, size.y);
-            imguiLayer.SetMinImageCount(swapchain.MinImageCount());
+            if (size.x != swapchain.Width() || size.y != swapchain.Height()) {
+                swapchain.Resize(size.x, size.y);
+                imguiLayer.SetMinImageCount(swapchain.MinImageCount());
+            }
             swapchainDirty = false;
         }
 
