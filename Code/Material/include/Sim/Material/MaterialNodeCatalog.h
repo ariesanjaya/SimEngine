@@ -2,8 +2,11 @@
 
 #include "Sim/Material/MaterialGraph.h"
 
+#include <map>
+#include <set>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 namespace sim::material {
@@ -65,5 +68,36 @@ private:
 ///
 /// Kosong bila tipe node-nya tidak ada di katalog.
 std::vector<MaterialPin> PinsOf(const MaterialGraph& graph, const MaterialNode& node);
+
+/// Tipe konkret setiap pin keluaran, setelah penyimpulan.
+///
+/// Node matematika dideklarasikan `Numeric` — ia tidak peduli lebar masukannya.
+/// Tipe hasilnya baru diketahui setelah melihat apa yang tersambung: `float3 *
+/// float` menghasilkan float3, aturan pelebaran yang sama dengan Slang.
+///
+/// **Satu penyimpulan, dipakai bersama.** Validasi, kompiler, dan panel
+/// memanggil yang ini. Kalau masing-masing menyimpulkan sendiri, kanvas bisa
+/// menerima sambungan yang kemudian ditolak kompiler — dan pengguna tidak punya
+/// cara menebak siapa yang benar.
+class MaterialTypes {
+public:
+    static MaterialTypes Infer(const MaterialGraph& graph);
+
+    /// Tipe sebuah pin keluaran. Untuk pin masukan, atau pin yang tidak
+    /// dikenali, mengembalikan tipe yang dideklarasikan katalog.
+    ValueKind Of(const MaterialGraph& graph, const MaterialNode& node,
+                 std::string_view pin) const;
+
+    /// Tipe yang mengalir MASUK ke sebuah pin input: tipe sumbernya bila
+    /// tersambung, atau tipe pin itu sendiri bila tidak.
+    ValueKind Into(const MaterialGraph& graph, const MaterialNode& node,
+                   std::string_view pin) const;
+
+private:
+    void Resolve(const MaterialGraph& graph, const Uuid& node);
+
+    std::map<std::pair<Uuid, std::string>, ValueKind> outputs_;
+    std::set<Uuid> resolving_;
+};
 
 }  // namespace sim::material

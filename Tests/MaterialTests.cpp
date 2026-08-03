@@ -305,3 +305,202 @@ TEST_CASE("Node komentar dan grup tidak ikut dinilai") {
     REQUIRE(LoadMaterialFromString(loaded, SaveMaterialToString(graph)).ok);
     CHECK(loaded.FindNode(Id(71))->size.x == doctest::Approx(320.0f));
 }
+
+// =============================================================================
+// Kompiler graph → Slang
+// =============================================================================
+
+#include "Sim/Material/MaterialCompiler.h"
+
+namespace {
+
+/// Graph yang menyentuh sebagian besar jalur kompiler: tekstur, parameter,
+/// matematika bertipe campur, dan tiga pin di luar OpenPBRSurface.
+MaterialGraph TexturedGraph() {
+    MaterialGraph graph;
+    graph.parameters.push_back({"tint", ValueKind::Float3, "float3(1.0)", {}, 0.0f, 0.0f});
+
+    graph.nodes.push_back(Node(1, std::string(kSurfaceOutputType)));
+
+    graph.nodes.push_back(Node(2, "input.texture"));
+    graph.nodes.back().settings["name"] = "Albedo";
+    graph.nodes.back().settings["texture"] = "11112222-3333-4444-5555-666677778888";
+
+    graph.nodes.push_back(Node(3, "input.sample"));
+    graph.nodes.push_back(Node(4, "param.get"));
+    graph.nodes.back().settings["parameter"] = "tint";
+    graph.nodes.push_back(Node(5, "math.multiply"));
+
+    Link(graph, 2, "texture", 3, "texture");
+    Link(graph, 3, "rgb", 5, "a");
+    Link(graph, 4, "value", 5, "b");
+    Link(graph, 5, "result", 1, "baseColor");
+    Link(graph, 3, "a", 1, "opacity");
+    return graph;
+}
+
+}  // namespace
+
+TEST_CASE("Kompiler mengisi OpenPBRSurface, bukan menghitung cahaya") {
+    const MaterialCompileResult result = CompileMaterial(MinimalGraph());
+    INFO(result.slang);
+    REQUIRE(result.ok);
+
+    CHECK(result.slang.find("import openpbr;") != std::string::npos);
+    CHECK(result.slang.find("MaterialSurface evalMaterial(MaterialInputs inputs)") !=
+          std::string::npos);
+    CHECK(result.slang.find("result.surface = OpenPBRSurface::defaults();") != std::string::npos);
+    CHECK(result.slang.find("result.surface.baseColor =") != std::string::npos);
+
+    // Tidak ada jejak model shading di sini: itu milik openpbr.slang.
+    CHECK(result.slang.find("evalOpenPBR") == std::string::npos);
+    CHECK(result.slang.find("D_GGX") == std::string::npos);
+}
+
+TEST_CASE("Pin yang tidak dikemudikan tidak ditulis sama sekali") {
+    const MaterialCompileResult result = CompileMaterial(MinimalGraph());
+    REQUIRE(result.ok);
+
+    // Hanya baseColor yang tersambung. Sisanya bersandar pada defaults() di
+    // shader — satu tempat untuk nilai bawaan runtime, bukan dua.
+    CHECK(result.slang.find("result.surface.baseColor") != std::string::npos);
+    CHECK(result.slang.find("result.surface.specularRoughness") == std::string::npos);
+    CHECK(result.slang.find("result.surface.coatWeight") == std::string::npos);
+
+    // Tiga pin di luar OpenPBRSurface tidak punya defaults() untuk bersandar,
+    // jadi ketiganya selalu ditulis.
+    CHECK(result.slang.find("result.normal =") != std::string::npos);
+    CHECK(result.slang.find("result.emissive =") != std::string::npos);
+    CHECK(result.slang.find("result.opacity =") != std::string::npos);
+}
+
+TEST_CASE("Nilai yang diketik di pin ikut ditulis, seperti kabel") {
+    MaterialGraph graph = MinimalGraph();
+    graph.nodes.front().pinValues["specularRoughness"] = "0.85";
+
+    const MaterialCompileResult result = CompileMaterial(graph);
+    REQUIRE(result.ok);
+    CHECK(result.slang.find("result.surface.specularRoughness = 0.85;") != std::string::npos);
+}
+
+TEST_CASE("Tipe hasil disimpulkan dari yang paling lebar di antara masukannya") {
+    const MaterialCompileResult result = CompileMaterial(TexturedGraph());
+    INFO(result.slang);
+    REQUIRE(result.ok);
+
+    // float3 (rgb tekstur) dikalikan float3 (parameter) tetap float3. Kalau
+    // penyimpulannya jatuh ke float, Slang akan menolak penugasannya ke
+    // baseColor — kegagalan yang muncul jauh dari sini.
+    CHECK(result.slang.find("float3 n") != std::string::npos);
+    CHECK(result.slang.find("float n") == std::string::npos);
+}
+
+TEST_CASE("Skalar dikali vektor menghasilkan vektor") {
+    MaterialGraph graph = MinimalGraph();
+    graph.nodes.push_back(Node(10, "input.constant"));
+    graph.nodes.back().settings["kind"] = "float3";
+    graph.nodes.back().settings["value"] = "float3(1.0, 0.5, 0.25)";
+    graph.nodes.push_back(Node(11, "math.multiply"));
+    graph.nodes.back().pinValues["b"] = "2.0";
+    Link(graph, 10, "value", 11, "a");
+    Link(graph, 11, "result", 1, "emissive");
+
+    const MaterialCompileResult result = CompileMaterial(graph);
+    INFO(result.slang);
+    REQUIRE(result.ok);
+    CHECK(result.slang.find("float3 n") != std::string::npos);
+}
+
+TEST_CASE("Dot selalu menghasilkan skalar, apa pun masukannya") {
+    MaterialGraph graph = MinimalGraph();
+    graph.nodes.push_back(Node(20, "input.normal"));
+    graph.nodes.push_back(Node(21, "input.viewDirection"));
+    graph.nodes.push_back(Node(22, "math.dot"));
+    Link(graph, 20, "normal", 22, "a");
+    Link(graph, 21, "direction", 22, "b");
+    Link(graph, 22, "result", 1, "specularRoughness");
+
+    const MaterialCompileResult result = CompileMaterial(graph);
+    INFO(result.slang);
+    REQUIRE(result.ok);
+    // Barisnya dideklarasikan float, bukan float3. Nomor variabelnya tidak
+    // diikat di sini: ia mengikuti urutan emisi, bukan janji apa pun ke
+    // pengguna.
+    const std::size_t at = result.slang.find("dot(inputs.worldNormal, inputs.viewDirection)");
+    REQUIRE(at != std::string::npos);
+    const std::size_t begin = result.slang.rfind('\n', at) + 1;
+    CHECK(result.slang.compare(begin, 10, "    float ") == 0);
+}
+
+TEST_CASE("Tekstur menjadi binding di lingkup modul, bukan baris di dalam fungsi") {
+    const MaterialCompileResult result = CompileMaterial(TexturedGraph());
+    REQUIRE(result.ok);
+
+    CHECK(result.slang.find("Texture2D<float4> tAlbedo;") != std::string::npos);
+    CHECK(result.slang.find("SamplerState sAlbedo;") != std::string::npos);
+    CHECK(result.slang.find("tAlbedo.Sample(sAlbedo, inputs.uv0)") != std::string::npos);
+
+    REQUIRE(result.textures.size() == 1);
+    CHECK(result.textures.front().name == "tAlbedo");
+    CHECK(result.textures.front().texture ==
+          Uuid::Parse("11112222-3333-4444-5555-666677778888"));
+}
+
+TEST_CASE("Parameter menjadi cbuffer, dan yang dipakai dicatat") {
+    MaterialGraph graph = TexturedGraph();
+    // Parameter yang tidak pernah dibaca tetap ikut ditulis: tata letak cbuffer
+    // harus sama dengan yang diharapkan material instance, apa pun isi graph.
+    graph.parameters.push_back({"unused", ValueKind::Float, "1.0", {}, 0.0f, 0.0f});
+
+    const MaterialCompileResult result = CompileMaterial(graph);
+    REQUIRE(result.ok);
+
+    CHECK(result.slang.find("cbuffer MaterialParams") != std::string::npos);
+    CHECK(result.slang.find("float3 tint;") != std::string::npos);
+    CHECK(result.slang.find("float unused;") != std::string::npos);
+
+    REQUIRE(result.usedParameters.size() == 1);
+    CHECK(result.usedParameters.front() == "tint");
+}
+
+TEST_CASE("Node yang tidak terjangkau keluaran tidak menghasilkan satu baris pun") {
+    MaterialGraph graph = MinimalGraph();
+    // Potongan yang menganggur di kanvas — sisa percobaan yang belum disambung.
+    graph.nodes.push_back(Node(30, "input.time"));
+    graph.nodes.push_back(Node(31, "math.sin"));
+    Link(graph, 30, "time", 31, "x");
+
+    const MaterialCompileResult result = CompileMaterial(graph);
+    INFO(result.slang);
+    REQUIRE(result.ok);
+    CHECK(result.slang.find("sin(") == std::string::npos);
+}
+
+TEST_CASE("Peta sumber menerjemahkan baris kembali menjadi node") {
+    const MaterialCompileResult result = CompileMaterial(TexturedGraph());
+    REQUIRE(result.ok);
+    REQUIRE_FALSE(result.sourceMap.empty());
+
+    // Node Multiply menghasilkan sebuah baris, dan baris itu menunjuk balik
+    // kepadanya — itulah yang mengubah kesalahan shader menjadi node yang
+    // menyala merah di kanvas.
+    const int line = result.LineOfNode(Id(5));
+    REQUIRE(line > 0);
+    CHECK(result.NodeAtLine(line) == Id(5));
+}
+
+TEST_CASE("Graph yang tidak lolos validasi tidak dikompilasi") {
+    MaterialGraph graph = MinimalGraph();
+    graph.nodes.push_back(Node(40, "input.texture"));
+    Link(graph, 40, "texture", 1, "baseMetalness");
+
+    const MaterialCompileResult result = CompileMaterial(graph);
+    CHECK_FALSE(result.ok);
+    REQUIRE_FALSE(result.errors.empty());
+    CHECK(result.slang.empty());
+}
+
+TEST_CASE("Kompilasi bersifat deterministik") {
+    const MaterialGraph graph = TexturedGraph();
+    CHECK(CompileMaterial(graph).slang == CompileMaterial(graph).slang);
+}

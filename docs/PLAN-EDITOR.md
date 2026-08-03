@@ -800,21 +800,40 @@ target.
   ditolak dengan pesan jelas; membuat instance dari material lalu mengubah satu
   parameter tidak mengubah induknya; hapus node yang tersambung membersihkan link.
 
-**Sudah ada** (13 test di `Tests/MaterialTests.cpp`): modul `Sim::Material` berisi
-model graph `.simmat` beserta I/O JSON-nya, katalog node, dan validasi. Tiga
-kriteria terima yang tidak menuntut UI sudah terpenuhi dan terkunci test — graph
-33 node bolak-balik byte-per-byte identik, koneksi bertipe salah ditolak dengan
-pesan yang menyebut kedua tipenya, dan menghapus node membersihkan kabelnya.
+**Sudah ada** (25 test di `Tests/MaterialTests.cpp`): modul `Sim::Material` berisi
+model graph `.simmat` beserta I/O JSON-nya, katalog node, validasi, dan kompiler
+graph → Slang. Tiga kriteria terima yang tidak menuntut UI sudah terpenuhi dan
+terkunci test — graph 33 node bolak-balik byte-per-byte identik, koneksi bertipe
+salah ditolak dengan pesan yang menyebut kedua tipenya, dan menghapus node
+membersihkan kabelnya.
 
 Aturan tipe mengikuti Slang: skalar melebar ke vektor apa pun (`0.5` sah untuk
 base color), arah sebaliknya tidak — memilihkan komponen mana yang dipakai adalah
 keputusan yang harus ditulis pengguna lewat node Split. Tekstur dan bool berdiri
 sendiri.
 
-**Belum ada:** panel Graph Editor untuk material, kompiler graph → Slang, aset
-`.simmatinst`, panel parameter, dan preview. Kanvasnya akan memakai ulang
-`Sim::NodeGraph` dari E6.5 — pembungkus imgui-node-editor yang sudah menanggung
-seluruh jebakan pustakanya.
+Pin node matematika bertipe `Numeric` — "skalar atau vektor float apa pun".
+Tipe hasilnya disimpulkan dari yang paling lebar di antara masukannya, dan
+**penyimpulan itu satu, dipakai bersama** validasi, kompiler, dan nanti panel.
+Kalau masing-masing menyimpulkan sendiri, kanvas bisa menerima sambungan yang
+kemudian ditolak kompiler, dan pengguna tidak punya cara menebak siapa yang
+benar. `Dot` didaftarkan tersendiri karena hasilnya selalu skalar apa pun
+masukannya.
+
+**Yang dihasilkan kompiler mengisi `OpenPBRSurface`, bukan menghitung cahaya.**
+Model shading-nya sudah ada dan sudah diuji di `openpbr.slang`; tugas graph hanya
+menjawab "berapa nilai tiap parameter permukaan di titik ini". Memisahkan
+keduanya berarti mengubah model shading tidak menyentuh satu pun material, dan
+mengubah material tidak bisa merusak model shading.
+
+Fungsinya diawali `OpenPBRSurface::defaults()` lalu hanya menimpa pin yang
+benar-benar dikemudikan, sehingga nilai bawaan runtime tinggal di satu tempat —
+shader itu sendiri — dan kode yang keluar tetap pendek untuk material yang hanya
+menyentuh dua-tiga kanal, yaitu sebagian besarnya.
+
+**Belum ada:** panel Graph Editor untuk material, aset `.simmatinst`, panel
+parameter, dan preview. Kanvasnya akan memakai ulang `Sim::NodeGraph` dari E6.5 —
+pembungkus imgui-node-editor yang sudah menanggung seluruh jebakan pustakanya.
 
 ### E7.2 — Particle Editor · ~5 sesi
 

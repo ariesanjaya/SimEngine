@@ -1,5 +1,6 @@
 sim_add_library(Material
     SOURCES
+        src/MaterialCompiler.cpp
         src/MaterialGraph.cpp
         src/MaterialNodeCatalog.cpp
         src/MaterialValidation.cpp

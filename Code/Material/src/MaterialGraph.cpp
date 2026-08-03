@@ -22,13 +22,14 @@ struct ValueKindName {
     const char* name;
 };
 
-constexpr std::array<ValueKindName, 6> kValueKindNames{{
+constexpr std::array<ValueKindName, 7> kValueKindNames{{
     {ValueKind::Float, "float"},
     {ValueKind::Float2, "float2"},
     {ValueKind::Float3, "float3"},
     {ValueKind::Float4, "float4"},
     {ValueKind::Texture, "texture"},
     {ValueKind::Bool, "bool"},
+    {ValueKind::Numeric, "numeric"},
 }};
 
 Json WriteStrings(const std::map<std::string, std::string>& values) {
@@ -82,6 +83,7 @@ int ComponentCount(ValueKind kind) {
         case ValueKind::Float2: return 2;
         case ValueKind::Float3: return 3;
         case ValueKind::Float4: return 4;
+        case ValueKind::Numeric: return 0;
         case ValueKind::Float:
         case ValueKind::Texture:
         case ValueKind::Bool: break;
@@ -92,6 +94,14 @@ int ComponentCount(ValueKind kind) {
 bool Accepts(ValueKind to, ValueKind from) {
     if (to == from) {
         return true;
+    }
+    // Numeric menerima lebar berapa pun, dan hanya itu — tekstur dan bool
+    // ditangani cabang di bawah. Di sisi `from` ia berarti tipe yang belum
+    // diselesaikan penyimpulan; membiarkannya lewat di sini menghindari
+    // kesalahan palsu pada graph yang belum utuh.
+    if (to == ValueKind::Numeric || from == ValueKind::Numeric) {
+        return to != ValueKind::Texture && from != ValueKind::Texture &&
+               to != ValueKind::Bool && from != ValueKind::Bool;
     }
     // Tekstur dan bool berdiri sendiri. Sebuah tekstur bukan angka sampai ada
     // yang men-sampling-nya, dan bool yang diam-diam jadi 0/1 membuat node
@@ -104,6 +114,10 @@ bool Accepts(ValueKind to, ValueKind from) {
     // tidak: memilihkan komponen mana yang dipakai adalah keputusan yang harus
     // ditulis pengguna lewat node Split, bukan ditebak kompiler.
     return from == ValueKind::Float;
+}
+
+ValueKind Widest(ValueKind a, ValueKind b) {
+    return ComponentCount(a) >= ComponentCount(b) ? a : b;
 }
 
 std::string MaterialNode::Setting(std::string_view key, std::string_view fallback) const {

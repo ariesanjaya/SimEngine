@@ -28,12 +28,24 @@ enum class ValueKind {
     /// Rujukan tekstur, bukan hasil sampling. Yang mengalir ke node Sample.
     Texture,
     Bool,
+    /// "Skalar atau vektor float apa pun". Dipakai pin node matematika, yang
+    /// memang tidak peduli lebarnya — `a * b` sama masuk akalnya untuk float
+    /// maupun float3.
+    ///
+    /// Bukan "apa saja": tekstur dan bool tetap ditolak. Dan sebuah pin
+    /// KELUARAN yang bertipe ini selalu diselesaikan menjadi tipe konkret oleh
+    /// penyimpulan (lihat MaterialTypes) sebelum ada yang memeriksanya — kalau
+    /// tidak, menyambungkan hasil `float3 * float3` ke sebuah pin float akan
+    /// lolos di kanvas lalu gagal di kompilasi shader.
+    Numeric,
 };
 
 const char* ToString(ValueKind kind);
 ValueKind ValueKindFromString(std::string_view text);
 
-/// Banyak komponen sebuah tipe. Texture dan Bool bernilai 1.
+/// Banyak komponen sebuah tipe. Texture dan Bool bernilai 1; Numeric bernilai
+/// 0, artinya "belum ditentukan" — dengan begitu ia selalu kalah saat dua tipe
+/// dibandingkan untuk mencari yang paling lebar.
 int ComponentCount(ValueKind kind);
 
 /// Apakah nilai bertipe `from` boleh mengalir ke pin bertipe `to`.
@@ -47,6 +59,10 @@ int ComponentCount(ValueKind kind);
 /// ditolak di kanvas daripada menghasilkan shader yang berhasil dikompilasi
 /// tapi salah.
 bool Accepts(ValueKind to, ValueKind from);
+
+/// Tipe yang paling lebar di antara dua masukan — aturan pelebaran Slang:
+/// `float3 * float` menghasilkan float3.
+ValueKind Widest(ValueKind a, ValueKind b);
 
 enum class PinDirection {
     Input,

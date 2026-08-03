@@ -62,6 +62,10 @@ bool ValidationResult::Mentions(const Uuid& node) const {
 
 ValidationResult ValidateMaterial(const MaterialGraph& graph) {
     ValidationResult result;
+    // Tipe hasil node matematika baru diketahui setelah melihat apa yang
+    // tersambung. Penyimpulan yang sama dipakai kompiler, sehingga kanvas tidak
+    // pernah menerima sambungan yang kemudian ditolak saat dikompilasi.
+    const MaterialTypes types = MaterialTypes::Infer(graph);
 
     // Pin setiap node dihitung sekali. PinsOf() membaca daftar parameter untuk
     // node param.get, dan mengulanginya per-link akan membuat pemeriksaan ini
@@ -108,10 +112,12 @@ ValidationResult ValidateMaterial(const MaterialGraph& graph) {
                 {link.toNode, link.toPin, "Pin '" + link.toPin + "' no longer exists"});
             continue;
         }
-        if (!Accepts(target->kind, source->kind)) {
+        const ValueKind sourceKind =
+            types.Of(graph, *graph.FindNode(link.fromNode), link.fromPin);
+        if (!Accepts(target->kind, sourceKind)) {
             result.errors.push_back(
                 {link.toNode, link.toPin,
-                 std::string("Cannot connect ") + ToString(source->kind) + " to " +
+                 std::string("Cannot connect ") + ToString(sourceKind) + " to " +
                      ToString(target->kind) + " on pin '" + link.toPin + "'"});
         }
     }
