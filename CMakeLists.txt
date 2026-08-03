@@ -51,6 +51,10 @@ add_subdirectory(Code/Platform)
 add_subdirectory(Code/RHI)
 add_subdirectory(Code/ImGuiIntegration)
 add_subdirectory(Code/Render)
+# Material: model graph, katalog node, dan validasi untuk aset `.simmat` (E7.1).
+# Tidak bergantung pada Lua maupun editor — graph material dikompilasi menjadi
+# kode shader, bukan skrip.
+add_subdirectory(Code/Material)
 if(SIM_WITH_LUA)
     add_subdirectory(Code/Script)
 endif()

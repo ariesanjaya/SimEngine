@@ -767,11 +767,29 @@ Semua editor di bawah ini **mengarang data**. Preview visualnya memakai `StubRen
 dan baru menjadi akurat setelah E8. Kriteria terima di fase ini menekankan keutuhan
 data dan alur kerja, bukan kualitas gambar.
 
-### E7.1 — Material Editor · ~5 sesi
+### E7.1 — Material Editor · ~5 sesi · 🔨 model data selesai
+
+**Keluarannya OpenPBR Surface v1.1, bukan base-color/metallic/roughness.**
+Perubahan dari rencana awal, dan alasannya bukan kelengkapan demi kelengkapan:
+shader yang akan menjalankannya sudah ditulis terhadap spesifikasi itu
+(`/home/arie/SDK/openpbr.slang`, berikut generator LUT split-sum-nya di
+`openpbr_dfg.slang`). Graph yang mengekspos himpunan parameter berbeda menuntut
+lapisan penerjemah di antara keduanya — tempat yang paling mungkin membuat
+material terlihat berbeda antara preview dan hasil akhir, dengan selisih yang
+tidak akan pernah dicari orang karena tidak ada yang mengaku salah.
+
+Nilai bawaan tiap pin disalin dari `OpenPBRSurface::defaults()`. Duplikasi yang
+disengaja, dijaga sebuah test: material yang dibiarkan apa adanya harus terlihat
+sama di editor dan di shader.
+
+Tiga pin di luar spesifikasi itu — `normal`, `emissive`, `opacity` — memang bukan
+bagian BRDF-nya. Normal membelokkan bingkai shading sebelum lobe dievaluasi,
+emissive ditambahkan sesudahnya, dan opacity dipakai saat menggabungkan ke
+target.
 
 - Node graph (imgui-node-editor): node input (texture sample, constant, UV, vertex
-  color, time), node matematika, node utilitas (lerp, fresnel, normal blend), node
-  output (base color, metallic, roughness, normal, emissive, opacity, AO).
+  color, time, world normal, view direction), node matematika, node utilitas
+  (lerp, clamp, fresnel, normal blend, combine, split), node output OpenPBR.
 - Pustaka node dari palet yang bisa dicari; komentar/frame untuk merapikan graph.
 - Validasi graph: tipe port, deteksi siklus, port wajib yang belum tersambung.
 - Aset material `.simmat` (JSON graph) + material instance `.simmatinst` yang hanya
@@ -781,6 +799,22 @@ data dan alur kerja, bukan kualitas gambar.
 - **Terima:** graph 30+ node disimpan/dimuat identik; menyambungkan port bertipe salah
   ditolak dengan pesan jelas; membuat instance dari material lalu mengubah satu
   parameter tidak mengubah induknya; hapus node yang tersambung membersihkan link.
+
+**Sudah ada** (13 test di `Tests/MaterialTests.cpp`): modul `Sim::Material` berisi
+model graph `.simmat` beserta I/O JSON-nya, katalog node, dan validasi. Tiga
+kriteria terima yang tidak menuntut UI sudah terpenuhi dan terkunci test — graph
+33 node bolak-balik byte-per-byte identik, koneksi bertipe salah ditolak dengan
+pesan yang menyebut kedua tipenya, dan menghapus node membersihkan kabelnya.
+
+Aturan tipe mengikuti Slang: skalar melebar ke vektor apa pun (`0.5` sah untuk
+base color), arah sebaliknya tidak — memilihkan komponen mana yang dipakai adalah
+keputusan yang harus ditulis pengguna lewat node Split. Tekstur dan bool berdiri
+sendiri.
+
+**Belum ada:** panel Graph Editor untuk material, kompiler graph → Slang, aset
+`.simmatinst`, panel parameter, dan preview. Kanvasnya akan memakai ulang
+`Sim::NodeGraph` dari E6.5 — pembungkus imgui-node-editor yang sudah menanggung
+seluruh jebakan pustakanya.
 
 ### E7.2 — Particle Editor · ~5 sesi
 

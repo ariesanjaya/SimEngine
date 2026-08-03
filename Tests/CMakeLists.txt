@@ -22,6 +22,14 @@ sim_add_test(SimAssetTests
     DEPS
         Sim::Assets)
 
+# Material: model graph `.simmat`, katalog node (keluarannya mengikuti OpenPBR
+# Surface v1.1), dan validasi. Tidak butuh Lua maupun editor.
+sim_add_test(SimMaterialTests
+    SOURCES
+        MaterialTests.cpp
+    DEPS
+        Sim::Material)
+
 sim_add_test(SimLevelEditorTests
     SOURCES
         LevelEditorTests.cpp
