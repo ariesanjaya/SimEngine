@@ -646,7 +646,9 @@ ubah berkas, dengan handle lama tetap dipakai sampai gambar baru siap.
 
 1. ✅ Skrip yang memutar entity berjalan saat **Play**, berhenti saat **Stop**,
    dan scene kembali persis ke keadaan sebelum Play — cuplikannya diambil
-   sebelum satu baris skrip pun berjalan.
+   sebelum satu baris skrip pun berjalan. Seleksi ikut kembali, dipetakan lewat
+   GUID: handle entity tidak bertahan melewati pembangunan ulang scene, tapi
+   GUID bertahan karena ialah yang tertulis di berkas level.
 2. ✅ Menyunting skrip saat editor berjalan berlaku dalam **22 ms** dari berkas
    ditulis sampai kode barunya jalan; kriterianya meminta di bawah satu detik.
    Berlaku juga untuk skrip editor di `Assets/Editor`, yang dimuat ulang
@@ -707,14 +709,6 @@ ubah berkas, dengan handle lama tetap dipakai sampai gambar baru siap.
   sehingga patch tidak menebak nomor versi dan tetap benar setelah ImGui
   dinaikkan — dan area klik latar kanvas yang melewatkan tombol menu konteks,
   cacat yang tersembunyi selama tombol pan dan tombol menu kebetulan sama.
-
-**Yang belum selesai** (diperiksa ulang 3 Agustus 2026)
-
-- **Seleksi hilang setelah Stop.** Cuplikan scene dipulihkan sebagai entity
-  baru, dan `Selection` masih memegang handle yang lama. GUID entity-nya sendiri
-  bertahan — Inspector menampilkan Entity ID yang sama persis setelah dipilih
-  ulang — jadi ini soal memetakan seleksi lewat GUID saat memulihkan, bukan
-  kehilangan data.
 
 **Temuan yang mengubah keputusan**
 

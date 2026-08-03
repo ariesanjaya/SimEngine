@@ -861,6 +861,24 @@ void EditorApp::Play() {
     // Play aman dicoba kapan saja: apa pun yang dilakukan skrip terhadap scene
     // — memindahkan, menghapus, membuat entity — hilang seluruhnya saat Stop.
     playSnapshot_ = scene::SaveLevelToString(world_);
+
+    // Seleksi ikut dicatat, dengan alasan yang sama seperti scene-nya: pengguna
+    // menekan Play untuk melihat sesuatu berjalan, bukan untuk kehilangan tempat
+    // ia sedang bekerja. Dicatat sebagai GUID karena handle entity tidak
+    // bertahan melewati pembangunan ulang scene di Stop.
+    //
+    // Urutannya dipertahankan: Selection::Primary() adalah yang terakhir, dan
+    // banyak operasi editor memakai "yang aktif" sebagai acuan.
+    playSelection_.clear();
+    playSelection_.reserve(selection_.Count());
+    for (const uint64_t id : selection_.Items()) {
+        const scene::Entity entity = ToEntity(id);
+        if (world_.IsAlive(entity)) {
+            playSelection_.push_back(world_.GuidOf(entity));
+        }
+    }
+    // Selama Play seleksinya dikosongkan: skrip boleh menghapus entity, dan
+    // panel yang memegang handle mati lebih buruk daripada panel yang kosong.
     selection_.Clear();
     history_.CloseMergeGroup();
 
@@ -887,6 +905,21 @@ void EditorApp::Stop() {
         SIM_ERROR("Editor", "Cannot restore scene after Stop: {}", result.error);
         notifications_.Error("Scene could not be restored: " + result.error);
     }
+    // Seleksi dipasang kembali lewat GUID. Entity yang tidak ditemukan
+    // dilewati alih-alih membatalkan seluruhnya: itu hanya terjadi kalau
+    // pemulihan scene-nya sendiri gagal, dan di keadaan itu memulihkan seleksi
+    // sebagian tetap lebih berguna daripada tidak sama sekali.
+    std::vector<uint64_t> restored;
+    restored.reserve(playSelection_.size());
+    for (const Uuid& guid : playSelection_) {
+        const scene::Entity entity = world_.FindByGuid(guid);
+        if (entity != scene::kNullEntity) {
+            restored.push_back(ToSelectionId(entity));
+        }
+    }
+    selection_.SetItems(std::move(restored));
+    playSelection_.clear();
+
     playSnapshot_.clear();
     playing_ = false;
     pausedAtBreakpoint_ = false;

@@ -136,6 +136,12 @@ private:
     std::filesystem::path levelPath_;
     /// Cuplikan level sesaat sebelum Play, dipakai Stop untuk mengembalikannya.
     std::string playSnapshot_;
+    /// Seleksi sesaat sebelum Play, disimpan sebagai GUID.
+    ///
+    /// Bukan `SelectionId`: memulihkan cuplikan membangun ulang scene dari nol,
+    /// jadi handle entity yang lama tidak menunjuk apa pun sesudahnya. GUID
+    /// justru bertahan — ia yang tertulis di berkas level.
+    std::vector<Uuid> playSelection_;
     bool playing_ = false;
     /// Play sedang tertahan sebuah breakpoint graph. Scene tetap tergambar,
     /// yang berhenti hanyalah OnUpdate.
