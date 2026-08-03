@@ -249,6 +249,14 @@ Sumber log ditandai kategori (`[Asset]`, `[Lua]`, `[RHI]`).
   Sempat dicoba berdampingan supaya keduanya terbaca sekaligus, tapi ongkosnya
   diambil dari kanvas — dan kanvaslah tempat pekerjaan sebenarnya terjadi. Lua
   paling sering dibuka sebentar untuk memastikan sesuatu, lalu ditinggalkan.
+  **Batas antara kanvas dan tab itu bisa digeser**, dengan batas di kedua ujung
+  supaya tidak ada sisi yang bisa dihilangkan sama sekali. Pemisahnya ditulis
+  sendiri, bukan `ImGuiChildFlags_ResizeX` seperti pemisah daftar graph, karena
+  flag itu hanya bisa memasang pegangan di tepi kanan sebuah child: yang
+  tersimpan lebar kanvas, sehingga melebarkan panel justru melebarkan tab —
+  terbalik — dan menyempitkan panel menghimpit tab sampai hilang, untuk
+  seterusnya, karena ukuran child yang bisa di-resize ikut tersimpan di
+  `layout.ini`.
   **Drag tengah** menggeser kanvas, sama seperti pan di viewport 3D — dua panel
   yang memakai tombol berbeda untuk gerakan yang sama adalah hal yang harus
   diingat pengguna setiap kali ia berpindah. **Klik ganda sebuah node**

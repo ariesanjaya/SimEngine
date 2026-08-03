@@ -19,6 +19,7 @@
 #include <imgui_stdlib.h>
 
 #include <algorithm>
+#include <cfloat>
 #include <cmath>
 #include <cstdint>
 #include <filesystem>
@@ -133,22 +134,91 @@ public:
 
         ImGui::SameLine();
         if (openGuid_.IsValid()) {
-            const float sideWidth = ImGui::GetContentRegionAvail().x * 0.36f;
-            if (ImGui::BeginChild("##canvas", ImVec2(-sideWidth, 0.0f))) {
-                DrawCanvas(context);
-            }
-            ImGui::EndChild();
-            ImGui::SameLine();
-            if (ImGui::BeginChild("##side", ImVec2(0.0f, 0.0f))) {
-                DrawSidePanel(context);
-            }
-            ImGui::EndChild();
+            DrawCanvasAndSide(context);
         } else {
             ImGui::TextColored(kHintColor, "Pick a graph on the left, or create one.");
         }
     }
 
 private:
+    // --- kanvas & pemisah panel samping ------------------------------------
+
+    /// Kanvas dan panel samping, dipisah pegangan yang bisa digeser.
+    ///
+    /// Pemisahnya ditulis sendiri, bukan memakai `ImGuiChildFlags_ResizeX`
+    /// seperti daftar graph di kiri, karena dua hal yang tidak bisa didapat dari
+    /// flag itu — keduanya ketahuan saat mencobanya lebih dulu.
+    ///
+    /// **Arah pertumbuhannya.** Flag itu hanya bisa memasang pegangan di tepi
+    /// KANAN sebuah child, jadi yang tersimpan adalah lebar *kanvas* dan panel
+    /// samping mendapat sisanya. Akibatnya melebarkan jendela melebarkan panel
+    /// samping, bukan kanvas — terbalik dari yang diinginkan, karena kanvaslah
+    /// tempat pekerjaan terjadi.
+    ///
+    /// **Batasnya.** Lebar kanvas yang tersimpan bersifat mutlak, jadi begitu
+    /// jendelanya menyempit di bawah lebar itu, panel samping terhimpit sampai
+    /// hilang sama sekali. Dan karena ukuran child yang bisa di-resize ikut
+    /// tersimpan di layout.ini, ia tidak kembali meski jendelanya dilebarkan
+    /// lagi: tab Details menjadi tak terjangkau sampai berkas layout dihapus.
+    void DrawCanvasAndSide(EditorContext& context) {
+        const float avail = ImGui::GetContentRegionAvail().x;
+        // Selebar jarak antar-item supaya tata letaknya persis seperti sebelum
+        // ada pegangan — yang dulu memisahkan keduanya memang celah itu.
+        const float handle = ImGui::GetStyle().ItemSpacing.x;
+
+        if (sideWidth_ <= 0.0f) {
+            sideWidth_ = avail * 0.36f;
+        }
+        // Batas atas dihitung lebih dulu: pada jendela yang sangat sempit, batas
+        // bawah harus mengalah, bukan menyilang batas atas.
+        // Batas bawah panel samping dipilih supaya kedua label tab masih muat:
+        // lebih sempit dari itu, tab bar memunculkan panah geser dan panelnya
+        // terlihat rusak alih-alih sekadar sempit.
+        const float maxSide = std::max(avail - ImGui::GetFontSize() * 12.0f - handle, 0.0f);
+        sideWidth_ = std::clamp(sideWidth_, std::min(ImGui::GetFontSize() * 13.0f, maxSide),
+                                maxSide);
+
+        if (ImGui::BeginChild("##canvas", ImVec2(std::max(avail - sideWidth_ - handle, 1.0f),
+                                                 0.0f))) {
+            DrawCanvas(context);
+        }
+        ImGui::EndChild();
+
+        ImGui::SameLine(0.0f, 0.0f);
+        DrawSideSplitter(handle);
+        ImGui::SameLine(0.0f, 0.0f);
+
+        if (ImGui::BeginChild("##side", ImVec2(0.0f, 0.0f))) {
+            DrawSidePanel(context);
+        }
+        ImGui::EndChild();
+    }
+
+    /// Pegangan pemisah: satu tombol tak terlihat setinggi panel.
+    void DrawSideSplitter(float width) {
+        // -FLT_MIN, bukan 0: nol berarti "ukuran bawaan" bagi InvisibleButton,
+        // sedangkan negatif berarti "sisa ruang".
+        ImGui::InvisibleButton("##sidesplit", ImVec2(width, -FLT_MIN));
+        const bool active = ImGui::IsItemActive();
+        const bool touched = active || ImGui::IsItemHovered();
+        if (touched) {
+            ImGui::SetMouseCursor(ImGuiMouseCursor_ResizeEW);
+        }
+        if (active) {
+            // Ke kiri berarti panel samping melebar; kanvas mendapat sisanya.
+            sideWidth_ -= ImGui::GetIO().MouseDelta.x;
+        }
+        // Digambar hanya saat disentuh. Garis permanen di tengah panel menambah
+        // satu batas visual yang tidak membawa informasi apa pun — celahnya
+        // sendiri sudah cukup memisahkan kanvas dari panel.
+        if (touched) {
+            ImGui::GetWindowDrawList()->AddRectFilled(
+                ImGui::GetItemRectMin(), ImGui::GetItemRectMax(),
+                ImGui::GetColorU32(active ? ImGuiCol_SeparatorActive
+                                          : ImGuiCol_SeparatorHovered));
+        }
+    }
+
     // --- toolbar & daftar --------------------------------------------------
 
     void DrawToolbar(EditorContext& context) {
@@ -1496,6 +1566,8 @@ private:
     bool pendingFit_ = false;
     /// Node yang akan dipusatkan setelah kanvas ditutup. 0 = tidak ada.
     uint64_t pendingFocus_ = 0;
+    /// Lebar panel samping, dalam piksel. 0 = belum ditentukan.
+    float sideWidth_ = 0.0f;
     float nextSpawn_ = 40.0f;
 
     std::vector<Uuid> errorNodes_;
