@@ -29,7 +29,7 @@ AssetType TypeFromExtension(std::string_view extension) {
     std::transform(lower.begin(), lower.end(), lower.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
-    static const std::array<std::pair<const char*, AssetType>, 18> kTable{{
+    static const std::array<std::pair<const char*, AssetType>, 19> kTable{{
         {".png", AssetType::Texture},
         {".jpg", AssetType::Texture},
         {".jpeg", AssetType::Texture},
@@ -42,6 +42,7 @@ AssetType TypeFromExtension(std::string_view extension) {
         {".gltf", AssetType::Mesh},
         {".glb", AssetType::Mesh},
         {".simmat", AssetType::Material},
+        {".simmatinst", AssetType::Material},
         {".lua", AssetType::Script},
         {".simgraph", AssetType::Graph},
         {".simlevel", AssetType::Level},

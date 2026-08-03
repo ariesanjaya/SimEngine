@@ -710,6 +710,25 @@ ubah berkas, dengan handle lama tetap dipakai sampai gambar baru siap.
   dinaikkan — dan area klik latar kanvas yang melewatkan tombol menu konteks,
   cacat yang tersembunyi selama tombol pan dan tombol menu kebetulan sama.
 
+**Yang belum terverifikasi di E7.1**
+
+- **Daftar aset di panel Material Editor tidak menanggapi klik sintetis.**
+  Panel yang sama sempat menanggapi lebih awal di sesi yang sama (tombol "New
+  Material" bekerja dan membuat berkasnya), lalu berhenti — termasuk setelah
+  editor dijalankan ulang bersih. Menu dan panel lain tetap menanggapi klik yang
+  sama, jadi ini bukan input yang mati secara umum.
+
+  Belum terpecahkan. Dugaan yang sudah DIGUGURKAN: `NodeCanvas::Initialize()`
+  yang dipanggil sekali alih-alih tiap frame (fungsinya early-return bila
+  konteksnya sudah ada, jadi keduanya setara), dan `BeginDisabled`/`BeginChild`
+  yang tidak berpasangan (jumlahnya seimbang).
+
+  Yang belum dicoba: mencatat `IsWindowHovered`/`IsItemHovered` dari dalam panel
+  untuk memastikan ImGui benar-benar melihat kursornya, dan menutup panel node
+  lain untuk menyingkirkan kemungkinan dua konteks imgui-node-editor saling
+  mengganggu. Sampai itu dilakukan, mode instance di panel harus dianggap belum
+  terbukti bekerja.
+
 **Temuan yang mengubah keputusan**
 
 1. **Pin setter komponen tidak boleh punya nilai bawaan.** `sim.set_component`
@@ -847,7 +866,32 @@ keempatnya saling bisa disambung lewat pelebaran skalar.
 Node keluaran tidak ada di palet dan tidak bisa dihapus: tepat satu boleh ada,
 dan material tanpanya tidak punya arti.
 
-**Belum ada:** aset `.simmatinst` beserta panel parameternya, dan preview.
+**Material instance (`.simmatinst`) ada.** Instance tidak menyalin graph — ia
+menyimpan GUID induk ditambah daftar parameter yang benar-benar diubah. Dua
+akibat yang keduanya diinginkan: memperbaiki induk memperbaiki seluruh
+instance-nya sekaligus, dan berkas instance tetap kecil berapa pun besar graph
+induknya. Yang tidak ditimpa tidak ditulis, sehingga mengubah nilai bawaan di
+induk mengalir ke instance yang tidak pernah menyentuh parameter itu — perilaku
+yang sama dengan properti skrip di Inspector.
+
+Nilai parameter disimpan **terurai menjadi angka**, bukan sebagai literal Slang.
+`MaterialParameter::defaultValue` tetap teks karena `.simmat` harus ramah dibaca,
+tapi nilai itu tidak pernah masuk kode yang dihasilkan — kompiler hanya menulis
+nama variabelnya. Jadi yang dibutuhkan instance dan panel adalah angka, dan
+menguraikannya sekali di satu tempat (`ParseValue`) lebih baik daripada di setiap
+pemakainya. Penguraiannya tidak bergantung locale: `strtof` akan membaca "0.8"
+sebagai 0 di locale yang memakai koma desimal, dan berkas yang isinya berubah
+arti menurut setelan sistem adalah kelas bug yang tidak boleh dibuka.
+
+Dengan ini **kriteria terima keempat terpenuhi** dan terkunci test: membuat
+instance lalu mengubah satu parameter meninggalkan berkas induknya byte-per-byte
+sama.
+
+**Belum ada:** preview.
+
+**Belum terverifikasi:** mode instance di panel — kodenya ada dan lulus
+kompilasi, tapi verifikasi UI-nya belum berhasil dilakukan. Lihat catatan di
+bawah.
 
 **Tiga kelompok parameter OpenPBR sengaja belum ada di node keluaran** —
 `subsurface_*`, `transmission_*`, `thin_film_*`. Ketiganya bukan dilupakan:

@@ -128,6 +128,13 @@ struct MaterialParameter {
     /// Rentang slider di panel parameter. Sama berarti "tanpa batas".
     float minValue = 0.0f;
     float maxValue = 0.0f;
+    /// Digambar sebagai pemilih warna, bukan tiga kotak angka.
+    ///
+    /// Ditandai penulis material, bukan ditebak dari namanya. Menebak dari nama
+    /// bekerja untuk "tint" lalu gagal diam-diam untuk "rimColour" atau untuk
+    /// sebuah float3 yang memang arah, dan tebakan yang salah pada pemilih warna
+    /// jauh lebih menyulitkan daripada tiga kotak angka yang polos.
+    bool isColor = false;
 };
 
 struct MaterialGraph {

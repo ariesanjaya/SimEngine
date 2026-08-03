@@ -187,6 +187,11 @@ std::string SaveMaterialToString(const MaterialGraph& graph) {
         if (parameter.minValue != parameter.maxValue) {
             entry["range"] = Json::array({parameter.minValue, parameter.maxValue});
         }
+        // Hanya ditulis bila benar: berkas yang tidak memakai penanda ini tetap
+        // menghasilkan byte yang sama seperti sebelum bidangnya ada.
+        if (parameter.isColor) {
+            entry["color"] = true;
+        }
         parameters.push_back(std::move(entry));
     }
     root["parameters"] = std::move(parameters);
@@ -272,6 +277,7 @@ MaterialIoResult LoadMaterialFromString(MaterialGraph& graph, const std::string&
                 parameter.minValue = (*range)[0].get<float>();
                 parameter.maxValue = (*range)[1].get<float>();
             }
+            parameter.isColor = entry.value("color", false);
             if (!parameter.name.empty()) {
                 graph.parameters.push_back(std::move(parameter));
             }

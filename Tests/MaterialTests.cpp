@@ -527,3 +527,168 @@ TEST_CASE("Kompilasi bersifat deterministik") {
     const MaterialGraph graph = TexturedGraph();
     CHECK(CompileMaterial(graph).slang == CompileMaterial(graph).slang);
 }
+
+// =============================================================================
+// Material instance (.simmatinst)
+// =============================================================================
+
+#include "Sim/Material/MaterialInstance.h"
+
+namespace {
+
+/// Induk dengan dua parameter: satu warna, satu angka bersalur.
+MaterialGraph ParentGraph() {
+    MaterialGraph graph = MinimalGraph();
+    graph.parameters.push_back({"tint", ValueKind::Float3, "float3(0.8, 0.4, 0.2)", "Warna",
+                                0.0f, 0.0f});
+    graph.parameters.push_back({"roughness", ValueKind::Float, "0.3", {}, 0.0f, 1.0f});
+    return graph;
+}
+
+}  // namespace
+
+TEST_CASE("Literal Slang terurai menjadi angka, termasuk bentuk satu-nilai") {
+    // Satu angka mengisi seluruh komponen, sama seperti di Slang.
+    const MaterialValue broadcast = ParseValue(ValueKind::Float3, "float3(0.8)");
+    CHECK(broadcast.components[0] == doctest::Approx(0.8f));
+    CHECK(broadcast.components[1] == doctest::Approx(0.8f));
+    CHECK(broadcast.components[2] == doctest::Approx(0.8f));
+
+    const MaterialValue listed = ParseValue(ValueKind::Float3, "float3(1.0, 0.5, 0.25)");
+    CHECK(listed.components[0] == doctest::Approx(1.0f));
+    CHECK(listed.components[1] == doctest::Approx(0.5f));
+    CHECK(listed.components[2] == doctest::Approx(0.25f));
+
+    CHECK(ParseValue(ValueKind::Float, "0.3").components[0] == doctest::Approx(0.3f));
+    CHECK(ParseValue(ValueKind::Float4, "float4(1,1,1,1)").components[3] == doctest::Approx(1.0f));
+
+    // Literal yang salah ketik memberi nilai netral, bukan kegagalan: satu
+    // parameter rusak tidak boleh membuat seluruh material gagal dibuka.
+    CHECK(ParseValue(ValueKind::Float, "bukan angka").components[0] == doctest::Approx(0.0f));
+}
+
+TEST_CASE("Nilai bolak-balik lewat teks tanpa berubah") {
+    for (const char* literal : {"0.3", "float3(0.8)", "float3(1.0, 0.5, 0.25)",
+                                "float4(0.1, 0.2, 0.3, 0.4)"}) {
+        const ValueKind kind = ValueKindFromString(
+            std::string(literal).find("float4") == 0
+                ? "float4"
+                : (std::string(literal).find("float3") == 0 ? "float3" : "float"));
+        const MaterialValue value = ParseValue(kind, literal);
+        INFO(literal);
+        CHECK(ParseValue(kind, FormatValue(value)) == value);
+    }
+}
+
+TEST_CASE("Instance mengubah satu parameter tanpa menyentuh induknya") {
+    const MaterialGraph parent = ParentGraph();
+    const std::string parentBefore = SaveMaterialToString(parent);
+
+    MaterialInstance instance;
+    instance.parent = Id(900);
+    instance.Set("roughness", ParseValue(ValueKind::Float, "0.9"));
+
+    // Kriteria terima E7.1 nomor 4. Induknya tidak boleh tersentuh sama sekali
+    // — bukan "nilainya sama", melainkan berkasnya byte-per-byte sama.
+    CHECK(SaveMaterialToString(parent) == parentBefore);
+
+    const std::vector<ResolvedParameter> resolved = ResolveParameters(parent, instance);
+    REQUIRE(resolved.size() == 2);
+
+    // Yang ditimpa memakai nilai instance...
+    const auto rough = std::find_if(resolved.begin(), resolved.end(),
+                                    [](const ResolvedParameter& parameter) {
+                                        return parameter.name == "roughness";
+                                    });
+    REQUIRE(rough != resolved.end());
+    CHECK(rough->value.components[0] == doctest::Approx(0.9f));
+    CHECK(rough->overridden);
+
+    // ...dan yang tidak ditimpa tetap memakai nilai induk.
+    const auto tint = std::find_if(resolved.begin(), resolved.end(),
+                                   [](const ResolvedParameter& parameter) {
+                                       return parameter.name == "tint";
+                                   });
+    REQUIRE(tint != resolved.end());
+    CHECK(tint->value.components[0] == doctest::Approx(0.8f));
+    CHECK(tint->value.components[1] == doctest::Approx(0.4f));
+    CHECK_FALSE(tint->overridden);
+}
+
+TEST_CASE("Mengubah bawaan induk mengalir ke instance yang tidak menimpanya") {
+    MaterialGraph parent = ParentGraph();
+    MaterialInstance instance;
+    instance.parent = Id(900);
+    instance.Set("roughness", ParseValue(ValueKind::Float, "0.9"));
+
+    // Inilah gunanya instance tidak menyalin graph: memperbaiki induk
+    // memperbaiki seluruh instance-nya sekaligus.
+    parent.parameters[0].defaultValue = "float3(0.1, 0.2, 0.3)";
+
+    const std::vector<ResolvedParameter> resolved = ResolveParameters(parent, instance);
+    CHECK(resolved[0].value.components[0] == doctest::Approx(0.1f));
+    // Yang ditimpa tetap milik instance — bawaan induk tidak menariknya kembali.
+    CHECK(resolved[1].value.components[0] == doctest::Approx(0.9f));
+}
+
+TEST_CASE("Timpaan dibuang saat parameternya hilang atau berganti tipe") {
+    MaterialGraph parent = ParentGraph();
+    MaterialInstance instance;
+    instance.parent = Id(900);
+    instance.Set("roughness", ParseValue(ValueKind::Float, "0.9"));
+    instance.Set("sudahTidakAda", ParseValue(ValueKind::Float, "1.0"));
+
+    // Parameter yang tidak ada di induk tidak muncul di hasil resolusi.
+    CHECK(ResolveParameters(parent, instance).size() == 2);
+
+    // Tipe yang berganti mengalahkan nilai tersimpan: sebuah angka yang menjadi
+    // warna tidak punya nilai lama yang masuk akal.
+    parent.parameters[1].kind = ValueKind::Float3;
+    parent.parameters[1].defaultValue = "float3(0.25)";
+    const std::vector<ResolvedParameter> resolved = ResolveParameters(parent, instance);
+    CHECK_FALSE(resolved[1].overridden);
+    CHECK(resolved[1].value.components[0] == doctest::Approx(0.25f));
+}
+
+TEST_CASE(".simmatinst bolak-balik tanpa kehilangan apa pun") {
+    MaterialInstance original;
+    original.parent = Id(900);
+    original.Set("tint", ParseValue(ValueKind::Float3, "float3(0.2, 0.4, 0.6)"));
+    original.Set("roughness", ParseValue(ValueKind::Float, "0.75"));
+
+    const std::string text = SaveInstanceToString(original);
+    MaterialInstance loaded;
+    REQUIRE(LoadInstanceFromString(loaded, text).ok);
+
+    CHECK(SaveInstanceToString(loaded) == text);
+    CHECK(loaded.parent == original.parent);
+    REQUIRE(loaded.overrides.size() == 2);
+    CHECK(loaded.Find("tint")->value.components[2] == doctest::Approx(0.6f));
+    CHECK(loaded.Find("roughness")->value.components[0] == doctest::Approx(0.75f));
+
+    // Berkasnya kecil berapa pun besar graph induknya: yang tersimpan hanya
+    // yang benar-benar diubah.
+    CHECK(text.find("nodes") == std::string::npos);
+}
+
+TEST_CASE("Instance tanpa induk ditolak saat dimuat") {
+    MaterialInstance loaded;
+    const MaterialIoResult result =
+        LoadInstanceFromString(loaded, "{\n  \"version\": 1,\n  \"overrides\": []\n}\n");
+    CHECK_FALSE(result.ok);
+    CHECK(result.error.find("parent") != std::string::npos);
+}
+
+TEST_CASE("Membersihkan timpaan mengembalikan parameter ke nilai induk") {
+    const MaterialGraph parent = ParentGraph();
+    MaterialInstance instance;
+    instance.parent = Id(900);
+    instance.Set("roughness", ParseValue(ValueKind::Float, "0.9"));
+    REQUIRE(ResolveParameters(parent, instance)[1].overridden);
+
+    instance.Clear("roughness");
+    const std::vector<ResolvedParameter> resolved = ResolveParameters(parent, instance);
+    CHECK_FALSE(resolved[1].overridden);
+    CHECK(resolved[1].value.components[0] == doctest::Approx(0.3f));
+    CHECK(instance.overrides.empty());
+}

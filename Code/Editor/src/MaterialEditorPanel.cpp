@@ -8,6 +8,7 @@
 #include "Sim/Editor/PanelRegistry.h"
 #include "Sim/Material/MaterialCompiler.h"
 #include "Sim/Material/MaterialGraph.h"
+#include "Sim/Material/MaterialInstance.h"
 #include "Sim/Material/MaterialNodeCatalog.h"
 #include "Sim/Material/MaterialValidation.h"
 
@@ -105,10 +106,12 @@ public:
             ImGui::TextDisabled("No asset database.");
             return;
         }
-        if (!canvasReady_) {
-            canvas_.Initialize();
-            canvasReady_ = true;
-        }
+        // Setiap frame, sama seperti Graph Editor: Initialize() bersifat
+        // idempoten dan sekaligus menetapkan konteks kanvas yang aktif. Dua
+        // panel node yang hidup bersamaan membuat "yang terakhir memanggil"
+        // menentukan konteks mana yang dipakai pustaka, jadi memanggilnya sekali
+        // saja di awal berarti panel ini bekerja pada konteks milik panel lain.
+        canvas_.Initialize();
 
         DrawToolbar(context);
         ImGui::Separator();
@@ -120,10 +123,15 @@ public:
         ImGui::EndChild();
 
         ImGui::SameLine();
-        if (openGuid_.IsValid()) {
-            DrawCanvasAndSide(context);
-        } else {
+        if (!openGuid_.IsValid()) {
             ImGui::TextColored(kHintColor, "Pick a material on the left, or create one.");
+        } else if (instanceMode_) {
+            // Instance tidak punya graph sendiri, jadi tidak ada kanvas untuk
+            // digambar. Menampilkan graph induknya di sini akan mengundang
+            // suntingan yang tidak akan tersimpan ke mana-mana.
+            DrawInstanceAndSide();
+        } else {
+            DrawCanvasAndSide(context);
         }
     }
 
@@ -138,9 +146,19 @@ private:
         ImGui::EndDisabled();
 
         ImGui::SameLine();
-        ImGui::BeginDisabled(!openGuid_.IsValid());
+        ImGui::BeginDisabled(!openGuid_.IsValid() || instanceMode_);
         if (ImGui::Button("Fit")) {
             pendingFit_ = true;
+        }
+        ImGui::EndDisabled();
+
+        // Instance dibuat dari material yang sedang dibuka, bukan dari dialog
+        // pemilih: "instance dari yang mana" adalah pertanyaan yang jawabannya
+        // sudah ada di layar.
+        ImGui::SameLine();
+        ImGui::BeginDisabled(!openGuid_.IsValid() || instanceMode_);
+        if (ImGui::Button("New Instance")) {
+            CreateInstance(context);
         }
         ImGui::EndDisabled();
 
@@ -149,6 +167,10 @@ private:
         }
         ImGui::SameLine();
         ImGui::TextColored(kHintColor, "%s%s", openName_.c_str(), dirty_ ? " *" : "");
+        if (instanceMode_) {
+            ImGui::SameLine();
+            ImGui::TextColored(kHintColor, "(instance of %s)", parentName_.c_str());
+        }
 
         ImGui::SameLine();
         if (compiled_.ok) {
@@ -210,6 +232,114 @@ private:
             DrawSidePanel();
         }
         ImGui::EndChild();
+    }
+
+    /// Instance: daftar parameter di kiri, hasil kompilasi induk di kanan.
+    ///
+    /// Hasil kompilasinya tetap ditampilkan, dan itu bukan sisa dari mode graph:
+    /// yang ingin diketahui pemakai instance adalah parameter mana yang
+    /// benar-benar dipakai shader — sesuatu yang hanya terjawab dengan melihat
+    /// kodenya.
+    void DrawInstanceAndSide() {
+        const float avail = ImGui::GetContentRegionAvail().x;
+        const float handle = ImGui::GetStyle().ItemSpacing.x;
+        if (sideWidth_ <= 0.0f) {
+            sideWidth_ = avail * 0.36f;
+        }
+        const float maxSide = std::max(avail - ImGui::GetFontSize() * 12.0f - handle, 0.0f);
+        sideWidth_ = std::clamp(sideWidth_, std::min(ImGui::GetFontSize() * 13.0f, maxSide),
+                                maxSide);
+
+        if (ImGui::BeginChild("##params",
+                              ImVec2(std::max(avail - sideWidth_ - handle, 1.0f), 0.0f))) {
+            DrawInstanceParameters();
+        }
+        ImGui::EndChild();
+
+        ImGui::SameLine(0.0f, 0.0f);
+        DrawSideSplitter(handle);
+        ImGui::SameLine(0.0f, 0.0f);
+
+        if (ImGui::BeginChild("##side", ImVec2(0.0f, 0.0f))) {
+            DrawCompiledSlang();
+        }
+        ImGui::EndChild();
+    }
+
+    void DrawInstanceParameters() {
+        const std::vector<ResolvedParameter> resolved = ResolveParameters(graph_, instance_);
+        if (resolved.empty()) {
+            ImGui::TextColored(kHintColor,
+                               "%s exposes no parameters, so there is nothing to override here.",
+                               parentName_.c_str());
+            return;
+        }
+
+        for (const ResolvedParameter& parameter : resolved) {
+            ImGui::PushID(parameter.name.c_str());
+
+            // Penanda timpaan di depan namanya, bukan di kolom terpisah: yang
+            // ingin dijawab sekali lihat adalah "mana yang sudah saya ubah",
+            // dan kolom terpisah membuat mata harus menyeberang.
+            ImGui::TextColored(parameter.overridden ? kOkColor : kHintColor,
+                               parameter.overridden ? "*" : " ");
+            ImGui::SameLine();
+            ImGui::TextUnformatted(parameter.name.c_str());
+            if (!parameter.tooltip.empty() &&
+                ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
+                ImGui::SetTooltip("%s", parameter.tooltip.c_str());
+            }
+
+            ImGui::SameLine(ImGui::GetFontSize() * 10.0f);
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 12.0f);
+
+            MaterialValue edited = parameter.value;
+            if (DrawValueWidget(parameter, edited)) {
+                instance_.Set(parameter.name, edited);
+                dirty_ = true;
+            }
+
+            // Mengembalikan ke nilai induk hanya berarti bila memang ditimpa.
+            if (parameter.overridden) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("revert")) {
+                    instance_.Clear(parameter.name);
+                    dirty_ = true;
+                }
+            }
+            ImGui::PopID();
+        }
+    }
+
+    /// Widget menurut tipe parameter. Mengembalikan true bila nilainya berubah.
+    static bool DrawValueWidget(const ResolvedParameter& parameter, MaterialValue& value) {
+        float* v = value.components.data();
+        const bool bounded = parameter.minValue != parameter.maxValue;
+        switch (parameter.kind) {
+            case ValueKind::Float:
+                return bounded ? ImGui::SliderFloat("##value", v, parameter.minValue,
+                                                    parameter.maxValue)
+                               : ImGui::DragFloat("##value", v, 0.01f);
+            case ValueKind::Float2: return ImGui::DragFloat2("##value", v, 0.01f);
+            case ValueKind::Float3:
+                return parameter.isColor ? ImGui::ColorEdit3("##value", v)
+                                         : ImGui::DragFloat3("##value", v, 0.01f);
+            case ValueKind::Float4:
+                return parameter.isColor ? ImGui::ColorEdit4("##value", v)
+                                         : ImGui::DragFloat4("##value", v, 0.01f);
+            case ValueKind::Bool: {
+                bool flag = v[0] != 0.0f;
+                if (ImGui::Checkbox("##value", &flag)) {
+                    v[0] = flag ? 1.0f : 0.0f;
+                    return true;
+                }
+                return false;
+            }
+            case ValueKind::Texture:
+            case ValueKind::Numeric: break;
+        }
+        ImGui::TextDisabled("(not editable)");
+        return false;
     }
 
     void DrawSideSplitter(float width) {
@@ -785,9 +915,14 @@ private:
         if (record == nullptr) {
             return;
         }
+        const std::filesystem::path path = context.assets->AbsolutePath(*record);
+        if (path.extension() == ".simmatinst") {
+            OpenInstance(context, guid, *record, path);
+            return;
+        }
+
         MaterialGraph loaded;
-        const MaterialIoResult result =
-            LoadMaterialFromFile(loaded, context.assets->AbsolutePath(*record));
+        const MaterialIoResult result = LoadMaterialFromFile(loaded, path);
         if (!result.ok) {
             if (context.notifications != nullptr) {
                 context.notifications->Error("Cannot open " + record->name + ": " + result.error);
@@ -795,6 +930,9 @@ private:
             return;
         }
         graph_ = std::move(loaded);
+        instance_ = MaterialInstance{};
+        instanceMode_ = false;
+        parentName_.clear();
         openGuid_ = guid;
         openName_ = record->name;
         openPath_ = context.assets->AbsolutePath(*record);
@@ -806,11 +944,102 @@ private:
         Recompile();
     }
 
+    /// Memuat instance beserta graph induknya.
+    ///
+    /// Graph induk dimuat apa adanya ke `graph_` — bukan disalin untuk disunting,
+    /// melainkan supaya daftar parameter dan hasil kompilasinya bisa ditampilkan.
+    /// Mode instance mematikan setiap jalur yang menyuntingnya.
+    void OpenInstance(EditorContext& context, const Uuid& guid,
+                      const assets::AssetRecord& record, const std::filesystem::path& path) {
+        MaterialInstance loaded;
+        const MaterialIoResult result = LoadInstanceFromFile(loaded, path);
+        if (!result.ok) {
+            if (context.notifications != nullptr) {
+                context.notifications->Error("Cannot open " + record.name + ": " + result.error);
+            }
+            return;
+        }
+        const assets::AssetRecord* parent = context.assets->Find(loaded.parent);
+        if (parent == nullptr) {
+            if (context.notifications != nullptr) {
+                context.notifications->Error(record.name + " points at a material that is gone");
+            }
+            return;
+        }
+        MaterialGraph parentGraph;
+        const MaterialIoResult parentResult =
+            LoadMaterialFromFile(parentGraph, context.assets->AbsolutePath(*parent));
+        if (!parentResult.ok) {
+            if (context.notifications != nullptr) {
+                context.notifications->Error("Cannot open parent " + parent->name);
+            }
+            return;
+        }
+
+        graph_ = std::move(parentGraph);
+        instance_ = std::move(loaded);
+        instanceMode_ = true;
+        parentName_ = parent->name;
+        openGuid_ = guid;
+        openName_ = record.name;
+        openPath_ = path;
+        dirty_ = false;
+        placed_.clear();
+        ids_.clear();
+        guids_.clear();
+        Recompile();
+    }
+
+    void CreateInstance(EditorContext& context) {
+        const std::filesystem::path folder =
+            std::filesystem::path(context.assets->Root()) / "Materials";
+        const std::string stem = openPath_.stem().string();
+        std::filesystem::path path = folder / (stem + "Instance.simmatinst");
+        int suffix = 0;
+        while (std::filesystem::exists(path)) {
+            path = folder / (stem + "Instance" + std::to_string(++suffix) + ".simmatinst");
+        }
+
+        MaterialInstance fresh;
+        fresh.parent = openGuid_;
+        // Tanpa satu timpaan pun. Instance baru harus terlihat persis seperti
+        // induknya — perbedaan yang muncul sebelum ada yang menyentuhnya akan
+        // membuat pengguna mencari sebab yang tidak ada.
+        if (!SaveInstanceToFile(fresh, path).ok) {
+            if (context.notifications != nullptr) {
+                context.notifications->Error("Cannot create " + path.filename().string());
+            }
+            return;
+        }
+        context.assets->ScanNow();
+        if (const assets::AssetRecord* record =
+                context.assets->FindByRelativePath("Materials/" + path.filename().string())) {
+            Open(context, record->guid);
+        }
+    }
+
     void Save(EditorContext& context) {
         if (!openGuid_.IsValid()) {
             return;
         }
+        if (instanceMode_) {
+            SaveInstance(context);
+            return;
+        }
         if (!SaveMaterialToFile(graph_, openPath_).ok) {
+            if (context.notifications != nullptr) {
+                context.notifications->Error("Save failed: " + openName_);
+            }
+            return;
+        }
+        dirty_ = false;
+        if (context.notifications != nullptr) {
+            context.notifications->Success("Saved " + openName_);
+        }
+    }
+
+    void SaveInstance(EditorContext& context) {
+        if (!SaveInstanceToFile(instance_, openPath_).ok) {
             if (context.notifications != nullptr) {
                 context.notifications->Error("Save failed: " + openName_);
             }
@@ -904,9 +1133,12 @@ private:
     }
 
     NodeCanvas canvas_;
-    bool canvasReady_ = false;
 
     MaterialGraph graph_;
+    /// Terisi hanya di mode instance; `graph_` lalu berisi graph INDUKNYA.
+    MaterialInstance instance_;
+    bool instanceMode_ = false;
+    std::string parentName_;
     MaterialTypes types_;
     MaterialCompileResult compiled_;
     std::vector<Uuid> errorNodes_;

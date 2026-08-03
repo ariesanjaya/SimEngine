@@ -2,6 +2,7 @@ sim_add_library(Material
     SOURCES
         src/MaterialCompiler.cpp
         src/MaterialGraph.cpp
+        src/MaterialInstance.cpp
         src/MaterialNodeCatalog.cpp
         src/MaterialValidation.cpp
     PUBLIC_DEPS
