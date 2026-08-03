@@ -216,6 +216,7 @@ int main(int /*argc*/, char** /*argv*/) {
     editor::EditorApp app;
     editor::EditorApp::Config appConfig;
     appConfig.configDir = configDir;
+    appConfig.resourceDir = ExecutableDirectory() / "Resources";
     appConfig.viewportRenderer = renderer.get();
     appConfig.frameLimiter = &frameLimiter;
     appConfig.lockedFps = frameLock.hz;

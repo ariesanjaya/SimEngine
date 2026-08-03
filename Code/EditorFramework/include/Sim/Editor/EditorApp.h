@@ -29,6 +29,10 @@ public:
     struct Config {
         /// Tempat pintasan, layout, dan log disimpan.
         std::filesystem::path configDir;
+        /// Folder `Resources` di sebelah executable. Kosong berarti aset contoh
+        /// tidak disemai — editor tetap berjalan, level contohnya saja yang
+        /// kehilangan modelnya.
+        std::filesystem::path resourceDir;
         render::IViewportRenderer* viewportRenderer = nullptr;
         const FrameLimiter* frameLimiter = nullptr;
         float lockedFps = 60.0f;
@@ -72,6 +76,7 @@ public:
     bool IsPlaying() const { return playing_; }
 
     void CreateStarterLevel();
+    void SeedStarterAssets(const std::filesystem::path& resourceDir);
     bool SaveLevel(const std::filesystem::path& path);
     bool LoadLevel(const std::filesystem::path& path);
 

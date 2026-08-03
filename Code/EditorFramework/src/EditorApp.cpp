@@ -68,6 +68,10 @@ bool EditorApp::Initialize(const Config& config) {
     context_.frameLockReason = config.frameLockReason;
     context_.prefabDir = (configDir_ / "Prefabs").string();
 
+    // Disemai sebelum pemindaian pertama, supaya asetnya sudah punya GUID saat
+    // CreateStarterLevel() mencarinya di bawah.
+    SeedStarterAssets(config.resourceDir);
+
     // Folder aset untuk sementara berada di folder konfigurasi editor. Begitu
     // konsep proyek matang, akarnya pindah mengikuti project.simproj.
     assets_.Initialize({configDir_ / "Assets", config.tasks, 1.0f});
@@ -417,6 +421,36 @@ void EditorApp::PasteAction(bool asChild) {
     // Salinan papan klip, bukan pindah: menempel dua kali harus menghasilkan
     // dua salinan, dan perintahnya menyimpan GUID hasil penukarannya sendiri.
     history_.Execute<PasteEntitiesCommand>(&world_, &selection_, clipboard_, parentGuid, "Paste");
+}
+
+void EditorApp::SeedStarterAssets(const std::filesystem::path& resourceDir) {
+    if (resourceDir.empty()) {
+        return;
+    }
+    const std::filesystem::path source = resourceDir / "Meshes";
+    const std::filesystem::path target = configDir_ / "Assets" / "Meshes";
+
+    std::error_code error;
+    // Syaratnya keberadaan FOLDER tujuan, bukan berkasnya satu per satu.
+    // Menyemai per-berkas berarti aset contoh yang sengaja dihapus pengguna
+    // muncul lagi setiap editor dijalankan — perilaku yang mustahil ditebak dan
+    // tidak bisa dilawan. Dengan syarat ini, penyemaian terjadi tepat sekali:
+    // pada proyek yang belum punya folder Meshes sama sekali.
+    if (!std::filesystem::exists(source, error) || std::filesystem::exists(target, error)) {
+        return;
+    }
+
+    // Berkas `.meta` ikut disalin, dan itu bukan kelengkapan belaka: GUID aset
+    // tinggal di sana. Tanpa menyalinnya, setiap mesin membangkitkan GUID
+    // sendiri, dan berkas level yang merujuk model ini hanya berlaku di mesin
+    // tempat ia dibuat.
+    std::filesystem::copy(source, target, std::filesystem::copy_options::recursive, error);
+    if (error) {
+        SIM_WARN("Editor", "Cannot seed starter assets into {}: {}", target.string(),
+                 error.message());
+        return;
+    }
+    SIM_INFO("Editor", "Starter assets seeded into {}", target.string());
 }
 
 void EditorApp::CreateStarterLevel() {

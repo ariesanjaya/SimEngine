@@ -37,6 +37,18 @@ berikutnya tidak menyentuh jaringan. Untuk build sepenuhnya offline setelah itu:
 |---|---|---|---|
 | **Inter** | 4.1 | SIL OFL 1.1 (`Resources/Fonts/Inter-LICENSE.txt`) | `Resources/Fonts/Inter-{Regular,Medium,SemiBold}.ttf` |
 | **Lucide** | 1.28.0 | ISC (`Resources/Fonts/lucide-LICENSE.txt`) | `Resources/Fonts/lucide.ttf` |
+| **ShaderBall** | derkreature/ShaderBall (Maret 2015), model oleh Mat Makin | Unlicense / public domain (`Resources/Meshes/shaderBall-LICENSE.txt`) | `Resources/Meshes/shaderBall.fbx` |
+
+Shader ball dibundel sebagai **aset contoh**, bukan sebagai bagian engine: ia
+disemai ke folder aset proyek saat proyek itu belum punya folder `Meshes`, lalu
+dipakai entity "Shader Ball" di level contoh. FBX, bukan OBJ yang ada di sumber
+yang sama: `ufbx` yang dijadwalkan E8 membaca FBX, sedangkan OBJ menuntut
+pembaca tersendiri yang tidak ada di rencana mana pun. Ia juga lebih kecil di
+git meski lebih besar di disk — 1,6 MB terkompresi berbanding 1,8 MB.
+
+Berkas `.meta`-nya ikut dibundel. GUID aset tinggal di sana, jadi tanpa itu
+setiap mesin membangkitkan GUID sendiri dan berkas level yang merujuk model ini
+hanya berlaku di mesin tempat ia dibuat.
 
 Font UI dibundel, bukan diambil dari sistem. Alasannya bukan estetika semata:
 metrik font menentukan lebar kolom dan tinggi baris, jadi memakai font sistem
