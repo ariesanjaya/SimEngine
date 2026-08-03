@@ -321,5 +321,6 @@ antarmuka `IViewportRenderer`. Rinciannya di
 - [PLAN-EDITOR.md](docs/PLAN-EDITOR.md) — E0..E7 dengan kriteria terima
 - [PLAN-AI.md](docs/PLAN-AI.md) — A0..A4, engine sebagai MCP server
 - [PLAN-RENDER.md](docs/PLAN-RENDER.md) — E8..E9
+- [RENDER-OPENPBR.md](docs/RENDER-OPENPBR.md) — lobe OpenPBR yang belum ada (subsurface, transmission, thin film) dan cara menjalankannya real time
 - [EDITOR-PANELS.md](docs/EDITOR-PANELS.md) — spesifikasi tiap panel
 - [DEPENDENCIES.md](docs/DEPENDENCIES.md) — versi terkunci dan alasannya

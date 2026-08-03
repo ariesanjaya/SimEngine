@@ -849,6 +849,16 @@ dan material tanpanya tidak punya arti.
 
 **Belum ada:** aset `.simmatinst` beserta panel parameternya, dan preview.
 
+**Tiga kelompok parameter OpenPBR sengaja belum ada di node keluaran** —
+`subsurface_*`, `transmission_*`, `thin_film_*`. Ketiganya bukan dilupakan:
+implementasi acuan Adobe menjalankannya lewat sampling dan integrasi volumetrik
+yang tidak berbentuk benar untuk rasterizer, jadi masing-masing menuntut teknik
+real-time tersendiri. Tekniknya sudah dipilih dan ditulis di
+[`docs/RENDER-OPENPBR.md`](RENDER-OPENPBR.md), berikut cara membayarnya hanya
+ketika dipakai. Satu langkah dari sana jatuh di E7.1 dan tidak menunggu E8:
+**topeng fitur di `MaterialCompileResult`**, yang memungkinkan permutasi shader
+dibangkitkan dari graph alih-alih cabang runtime.
+
 ### E7.2 — Particle Editor · ~5 sesi
 
 - Sistem berbasis modul: Spawn (rate/burst), Shape (point/sphere/box/cone/mesh),
