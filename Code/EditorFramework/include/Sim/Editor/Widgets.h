@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Sim/Core/Curve.h"
+
 #include <imgui.h>
 
 #include <array>
@@ -64,5 +66,43 @@ void PropertyLabel(const char* label, float labelWidth = 0.0f);
 
 /// Header komponen yang bisa dilipat, dengan ikon.
 bool ComponentHeader(const char* icon, const char* label, bool defaultOpen = true);
+
+/// Preset bentuk kurva yang paling sering dipakai, untuk tombol pintas.
+enum class CurvePreset {
+    Constant,
+    Linear,
+    EaseIn,
+    EaseOut,
+    EaseInOut,
+    /// Naik lalu turun — bentuk paling lazim untuk ukuran partikel.
+    Spike,
+};
+
+const char* ToString(CurvePreset preset);
+/// Mengganti seluruh isi kurva dengan preset, memakai rentang nilai yang ada.
+void ApplyPreset(Curve& curve, CurvePreset preset);
+
+/// Penyunting kurva: seret kunci, klik ganda untuk menambah, kanan untuk hapus.
+///
+/// **Dipakai tiga fase** — Particle (E7.2), Terrain (E7.3), Animation (E7.5) —
+/// jadi ia tidak boleh tahu apa pun tentang partikel. Yang masuk hanya sebuah
+/// `Curve` dan rentang sumbunya.
+///
+/// Tangen ditampilkan sebagai pegangan hanya untuk kunci yang sedang terpilih.
+/// Menampilkan seluruhnya sekaligus membuat kurva dengan sepuluh kunci menjadi
+/// rimbun garis yang justru menyembunyikan bentuk kurvanya sendiri.
+///
+/// Mengembalikan true bila kurvanya berubah frame ini.
+bool CurveEditor(const char* id, Curve& curve, const ImVec2& size, float minValue = 0.0f,
+                 float maxValue = 1.0f);
+
+/// Penyunting gradient: perhentian warna di bawah, alpha di atas.
+///
+/// Dua baris terpisah, karena datanya memang terpisah — lihat catatan di
+/// `Gradient`. Menggambar keduanya di satu baris memaksa pengguna menebak
+/// perhentian mana yang sedang dipegangnya.
+///
+/// Mengembalikan true bila gradientnya berubah frame ini.
+bool GradientEditor(const char* id, Gradient& gradient, const ImVec2& size);
 
 }  // namespace sim::editor::widgets

@@ -944,7 +944,7 @@ ketika dipakai. Satu langkah dari sana jatuh di E7.1 dan tidak menunggu E8:
 **topeng fitur di `MaterialCompileResult`**, yang memungkinkan permutasi shader
 dibangkitkan dari graph alih-alih cabang runtime.
 
-### E7.2 — Particle Editor · ~5 sesi · 🔨 model data + simulasi selesai
+### E7.2 — Particle Editor · ~5 sesi · 🔨 model, simulasi, dan panel selesai
 
 - Sistem berbasis modul: Spawn (rate/burst), Shape (point/sphere/box/cone/mesh),
   Initial (velocity, size, color, rotation, lifetime), Over-Lifetime (curve untuk
@@ -987,8 +987,35 @@ modul Particle — memindahkannya ke Core sekarang menuntut Core membocorkan
 nlohmann ke header publiknya, dan bentuk API yang benar baru terlihat ketika ada
 pemakai kedua yang nyata.
 
-**Belum ada:** panel Particle Editor, widget CurveEditor dan GradientEditor,
-timeline preview, dan statistik langsung.
+**Panelnya ada**, berikut widget `CurveEditor` dan `GradientEditor` di
+`EditorFramework/Widgets` — keduanya tidak tahu apa pun tentang partikel, karena
+Terrain (E7.3) dan Animation (E7.5) akan memakainya juga. Yang masuk hanya sebuah
+`Curve` atau `Gradient` dan ukuran kotaknya.
+
+Kurva dan pita gradient **digambar dengan mencuplik evaluatornya**, bukan dengan
+menghitung ulang bezier di widget. Itu yang menjamin apa yang terlihat sama
+dengan apa yang dievaluasi simulasi — dua rumus untuk satu kurva adalah dua rumus
+yang akan berbeda. Pegangan tangen hanya muncul untuk kunci yang terpilih: sepuluh
+kunci dengan seluruh pegangannya sekaligus menjadi rimbun garis yang justru
+menyembunyikan bentuk kurvanya. Alpha gradient ditampilkan sebagai tinggi terisi,
+bukan papan catur — papan catur memberitahu ADA transparansi, tingginya
+memberitahu BERAPA, dan itulah yang sedang disunting.
+
+**Preview-nya digambar dengan draw list ImGui, bukan lewat `IViewportRenderer`.**
+Kendalanya sama dengan preview material — satu instance, satu target render,
+sudah dipakai panel Viewport. Bedanya, untuk partikel gambar 2D justru cukup
+jujur: sebuah partikel adalah titik dengan ukuran dan warna, jadi yang terlihat
+benar-benar memperlihatkan bentuk semburan, gerak, kurva ukuran, dan gradient
+warnanya. Yang belum ada: billboard bertekstur dan urutan tembus pandang, yang
+memang milik E8. Partikel jauh digambar lebih dulu — tanpa pengurutan, gumpalan
+partikel terlihat berlubang.
+
+Simulasinya milik `Sim::Particle`, bukan panel: panel hanya menentukan waktu mana
+yang ingin dilihat. Itu yang membuat preview dijamin sama dengan yang dijalankan
+runtime nanti.
+
+**Belum ada:** modul Sub-emitter, dan penetapan material/mesh pada modul Render —
+keduanya menunggu sesuatu yang bisa menggambarnya.
 
 ### E7.3 — Terrain Editor · ~5 sesi
 
