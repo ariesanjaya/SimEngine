@@ -283,6 +283,11 @@ void NodeCanvas::CenterOnNode(uint64_t id) {
     ed::NavigateToSelection();
 }
 
+uint64_t NodeCanvas::DoubleClickedLink() const {
+    const ScopedEditor scoped(impl_->context);
+    return ed::GetDoubleClickedLink().Get();
+}
+
 bool NodeCanvas::RequestedBackgroundMenu() {
     return ed::ShowBackgroundContextMenu();
 }

@@ -395,6 +395,65 @@ TEST_CASE("Antarmuka subgraph bertahan lewat berkas") {
     CHECK(plain.find("\"outputs\"") == std::string::npos);
 }
 
+TEST_CASE("Titik belok merapikan kabel tanpa mengubah satu baris pun Lua") {
+    scene::RegisterCoreComponents();
+    NodeCatalog::Rebuild();
+
+    const Graph plain = SpinGraph();
+    const std::string before = CompileGraph(plain, "spin.simgraph").lua;
+
+    // Kabel data 4.result → 6.radians dipecah lewat sebuah titik belok, dan
+    // kabel exec 1.then → 7.in lewat titik belok kedua.
+    Graph routed = plain;
+    routed.links.erase(std::remove_if(routed.links.begin(), routed.links.end(),
+                                      [](const GraphLink& link) {
+                                          return (link.toNode == Id(6) && link.toPin == "radians") ||
+                                                 (link.toNode == Id(7) && link.toPin == "in");
+                                      }),
+                       routed.links.end());
+    routed.nodes.push_back(Node(80, "reroute"));
+    routed.nodes.push_back(Node(81, "reroute"));
+    Link(routed, 4, "result", 80, "in");
+    Link(routed, 80, "out", 6, "radians");
+    Link(routed, 1, "then", 81, "in");
+    Link(routed, 81, "out", 7, "in");
+
+    const CompileResult after = CompileGraph(routed, "spin.simgraph");
+    INFO(FirstError(after));
+    REQUIRE(after.ok);
+
+    // Inilah janjinya: merapikan tampilan tidak boleh mengubah perilaku. Kalau
+    // titik belok meninggalkan jejak di Lua, "merapikan" berubah menjadi
+    // "menyunting", dan tidak ada yang berani memakainya.
+    CHECK(after.lua == before);
+}
+
+TEST_CASE("Tipe titik belok disimpulkan dari kabel yang melewatinya") {
+    scene::RegisterCoreComponents();
+    NodeCatalog::Rebuild();
+
+    Graph graph;
+    graph.nodes.push_back(Node(1, "sim.up"));
+    graph.nodes.push_back(Node(2, "reroute"));
+    Link(graph, 1, "value", 2, "in");
+
+    const GraphNode* reroute = graph.FindNode(Id(2));
+    REQUIRE(reroute != nullptr);
+    const std::vector<GraphPin> pins = PinsOf(graph, *reroute);
+    REQUIRE(pins.size() == 2);
+    // Vec3 masuk, Vec3 keluar. Kalau dipatok Any, titik belok akan menjadi
+    // lubang di sistem tipe — Vec3 masuk lalu keluar sebagai apa pun.
+    CHECK(pins[0].kind == PinKind::Vec3);
+    CHECK(pins[1].kind == PinKind::Vec3);
+
+    // Yang belum tersambung apa pun menerima apa saja.
+    Graph loose;
+    loose.nodes.push_back(Node(3, "reroute"));
+    const std::vector<GraphPin> loosePins = PinsOf(loose, *loose.FindNode(Id(3)));
+    REQUIRE(loosePins.size() == 2);
+    CHECK(loosePins[0].kind == PinKind::Any);
+}
+
 TEST_CASE("Koneksi yang menunjuk node yang hilang dibuang saat dimuat") {
     Graph graph = SpinGraph();
     // Node dihapus dari berkas, misalnya karena disunting di luar editor.

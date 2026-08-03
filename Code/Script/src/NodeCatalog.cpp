@@ -398,6 +398,12 @@ void NodeCatalog::AddCoreTypes() {
     // keanggotaannya ditentukan letak, bukan daftar, jadi tidak ada yang perlu
     // diperbarui ketika node ditambah atau dipindahkan.
     add({"comment", "Comment", "Misc", true, "Catatan di kanvas", {}});
+    // Titik belok. Tipenya tidak ditetapkan di sini melainkan disimpulkan dari
+    // kabel yang melewatinya — lihat PinsOf(). Kalau dipatok `Any`, sebuah
+    // titik belok akan menjadi lubang di sistem tipe: Vec3 bisa masuk lalu
+    // keluar sebagai apa pun.
+    add({"reroute", "Reroute", "Misc", true,
+         "Titik belok untuk merapikan jalur kabel", {}});
     add({"group", "Group", "Misc", true,
          "Kotak yang memindahkan seluruh node di dalamnya", {}});
 }
@@ -506,6 +512,45 @@ std::vector<GraphPin> PinsOf(const Graph& graph, const GraphNode& node,
             pins.push_back(Exec("then" + std::to_string(i), PinDirection::Output,
                                 "then " + std::to_string(i)));
         }
+        return pins;
+    }
+
+    if (node.type == "reroute") {
+        // Tipe diambil dari kabel yang masuk; kalau belum ada, dari kabel yang
+        // keluar. Titik belok yang belum tersambung apa pun menerima apa saja —
+        // begitu satu ujungnya tersambung, ia mengunci diri ke tipe itu.
+        PinKind kind = PinKind::Any;
+        if (const GraphLink* incoming = graph.LinkInto(node.guid, "in")) {
+            if (const GraphNode* source = graph.FindNode(incoming->fromNode)) {
+                const std::vector<GraphPin> sourcePins = PinsOf(graph, *source, library);
+                const auto pin = std::find_if(
+                    sourcePins.begin(), sourcePins.end(),
+                    [incoming](const GraphPin& p) { return p.name == incoming->fromPin; });
+                if (pin != sourcePins.end()) {
+                    kind = pin->kind;
+                }
+            }
+        } else {
+            for (const GraphLink& link : graph.links) {
+                if (link.fromNode != node.guid) {
+                    continue;
+                }
+                const GraphNode* target = graph.FindNode(link.toNode);
+                if (target == nullptr) {
+                    continue;
+                }
+                const std::vector<GraphPin> targetPins = PinsOf(graph, *target, library);
+                const auto pin = std::find_if(
+                    targetPins.begin(), targetPins.end(),
+                    [&link](const GraphPin& p) { return p.name == link.toPin; });
+                if (pin != targetPins.end()) {
+                    kind = pin->kind;
+                    break;
+                }
+            }
+        }
+        pins.push_back(In("in", kind, {}));
+        pins.push_back(Out("out", kind));
         return pins;
     }
 

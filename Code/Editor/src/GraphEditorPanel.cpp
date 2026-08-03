@@ -254,6 +254,7 @@ private:
 
         HandleCreate();
         HandleDelete();
+        HandleRerouteInsert();
         HandleContextMenus(context);
 
         canvas_.End();
@@ -297,6 +298,10 @@ private:
 
         if (node.type == "group") {
             DrawGroupNode(node, id);
+            return;
+        }
+        if (node.type == "reroute") {
+            DrawRerouteNode(node, id);
             return;
         }
 
@@ -357,6 +362,26 @@ private:
     }
 
 
+
+    /// Titik belok: sekecil mungkin, karena ia bagian dari kabel dan bukan
+    /// sebuah langkah. Node berukuran penuh dengan judul justru memutus alur
+    /// yang sedang dirapikan.
+    void DrawRerouteNode(const GraphNode& node, uint64_t id) {
+        const std::vector<GraphPin> pins = PinsOf(graph_, node, library_);
+        const ImVec4 color = pins.empty() ? kHintColor : ColorOf(pins.front().kind);
+
+        canvas_.BeginNode(id);
+        canvas_.BeginInputPin(PinId(id, 0));
+        ImGui::TextColored(color, "%s", pins.empty() || pins.front().kind != PinKind::Exec
+                                            ? "\u25cf"
+                                            : "\u25b6");
+        canvas_.EndPin();
+        ImGui::SameLine();
+        canvas_.BeginOutputPin(PinId(id, 1));
+        ImGui::TextColored(color, " ");
+        canvas_.EndPin();
+        canvas_.EndNode();
+    }
 
     /// Node grup: kotak yang membawa serta node di dalamnya ketika digeser.
     ///
@@ -581,6 +606,63 @@ private:
         link.toNode = toNode->guid;
         link.toPin = toPin.name;
         graph_.links.push_back(std::move(link));
+        Touch();
+    }
+
+    /// Klik ganda pada sebuah kabel menyisipkan titik belok tepat di situ.
+    ///
+    /// Kabelnya dipecah, bukan ditambahi: A→B menjadi A→R dan R→B. Yang
+    /// dikompilasi tetap sama persis, karena titik belok hanya meneruskan
+    /// nilainya — merapikan tampilan tidak boleh mengubah perilaku.
+    void HandleRerouteInsert() {
+        const uint64_t linkId = canvas_.DoubleClickedLink();
+        if (linkId == 0) {
+            return;
+        }
+        const Uuid* guid = GuidOf(linkId);
+        if (guid == nullptr) {
+            return;
+        }
+        const auto it = std::find_if(graph_.links.begin(), graph_.links.end(),
+                                     [guid](const GraphLink& link) { return link.guid == *guid; });
+        if (it == graph_.links.end()) {
+            return;
+        }
+        const GraphLink original = *it;
+
+        GraphNode reroute;
+        reroute.guid = Uuid::Generate();
+        reroute.type = "reroute";
+        // Posisi kursor dipakai APA ADANYA. Di dalam kanvas, pustaka sudah
+        // menulis ulang posisi mouse ImGui ke ruang kanvas — itu yang membuat
+        // widget di dalam node bisa diklik dengan benar saat di-zoom.
+        // Menerjemahkannya sekali lagi menerapkan transformasi dua kali, dan
+        // titik beloknya mendarat ribuan piksel dari kursor.
+        const ImVec2 mouse = ImGui::GetMousePos();
+        reroute.position = Vec2(mouse.x, mouse.y);
+        const Uuid rerouteGuid = reroute.guid;
+        graph_.nodes.push_back(std::move(reroute));
+
+        graph_.links.erase(it);
+
+        GraphLink incoming;
+        incoming.guid = Uuid::Generate();
+        incoming.fromNode = original.fromNode;
+        incoming.fromPin = original.fromPin;
+        incoming.toNode = rerouteGuid;
+        incoming.toPin = "in";
+        graph_.links.push_back(std::move(incoming));
+
+        GraphLink outgoing;
+        outgoing.guid = Uuid::Generate();
+        outgoing.fromNode = rerouteGuid;
+        outgoing.fromPin = "out";
+        outgoing.toNode = original.toNode;
+        outgoing.toPin = original.toPin;
+        graph_.links.push_back(std::move(outgoing));
+
+        // Node baru ditempatkan dari model pada frame berikutnya.
+        placed_.erase(rerouteGuid);
         Touch();
     }
 
@@ -1277,6 +1359,14 @@ private:
     }
 
     void RemoveNode(const Uuid& guid) {
+        // Menghapus titik belok menyambung kembali kabelnya, bukan memutusnya.
+        // Ia bagian dari kabel; membuangnya berarti "aku tidak jadi membelokkan
+        // di sini", bukan "aku tidak jadi menyambungkan keduanya".
+        const GraphNode* node = graph_.FindNode(guid);
+        if (node != nullptr && node->type == "reroute") {
+            RejoinThrough(guid);
+        }
+
         graph_.nodes.erase(std::remove_if(graph_.nodes.begin(), graph_.nodes.end(),
                                           [&guid](const GraphNode& n) { return n.guid == guid; }),
                            graph_.nodes.end());
@@ -1290,6 +1380,33 @@ private:
                            graph_.links.end());
         breakpoints_.erase(std::remove(breakpoints_.begin(), breakpoints_.end(), guid),
                            breakpoints_.end());
+    }
+
+    /// Menyambung ulang kabel yang melewati sebuah titik belok: A→R→B jadi A→B.
+    void RejoinThrough(const Uuid& reroute) {
+        const GraphLink* incoming = graph_.LinkInto(reroute, "in");
+        if (incoming == nullptr) {
+            return;
+        }
+        const Uuid fromNode = incoming->fromNode;
+        const std::string fromPin = incoming->fromPin;
+
+        std::vector<GraphLink> rejoined;
+        for (const GraphLink& link : graph_.links) {
+            if (link.fromNode != reroute || link.fromPin != "out") {
+                continue;
+            }
+            GraphLink direct;
+            direct.guid = Uuid::Generate();
+            direct.fromNode = fromNode;
+            direct.fromPin = fromPin;
+            direct.toNode = link.toNode;
+            direct.toPin = link.toPin;
+            rejoined.push_back(std::move(direct));
+        }
+        for (GraphLink& link : rejoined) {
+            graph_.links.push_back(std::move(link));
+        }
     }
 
     /// Id kanvas untuk sebuah GUID, dibuat saat pertama diminta.

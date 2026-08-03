@@ -441,6 +441,13 @@ PureValue Compiler::BuildPure(const GraphNode& node) {
     // Komentar dan grup tidak menghasilkan apa pun. Keduanya tidak punya pin,
     // jadi penelusuran tidak akan pernah sampai ke sini lewat koneksi — cabang
     // ini menjaga graph yang menyebutnya secara langsung tetap terkompilasi.
+    if (key == "reroute") {
+        // Titik belok tidak menghitung apa pun: nilainya diteruskan apa adanya,
+        // jadi ia tidak meninggalkan satu baris pun di Lua yang dihasilkan.
+        // Merapikan kabel tidak boleh mengubah kode.
+        value.outputs["out"] = input("in");
+        return value;
+    }
     if (key == "comment" || key == "group") {
         return value;
     }
@@ -678,6 +685,9 @@ void Compiler::EmitNode(const GraphNode& node) {
             InvalidatePure();
         }
         EmitExecFrom(node, "then");
+    } else if (key == "reroute") {
+        // Versi exec: yang diteruskan urutan jalannya, bukan sebuah nilai.
+        EmitExecFrom(node, "out");
     } else if (key == "graph.output") {
         std::string values;
         for (const GraphPort& port : graph_->outputs) {

@@ -249,6 +249,12 @@ Sumber log ditandai kategori (`[Asset]`, `[Lua]`, `[RHI]`).
   ia berjalan ketika dipanggil, dan "keadaan yang bertahan milik siapa" tidak
   punya jawaban yang bisa dipertahankan di sesuatu yang dipanggil dari banyak
   tempat. Lingkar antar-graph ditolak saat kompilasi.
+  **Merapikan kabel.** **Klik ganda** sebuah kabel menyisipkan *titik belok* di
+  situ; menyeretnya membelokkan jalur kabel tanpa mengubah apa yang tersambung.
+  Tipenya disimpulkan dari kabel yang melewatinya — kalau dipatok "apa saja", ia
+  akan menjadi lubang di sistem tipe. Menghapusnya menyambung kembali kabelnya,
+  bukan memutusnya. Titik belok tidak meninggalkan satu baris pun di Lua yang
+  dihasilkan: merapikan tampilan tidak boleh mengubah perilaku.
   **Ctrl+G** membungkus node terpilih dengan sebuah grup — kotak yang membawa
   serta seluruh isinya ketika digeser dari judulnya, dan bisa diubah ukurannya
   dari tepinya. Keanggotaannya ditentukan letak, bukan daftar: apa pun yang

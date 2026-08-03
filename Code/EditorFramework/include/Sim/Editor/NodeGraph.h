@@ -111,6 +111,16 @@ public:
     void FitToContent();
     void CenterOnNode(uint64_t id);
 
+    /// Link yang baru saja diklik ganda, atau 0. Dipakai menyisipkan titik
+    /// belok di tengah kabel — gerakan yang sama dengan editor node lain.
+    ///
+    /// Catatan untuk pemanggil: di antara Begin() dan End(), posisi mouse ImGui
+    /// SUDAH berada di ruang kanvas — pustaka menulis ulangnya supaya widget di
+    /// dalam node tetap bisa diklik saat di-zoom. Jadi `ImGui::GetMousePos()`
+    /// bisa dipakai apa adanya sebagai posisi node baru, tanpa konversi.
+    uint64_t DoubleClickedLink() const;
+
+
     /// True pada frame ketika pengguna meminta menu konteks di latar kanvas.
     ///
     /// Ditanyakan ke pustaka, bukan disimpulkan dari `IsMouseReleased` +
