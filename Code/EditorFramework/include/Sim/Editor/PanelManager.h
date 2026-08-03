@@ -62,6 +62,7 @@ private:
     };
 
     void EnforceViewportPlacement();
+    void ClampFloatingWindow();
     void DrawMaximizeButton(Panel& panel, bool hasCloseButton);
 
     std::vector<std::unique_ptr<Panel>> panels_;

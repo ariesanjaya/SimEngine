@@ -30,6 +30,19 @@ struct ImGuiLayerDesc {
     /// Rentang codepoint ikon. Di luar rentang ini glyph diambil dari font teks.
     unsigned int iconRangeMin = 0;
     unsigned int iconRangeMax = 0;
+
+    /// Panel boleh ditarik keluar menjadi jendela OS tersendiri.
+    ///
+    /// **Dimatikan untuk sementara.** Panel yang mendapat viewport sendiri
+    /// terlihat menggantung, dan gejalanya tidak selalu terjadi — dua hal yang
+    /// bersama-sama membuatnya sulit dilacak sementara editor tetap dipakai
+    /// bekerja setiap hari. Sampai penyebabnya ketemu, panel tetap di dalam
+    /// jendela utama: masih bisa dilepas dari dock dan mengambang, tapi tidak
+    /// keluar dari jendela.
+    ///
+    /// Menyalakannya kembali untuk menguji perbaikan cukup lewat
+    /// `SIM_ENABLE_VIEWPORTS=1` di environment, tanpa membangun ulang.
+    bool enableViewports = false;
 };
 
 /// Pemilik konteks Dear ImGui beserta backend SDL3 + Vulkan.

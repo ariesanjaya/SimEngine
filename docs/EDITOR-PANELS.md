@@ -62,7 +62,12 @@ biasa.
 Preset workspace lain (menu **View → Workspace**): *Level* (di atas), *Material*,
 *Particle*, *Terrain*, *Animation* — masing-masing memunculkan panel yang relevan.
 
-**Panel yang berdiri sendiri.** Panel yang ditarik keluar dockspace menjadi
+**Panel yang berdiri sendiri — tidak aktif untuk sementara.** Multi-viewport
+dimatikan karena panel yang mendapat viewport sendiri menggantung, jadi tombol
+yang dijelaskan di bawah tidak muncul sampai fiturnya dinyalakan lagi
+(`SIM_ENABLE_VIEWPORTS=1`). Penjelasannya disimpan karena kodenya tetap ada.
+
+Panel yang ditarik keluar dockspace menjadi
 jendela OS tersendiri, dan title bar-nya digambar ImGui, bukan window manager —
 jadi tombol maksimalkan yang biasa disediakan OS tidak ada di sana sama sekali.
 Karena itu `PanelManager` menambahkan sendiri satu tombol **maksimalkan /

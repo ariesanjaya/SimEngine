@@ -1,7 +1,8 @@
 # SimEngine
 
 Game engine 3D dengan inti C++20 dan Lua 5.4 sebagai bahasa runtime. Editornya
-dibangun di atas Dear ImGui (branch docking) dengan multi-viewport, sehingga
+dibangun di atas Dear ImGui (branch docking) dengan multi-viewport — untuk
+sementara dimatikan, lihat catatan di bawah — sehingga
 panel bisa ditarik keluar jendela utama ke monitor lain.
 
 Urutan pengerjaan: **editor dulu, rendering kemudian**. Alasan dan
@@ -51,7 +52,7 @@ Berkas yang ditulis editor saat berjalan:
 
 | Path | Isi |
 |---|---|
-| `~/.simengine/layout.ini` | susunan dock, termasuk posisi jendela di monitor kedua |
+| `~/.simengine/layout.ini` | susunan dock dan posisi panel mengambang |
 | `~/.simengine/panels.json` | panel mana yang terbuka |
 | `~/.simengine/shortcuts.json` | pintasan yang diubah dari bawaannya |
 | `~/.simengine/Logs/editor.log` | log lengkap sesi terakhir |
@@ -93,6 +94,14 @@ berwarna berbeda tetap berbeda warnanya ketika intensitasnya diseragamkan.
 Viewport terkunci di dockspace dan tidak bisa dilepas menjadi jendela tersendiri.
 Panel yang dilepas mendapat swapchain dan present sendiri; untuk gambar seukuran
 viewport penuh biayanya jauh di atas panel berisi teks.
+
+> **Panel tidak bisa keluar menjadi jendela OS untuk sementara.** Panel yang
+> mendapat viewport sendiri terlihat menggantung, dan gejalanya tidak selalu
+> muncul — dua hal yang bersama-sama membuatnya sulit dilacak sementara editor
+> tetap dipakai bekerja. Sampai penyebabnya ketemu, `ImGuiConfigFlags_ViewportsEnable`
+> dimatikan: panel masih bisa dilepas dari dock dan mengambang, tapi tetap di
+> dalam jendela editor. Untuk menguji perbaikannya, jalankan dengan
+> `SIM_ENABLE_VIEWPORTS=1` — tanpa membangun ulang.
 
 ### Aset
 
@@ -290,10 +299,12 @@ menggantung membawa serta editor.
 ### Kunci laju frame
 
 Editor mengunci laju frame ke **refresh rate terendah** di antara semua monitor
-yang terpasang — 60 Hz + 100 Hz menjadi 60, 100 Hz + 144 Hz menjadi 100. Dengan
-multi-viewport, sebuah panel bisa berada di monitor mana pun dan ikut digambar
-pada frame yang sama; menyamakan ke monitor terlambat membuat semua panel
-bergerak konsisten alih-alih sebagian patah-patah. Laju dihitung ulang otomatis
+yang terpasang — 60 Hz + 100 Hz menjadi 60, 100 Hz + 144 Hz menjadi 100.
+Alasannya multi-viewport: sebuah panel bisa berada di monitor mana pun dan ikut
+digambar pada frame yang sama, dan menyamakan ke monitor terlambat membuat semua
+panel bergerak konsisten alih-alih sebagian patah-patah. Aturannya dipertahankan
+selagi multi-viewport dimatikan — jendela editor sendiri tetap bisa dipindahkan
+ke monitor mana pun. Laju dihitung ulang otomatis
 kalau monitor ditambah, dicabut, atau mode-nya berubah, dan nilainya beserta
 monitor penyebabnya ditampilkan di status bar.
 

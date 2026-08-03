@@ -8,6 +8,7 @@
 #include <imgui_impl_vulkan.h>
 
 #include <SDL3/SDL_events.h>
+#include <SDL3/SDL_stdinc.h>
 
 #include <cmath>
 
@@ -80,7 +81,18 @@ void ImGuiLayer::ConfigureIo(const ImGuiLayerDesc& desc) {
 
     io.ConfigFlags |= ImGuiConfigFlags_NavEnableKeyboard;
     io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
-    io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+
+    // Multi-viewport dimatikan untuk sementara — lihat ImGuiLayerDesc.
+    // Environment override ada supaya perbaikannya bisa diuji tanpa membangun
+    // ulang; ia hanya bisa MENYALAKAN, tidak mematikan, sehingga tidak ada cara
+    // tidak sengaja mematikannya di mesin yang sudah benar.
+    const char* forceViewports = SDL_getenv("SIM_ENABLE_VIEWPORTS");
+    const bool viewports =
+        desc.enableViewports || (forceViewports != nullptr && forceViewports[0] == '1');
+    if (viewports) {
+        io.ConfigFlags |= ImGuiConfigFlags_ViewportsEnable;
+    }
+    SIM_INFO("ImGui", "Multi-viewport {}", viewports ? "on" : "off (panels stay in the main window)");
 
     // Panel hanya menempel ke dockspace eksplisit. Tanpa ini, menyeret panel ke
     // tengah viewport 3D akan menempelkannya ke jendela mana pun yang kebetulan

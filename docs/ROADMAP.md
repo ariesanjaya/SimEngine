@@ -1,7 +1,9 @@
 # SimEngine — Roadmap
 
 Game engine 3D dengan C++20 di inti dan Lua 5.4 sebagai bahasa runtime/gameplay.
-Editor dibangun di atas Dear ImGui (branch docking) dengan multi-viewport sehingga
+Editor dibangun di atas Dear ImGui (branch docking) dengan multi-viewport —
+untuk sementara dimatikan karena panel yang mendapat viewport sendiri
+menggantung — sehingga
 panel bisa ditarik keluar jendela utama ke monitor lain.
 
 Dokumen ini adalah peta besar. Detail per milestone ada di:

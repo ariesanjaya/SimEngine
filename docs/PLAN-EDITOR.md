@@ -116,6 +116,11 @@ ke monitor kedua, font tajam di tiap DPI, dan tema gelap terpasang.
    lagi → jendela kembali di (1473, 90) berukuran 320×715, dan siklus kedua
    tanpa menyentuh `layout.ini` menghasilkan hasil yang sama. Sempat rusak;
    lihat "Penempatan viewport" di bawah.
+
+   ⚠️ **Kriteria 2 dan 3 tidak lagi berlaku sejak multi-viewport dimatikan**
+   (3 Agustus 2026): panel yang mendapat viewport sendiri menggantung. Keduanya
+   pernah terverifikasi dan jalurnya masih ada — `SIM_ENABLE_VIEWPORTS=1`
+   menyalakannya kembali — tapi jangan dibaca sebagai keadaan editor sekarang.
 4. ⚠️ Nol error validation dari kode SimEngine. Yang tersisa berasal dari Dear ImGui
    sendiri: `ImGui_ImplVulkanH_CreateOrResizeWindow` mentransisikan layout semua
    image swapchain viewport sekunder tanpa meng-*acquire*-nya lebih dulu,

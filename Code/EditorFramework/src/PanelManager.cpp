@@ -117,6 +117,7 @@ void PanelManager::Draw(EditorContext& context) {
         }
         const bool visible = ImGui::Begin(label.c_str(), openFlag, windowFlags);
         EnforceViewportPlacement();
+        ClampFloatingWindow();
         DrawMaximizeButton(*panel, openFlag != nullptr);
 
         if (zeroPadding) {
@@ -242,6 +243,35 @@ void PanelManager::EnforceViewportPlacement() {
     if (driftX > kToleranceInPixels || driftY > kToleranceInPixels) {
         ImGui::SetWindowPos(ImVec2(placement.wantedX, placement.wantedY));
     }
+}
+
+void PanelManager::ClampFloatingWindow() {
+    // Panel mengambang yang lebih besar dari jendela utama dikecilkan.
+    //
+    // Yang dijaga adalah satu peralihan: layout tersimpan dari masa ketika panel
+    // boleh keluar menjadi jendela OS sendiri. Sebuah panel yang dulu memenuhi
+    // monitor kedua punya ukuran tersimpan yang lebih besar dari seluruh jendela
+    // editor, dan ketika multi-viewport dimatikan ia kembali masuk dengan ukuran
+    // itu — menutupi segalanya. Yang terlihat pengguna adalah editor yang rusak
+    // setelah pembaruan, bukan sebuah panel yang kebesaran.
+    //
+    // Hanya berlaku saat panel tidak punya viewport sendiri: kalau multi-viewport
+    // menyala, ukuran melebihi jendela utama justru wajar.
+    ImGuiWindow* window = ImGui::GetCurrentWindow();
+    if (window->ViewportOwned || window->DockIsActive || window->Collapsed) {
+        return;
+    }
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    const ImVec2 limit = viewport->WorkSize;
+    if (window->SizeFull.x <= limit.x && window->SizeFull.y <= limit.y) {
+        return;
+    }
+    ImGui::SetWindowSize(ImVec2(ImMin(window->SizeFull.x, limit.x),
+                                ImMin(window->SizeFull.y, limit.y)));
+    // Sekalian ditarik masuk: panel sebesar layar yang pojok kirinya di luar
+    // layar tetap tidak bisa dipegang title bar-nya.
+    ImGui::SetWindowPos(ImVec2(ImMax(window->Pos.x, viewport->WorkPos.x),
+                               ImMax(window->Pos.y, viewport->WorkPos.y)));
 }
 
 void PanelManager::DrawMaximizeButton(Panel& panel, bool hasCloseButton) {

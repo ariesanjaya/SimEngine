@@ -232,6 +232,9 @@ disubmit, karena tekstur hasilnya dipakai di draw list yang sama.
 
 Dear ImGui branch docking menyediakan `ImGuiConfigFlags_ViewportsEnable`: panel yang
 ditarik keluar dockspace menjadi jendela OS asli, bisa dipindah ke monitor lain.
+**Dimatikan untuk sementara** (`ImGuiLayerDesc::enableViewports`): panel yang
+mendapat viewport sendiri menggantung. Jalurnya tetap ada dan bisa dinyalakan
+lewat `SIM_ENABLE_VIEWPORTS=1` untuk menguji perbaikan.
 Yang harus kita tangani:
 
 - **DPI per monitor.** `io.ConfigDpiScaleFonts = true` dan

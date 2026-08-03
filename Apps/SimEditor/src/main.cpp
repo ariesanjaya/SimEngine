@@ -180,6 +180,10 @@ int main(int /*argc*/, char** /*argv*/) {
     layerDesc.iconFontPath = ExecutableDirectory() / "Resources" / "Fonts" / "lucide.ttf";
     layerDesc.iconRangeMin = ICON_MIN_LC;
     layerDesc.iconRangeMax = ICON_MAX_LC;
+    // Ditulis eksplisit meski sudah menjadi bawaan: mematikan panel yang bisa
+    // keluar jadi jendela OS adalah keputusan yang harus terlihat di tempat
+    // seluruh modul disambungkan, bukan hanya di nilai bawaan sebuah struct.
+    layerDesc.enableViewports = false;
 
     std::error_code ec;
     std::filesystem::create_directories(configDir, ec);
