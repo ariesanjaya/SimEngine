@@ -157,6 +157,18 @@ pembuatan aset baru (Material, Material Instance, Particle, Terrain, Lua Script)
 Header: nama entity (bisa diedit), status, Entity ID (bisa disalin) — sesuai acuan.
 Tombol **Add Component** dengan daftar yang bisa dicari, dikelompokkan per kategori.
 
+Komponen **Script** dan **Graph** mendapat satu bagian tambahan, **Exposed**:
+properti yang dideklarasikan berkas skrip, atau variabel graph yang ditandai
+*Exposed* di tab Details. Keduanya digambar kode yang sama — kompiler graph
+membangkitkan deklarasi `properties` yang bentuknya sama persis dengan milik
+skrip tulis tangan, jadi yang membedakan hanya aset yang dirujuk.
+
+Bagian ini sengaja tidak lewat grid generik: daftarnya ditentukan berkas skrip
+atau graph, bukan pengguna, dan tombol tambah/hapus elemen yang akan muncul
+sendiri untuk sebuah field vektor menjanjikan sesuatu yang tidak berlaku. Yang
+tersimpan di entity hanya nilainya; bawaannya tetap tinggal di berkas asalnya,
+sehingga mengubah bawaan tidak menyentuh entity yang sudah punya nilai sendiri.
+
 Isi digambar otomatis dari `Reflect`:
 
 | Tipe field | Widget |

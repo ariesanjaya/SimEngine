@@ -786,6 +786,47 @@ TEST_CASE("GraphComponent berjalan lewat jalur yang sama dengan ScriptComponent"
     CHECK_FALSE(world.TryGet<scene::GraphComponent>(entity)->loaded);
 }
 
+TEST_CASE("Nilai properti di GraphComponent mengalahkan bawaan graph") {
+    scene::RegisterCoreComponents();
+    NodeCatalog::Rebuild();
+
+    TempDir assetsDir;
+    TempDir cacheDir;
+    REQUIRE(SaveGraphToFile(SpinGraph(), assetsDir.path / "spin.simgraph").ok);
+
+    TaskPool pool(2);
+    assets::AssetDatabase db;
+    REQUIRE(db.Initialize({assetsDir.path, &pool, 0.05f}));
+    const assets::AssetRecord* record = db.FindByRelativePath("spin.simgraph");
+    REQUIRE(record != nullptr);
+
+    scene::World world;
+    const scene::Entity entity = world.Create("Spinner");
+    auto& component = world.Add<scene::GraphComponent>(entity);
+    component.graph = AssetRef{record->guid};
+    // Persis yang ditulis Inspector ketika pengguna menyunting variabel yang
+    // ditandai "Exposed". Nol dipilih karena ia satu-satunya nilai yang bisa
+    // hilang tanpa terlihat: bawaan graph 1.5, dan setiap cara menyiapkan
+    // properti yang memakai `or` di Lua akan diam-diam mengembalikannya.
+    component.properties.push_back(
+        scene::ScriptProperty{"speed", scene::ScriptPropertyKind::Number, 0.0f, false, {}});
+
+    ScriptRuntime runtime;
+    REQUIRE(runtime.Initialize(world, &db, cacheDir.path));
+    runtime.Start();
+    for (int i = 0; i < 5; ++i) {
+        runtime.Update(0.016f);
+    }
+
+    // Sudut putarnya waktu * speed, jadi speed nol berarti rotasi tetap
+    // identitas — sementara bawaan 1.5 akan memutarnya.
+    const auto* transform = world.TryGet<scene::TransformComponent>(entity);
+    REQUIRE(transform != nullptr);
+    CHECK(transform->rotation.y == doctest::Approx(0.0f));
+    CHECK(transform->rotation.w == doctest::Approx(1.0f));
+    runtime.Stop();
+}
+
 TEST_CASE("Breakpoint memanggil penangan dan menyebut node-nya") {
     scene::RegisterCoreComponents();
     NodeCatalog::Rebuild();

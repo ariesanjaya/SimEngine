@@ -214,11 +214,9 @@ private:
 
             if (open) {
                 PropertyGridResult result = DrawProperties(*ops.type, data, mixed);
-                if (ops.type->name == "Script") {
-                    const PropertyGridResult exposed = DrawExposedProperties(context, data);
-                    result.edited = result.edited || exposed.edited;
-                    result.finished = result.finished || exposed.finished;
-                }
+                const PropertyGridResult exposed = DrawExposedProperties(context, ops, data);
+                result.edited = result.edited || exposed.edited;
+                result.finished = result.finished || exposed.finished;
 
                 if (result.edited && context.history != nullptr) {
                     ApplyEdit(context, world, ops, items, data);
@@ -242,20 +240,37 @@ private:
     /// menyentuh komponennya langsung, lalu DrawComponents yang membandingkan
     /// dengan cuplikan sebelum-gambar dan menerbitkan satu command. Undo dan
     /// multi-select karena itu berlaku tanpa kode tambahan.
-    PropertyGridResult DrawExposedProperties(EditorContext& context, void* data) {
+    PropertyGridResult DrawExposedProperties(EditorContext& context,
+                                             const scene::ComponentOps& ops,
+                                             void* data) {
         PropertyGridResult result;
 #if SIM_WITH_LUA
-        auto* component = static_cast<scene::ScriptComponent*>(data);
-        if (context.scripts == nullptr || !component->script.IsValid()) {
+        // Script dan Graph sama-sama menjalankan Lua dan sama-sama menyimpan
+        // nilai propertinya per-entity; yang berbeda hanya aset yang dirujuk.
+        // Kompiler graph membangkitkan deklarasi `properties` yang bentuknya
+        // sama persis dengan milik skrip tulis tangan, jadi kode di bawah tidak
+        // perlu tahu ia sedang melayani yang mana.
+        const AssetRef* asset = nullptr;
+        std::vector<scene::ScriptProperty>* properties = nullptr;
+        if (ops.type->name == "Script") {
+            auto* component = static_cast<scene::ScriptComponent*>(data);
+            asset = &component->script;
+            properties = &component->properties;
+        } else if (ops.type->name == "Graph") {
+            auto* component = static_cast<scene::GraphComponent*>(data);
+            asset = &component->graph;
+            properties = &component->properties;
+        }
+        if (properties == nullptr || context.scripts == nullptr || !asset->IsValid()) {
             return result;
         }
-        SyncWithDeclaration(context, *component);
-        if (component->properties.empty()) {
+        SyncWithDeclaration(context, *asset, *properties);
+        if (properties->empty()) {
             return result;
         }
 
         ImGui::SeparatorText("Exposed");
-        for (scene::ScriptProperty& property : component->properties) {
+        for (scene::ScriptProperty& property : *properties) {
             ImGui::PushID(property.name.c_str());
             ImGui::TextUnformatted(property.name.c_str());
             ImGui::SameLine(ImGui::GetFontSize() * 9.0f);
@@ -287,13 +302,14 @@ private:
         }
 #else
         (void)context;
+        (void)ops;
         (void)data;
 #endif
         return result;
     }
 
 #if SIM_WITH_LUA
-    /// Menyesuaikan daftar properti komponen dengan deklarasi skripnya:
+    /// Menyesuaikan daftar properti komponen dengan deklarasi asetnya:
     /// yang hilang dibuang, yang baru diambil beserta bawaannya, dan yang
     /// namanya masih ada mempertahankan nilai yang sudah disunting.
     ///
@@ -301,44 +317,46 @@ private:
     /// Mengadopsi deklarasi skrip bukan suntingan pengguna — memperlakukannya
     /// sebagai suntingan akan menaruh entri undo di riwayat hanya karena sebuah
     /// entity kebetulan dipilih.
-    void SyncWithDeclaration(EditorContext& context, scene::ScriptComponent& component) {
+    void SyncWithDeclaration(EditorContext& context, const AssetRef& asset,
+                             std::vector<scene::ScriptProperty>& properties) {
         const uint64_t version = context.assets != nullptr ? context.assets->Version() : 0;
         if (version != declarationVersion_) {
             // Berkas skripnya mungkin berubah. Menjalankan ulang chunk-nya tiap
             // frame hanya untuk membaca tabel yang sama adalah pemborosan yang
             // tidak terlihat sampai ada seratus entity berskrip.
+            //
+            // Untuk graph, cache ini menahan lebih dari itu: membaca deklarasi
+            // sebuah graph berarti memastikan hasil kompilasinya mutakhir, dan
+            // itu bukan pekerjaan yang boleh dilakukan setiap frame hanya karena
+            // sebuah entity kebetulan dipilih.
             declarations_.clear();
             declarationVersion_ = version;
         }
-        auto it = declarations_.find(component.script.guid);
+        auto it = declarations_.find(asset.guid);
         if (it == declarations_.end()) {
-            it = declarations_
-                     .emplace(component.script.guid,
-                              context.scripts->DeclaredProperties(component.script.guid))
+            it = declarations_.emplace(asset.guid, context.scripts->DeclaredProperties(asset.guid))
                      .first;
         }
 
         std::vector<scene::ScriptProperty> merged;
         merged.reserve(it->second.size());
         for (const scene::ScriptProperty& declared : it->second) {
-            const auto stored =
-                std::find_if(component.properties.begin(), component.properties.end(),
-                             [&](const scene::ScriptProperty& candidate) {
-                                 return candidate.name == declared.name;
-                             });
+            const auto stored = std::find_if(properties.begin(), properties.end(),
+                                             [&](const scene::ScriptProperty& candidate) {
+                                                 return candidate.name == declared.name;
+                                             });
             // Tipe yang berganti di skrip mengalahkan nilai tersimpan: sebuah
             // angka yang menjadi teks tidak punya nilai lama yang masuk akal.
-            merged.push_back(stored != component.properties.end() && stored->kind == declared.kind
-                                 ? *stored
-                                 : declared);
+            merged.push_back(
+                stored != properties.end() && stored->kind == declared.kind ? *stored : declared);
         }
-        if (merged.size() != component.properties.size() ||
-            !std::equal(merged.begin(), merged.end(), component.properties.begin(),
+        if (merged.size() != properties.size() ||
+            !std::equal(merged.begin(), merged.end(), properties.begin(),
                         [](const scene::ScriptProperty& a, const scene::ScriptProperty& b) {
                             return a.name == b.name && a.kind == b.kind && a.number == b.number &&
                                    a.flag == b.flag && a.text == b.text;
                         })) {
-            component.properties = std::move(merged);
+            properties = std::move(merged);
         }
     }
 

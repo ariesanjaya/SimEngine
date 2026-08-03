@@ -617,7 +617,7 @@ ubah berkas, dengan handle lama tetap dipakai sampai gambar baru siap.
 
 ---
 
-## E6 — Runtime Lua + visual scripting + editor scripting · ~6 sesi · ✅ SELESAI (2 Agustus 2026) · sisa satu celah, lihat "Yang belum selesai"
+## E6 — Runtime Lua + visual scripting + editor scripting · ~6 sesi · ✅ SELESAI (2 Agustus 2026)
 
 **Tujuan.** Lua jadi bahasa gameplay, dan editor bisa diperluas dengan Lua.
 
@@ -641,7 +641,7 @@ ubah berkas, dengan handle lama tetap dipakai sampai gambar baru siap.
   compiler graph → Lua beserta peta sumber, `GraphCache`, `GraphComponent`, dan
   panel **Graph Editor** di atas imgui-node-editor.
 
-**Kriteria terima** — 26 test di `Tests/GraphTests.cpp`, 12 di `ScriptTests.cpp`,
+**Kriteria terima** — 27 test di `Tests/GraphTests.cpp`, 12 di `ScriptTests.cpp`,
 5 di `EditorScriptingTests.cpp`, plus verifikasi di editor sungguhan.
 
 1. ✅ Skrip yang memutar entity berjalan saat **Play**, berhenti saat **Stop**,
@@ -661,6 +661,9 @@ ubah berkas, dengan handle lama tetap dipakai sampai gambar baru siap.
 5. ✅ Properti yang diekspos skrip muncul di Inspector, bisa disunting untuk
    seluruh seleksi sebagai satu entri undo, dan ikut tersimpan ke berkas level.
    Yang tersimpan di entity hanyalah yang benar-benar disunting.
+   Berlaku sama untuk variabel graph yang ditandai *Exposed*: keduanya
+   menjalankan Lua dan menyimpan nilainya per-entity, jadi Inspector melayani
+   keduanya lewat kode yang sama — yang membedakan hanya aset yang dirujuk.
 6. ✅ Graph "putar entity saat OnUpdate" menghasilkan Lua yang bisa dibaca, dan
    perilakunya identik dengan skrip tulis tangan yang setara — keduanya
    dijalankan berdampingan dan transform-nya dicocokkan **tiap frame** selama 30
@@ -706,25 +709,6 @@ ubah berkas, dengan handle lama tetap dipakai sampai gambar baru siap.
   cacat yang tersembunyi selama tombol pan dan tombol menu kebetulan sama.
 
 **Yang belum selesai** (diperiksa ulang 3 Agustus 2026)
-
-- **Variabel graph yang ditandai "Exposed" tidak punya UI di Inspector.**
-  Seluruh jalurnya sudah ada kecuali satu ujung: Graph Editor menyediakan
-  centang *Exposed*, kompiler membangkitkan deklarasi `properties` darinya,
-  `GraphComponent::properties` ada dan ikut tersimpan ke berkas level, dan
-  `ScriptRuntime` menimpa nilai bawaan dengan isinya persis seperti untuk
-  skrip. Yang tidak ada hanya penggambarnya: `InspectorPanel` memanggil
-  `DrawExposedProperties()` hanya ketika komponennya bernama "Script", sehingga
-  komponen Graph berhenti di *Graph Asset* dan *Loaded*.
-
-  Akibatnya centang *Exposed* menjanjikan sesuatu yang tidak bisa ditepati —
-  satu-satunya cara memberi entity nilainya sendiri adalah menyunting berkas
-  level dengan tangan. Kriteria terima 5 tidak dilanggar (ia menyebut properti
-  yang diekspos *skrip*), tapi separuh fitur yang sudah dibayar lunas di semua
-  lapisan lain tidak bisa dipakai.
-
-  Yang dibutuhkan: `DrawExposedProperties()` dan `SyncWithDeclaration()`
-  bekerja pada pasangan (`AssetRef`, `std::vector<ScriptProperty>&`), bukan
-  pada `ScriptComponent*`, lalu dipanggil untuk kedua komponen.
 
 - **Seleksi hilang setelah Stop.** Cuplikan scene dipulihkan sebagai entity
   baru, dan `Selection` masih memegang handle yang lama. GUID entity-nya sendiri
