@@ -137,5 +137,7 @@ source /home/arie/SDK/vulkan-sdk-1.4.350.1/setup-env.sh
 | `/home/arie/SDK/PhysX-main` | Sumber PhysX untuk E9 |
 | `/home/arie/SDK/o3de` | Acuan alur kerja & tata letak editor (gambar acuan berasal dari sini) |
 | `/home/arie/SDK/MemeEngine` | Proyek sebelumnya — acuan konvensi CMake, dokumen, dan struktur modul |
-| `/home/arie/SDK/openpbr.slang` | Implementasi OpenPBR Surface v1.1 real-time. Menentukan himpunan parameter node keluaran Material Editor (E7.1) dan model shading E8 |
+| `/home/arie/SDK/openpbr.slang` | Implementasi OpenPBR Surface v1.1 real-time. Menentukan himpunan parameter node keluaran Material Editor (E7.1) dan model shading E8. Nilai bawaannya sudah dicocokkan dengan berkas normatif OpenPBR (lihat baris di bawah) dan dikunci test |
+| [`reference/open_pbr_surface.mtlx`](https://github.com/AcademySoftwareFoundation/OpenPBR) | Berkas **normatif** nilai bawaan OpenPBR Surface (nodedef MaterialX, `isdefaultversion`). Yang menang kalau berbeda dari halaman prosa spesifikasinya — halaman itu memuat sisa revisi lama, dan sempat membuat `coat_roughness`/`coat_ior` terbaca 0.03/1.5 alih-alih 0.0/1.6 |
+| [`adobe/openpbr-bsdf`](https://github.com/adobe/openpbr-bsdf) | Implementasi acuan OpenPBR 1.1 dari Adobe. **Untuk path tracing, bukan real time** — README-nya menyatakan "designed for unidirectional path tracing", dan isinya evaluate + sample + PDF, 7 tabel kompensasi energi, integrasi volumetrik, sampling panjang gelombang. Dipakai sebagai acuan kebenaran, bukan sebagai kode yang dipakai ulang |
 | `/home/arie/SDK/openpbr_dfg.slang` | Generator LUT split-sum (DFG) untuk berkas di atas. RG16F 128², `E_spec = F0*dfg.x + dfg.y`; deterministik, jadi boleh di-bake sekali dan di-ship |

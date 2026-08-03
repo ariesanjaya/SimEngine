@@ -74,10 +74,33 @@ TEST_CASE("Katalog memakai parameter OpenPBR Surface pada node keluaran") {
 
     // Nilai bawaannya juga mengikuti OpenPBRSurface::defaults(). Material yang
     // dibiarkan apa adanya harus terlihat sama di editor dan di shader.
-    CHECK(output->FindPin("specularRoughness")->defaultValue == "0.3");
-    CHECK(output->FindPin("specularIor")->defaultValue == "1.5");
-    CHECK(output->FindPin("coatIor")->defaultValue == "1.6");
+    //
+    // Angkanya dicocokkan dengan berkas NORMATIF OpenPBR, bukan halaman prosa
+    // spesifikasinya: `reference/open_pbr_surface.mtlx` di repo
+    // AcademySoftwareFoundation/OpenPBR (nodedef isdefaultversion, v1.1.1).
+    // Halaman prosanya sempat membuat `coat_roughness` terbaca 0.03 dan
+    // `coat_ior` terbaca 1.5 — keduanya angka revisi lama, dari bagian yang
+    // masih menyebut coat_affect_color/coat_affect_roughness. Berkas nodedef
+    // itu yang menang, dan seluruh coat dikunci di sini supaya salah baca yang
+    // sama tidak bisa terulang menjadi perubahan kode.
+    CHECK(output->FindPin("baseWeight")->defaultValue == "1.0");
     CHECK(output->FindPin("baseColor")->defaultValue == "float3(0.8)");
+    CHECK(output->FindPin("baseMetalness")->defaultValue == "0.0");
+    CHECK(output->FindPin("baseDiffuseRoughness")->defaultValue == "0.0");
+    CHECK(output->FindPin("specularWeight")->defaultValue == "1.0");
+    CHECK(output->FindPin("specularColor")->defaultValue == "float3(1.0)");
+    CHECK(output->FindPin("specularRoughness")->defaultValue == "0.3");
+    CHECK(output->FindPin("specularRoughnessAnisotropy")->defaultValue == "0.0");
+    CHECK(output->FindPin("specularIor")->defaultValue == "1.5");
+    CHECK(output->FindPin("coatWeight")->defaultValue == "0.0");
+    CHECK(output->FindPin("coatColor")->defaultValue == "float3(1.0)");
+    CHECK(output->FindPin("coatRoughness")->defaultValue == "0.0");
+    CHECK(output->FindPin("coatRoughnessAnisotropy")->defaultValue == "0.0");
+    CHECK(output->FindPin("coatIor")->defaultValue == "1.6");
+    CHECK(output->FindPin("coatDarkening")->defaultValue == "1.0");
+    CHECK(output->FindPin("fuzzWeight")->defaultValue == "0.0");
+    CHECK(output->FindPin("fuzzColor")->defaultValue == "float3(1.0)");
+    CHECK(output->FindPin("fuzzRoughness")->defaultValue == "0.5");
 
     // Node keluaran tidak punya pin keluar — ia ujung graph.
     CHECK(output->Outputs().empty());
