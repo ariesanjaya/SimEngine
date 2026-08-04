@@ -232,7 +232,7 @@ Sumber log ditandai kategori (`[Asset]`, `[Lua]`, `[RHI]`).
 |---|---|
 | **Material Editor** | kiri: palet node + daftar parameter · tengah: node graph · kanan: properti node terpilih · pojok: preview mesh |
 | **Particle Editor** | kiri: daftar efek · tengah: preview + timeline + statistik di bawahnya · kanan: daftar emitter (baris bertumpuk, tiap baris punya sakelar dan jumlah partikelnya sendiri) lalu tumpukan modul emitter terpilih, dengan kurva & gradient inline |
-| **Terrain Editor** | kiri: daftar terrain · tengah: peta relief 2D dari atas (sculpt langsung di sini) + status · kanan: pemilih alat, setting brush + profilnya, erosi, impor/ekspor heightmap · viewport 3D menyusul di E8 |
+| **Terrain Editor** | kiri: daftar terrain · tengah: peta 2D dari atas (sculpt dan paint langsung di sini) + status · kanan: tiga tab alat — Sculpt (pemilih alat, brush + profilnya, erosi), Paint (daftar layer material + propertinya, kuas bobot), Holes (kuas lubang + jumlah quad terpotong) — lalu impor/ekspor heightmap dan pilihan tampilan peta (Relief / Layers / Weight) · viewport 3D menyusul di E8 |
 | **Vegetation Editor** | kiri: daftar layer vegetasi · kanan: aturan penempatan + setting instance · toolbar: paint/erase/scatter |
 | **Animation Editor** | kiri: pohon skeleton · tengah-atas: preview · tengah-bawah: dope sheet / curve editor · kanan: properti keyframe/event · tab terpisah: state machine graph |
 

@@ -88,6 +88,8 @@ inline constexpr const char* kNodeGraph = ICON_LC_GIT_BRANCH;
 inline constexpr const char* kCurve = ICON_LC_SPLINE;
 inline constexpr const char* kBrush = ICON_LC_BRUSH;
 inline constexpr const char* kSculpt = ICON_LC_SHOVEL;
+inline constexpr const char* kHole = ICON_LC_CIRCLE_DASHED;
+inline constexpr const char* kLayers = ICON_LC_LAYERS;
 inline constexpr const char* kImport = ICON_LC_IMPORT;
 inline constexpr const char* kExport = ICON_LC_UPLOAD;
 

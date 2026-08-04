@@ -75,6 +75,54 @@ Brush RaiseBrush() {
     return brush;
 }
 
+PaintBrush LayerPaintBrush() {
+    PaintBrush brush;
+    brush.radius = 12.0f;
+    brush.strength = 4.0f;
+    brush.falloff = 0.5f;
+    brush.target = 1.0f;
+    return brush;
+}
+
+uint64_t HashWeights(const Terrain& terrain, int layer) {
+    std::vector<Weight> weights;
+    terrain.ReadWeights(layer, weights);
+    uint64_t hash = 1469598103934665603ull;
+    for (const Weight weight : weights) {
+        hash ^= weight;
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+uint64_t HashHoles(const Terrain& terrain) {
+    std::vector<uint8_t> holes;
+    terrain.ReadHoles(holes);
+    uint64_t hash = 1469598103934665603ull;
+    for (const uint8_t hole : holes) {
+        hash ^= hole;
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+/// Total bobot seluruh layer pada sebuah sampel. Menurut bentuk penyimpanannya
+/// ia selalu 255 — layer dasar adalah sisanya — jadi angka lain berarti ada
+/// jalur tulis yang melanggar invariannya.
+int TotalWeight(const Terrain& terrain, int x, int y) {
+    int total = 0;
+    for (int layer = 0; layer < terrain.LayerCount(); ++layer) {
+        total += terrain.WeightAt(layer, x, y);
+    }
+    return total;
+}
+
+TerrainLayer NamedLayer(const std::string& name) {
+    TerrainLayer layer;
+    layer.name = name;
+    return layer;
+}
+
 }  // namespace
 
 TEST_CASE("Sampel di luar batas dijepit, bukan menabrak") {
@@ -429,10 +477,15 @@ TEST_CASE("Dokumen .simterrain disimpan lalu dimuat identik, bersama heightmapny
 
     // Byte-per-byte sama, seperti `.simfx` dan `.simmat`: menyimpan dokumen yang
     // tidak disunting tidak boleh menghasilkan diff palsu.
-    const std::string text = SaveDocumentToString(loadedDocument);
+    std::vector<TerrainLayer> layers;
+    for (int index = 0; index < loadedTerrain.LayerCount(); ++index) {
+        layers.push_back(loadedTerrain.Layer(index));
+    }
+    const std::string text = SaveDocumentToString(loadedDocument, layers);
     TerrainDocument again;
-    REQUIRE(LoadDocumentFromString(again, text).ok);
-    CHECK(SaveDocumentToString(again) == text);
+    std::vector<TerrainLayer> againLayers;
+    REQUIRE(LoadDocumentFromString(again, againLayers, text).ok);
+    CHECK(SaveDocumentToString(again, againLayers) == text);
 }
 
 TEST_CASE("Flatten menuju tinggi tujuan, tidak melewatinya") {
@@ -715,4 +768,539 @@ TEST_CASE("Menyeret cepat tidak menumpuk lebih banyak material daripada pelan") 
     const double fine = totalRise(30);
     INFO("kasar ", coarse, " vs halus ", fine);
     CHECK(coarse == doctest::Approx(fine).epsilon(0.05));
+}
+
+// --- layer material dan bobot splat ------------------------------------------
+
+TEST_CASE("Layer dasar adalah sisa, jadi terrain baru tidak menyimpan bobot apa pun") {
+    Terrain terrain(TerrainDesc{64, 2, 2, 1.0f, 0.0f, 100.0f, 0.0f});
+    REQUIRE(terrain.LayerCount() == 1);
+
+    const std::size_t empty = terrain.BytesResident();
+    CHECK(terrain.WeightAt(0, 0, 0) == 255);
+    CHECK(terrain.WeightAt(0, 90, 90) == 255);
+    CHECK(TotalWeight(terrain, 90, 90) == 255);
+
+    // Membaca bobot tidak boleh mewujudkan apa pun. Peta yang lahir dari
+    // dibaca adalah peta yang membuat "belum pernah dicat" mustahil dibedakan
+    // dari "dicat nol".
+    CHECK(terrain.BytesResident() == empty);
+    CHECK_FALSE(terrain.LayerPainted(0));
+}
+
+TEST_CASE("Total bobot tiap sampel tetap 255, apa pun urutan mengecatnya") {
+    Terrain terrain(TerrainDesc{64, 2, 2, 1.0f, 0.0f, 100.0f, 0.0f});
+    REQUIRE(terrain.AddLayer(NamedLayer("Rumput")) == 1);
+    REQUIRE(terrain.AddLayer(NamedLayer("Batu")) == 2);
+    REQUIRE(terrain.AddLayer(NamedLayer("Pasir")) == 3);
+
+    const PaintBrush brush = LayerPaintBrush();
+    // Tiga sapuan yang saling menumpuk, dengan pusat berbeda supaya ada sampel
+    // yang menerima satu, dua, dan tiga layer sekaligus.
+    terrain.BeginStroke();
+    for (int i = 0; i < 30; ++i) {
+        ApplyLayerDab(terrain, brush, 1, 60.0f, 60.0f, 1.0f / 60.0f);
+        ApplyLayerDab(terrain, brush, 2, 68.0f, 60.0f, 1.0f / 60.0f);
+        ApplyLayerDab(terrain, brush, 3, 64.0f, 68.0f, 1.0f / 60.0f);
+    }
+    terrain.EndStroke();
+
+    int explicitOverflow = 0;
+    int wrongTotal = 0;
+    for (int y = 40; y < 90; ++y) {
+        for (int x = 40; x < 90; ++x) {
+            if (TotalWeight(terrain, x, y) != 255) {
+                ++wrongTotal;
+            }
+            int sum = 0;
+            for (int layer = 1; layer < terrain.LayerCount(); ++layer) {
+                sum += terrain.WeightAt(layer, x, y);
+            }
+            if (sum > 255) {
+                ++explicitOverflow;
+            }
+        }
+    }
+    INFO("total salah pada ", wrongTotal, " sampel, kelebihan pada ", explicitOverflow);
+    CHECK(wrongTotal == 0);
+    CHECK(explicitOverflow == 0);
+
+    // Dan yang dicat memang ada — kalau seluruhnya nol, total 255 hanya berarti
+    // layer dasar tidak pernah tersentuh.
+    //
+    // Yang diuji perbandingannya, bukan angkanya: di titik ini ketiga kuas
+    // tumpang tindih, jadi ketiganya berbagi 255 dan tidak satu pun mendekati
+    // penuh. Yang harus benar adalah layer yang pusat kuasnya di sini mendapat
+    // bagian terbesar.
+    CHECK(terrain.WeightAt(0, 60, 60) < 60);
+    CHECK(terrain.WeightAt(1, 60, 60) > terrain.WeightAt(2, 60, 60));
+    CHECK(terrain.WeightAt(1, 60, 60) > terrain.WeightAt(3, 60, 60));
+}
+
+TEST_CASE("Mengecat sampai penuh benar-benar mencapai 255") {
+    Terrain terrain(TerrainDesc{32, 1, 1, 1.0f, 0.0f, 100.0f, 0.0f});
+    REQUIRE(terrain.AddLayer(NamedLayer("Rumput")) == 1);
+
+    PaintBrush brush = LayerPaintBrush();
+    brush.radius = 6.0f;
+    brush.falloff = 0.0f;
+
+    terrain.BeginStroke();
+    for (int i = 0; i < 120; ++i) {
+        ApplyLayerDab(terrain, brush, 1, 16.0f, 16.0f, 1.0f / 60.0f);
+    }
+    terrain.EndStroke();
+
+    // Dengan pembulatan ke terdekat, sentuhan terakhir sebelum penuh selalu
+    // membulat kembali dan bobotnya berhenti di 254: "cat sampai penuh" menjadi
+    // mustahil, dan tidak ada jumlah sapuan yang menolongnya.
+    CHECK(terrain.WeightAt(1, 16, 16) == 255);
+    CHECK(terrain.WeightAt(0, 16, 16) == 0);
+}
+
+TEST_CASE("Mengecat layer dasar menghapus layer di atasnya") {
+    Terrain terrain(TerrainDesc{32, 1, 1, 1.0f, 0.0f, 100.0f, 0.0f});
+    REQUIRE(terrain.AddLayer(NamedLayer("Rumput")) == 1);
+    terrain.SetWeightAt(1, 10, 10, 200);
+    REQUIRE(terrain.WeightAt(1, 10, 10) == 200);
+
+    terrain.SetWeightAt(0, 10, 10, 255);
+    CHECK(terrain.WeightAt(1, 10, 10) == 0);
+    CHECK(terrain.WeightAt(0, 10, 10) == 255);
+    CHECK(TotalWeight(terrain, 10, 10) == 255);
+}
+
+TEST_CASE("Menghapus di atas yang belum pernah dicat tidak mengalokasikan apa pun") {
+    Terrain terrain(TerrainDesc{256, 4, 4, 1.0f, 0.0f, 100.0f, 0.0f});
+    REQUIRE(terrain.AddLayer(NamedLayer("Rumput")) == 1);
+    const std::size_t empty = terrain.BytesResident();
+
+    PaintBrush brush = LayerPaintBrush();
+    brush.radius = 200.0f;
+    brush.target = 0.0f;
+
+    terrain.BeginStroke();
+    for (int i = 0; i < 20; ++i) {
+        ApplyLayerDab(terrain, brush, 1, 500.0f, 500.0f, 1.0f / 60.0f);
+    }
+    terrain.EndStroke();
+
+    // Menghapus yang tidak ada adalah operasi yang tidak melakukan apa-apa. Kalau
+    // ia tetap mewujudkan ubin, sekali sapu penghapus di atas terrain 4x4 km
+    // sudah cukup untuk menghuni seluruh petanya.
+    INFO("sebelum ", empty, " sesudah ", terrain.BytesResident());
+    CHECK(terrain.BytesResident() == empty);
+    CHECK(terrain.UndoDepth() == 0);
+}
+
+TEST_CASE("Menghapus layer mengembalikan bobotnya ke dasar") {
+    Terrain terrain(TerrainDesc{32, 1, 1, 1.0f, 0.0f, 100.0f, 0.0f});
+    REQUIRE(terrain.AddLayer(NamedLayer("Rumput")) == 1);
+    REQUIRE(terrain.AddLayer(NamedLayer("Batu")) == 2);
+    terrain.SetWeightAt(1, 8, 8, 100);
+    terrain.SetWeightAt(2, 8, 8, 80);
+    REQUIRE(terrain.WeightAt(0, 8, 8) == 75);
+
+    REQUIRE(terrain.RemoveLayer(1));
+    CHECK(terrain.LayerCount() == 2);
+    CHECK(terrain.Layer(1).name == "Batu");
+    CHECK(terrain.WeightAt(1, 8, 8) == 80);
+    CHECK(terrain.WeightAt(0, 8, 8) == 175);
+    CHECK(TotalWeight(terrain, 8, 8) == 255);
+
+    // Layer dasar bukan salah satu dari mereka: bobotnya sisa, jadi tidak ada
+    // yang bisa dihapus.
+    CHECK_FALSE(terrain.RemoveLayer(0));
+}
+
+TEST_CASE("Memindahkan layer membawa peta bobotnya") {
+    Terrain terrain(TerrainDesc{32, 1, 1, 1.0f, 0.0f, 100.0f, 0.0f});
+    REQUIRE(terrain.AddLayer(NamedLayer("Rumput")) == 1);
+    REQUIRE(terrain.AddLayer(NamedLayer("Batu")) == 2);
+    terrain.SetWeightAt(1, 5, 5, 120);
+    terrain.SetWeightAt(2, 6, 6, 60);
+
+    REQUIRE(terrain.MoveLayer(1, 2));
+    CHECK(terrain.Layer(1).name == "Batu");
+    CHECK(terrain.Layer(2).name == "Rumput");
+    // Nama dan bobot berpindah bersama. Kalau hanya deskripsinya yang pindah,
+    // cat berpindah ke material yang salah tanpa satu pun tanda.
+    CHECK(terrain.WeightAt(2, 5, 5) == 120);
+    CHECK(terrain.WeightAt(1, 6, 6) == 60);
+
+    CHECK_FALSE(terrain.MoveLayer(0, 1));
+}
+
+TEST_CASE("Batas jumlah layer ditegakkan") {
+    Terrain terrain(TerrainDesc{16, 1, 1, 1.0f, 0.0f, 100.0f, 0.0f});
+    for (int index = 1; index < kMaxLayers; ++index) {
+        CHECK(terrain.AddLayer(NamedLayer("L" + std::to_string(index))) == index);
+    }
+    CHECK(terrain.LayerCount() == kMaxLayers);
+    CHECK(terrain.AddLayer(NamedLayer("Kelebihan")) == -1);
+    CHECK(terrain.LayerCount() == kMaxLayers);
+}
+
+TEST_CASE("Undo satu goresan cat mengembalikan bobot persis") {
+    Terrain terrain(TerrainDesc{64, 2, 2, 1.0f, 0.0f, 100.0f, 0.0f});
+    REQUIRE(terrain.AddLayer(NamedLayer("Rumput")) == 1);
+    REQUIRE(terrain.AddLayer(NamedLayer("Batu")) == 2);
+
+    const PaintBrush brush = LayerPaintBrush();
+    terrain.BeginStroke();
+    for (int i = 0; i < 20; ++i) {
+        ApplyLayerDab(terrain, brush, 1, 50.0f, 50.0f, 1.0f / 60.0f);
+    }
+    terrain.EndStroke();
+
+    const uint64_t before1 = HashWeights(terrain, 1);
+    const uint64_t before2 = HashWeights(terrain, 2);
+
+    terrain.BeginStroke();
+    for (int i = 0; i < 20; ++i) {
+        ApplyLayerDab(terrain, brush, 2, 52.0f, 50.0f, 1.0f / 60.0f);
+    }
+    terrain.EndStroke();
+    REQUIRE(HashWeights(terrain, 2) != before2);
+    // Sapuan kedua menggerus layer pertama karena totalnya dijaga 255, jadi undo
+    // harus memulihkan KEDUANYA — bukan hanya layer yang dicat.
+    REQUIRE(HashWeights(terrain, 1) != before1);
+
+    REQUIRE(terrain.Undo());
+    CHECK(HashWeights(terrain, 1) == before1);
+    CHECK(HashWeights(terrain, 2) == before2);
+
+    REQUIRE(terrain.Redo());
+    CHECK(HashWeights(terrain, 1) != before1);
+}
+
+TEST_CASE("Mengecat di batas ubin sama persis dengan tanpa ubin") {
+    // Argumen yang sama dengan kriteria 1 untuk tinggi: kalau peta bobot ikut
+    // menyimpan baris tepi di dua ubin, jahitannya akan muncul sebagai garis cat
+    // yang tidak pernah disapu siapa pun.
+    const auto paint = [](Terrain& terrain) {
+        REQUIRE(terrain.AddLayer(NamedLayer("Rumput")) == 1);
+        PaintBrush brush = LayerPaintBrush();
+        brush.radius = 20.0f;
+        BrushStroke stroke;
+        stroke.Begin(terrain, 40.0f, 64.0f);
+        for (int i = 1; i <= 30; ++i) {
+            const float x = 40.0f + 2.0f * static_cast<float>(i);
+            stroke.Advance(20.0f, x, 64.0f, 1.0f / 60.0f, [&](float px, float pz, float dt) {
+                ApplyLayerDab(terrain, brush, 1, px, pz, dt);
+            });
+        }
+        stroke.End(terrain);
+    };
+
+    Terrain tiled(TerrainDesc{32, 4, 4, 1.0f, 0.0f, 100.0f, 0.0f});
+    Terrain single(TerrainDesc{128, 1, 1, 1.0f, 0.0f, 100.0f, 0.0f});
+    paint(tiled);
+    paint(single);
+
+    CHECK(HashWeights(tiled, 1) == HashWeights(single, 1));
+}
+
+TEST_CASE("Peta bobot yang dimuat dinormalkan, bukan dipercaya begitu saja") {
+    Terrain terrain(TerrainDesc{16, 1, 1, 1.0f, 0.0f, 100.0f, 0.0f});
+    REQUIRE(terrain.AddLayer(NamedLayer("Rumput")) == 1);
+    REQUIRE(terrain.AddLayer(NamedLayer("Batu")) == 2);
+
+    // Dua peta yang masing-masing penuh: jumlahnya 510, keadaan yang tidak bisa
+    // dihasilkan jalur paint tapi bisa datang dari berkas yang disunting di luar.
+    const std::vector<Weight> full(16u * 16u, 255);
+    terrain.WriteWeights(1, full.data());
+    terrain.WriteWeights(2, full.data());
+    REQUIRE(terrain.WeightAt(1, 4, 4) + terrain.WeightAt(2, 4, 4) == 510);
+
+    terrain.NormalizeWeights();
+    CHECK(TotalWeight(terrain, 4, 4) == 255);
+    CHECK(terrain.WeightAt(1, 4, 4) + terrain.WeightAt(2, 4, 4) <= 255);
+}
+
+// --- peta hole ----------------------------------------------------------------
+
+TEST_CASE("Hole adalah sifat quad, bukan sifat sampel") {
+    Terrain terrain(TerrainDesc{32, 2, 2, 1.0f, 0.0f, 100.0f, 0.0f});
+    CHECK(terrain.HoleCount() == 0);
+
+    terrain.SetHoleAt(10, 10, true);
+    CHECK(terrain.HoleCount() == 1);
+    CHECK(terrain.HoleAt(10, 10));
+    // Satu quad dicat berarti satu quad hilang. Disimpan per sampel, keempat
+    // quad di sekelilingnya akan ikut hilang dan lubang selebar satu quad
+    // mustahil dibuat.
+    CHECK_FALSE(terrain.HoleAt(9, 10));
+    CHECK_FALSE(terrain.HoleAt(11, 10));
+    CHECK_FALSE(terrain.HoleAt(10, 9));
+    CHECK_FALSE(terrain.HoleAt(10, 11));
+
+    terrain.SetHoleAt(10, 10, true);
+    CHECK(terrain.HoleCount() == 1);  // menandai dua kali tetap satu lubang
+    terrain.SetHoleAt(10, 10, false);
+    CHECK(terrain.HoleCount() == 0);
+}
+
+TEST_CASE("Kolom dan baris terakhir tidak punya quad") {
+    Terrain terrain(TerrainDesc{16, 1, 1, 1.0f, 0.0f, 100.0f, 0.0f});
+    const int last = terrain.SamplesX() - 1;
+
+    terrain.SetHoleAt(last, 4, true);
+    terrain.SetHoleAt(4, last, true);
+    CHECK(terrain.HoleCount() == 0);
+    CHECK_FALSE(terrain.HoleAt(last, 4));
+
+    // Yang tepat di sebelahnya masih quad yang sah.
+    terrain.SetHoleAt(last - 1, 4, true);
+    CHECK(terrain.HoleCount() == 1);
+}
+
+TEST_CASE("Undo goresan hole mengembalikan peta dan jumlahnya") {
+    Terrain terrain(TerrainDesc{64, 2, 2, 1.0f, 0.0f, 100.0f, 0.0f});
+    PaintBrush brush = LayerPaintBrush();
+    brush.radius = 8.0f;
+
+    terrain.BeginStroke();
+    ApplyHoleDab(terrain, brush, true, 60.0f, 60.0f);
+    terrain.EndStroke();
+    const std::size_t cut = terrain.HoleCount();
+    const uint64_t hash = HashHoles(terrain);
+    REQUIRE(cut > 0);
+
+    terrain.BeginStroke();
+    ApplyHoleDab(terrain, brush, true, 70.0f, 60.0f);
+    terrain.EndStroke();
+    REQUIRE(terrain.HoleCount() > cut);
+
+    REQUIRE(terrain.Undo());
+    CHECK(terrain.HoleCount() == cut);
+    CHECK(HashHoles(terrain) == hash);
+
+    REQUIRE(terrain.Redo());
+    CHECK(terrain.HoleCount() > cut);
+}
+
+TEST_CASE("Menutup semua lubang bisa dibatalkan") {
+    Terrain terrain(TerrainDesc{32, 2, 2, 1.0f, 0.0f, 100.0f, 0.0f});
+    PaintBrush brush = LayerPaintBrush();
+    brush.radius = 6.0f;
+
+    terrain.BeginStroke();
+    ApplyHoleDab(terrain, brush, true, 30.0f, 30.0f);
+    terrain.EndStroke();
+    const uint64_t hash = HashHoles(terrain);
+    const std::size_t cut = terrain.HoleCount();
+    REQUIRE(cut > 0);
+
+    terrain.BeginStroke();
+    terrain.ClearHoles();
+    terrain.EndStroke();
+    REQUIRE(terrain.HoleCount() == 0);
+
+    REQUIRE(terrain.Undo());
+    CHECK(terrain.HoleCount() == cut);
+    CHECK(HashHoles(terrain) == hash);
+}
+
+TEST_CASE("Kuas hole memotong quad utuh, bukan setengah quad") {
+    Terrain terrain(TerrainDesc{64, 1, 1, 1.0f, 0.0f, 100.0f, 0.0f});
+    PaintBrush brush = LayerPaintBrush();
+    brush.radius = 10.0f;
+    brush.falloff = 1.0f;
+
+    ApplyHoleDab(terrain, brush, true, 32.0f, 32.0f);
+
+    // Dengan falloff penuh, ambang setengah bobot jatuh di setengah jari-jari.
+    // Yang diuji bukan angkanya melainkan bahwa batasnya tajam: ada jarak yang
+    // seluruhnya berlubang dan jarak yang seluruhnya utuh, tanpa daerah abu-abu.
+    CHECK(terrain.HoleAt(32, 32));
+    CHECK(terrain.HoleAt(34, 32));
+    CHECK_FALSE(terrain.HoleAt(41, 32));
+    CHECK_FALSE(terrain.HoleAt(50, 32));
+}
+
+// --- berkas pendamping ---------------------------------------------------------
+
+TEST_CASE("Layer, bobot, dan lubang ikut tersimpan lalu dimuat kembali persis") {
+    TempDir dir("splat");
+    TerrainDocument document;
+    document.name = "Bukit";
+    document.desc = TerrainDesc{32, 2, 2, 1.0f, 0.0f, 200.0f, 10.0f};
+
+    Terrain terrain(document.desc);
+    TerrainLayer grass = NamedLayer("Rumput");
+    grass.color = Vec3(0.2f, 0.7f, 0.3f);
+    grass.tileSize = 3.5f;
+    REQUIRE(terrain.AddLayer(grass) == 1);
+    REQUIRE(terrain.AddLayer(NamedLayer("Belum dicat")) == 2);
+
+    PaintBrush brush = LayerPaintBrush();
+    brush.radius = 10.0f;
+    terrain.BeginStroke();
+    for (int i = 0; i < 20; ++i) {
+        ApplyLayerDab(terrain, brush, 1, 30.0f, 30.0f, 1.0f / 60.0f);
+    }
+    ApplyHoleDab(terrain, brush, true, 40.0f, 20.0f);
+    terrain.EndStroke();
+    REQUIRE(terrain.HoleCount() > 0);
+
+    const std::filesystem::path path = dir / "Bukit.simterrain";
+    REQUIRE(SaveTerrain(terrain, document, path).ok);
+    CHECK(std::filesystem::exists(dir / "Bukit_w1.png"));
+    CHECK(std::filesystem::exists(dir / "Bukit_holes.png"));
+    // Layer yang belum pernah dicat tidak menulis berkas: nama yang tetap dicatat
+    // adalah nama yang menunjuk berkas yang tidak ada.
+    CHECK_FALSE(std::filesystem::exists(dir / "Bukit_w2.png"));
+
+    Terrain loaded;
+    TerrainDocument loadedDocument;
+    const TerrainIoResult result = LoadTerrain(loaded, loadedDocument, path);
+    INFO(result.error);
+    REQUIRE(result.ok);
+
+    REQUIRE(loaded.LayerCount() == 3);
+    CHECK(loaded.Layer(1).name == "Rumput");
+    CHECK(loaded.Layer(1).tileSize == doctest::Approx(3.5f));
+    CHECK(loaded.Layer(1).color.y == doctest::Approx(0.7f));
+    CHECK(loaded.Layer(2).name == "Belum dicat");
+    CHECK_FALSE(loaded.LayerPainted(2));
+
+    CHECK(HashWeights(loaded, 1) == HashWeights(terrain, 1));
+    CHECK(loaded.HoleCount() == terrain.HoleCount());
+    CHECK(HashHoles(loaded) == HashHoles(terrain));
+}
+
+TEST_CASE("Terrain tanpa lubang tidak menulis peta hole") {
+    TempDir dir("noholes");
+    TerrainDocument document;
+    document.name = "Datar";
+    document.desc = TerrainDesc{32, 1, 1, 1.0f, 0.0f, 100.0f, 0.0f};
+
+    Terrain terrain(document.desc);
+    const std::filesystem::path path = dir / "Datar.simterrain";
+    REQUIRE(SaveTerrain(terrain, document, path).ok);
+    CHECK_FALSE(std::filesystem::exists(dir / "Datar_holes.png"));
+
+    Terrain loaded;
+    TerrainDocument loadedDocument;
+    REQUIRE(LoadTerrain(loaded, loadedDocument, path).ok);
+    CHECK(loadedDocument.holeFile.empty());
+    CHECK(loaded.HoleCount() == 0);
+}
+
+TEST_CASE("Berkas versi 1 tetap terbaca sebagai terrain berlayer tunggal") {
+    // Berkas yang ditulis sebelum ada layer: tanpa daftar layer, tanpa peta hole.
+    const std::string v1 = R"({
+  "version": 1,
+  "name": "Lama",
+  "heightmap": "Lama_height.png",
+  "tileSamples": 32,
+  "tilesX": 2,
+  "tilesY": 2,
+  "sampleSpacing": 1.0,
+  "minHeight": 0.0,
+  "maxHeight": 500.0,
+  "baseHeight": 25.0
+})";
+
+    TerrainDocument document;
+    std::vector<TerrainLayer> layers;
+    const TerrainIoResult result = LoadDocumentFromString(document, layers, v1);
+    INFO(result.error);
+    REQUIRE(result.ok);
+    CHECK(result.sourceVersion == 1);
+    CHECK(document.name == "Lama");
+    CHECK(document.holeFile.empty());
+    CHECK(document.desc.baseHeight == doctest::Approx(25.0f));
+    REQUIRE(layers.size() == 1u);
+    CHECK(layers[0].weightFile.empty());
+}
+
+TEST_CASE("Round-trip PNG 8-bit peta bobot tanpa kehilangan satu tingkat pun") {
+    TempDir dir("weightpng");
+    const TerrainDesc desc{32, 2, 2, 1.0f, 0.0f, 100.0f, 0.0f};
+
+    Terrain terrain(desc);
+    REQUIRE(terrain.AddLayer(NamedLayer("Rumput")) == 1);
+    // Nilai yang bervariasi di setiap sampel, bukan sekadar blok penuh: bobot
+    // yang seragam akan lolos bahkan lewat enkoder yang membulatkan.
+    for (int y = 0; y < terrain.SamplesY(); ++y) {
+        for (int x = 0; x < terrain.SamplesX(); ++x) {
+            terrain.SetWeightAt(1, x, y, static_cast<Weight>((x * 7 + y * 13) % 256));
+        }
+    }
+
+    const std::filesystem::path path = dir / "weights.png";
+    REQUIRE(SaveWeightPng(terrain, 1, path).ok);
+
+    Terrain loaded(desc);
+    REQUIRE(loaded.AddLayer(NamedLayer("Rumput")) == 1);
+    const TerrainIoResult result = LoadWeightPng(loaded, 1, path);
+    INFO(result.error);
+    REQUIRE(result.ok);
+    CHECK(HashWeights(loaded, 1) == HashWeights(terrain, 1));
+
+    // Dibaca dengan stb, bukan dengan dekoder buatan sendiri — jadi berkasnya
+    // memang PNG yang sah, bukan sekadar konsisten dengan penulisnya.
+    Terrain wrongSize(TerrainDesc{16, 1, 1, 1.0f, 0.0f, 100.0f, 0.0f});
+    REQUIRE(wrongSize.AddLayer(NamedLayer("Rumput")) == 1);
+    const TerrainIoResult mismatch = LoadWeightPng(wrongSize, 1, path);
+    CHECK_FALSE(mismatch.ok);
+    CHECK(mismatch.error.find("64x64") != std::string::npos);
+    CHECK(mismatch.error.find("16x16") != std::string::npos);
+}
+
+TEST_CASE("Peta bobot ikut lazy: layer yang dicat sepetak tidak menghuni seluruh peta") {
+    Terrain terrain(TerrainDesc{256, 4, 4, 1.0f, 0.0f, 100.0f, 0.0f});
+    REQUIRE(terrain.AddLayer(NamedLayer("Rumput")) == 1);
+    const std::size_t empty = terrain.BytesResident();
+
+    PaintBrush brush = LayerPaintBrush();
+    brush.radius = 20.0f;
+    // Jauh di dalam satu ubin, dengan sengaja: sapuan yang menyeberangi batas
+    // memang mewujudkan keempat ubin yang disentuhnya, dan yang sedang diuji di
+    // sini bukan itu melainkan bahwa ubin yang TIDAK disentuh tetap kosong.
+    terrain.BeginStroke();
+    for (int i = 0; i < 10; ++i) {
+        ApplyLayerDab(terrain, brush, 1, 128.0f, 128.0f, 1.0f / 60.0f);
+    }
+    terrain.EndStroke();
+
+    // Satu ubin bobot (256² byte) plus beberapa blok jurnal. Peta bobot penuh
+    // untuk 16 ubin adalah satu megabyte; yang dibayar hanya yang benar-benar
+    // dicat.
+    const std::size_t grew = terrain.BytesResident() - empty;
+    INFO("tumbuh ", grew, " byte");
+    CHECK(grew >= 256u * 256u);
+    CHECK(grew < 128u * 1024u);
+    CHECK(terrain.LayerPainted(1));
+}
+
+TEST_CASE("Profil kuas cat masih berarti setelah kuasnya ditahan") {
+    Terrain terrain(TerrainDesc{64, 1, 1, 1.0f, 0.0f, 100.0f, 0.0f});
+    REQUIRE(terrain.AddLayer(NamedLayer("Rumput")) == 1);
+
+    PaintBrush brush = LayerPaintBrush();
+    brush.radius = 20.0f;
+    brush.falloff = 1.0f;
+
+    // Menahan kuas di satu tempat adalah keadaan terburuk bagi aturan
+    // "membulat menjauhi": setiap sentuhan mengenai sampel yang sama, jadi
+    // langkah minimum satu tingkat di pinggir kuas menumpuk paling cepat di sini.
+    terrain.BeginStroke();
+    for (int i = 0; i < 30; ++i) {
+        ApplyLayerDab(terrain, brush, 1, 32.0f, 32.0f, 1.0f / 60.0f);
+    }
+    terrain.EndStroke();
+
+    const int centre = terrain.WeightAt(1, 32, 32);
+    const int middle = terrain.WeightAt(1, 42, 32);  // setengah jari-jari
+    const int rim = terrain.WeightAt(1, 50, 32);     // 90% jari-jari
+
+    INFO("pusat ", centre, " tengah ", middle, " pinggir ", rim);
+    CHECK(centre > middle);
+    CHECK(middle > rim);
+    // Dan di luar jari-jari tetap tidak tersentuh: pembulatan menjauhi hanya
+    // berlaku pada sampel yang bobot kuasnya bukan nol.
+    CHECK(terrain.WeightAt(1, 53, 32) == 0);
 }

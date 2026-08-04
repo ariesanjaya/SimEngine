@@ -1,4 +1,5 @@
-// Enkoder PNG greyscale 16-bit.
+// Enkoder PNG greyscale, 16 bit untuk heightmap dan 8 bit untuk peta bobot dan
+// peta hole.
 //
 // **Ditulis sendiri, bukan lewat dependensi baru.** `stb_image_write` sudah ada
 // di proyek dan sudah memuat deflate lengkap — tapi `stbi_write_png` hanya
@@ -7,6 +8,12 @@
 // melainkan wadahnya: sebuah header, satu CRC per chunk, dan satu filter per
 // baris. Itu yang ditulis di sini, di atas `stbi_zlib_compress` yang memang
 // sudah diekspor stb.
+//
+// Peta 8-bit lewat jalur yang sama, bukan lewat `stbi_write_png`. Bukan karena
+// jalur itu tidak mampu, melainkan supaya seluruh berkas pendamping sebuah
+// terrain dihasilkan satu penulis: dua penulis berarti dua perilaku yang bisa
+// berbeda dalam hal-hal yang baru terlihat pada berkas orang lain — pilihan
+// filter, ukuran keluaran, penanganan gambar kosong.
 //
 // Filternya adaptif per baris. Tanpa filter, heightmap 16-bit nyaris tidak
 // terkompresi sama sekali — dan PNG yang seukuran RAW tidak ada gunanya, karena
@@ -81,30 +88,14 @@ std::size_t FilterCost(const std::vector<unsigned char>& line) {
     return sum;
 }
 
-}  // namespace
-
-std::vector<unsigned char> EncodeHeightmapPng(const Sample* samples, int width, int height) {
+/// Menyusun berkas PNG dari baris piksel mentah yang sudah dalam tata letak
+/// berkasnya.
+std::vector<unsigned char> EncodePng(const std::vector<unsigned char>& raw, int width, int height,
+                                     int bitDepth) {
     std::vector<unsigned char> png;
-    if (samples == nullptr || width <= 0 || height <= 0) {
-        return png;
-    }
+    const int bpp = bitDepth / 8;  // byte per sampel greyscale
+    const std::size_t stride = static_cast<std::size_t>(width) * static_cast<std::size_t>(bpp);
 
-    // PNG menyimpan sampel 16-bit big-endian, apa pun endianness mesinnya.
-    const std::size_t stride = static_cast<std::size_t>(width) * 2u;
-    std::vector<unsigned char> raw(stride * static_cast<std::size_t>(height));
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            const Sample value = samples[static_cast<std::size_t>(y) *
-                                             static_cast<std::size_t>(width) +
-                                         static_cast<std::size_t>(x)];
-            raw[static_cast<std::size_t>(y) * stride + static_cast<std::size_t>(x) * 2u] =
-                static_cast<unsigned char>(value >> 8);
-            raw[static_cast<std::size_t>(y) * stride + static_cast<std::size_t>(x) * 2u + 1u] =
-                static_cast<unsigned char>(value & 0xffU);
-        }
-    }
-
-    constexpr int kBpp = 2;  // byte per sampel greyscale 16-bit
     std::vector<unsigned char> filtered;
     filtered.reserve((stride + 1u) * static_cast<std::size_t>(height));
 
@@ -121,9 +112,9 @@ std::vector<unsigned char> EncodeHeightmapPng(const Sample* samples, int width, 
         unsigned char bestType = 0;
         for (unsigned char type = 0; type <= 4; ++type) {
             for (std::size_t i = 0; i < stride; ++i) {
-                const int a = i >= static_cast<std::size_t>(kBpp) ? line[i - kBpp] : 0;
+                const int a = i >= static_cast<std::size_t>(bpp) ? line[i - bpp] : 0;
                 const int b = prior[i];
-                const int c = i >= static_cast<std::size_t>(kBpp) ? prior[i - kBpp] : 0;
+                const int c = i >= static_cast<std::size_t>(bpp) ? prior[i - bpp] : 0;
                 int value = 0;
                 switch (type) {
                     case 0: value = line[i]; break;
@@ -163,7 +154,7 @@ std::vector<unsigned char> EncodeHeightmapPng(const Sample* samples, int width, 
     ihdr[5] = static_cast<unsigned char>(static_cast<uint32_t>(height) >> 16);
     ihdr[6] = static_cast<unsigned char>(static_cast<uint32_t>(height) >> 8);
     ihdr[7] = static_cast<unsigned char>(static_cast<uint32_t>(height));
-    ihdr[8] = 16;  // kedalaman bit
+    ihdr[8] = static_cast<unsigned char>(bitDepth);
     ihdr[9] = 0;   // greyscale
     ihdr[10] = 0;  // kompresi deflate
     ihdr[11] = 0;  // metode filter standar
@@ -173,6 +164,38 @@ std::vector<unsigned char> EncodeHeightmapPng(const Sample* samples, int width, 
     const unsigned char empty = 0;
     PushChunk(png, "IEND", &empty, 0);
     return png;
+}
+
+}  // namespace
+
+std::vector<unsigned char> EncodeHeightmapPng(const Sample* samples, int width, int height) {
+    if (samples == nullptr || width <= 0 || height <= 0) {
+        return {};
+    }
+    // PNG menyimpan sampel 16-bit big-endian, apa pun endianness mesinnya.
+    const std::size_t stride = static_cast<std::size_t>(width) * 2u;
+    std::vector<unsigned char> raw(stride * static_cast<std::size_t>(height));
+    for (int y = 0; y < height; ++y) {
+        for (int x = 0; x < width; ++x) {
+            const Sample value = samples[static_cast<std::size_t>(y) *
+                                             static_cast<std::size_t>(width) +
+                                         static_cast<std::size_t>(x)];
+            raw[static_cast<std::size_t>(y) * stride + static_cast<std::size_t>(x) * 2u] =
+                static_cast<unsigned char>(value >> 8);
+            raw[static_cast<std::size_t>(y) * stride + static_cast<std::size_t>(x) * 2u + 1u] =
+                static_cast<unsigned char>(value & 0xffU);
+        }
+    }
+    return EncodePng(raw, width, height, 16);
+}
+
+std::vector<unsigned char> EncodeMaskPng(const uint8_t* values, int width, int height) {
+    if (values == nullptr || width <= 0 || height <= 0) {
+        return {};
+    }
+    const std::vector<unsigned char> raw(
+        values, values + static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
+    return EncodePng(raw, width, height, 8);
 }
 
 }  // namespace sim::terrain

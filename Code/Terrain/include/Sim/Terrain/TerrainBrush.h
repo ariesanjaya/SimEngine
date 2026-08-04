@@ -2,6 +2,8 @@
 
 #include "Sim/Terrain/Terrain.h"
 
+#include <functional>
+
 namespace sim::terrain {
 
 enum class BrushKind {
@@ -30,11 +32,30 @@ struct Brush {
     uint32_t seed = 1;
 };
 
+/// Kuas cat: bobot layer material dan peta hole.
+///
+/// **Dipisah dari `Brush`, bukan disatukan dengannya**, walaupun jari-jari dan
+/// falloff-nya sama artinya. Yang berbeda adalah kekuatannya: pada `Brush` ia
+/// meter per detik, di sini laju konvergensi ke bobot tujuan. Satu struct
+/// bersama berarti satu slider yang artinya berganti diam-diam saat alat
+/// berpindah — dan angka 20 yang tadinya wajar menjadi "penuh seketika".
+struct PaintBrush {
+    /// Jari-jari, meter.
+    float radius = 10.0f;
+    /// Laju konvergensi ke bobot tujuan, per detik.
+    float strength = 4.0f;
+    /// 0 = tepi tajam, 1 = melembut dari pusat.
+    float falloff = 0.5f;
+    /// Bobot tujuan di pusat brush, 0..1. 0 berarti menghapus.
+    float target = 1.0f;
+};
+
 /// Bobot brush pada jarak tertentu dari pusatnya. Dipisah supaya panel bisa
 /// menggambar profil brush dengan rumus yang sama persis dengan yang menyunting
 /// terrain — profil yang digambar ulang dengan rumus kedua adalah profil yang
 /// akan berbeda.
 float BrushWeight(const Brush& brush, float distance);
+float BrushWeight(const PaintBrush& brush, float distance);
 
 /// Satu sentuhan brush pada posisi dunia. `dt` detik sejak sentuhan sebelumnya.
 ///
@@ -46,6 +67,19 @@ void ApplyDab(Terrain& terrain, const Brush& brush, float worldX, float worldZ, 
 /// Ramp linear antara dua titik dunia, selebar `brush.radius` di kiri-kanan
 /// garisnya. Bukan sentuhan: ramp ditentukan dua titik, jadi ia satu operasi.
 void ApplyRamp(Terrain& terrain, const Brush& brush, const Vec3& start, const Vec3& end);
+
+/// Satu sentuhan cat pada peta bobot sebuah layer.
+void ApplyLayerDab(Terrain& terrain, const PaintBrush& brush, int layer, float worldX,
+                   float worldZ, float dt);
+
+/// Satu sentuhan pada peta hole.
+///
+/// **Tanpa `dt`.** Hole itu biner: tidak ada yang bisa dikonvergensikan, jadi
+/// tidak ada yang bergantung pada berapa lama kuas berada di sana. `falloff`
+/// karenanya bekerja sebagai ambang, bukan sebagai gradasi — separuh quad yang
+/// berlubang bukan sesuatu yang bisa digambar perender mana pun.
+void ApplyHoleDab(Terrain& terrain, const PaintBrush& brush, bool hole, float worldX,
+                  float worldZ);
 
 /// Satu goresan brush: sentuhan yang disebar di sepanjang lintasan kursor.
 ///
@@ -95,6 +129,18 @@ public:
     /// Memajukan goresan ke posisi kursor sekarang selama `dt` detik. Sentuhan
     /// disebar merata di sepanjang ruas dari posisi sebelumnya.
     void Advance(Terrain& terrain, const Brush& brush, float worldX, float worldZ, float dt);
+
+    /// Bentuk umumnya: `dab(worldX, worldZ, dt)` dipanggil sekali per sentuhan.
+    ///
+    /// Penjadwalnya sengaja tidak tahu apa yang dilakukan sentuhannya, dan tidak
+    /// menyentuh terrain sama sekali. Sculpt dan paint memakai jadwal yang sama
+    /// persis karena masalahnya memang sama persis — laju frame yang tidak boleh
+    /// mengubah hasil, dan seretan cepat yang tidak boleh meninggalkan
+    /// manik-manik. Menyalin jadwalnya untuk paint berarti dua salinan aturan
+    /// yang akan berbeda pada perbaikan berikutnya.
+    void Advance(float radius, float worldX, float worldZ, float dt,
+                 const std::function<void(float, float, float)>& dab);
+
     void End(Terrain& terrain);
 
     bool Active() const { return active_; }

@@ -57,6 +57,40 @@ constexpr std::array<ToolEntry, 6> kTools{{
     {Tool::Ramp, "Ramp", "Click a start point, then an end point."},
 }};
 
+/// Kelompok alat.
+///
+/// Tiga tab, bukan satu daftar alat yang panjang: sculpt, paint, dan hole
+/// menyunting tiga peta yang berbeda dengan parameter yang berbeda, dan alat
+/// yang berbagi satu papan parameter akan berbagi slider yang artinya berganti
+/// diam-diam. Tab juga yang membuat "apa yang akan terjadi kalau saya menyeret"
+/// bisa dijawab tanpa melihat parameter mana yang terakhir disentuh.
+enum class Mode {
+    Sculpt,
+    Paint,
+    Holes,
+};
+
+/// Apa yang diwarnai peta 2D.
+enum class MapView {
+    Relief,
+    Layers,
+    Weight,
+};
+
+/// Warna bawaan layer baru, berputar menurut indeksnya.
+///
+/// Bukan satu warna bawaan untuk semuanya: layer kedua yang warnanya sama persis
+/// dengan layer pertama membuat peta 2D-nya tidak bisa dibaca tepat pada saat
+/// warna itu satu-satunya cara membacanya.
+constexpr std::array<std::array<float, 3>, 6> kLayerPalette{{
+    {0.42f, 0.52f, 0.30f},
+    {0.52f, 0.50f, 0.48f},
+    {0.72f, 0.66f, 0.48f},
+    {0.30f, 0.34f, 0.38f},
+    {0.88f, 0.90f, 0.93f},
+    {0.45f, 0.35f, 0.28f},
+}};
+
 /// Penyunting terrain.
 ///
 /// **Preview-nya peta 2D dari atas, bukan viewport 3D.** Bukan karena viewport
@@ -309,6 +343,78 @@ private:
     /// setiap goresan tampak tidak melakukan apa-apa. Yang dibayar adalah arti
     /// warnanya berubah saat digeser — dan itu dibayar balik dengan legenda yang
     /// menyebutkan meternya, bukan dengan menebak.
+    /// Cahaya dari barat laut — arah baku peta topografi, karena otak membaca
+    /// bayangan dari kiri atas sebagai cekung/cembung dengan benar dan dari arah
+    /// lain sering terbalik.
+    ///
+    /// Dipisah dari warnanya supaya ketiga tampilan peta — relief, layer, dan
+    /// bobot — memakai bayangan yang sama persis. Peta bobot yang kehilangan
+    /// bayangannya menjadi bercak abu-abu yang tidak bisa dicocokkan dengan
+    /// bentuk terrain di bawahnya, dan justru itu yang ingin dilihat saat
+    /// mengecat.
+    static float Hillshade(float slopeX, float slopeZ) {
+        const Vec3 normal = glm::normalize(Vec3(-slopeX, 1.0f, -slopeZ));
+        const Vec3 light = glm::normalize(Vec3(-0.6f, 0.7f, -0.4f));
+        return 0.45f + 0.75f * std::clamp(glm::dot(normal, light), 0.0f, 1.0f);
+    }
+
+    static ImU32 Tint(const Vec3& albedo, float shade) {
+        return ImGui::GetColorU32(ImVec4(std::min(albedo.x * shade, 1.0f),
+                                         std::min(albedo.y * shade, 1.0f),
+                                         std::min(albedo.z * shade, 1.0f), 1.0f));
+    }
+
+    int SampleIndexX(float worldX) const {
+        return std::clamp(static_cast<int>(std::lround(worldX / terrain_.Desc().sampleSpacing)), 0,
+                          terrain_.SamplesX() - 1);
+    }
+
+    int SampleIndexZ(float worldZ) const {
+        return std::clamp(static_cast<int>(std::lround(worldZ / terrain_.Desc().sampleSpacing)), 0,
+                          terrain_.SamplesY() - 1);
+    }
+
+    /// Campuran warna layer pada satu titik, ditimbang bobotnya.
+    ///
+    /// Dicampur dengan rumus yang sama dengan yang akan dipakai perender —
+    /// jumlah bobot terbagi 255 — jadi apa yang terlihat di peta adalah
+    /// perbandingan yang benar-benar tersimpan, bukan perkiraan yang kebetulan
+    /// mirip.
+    ImU32 ShadeLayers(float worldX, float worldZ, float shade) const {
+        const int sx = SampleIndexX(worldX);
+        const int sy = SampleIndexZ(worldZ);
+        Vec3 albedo(0.0f);
+        int sum = 0;
+        for (int layer = 1; layer < terrain_.LayerCount(); ++layer) {
+            const int weight = terrain_.WeightAt(layer, sx, sy);
+            if (weight == 0) {
+                continue;
+            }
+            albedo += terrain_.Layer(layer).color * static_cast<float>(weight);
+            sum += weight;
+        }
+        albedo += terrain_.Layer(0).color *
+                  static_cast<float>(std::max(0, static_cast<int>(kWeightMax) - sum));
+        return Tint(albedo / static_cast<float>(kWeightMax), shade);
+    }
+
+    /// Bobot satu layer saja, dari gelap ke warna layernya.
+    ///
+    /// Bukan abu-abu ke putih: dengan gradasi netral tidak ada yang membedakan
+    /// peta bobot layer satu dari peta bobot layer lain di tangkapan layar mana
+    /// pun, termasuk di kepala orang yang baru saja berpindah layer.
+    ImU32 ShadeWeight(float worldX, float worldZ, float shade) const {
+        const int sx = SampleIndexX(worldX);
+        const int sy = SampleIndexZ(worldZ);
+        const float weight = static_cast<float>(terrain_.WeightAt(paintLayer_, sx, sy)) /
+                             static_cast<float>(kWeightMax);
+        const Vec3 albedo =
+            Vec3(0.07f, 0.07f, 0.09f) + (terrain_.Layer(paintLayer_).color -
+                                         Vec3(0.07f, 0.07f, 0.09f)) *
+                                            weight;
+        return Tint(albedo, shade);
+    }
+
     ImU32 Shade(float unitHeight, float slopeX, float slopeZ) const {
         const float t = std::clamp(unitHeight, 0.0f, 1.0f);
 
@@ -334,15 +440,7 @@ private:
             }
         }
 
-        // Cahaya dari barat laut — arah baku peta topografi, karena otak membaca
-        // bayangan dari kiri atas sebagai cekung/cembung dengan benar dan dari
-        // arah lain sering terbalik.
-        const Vec3 normal = glm::normalize(Vec3(-slopeX, 1.0f, -slopeZ));
-        const Vec3 light = glm::normalize(Vec3(-0.6f, 0.7f, -0.4f));
-        const float lambert = std::clamp(glm::dot(normal, light), 0.0f, 1.0f);
-        const float shade = 0.45f + 0.75f * lambert;
-        return ImGui::GetColorU32(ImVec4(std::min(r * shade, 1.0f), std::min(g * shade, 1.0f),
-                                         std::min(b * shade, 1.0f), 1.0f));
+        return Tint(Vec3(r, g, b), Hillshade(slopeX, slopeZ));
     }
 
     void DrawHeightfield(ImDrawList* draw) {
@@ -441,7 +539,16 @@ private:
                                          (2.0f * pixelsPerCellX);
                     const float slopeZ = (heightAt(i, j + 1) - heightAt(i, j - 1)) * scale /
                                          (2.0f * pixelsPerCellZ);
-                    color = Shade((heights_[at] - visibleLow_) / range, slopeX, slopeZ);
+                    if (view_ == MapView::Relief || terrain_.LayerCount() < 2) {
+                        color = Shade((heights_[at] - visibleLow_) / range, slopeX, slopeZ);
+                    } else {
+                        float wx = 0.0f;
+                        float wz = 0.0f;
+                        ScreenToWorld(screen, wx, wz);
+                        color = view_ == MapView::Layers
+                                    ? ShadeLayers(wx, wz, Hillshade(slopeX, slopeZ))
+                                    : ShadeWeight(wx, wz, Hillshade(slopeX, slopeZ));
+                    }
                 }
                 draw->PrimWriteVtx(screen, uv, color);
             }
@@ -483,11 +590,69 @@ private:
         draw->PushClipRect(mapOrigin_, ImVec2(mapOrigin_.x + mapSize_.x, mapOrigin_.y + mapSize_.y),
                            true);
         DrawHeightfield(draw);
+        DrawHoles(draw);
         DrawTileGrid(draw);
         DrawCursor(draw, hovered);
         draw->PopClipRect();
         draw->AddRect(mapOrigin_, ImVec2(mapOrigin_.x + mapSize_.x, mapOrigin_.y + mapSize_.y),
                       ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.10f)));
+    }
+
+    /// Lubang digambar sebagai persegi quad-nya sendiri, bukan dicuplik di
+    /// simpul kisi seperti tingginya.
+    ///
+    /// Tinggi boleh dicuplik: sebuah puncak yang hilang pada zoom jauh tetap
+    /// menyisakan lerengnya, jadi petanya tetap benar walaupun kasar. Lubang
+    /// tidak punya lereng — ia ada atau tidak ada — dan lubang yang tidak
+    /// tergambar terbaca sebagai lubang yang tidak ada. Karena itu peta hole
+    /// dipindai pada kisi quad-nya sendiri, dengan langkah yang melebar mengikuti
+    /// zoom supaya ongkosnya tetap terbatas, dan sel-sel sebaris digabung menjadi
+    /// satu persegi supaya jumlah perintah gambarnya tidak ikut melebar.
+    void DrawHoles(ImDrawList* draw) {
+        if (terrain_.HoleCount() == 0) {
+            return;
+        }
+        const float spacing = terrain_.Desc().sampleSpacing;
+        float minX = 0.0f;
+        float minZ = 0.0f;
+        float maxX = 0.0f;
+        float maxZ = 0.0f;
+        ScreenToWorld(mapOrigin_, minX, minZ);
+        ScreenToWorld(ImVec2(mapOrigin_.x + mapSize_.x, mapOrigin_.y + mapSize_.y), maxX, maxZ);
+
+        const int x0 = std::max(0, static_cast<int>(std::floor(minX / spacing)));
+        const int y0 = std::max(0, static_cast<int>(std::floor(minZ / spacing)));
+        const int x1 = std::min(terrain_.SamplesX() - 1,
+                                static_cast<int>(std::ceil(maxX / spacing)) + 1);
+        const int y1 = std::min(terrain_.SamplesY() - 1,
+                                static_cast<int>(std::ceil(maxZ / spacing)) + 1);
+        if (x1 <= x0 || y1 <= y0) {
+            return;
+        }
+
+        constexpr double kMaxTaps = 32768.0;
+        const double area = static_cast<double>(x1 - x0) * static_cast<double>(y1 - y0);
+        const int step = std::max(1, static_cast<int>(std::ceil(std::sqrt(area / kMaxTaps))));
+        const ImU32 color = ImGui::GetColorU32(ImVec4(0.95f, 0.22f, 0.52f, 0.60f));
+
+        for (int y = y0; y < y1; y += step) {
+            int run = -1;
+            for (int x = x0; x <= x1; x += step) {
+                const bool hole = x < x1 && terrain_.HoleAt(x, y);
+                if (hole && run < 0) {
+                    run = x;
+                }
+                if (!hole && run >= 0) {
+                    draw->AddRectFilled(
+                        WorldToScreen(static_cast<float>(run) * spacing,
+                                      static_cast<float>(y) * spacing),
+                        WorldToScreen(static_cast<float>(std::min(x, x1)) * spacing,
+                                      static_cast<float>(std::min(y + step, y1)) * spacing),
+                        color);
+                    run = -1;
+                }
+            }
+        }
     }
 
     void DrawTileGrid(ImDrawList* draw) {
@@ -518,16 +683,27 @@ private:
             return;
         }
         const ImVec2 centre = WorldToScreen(cursorX_, cursorZ_);
-        const float radius = brush_.radius / metersPerPixel_;
+        const float falloff = std::clamp(CursorFalloff(), 0.0f, 1.0f);
+        const float radius = CursorRadius() / metersPerPixel_;
 
-        // Dua lingkaran: tepi luar jari-jari, tepi dalam batas bobot penuh.
-        // Falloff tidak bisa dibaca dari satu lingkaran, dan menebaknya berarti
-        // menggores lalu membatalkan sampai terasa benar.
-        draw->AddCircle(centre, radius, ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.85f)), 0,
-                        1.5f);
-        const float inner = radius * (1.0f - std::clamp(brush_.falloff, 0.0f, 1.0f));
-        if (inner > 2.0f) {
-            draw->AddCircle(centre, inner, ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.35f)));
+        if (mode_ == Mode::Holes) {
+            // Batas yang digambar adalah batas bobot setengah, karena di situlah
+            // quad mulai dipotong. Menggambar jari-jari penuh untuk alat yang
+            // memotong hanya sampai setengahnya adalah kursor yang berbohong
+            // tepat pada satu-satunya hal yang ditanyakan orang kepadanya.
+            draw->AddCircle(centre, radius, ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.20f)));
+            draw->AddCircle(centre, radius * (1.0f - falloff * 0.5f),
+                            ImGui::GetColorU32(ImVec4(1.0f, 0.45f, 0.65f, 0.9f)), 0, 1.5f);
+        } else {
+            // Dua lingkaran: tepi luar jari-jari, tepi dalam batas bobot penuh.
+            // Falloff tidak bisa dibaca dari satu lingkaran, dan menebaknya
+            // berarti menggores lalu membatalkan sampai terasa benar.
+            draw->AddCircle(centre, radius, ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.85f)), 0,
+                            1.5f);
+            const float inner = radius * (1.0f - falloff);
+            if (inner > 2.0f) {
+                draw->AddCircle(centre, inner, ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.35f)));
+            }
         }
 
         if (rampAnchored_) {
@@ -568,22 +744,52 @@ private:
             viewZ_ += beforeZ - afterZ;
         }
 
-        if (tool_ == Tool::Ramp) {
+        if (mode_ == Mode::Sculpt && tool_ == Tool::Ramp) {
             HandleRamp(hovered);
             return;
         }
+        if (mode_ == Mode::Paint && terrain_.LayerCount() < 2) {
+            return;  // tanpa layer di atas dasar, tidak ada yang bisa dicat
+        }
 
-        const Brush brush = EffectiveBrush();
         if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
             stroke_.Begin(terrain_, cursorX_, cursorZ_);
         }
-        if (stroke_.Active()) {
-            const float dt = context.deltaSeconds > 0.0f ? context.deltaSeconds : 1.0f / 60.0f;
-            stroke_.Advance(terrain_, brush, cursorX_, cursorZ_, dt);
-            dirty_ = true;
-            if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-                stroke_.End(terrain_);
+        if (!stroke_.Active()) {
+            return;
+        }
+
+        const float dt = context.deltaSeconds > 0.0f ? context.deltaSeconds : 1.0f / 60.0f;
+        switch (mode_) {
+            case Mode::Sculpt:
+                stroke_.Advance(terrain_, EffectiveBrush(), cursorX_, cursorZ_, dt);
+                break;
+            case Mode::Paint: {
+                // Shift menghapus, sama seperti Shift membalik Raise/Lower.
+                // Menghapus cat adalah menariknya ke bobot nol, bukan alat lain.
+                PaintBrush brush = paint_;
+                if (ImGui::GetIO().KeyShift) {
+                    brush.target = 0.0f;
+                }
+                const int layer = paintLayer_;
+                stroke_.Advance(brush.radius, cursorX_, cursorZ_, dt,
+                                [&](float x, float z, float step) {
+                                    ApplyLayerDab(terrain_, brush, layer, x, z, step);
+                                });
+                break;
             }
+            case Mode::Holes: {
+                const bool cut = !ImGui::GetIO().KeyShift;
+                stroke_.Advance(paint_.radius, cursorX_, cursorZ_, dt,
+                                [&](float x, float z, float) {
+                                    ApplyHoleDab(terrain_, paint_, cut, x, z);
+                                });
+                break;
+            }
+        }
+        dirty_ = true;
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            stroke_.End(terrain_);
         }
     }
 
@@ -607,6 +813,9 @@ private:
         rampAnchored_ = false;
         dirty_ = true;
     }
+
+    float CursorRadius() const { return mode_ == Mode::Sculpt ? brush_.radius : paint_.radius; }
+    float CursorFalloff() const { return mode_ == Mode::Sculpt ? brush_.falloff : paint_.falloff; }
 
     /// Brush yang benar-benar dipakai, setelah pengubah papan ketik.
     Brush EffectiveBrush() const {
@@ -642,10 +851,24 @@ private:
                            terrain_.HeightAtWorld(cursorX_, cursorZ_),
                            inside ? "" : "   (outside)");
         ImGui::SameLine();
-        // Legenda: warna peta menyesuaikan rentang yang terlihat, jadi artinya
-        // harus disebut angkanya — kalau tidak, "hijau" berarti berbeda setiap
-        // kali digeser dan tidak ada yang bisa dibaca darinya.
-        ImGui::TextColored(kHintColor, "|  shading %.1f..%.1f m  |", visibleLow_, visibleHigh_);
+        if (mode_ == Mode::Sculpt || terrain_.LayerCount() < 2) {
+            // Legenda: warna peta menyesuaikan rentang yang terlihat, jadi
+            // artinya harus disebut angkanya — kalau tidak, "hijau" berarti
+            // berbeda setiap kali digeser dan tidak ada yang bisa dibaca
+            // darinya.
+            ImGui::TextColored(kHintColor, "|  shading %.1f..%.1f m  |", visibleLow_, visibleHigh_);
+        } else if (mode_ == Mode::Paint) {
+            // Bobot di bawah kursor disebut angkanya karena campuran warna tidak
+            // bisa dibaca terbalik: hijau yang sedikit lebih pucat bisa berarti
+            // 200 atau 230, dan selisih itu yang menentukan apakah masih perlu
+            // disapu sekali lagi.
+            ImGui::TextColored(kHintColor, "|  %s %d/255  |",
+                               terrain_.Layer(paintLayer_).name.c_str(),
+                               terrain_.WeightAt(paintLayer_, SampleIndexX(cursorX_),
+                                                 SampleIndexZ(cursorZ_)));
+        } else {
+            ImGui::TextColored(kHintColor, "|  %zu quads cut  |", terrain_.HoleCount());
+        }
         ImGui::SameLine();
         ImGui::TextColored(kHintColor, "%zu/%d tiles   %.1f MB   %zu undo",
                            terrain_.TilesResident(),
@@ -657,6 +880,52 @@ private:
     // --- alat ----------------------------------------------------------------
 
     void DrawTools(EditorContext& context) {
+        if (ImGui::BeginTabBar("##modes")) {
+            if (ImGui::BeginTabItem((std::string(icons::kSculpt) + "  Sculpt").c_str())) {
+                SetMode(Mode::Sculpt);
+                DrawSculptTools();
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem((std::string(icons::kBrush) + "  Paint").c_str())) {
+                SetMode(Mode::Paint);
+                DrawPaintTools(context);
+                ImGui::EndTabItem();
+            }
+            if (ImGui::BeginTabItem((std::string(icons::kHole) + "  Holes").c_str())) {
+                SetMode(Mode::Holes);
+                DrawHoleTools();
+                ImGui::EndTabItem();
+            }
+            ImGui::EndTabBar();
+        }
+
+        ImGui::Separator();
+        DrawTransferSection(context);
+        ImGui::Separator();
+        DrawViewSection();
+    }
+
+    /// Tampilan peta mengikuti apa yang sedang dikerjakan, tapi hanya saat
+    /// modenya berganti — bukan setiap frame. Berpindah tab adalah tindakan yang
+    /// disengaja, jadi pantas mengubah tampilan; memaksakannya terus-menerus akan
+    /// membuat combo tampilan di bawah tidak bisa dipakai sama sekali.
+    void SetMode(Mode mode) {
+        if (mode_ == mode) {
+            return;
+        }
+        if (stroke_.Active()) {
+            stroke_.End(terrain_);
+        }
+        mode_ = mode;
+        rampAnchored_ = false;
+        if (mode == Mode::Sculpt) {
+            view_ = MapView::Relief;
+        } else if (mode == Mode::Paint) {
+            view_ = MapView::Layers;
+        }
+    }
+
+    void DrawSculptTools() {
         const float width = ImGui::GetFontSize() * 7.0f;
 
         for (const ToolEntry& entry : kTools) {
@@ -715,8 +984,188 @@ private:
             }
             widgets::Tooltip("Whole terrain — this materialises every tile");
         }
+    }
 
+    // --- layer material -------------------------------------------------------
+
+    void DrawPaintTools(EditorContext& context) {
+        DrawLayerList(context);
         ImGui::Separator();
+
+        if (terrain_.LayerCount() < 2) {
+            ImGui::TextColored(kHintColor,
+                               "Add a layer to paint. The base layer\nshows wherever nothing else "
+                               "is painted,\nso it has no weight map of its own.");
+            return;
+        }
+
+        const float width = ImGui::GetFontSize() * 7.0f;
+        ImGui::SetNextItemWidth(width);
+        ImGui::DragFloat("Radius", &paint_.radius, 0.25f, 0.5f, 2000.0f, "%.1f m");
+        ImGui::SetNextItemWidth(width);
+        ImGui::DragFloat("Strength", &paint_.strength, 0.05f, 0.05f, 20.0f, "%.2f /s");
+        widgets::Tooltip("How fast the weight converges, per second");
+        ImGui::SetNextItemWidth(width);
+        ImGui::SliderFloat("Falloff", &paint_.falloff, 0.0f, 1.0f);
+        ImGui::SetNextItemWidth(width);
+        ImGui::SliderFloat("Target", &paint_.target, 0.0f, 1.0f);
+        widgets::Tooltip("Weight the brush converges to. Hold Shift to erase.");
+        DrawBrushProfile();
+    }
+
+    void DrawLayerList(EditorContext& context) {
+        ImGui::BeginDisabled(terrain_.LayerCount() >= kMaxLayers);
+        if (ImGui::Button(icons::kAdd)) {
+            AddLayer();
+        }
+        ImGui::EndDisabled();
+        widgets::Tooltip(terrain_.LayerCount() >= kMaxLayers ? "Layer limit reached"
+                                                             : "Add a material layer");
+
+        // Layer dasar tidak bisa dihapus maupun dipindah: bobotnya sisa dari yang
+        // lain, jadi ia bukan salah satu dari mereka.
+        ImGui::SameLine();
+        ImGui::BeginDisabled(paintLayer_ <= 0);
+        if (ImGui::Button(icons::kDelete)) {
+            terrain_.RemoveLayer(paintLayer_);
+            paintLayer_ = std::min(paintLayer_, terrain_.LayerCount() - 1);
+            dirty_ = true;
+        }
+        widgets::Tooltip("Remove the layer. Its weight returns to the base layer.");
+        ImGui::SameLine();
+        if (ImGui::Button(icons::kChevronUp) && terrain_.MoveLayer(paintLayer_, paintLayer_ - 1)) {
+            paintLayer_ = std::max(1, paintLayer_ - 1);
+            dirty_ = true;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(icons::kChevronDown) && terrain_.MoveLayer(paintLayer_, paintLayer_ + 1)) {
+            paintLayer_ = std::min(terrain_.LayerCount() - 1, paintLayer_ + 1);
+            dirty_ = true;
+        }
+        ImGui::EndDisabled();
+
+        const float rows = std::clamp(static_cast<float>(terrain_.LayerCount()), 3.0f, 7.0f);
+        if (ImGui::BeginChild("##layers", ImVec2(0.0f, ImGui::GetFrameHeight() * rows),
+                              ImGuiChildFlags_Borders)) {
+            for (int index = 0; index < terrain_.LayerCount(); ++index) {
+                ImGui::PushID(index);
+                const TerrainLayer& layer = terrain_.Layer(index);
+                const ImVec2 origin = ImGui::GetCursorScreenPos();
+                if (ImGui::Selectable("##row", index == paintLayer_, 0,
+                                      ImVec2(0.0f, ImGui::GetFrameHeight()))) {
+                    paintLayer_ = index;
+                }
+
+                // Contoh warnanya digambar di baris, bukan hanya di properti
+                // layer terpilih: warna itulah satu-satunya cara membaca peta di
+                // sebelah kiri, jadi ia harus terlihat tanpa memilih apa pun.
+                const float swatch = ImGui::GetFrameHeight() * 0.55f;
+                const float pad = (ImGui::GetFrameHeight() - swatch) * 0.5f;
+                ImGui::GetWindowDrawList()->AddRectFilled(
+                    ImVec2(origin.x + pad, origin.y + pad),
+                    ImVec2(origin.x + pad + swatch, origin.y + pad + swatch),
+                    ImGui::GetColorU32(ImVec4(layer.color.x, layer.color.y, layer.color.z, 1.0f)),
+                    2.0f);
+
+                ImGui::SameLine(ImGui::GetFrameHeight());
+                ImGui::TextUnformatted(layer.name.c_str());
+                if (index == 0) {
+                    ImGui::SameLine();
+                    ImGui::TextColored(kHintColor, "(base)");
+                }
+                ImGui::PopID();
+            }
+        }
+        ImGui::EndChild();
+
+        TerrainLayer& layer = terrain_.Layer(paintLayer_);
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::InputText("##name", &layer.name)) {
+            dirty_ = true;
+        }
+        widgets::Tooltip("Layer name");
+
+        ImGui::TextColored(kHintColor, "Material");
+        DrawMaterialPicker(context, layer);
+
+        if (ImGui::ColorEdit3("Colour", &layer.color.x, ImGuiColorEditFlags_NoInputs)) {
+            dirty_ = true;
+        }
+        widgets::Tooltip("Stand-in colour for the map above, until the 3D viewport can draw the "
+                         "material itself");
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.0f);
+        if (ImGui::DragFloat("Tile size", &layer.tileSize, 0.05f, 0.05f, 512.0f, "%.2f m")) {
+            dirty_ = true;
+        }
+        widgets::Tooltip("Metres per texture repeat");
+
+        ImGui::BeginDisabled(!terrain_.LayerPainted(paintLayer_));
+        if (ImGui::Button("Clear painted weight")) {
+            terrain_.BeginStroke();
+            terrain_.ClearLayerWeights(paintLayer_);
+            terrain_.EndStroke();
+            dirty_ = true;
+        }
+        ImGui::EndDisabled();
+    }
+
+    void DrawMaterialPicker(EditorContext& context, TerrainLayer& layer) {
+        const assets::AssetRecord* current =
+            layer.material.IsValid() ? context.assets->Find(layer.material.guid) : nullptr;
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (!ImGui::BeginCombo("##material",
+                               current != nullptr ? current->name.c_str() : "(none)")) {
+            return;
+        }
+        if (ImGui::Selectable("(none)", !layer.material.IsValid())) {
+            layer.material.Clear();
+            dirty_ = true;
+        }
+        for (const assets::AssetRecord& record : context.assets->All()) {
+            if (record.type != assets::AssetType::Material) {
+                continue;
+            }
+            if (ImGui::Selectable(record.name.c_str(), record.guid == layer.material.guid)) {
+                layer.material = AssetRef{record.guid};
+                dirty_ = true;
+            }
+        }
+        ImGui::EndCombo();
+    }
+
+    // --- hole -----------------------------------------------------------------
+
+    void DrawHoleTools() {
+        ImGui::TextColored(kHintColor, "Drag to cut holes.\nHold Shift to fill them back in.");
+        ImGui::Spacing();
+
+        const float width = ImGui::GetFontSize() * 7.0f;
+        ImGui::SetNextItemWidth(width);
+        ImGui::DragFloat("Radius", &paint_.radius, 0.25f, 0.5f, 2000.0f, "%.1f m");
+        ImGui::SetNextItemWidth(width);
+        ImGui::SliderFloat("Falloff", &paint_.falloff, 0.0f, 1.0f);
+        widgets::Tooltip("A quad is either cut or it is not, so falloff is a threshold here, not a "
+                         "gradient: quads past half weight go.");
+        DrawBrushProfile();
+
+        ImGui::Spacing();
+        ImGui::TextColored(kHintColor, "%zu quads cut", terrain_.HoleCount());
+        ImGui::BeginDisabled(terrain_.HoleCount() == 0);
+        if (ImGui::Button("Fill every hole")) {
+            // Dibungkus goresan supaya satu Ctrl+Z mengembalikannya. Menghapus
+            // seluruh pekerjaan tanpa jalan pulang adalah tombol yang tidak berani
+            // ditekan siapa pun.
+            terrain_.BeginStroke();
+            terrain_.ClearHoles();
+            terrain_.EndStroke();
+            dirty_ = true;
+        }
+        ImGui::EndDisabled();
+    }
+
+    // --- berkas dan tampilan --------------------------------------------------
+
+    void DrawTransferSection(EditorContext& context) {
         if (ImGui::CollapsingHeader("Heightmap", ImGuiTreeNodeFlags_DefaultOpen)) {
             ImGui::SetNextItemWidth(-FLT_MIN);
             ImGui::InputText("##file", &transferFile_);
@@ -731,12 +1180,41 @@ private:
             }
             ImGui::TextColored(kHintColor, ".png is 16-bit greyscale, .raw is uint16 LE");
         }
+    }
 
-        ImGui::Separator();
+    void DrawViewSection() {
+        static constexpr std::array<const char*, 3> kViews{"Relief", "Layers", "Weight"};
+        int view = static_cast<int>(view_);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.0f);
+        ImGui::BeginDisabled(terrain_.LayerCount() < 2);
+        if (ImGui::Combo("Map", &view, kViews.data(), static_cast<int>(kViews.size()))) {
+            view_ = static_cast<MapView>(view);
+        }
+        ImGui::EndDisabled();
+        widgets::Tooltip(terrain_.LayerCount() < 2
+                             ? "Relief only, until there is a second layer to show"
+                             : "Relief shading, blended layer colours, or the selected layer's "
+                               "weight alone");
+
         ImGui::Checkbox("Show tile bounds", &showTiles_);
         if (ImGui::Button("Fit view")) {
             FitView();
         }
+    }
+
+    void AddLayer() {
+        TerrainLayer layer;
+        const int index = terrain_.LayerCount();
+        layer.name = "Layer " + std::to_string(index);
+        const std::array<float, 3>& rgb =
+            kLayerPalette[static_cast<std::size_t>(index - 1) % kLayerPalette.size()];
+        layer.color = Vec3(rgb[0], rgb[1], rgb[2]);
+        const int added = terrain_.AddLayer(layer);
+        if (added < 0) {
+            return;
+        }
+        paintLayer_ = added;
+        dirty_ = true;
     }
 
     /// Profil brush, digambar dengan `BrushWeight` — fungsi yang sama persis
@@ -751,13 +1229,23 @@ private:
         ImDrawList* draw = ImGui::GetWindowDrawList();
         draw->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y),
                             ImGui::GetColorU32(ImVec4(0.10f, 0.11f, 0.13f, 1.0f)));
+        if (mode_ == Mode::Holes) {
+            // Garis ambangnya digambar karena di situlah kurvanya berhenti
+            // berarti: di atas garis quad-nya hilang, di bawahnya tidak, dan
+            // tidak ada di antaranya.
+            const float y = origin.y + size.y * 0.5f;
+            draw->AddLine(ImVec2(origin.x, y), ImVec2(origin.x + size.x, y),
+                          ImGui::GetColorU32(ImVec4(1.0f, 0.45f, 0.65f, 0.55f)));
+        }
+
         ImVec2 previous(origin.x, origin.y + size.y);
         constexpr int kSteps = 48;
         for (int i = 0; i <= kSteps; ++i) {
             const float t = static_cast<float>(i) / static_cast<float>(kSteps);
-            const float weight = BrushWeight(brush_, (t * 2.0f - 1.0f < 0.0f ? -(t * 2.0f - 1.0f)
-                                                                            : (t * 2.0f - 1.0f)) *
-                                                         brush_.radius);
+            const float unit = std::abs(t * 2.0f - 1.0f);
+            const float weight = mode_ == Mode::Sculpt
+                                     ? BrushWeight(brush_, unit * brush_.radius)
+                                     : BrushWeight(paint_, unit * paint_.radius);
             const ImVec2 point(origin.x + size.x * t, origin.y + size.y * (1.0f - weight));
             if (i > 0) {
                 draw->AddLine(previous, point, ImGui::GetColorU32(ImVec4(0.55f, 0.80f, 0.45f, 1.0f)),
@@ -849,6 +1337,12 @@ private:
         brush_.radius = std::clamp(terrain_.WorldWidth() * 0.02f, 1.0f, 500.0f);
         brush_.strength = std::max((terrain_.Desc().maxHeight - terrain_.Desc().minHeight) * 0.02f,
                                    0.5f);
+        // Kuas cat mengikuti ukuran yang sama, dengan alasan yang sama. Ia tidak
+        // ikut menyalin kekuatannya: kekuatan sculpt meter per detik, kekuatan
+        // cat laju konvergensi, dan menyalin angka di antara dua satuan yang
+        // berbeda adalah cara membuat sapuan pertama selalu salah.
+        paint_.radius = brush_.radius;
+        paintLayer_ = terrain_.LayerCount() > 1 ? 1 : 0;
         FitView();
     }
 
@@ -911,8 +1405,12 @@ private:
     std::string transferFile_;
     bool dirty_ = false;
 
+    Mode mode_ = Mode::Sculpt;
+    MapView view_ = MapView::Relief;
     Tool tool_ = Tool::Raise;
     Brush brush_;
+    PaintBrush paint_;
+    int paintLayer_ = 0;
     BrushStroke stroke_;
     bool rampAnchored_ = false;
     Vec3 rampStart_{0.0f};

@@ -1068,7 +1068,7 @@ terpisah memperbaiki seluruh golongan bug itu, bukan satu kejadiannya.
 **Belum ada:** modul Sub-emitter, dan penetapan material/mesh pada modul Render —
 keduanya menunggu sesuatu yang bisa menggambarnya.
 
-### E7.3 — Terrain Editor · ~5 sesi · 🔨 data, brush, undo, I/O, dan panel selesai
+### E7.3 — Terrain Editor · ~5 sesi · 🔨 semuanya kecuali LOD dan sculpt di viewport 3D
 
 - Data terrain: heightmap ubin (tile) + layer material + peta bobot (splat) + peta
   hole, disimpan sebagai `.simterrain` + tekstur pendamping.
@@ -1083,11 +1083,12 @@ keduanya menunggu sesuatu yang bisa menggambarnya.
   heightmap 2048² per tile tetap bisa diedit tanpa lonjakan memori; import/export PNG
   16-bit round-trip tanpa kehilangan presisi.
 
-**Sudah ada** (24 test di `Tests/TerrainTests.cpp`): modul `Sim::Terrain` berisi
-penyimpanan heightmap berubin, brush sculpt, undo per goresan, dan I/O
-`.simterrain` + PNG 16-bit + RAW, berikut panelnya. **Keempat kriteria terimanya
-sudah terpenuhi** — yang tersisa di E7.3 adalah layer material/splat, peta hole,
-dan penyambungan ke viewport 3D di E8.
+**Sudah ada** (46 test di `Tests/TerrainTests.cpp`): modul `Sim::Terrain` berisi
+penyimpanan heightmap berubin, layer material dengan peta bobot splat, peta hole,
+brush sculpt dan paint, undo per goresan untuk ketiga peta, dan I/O `.simterrain`
++ PNG 16-bit/8-bit + RAW, berikut panelnya. **Keempat kriteria terimanya sudah
+terpenuhi** — yang tersisa di E7.3 adalah pengaturan LOD dan penyambungan ke
+viewport 3D, keduanya menunggu E8.
 
 Keempat kriteria itu bukan sekadar diuji belakangan; masing-masing memaksa satu
 keputusan bentuk, dan itu sebabnya semuanya bisa dipenuhi tanpa renderer.
@@ -1240,11 +1241,140 @@ Impor heightmap **mengosongkan riwayat goresan**. Impor bukan goresan, jadi
 riwayatnya tidak lagi cocok dengan apa yang ada di peta; membiarkannya berarti
 satu Ctrl+Z memasang kembali potongan heightmap lama di atas yang baru diimpor.
 
-**Belum ada:** layer material + peta bobot (splat), peta hole, pengaturan LOD,
-dan sculpt langsung di viewport 3D. Dua yang pertama sudah bisa dikerjakan
-sekarang; LOD dan viewport 3D baru berarti ketika ada yang menggambar terrainnya
-di E8. Alat brush-nya sendiri tidak perlu ditulis ulang saat itu — `BrushStroke`
-hanya menerima posisi dunia, dan dari mana posisi itu datang bukan urusannya.
+#### Layer material dan peta bobot
+
+**Bobot layer dasar tidak disimpan. Ia sisa: `255 − Σ(bobot layer lain)`.**
+
+Itu yang membuat "total bobot tiap sampel selalu 255" menjadi sifat bentuk
+penyimpanannya, bukan kewajiban yang harus diingat setiap penulis — argumen yang
+sama dengan kepemilikan sampel setengah terbuka pada heightmap-nya. Dan invarian
+itulah yang menentukan apakah hasil paint bisa diduga: kalau totalnya bebas,
+sebuah sampel bisa berakhir bertotal 40, dan perender harus memilih di antara dua
+kesalahan. Menormalkan saat menggambar berarti menghapus semua layer tidak
+menghapus apa pun, karena sisa sekecil apa pun diregangkan kembali menjadi penuh.
+Tidak menormalkan berarti ada bercak gelap yang tidak dicat siapa pun. Dengan
+layer dasar sebagai sisa, tidak ada sampel yang bisa kehilangan seluruh
+materialnya. Konsekuensinya layer 0 tidak bisa dihapus maupun dipindah, dan
+mengecat layer 0 berarti menghapus layer di atasnya — yang memang persis arti
+"mengecat kembali ke dasar".
+
+**Deskripsi layer tinggal di dalam `Terrain`, bersama peta bobot yang
+ditunjuknya**, bukan di `TerrainDocument`. Peta bobot layer ke-2 tidak berarti
+apa-apa tanpa tahu layer ke-2 itu apa, jadi menghapus atau memindahkan layer
+harus menggeser keduanya. Disimpan di dua tempat, setiap pemanggil wajib
+melakukan dua hal — dan yang lupa menghasilkan cat yang berpindah ke material
+yang salah tanpa satu pun tanda. `SaveDocumentToString` karena itu menerima
+daftar layer sebagai parameter terpisah; ia serialisasi, bukan salinan hidup.
+
+**Peta bobot ikut berubin dan ikut dialokasikan malas**, dengan satu tambahan:
+menulis nol ke ubin yang belum ada tidak melakukan apa-apa. Tanpa pintasan itu,
+sekali sapu penghapus di atas terrain 4×4 km sudah cukup untuk mewujudkan seluruh
+peta bobotnya — kebalikan dari yang diminta. Dan karena menyusutkan layer lain
+hanya menulis ketika totalnya benar-benar terlampaui, mengecat layer pertama di
+atas terrain kosong tidak menyentuh peta mana pun kecuali miliknya sendiri.
+
+**`WriteWeights` sengaja tidak menjaga invariannya, dan pemuat berkas memanggil
+`NormalizeWeights()` setelah seluruh layer masuk.** Dinormalkan per berkas, layer
+yang dibaca lebih dulu akan menggerus layer berikutnya hanya karena urutan
+bacanya. Normalisasinya sendiri ada karena peta bobot datang dari berkas yang
+bisa disunting di luar editor: invarian yang hanya dijaga jalur paint adalah
+invarian yang batal begitu ada jalan masuk kedua.
+
+**Sentuhan cat dibulatkan menjauhi nilai sekarang, bukan ke terdekat.** Dengan
+pembulatan ke terdekat, setiap langkah yang lebih kecil dari setengah tingkat
+membulat kembali ke tempatnya, dan itu terjadi di dua tempat: pada sentuhan
+terakhir sebelum penuh — sehingga "cat sampai penuh" menjadi mustahil — dan di
+pinggir kuas, di mana bobotnya kecil sehingga sampel di sana tidak pernah
+tersentuh sama sekali. Yang kedua lebih buruk: jari-jari yang sebenarnya menjadi
+lebih kecil daripada lingkaran yang digambar kursor, dan tidak ada angka di panel
+yang menyebutkannya. Yang dibayar adalah pita tipis di pinggir kuas terisi lebih
+cepat daripada janji profilnya, terbatas satu tingkat per sentuhan; bentuk
+profilnya sendiri tetap terbaca, dan itu yang dikunci sebuah test tersendiri.
+
+#### Peta hole
+
+**Hole adalah sifat quad, bukan sifat sampel.** Yang dihapus perender adalah segi
+empat di antara empat sampel, bukan sampelnya. Disimpan per sampel ada dua
+pilihan dan keduanya salah: quad dihapus bila salah satu sudutnya ditandai — maka
+lubang yang tergambar selalu lebih besar daripada yang dicat dan lubang selebar
+satu quad mustahil dibuat; atau quad dihapus hanya bila keempat sudutnya ditandai
+— maka lubang kecil tidak pernah muncul sama sekali. Disimpan per quad, yang
+dicat dan yang tergambar adalah benda yang sama. Kolom dan baris terakhir peta
+karena itu tidak memiliki quad, dan `HoleAt` di sana selalu false.
+
+**Hole biner, jadi `falloff` pada kuasnya bekerja sebagai ambang, bukan
+gradasi** — separuh quad yang berlubang bukan sesuatu yang bisa digambar perender
+mana pun. Kursornya menggambar lingkaran pada ambang setengah bobot, bukan pada
+jari-jari penuh: kursor yang menggambar jari-jari penuh untuk alat yang memotong
+sampai setengahnya berbohong tepat pada satu-satunya hal yang ditanyakan orang
+kepadanya.
+
+**Disimpan satu byte per quad, bukan satu bit.** Bit delapan kali lebih hemat,
+tapi yang dibayar untuk kemasan itu bukan hanya kode pengemasnya melainkan blok
+jurnal undo yang tidak lagi sejajar dengan batas kata pada ukuran ubin yang bukan
+kelipatan 64. Satu byte membuat peta hole memakai jalur salin, jurnal, dan
+alokasi yang sama persis dengan peta bobot. Hole jarang, dan ubin yang tidak
+berlubang tidak dialokasikan sama sekali — jadi yang dihemat pengemasan adalah
+delapan per sembilan dari sesuatu yang sudah mendekati nol.
+
+**Jumlah lubang dijaga bertahap, termasuk saat undo menukar isi blok.** Panel
+menampilkannya tiap frame; menghitungnya saat ditanya berarti membaca puluhan
+megabyte demi satu angka, dan menghitung ulang setelah tiap undo membuat Ctrl+Z
+pada terrain besar tersendat karena pekerjaan yang tidak ada hubungannya dengan
+besar goresannya.
+
+#### Yang mengikat ketiganya
+
+**Satu goresan mencakup ketiga peta.** Bukan karena satu goresan pernah menyentuh
+ketiganya — tidak pernah — melainkan karena riwayat yang terpisah per peta berarti
+Ctrl+Z yang artinya bergantung pada tab mana yang sedang terbuka, dan itu tidak
+bisa ditebak siapa pun. `RemoveLayer` dan `MoveLayer` sebaliknya **membuang**
+riwayat: jurnalnya menunjuk layer lewat indeks, dan indeks yang sama sesudahnya
+menunjuk layer yang berbeda — satu Ctrl+Z akan memasang bobot layer yang dihapus
+ke atas layer yang bukan pemiliknya, kerusakan senyap yang lebih buruk daripada
+undo yang hilang.
+
+**Peta yang tidak menyimpan apa pun tidak ditulis, dan namanya tidak dicatat.**
+Satu aturan untuk heightmap, peta bobot, dan peta hole sekaligus: tidak ada
+berkas nol byte yang harus dijelaskan, dan tidak ada nama di JSON yang menunjuk
+berkas yang tidak ada. Nama berkasnya tetap dicatat di `.simterrain` alih-alih
+ditebak dari nama dokumennya, karena pemuat yang menebak akan diam-diam mengambil
+peta milik terrain lain yang kebetulan senama, dan tidak punya cara membedakan
+"berkasnya belum ada" dari "layernya memang belum pernah dicat".
+
+Enkoder PNG-nya yang sama melayani 8 bit maupun 16 bit. Bukan karena
+`stbi_write_png` tidak mampu menulis 8 bit — ia mampu — melainkan supaya seluruh
+berkas pendamping sebuah terrain dihasilkan satu penulis: dua penulis berarti dua
+perilaku yang bisa berbeda dalam hal yang baru terlihat pada berkas orang lain,
+yaitu pilihan filter, ukuran keluaran, dan penanganan gambar kosong. Berkas
+keluarannya diperiksa di luar build dengan Pillow dan pemeriksa CRC tersendiri:
+mode `L`, seluruh 4096 sampel bobot cocok, peta hole hanya berisi 0/255.
+
+**Peta 2D-nya punya tiga tampilan** — Relief, Layers, dan Weight — dan tampilan
+itu berganti mengikuti tab alat yang dipilih, tapi hanya pada saat tabnya
+berganti. Berpindah tab adalah tindakan yang disengaja, jadi pantas mengubah
+tampilan; memaksakannya tiap frame akan membuat combo tampilan di bawahnya tidak
+bisa dipakai sama sekali. Ketiganya memakai bayangan lereng yang sama: peta bobot
+yang kehilangan bayangannya menjadi bercak abu-abu yang tidak bisa dicocokkan
+dengan bentuk terrain di bawahnya, padahal justru itu yang ingin dilihat saat
+mengecat.
+
+**Lubang digambar sebagai persegi quad-nya sendiri, bukan dicuplik di simpul kisi
+seperti tingginya.** Tinggi boleh dicuplik: puncak yang hilang pada zoom jauh
+tetap menyisakan lerengnya, jadi petanya tetap benar walaupun kasar. Lubang tidak
+punya lereng — ia ada atau tidak ada — dan lubang yang tidak tergambar terbaca
+sebagai lubang yang tidak ada. Peta hole karena itu dipindai pada kisi quad-nya
+sendiri, dengan langkah yang melebar mengikuti zoom supaya ongkosnya terbatas,
+dan sel sebaris digabung menjadi satu persegi supaya jumlah perintah gambarnya
+tidak ikut melebar.
+
+**Belum ada:** pengaturan LOD, dan sculpt maupun paint langsung di viewport 3D.
+Keduanya baru berarti ketika ada yang menggambar terrainnya di E8. Alat brush-nya
+sendiri tidak perlu ditulis ulang saat itu — penjadwal sentuhan `BrushStroke`
+hanya menerima posisi dunia dan sebuah callback, dan dari mana posisi itu datang
+bukan urusannya. Sculpt dan paint sudah berbagi penjadwal yang sama persis itu,
+karena masalahnya memang sama persis: laju frame yang tidak boleh mengubah hasil,
+dan seretan cepat yang tidak boleh meninggalkan manik-manik.
 
 ### E7.4 — Vegetation Editor · ~4 sesi
 
@@ -1291,7 +1421,9 @@ E0 ─► E1 ─► E2 ─► E3 ─► E4 ─┬─► E5 ─┬─► E6 ─�
 ```
 
 E7.4 (Vegetation) bergantung pada E7.3 (Terrain) karena aturan penempatannya membaca
-heightmap dan layer terrain. Sisanya bisa dikerjakan paralel setelah E5/E6.
+heightmap dan layer terrain. Keduanya sudah ada — `HeightAtWorld` dan
+`WeightAt(layer, x, y)` — jadi ketergantungan itu sudah terbayar. Sisanya bisa
+dikerjakan paralel setelah E5/E6.
 
 **Track AI (A0..A4)** bercabang dari E2 dan berjalan paralel — lihat
 [PLAN-AI.md](PLAN-AI.md). Menjalankannya lebih awal justru menguntungkan: sejak A0,

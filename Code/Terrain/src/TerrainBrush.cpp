@@ -89,16 +89,18 @@ const char* ToString(BrushKind kind) {
     return "Unknown";
 }
 
-float BrushWeight(const Brush& brush, float distance) {
-    if (brush.radius <= 0.0f || distance >= brush.radius) {
+namespace {
+
+float FalloffWeight(float radius, float falloff, float distance) {
+    if (radius <= 0.0f || distance >= radius) {
         return 0.0f;
     }
-    const float t = distance / brush.radius;
+    const float t = distance / radius;
     // `falloff` menentukan seberapa lebar dataran penuh di tengah. Dengan 0,
     // seluruh lingkaran berbobot penuh dan tepinya tajam — itu yang dibutuhkan
     // untuk memahat bentuk bersudut, dan tidak bisa didapat dari kurva yang
     // selalu melembut.
-    const float inner = 1.0f - std::clamp(brush.falloff, 0.0f, 1.0f);
+    const float inner = 1.0f - std::clamp(falloff, 0.0f, 1.0f);
     if (t <= inner) {
         return 1.0f;
     }
@@ -107,6 +109,16 @@ float BrushWeight(const Brush& brush, float distance) {
     }
     const float u = (t - inner) / (1.0f - inner);
     return 1.0f - u * u * (3.0f - 2.0f * u);
+}
+
+}  // namespace
+
+float BrushWeight(const Brush& brush, float distance) {
+    return FalloffWeight(brush.radius, brush.falloff, distance);
+}
+
+float BrushWeight(const PaintBrush& brush, float distance) {
+    return FalloffWeight(brush.radius, brush.falloff, distance);
 }
 
 void ApplyDab(Terrain& terrain, const Brush& brush, float worldX, float worldZ, float dt) {
@@ -199,6 +211,80 @@ void ApplyRamp(Terrain& terrain, const Brush& brush, const Vec3& start, const Ve
     }
 }
 
+void ApplyLayerDab(Terrain& terrain, const PaintBrush& brush, int layer, float worldX,
+                   float worldZ, float dt) {
+    if (dt <= 0.0f || brush.radius <= 0.0f || layer < 0 || layer >= terrain.LayerCount()) {
+        return;
+    }
+    const SampleRect rect = terrain.RectForCircle(worldX, worldZ, brush.radius);
+    if (rect.Empty()) {
+        return;
+    }
+    const float spacing = terrain.Desc().sampleSpacing;
+    const float target = std::clamp(brush.target, 0.0f, 1.0f) * static_cast<float>(kWeightMax);
+
+    for (int y = rect.y0; y < rect.y1; ++y) {
+        for (int x = rect.x0; x < rect.x1; ++x) {
+            const float dx = static_cast<float>(x) * spacing - worldX;
+            const float dz = static_cast<float>(y) * spacing - worldZ;
+            const float weight = BrushWeight(brush, std::sqrt(dx * dx + dz * dz));
+            if (weight <= 0.0f) {
+                continue;
+            }
+            const float amount = std::min(1.0f, brush.strength * dt * weight);
+            const auto current = static_cast<float>(terrain.WeightAt(layer, x, y));
+            const float next = current + (target - current) * amount;
+
+            // Dibulatkan MENJAUHI nilai sekarang, bukan ke terdekat.
+            //
+            // Dengan pembulatan ke terdekat, setiap langkah yang lebih kecil dari
+            // setengah tingkat membulat kembali ke tempatnya, dan itu terjadi di
+            // dua tempat sekaligus: pada sentuhan-sentuhan terakhir sebelum penuh
+            // — sehingga kuas mendekati 255 tanpa pernah sampai, dan "cat sampai
+            // penuh" menjadi mustahil — dan di pinggir kuas, di mana bobotnya
+            // kecil sehingga sampel di sana tidak pernah tersentuh sama sekali.
+            // Yang kedua lebih buruk daripada yang pertama: jari-jari yang
+            // sebenarnya menjadi lebih kecil daripada lingkaran yang digambar
+            // kursor, dan tidak ada satu pun angka di panel yang menyebutkannya.
+            //
+            // Yang dibayar: langkah yang seharusnya lebih kecil dari satu tingkat
+            // menjadi satu tingkat, jadi pita tipis di pinggir kuas terisi lebih
+            // cepat daripada yang dijanjikan profilnya. Selisihnya terbatas pada
+            // satu tingkat per sentuhan — 0,4% bobot — dan hanya di tempat yang
+            // tanpa ini tidak akan tersentuh sama sekali. Bentuk profilnya sendiri
+            // tetap terbaca; itu yang dikunci test "profil kuas masih berarti".
+            const float rounded = target > current ? std::ceil(next) : std::floor(next);
+            terrain.SetWeightAt(
+                layer, x, y,
+                static_cast<Weight>(std::clamp(rounded, 0.0f, static_cast<float>(kWeightMax))));
+        }
+    }
+}
+
+void ApplyHoleDab(Terrain& terrain, const PaintBrush& brush, bool hole, float worldX,
+                  float worldZ) {
+    if (brush.radius <= 0.0f) {
+        return;
+    }
+    const SampleRect rect = terrain.RectForCircle(worldX, worldZ, brush.radius);
+    if (rect.Empty()) {
+        return;
+    }
+    const float spacing = terrain.Desc().sampleSpacing;
+    for (int y = rect.y0; y < rect.y1; ++y) {
+        for (int x = rect.x0; x < rect.x1; ++x) {
+            // Titik ujinya pusat quad, bukan sudutnya: quad itulah yang akan
+            // hilang, dan mengujinya di sudut menggeser seluruh lubang setengah
+            // sel dari tempat kursornya berada.
+            const float dx = (static_cast<float>(x) + 0.5f) * spacing - worldX;
+            const float dz = (static_cast<float>(y) + 0.5f) * spacing - worldZ;
+            if (BrushWeight(brush, std::sqrt(dx * dx + dz * dz)) >= 0.5f) {
+                terrain.SetHoleAt(x, y, hole);
+            }
+        }
+    }
+}
+
 void BrushStroke::Begin(Terrain& terrain, float worldX, float worldZ) {
     if (active_) {
         return;
@@ -213,6 +299,13 @@ void BrushStroke::Begin(Terrain& terrain, float worldX, float worldZ) {
 
 void BrushStroke::Advance(Terrain& terrain, const Brush& brush, float worldX, float worldZ,
                           float dt) {
+    Advance(brush.radius, worldX, worldZ, dt, [&](float x, float z, float step) {
+        ApplyDab(terrain, brush, x, z, step);
+    });
+}
+
+void BrushStroke::Advance(float radius, float worldX, float worldZ, float dt,
+                          const std::function<void(float, float, float)>& dab) {
     if (!active_ || dt <= 0.0f) {
         return;
     }
@@ -234,7 +327,7 @@ void BrushStroke::Advance(Terrain& terrain, const Brush& brush, float worldX, fl
     const float dx = worldX - lastX_;
     const float dz = worldZ - lastZ_;
     const float distance = std::sqrt(dx * dx + dz * dz);
-    const float spacing = std::max(brush.radius * kDabSpacing, 1e-3f);
+    const float spacing = std::max(radius * kDabSpacing, 1e-3f);
     const int spanSteps = static_cast<int>(std::ceil(distance / spacing));
     const int timeSteps = static_cast<int>(used / kDabStep);
 
@@ -242,7 +335,7 @@ void BrushStroke::Advance(Terrain& terrain, const Brush& brush, float worldX, fl
     const float share = used / static_cast<float>(dabs);
     for (int i = 1; i <= dabs; ++i) {
         const float t = static_cast<float>(i) / static_cast<float>(dabs);
-        ApplyDab(terrain, brush, lastX_ + dx * t, lastZ_ + dz * t, share);
+        dab(lastX_ + dx * t, lastZ_ + dz * t, share);
     }
     dabs_ += dabs;
     lastX_ = worldX;

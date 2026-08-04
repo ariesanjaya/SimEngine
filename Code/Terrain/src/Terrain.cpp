@@ -6,8 +6,14 @@
 namespace sim::terrain {
 namespace {
 
-uint64_t BlockKey(int tile, int block) {
-    return (static_cast<uint64_t>(static_cast<uint32_t>(tile)) << 32) |
+/// Peta tinggi diberi nomor -2 dan peta hole -1 supaya keduanya berbagi ruang
+/// kunci dengan layer bobot tanpa bisa bertabrakan dengannya.
+constexpr int kHeightChannel = -2;
+constexpr int kHoleChannel = -1;
+
+uint64_t BlockKey(int channel, int tile, int block) {
+    return (static_cast<uint64_t>(static_cast<uint32_t>(channel + 2)) << 48) |
+           (static_cast<uint64_t>(static_cast<uint32_t>(tile)) << 24) |
            static_cast<uint32_t>(block);
 }
 
@@ -21,7 +27,16 @@ Terrain::Terrain(const TerrainDesc& desc) : desc_(desc) {
         desc_.maxHeight = desc_.minHeight + 1.0f;
     }
     base_ = ToSample(desc_.baseHeight);
-    tiles_.resize(static_cast<std::size_t>(desc_.tilesX) * static_cast<std::size_t>(desc_.tilesY));
+    tiles_.resize(static_cast<std::size_t>(TileCount()));
+    holes_.resize(static_cast<std::size_t>(TileCount()));
+
+    // Layer dasar selalu ada. Terrain tanpa satu pun layer adalah terrain yang
+    // setiap sampelnya tidak punya material — keadaan yang tidak berguna bagi
+    // siapa pun dan harus diperiksa di setiap pembaca.
+    LayerData base;
+    base.desc.name = "Base";
+    base.tiles.resize(static_cast<std::size_t>(TileCount()));
+    layers_.push_back(std::move(base));
 }
 
 float Terrain::ToMeters(Sample value) const {
@@ -69,7 +84,7 @@ void Terrain::CaptureBlock(int tileIndex, int blockIndex) {
     if (!inStroke_) {
         return;
     }
-    if (!captured_.insert(BlockKey(tileIndex, blockIndex)).second) {
+    if (!captured_.insert(BlockKey(kHeightChannel, tileIndex, blockIndex)).second) {
         return;
     }
 
@@ -209,6 +224,450 @@ void Terrain::WriteAll(const Sample* samples) {
     }
 }
 
+// --- peta byte: bobot layer dan hole -----------------------------------------
+
+std::vector<std::unique_ptr<Terrain::ByteTile>>& Terrain::ByteTiles(int layer) {
+    return layer >= 0 ? layers_[static_cast<std::size_t>(layer)].tiles : holes_;
+}
+
+const std::vector<std::unique_ptr<Terrain::ByteTile>>& Terrain::ByteTiles(int layer) const {
+    return layer >= 0 ? layers_[static_cast<std::size_t>(layer)].tiles : holes_;
+}
+
+Terrain::ByteTile& Terrain::MaterializeByteTile(int layer, int index) {
+    std::unique_ptr<ByteTile>& tile = ByteTiles(layer)[static_cast<std::size_t>(index)];
+    if (tile == nullptr) {
+        tile = std::make_unique<ByteTile>();
+        tile->bytes.assign(static_cast<std::size_t>(desc_.tileSamples) *
+                               static_cast<std::size_t>(desc_.tileSamples),
+                           0);
+    }
+    return *tile;
+}
+
+void Terrain::CaptureByteBlock(int layer, int tileIndex, int blockIndex) {
+    if (!inStroke_) {
+        return;
+    }
+    if (!captured_.insert(BlockKey(layer, tileIndex, blockIndex)).second) {
+        return;
+    }
+
+    const int perSide = BlocksPerSide();
+    const int bx = (blockIndex % perSide) * kBlockSize;
+    const int by = (blockIndex / perSide) * kBlockSize;
+    const int w = std::min(kBlockSize, desc_.tileSamples - bx);
+    const int h = std::min(kBlockSize, desc_.tileSamples - by);
+
+    ByteBlockImage record;
+    record.layer = layer;
+    record.tile = tileIndex;
+    record.block = blockIndex;
+    record.image.resize(static_cast<std::size_t>(w) * static_cast<std::size_t>(h));
+
+    const ByteTile& tile = *ByteTiles(layer)[static_cast<std::size_t>(tileIndex)];
+    for (int row = 0; row < h; ++row) {
+        const uint8_t* src =
+            &tile.bytes[static_cast<std::size_t>((by + row) * desc_.tileSamples + bx)];
+        std::copy(src, src + w, record.image.begin() + static_cast<std::ptrdiff_t>(row) * w);
+    }
+
+    current_.bytes += record.image.size();
+    current_.byteBlocks.push_back(std::move(record));
+}
+
+uint8_t Terrain::ByteAt(int layer, int x, int y) const {
+    x = std::clamp(x, 0, SamplesX() - 1);
+    y = std::clamp(y, 0, SamplesY() - 1);
+    const int tx = x / desc_.tileSamples;
+    const int ty = y / desc_.tileSamples;
+    const std::unique_ptr<ByteTile>& tile =
+        ByteTiles(layer)[static_cast<std::size_t>(ty * desc_.tilesX + tx)];
+    if (tile == nullptr) {
+        return 0;
+    }
+    const int lx = x - tx * desc_.tileSamples;
+    const int ly = y - ty * desc_.tileSamples;
+    return tile->bytes[static_cast<std::size_t>(ly * desc_.tileSamples + lx)];
+}
+
+void Terrain::SetByteAt(int layer, int x, int y, uint8_t value) {
+    if (x < 0 || y < 0 || x >= SamplesX() || y >= SamplesY()) {
+        return;
+    }
+    const int tx = x / desc_.tileSamples;
+    const int ty = y / desc_.tileSamples;
+    const int tileIndex = ty * desc_.tilesX + tx;
+    if (ByteTiles(layer)[static_cast<std::size_t>(tileIndex)] == nullptr && value == 0) {
+        // Menulis nol ke ubin yang belum ada tidak mengubah apa pun. Tanpa
+        // pintasan ini, menghapus di atas daerah yang belum pernah dicat justru
+        // mewujudkan seluruh peta bobotnya — kebalikan dari yang diminta.
+        return;
+    }
+
+    const int lx = x - tx * desc_.tileSamples;
+    const int ly = y - ty * desc_.tileSamples;
+    ByteTile& tile = MaterializeByteTile(layer, tileIndex);
+    if (inStroke_) {
+        const int perSide = BlocksPerSide();
+        CaptureByteBlock(layer, tileIndex, (ly / kBlockSize) * perSide + (lx / kBlockSize));
+    }
+    tile.bytes[static_cast<std::size_t>(ly * desc_.tileSamples + lx)] = value;
+}
+
+void Terrain::ReadBytes(int layer, std::vector<uint8_t>& out) const {
+    const int w = SamplesX();
+    out.assign(static_cast<std::size_t>(w) * static_cast<std::size_t>(SamplesY()), 0);
+    for (int ty = 0; ty < desc_.tilesY; ++ty) {
+        for (int tx = 0; tx < desc_.tilesX; ++tx) {
+            const std::unique_ptr<ByteTile>& tile =
+                ByteTiles(layer)[static_cast<std::size_t>(ty * desc_.tilesX + tx)];
+            if (tile == nullptr) {
+                continue;
+            }
+            for (int row = 0; row < desc_.tileSamples; ++row) {
+                const uint8_t* src = &tile->bytes[static_cast<std::size_t>(row) *
+                                                  static_cast<std::size_t>(desc_.tileSamples)];
+                uint8_t* dst = out.data() +
+                               static_cast<std::size_t>(ty * desc_.tileSamples + row) *
+                                   static_cast<std::size_t>(w) +
+                               static_cast<std::size_t>(tx * desc_.tileSamples);
+                std::copy(src, src + desc_.tileSamples, dst);
+            }
+        }
+    }
+}
+
+void Terrain::WriteBytes(int layer, const uint8_t* bytes) {
+    const int w = SamplesX();
+    for (int ty = 0; ty < desc_.tilesY; ++ty) {
+        for (int tx = 0; tx < desc_.tilesX; ++tx) {
+            const int index = ty * desc_.tilesX + tx;
+            // Alasan yang sama dengan WriteAll: ubin yang seluruhnya nol tidak
+            // menyimpan apa pun yang belum diketahui, dan mewujudkannya membuang
+            // seluruh guna alokasi malas justru pada saat membuka berkas.
+            if (ByteTiles(layer)[static_cast<std::size_t>(index)] == nullptr) {
+                bool empty = true;
+                for (int row = 0; row < desc_.tileSamples && empty; ++row) {
+                    const uint8_t* src = bytes +
+                                         static_cast<std::size_t>(ty * desc_.tileSamples + row) *
+                                             static_cast<std::size_t>(w) +
+                                         static_cast<std::size_t>(tx * desc_.tileSamples);
+                    for (int col = 0; col < desc_.tileSamples; ++col) {
+                        if (src[col] != 0) {
+                            empty = false;
+                            break;
+                        }
+                    }
+                }
+                if (empty) {
+                    continue;
+                }
+            }
+
+            ByteTile& tile = MaterializeByteTile(layer, index);
+            for (int row = 0; row < desc_.tileSamples; ++row) {
+                const uint8_t* src = bytes +
+                                     static_cast<std::size_t>(ty * desc_.tileSamples + row) *
+                                         static_cast<std::size_t>(w) +
+                                     static_cast<std::size_t>(tx * desc_.tileSamples);
+                uint8_t* dst = &tile.bytes[static_cast<std::size_t>(row) *
+                                           static_cast<std::size_t>(desc_.tileSamples)];
+                std::copy(src, src + desc_.tileSamples, dst);
+            }
+        }
+    }
+}
+
+// --- layer material -----------------------------------------------------------
+
+const TerrainLayer& Terrain::Layer(int index) const {
+    return layers_[static_cast<std::size_t>(std::clamp(index, 0, LayerCount() - 1))].desc;
+}
+
+TerrainLayer& Terrain::Layer(int index) {
+    return layers_[static_cast<std::size_t>(std::clamp(index, 0, LayerCount() - 1))].desc;
+}
+
+int Terrain::AddLayer(const TerrainLayer& layer) {
+    if (LayerCount() >= kMaxLayers) {
+        return -1;
+    }
+    LayerData data;
+    data.desc = layer;
+    data.tiles.resize(static_cast<std::size_t>(TileCount()));
+    layers_.push_back(std::move(data));
+    return LayerCount() - 1;
+}
+
+bool Terrain::RemoveLayer(int index) {
+    if (index <= 0 || index >= LayerCount()) {
+        return false;
+    }
+    layers_.erase(layers_.begin() + index);
+    // Riwayat dibuang: jurnalnya menunjuk layer lewat indeks, dan indeks yang
+    // sama sekarang menunjuk layer yang berbeda. Satu Ctrl+Z akan memasang bobot
+    // layer yang dihapus ke atas layer yang bukan pemiliknya — kerusakan senyap,
+    // yang lebih buruk daripada undo yang hilang.
+    ClearHistory();
+    return true;
+}
+
+bool Terrain::MoveLayer(int from, int to) {
+    if (from <= 0 || to <= 0 || from >= LayerCount() || to >= LayerCount() || from == to) {
+        return false;
+    }
+    LayerData moved = std::move(layers_[static_cast<std::size_t>(from)]);
+    layers_.erase(layers_.begin() + from);
+    layers_.insert(layers_.begin() + to, std::move(moved));
+    ClearHistory();  // alasan yang sama dengan RemoveLayer
+    return true;
+}
+
+void Terrain::SetLayers(const std::vector<TerrainLayer>& layers) {
+    layers_.clear();
+    for (const TerrainLayer& layer : layers) {
+        LayerData data;
+        data.desc = layer;
+        data.tiles.resize(static_cast<std::size_t>(TileCount()));
+        layers_.push_back(std::move(data));
+        if (LayerCount() >= kMaxLayers) {
+            break;
+        }
+    }
+    if (layers_.empty()) {
+        LayerData base;
+        base.desc.name = "Base";
+        base.tiles.resize(static_cast<std::size_t>(TileCount()));
+        layers_.push_back(std::move(base));
+    }
+    ClearHistory();
+}
+
+Weight Terrain::WeightAt(int layer, int x, int y) const {
+    if (layer < 0 || layer >= LayerCount()) {
+        return 0;
+    }
+    if (layer > 0) {
+        return ByteAt(layer, x, y);
+    }
+    int sum = 0;
+    for (int other = 1; other < LayerCount(); ++other) {
+        sum += ByteAt(other, x, y);
+    }
+    // Dijepit, bukan diandaikan: peta bobot bisa datang dari berkas yang disunting
+    // di luar editor, dan sampel yang totalnya melebihi 255 tidak boleh membuat
+    // bobot dasar berputar menjadi angka besar.
+    return static_cast<Weight>(std::clamp(kWeightMax - sum, 0, static_cast<int>(kWeightMax)));
+}
+
+void Terrain::ShrinkOtherWeights(int keep, int x, int y, int budget) {
+    int sum = 0;
+    for (int layer = 1; layer < LayerCount(); ++layer) {
+        if (layer != keep) {
+            sum += ByteAt(layer, x, y);
+        }
+    }
+    if (sum <= budget) {
+        // Tidak ada yang ditulis — dan karena itu tidak ada ubin yang diwujudkan
+        // dan tidak ada blok yang masuk jurnal. Mengecat layer pertama di atas
+        // terrain kosong karena itu tidak menyentuh peta bobot mana pun kecuali
+        // miliknya sendiri.
+        return;
+    }
+    for (int layer = 1; layer < LayerCount(); ++layer) {
+        if (layer == keep) {
+            continue;
+        }
+        const int weight = ByteAt(layer, x, y);
+        if (weight == 0) {
+            continue;
+        }
+        SetByteAt(layer, x, y, static_cast<uint8_t>(weight * budget / sum));
+    }
+}
+
+void Terrain::SetWeightAt(int layer, int x, int y, Weight weight) {
+    if (layer < 0 || layer >= LayerCount()) {
+        return;
+    }
+    if (layer == 0) {
+        // Layer dasar tidak punya peta: bobotnya sisa. "Menetapkan" bobot dasar
+        // berarti menyusutkan layer di atasnya sampai sisanya sebesar itu — dan
+        // itu memang arti mengecat kembali ke dasar.
+        ShrinkOtherWeights(-1, x, y, kWeightMax - weight);
+        return;
+    }
+    SetByteAt(layer, x, y, weight);
+    ShrinkOtherWeights(layer, x, y, kWeightMax - weight);
+}
+
+bool Terrain::LayerPainted(int layer) const {
+    if (layer <= 0 || layer >= LayerCount()) {
+        return false;
+    }
+    for (const std::unique_ptr<ByteTile>& tile : ByteTiles(layer)) {
+        if (tile != nullptr) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void Terrain::ClearLayerWeights(int layer) {
+    if (layer <= 0 || layer >= LayerCount()) {
+        return;
+    }
+    for (int index = 0; index < TileCount(); ++index) {
+        if (ByteTiles(layer)[static_cast<std::size_t>(index)] == nullptr) {
+            continue;
+        }
+        const int tx = index % desc_.tilesX;
+        const int ty = index / desc_.tilesX;
+        for (int row = 0; row < desc_.tileSamples; ++row) {
+            for (int col = 0; col < desc_.tileSamples; ++col) {
+                if (ByteAt(layer, tx * desc_.tileSamples + col, ty * desc_.tileSamples + row) != 0) {
+                    SetByteAt(layer, tx * desc_.tileSamples + col, ty * desc_.tileSamples + row, 0);
+                }
+            }
+        }
+    }
+}
+
+void Terrain::ReadWeights(int layer, std::vector<Weight>& out) const {
+    if (layer <= 0 || layer >= LayerCount()) {
+        // Layer dasar tidak punya peta untuk dibaca; membangunnya di sini akan
+        // menghasilkan berkas yang tidak boleh ada, karena memuatnya kembali
+        // berarti bobot dasar disimpan dua kali dan bisa bertentangan.
+        out.clear();
+        return;
+    }
+    ReadBytes(layer, out);
+}
+
+void Terrain::WriteWeights(int layer, const Weight* weights) {
+    if (layer <= 0 || layer >= LayerCount() || weights == nullptr) {
+        return;
+    }
+    WriteBytes(layer, weights);
+}
+
+void Terrain::NormalizeWeights() {
+    // Dengan satu layer eksplisit, totalnya tidak mungkin melebihi 255: sebuah
+    // byte tidak bisa.
+    if (LayerCount() <= 2) {
+        return;
+    }
+    for (int index = 0; index < TileCount(); ++index) {
+        int resident = 0;
+        for (int layer = 1; layer < LayerCount(); ++layer) {
+            if (ByteTiles(layer)[static_cast<std::size_t>(index)] != nullptr) {
+                ++resident;
+            }
+        }
+        if (resident < 2) {
+            continue;  // butuh dua layer terwujud untuk bisa melebihi anggaran
+        }
+        const int tx = (index % desc_.tilesX) * desc_.tileSamples;
+        const int ty = (index / desc_.tilesX) * desc_.tileSamples;
+        for (int row = 0; row < desc_.tileSamples; ++row) {
+            for (int col = 0; col < desc_.tileSamples; ++col) {
+                ShrinkOtherWeights(-1, tx + col, ty + row, kWeightMax);
+            }
+        }
+    }
+}
+
+// --- peta hole ----------------------------------------------------------------
+
+bool Terrain::HoleAt(int x, int y) const {
+    // Kolom dan baris terakhir tidak punya quad, jadi tidak bisa berlubang.
+    if (x < 0 || y < 0 || x >= SamplesX() - 1 || y >= SamplesY() - 1) {
+        return false;
+    }
+    return ByteAt(kHoleChannel, x, y) != 0;
+}
+
+void Terrain::SetHoleAt(int x, int y, bool hole) {
+    if (x < 0 || y < 0 || x >= SamplesX() - 1 || y >= SamplesY() - 1) {
+        return;
+    }
+    const bool was = ByteAt(kHoleChannel, x, y) != 0;
+    if (was == hole) {
+        return;
+    }
+    SetByteAt(kHoleChannel, x, y, hole ? 1 : 0);
+    if (hole) {
+        ++holeCount_;
+    } else {
+        --holeCount_;
+    }
+}
+
+void Terrain::ClearHoles() {
+    for (int index = 0; index < TileCount(); ++index) {
+        if (holes_[static_cast<std::size_t>(index)] == nullptr) {
+            continue;
+        }
+        const int tx = (index % desc_.tilesX) * desc_.tileSamples;
+        const int ty = (index / desc_.tilesX) * desc_.tileSamples;
+        for (int row = 0; row < desc_.tileSamples; ++row) {
+            for (int col = 0; col < desc_.tileSamples; ++col) {
+                SetHoleAt(tx + col, ty + row, false);
+            }
+        }
+    }
+}
+
+void Terrain::ReadHoles(std::vector<uint8_t>& out) const {
+    ReadBytes(kHoleChannel, out);
+    // Ditulis sebagai 0/255, bukan 0/1: berkasnya adalah gambar, dan gambar yang
+    // seluruhnya bernilai satu terlihat hitam pekat di penyunting mana pun.
+    const int w = SamplesX();
+    const int h = SamplesY();
+    for (int y = 0; y < h; ++y) {
+        for (int x = 0; x < w; ++x) {
+            uint8_t& value = out[static_cast<std::size_t>(y) * static_cast<std::size_t>(w) +
+                                 static_cast<std::size_t>(x)];
+            // Kolom dan baris terakhir dinolkan: di sana tidak ada quad, jadi apa
+            // pun yang tersimpan tidak berarti dan tidak boleh ikut terbaca.
+            value = (x < w - 1 && y < h - 1 && value != 0) ? 255 : 0;
+        }
+    }
+}
+
+void Terrain::WriteHoles(const uint8_t* holes) {
+    if (holes == nullptr) {
+        return;
+    }
+    WriteBytes(kHoleChannel, holes);
+    // Dihitung ulang dari ubin yang terwujud saja. Memindai seluruh peta berarti
+    // seperempat miliar langkah pada terrain 16k² — untuk menghitung lubang yang
+    // menurut definisinya hanya ada di ubin yang terwujud.
+    holeCount_ = 0;
+    for (int index = 0; index < TileCount(); ++index) {
+        if (holes_[static_cast<std::size_t>(index)] == nullptr) {
+            continue;
+        }
+        const int tx = (index % desc_.tilesX) * desc_.tileSamples;
+        const int ty = (index / desc_.tilesX) * desc_.tileSamples;
+        const ByteTile& tile = *holes_[static_cast<std::size_t>(index)];
+        for (int row = 0; row < desc_.tileSamples; ++row) {
+            if (ty + row >= SamplesY() - 1) {
+                break;
+            }
+            const int columns = std::min(desc_.tileSamples, SamplesX() - 1 - tx);
+            const uint8_t* line = &tile.bytes[static_cast<std::size_t>(row) *
+                                              static_cast<std::size_t>(desc_.tileSamples)];
+            for (int col = 0; col < columns; ++col) {
+                if (line[col] != 0) {
+                    ++holeCount_;
+                }
+            }
+        }
+    }
+}
+
 void Terrain::BeginStroke() {
     if (inStroke_) {
         return;
@@ -224,7 +683,7 @@ void Terrain::EndStroke() {
     }
     inStroke_ = false;
     captured_.clear();
-    if (current_.blocks.empty()) {
+    if (current_.Empty()) {
         // Goresan yang tidak menyentuh apa pun tidak masuk riwayat: satu Ctrl+Z
         // yang tidak mengubah apa-apa terlihat seperti undo yang rusak.
         return;
@@ -252,6 +711,38 @@ void Terrain::SwapStroke(Stroke& stroke) {
         for (int row = 0; row < h; ++row) {
             Sample* live = &tile.samples[static_cast<std::size_t>((by + row) * desc_.tileSamples + bx)];
             Sample* saved = record.image.data() + static_cast<std::ptrdiff_t>(row) * w;
+            std::swap_ranges(live, live + w, saved);
+        }
+    }
+
+    for (ByteBlockImage& record : stroke.byteBlocks) {
+        ByteTile& tile = MaterializeByteTile(record.layer, record.tile);
+        const int perSide = BlocksPerSide();
+        const int bx = (record.block % perSide) * kBlockSize;
+        const int by = (record.block / perSide) * kBlockSize;
+        const int w = std::min(kBlockSize, desc_.tileSamples - bx);
+        const int h = std::min(kBlockSize, desc_.tileSamples - by);
+        for (int row = 0; row < h; ++row) {
+            uint8_t* live = &tile.bytes[static_cast<std::size_t>((by + row) * desc_.tileSamples + bx)];
+            uint8_t* saved = record.image.data() + static_cast<std::ptrdiff_t>(row) * w;
+            if (record.layer < 0) {
+                // Jumlah lubang dijaga bertahap, jadi ia harus ikut bertukar
+                // bersama isinya. Menghitung ulang seluruh peta setelah tiap undo
+                // akan membuat Ctrl+Z pada terrain besar terasa tersendat karena
+                // pekerjaan yang tidak ada hubungannya dengan besar goresannya.
+                for (int col = 0; col < w; ++col) {
+                    const bool before = live[col] != 0;
+                    const bool after = saved[col] != 0;
+                    if (before == after) {
+                        continue;
+                    }
+                    if (after) {
+                        ++holeCount_;
+                    } else {
+                        --holeCount_;
+                    }
+                }
+            }
             std::swap_ranges(live, live + w, saved);
         }
     }
@@ -305,9 +796,28 @@ std::size_t Terrain::TilesResident() const {
 }
 
 std::size_t Terrain::BytesResident() const {
-    const std::size_t perTile = static_cast<std::size_t>(desc_.tileSamples) *
-                                static_cast<std::size_t>(desc_.tileSamples) * sizeof(Sample);
-    return TilesResident() * perTile + undoBytes_ + current_.bytes;
+    const std::size_t samplesPerTile = static_cast<std::size_t>(desc_.tileSamples) *
+                                       static_cast<std::size_t>(desc_.tileSamples);
+
+    // Peta bobot dan peta hole ikut dihitung: keduanya dialokasikan malas dengan
+    // aturan yang sama, jadi angka yang tidak menyebut keduanya adalah angka yang
+    // mengecil tepat ketika terrainnya membesar.
+    std::size_t byteTiles = 0;
+    for (const LayerData& layer : layers_) {
+        for (const std::unique_ptr<ByteTile>& tile : layer.tiles) {
+            if (tile != nullptr) {
+                ++byteTiles;
+            }
+        }
+    }
+    for (const std::unique_ptr<ByteTile>& tile : holes_) {
+        if (tile != nullptr) {
+            ++byteTiles;
+        }
+    }
+
+    return TilesResident() * samplesPerTile * sizeof(Sample) + byteTiles * samplesPerTile +
+           undoBytes_ + current_.bytes;
 }
 
 }  // namespace sim::terrain

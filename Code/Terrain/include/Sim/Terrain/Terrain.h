@@ -1,10 +1,12 @@
 #pragma once
 
+#include "Sim/Core/AssetRef.h"
 #include "Sim/Core/Math.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <unordered_set>
 #include <vector>
 
@@ -44,6 +46,41 @@ struct TerrainDesc {
     /// sebanding dengan lama sesi — dan pada terrain 4×4 km, beberapa ratus
     /// goresan besar sudah cukup untuk menghabiskan RAM mesin.
     std::size_t undoBudgetBytes = 128u * 1024u * 1024u;
+};
+
+/// Bobot satu layer material pada satu sampel. 0 = tidak terlihat, 255 = penuh.
+using Weight = uint8_t;
+
+inline constexpr Weight kWeightMax = 255;
+
+/// Batas jumlah layer material.
+///
+/// Bukan batas penyimpanannya melainkan batas yang jujur: setiap layer tambahan
+/// adalah satu peta bobot seukuran seluruh terrain, dan tidak ada perender yang
+/// memadukan puluhan layer dalam satu lintasan. Angka yang lebih besar hanya
+/// akan menghasilkan terrain yang tidak bisa digambar.
+inline constexpr int kMaxLayers = 16;
+
+/// Satu layer material terrain.
+struct TerrainLayer {
+    std::string name = "Layer";
+    /// Material yang dicat layer ini.
+    AssetRef material;
+    /// Warna wakil layer di peta 2D panel.
+    ///
+    /// Panel tidak bisa menggambar tekstur material — tidak ada jalan dari panel
+    /// ke `rhi::Device` — jadi warna inilah yang mewakili layer sampai viewport
+    /// 3D ada. Ia juga tetap berguna setelah itu: peta dari atas yang memakai
+    /// warna datar per layer memperlihatkan batas cat jauh lebih jelas daripada
+    /// tekstur yang sebenarnya.
+    Vec3 color{0.55f, 0.52f, 0.45f};
+    /// Meter per pengulangan tekstur.
+    float tileSize = 8.0f;
+    /// Berkas peta bobot pendamping, relatif terhadap `.simterrain`-nya.
+    ///
+    /// Kosong pada layer dasar — bobotnya sisa, bukan data — dan kosong pada
+    /// layer yang belum pernah dicat.
+    std::string weightFile;
 };
 
 /// Persegi panjang dalam koordinat sampel global, batas kanan/bawah eksklusif.
@@ -130,6 +167,87 @@ public:
     /// dihindari.
     void WriteAll(const Sample* samples);
 
+    // --- layer material dan bobotnya -----------------------------------------
+
+    /// **Bobot layer 0 tidak disimpan. Ia sisa: `255 − Σ(bobot layer lain)`.**
+    ///
+    /// Itu yang membuat "total bobot tiap sampel selalu 255" menjadi sifat
+    /// bentuknya, bukan kewajiban yang harus diingat setiap penulis — dan
+    /// invarian itulah yang menentukan apakah hasil paint bisa diduga. Kalau
+    /// totalnya bebas, sebuah sampel bisa berakhir bertotal 40, dan perender
+    /// harus memilih di antara dua kesalahan: menormalkan saat menggambar
+    /// (sehingga menghapus semua layer tidak menghapus apa pun, karena sisa
+    /// sekecil apa pun diregangkan kembali menjadi penuh) atau tidak menormalkan
+    /// (sehingga ada bercak gelap yang tidak dicat siapa pun). Dengan layer dasar
+    /// sebagai sisa, tidak ada sampel yang bisa kehilangan seluruh materialnya.
+    ///
+    /// Konsekuensinya layer 0 tidak bisa dihapus maupun dipindah, dan mengecat
+    /// layer 0 berarti menghapus layer di atasnya — yang memang persis arti
+    /// "mengecat kembali ke dasar".
+    int LayerCount() const { return static_cast<int>(layers_.size()); }
+    const TerrainLayer& Layer(int index) const;
+    TerrainLayer& Layer(int index);
+
+    /// Menambah layer. Mengembalikan indeksnya, atau -1 kalau sudah penuh.
+    int AddLayer(const TerrainLayer& layer);
+    /// Menghapus layer beserta peta bobotnya. Bobot yang dilepaskannya kembali
+    /// ke layer dasar — itu bukan pilihan melainkan akibat langsung dari dasar
+    /// yang berupa sisa.
+    bool RemoveLayer(int index);
+    /// Memindahkan layer beserta peta bobotnya. Layer 0 tidak ikut serta.
+    bool MoveLayer(int from, int to);
+    /// Mengganti seluruh daftar layer. Peta bobot layer yang bertahan **tidak**
+    /// dipertahankan: dipakai saat memuat berkas, ketika terrainnya memang baru.
+    void SetLayers(const std::vector<TerrainLayer>& layers);
+
+    Weight WeightAt(int layer, int x, int y) const;
+    /// Menetapkan bobot sebuah layer, lalu menyusutkan layer lain secukupnya
+    /// supaya totalnya tetap 255.
+    void SetWeightAt(int layer, int x, int y, Weight weight);
+
+    /// Sebuah layer punya ubin terwujud, yaitu pernah dicat. Dipakai I/O untuk
+    /// tidak menulis berkas bobot yang seluruhnya nol.
+    bool LayerPainted(int layer) const;
+    void ClearLayerWeights(int layer);
+
+    void ReadWeights(int layer, std::vector<Weight>& out) const;
+    /// Menulis peta bobot mentah, tanpa menyentuh layer lain — jadi ia **bisa**
+    /// meninggalkan total di atas 255. Dipakai pemuat berkas, yang memanggil
+    /// `NormalizeWeights()` setelah seluruh layer masuk.
+    void WriteWeights(int layer, const Weight* weights);
+
+    /// Menyusutkan bobot sampai totalnya kembali ≤ 255 di mana pun terlampaui.
+    ///
+    /// Ada karena peta bobot datang dari berkas yang bisa disunting di luar
+    /// editor. Invarian yang hanya dijaga oleh jalur paint adalah invarian yang
+    /// batal begitu ada jalan masuk kedua.
+    void NormalizeWeights();
+
+    // --- peta hole -----------------------------------------------------------
+
+    /// **Hole adalah sifat quad, bukan sifat sampel.**
+    ///
+    /// Yang dihapus perender adalah segi empat di antara empat sampel, bukan
+    /// sampelnya. Kalau hole disimpan per sampel, ada dua pilihan dan keduanya
+    /// salah: quad dihapus bila salah satu sudutnya ditandai — maka lubang yang
+    /// tergambar selalu lebih besar daripada yang dicat dan lubang selebar satu
+    /// quad mustahil dibuat; atau quad dihapus hanya bila keempat sudutnya
+    /// ditandai — maka lubang kecil tidak pernah muncul sama sekali. Disimpan
+    /// per quad, yang dicat dan yang tergambar adalah benda yang sama.
+    ///
+    /// Quad (x,y) membentang antara sampel x..x+1 dan y..y+1, jadi kolom dan
+    /// baris terakhir peta tidak memiliki quad; `HoleAt` di sana selalu false.
+    /// Keduanya tetap disediakan penyimpanannya supaya peta hole berukuran sama
+    /// dengan heightmap-nya, dan berkas pendampingnya bisa dibuka bersisian di
+    /// penyunting gambar mana pun.
+    bool HoleAt(int x, int y) const;
+    void SetHoleAt(int x, int y, bool hole);
+    std::size_t HoleCount() const { return holeCount_; }
+    void ClearHoles();
+
+    void ReadHoles(std::vector<uint8_t>& out) const;
+    void WriteHoles(const uint8_t* holes);
+
     // --- goresan dan undo ----------------------------------------------------
 
     /// Sebuah goresan adalah satu satuan undo, bukan satu sentuhan.
@@ -137,6 +255,12 @@ public:
     /// Menyeret brush menghasilkan puluhan sentuhan; kalau tiap sentuhan menjadi
     /// satu langkah undo, membatalkan satu goresan menuntut puluhan kali Ctrl+Z
     /// dan tidak ada yang bisa memakainya.
+    ///
+    /// Satu goresan mencakup **ketiga peta**: tinggi, bobot layer, dan hole.
+    /// Bukan karena satu goresan menyentuh ketiganya — tidak pernah — melainkan
+    /// karena riwayat yang terpisah per peta berarti Ctrl+Z yang artinya
+    /// bergantung pada tab mana yang sedang terbuka, dan itu tidak bisa ditebak
+    /// siapa pun.
     void BeginStroke();
     void EndStroke();
     bool InStroke() const { return inStroke_; }
@@ -158,6 +282,25 @@ private:
         std::vector<Sample> samples;
     };
 
+    /// Ubin byte, dipakai peta bobot maupun peta hole.
+    ///
+    /// Keduanya berbentuk sama persis — satu byte per sampel, dialokasikan saat
+    /// pertama ditulis — jadi keduanya memakai jalur salin, jurnal, dan alokasi
+    /// yang sama. Hole memang cukup satu bit, dan mengemasnya delapan kali lebih
+    /// hemat; yang dibayar untuk kemasan itu bukan hanya kode pengemasnya
+    /// melainkan blok jurnal yang tidak lagi sejajar dengan batas kata pada
+    /// ukuran ubin yang bukan kelipatan 64. Hole jarang, dan ubin yang tidak
+    /// berlubang tidak dialokasikan sama sekali — jadi yang dihemat pengemasan
+    /// itu adalah delapan per sembilan dari sesuatu yang sudah mendekati nol.
+    struct ByteTile {
+        std::vector<uint8_t> bytes;
+    };
+
+    struct LayerData {
+        TerrainLayer desc;
+        std::vector<std::unique_ptr<ByteTile>> tiles;
+    };
+
     /// Satu blok yang disalin sebelum disentuh. `image` menyimpan isi *lama*
     /// saat direkam; setelah undo ia menyimpan isi *baru*, karena undo menukar
     /// isinya dengan yang hidup. Satu salinan melayani undo dan redo sekaligus.
@@ -167,9 +310,21 @@ private:
         std::vector<Sample> image;
     };
 
+    /// Blok byte dalam jurnal. `layer` ≥ 0 menunjuk peta bobot layer itu, -1
+    /// menunjuk peta hole.
+    struct ByteBlockImage {
+        int layer = 0;
+        int tile = 0;
+        int block = 0;
+        std::vector<uint8_t> image;
+    };
+
     struct Stroke {
         std::vector<BlockImage> blocks;
+        std::vector<ByteBlockImage> byteBlocks;
         std::size_t bytes = 0;
+
+        bool Empty() const { return blocks.empty() && byteBlocks.empty(); }
     };
 
     Tile& MaterializeTile(int index);
@@ -177,17 +332,39 @@ private:
     void SwapStroke(Stroke& stroke);
     void TrimJournal();
 
+    /// Peta byte milik sebuah layer, atau peta hole untuk `layer` negatif.
+    std::vector<std::unique_ptr<ByteTile>>& ByteTiles(int layer);
+    const std::vector<std::unique_ptr<ByteTile>>& ByteTiles(int layer) const;
+    ByteTile& MaterializeByteTile(int layer, int index);
+    void CaptureByteBlock(int layer, int tileIndex, int blockIndex);
+    uint8_t ByteAt(int layer, int x, int y) const;
+    void SetByteAt(int layer, int x, int y, uint8_t value);
+    void ReadBytes(int layer, std::vector<uint8_t>& out) const;
+    void WriteBytes(int layer, const uint8_t* bytes);
+    /// Menyusutkan layer eksplisit selain `keep` sampai jumlahnya tidak melebihi
+    /// `budget`. Pembulatannya ke bawah dengan sengaja: pembulatan ke terdekat
+    /// bisa membuat jumlahnya justru melewati anggaran, dan invarian yang dijaga
+    /// dengan "hampir" bukan invarian.
+    void ShrinkOtherWeights(int keep, int x, int y, int budget);
+
+    int TileCount() const { return desc_.tilesX * desc_.tilesY; }
     int BlocksPerSide() const { return (desc_.tileSamples + kBlockSize - 1) / kBlockSize; }
 
     TerrainDesc desc_;
     Sample base_ = 0;
     std::vector<std::unique_ptr<Tile>> tiles_;
+    std::vector<LayerData> layers_;
+    std::vector<std::unique_ptr<ByteTile>> holes_;
+    /// Dijaga bertahap, bukan dihitung saat ditanya: panel menampilkannya tiap
+    /// frame, dan memindai seluruh peta hole untuk itu adalah membaca puluhan
+    /// megabyte demi satu angka.
+    std::size_t holeCount_ = 0;
 
     bool inStroke_ = false;
     Stroke current_;
     /// Blok yang sudah disalin dalam goresan berjalan, sebagai kunci gabungan
-    /// (tile, blok). Tanpa ini, satu blok yang disentuh puluhan kali dalam satu
-    /// goresan akan disalin puluhan kali.
+    /// (peta, layer, tile, blok). Tanpa ini, satu blok yang disentuh puluhan kali
+    /// dalam satu goresan akan disalin puluhan kali.
     std::unordered_set<uint64_t> captured_;
 
     std::vector<Stroke> undo_;
