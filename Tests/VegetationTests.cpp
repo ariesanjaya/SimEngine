@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 
 #include "Sim/Terrain/TerrainBrush.h"
+#include "Sim/Terrain/TerrainIo.h"
 #include "Sim/Vegetation/Vegetation.h"
 #include "Sim/Vegetation/VegetationBrush.h"
 #include "Sim/Vegetation/VegetationIo.h"
@@ -863,6 +864,73 @@ TEST_CASE("Peta kepadatan berukuran salah ditolak dan menyebutkan kedua ukuranny
     CHECK(!result.ok);
     CHECK(result.error.find("8x8") != std::string::npos);
     CHECK(result.error.find(std::to_string(vegetation.DensityWidth())) != std::string::npos);
+}
+
+TEST_CASE("Mask dari luar editor dicuplik ulang ke kisi kepadatan") {
+    TempDir dir("import");
+    // Mask 64x64 dengan separuh kiri hitam dan separuh kanan putih, ditulis
+    // lewat enkoder yang sama yang dipakai peta bobot terrain.
+    constexpr int kSide = 64;
+    std::vector<uint8_t> mask(static_cast<std::size_t>(kSide) * kSide, 0);
+    for (int y = 0; y < kSide; ++y) {
+        for (int x = kSide / 2; x < kSide; ++x) {
+            mask[static_cast<std::size_t>(y) * kSide + static_cast<std::size_t>(x)] = 255;
+        }
+    }
+    const std::vector<unsigned char> png = terrain::EncodeMaskPng(mask.data(), kSide, kSide);
+    REQUIRE(!png.empty());
+    {
+        std::ofstream stream(dir / "mask.png", std::ios::binary);
+        stream.write(reinterpret_cast<const char*>(png.data()),
+                     static_cast<std::streamsize>(png.size()));
+    }
+
+    terrain::Terrain terrain = MakeTerrain();
+    Vegetation vegetation;
+    vegetation.Fit(terrain);
+    const int index = vegetation.AddLayer(MakeLayer(3.0f));
+    REQUIRE(vegetation.DensityWidth() != kSide);  // kalau sama, tidak ada yang diuji
+
+    const VegetationIoResult result = ImportDensityPng(vegetation, index, dir / "mask.png");
+    REQUIRE(result.ok);
+    CHECK(result.sourceWidth == kSide);
+    CHECK(result.sourceHeight == kSide);
+    REQUIRE(vegetation.Density(index).Painted());
+    CHECK(vegetation.Density(index).Width() == vegetation.DensityWidth());
+
+    // Tepi gambar berimpit dengan tepi dunia, bukan bergeser setengah sel.
+    CHECK(vegetation.Density(index).At(0, 0) == 0);
+    CHECK(vegetation.Density(index).At(vegetation.DensityWidth() - 1, 0) == 255);
+
+    // Dan mask itu benar-benar dipakai sebaran: kiri kosong, kanan tumbuh.
+    REQUIRE(vegetation.Scatter(terrain, index) > 0);
+    const float middle = terrain.WorldWidth() * 0.5f;
+    std::size_t left = 0;
+    for (const Instance& instance : vegetation.Instances(index)) {
+        if (instance.position.x < middle - terrain.WorldWidth() * 0.05f) {
+            ++left;
+        }
+    }
+    CHECK(left == 0);
+}
+
+TEST_CASE("Berkas pendamping berukuran salah tetap ditolak, bukan dicuplik ulang") {
+    // Jalur dokumen dan jalur impor sengaja berbeda: yang satu membaca berkas
+    // yang ditulis editor sendiri, yang lain menerima gambar dari mana saja.
+    TempDir dir("companion");
+    terrain::Terrain terrain = MakeTerrain();
+    Vegetation vegetation;
+    vegetation.Fit(terrain);
+    const int index = vegetation.AddLayer(MakeLayer());
+    vegetation.PaintDensity(index, 1, 1, 0);
+    REQUIRE(SaveDensityPng(vegetation, index, dir / "mask.png").ok);
+
+    Vegetation other;
+    other.SetDensityGrid(8, 8);
+    other.AddLayer(MakeLayer());
+    CHECK(!LoadDensityPng(other, 0, dir / "mask.png").ok);
+    CHECK(ImportDensityPng(other, 0, dir / "mask.png").ok);
+    CHECK(other.Density(0).Width() == 8);
 }
 
 // --- kriteria terima ----------------------------------------------------------

@@ -696,7 +696,7 @@ private:
             }
             if (ImGui::BeginTabItem((std::string(icons::kBrush) + "  Density").c_str())) {
                 SetMode(Mode::Density);
-                DrawDensityTools();
+                DrawDensityTools(context);
                 ImGui::EndTabItem();
             }
             if (ImGui::BeginTabItem((std::string(icons::kPlant) + "  Instances").c_str())) {
@@ -970,7 +970,7 @@ private:
         widgets::Tooltip("How much of that painted terrain layer must be under an instance");
     }
 
-    void DrawDensityTools() {
+    void DrawDensityTools(EditorContext& context) {
         if (vegetation_.LayerCount() == 0) {
             ImGui::TextColored(kHintColor, "Add a layer first.");
             return;
@@ -1016,6 +1016,78 @@ private:
             densityDirty_ = true;
         }
         ImGui::EndDisabled();
+
+        DrawMaskTransfer(context);
+    }
+
+    /// Mask yang dibuat di luar editor.
+    ///
+    /// Ada karena aturan penempatan menyebut "mask tekstur", dan sebuah mask yang
+    /// hanya bisa dibuat dengan kuas di panel ini bukan itu: mask yang berguna
+    /// datang dari peta yang sudah ada — sebaran hujan, keteduhan, zona yang
+    /// dilarang ditumbuhi — dan tidak satu pun dari itu digambar tangan. Peta
+    /// kepadatan yang dicat dan mask yang diimpor sengaja **benda yang sama**,
+    /// bukan dua masukan yang dikalikan: dua mask berarti pertanyaan "kenapa di
+    /// sini kosong" punya dua tempat untuk dijawab, dan kuas tidak bisa
+    /// memperbaiki apa yang datang dari berkas.
+    void DrawMaskTransfer(EditorContext& context) {
+        if (!ImGui::CollapsingHeader("Mask")) {
+            return;
+        }
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        ImGui::InputText("##maskfile", &maskFile_);
+        widgets::Tooltip("File name, next to the .simveg");
+
+        ImGui::BeginDisabled(!vegetation_.Density(activeLayer_).Painted());
+        if (ImGui::Button((std::string(icons::kExport) + "  Export").c_str())) {
+            TransferMask(context, true);
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button((std::string(icons::kImport) + "  Import").c_str())) {
+            TransferMask(context, false);
+        }
+        ImGui::TextColored(kHintColor, "8-bit greyscale: black is bare, white is full.\n"
+                                       "Any size — it is resampled onto the grid.");
+    }
+
+    void TransferMask(EditorContext& context, bool exporting) {
+        if (maskFile_.empty() || vegetation_.LayerCount() == 0) {
+            return;
+        }
+        const std::filesystem::path path = openPath_.parent_path() / maskFile_;
+        const VegetationIoResult result =
+            exporting ? SaveDensityPng(vegetation_, activeLayer_, path)
+                      : ImportDensityPng(vegetation_, activeLayer_, path);
+        if (context.notifications == nullptr) {
+            return;
+        }
+        if (!result.ok) {
+            context.notifications->Error(result.error);
+            return;
+        }
+        if (exporting) {
+            context.notifications->Success("Exported " + path.filename().string());
+            return;
+        }
+        // Impor bukan goresan, jadi riwayat goresan tidak lagi cocok dengan apa
+        // yang ada di peta — alasan yang sama seperti impor heightmap. Satu
+        // Ctrl+Z akan memasang kembali potongan mask lama di atas yang baru.
+        vegetation_.ClearHistory();
+        dirty_ = true;
+        densityDirty_ = true;
+        std::string message = "Imported " + path.filename().string();
+        if (result.sourceWidth != vegetation_.DensityWidth() ||
+            result.sourceHeight != vegetation_.DensityHeight()) {
+            // Pencuplikan ulang disebutkan, tidak dibiarkan tak terlihat: mask
+            // yang jauh lebih halus daripada kisinya kehilangan detail, dan yang
+            // hilang diam-diam terbaca sebagai kuas yang tidak bekerja.
+            message += " (" + std::to_string(result.sourceWidth) + "x" +
+                       std::to_string(result.sourceHeight) + " resampled to " +
+                       std::to_string(vegetation_.DensityWidth()) + "x" +
+                       std::to_string(vegetation_.DensityHeight()) + ")";
+        }
+        context.notifications->Success(message);
     }
 
     void DrawInstanceTools() {
@@ -1215,6 +1287,7 @@ private:
         openGuid_ = guid;
         openName_ = record->name;
         openPath_ = context.assets->AbsolutePath(*record);
+        maskFile_ = openPath_.stem().string() + "_mask.png";
         dirty_ = false;
         densityDirty_ = false;
         reseated_ = 0;
@@ -1319,6 +1392,7 @@ private:
     Uuid newTerrain_;
     std::string openName_;
     std::filesystem::path openPath_;
+    std::string maskFile_;
     bool dirty_ = false;
     bool densityDirty_ = false;
 

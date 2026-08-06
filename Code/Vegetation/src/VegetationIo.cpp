@@ -5,6 +5,8 @@
 #include <nlohmann/json.hpp>
 #include <stb_image.h>
 
+#include <algorithm>
+#include <cmath>
 #include <fstream>
 #include <sstream>
 
@@ -32,6 +34,28 @@ bool WriteFile(const std::filesystem::path& path, const void* data, std::size_t 
 
 std::string CompanionName(const std::filesystem::path& path, const std::string& suffix) {
     return path.stem().string() + suffix;
+}
+
+/// Membaca gambar greyscale 8-bit apa adanya, tanpa menuntut ukurannya.
+VegetationIoResult ReadMaskFile(const std::filesystem::path& path, std::vector<uint8_t>& values,
+                                int& width, int& height) {
+    VegetationIoResult result;
+    int channels = 0;
+    stbi_uc* pixels = stbi_load(path.string().c_str(), &width, &height, &channels, 1);
+    if (pixels == nullptr) {
+        result.error = std::string("cannot read ") + path.string() + ": " + stbi_failure_reason();
+        return result;
+    }
+    if (width <= 0 || height <= 0) {
+        stbi_image_free(pixels);
+        result.error = "image is empty: " + path.string();
+        return result;
+    }
+    values.assign(pixels,
+                  pixels + static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
+    stbi_image_free(pixels);
+    result.ok = true;
+    return result;
 }
 
 Json RulesToJson(const PlacementRules& rules) {
@@ -313,25 +337,23 @@ VegetationIoResult SaveDensityPng(const Vegetation& vegetation, int layer,
 
 VegetationIoResult LoadDensityPng(Vegetation& vegetation, int layer,
                                   const std::filesystem::path& path) {
-    VegetationIoResult result;
+    std::vector<uint8_t> values;
     int width = 0;
     int height = 0;
-    int channels = 0;
-    stbi_uc* pixels = stbi_load(path.string().c_str(), &width, &height, &channels, 1);
-    if (pixels == nullptr) {
-        result.error = std::string("cannot read ") + path.string() + ": " + stbi_failure_reason();
+    VegetationIoResult result = ReadMaskFile(path, values, width, height);
+    if (!result.ok) {
         return result;
     }
-    std::vector<uint8_t> values(
-        pixels, pixels + static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
-    stbi_image_free(pixels);
+    result.ok = false;
 
     if (vegetation.DensityWidth() <= 0 || vegetation.DensityHeight() <= 0) {
         vegetation.SetDensityGrid(width, height);
     } else if (width != vegetation.DensityWidth() || height != vegetation.DensityHeight()) {
-        // Ukuran yang tidak cocok ditolak, bukan diskalakan — alasan yang sama
-        // dengan heightmap: hasil penskalaan diam-diam terlihat masuk akal dan
-        // tetap salah.
+        // **Ditolak di sini, dicuplik ulang di `ImportDensityPng`.** Jalur ini
+        // membaca berkas pendamping yang ditulis editor sendiri, jadi ukuran
+        // yang tidak cocok bukan gambar yang perlu disesuaikan melainkan tanda
+        // bahwa berkasnya milik dokumen lain — dan mencuplik ulang milik dokumen
+        // lain menghasilkan sesuatu yang terlihat masuk akal dan tetap salah.
         result.error = "density map is " + std::to_string(width) + "x" +
                        std::to_string(height) + ", grid expects " +
                        std::to_string(vegetation.DensityWidth()) + "x" +
@@ -339,6 +361,71 @@ VegetationIoResult LoadDensityPng(Vegetation& vegetation, int layer,
         return result;
     }
     vegetation.Density(layer).SetCells(values.data());
+    result.ok = true;
+    return result;
+}
+
+VegetationIoResult ImportDensityPng(Vegetation& vegetation, int layer,
+                                    const std::filesystem::path& path) {
+    std::vector<uint8_t> values;
+    int width = 0;
+    int height = 0;
+    VegetationIoResult result = ReadMaskFile(path, values, width, height);
+    if (!result.ok) {
+        return result;
+    }
+    result.sourceWidth = width;
+    result.sourceHeight = height;
+    result.ok = false;
+
+    if (vegetation.DensityWidth() <= 0 || vegetation.DensityHeight() <= 0) {
+        // Belum ada kisi berarti belum ada terrain yang menentukannya; gambarnya
+        // yang menentukan, sama seperti pada pemuatan berkas.
+        vegetation.SetDensityGrid(width, height);
+    }
+    const int targetWidth = vegetation.DensityWidth();
+    const int targetHeight = vegetation.DensityHeight();
+    if (targetWidth <= 0 || targetHeight <= 0) {
+        result.error = "density grid has no size yet";
+        return result;
+    }
+
+    std::vector<uint8_t> resampled(static_cast<std::size_t>(targetWidth) *
+                                   static_cast<std::size_t>(targetHeight));
+    const auto source = [&](int x, int y) {
+        const int cx = std::clamp(x, 0, width - 1);
+        const int cy = std::clamp(y, 0, height - 1);
+        return static_cast<float>(
+            values[static_cast<std::size_t>(cy) * static_cast<std::size_t>(width) +
+                   static_cast<std::size_t>(cx)]);
+    };
+    // Bilinear, dan sudut kisi dipetakan ke sudut gambar — bukan pusat piksel ke
+    // pusat sel. Mask menutupi dunia dari tepi ke tepi, jadi yang harus berimpit
+    // adalah tepinya; menyelaraskan pusat piksel menggeser seluruh mask setengah
+    // sel, dan setengah sel di tepi hutan terlihat.
+    const float scaleX = targetWidth > 1 ? static_cast<float>(width - 1) /
+                                               static_cast<float>(targetWidth - 1)
+                                         : 0.0f;
+    const float scaleY = targetHeight > 1 ? static_cast<float>(height - 1) /
+                                                static_cast<float>(targetHeight - 1)
+                                          : 0.0f;
+    for (int y = 0; y < targetHeight; ++y) {
+        const float fy = static_cast<float>(y) * scaleY;
+        const int y0 = static_cast<int>(std::floor(fy));
+        const float ty = fy - static_cast<float>(y0);
+        for (int x = 0; x < targetWidth; ++x) {
+            const float fx = static_cast<float>(x) * scaleX;
+            const int x0 = static_cast<int>(std::floor(fx));
+            const float tx = fx - static_cast<float>(x0);
+            const float mixed =
+                (source(x0, y0) * (1.0f - tx) + source(x0 + 1, y0) * tx) * (1.0f - ty) +
+                (source(x0, y0 + 1) * (1.0f - tx) + source(x0 + 1, y0 + 1) * tx) * ty;
+            resampled[static_cast<std::size_t>(y) * static_cast<std::size_t>(targetWidth) +
+                      static_cast<std::size_t>(x)] =
+                static_cast<uint8_t>(std::clamp(mixed + 0.5f, 0.0f, 255.0f));
+        }
+    }
+    vegetation.Density(layer).SetCells(resampled.data());
     result.ok = true;
     return result;
 }

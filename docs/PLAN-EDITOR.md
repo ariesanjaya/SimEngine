@@ -1395,8 +1395,8 @@ dan seretan cepat yang tidak boleh meninggalkan manik-manik.
 aturan penempatannya, sebaran Poisson disk deterministik, peta kepadatan yang
 dicat, suntingan tangan yang bertahan, undo per goresan, dan format `.simveg`
 beserta PNG kepadatan pendampingnya; panel Vegetation Editor dengan peta 2D,
-tiga tab alat, dan tombol Scatter. 36 test (241.967 assertion) — termasuk keempat
-kriteria terimanya. Keempatnya terukur, bukan diperkirakan: 1.118.891 instance
+tiga tab alat, impor/ekspor mask, dan tombol Scatter. 38 test (241.982
+assertion) — termasuk keempat kriteria terimanya. Keempatnya terukur, bukan diperkirakan: 1.118.891 instance
 dalam **416 ms** (Release; 2.137 ms pada build Debug) dan berkas tersimpan
 **979 byte**.
 
@@ -1475,6 +1475,25 @@ berbeda dari yang dijanjikan benihnya di sepanjang tepi persegi itu — dan
 kepadatan tidak langsung menumbuhkan atau mencabut apa pun; panel menyebutkan itu
 di baris status ("Density edited — Scatter to apply") alih-alih menyembunyikannya
 dengan sebaran sepotong.
+
+**Mask yang diimpor dan peta kepadatan yang dicat adalah benda yang sama.**
+Aturan penempatan menyebut "mask tekstur", dan mask yang hanya bisa dibuat dengan
+kuas di panel ini bukan itu — mask yang berguna datang dari peta yang sudah ada
+(sebaran hujan, keteduhan, zona terlarang), dan tidak satu pun digambar tangan.
+Menjadikannya masukan kedua yang dikalikan dengan yang dicat terdengar lebih
+luwes, tapi itu membuat pertanyaan "kenapa di sini kosong" punya dua tempat untuk
+dijawab, dan kuas tidak bisa memperbaiki apa yang datang dari berkas. Satu peta,
+dua cara mengisinya.
+
+Impor **mencuplik ulang** gambar berukuran berapa pun, sedangkan pemuat berkas
+pendamping menolak ukuran yang tidak cocok. Keduanya benar dan bukan
+ketidakkonsistenan: jumlah sampel heightmap *adalah* identitas terrainnya,
+sedangkan resolusi kisi kepadatan semata pilihan internal editor
+(`densityCellSize`) yang tidak bisa ditebak orang yang menyiapkan gambarnya di
+Substance. Menolak 1024² hanya karena kisinya kebetulan 1025² berarti menyuruh
+orang membalik rekayasa angka yang bukan urusannya. Yang dibayar — mask yang
+lebih halus daripada kisinya kehilangan detail — disebutkan di notifikasinya,
+karena detail yang hilang diam-diam terbaca sebagai kuas yang tidak bekerja.
 
 **Menanam tangan adalah klik, menghapus adalah seretan.** Kuas yang menanam
 sambil diseret harus tahu apakah sudah ada sesuatu di dekat sentuhannya, dan

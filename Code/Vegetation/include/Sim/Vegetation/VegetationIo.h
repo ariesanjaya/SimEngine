@@ -38,6 +38,11 @@ struct VegetationIoResult {
     bool ok = false;
     std::string error;
     int sourceVersion = kVegetationSchemaVersion;
+    /// Ukuran gambar sumber, terisi oleh `ImportDensityPng`. Ada supaya
+    /// pemanggil bisa menyebutkan pencuplikan ulang yang terjadi alih-alih
+    /// melakukannya diam-diam.
+    int sourceWidth = 0;
+    int sourceHeight = 0;
 };
 
 /// Keluarannya deterministik — urutan field tetap, angka tanpa bergantung locale
@@ -78,5 +83,25 @@ VegetationIoResult SaveDensityPng(const Vegetation& vegetation, int layer,
 /// ukuran kisinya.
 VegetationIoResult LoadDensityPng(Vegetation& vegetation, int layer,
                                   const std::filesystem::path& path);
+
+/// Mengambil mask yang dibuat di luar editor, berukuran berapa pun, lalu
+/// mencuplik ulangnya ke kisi kepadatan yang berlaku.
+///
+/// **Mencuplik ulang di sini benar, sedangkan pada heightmap ia terlarang.**
+/// Perbedaannya bukan selera: jumlah sampel sebuah heightmap *adalah* identitas
+/// terrainnya — menskalanya menghasilkan peta yang terlihat masuk akal dan tidak
+/// lagi cocok dengan apa pun yang menunjuknya. Mask kepadatan bukan itu. Ia
+/// medan atas dunia, dan resolusi kisinya semata pilihan internal editor
+/// (`densityCellSize`), bukan sesuatu yang bisa ditebak orang yang menyiapkan
+/// gambarnya di Substance atau World Machine. Menolak 1024² hanya karena kisinya
+/// kebetulan 1025² berarti menyuruh orang membalik rekayasa angka yang bukan
+/// urusannya.
+///
+/// Yang dibayar: mask yang jauh lebih halus daripada kisinya kehilangan detail
+/// yang tidak muat. Karena itu ukuran sumbernya dikembalikan lewat `result`,
+/// supaya panel menyebutkan pencuplikannya alih-alih membiarkannya tak
+/// terlihat.
+VegetationIoResult ImportDensityPng(Vegetation& vegetation, int layer,
+                                    const std::filesystem::path& path);
 
 }  // namespace sim::vegetation
