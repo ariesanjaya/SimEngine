@@ -23,6 +23,7 @@ SimEngine/
 │   ├── Material/             # graph `.simmat`, katalog node OpenPBR, kompilasi ke Slang
 │   ├── Particle/             # efek `.simfx`, emitter, simulasi CPU deterministik
 │   ├── Terrain/              # heightmap berubin, layer splat, peta hole, brush, undo, I/O PNG/RAW
+│   ├── Vegetation/           # `.simveg`, sebaran Poisson deterministik, peta kepadatan, suntingan tangan
 │   ├── Render/               # IViewportRenderer + StubRenderer (E1..E7) → renderer nyata (E8)
 │   ├── EditorFramework/      # App, PanelManager, dock layout, Command/Undo, Selection, widget
 │   ├── AIBridge/             # MCP server (JSON-RPC/HTTP), ToolRegistry, MainThreadQueue, izin

@@ -143,6 +143,25 @@ float Terrain::HeightAtWorld(float worldX, float worldZ) const {
            (h01 * (1.0f - tx) + h11 * tx) * tz;
 }
 
+Vec3 Terrain::NormalAtWorld(float worldX, float worldZ) const {
+    const float fx = worldX / desc_.sampleSpacing;
+    const float fz = worldZ / desc_.sampleSpacing;
+    const int x0 = static_cast<int>(std::floor(fx));
+    const int z0 = static_cast<int>(std::floor(fz));
+    const float tx = fx - static_cast<float>(x0);
+    const float tz = fz - static_cast<float>(z0);
+
+    const float h00 = HeightAt(x0, z0);
+    const float h10 = HeightAt(x0 + 1, z0);
+    const float h01 = HeightAt(x0, z0 + 1);
+    const float h11 = HeightAt(x0 + 1, z0 + 1);
+
+    // Turunan permukaan bilinear terhadap x dan z, dalam meter per meter.
+    const float dhdx = ((h10 - h00) * (1.0f - tz) + (h11 - h01) * tz) / desc_.sampleSpacing;
+    const float dhdz = ((h01 - h00) * (1.0f - tx) + (h11 - h10) * tx) / desc_.sampleSpacing;
+    return glm::normalize(Vec3(-dhdx, 1.0f, -dhdz));
+}
+
 SampleRect Terrain::RectForCircle(float worldX, float worldZ, float radius) const {
     const float inv = 1.0f / desc_.sampleSpacing;
     SampleRect rect;

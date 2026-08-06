@@ -130,6 +130,18 @@ public:
     /// disebar merata di sepanjang ruas dari posisi sebelumnya.
     void Advance(Terrain& terrain, const Brush& brush, float worldX, float worldZ, float dt);
 
+    /// Bentuk umum `Begin`/`End`: penjadwalnya saja, tanpa dokumen.
+    ///
+    /// Ada karena penjadwal ini bukan milik terrain — ia menjawab "kapan sebuah
+    /// sentuhan dipancarkan", dan jawaban itu sama untuk setiap alat yang
+    /// diseret. Dokumen yang disunting vegetasi bukan `Terrain`, jadi kalau
+    /// membuka goresan menuntut sebuah `Terrain`, penjadwalnya harus disalin —
+    /// dan salinan kedua aturan langkah-tetap akan berbeda pada perbaikan
+    /// berikutnya. Yang membuka dan menutup goresan dokumennya adalah
+    /// pemanggil.
+    void Begin(float worldX, float worldZ);
+    void End();
+
     /// Bentuk umumnya: `dab(worldX, worldZ, dt)` dipanggil sekali per sentuhan.
     ///
     /// Penjadwalnya sengaja tidak tahu apa yang dilakukan sentuhannya, dan tidak

@@ -1376,7 +1376,7 @@ bukan urusannya. Sculpt dan paint sudah berbagi penjadwal yang sama persis itu,
 karena masalahnya memang sama persis: laju frame yang tidak boleh mengubah hasil,
 dan seretan cepat yang tidak boleh meninggalkan manik-manik.
 
-### E7.4 — Vegetation Editor · ~4 sesi
+### E7.4 — Vegetation Editor · ~4 sesi · 🔨 semuanya kecuali menggambar mesh-nya
 
 - Layer vegetasi: aset mesh/prefab, kepadatan, skala acak (min/maks), rotasi acak,
   offset, penyelarasan ke normal permukaan, jarak LOD & billboard.
@@ -1390,6 +1390,114 @@ dan seretan cepat yang tidak boleh meninggalkan manik-manik.
   tersimpan < 5 MB; seed yang sama menghasilkan sebaran yang sama persis di mesin
   berbeda; mengubah terrain di bawah vegetasi memicu penyesuaian ketinggian instance;
   edit manual bertahan setelah aturan diubah.
+
+**Sudah ada:** modul `Sim::Vegetation` (`Code/Vegetation`) berisi layer beserta
+aturan penempatannya, sebaran Poisson disk deterministik, peta kepadatan yang
+dicat, suntingan tangan yang bertahan, undo per goresan, dan format `.simveg`
+beserta PNG kepadatan pendampingnya; panel Vegetation Editor dengan peta 2D,
+tiga tab alat, dan tombol Scatter. 36 test (241.967 assertion) — termasuk keempat
+kriteria terimanya. Keempatnya terukur, bukan diperkirakan: 1.118.891 instance
+dalam **416 ms** (Release; 2.137 ms pada build Debug) dan berkas tersimpan
+**979 byte**.
+
+**Yang menentukan seluruh rancangan: instance tidak disimpan, aturannya yang
+disimpan.** Sejuta instance adalah 36 MB di memori dan puluhan megabyte di
+berkas apa pun yang menuliskannya satu per satu — dan seluruhnya bisa dihitung
+ulang dari beberapa ratus byte. Kriteria "berkas < 5 MB" karena itu bukan target
+kompresi melainkan akibat: yang ditulis hanya aturan, benih, peta kepadatan yang
+dicat, dan suntingan tangan. Yang tersisa dari kriteria itu tinggal memastikan
+suntingan tangan tidak tumbuh tak terbatas, dan itu memang dibatasi tangan yang
+membuatnya.
+
+**Sebaran ditulis sendiri sampai ke bit terakhirnya, bukan memakai
+`std::mt19937` beserta distribusinya.** Mesin Mersenne-nya memang menghasilkan
+barisan bit yang sama di mana pun, tapi standar tidak menetapkan bagaimana
+sebuah `std::uniform_real_distribution` mengubah bit menjadi angka — dua pustaka
+standar boleh berbeda dari benih yang sama. Kriteria "benih yang sama, sebaran
+yang sama di mesin berbeda" mustahil dipenuhi dengan pinjaman itu. Yang dipakai
+splitmix64 (perkalian, geser, XOR 64-bit) dengan pecahan dibuat sebagai
+`(u32 >> 8) * 2⁻²⁴` — perkalian pangkat dua yang tidak pernah membulatkan di FPU
+IEEE-754 mana pun. Satu-satunya libm di jalur penerimaan kandidat adalah kosinus
+ambang kemiringan, dan ia dihitung sekali per sebaran dalam double lalu
+dikuantisasi ke kisi 1/65536 — selisih satu ULP antar-libm hilang jauh sebelum
+sampai ke perbandingan. Test mengunci hasilnya pada satu nilai hash tetap; ia
+tidak bisa membuktikan mesin lain setuju, tapi ia menutup satu-satunya cara
+sifat itu hilang dalam praktik, yaitu seseorang menukar aliran acaknya dengan
+yang "setara".
+
+**Susunan titiknya diputuskan sebelum aturan mana pun dilihat.** Ini yang paling
+mudah salah, dan versi pertamanya memang salah: menguji jarak minimum *setelah*
+aturan tinggi dan kemiringan terdengar hemat — buat apa menghitung jarak untuk
+kandidat yang toh ditolak. Test yang menuntut "mengubah aturan hanya menyaring"
+langsung menangkapnya. Kandidat yang ditolak aturan tidak menempati slot dalam
+pemadatan, jadi tetangga yang tadinya terhalang olehnya menjadi diterima:
+mengetatkan sebuah aturan bukan menipiskan hutan melainkan **menyusunnya
+ulang**, dan setiap penghapusan tangan yang menunjuk posisi lama menunjuk ke
+tempat yang sudah tidak ada isinya. Dengan pemadatan diputuskan lebih dulu,
+posisi hanya ditentukan benih, jarak minimum, dan ukuran dunia; setiap aturan
+menjadi murni pengurang. Kerapatan di dalam daerah yang lolos tidak ikut
+berkurang, karena susunannya memang menutupi seluruh dunia sejak awal.
+
+**Penghapusan tangan dikunci pada posisi, bukan nomor urut.** Nomor urut bergeser
+begitu sebuah aturan diubah, dan penghapusan yang bergeser menghapus pohon yang
+salah tanpa ada yang menyadarinya. Kuncinya XZ yang dibulatkan ke milimeter, dan
+ia unik menurut konstruksi: sebaran menjamin jarak antar-instance tidak kurang
+dari `minDistance`, yang dijepit jauh di atas satu milimeter. Satu-satunya
+perubahan yang membatalkan daftar hapus adalah mengubah jarak minimum atau
+benihnya — keduanya memang memindahkan semuanya, dan panel menyebutkannya di
+tooltip slidernya. Instance yang dihapus **tetap memegang tempatnya** dalam
+pemadatan; kalau ia dilepas, menghapus satu pohon akan menumbuhkan pohon lain di
+sebelahnya.
+
+**Kisi Poisson-nya hanya menyimpan dua baris sel.** Uji jarak minimum berjangkauan
+satu sel, dan kisi dipindai baris demi baris, jadi yang harus diingat hanyalah
+baris sekarang dan baris sebelumnya — baris berikutnya masih kosong. Tanpa itu,
+terrain empat kilometer dengan jarak minimum satu meter menuntut setengah
+gigabyte kisi untuk sebuah uji berjangkauan satu meter. Kapasitas empat instance
+per sel bukan tebakan: sel berukuran `minDistance` persegi bisa dibagi empat
+sub-persegi yang diagonalnya `minDistance/√2`, jadi dua instance tidak mungkin
+berbagi sub-persegi — dan empat sudut sel bisa terisi seluruhnya, jadi empat juga
+tidak bisa dikurangi.
+
+**Memahat di bawah hutan menempelkan ulang, bukan menyebar ulang.** Menyebar
+ulang berarti setiap goresan brush mengocok seluruh hutan: pohon berpindah,
+hilang, dan muncul di tempat lain sementara yang diminta hanyalah tanah di
+bawahnya naik. `RefreshHeights` menjaga XZ setiap instance dan hanya memperbarui
+tinggi dan normalnya. Aturan penempatan sengaja tidak diperiksa ulang di sana —
+instance yang lerengnya menjadi terlalu curam tetap berdiri sampai disebar ulang,
+karena pohon yang lenyap di bawah kuas sculpt tanpa ada yang menghapusnya lebih
+buruk daripada pohon yang berdiri di tempat yang tidak semestinya.
+
+**Sebaran ulang selalu utuh, tidak pernah sepotong.** Pemadatan Poisson
+bergantung pada urutan, jadi menyebar ulang sebuah persegi akan diam-diam
+berbeda dari yang dijanjikan benihnya di sepanjang tepi persegi itu — dan
+"diam-diam berbeda" adalah kebalikan dari seluruh guna benih. Akibatnya mengecat
+kepadatan tidak langsung menumbuhkan atau mencabut apa pun; panel menyebutkan itu
+di baris status ("Density edited — Scatter to apply") alih-alih menyembunyikannya
+dengan sebaran sepotong.
+
+**Menanam tangan adalah klik, menghapus adalah seretan.** Kuas yang menanam
+sambil diseret harus tahu apakah sudah ada sesuatu di dekat sentuhannya, dan
+menjawab itu pada daftar berisi sejuta instance menuntut indeks spasial yang
+jalur prosedural sama sekali tidak membutuhkannya — kisinya hanya hidup selama
+penyebaran. Menanam tanpa pemeriksaan itu menumpuk puluhan pohon di satu titik
+pada seretan paling pelan sekalipun.
+
+**Peta 2D-nya digambar abu-abu, bukan dengan gradasi topografi seperti di
+penyunting terrain.** Bukan penyederhanaan: warna di panel ini sudah punya
+pekerjaan lain, yaitu membedakan layer vegetasi, dan latar berwarna membuat titik
+hijau di atas lereng hijau tidak terlihat sama sekali. Titiknya digambar dengan
+langkah yang melebar mengikuti **perkiraan jumlah yang terlihat**, bukan jumlah
+seluruhnya — dengan langkah tetap, memperbesar ke satu rumpun tetap membuang 49
+dari 50 pohonnya walaupun yang tersisa di layar tinggal seratus. Berapa yang
+dilewati disebutkan di baris status, karena peta yang menggambar sebagian dan
+diam soal itu berbohong tepat tentang kerapatan — satu-satunya hal yang dinilai
+orang di sini.
+
+**Belum ada:** menggambar mesh vegetasinya sendiri, LOD dan billboard yang
+benar-benar berlaku, dan menanam/menghapus langsung di viewport 3D. Ketiganya
+menunggu E8; jarak LOD, billboard, dan cull sudah tersimpan di `.simveg` dan
+tinggal dibaca perendernya.
 
 ### E7.5 — Animation Editor · ~6 sesi
 

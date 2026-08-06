@@ -30,7 +30,9 @@ sim_add_library(EditorPanels
         Sim::Material
         # Panel Particle Editor menyunting `.simfx` dan menjalankan simulasinya.
         Sim::Particle
-        Sim::Terrain)
+        Sim::Terrain
+        # Panel Vegetation Editor membuka `.simveg` beserta terrain-nya.
+        Sim::Vegetation)
 
 list(LENGTH _sim_panel_sources _sim_panel_count)
 message(STATUS "  editor panels: ${_sim_panel_count} berkas")

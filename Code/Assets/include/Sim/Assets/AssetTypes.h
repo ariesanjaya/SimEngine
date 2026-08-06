@@ -26,6 +26,8 @@ enum class AssetType : uint8_t {
     Graph,
     /// Terrain (`.simterrain`) — deskriptor; heightmapnya berkas pendamping.
     Terrain,
+    /// Vegetasi (`.simveg`) — aturan sebaran; instance-nya dihitung ulang.
+    Vegetation,
     Level,
     Prefab,
     Text,

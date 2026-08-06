@@ -38,6 +38,14 @@ sim_add_test(SimTerrainTests
     DEPS
         Sim::Terrain)
 
+# Vegetation: sebaran deterministik dari aturan penempatan, peta kepadatan yang
+# dicat, suntingan tangan yang bertahan, dan format `.simveg`.
+sim_add_test(SimVegetationTests
+    SOURCES
+        VegetationTests.cpp
+    DEPS
+        Sim::Vegetation)
+
 # Particle: model efek `.simfx`, kurva/gradient, dan simulasi CPU deterministik.
 sim_add_test(SimParticleTests
     SOURCES

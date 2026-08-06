@@ -149,6 +149,18 @@ public:
     /// Tinggi terinterpolasi bilinear pada posisi dunia (meter).
     float HeightAtWorld(float worldX, float worldZ) const;
 
+    /// Normal permukaan pada posisi dunia, ternormalisasi.
+    ///
+    /// **Gradien analitik dari permukaan bilinear yang sama**, bukan beda hingga
+    /// dari `HeightAtWorld` di empat titik di sekitarnya. Bukan demi kecepatan
+    /// saja — walaupun empat sampel jauh lebih murah daripada enam belas — tapi
+    /// karena beda hingga dengan langkah sembarang menjawab pertanyaan yang
+    /// berbeda dari yang ditanyakan: ia melaporkan lereng rata-rata selebar
+    /// langkahnya, jadi normalnya tidak pernah cocok dengan permukaan yang
+    /// benar-benar digambar dari sampel yang sama. Gradien analitik cocok
+    /// menurut definisi.
+    Vec3 NormalAtWorld(float worldX, float worldZ) const;
+
     float ToMeters(Sample value) const;
     Sample ToSample(float meters) const;
 

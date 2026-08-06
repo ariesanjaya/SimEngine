@@ -90,6 +90,10 @@ inline constexpr const char* kBrush = ICON_LC_BRUSH;
 inline constexpr const char* kSculpt = ICON_LC_SHOVEL;
 inline constexpr const char* kHole = ICON_LC_CIRCLE_DASHED;
 inline constexpr const char* kLayers = ICON_LC_LAYERS;
+inline constexpr const char* kScatter = ICON_LC_SPRAY_CAN;
+inline constexpr const char* kPlant = ICON_LC_SPROUT;
+inline constexpr const char* kErase = ICON_LC_ERASER;
+inline constexpr const char* kSeed = ICON_LC_DICES;
 inline constexpr const char* kImport = ICON_LC_IMPORT;
 inline constexpr const char* kExport = ICON_LC_UPLOAD;
 

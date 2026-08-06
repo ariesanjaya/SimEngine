@@ -60,6 +60,9 @@ add_subdirectory(Code/Particle)
 # Terrain: heightmap berubin, brush sculpt, undo per goresan, dan I/O
 # heightmap PNG 16-bit/RAW (E7.3).
 add_subdirectory(Code/Terrain)
+# Vegetation: sebaran instance deterministik dari aturan penempatan di atas
+# terrain, peta kepadatan yang dicat, dan format `.simveg` (E7.4).
+add_subdirectory(Code/Vegetation)
 if(SIM_WITH_LUA)
     add_subdirectory(Code/Script)
 endif()

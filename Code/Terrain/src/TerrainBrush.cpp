@@ -290,6 +290,13 @@ void BrushStroke::Begin(Terrain& terrain, float worldX, float worldZ) {
         return;
     }
     terrain.BeginStroke();
+    Begin(worldX, worldZ);
+}
+
+void BrushStroke::Begin(float worldX, float worldZ) {
+    if (active_) {
+        return;
+    }
     active_ = true;
     lastX_ = worldX;
     lastZ_ = worldZ;
@@ -347,6 +354,10 @@ void BrushStroke::End(Terrain& terrain) {
         return;
     }
     terrain.EndStroke();
+    End();
+}
+
+void BrushStroke::End() {
     active_ = false;
     accumulator_ = 0.0f;
 }
