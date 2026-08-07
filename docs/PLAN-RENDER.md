@@ -1310,6 +1310,60 @@ benar untuk M3: satu probe per 16×16 piksel tanpa penyaring spasial apa pun.
 Yang menghaluskannya A-trous di M5, dan menambahkannya sekarang akan
 menyembunyikan justru apa yang perlu dilihat saat menyetel probe.
 
+#### M4 — Hash grid radiance cache (berjalan)
+
+**Sudah ada: acuan CPU-nya, lengkap dan teruji, termasuk uji tungku yang menjadi
+kriteria selesainya.**
+
+Cache ini yang memberi warna pada sinar yang mengenai lewat lapis SDF — sinar
+yang di M3 terpaksa dibuang dari penaksir karena clipmap hanya menyimpan jarak,
+bukan radiansi. Membuangnya adalah jawaban yang benar selama tidak ada yang tahu
+warnanya; cache inilah yang tahu.
+
+**Arah ikut ke dalam kunci, bukan hanya posisi.** Sebuah titik di lantai
+memancarkan radiansi yang sangat berbeda ke atas dan ke samping; menyimpan satu
+angka per posisi berarti merata-ratakan keduanya, dan hasilnya cahaya yang bocor
+menembus permukaan tipis — sisi gelap sebuah dinding menerima rata-rata sisi
+terangnya. Enam arah cukup: yang dicatat radiansi permukaan, dan enam sudah
+membedakan lantai dari langit-langit dan keempat dinding.
+
+**Sel membesar mengikuti jarak ke kamera**, sama seperti kaskade SDF. Detail
+radiansi pada jarak lima puluh meter tidak terlihat sama sekali, dan menyimpannya
+sehalus yang di depan mata menghabiskan seluruh cache untuk hal yang tidak ada
+yang melihat. Tingkatnya ikut ke kunci: sel halus dan sel kasar yang kebetulan
+bertumpuk tidak boleh berbagi entri, karena isinya beda arti.
+
+**Kapasitasnya tetap, bukan tumbuh.** Cache yang tumbuh mengikuti adegan adalah
+cache yang biayanya tidak bisa disebut di muka — dan yang harus dialokasi ulang
+tepat saat kamera memasuki ruangan baru, yaitu frame yang paling tidak punya
+waktu luang. Yang tetap kadang membuang entri, dan `DroppedSamples` menghitungnya
+supaya cache yang terlalu kecil terlihat sebagai angka, bukan sebagai gambar yang
+agak salah.
+
+**Query yang tidak ketemu menjawab "tidak tahu", bukan hitam.** Pelajaran yang
+sama dengan sinar SDF di M3, dan alasannya sama: nilai yang tidak diketahui dan
+nilai nol adalah dua hal berbeda, dan menyamakannya menggelapkan gambar sambil
+menambah derau.
+
+Bit kuncinya dicampur, bukan dipakai apa adanya. Dua sel bertetangga berbeda satu
+pada satu sumbu; tanpa pencampuran keduanya mendarat di slot bertetangga, dan
+probing linear lalu langsung menabrak tetangganya sendiri — cache penuh jauh
+sebelum entrinya habis. Diuji: 8000 kunci bertetangga ke 65536 slot dengan empat
+langkah probing menyisipkan lebih dari 7900.
+
+**Uji tungku sebagai kriteria selesai.** Adegan albedo 1,0 di bawah pencahayaan
+seragam L harus tetap L setelah berapa pun pantulan. Yang diuji lingkarannya,
+bukan salah satu bagiannya: radiansi masuk ke cache, dibaca kembali sebagai
+radiansi permukaan, lalu masuk lagi — persis jalur multi-bounce. Dua ratus
+iterasi atas sepuluh permukaan, dan hasilnya tetap L dalam 10%. Yang
+menggelapkan adalah faktor yang hilang — pembagi π yang lupa, iradiansi yang
+dikira radiansi, atau entri yang belum terisi dianggap hitam — dan tidak satu pun
+dari ketiganya muncul sebagai galat.
+
+**Belum ada:** sisi GPU-nya — storage buffer entri, penyisipan dari pass probe
+dengan atomik untuk merebut slot, query di `gi_trace.slang` untuk sinar yang
+mengenai lewat SDF, dan peluruhan entri yang tidak lagi terlihat.
+
 - **Anggarannya belum didamaikan dengan kriteria terima E8.** 3,0 ms adalah 18%
   dari frame 60 fps, sementara adegan uji E8 — terrain 2×2 km, 200 ribu instance
   vegetasi, 20 lampu berbayang — sudah menuntut sisanya. Keduanya ditulis

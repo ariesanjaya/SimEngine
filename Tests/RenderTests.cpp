@@ -4,6 +4,7 @@
 #include "Sim/Render/Frustum.h"
 #include "Sim/Render/Ibl.h"
 #include "Sim/Render/LightCluster.h"
+#include "Sim/Render/RadianceCache.h"
 #include "Sim/Render/ScreenProbe.h"
 #include "Sim/Render/ScreenTrace.h"
 #include "Sim/Render/SdfClipmap.h"
@@ -2795,4 +2796,166 @@ TEST_CASE("SH probe membawa arah, bukan hanya terang rata-rata") {
     const Vec3 down = EvaluateProbeSh(accumulated, -lit);
     CHECK(up.x > down.x * 3.0f);
     CHECK(down.x >= 0.0f);
+}
+
+// --- M4: hash grid radiance cache -------------------------------------------
+
+TEST_CASE("Kunci cache membedakan arah, bukan hanya posisi") {
+    // Sebuah titik di lantai memancarkan radiansi yang sangat berbeda ke atas
+    // dan ke samping. Menyimpan satu angka per posisi berarti merata-ratakan
+    // keduanya, dan hasilnya cahaya yang bocor menembus permukaan tipis — sisi
+    // gelap sebuah dinding menerima rata-rata sisi terangnya.
+    RadianceCacheSettings settings;
+    settings.capacity = 1u << 12;
+    RadianceCache cache;
+    cache.Configure(settings);
+
+    const Vec3 point(1.3f, 0.4f, -2.2f);
+    const Vec3 camera(0.0f);
+    const RadianceCacheKey up = cache.KeyFor(point, Vec3(0, 1, 0), camera);
+    const RadianceCacheKey down = cache.KeyFor(point, Vec3(0, -1, 0), camera);
+    const RadianceCacheKey side = cache.KeyFor(point, Vec3(1, 0, 0), camera);
+
+    CHECK(up.cell == down.cell);
+    CHECK(up.face != down.face);
+    CHECK(up.face != side.face);
+
+    cache.Insert(up, Vec3(1.0f, 0.0f, 0.0f));
+    cache.Insert(down, Vec3(0.0f, 1.0f, 0.0f));
+
+    Vec3 value;
+    REQUIRE(cache.Query(up, value));
+    CHECK(value.x == doctest::Approx(1.0f));
+    REQUIRE(cache.Query(down, value));
+    CHECK(value.y == doctest::Approx(1.0f));
+    // Yang belum pernah diisi menjawab "tidak tahu", bukan hitam.
+    CHECK(!cache.Query(side, value));
+}
+
+TEST_CASE("Sel membesar mengikuti jarak ke kamera") {
+    // Detail radiansi pada jarak lima puluh meter tidak terlihat sama sekali,
+    // dan menyimpannya sehalus yang di depan mata menghabiskan seluruh cache
+    // untuk hal yang tidak ada yang melihat.
+    RadianceCacheSettings settings;
+    settings.capacity = 1u << 12;
+    settings.cellSize = 0.25f;
+    settings.lodDistance = 8.0f;
+    RadianceCache cache;
+    cache.Configure(settings);
+
+    const Vec3 camera(0.0f);
+    const Vec3 normal(0.0f, 1.0f, 0.0f);
+    CHECK(cache.KeyFor(Vec3(1.0f, 0.0f, 0.0f), normal, camera).level == 0);
+    CHECK(cache.KeyFor(Vec3(12.0f, 0.0f, 0.0f), normal, camera).level == 1);
+    CHECK(cache.KeyFor(Vec3(40.0f, 0.0f, 0.0f), normal, camera).level == 3);
+
+    // Tingkatnya ikut ke kunci: sel halus dan sel kasar yang kebetulan
+    // bertumpuk tidak boleh berbagi entri, karena isinya beda arti.
+    const RadianceCacheKey near = cache.KeyFor(Vec3(1.0f, 0.0f, 0.0f), normal, camera);
+    const RadianceCacheKey far = cache.KeyFor(Vec3(1.0f, 0.0f, 0.0f), normal, Vec3(100.0f, 0, 0));
+    CHECK(near.level != far.level);
+}
+
+TEST_CASE("Hash menyebar sel bertetangga ke slot yang berjauhan") {
+    // Dua sel bertetangga berbeda satu pada satu sumbu. Tanpa pencampuran bit
+    // keduanya mendarat di slot bertetangga — dan probing linear lalu langsung
+    // menabrak tetangganya sendiri, yang membuat cache penuh jauh sebelum
+    // entrinya habis.
+    RadianceCacheSettings settings;
+    settings.capacity = 1u << 16;
+    settings.maxProbe = 4;
+    RadianceCache cache;
+    cache.Configure(settings);
+
+    // Satu blok 20x20x20 sel bertetangga, satu arah: 8000 kunci ke 65536 slot.
+    uint32_t inserted = 0;
+    for (int z = 0; z < 20; ++z) {
+        for (int y = 0; y < 20; ++y) {
+            for (int x = 0; x < 20; ++x) {
+                RadianceCacheKey key;
+                key.cell = {x, y, z};
+                key.face = 2;
+                if (cache.Insert(key, Vec3(static_cast<float>(x)))) {
+                    ++inserted;
+                }
+            }
+        }
+    }
+    // Dengan beban 12% dan empat langkah probing, hampir semuanya harus muat.
+    CHECK(inserted > 7900);
+    CHECK(cache.DroppedSamples() < 100);
+
+    // Dan yang masuk harus bisa dibaca kembali apa adanya.
+    RadianceCacheKey probe;
+    probe.cell = {7, 11, 13};
+    probe.face = 2;
+    Vec3 value;
+    REQUIRE(cache.Query(probe, value));
+    CHECK(value.x == doctest::Approx(7.0f));
+}
+
+TEST_CASE("Uji tungku: albedo satu di bawah cahaya seragam tidak menggelap") {
+    // **Kriteria selesai M4.** Sebuah adegan dengan albedo 1,0 di bawah
+    // pencahayaan seragam L harus tetap L setelah berapa pun pantulan: setiap
+    // permukaan memantulkan seluruh yang diterimanya. Yang menggelapkan adalah
+    // faktor yang hilang — pembagi pi yang lupa, iradiansi yang dikira radiansi,
+    // atau entri cache yang belum terisi dianggap hitam.
+    //
+    // Yang diuji di sini lingkarannya, bukan salah satu bagiannya: radiansi
+    // masuk ke cache, dibaca kembali sebagai radiansi permukaan, lalu masuk lagi
+    // — persis jalur yang dipakai multi-bounce.
+    RadianceCacheSettings settings;
+    settings.capacity = 1u << 14;
+    settings.accumulationFrames = 32;
+    RadianceCache cache;
+    cache.Configure(settings);
+
+    ProbeGridSettings probeSettings;
+    const Vec3 camera(0.0f);
+    const float uniform = 0.7f;
+
+    // Sepuluh permukaan tersebar, masing-masing menghadap arah berbeda.
+    std::vector<Vec3> positions;
+    std::vector<Vec3> normals;
+    for (int i = 0; i < 10; ++i) {
+        const float angle = static_cast<float>(i) * 0.7f;
+        positions.push_back(Vec3(std::cos(angle) * 3.0f, static_cast<float>(i) * 0.4f,
+                                 std::sin(angle) * 3.0f));
+        normals.push_back(glm::normalize(Vec3(std::cos(angle), 0.4f, std::sin(angle))));
+    }
+
+    // Frame pertama: hanya cahaya langsung yang seragam. Sesudahnya setiap
+    // permukaan mengambil radiansinya dari cache — itulah pantulan berikutnya.
+    std::vector<ProbeRay> rays(16);
+    for (uint32_t frame = 0; frame < 200; ++frame) {
+        for (std::size_t i = 0; i < positions.size(); ++i) {
+            for (uint32_t r = 0; r < rays.size(); ++r) {
+                rays[r].direction =
+                    ProbeRayDirection(r, frame, static_cast<uint32_t>(i), probeSettings);
+                // Radiansi yang datang: dari cache kalau sudah tahu, dari cahaya
+                // langsung kalau belum. Yang tidak diketahui **dibuang**, bukan
+                // dihitung nol — pelajaran yang sama dengan sinar SDF di M3.
+                Vec3 incoming;
+                const RadianceCacheKey key =
+                    cache.KeyFor(positions[i] + rays[r].direction, -rays[r].direction, camera);
+                rays[r].radiance = cache.Query(key, incoming) ? incoming : Vec3(uniform);
+            }
+            const Vec3 irradiance =
+                IntegrateIrradiance(rays.data(), static_cast<uint32_t>(rays.size()), normals[i]);
+            // Albedo 1,0: radiansi keluar = iradiansi / pi. Faktor pi inilah
+            // yang paling sering hilang, dan hilangnya terlihat sebagai adegan
+            // yang menggelap tiap pantulan — bukan sebagai galat.
+            const Vec3 outgoing = irradiance / 3.14159265358979323846f;
+            cache.Insert(cache.KeyFor(positions[i], normals[i], camera), outgoing);
+        }
+    }
+
+    // Tidak menggelap, dan tidak meledak.
+    for (std::size_t i = 0; i < positions.size(); ++i) {
+        Vec3 value;
+        REQUIRE(cache.Query(cache.KeyFor(positions[i], normals[i], camera), value));
+        CHECK(value.x == doctest::Approx(uniform).epsilon(0.1));
+        CHECK(value.y == doctest::Approx(uniform).epsilon(0.1));
+        CHECK(value.z == doctest::Approx(uniform).epsilon(0.1));
+    }
 }
