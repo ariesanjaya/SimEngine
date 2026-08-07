@@ -2,6 +2,7 @@ sim_add_library(RHI
     SOURCES
         src/Buffer.cpp
         src/Device.cpp
+        src/GpuProfiler.cpp
         src/RenderTarget.cpp
         src/Swapchain.cpp
         src/Texture.cpp

@@ -3,8 +3,24 @@
 #include "Sim/Render/Types.h"
 
 #include <cstdint>
+#include <span>
+#include <string_view>
 
 namespace sim::render {
+
+/// Waktu GPU satu pass, milidetik.
+///
+/// **Angkanya tertinggal beberapa frame dari yang terlihat**, dan itu disengaja:
+/// membacanya tepat waktu menuntut CPU menunggu GPU, yaitu persis yang tidak
+/// boleh dilakukan alat ukur. Untuk angka yang dibaca manusia, keterlambatan itu
+/// tidak berarti apa-apa.
+///
+/// `name` menunjuk penyimpanan milik renderer dan hanya sah sampai `Render()`
+/// berikutnya — sama disiplinnya dengan span di `ViewportScene`.
+struct PassTiming {
+    std::string_view name;
+    float milliseconds = 0.0f;
+};
 
 /// Batas antara editor dan rendering (seam #1 di docs/ARCHITECTURE.md).
 ///
@@ -42,6 +58,10 @@ public:
     /// Name implementasi, ditampilkan di pojok viewport supaya jelas bahwa yang
     /// terlihat masih preview stub, bukan hasil rendering sungguhan.
     virtual const char* Name() const = 0;
+
+    /// Waktu GPU per pass frame yang terakhir selesai. Kosong bila perangkatnya
+    /// tidak mendukung timestamp, atau selama beberapa frame pertama.
+    virtual std::span<const PassTiming> PassTimings() const { return {}; }
 };
 
 }  // namespace sim::render

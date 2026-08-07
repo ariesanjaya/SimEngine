@@ -755,9 +755,32 @@ Rencana terpisah ada di `/home/arie/SDK/rencana-implementasi-gi.md`: screen prob
 implementasi — SDF clipmap untuk GPU tanpa RT core, ray query untuk yang punya.
 Anggarannya 3,0 ms per frame di 1080p, ±16 minggu untuk satu orang.
 
-**Urutan yang diminta: GI lebih dulu, lalu E8.8.** Dari ketiga hal di bawah,
-satu sudah lepas dengan selesainya E8.3 — dua sisanya masih perlu diputuskan
-sebelum baris kode pertama ditulis.
+**Urutan yang diminta: GI lebih dulu, lalu E8.8.**
+
+Ketiga hal di bawah sudah terjawab, dan dua di antaranya bermuara ke tempat yang
+sama — M0.
+
+**Anggaran tidak bisa didamaikan di atas kertas; ia harus diukur.** 3,0 ms dari
+frame 16,67 ms menyisakan 13,67 ms untuk terrain, 200 ribu instance vegetasi, 20
+lampu berbayang, karakter, partikel, dan seluruh post-process. Apakah itu cukup
+bukan hal yang bisa disimpulkan dengan menalar — dan adegan ujinya belum ada,
+karena E8.4–E8.7 belum dikerjakan. Jadi yang bisa diputuskan sekarang bukan
+angkanya melainkan **alatnya**: pengukuran GPU per pass, yang memang sudah
+diminta M0 dan kini ada. Angka yang tidak bisa diukur bukan anggaran melainkan
+harapan.
+
+Pengukuran pertama pada adegan hampir kosong (RTX 2060, 1277×614): total
+**0,315 ms** — shadow-cascades 0,151, grid 0,070, shadow-atlas 0,052,
+forward-opaque 0,025, depth-prepass 0,014, sisanya di bawah 0,005. Itu garis
+dasarnya; yang menarik adalah bagaimana ia tumbuh saat E8.4 ke atas mendarat.
+
+**Pemilih backend harus terlihat sejak M0, bukan M7.** Rencana menaruh override
+manual di M7, dan itu terlambat: begitu `RayQueryBackend` ada, pengujian
+sehari-hari di mesin ini otomatis pindah ke sana — dan jalur SDF, yang justru
+harus bekerja di GPU tanpa RT core, berhenti dijalankan siapa pun tanpa ada yang
+menyadarinya. Urutan milestone-nya sendiri sudah benar (SDF dulu di M1–M2, ray
+query terakhir di M7); yang ditambahkan hanyalah bahwa pemilihnya wajib eksplisit
+dan tampak, sejak awal.
 
 - **Anggarannya belum didamaikan dengan kriteria terima E8.** 3,0 ms adalah 18%
   dari frame 60 fps, sementara adegan uji E8 — terrain 2×2 km, 200 ribu instance

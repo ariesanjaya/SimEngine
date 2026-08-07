@@ -73,7 +73,8 @@ FrameGraphExecutor::Stage FrameGraphExecutor::Translate(Access access) {
 }
 
 bool FrameGraphExecutor::Execute(const CompiledGraph& compiled, VkCommandBuffer cmd,
-                                 std::span<const Recorder> recorders) {
+                                 std::span<const Recorder> recorders,
+                                 rhi::GpuProfiler* profiler) {
     if (!compiled.ok) {
         return false;
     }
@@ -124,11 +125,22 @@ bool FrameGraphExecutor::Execute(const CompiledGraph& compiled, VkCommandBuffer 
     };
 
     for (const CompiledPass& pass : compiled.order) {
-        if (!flush(pass.barriers)) {
-            return false;
+        // Barrier ikut diukur bersama pass-nya. Ia memang bagian dari biaya
+        // pass itu — barrier yang mahal adalah barrier yang disimpulkan graph
+        // untuk pass itu, dan memisahkannya menyembunyikan justru hal yang
+        // ingin dilihat orang yang membuka tabel ini.
+        if (profiler != nullptr) {
+            profiler->BeginScope(cmd, pass.name);
         }
-        if (pass.pass < recorders.size() && recorders[pass.pass]) {
+        const bool ok = flush(pass.barriers);
+        if (ok && pass.pass < recorders.size() && recorders[pass.pass]) {
             recorders[pass.pass](cmd);
+        }
+        if (profiler != nullptr) {
+            profiler->EndScope(cmd);
+        }
+        if (!ok) {
+            return false;
         }
     }
     return flush(compiled.finalBarriers);

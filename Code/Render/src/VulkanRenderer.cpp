@@ -4,6 +4,7 @@
 #include "Sim/Core/Log.h"
 #include "Sim/RHI/Buffer.h"
 #include "Sim/RHI/Device.h"
+#include "Sim/RHI/GpuProfiler.h"
 #include "Sim/RHI/RenderTarget.h"
 #include "Sim/RHI/TextureRegistry.h"
 #include "Sim/Render/FrameGraph.h"
@@ -300,6 +301,8 @@ public:
         if (!WriteShadowDescriptors()) {
             return false;
         }
+        // Profiler boleh gagal dibuat; renderer tetap jalan tanpa tabel waktu.
+        profiler_.Create(device_);
         AdoptTargetLayout();
         AdoptShadowLayout();
         AdoptAtlasLayout();
@@ -429,6 +432,7 @@ public:
         BuildGraph();
 
         VkCommandBuffer cmd = device_.BeginTransient();
+        profiler_.BeginFrame(cmd);
         executor_.Clear();
         executor_.Bind(colorId_, BoundImage{target_.ColorImage(), target_.ColorView(),
                                             VK_IMAGE_ASPECT_COLOR_BIT});
@@ -512,9 +516,10 @@ public:
             vkCmdEndRendering(command);
         };
 
-        if (!executor_.Execute(compiled_, cmd, recorders)) {
+        if (!executor_.Execute(compiled_, cmd, recorders, &profiler_)) {
             SIM_ERROR("Render", "frame graph execution failed: {}", compiled_.error);
         }
+        profiler_.EndFrame(cmd);
         slot.submitId = device_.SubmitTransient(cmd);
         slotIndex_ = (slotIndex_ + 1) % slots_.size();
         drawnOpaque_ = opaqueCount;
@@ -526,6 +531,14 @@ public:
     uint32_t Width() const override { return target_.Width(); }
     uint32_t Height() const override { return target_.Height(); }
     const char* Name() const override { return "VulkanRenderer"; }
+
+    std::span<const PassTiming> PassTimings() const override {
+        timings_.clear();
+        for (const rhi::GpuProfiler::Scope& scope : profiler_.Results()) {
+            timings_.push_back(PassTiming{scope.name, static_cast<float>(scope.milliseconds)});
+        }
+        return timings_;
+    }
 
 private:
     struct InstanceSlot {
@@ -1778,6 +1791,11 @@ private:
     rhi::Device& device_;
     rhi::ITextureRegistry& textures_;
     rhi::RenderTarget target_;
+    rhi::GpuProfiler profiler_;
+    /// Disusun ulang saat diminta, bukan disimpan tiap frame — panel Statistics
+    /// biasanya tertutup, dan menyusun daftar yang tidak ada yang membacanya
+    /// adalah pekerjaan yang dibuang setiap frame.
+    mutable std::vector<PassTiming> timings_;
     TextureHandle textureHandle_ = kInvalidTexture;
 
     FrameGraph graph_;

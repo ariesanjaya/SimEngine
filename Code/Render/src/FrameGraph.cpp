@@ -263,6 +263,7 @@ CompiledGraph FrameGraph::Compile() const {
         }
         CompiledPass compiled;
         compiled.pass = pass;
+        compiled.name = passes_[pass].name;
         for (const Use& use : passes_[pass].uses) {
             if (state[use.resource] != use.access) {
                 compiled.barriers.push_back(Barrier{use.resource, state[use.resource], use.access});

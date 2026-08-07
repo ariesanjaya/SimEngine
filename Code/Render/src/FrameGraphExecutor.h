@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Sim/RHI/GpuProfiler.h"
 #include "Sim/RHI/Vulkan.h"
 #include "Sim/Render/FrameGraph.h"
 
@@ -46,8 +47,11 @@ public:
     /// Mengembalikan false kalau ada resource yang dipakai tapi tidak dipasangkan
     /// — dilaporkan, bukan dilewati diam-diam: pass yang menggambar ke image
     /// kosong menghasilkan layar hitam tanpa satu pun pesan validasi.
+    /// `profiler` boleh null. Bila ada, tiap pass dibungkus lingkup ukur yang
+    /// namanya diambil dari graph — jadi menambah pass otomatis menambah
+    /// barisnya di tabel waktu, tanpa satu pun daftar yang harus dipelihara.
     bool Execute(const CompiledGraph& compiled, VkCommandBuffer cmd,
-                 std::span<const Recorder> recorders);
+                 std::span<const Recorder> recorders, rhi::GpuProfiler* profiler = nullptr);
 
     /// Keadaan layout terakhir sebuah resource sesudah `Execute`. Dipakai
     /// pemanggil yang harus mengembalikan image impor ke keadaan semula.

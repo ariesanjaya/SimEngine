@@ -82,6 +82,10 @@ struct Barrier {
 /// selesai punya tempatnya sendiri: `CompiledGraph::finalBarriers`.
 struct CompiledPass {
     PassId pass = kInvalidPass;
+    /// Nama pass, disalin dari graph. Ada supaya hasil kompilasi bisa
+    /// menjelaskan dirinya sendiri — pengukur waktu GPU dan pesan galat sama-
+    /// sama menyebut pass menurut namanya, bukan menurut nomornya.
+    std::string name;
     std::vector<Barrier> barriers;
 };
 
