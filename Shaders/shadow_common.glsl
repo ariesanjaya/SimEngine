@@ -26,6 +26,11 @@ layout(set = 0, binding = 0) uniform ShadowParams {
     // layar. Di UBO, bukan di push constant: batas push constant yang dijamin
     // Vulkan hanya 128 byte, dan dua matriks saja sudah menghabiskannya.
     mat4 viewProj;
+    // Clip -> dunia. Dipakai penelusur screen-space memulihkan posisi dunia dari
+    // sebuah texel depth, dan itulah yang membuat uji ketebalan bisa diukur
+    // dalam meter. Di UBO supaya penelusurnya tidak bergantung pada push
+    // constant pemakainya — dan ia dipakai lebih dari satu pass.
+    mat4 invViewProj;
     // x ketebalan yang diandaikan (meter), y dorongan awal (meter),
     // z langkah maksimum screen-space, w jumlah tingkat HiZ. Nol pada w berarti
     // lapis screen-space mati.

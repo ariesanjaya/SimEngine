@@ -73,14 +73,17 @@ struct ShadowUniforms {
     /// layar. Di sini, bukan di push constant: batas push constant yang dijamin
     /// Vulkan hanya 128 byte, dan dua matriks saja sudah menghabiskannya.
     Mat4 viewProj{1.0f};
+    /// Clip → dunia. Di UBO supaya penelusur screen-space tidak bergantung pada
+    /// push constant pemakainya — dan ia dipakai lebih dari satu pass.
+    Mat4 invViewProj{1.0f};
     /// x ketebalan yang diandaikan (meter), y dorongan awal (meter),
     /// z langkah maks screen-space, w jumlah tingkat HiZ. Nol berarti lapis
     /// screen-space mati.
     Vec4 screenTrace{0.0f};
 };
-// 5 mat4 + 16 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
+// 6 mat4 + 16 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
 // memperbarui shader-nya menjadi galat kompilasi, bukan bayangan yang bergeser.
-static_assert(sizeof(ShadowUniforms) == 5 * 64 + 16 * 16,
+static_assert(sizeof(ShadowUniforms) == 6 * 64 + 16 * 16,
               "ShadowUniforms harus cocok dengan blok ShadowParams di shadow_common.glsl");
 
 /// Cermin dari `GpuLight` di Shaders/cluster_common.glsl. std430.
@@ -1970,6 +1973,7 @@ private:
                                   static_cast<float>(clipmap.CascadeCount()),
                                   clipmap.Settings().bandVoxels, kSdfMaxSteps);
         uniforms.viewProj = viewProj;
+        uniforms.invViewProj = glm::inverse(viewProj);
         // Nol tingkat berarti lapis screen-space mati, dan itulah keadaan yang
         // benar saat piramidanya gagal dibuat: penelusur lalu langsung memakai
         // SDF alih-alih membaca tekstur yang tidak ada isinya.

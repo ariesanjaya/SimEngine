@@ -143,6 +143,52 @@ Vec3 IntegrateIrradiance(const ProbeRay* rays, uint32_t count, const Vec3& norma
     return sum * (kSphereArea / static_cast<float>(count));
 }
 
+namespace {
+
+/// Empat basis SH pertama pada sebuah arah.
+Vec4 ShBasis(const Vec3& direction) {
+    return {0.282095f, 0.488603f * direction.y, 0.488603f * direction.z,
+            0.488603f * direction.x};
+}
+
+/// Faktor konvolusi cosinus per orde. Sama dengan `EvaluateIrradiance` di
+/// `Ibl.h` — dua rumus iradiansi SH yang berselisih di enginenya sendiri adalah
+/// dua jawaban berbeda untuk pertanyaan yang sama.
+constexpr float kCosineA0 = 3.14159265358979323846f;
+constexpr float kCosineA1 = 2.0943951023931953f;  // 2π/3
+
+}  // namespace
+
+ProbeSh ProjectProbeSh(const ProbeRay* rays, uint32_t count) {
+    ProbeSh sh;
+    if (rays == nullptr || count == 0) {
+        return sh;
+    }
+    // Bobot sampel bola seragam: 4π/N.
+    constexpr float kSphereArea = 4.0f * 3.14159265358979323846f;
+    const float weight = kSphereArea / static_cast<float>(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        const Vec4 basis = ShBasis(rays[i].direction) * weight;
+        sh.r += basis * rays[i].radiance.r;
+        sh.g += basis * rays[i].radiance.g;
+        sh.b += basis * rays[i].radiance.b;
+    }
+    return sh;
+}
+
+Vec3 EvaluateProbeSh(const ProbeSh& sh, const Vec3& normal) {
+    const Vec4 basis = ShBasis(normal) * Vec4(kCosineA0, kCosineA1, kCosineA1, kCosineA1);
+    return {glm::dot(sh.r, basis), glm::dot(sh.g, basis), glm::dot(sh.b, basis)};
+}
+
+ProbeSh BlendProbeSh(const ProbeSh& sh, float weight) {
+    return {sh.r * weight, sh.g * weight, sh.b * weight};
+}
+
+ProbeSh AddProbeSh(const ProbeSh& a, const ProbeSh& b) {
+    return {a.r + b.r, a.g + b.g, a.b + b.b};
+}
+
 Vec3 AccumulateProbe(const Vec3& history, const Vec3& current, uint32_t frames,
                      uint32_t maxFrames) {
     const uint32_t weight = std::min(frames + 1, std::max(maxFrames, 1u));

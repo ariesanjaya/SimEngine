@@ -1139,6 +1139,72 @@ sampai), dan satu untuk lapis mana yang menjawab — dengan geometri SDF sengaja
 diletakkan di luar layar supaya lapisnya terbaca dari lapisnya sendiri, bukan
 disimpulkan dari jaraknya.
 
+#### M3 — Screen probe (berjalan)
+
+**Sudah ada: acuan CPU-nya, lengkap dan teruji.** Pemetaan oktahedral, kisi
+probe, arah ray berjitter, integrasi iradiansi, proyeksi SH, akumulasi temporal,
+dan bobot interpolasi bilateral. Sepuluh test, ditulis sebelum satu baris shader
+pun ada — pola yang sama dengan M1 dan M2, dan alasannya sama: yang di shader
+harus cocok dengan yang di CPU texel demi texel, dan acuan yang ditulis
+belakangan hanya mengukuhkan kesalahan yang sudah ada.
+
+**Oktahedral, bukan kubus atau bola.** Pemetaan kubus menuntut enam sisi dan
+karena itu enam kali pemilihan sisi di setiap pembacaan; latitude/longitude
+memusatkan hampir seluruh texel-nya di kutub. Oktahedral memetakan seluruh bola
+ke satu kotak dengan luasan hampir seragam — dan keseragaman itulah yang membuat
+16 texel per probe cukup mewakili seluruh arah.
+
+**Ray menelusuri seluruh bola, bukan setengahnya.** Sebuah probe melayani ubin
+16×16 piksel, dan piksel di dalam satu ubin bisa punya normal yang sangat
+berbeda — di tepi geometri bahkan berlawanan. Probe yang hanya menelusuri
+setengah bola di sekitar satu normal tidak punya apa pun untuk diberikan kepada
+piksel yang menghadap ke arah lain.
+
+**Satu ray per sel oktahedral; yang berjitter hanya letaknya di dalam sel.**
+Tanpa stratifikasi itu, separuh bola bisa tidak tersampel sama sekali pada sebuah
+frame — dan yang kosong muncul sebagai iradiansi yang berdenyut walaupun
+adegannya diam, yaitu tepat yang dilarang kriteria selesai M3. Jitternya berbeda
+tiap probe lewat rotasi Cranley–Patterson: jitter yang seragam di seluruh probe
+membuat polanya terlihat sebagai kisi ubin.
+
+**Radiansi probe disimpan sebagai SH orde satu, bukan 16 texel oktahedral.** Yang
+dibutuhkan piksel adalah iradiansi — integral radiansi terhadap cosinus — dan
+integral itu memangkas seluruh frekuensi tinggi. Menyimpan arahnya utuh berarti
+setiap piksel membaca 16 texel dari masing-masing empat probe tetangganya lalu
+menjumlahkannya kembali menjadi angka yang hanya punya empat derajat kebebasan.
+Orde satu, bukan dua: dengan 16 ray per frame, koefisien orde dua lebih banyak
+berisi derau daripada isyarat. Tata letaknya satu `vec4` per kanal warna — bentuk
+yang muat persis di tiga lampiran RGBA16F.
+
+**Jarak pada bobot interpolasi diukur tegak lurus bidang piksel.** Dua titik di
+lantai yang sama boleh berjauhan; dua titik yang terpisah dinding tidak boleh
+berdekatan. Memakai jarak lurus membuat cahaya merembes menembus sudut ruangan —
+cacat yang paling sering dikira kebocoran denoiser.
+
+Uji tungku yang mengunci normalisasinya: radiance seragam harus menghasilkan
+iradiansi tepat π kali radiance-nya untuk normal mana pun, karena ∫cos dω atas
+setengah bola persis π. Dua jalur diuji terhadap angka yang sama — integrasi
+langsung dan lewat SH — sehingga faktor konvolusi cosinus SH tidak bisa
+menyimpang diam-diam. Kesalahan normalisasi muncul sebagai adegan yang terlalu
+terang atau terlalu gelap secara merata, dan itu paling mudah dikira masalah
+eksposur.
+
+**Penelusur berjenjang dipindah ke `Shaders/gi_trace.glsl`.** Pass probe dan pass
+debug memakai satu implementasi. Dua salinan rumus yang sama adalah dua rumus
+yang akan berselisih — dan selisih antara apa yang dilihat alat diagnostik dan
+apa yang dipakai menggambar adalah selisih yang paling mahal, karena alatnya lalu
+berbohong justru saat paling dibutuhkan. `invViewProj` ikut pindah ke UBO supaya
+penelusurnya tidak bergantung pada push constant pemakainya.
+
+**Belum ada:** seluruh sisi GPU-nya — G-buffer normal dari depth prepass, pass
+penelusur probe yang menembakkan 16 ray dan memproyeksikannya ke SH, ping-pong
+akumulasi temporal, pass resolve yang menginterpolasi probe ke piksel, dan
+tampilan debug Irradiance yang menampilkannya. Beserta adegan Cornell box yang
+menjadi kriteria selesainya. Radiansi untuk sinar yang mengenai lewat lapis SDF
+juga belum ada dan memang belum bisa ada: yang memberinya warna adalah hash grid
+di M4, dan sampai saat itu hanya sinar yang mengenai lewat lapis layar yang
+membawa warna.
+
 - **Anggarannya belum didamaikan dengan kriteria terima E8.** 3,0 ms adalah 18%
   dari frame 60 fps, sementara adegan uji E8 — terrain 2×2 km, 200 ribu instance
   vegetasi, 20 lampu berbayang — sudah menuntut sisanya. Keduanya ditulis

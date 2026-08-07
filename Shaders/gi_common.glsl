@@ -1,0 +1,88 @@
+// Rumus screen probe yang dipakai bersama beberapa pass.
+//
+// **Seluruh isinya harus sama persis dengan `ScreenProbe.cpp`.** Yang di CPU
+// adalah acuan yang diuji — termasuk uji tungku yang menuntut radiance seragam
+// menghasilkan iradiansi tepat π kali radiance-nya — dan yang di sini yang
+// benar-benar dipakai menggambar. Dua rumus yang ditulis terpisah berselisih
+// tepat di kasus yang paling sulit dilihat.
+
+#ifndef GI_COMMON_GLSL
+#define GI_COMMON_GLSL
+
+float giSignNotZero(float value) { return value >= 0.0 ? 1.0 : -1.0; }
+
+/// Arah satuan -> kotak [0,1]².
+vec2 octEncode(vec3 direction) {
+    float length = abs(direction.x) + abs(direction.y) + abs(direction.z);
+    if (length < 1e-20) {
+        return vec2(0.5);
+    }
+    vec3 n = direction / length;
+    vec2 p = n.xy;
+    if (n.z < 0.0) {
+        // Setengah bola bawah dilipat ke luar kotak dalamnya, memenuhi keempat
+        // sudutnya — itu yang membuat seluruh bola muat tanpa daerah kosong.
+        p = vec2((1.0 - abs(n.y)) * giSignNotZero(n.x), (1.0 - abs(n.x)) * giSignNotZero(n.y));
+    }
+    return p * 0.5 + 0.5;
+}
+
+/// Kotak [0,1]² -> arah satuan.
+vec3 octDecode(vec2 uv) {
+    vec2 f = uv * 2.0 - 1.0;
+    vec3 n = vec3(f, 1.0 - abs(f.x) - abs(f.y));
+    float fold = max(-n.z, 0.0);
+    n.x += n.x >= 0.0 ? -fold : fold;
+    n.y += n.y >= 0.0 ? -fold : fold;
+    return normalize(n);
+}
+
+/// Titik ke-`index` dari urutan Hammersley 2D berukuran `count`.
+vec2 giHammersley(uint index, uint count) {
+    uint bits = index;
+    bits = (bits << 16u) | (bits >> 16u);
+    bits = ((bits & 0x55555555u) << 1u) | ((bits & 0xAAAAAAAAu) >> 1u);
+    bits = ((bits & 0x33333333u) << 2u) | ((bits & 0xCCCCCCCCu) >> 2u);
+    bits = ((bits & 0x0F0F0F0Fu) << 4u) | ((bits & 0xF0F0F0F0u) >> 4u);
+    bits = ((bits & 0x00FF00FFu) << 8u) | ((bits & 0xFF00FF00u) >> 8u);
+    return vec2(float(index) / float(max(count, 1u)), float(bits) * 2.3283064365386963e-10);
+}
+
+/// Pergeseran tetap sebuah probe, di [0,1)². Rotasi Cranley-Patterson.
+vec2 giProbeOffset(uint probeIndex) {
+    uint hash = probeIndex * 0x9E3779B9u;
+    hash ^= hash >> 15u;
+    hash *= 0x85EBCA6Bu;
+    hash ^= hash >> 13u;
+    return vec2(float(hash & 0xFFFFu) / 65536.0, float((hash >> 16u) & 0xFFFFu) / 65536.0);
+}
+
+/// Arah ray ke-`ray` sebuah probe pada frame ke-`frame`.
+///
+/// Satu ray per sel oktahedral, jadi keenam belasnya menutupi seluruh bola tiap
+/// frame; yang berjitter hanya letaknya di dalam selnya.
+vec3 giProbeRayDirection(uint ray, uint frame, uint probeIndex, uint raysPerAxis,
+                         uint accumulationFrames) {
+    uint axis = max(raysPerAxis, 1u);
+    uint index = ray % (axis * axis);
+    vec2 cell = vec2(float(index % axis), float(index / axis));
+    vec2 jitter = giHammersley(frame, accumulationFrames) + giProbeOffset(probeIndex);
+    return octDecode((cell + fract(jitter)) / float(axis));
+}
+
+/// Empat basis SH pertama pada sebuah arah.
+vec4 giShBasis(vec3 direction) {
+    return vec4(0.282095, 0.488603 * direction.y, 0.488603 * direction.z,
+                0.488603 * direction.x);
+}
+
+/// Faktor konvolusi cosinus per orde: π untuk orde nol, 2π/3 untuk orde satu.
+const vec4 kGiCosineConvolution = vec4(3.14159265, 2.09439510, 2.09439510, 2.09439510);
+
+/// Iradiansi pada sebuah normal dari SH orde satu, satu vec4 per kanal.
+vec3 giEvaluateSh(vec4 shR, vec4 shG, vec4 shB, vec3 normal) {
+    vec4 basis = giShBasis(normal) * kGiCosineConvolution;
+    return vec3(dot(shR, basis), dot(shG, basis), dot(shB, basis));
+}
+
+#endif

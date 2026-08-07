@@ -97,6 +97,37 @@ struct ProbeRay {
 /// di belakang permukaan menyumbang nol lewat `maks`.
 Vec3 IntegrateIrradiance(const ProbeRay* rays, uint32_t count, const Vec3& normal);
 
+/// Radiansi sebuah probe sebagai SH orde satu, satu vektor koefisien per kanal.
+///
+/// **SH, bukan enam belas texel oktahedral yang disimpan apa adanya.** Yang
+/// dibutuhkan piksel adalah iradiansi — integral radiansi terhadap cosinus — dan
+/// integral itu memangkas seluruh frekuensi tinggi. Menyimpan arahnya utuh
+/// berarti setiap piksel membaca 16 texel dari masing-masing empat probe
+/// tetangganya lalu menjumlahkannya kembali menjadi satu angka yang hanya punya
+/// empat derajat kebebasan. Orde satu, bukan dua: dengan 16 ray per frame,
+/// koefisien orde dua lebih banyak berisi derau daripada isyarat.
+///
+/// Tata letaknya **satu vektor empat per kanal warna**, bukan empat vektor tiga
+/// per koefisien: itu bentuk yang muat persis di tiga lampiran RGBA16F, dan
+/// lampiran adalah satuan yang bisa ditulis satu pass di GPU.
+struct ProbeSh {
+    Vec4 r{0.0f};
+    Vec4 g{0.0f};
+    Vec4 b{0.0f};
+};
+
+/// Memproyeksikan sampel arah seragam ke SH orde satu.
+ProbeSh ProjectProbeSh(const ProbeRay* rays, uint32_t count);
+
+/// Iradiansi pada sebuah normal. Konvolusi cosinus-nya sudah termasuk, dengan
+/// faktor yang sama dengan `EvaluateIrradiance` di `Ibl.h`: π untuk orde nol,
+/// 2π/3 untuk orde satu.
+Vec3 EvaluateProbeSh(const ProbeSh& sh, const Vec3& normal);
+
+/// Campuran linear dua probe. Dipakai interpolasi ke piksel.
+ProbeSh BlendProbeSh(const ProbeSh& sh, float weight);
+ProbeSh AddProbeSh(const ProbeSh& a, const ProbeSh& b);
+
 /// Rata-rata berjalan atas `maxFrames` frame terakhir.
 ///
 /// **Jumlah sampel dibatasi, bukan dibiarkan tumbuh.** Rata-rata sejati atas

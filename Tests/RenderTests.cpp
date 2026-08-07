@@ -2737,3 +2737,62 @@ TEST_CASE("Koordinat ubin berpusat di probe, bukan di pojok ubin") {
     const Vec2 between = grid.TileCoordinate(Vec2(32.0f, 24.0f));
     CHECK(between.x == doctest::Approx(1.5f));
 }
+
+TEST_CASE("SH probe menjawab uji tungku yang sama dengan integrasi langsung") {
+    // Dua jalur menuju satu angka: sampel diintegrasikan langsung, atau
+    // diproyeksikan ke SH lalu dievaluasi. Keduanya harus sepakat pada medan
+    // yang cukup halus — dan radiance seragam adalah yang paling halus.
+    // Berselisih di sini berarti faktor konvolusi cosinus-nya salah, dan
+    // gejalanya adegan yang terlalu terang atau terlalu gelap secara merata.
+    ProbeGridSettings settings;
+    std::vector<ProbeRay> rays(16);
+    const Vec3 radiance(0.5f, 0.25f, 0.75f);
+
+    ProbeSh accumulated;
+    constexpr uint32_t kFrames = 256;
+    for (uint32_t frame = 0; frame < kFrames; ++frame) {
+        for (uint32_t i = 0; i < rays.size(); ++i) {
+            rays[i].direction = ProbeRayDirection(i, frame, 0, settings);
+            rays[i].radiance = radiance;
+        }
+        accumulated = AddProbeSh(
+            accumulated,
+            BlendProbeSh(ProjectProbeSh(rays.data(), static_cast<uint32_t>(rays.size())),
+                         1.0f / static_cast<float>(kFrames)));
+    }
+
+    for (const Vec3 normal : {Vec3(0, 1, 0), Vec3(-1, 0, 0), glm::normalize(Vec3(2, -1, 1))}) {
+        const Vec3 irradiance = EvaluateProbeSh(accumulated, normal);
+        CHECK(irradiance.x == doctest::Approx(radiance.x * 3.14159265f).epsilon(0.05));
+        CHECK(irradiance.y == doctest::Approx(radiance.y * 3.14159265f).epsilon(0.05));
+        CHECK(irradiance.z == doctest::Approx(radiance.z * 3.14159265f).epsilon(0.05));
+    }
+}
+
+TEST_CASE("SH probe membawa arah, bukan hanya terang rata-rata") {
+    // Kalau ia hanya membawa orde nol, permukaan yang menghadap ke cahaya dan
+    // yang membelakanginya akan sama terangnya — dan color bleeding, yang
+    // seluruhnya soal arah, tidak akan pernah muncul.
+    ProbeGridSettings settings;
+    std::vector<ProbeRay> rays(16);
+    const Vec3 lit(0.0f, 1.0f, 0.0f);
+
+    ProbeSh accumulated;
+    constexpr uint32_t kFrames = 256;
+    for (uint32_t frame = 0; frame < kFrames; ++frame) {
+        for (uint32_t i = 0; i < rays.size(); ++i) {
+            rays[i].direction = ProbeRayDirection(i, frame, 0, settings);
+            // Setengah bola atas terang, bawahnya gelap.
+            rays[i].radiance = rays[i].direction.y > 0.0f ? Vec3(1.0f) : Vec3(0.0f);
+        }
+        accumulated = AddProbeSh(
+            accumulated,
+            BlendProbeSh(ProjectProbeSh(rays.data(), static_cast<uint32_t>(rays.size())),
+                         1.0f / static_cast<float>(kFrames)));
+    }
+
+    const Vec3 up = EvaluateProbeSh(accumulated, lit);
+    const Vec3 down = EvaluateProbeSh(accumulated, -lit);
+    CHECK(up.x > down.x * 3.0f);
+    CHECK(down.x >= 0.0f);
+}
