@@ -33,9 +33,24 @@ struct ExposurePush {
     Vec4 adaptation{0.0f};
 };
 
+struct BloomPush {
+    float sourceTexelX = 0.0f;
+    float sourceTexelY = 0.0f;
+    float sourceUvScaleX = 1.0f;
+    float sourceUvScaleY = 1.0f;
+    Vec4 params{0.0f};
+};
+
 struct ResolvePush {
     Vec4 params{0.0f};
 };
+
+/// Ukuran sebuah tingkat bloom: dibagi dua dibulatkan ke atas, minimal satu.
+/// **Ke atas, bukan ke bawah:** dibulatkan ke bawah, baris terakhir viewport
+/// ganjil tidak punya texel yang menanggungnya, dan yang hilang itu tepi layar.
+uint32_t HalfCeil(uint32_t value) {
+    return std::max((value + 1u) / 2u, 1u);
+}
 
 std::vector<uint32_t> ReadSpirv(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
@@ -72,7 +87,13 @@ VkShaderModule LoadModule(VkDevice device, const std::filesystem::path& path) {
 }  // namespace
 
 bool PostProcess::CreateSetLayout(uint32_t bindingCount, VkDescriptorSetLayout& outLayout) {
-    std::array<VkDescriptorSetLayoutBinding, 2> bindings{};
+    // Ukurannya dari `bindingCount`, bukan larik tetap. Bentuk pertama saya
+    // memakai `std::array<..., 2>`, dan set ketiga — penyelesaian yang membaca
+    // adegan, eksposur, dan bloom — menulis di luarnya: **stack corruption, bukan
+    // galat.** Crash-nya bahkan muncul di dalam driver, jauh dari sebabnya.
+    // Angka yang harus diperbarui setiap kali sebuah binding ditambahkan adalah
+    // angka yang suatu saat lupa diperbarui.
+    std::vector<VkDescriptorSetLayoutBinding> bindings(bindingCount);
     for (uint32_t i = 0; i < bindingCount; ++i) {
         bindings[i].binding = i;
         bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -90,7 +111,8 @@ bool PostProcess::CreateSetLayout(uint32_t bindingCount, VkDescriptorSetLayout& 
 bool PostProcess::CreatePipeline(const std::filesystem::path& shaderDirectory,
                                  const char* fragmentName, VkDescriptorSetLayout setLayout,
                                  uint32_t pushSize, VkFormat colorFormat,
-                                 VkPipelineLayout& outLayout, VkPipeline& outPipeline) {
+                                 VkPipelineLayout& outLayout, VkPipeline& outPipeline,
+                                 VkShaderModule vertexModule) {
     VkPushConstantRange range{};
     range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     range.size = pushSize;
@@ -112,8 +134,8 @@ bool PostProcess::CreatePipeline(const std::filesystem::path& shaderDirectory,
 
     const std::array<VkPipelineShaderStageCreateInfo, 2> stages{
         VkPipelineShaderStageCreateInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
-                                        nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vertex_, "main",
-                                        nullptr},
+                                        nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vertexModule,
+                                        "main", nullptr},
         VkPipelineShaderStageCreateInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
                                         nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fragment,
                                         "main", nullptr}};
@@ -194,8 +216,9 @@ bool PostProcess::Create(rhi::Device& device, const std::filesystem::path& shade
     outputFormat_ = outputFormat;
 
     vertex_ = LoadModule(device_->Handle(), shaderDirectory / "fullscreen.vert.spv");
-    if (vertex_ == VK_NULL_HANDLE) {
-        SIM_ERROR("Render", "post-process needs fullscreen.vert.spv");
+    vertexUv_ = LoadModule(device_->Handle(), shaderDirectory / "fullscreen_uv.vert.spv");
+    if (vertex_ == VK_NULL_HANDLE || vertexUv_ == VK_NULL_HANDLE) {
+        SIM_ERROR("Render", "post-process needs fullscreen.vert.spv and fullscreen_uv.vert.spv");
         return false;
     }
 
@@ -217,14 +240,15 @@ bool PostProcess::Create(rhi::Device& device, const std::filesystem::path& shade
         return false;
     }
 
-    if (!CreateSetLayout(1, oneSourceLayout_) || !CreateSetLayout(2, twoSourceLayout_)) {
+    if (!CreateSetLayout(1, oneSourceLayout_) || !CreateSetLayout(2, twoSourceLayout_) ||
+        !CreateSetLayout(3, threeSourceLayout_)) {
         return false;
     }
 
     // Satu set petak awal, satu per tingkat reduksi, dua eksposur, dua
     // penyelesaian.
-    constexpr uint32_t kMaxSets = 1 + 16 + 2 + 2;
-    const VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxSets * 2};
+    constexpr uint32_t kMaxSets = 1 + 16 + 2 + 2 + 32;
+    const VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxSets * 3};
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.maxSets = kMaxSets;
@@ -236,14 +260,21 @@ bool PostProcess::Create(rhi::Device& device, const std::filesystem::path& shade
     }
 
     if (!CreatePipeline(shaderDirectory, "lum_seed.frag.spv", oneSourceLayout_, sizeof(SeedPush),
-                        kLuminanceFormat, seedLayout_, seedPipeline_) ||
+                        kLuminanceFormat, seedLayout_, seedPipeline_, vertex_) ||
         !CreatePipeline(shaderDirectory, "lum_reduce.frag.spv", oneSourceLayout_,
-                        sizeof(ReducePush), kLuminanceFormat, reduceLayout_, reducePipeline_) ||
+                        sizeof(ReducePush), kLuminanceFormat, reduceLayout_, reducePipeline_,
+                        vertex_) ||
         !CreatePipeline(shaderDirectory, "exposure.frag.spv", twoSourceLayout_,
-                        sizeof(ExposurePush), kExposureFormat, exposureLayout_,
-                        exposurePipeline_) ||
-        !CreatePipeline(shaderDirectory, "tonemap.frag.spv", twoSourceLayout_,
-                        sizeof(ResolvePush), outputFormat_, resolveLayout_, resolvePipeline_)) {
+                        sizeof(ExposurePush), kExposureFormat, exposureLayout_, exposurePipeline_,
+                        vertex_) ||
+        !CreatePipeline(shaderDirectory, "bloom_down.frag.spv", oneSourceLayout_,
+                        sizeof(BloomPush), kSceneFormat, bloomDownLayout_, bloomDownPipeline_,
+                        vertexUv_) ||
+        !CreatePipeline(shaderDirectory, "bloom_up.frag.spv", twoSourceLayout_, sizeof(BloomPush),
+                        kSceneFormat, bloomUpLayout_, bloomUpPipeline_, vertexUv_) ||
+        !CreatePipeline(shaderDirectory, "tonemap.frag.spv", threeSourceLayout_,
+                        sizeof(ResolvePush), outputFormat_, resolveLayout_, resolvePipeline_,
+                        vertex_)) {
         return false;
     }
     return true;
@@ -343,6 +374,37 @@ bool PostProcess::Adopt(uint32_t allocatedWidth, uint32_t allocatedHeight) {
         }
     }
 
+    // Rantai bloom bermula di setengah resolusi: pendaran adalah tapis
+    // berjangkauan lebar, dan resolusi penuhnya tidak menyumbang apa pun yang
+    // bisa dibedakan sesudah beberapa tingkat penurunan.
+    bloomWidth_ = HalfCeil(allocatedWidth_);
+    bloomHeight_ = HalfCeil(allocatedHeight_);
+    bloomLevels_ = BloomChain::LevelsFor(bloomWidth_, bloomHeight_);
+    if (!make(bloomDown_, kSceneFormat, bloomWidth_, bloomHeight_, bloomLevels_) ||
+        !make(bloomUp_, kSceneFormat, bloomWidth_, bloomHeight_, bloomLevels_)) {
+        SIM_ERROR("Render", "cannot allocate the bloom chain");
+        return false;
+    }
+    bloomDownLevels_.resize(bloomLevels_);
+    bloomUpLevels_.resize(bloomLevels_);
+    for (uint32_t level = 0; level < bloomLevels_; ++level) {
+        for (int which = 0; which < 2; ++which) {
+            VkImageViewCreateInfo viewInfo{};
+            viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+            viewInfo.image = which == 0 ? bloomDown_.image : bloomUp_.image;
+            viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+            viewInfo.format = kSceneFormat;
+            viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+            viewInfo.subresourceRange.baseMipLevel = level;
+            viewInfo.subresourceRange.levelCount = 1;
+            viewInfo.subresourceRange.layerCount = 1;
+            VkImageView& target = which == 0 ? bloomDownLevels_[level] : bloomUpLevels_[level];
+            if (vkCreateImageView(device_->Handle(), &viewInfo, nullptr, &target) != VK_SUCCESS) {
+                return false;
+            }
+        }
+    }
+
     WriteSets();
     return true;
 }
@@ -363,22 +425,54 @@ void PostProcess::WriteSets() {
     seedSet_ = sets[0];
     reduceSets_.assign(sets.begin() + 1, sets.end());
 
-    const std::array<VkDescriptorSetLayout, 4> pairLayouts{twoSourceLayout_, twoSourceLayout_,
-                                                           twoSourceLayout_, twoSourceLayout_};
-    std::array<VkDescriptorSet, 4> pairSets{};
-    allocateInfo.descriptorSetCount = static_cast<uint32_t>(pairLayouts.size());
-    allocateInfo.pSetLayouts = pairLayouts.data();
-    if (vkAllocateDescriptorSets(device_->Handle(), &allocateInfo, pairSets.data()) !=
+    // Satu set penurunan bloom per tingkat, ditambah set petak awal di atas.
+    std::vector<VkDescriptorSetLayout> downLayouts(bloomLevels_, oneSourceLayout_);
+    bloomDownSets_.resize(bloomLevels_);
+    allocateInfo.descriptorSetCount = bloomLevels_;
+    allocateInfo.pSetLayouts = downLayouts.data();
+    if (bloomLevels_ > 0 &&
+        vkAllocateDescriptorSets(device_->Handle(), &allocateInfo, bloomDownSets_.data()) !=
+            VK_SUCCESS) {
+        SIM_ERROR("Render", "cannot allocate bloom descriptor sets");
+        bloomDownSets_.clear();
+        return;
+    }
+
+    const uint32_t upCount = bloomLevels_ > 1 ? bloomLevels_ - 1 : 0;
+    std::vector<VkDescriptorSetLayout> upLayouts(upCount, twoSourceLayout_);
+    bloomUpSets_.resize(upCount);
+    if (upCount > 0) {
+        allocateInfo.descriptorSetCount = upCount;
+        allocateInfo.pSetLayouts = upLayouts.data();
+        if (vkAllocateDescriptorSets(device_->Handle(), &allocateInfo, bloomUpSets_.data()) !=
+            VK_SUCCESS) {
+            SIM_ERROR("Render", "cannot allocate bloom descriptor sets");
+            bloomUpSets_.clear();
+            return;
+        }
+    }
+
+    const std::array<VkDescriptorSetLayout, 2> exposureLayouts{twoSourceLayout_,
+                                                               twoSourceLayout_};
+    allocateInfo.descriptorSetCount = 2;
+    allocateInfo.pSetLayouts = exposureLayouts.data();
+    if (vkAllocateDescriptorSets(device_->Handle(), &allocateInfo, exposureSets_.data()) !=
         VK_SUCCESS) {
         SIM_ERROR("Render", "cannot allocate post-process descriptor sets");
         return;
     }
-    exposureSets_ = {pairSets[0], pairSets[1]};
-    resolveSets_ = {pairSets[2], pairSets[3]};
+    const std::array<VkDescriptorSetLayout, 2> resolveLayouts{threeSourceLayout_,
+                                                              threeSourceLayout_};
+    allocateInfo.pSetLayouts = resolveLayouts.data();
+    if (vkAllocateDescriptorSets(device_->Handle(), &allocateInfo, resolveSets_.data()) !=
+        VK_SUCCESS) {
+        SIM_ERROR("Render", "cannot allocate post-process descriptor sets");
+        return;
+    }
 
     std::vector<VkDescriptorImageInfo> images;
     std::vector<VkWriteDescriptorSet> writes;
-    images.reserve(2 + reduceCount + 4 + 4);
+    images.reserve(64 + reduceCount + bloomLevels_ * 3);
     const auto push = [&](VkDescriptorSet set, uint32_t binding, VkSampler sampler,
                           VkImageView view) {
         images.push_back({sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
@@ -402,6 +496,23 @@ void PostProcess::WriteSets() {
         push(exposureSets_[i], 1, pointSampler_, exposure_[1 - i].view);
         push(resolveSets_[i], 0, pointSampler_, sceneView_);
         push(resolveSets_[i], 1, pointSampler_, exposure_[i].view);
+        // Bloom disampel bilinear: hasil akhirnya setengah resolusi, dan
+        // membacanya per texel akan memunculkan kembali tepi tangga yang justru
+        // dihaluskan seluruh rantai ini.
+        push(resolveSets_[i], 2, sampler_, bloomUpLevels_[0]);
+    }
+    // Tingkat nol penurunan membaca gambar HDR; sisanya membaca tingkat di atasnya.
+    for (uint32_t level = 0; level < bloomLevels_; ++level) {
+        push(bloomDownSets_[level], 0, sampler_,
+             level == 0 ? sceneView_ : bloomDownLevels_[level - 1]);
+    }
+    // Penaikan: sumbernya tingkat yang lebih kecil — untuk tingkat terkecil ia
+    // masih ada di rantai penurunan — dan sasarannya rantai penurunan tingkat ini.
+    for (uint32_t level = 0; level + 1 < bloomLevels_; ++level) {
+        const bool fromDown = level + 2 == bloomLevels_;
+        push(bloomUpSets_[level], 0, sampler_,
+             fromDown ? bloomDownLevels_[level + 1] : bloomUpLevels_[level + 1]);
+        push(bloomUpSets_[level], 1, pointSampler_, bloomDownLevels_[level]);
     }
     for (std::size_t i = 0; i < writes.size(); ++i) {
         writes[i].pImageInfo = &images[i];
@@ -446,6 +557,12 @@ void PostProcess::AdoptLayouts() {
     barrier(luminance_.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
             VK_ACCESS_2_NONE, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
             VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+    for (Image* image : {&bloomDown_, &bloomUp_}) {
+        barrier(image->image, VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_2_NONE,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+    }
 
     // Kedua texel eksposur dinolkan. Nol berarti "belum ada riwayat", dan itu
     // satu-satunya cara pass eksposur tahu bahwa frame ini harus mendarat di
@@ -533,6 +650,86 @@ void PostProcess::DrawInto(VkCommandBuffer cmd, VkImageView target, uint32_t wid
     vkCmdEndRendering(cmd);
 }
 
+void PostProcess::RecordBloom(VkCommandBuffer cmd, uint32_t viewportWidth,
+                              uint32_t viewportHeight, const BloomSettings& settings) {
+    if (!IsValid() || bloomLevels_ == 0 || viewportWidth == 0 || viewportHeight == 0) {
+        return;
+    }
+
+    // Ukuran terpakai dan ukuran alokasi setiap tingkat. Keduanya dibutuhkan:
+    // yang pertama menentukan seberapa luas digambar, yang kedua menentukan uv.
+    // **Menyampurnya berarti tapisnya membaca sisa frame sebelumnya di luar
+    // petak yang digambar, dan sisa itu lalu diburamkan ke dalam gambar** — tepi
+    // viewport menjadi berhalo, dan halonya bergerak saat jendela diubah ukuran.
+    std::vector<glm::uvec2> used(bloomLevels_);
+    std::vector<glm::uvec2> allocated(bloomLevels_);
+    uint32_t uw = HalfCeil(viewportWidth);
+    uint32_t uh = HalfCeil(viewportHeight);
+    uint32_t aw = bloomWidth_;
+    uint32_t ah = bloomHeight_;
+    for (uint32_t level = 0; level < bloomLevels_; ++level) {
+        used[level] = {uw, uh};
+        allocated[level] = {aw, ah};
+        uw = HalfCeil(uw);
+        uh = HalfCeil(uh);
+        aw = std::max(aw / 2u, 1u);
+        ah = std::max(ah / 2u, 1u);
+    }
+
+    // Pecahan alokasi yang benar-benar terisi di sebuah tingkat. **Sebuah
+    // skala, bukan batas:** segitiga penutup layar menghasilkan uv 0..1 atas
+    // petak yang digambar, dan petak itu hanya sebagian dari alokasi sumbernya.
+    const auto uvScale = [&](uint32_t level) {
+        return glm::vec2(
+            static_cast<float>(used[level].x) / static_cast<float>(allocated[level].x),
+            static_cast<float>(used[level].y) / static_cast<float>(allocated[level].y));
+    };
+
+    // --- Turun ---
+    for (uint32_t level = 0; level < bloomLevels_; ++level) {
+        BloomPush push;
+        if (level == 0) {
+            push.sourceTexelX = 1.0f / static_cast<float>(allocatedWidth_);
+            push.sourceTexelY = 1.0f / static_cast<float>(allocatedHeight_);
+            push.sourceUvScaleX =
+                static_cast<float>(viewportWidth) / static_cast<float>(allocatedWidth_);
+            push.sourceUvScaleY =
+                static_cast<float>(viewportHeight) / static_cast<float>(allocatedHeight_);
+            push.params = Vec4(1.0f, settings.threshold, settings.knee, 0.0f);
+        } else {
+            push.sourceTexelX = 1.0f / static_cast<float>(allocated[level - 1].x);
+            push.sourceTexelY = 1.0f / static_cast<float>(allocated[level - 1].y);
+            const glm::vec2 scale = uvScale(level - 1);
+            push.sourceUvScaleX = scale.x;
+            push.sourceUvScaleY = scale.y;
+            push.params = Vec4(0.0f);
+        }
+        Transition(cmd, bloomDown_.image, level, VK_IMAGE_LAYOUT_UNDEFINED,
+                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, true);
+        DrawInto(cmd, bloomDownLevels_[level], used[level].x, used[level].y, bloomDownPipeline_,
+                 bloomDownLayout_, bloomDownSets_[level], &push, sizeof(push));
+        Transition(cmd, bloomDown_.image, level, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false);
+    }
+
+    // --- Naik ---
+    for (uint32_t level = bloomLevels_ - 1; level-- > 0;) {
+        BloomPush push;
+        push.sourceTexelX = 1.0f / static_cast<float>(allocated[level + 1].x);
+        push.sourceTexelY = 1.0f / static_cast<float>(allocated[level + 1].y);
+        const glm::vec2 scale = uvScale(level + 1);
+        push.sourceUvScaleX = scale.x;
+        push.sourceUvScaleY = scale.y;
+        push.params = Vec4(settings.scatter, 0.0f, 0.0f, 0.0f);
+        Transition(cmd, bloomUp_.image, level, VK_IMAGE_LAYOUT_UNDEFINED,
+                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, true);
+        DrawInto(cmd, bloomUpLevels_[level], used[level].x, used[level].y, bloomUpPipeline_,
+                 bloomUpLayout_, bloomUpSets_[level], &push, sizeof(push));
+        Transition(cmd, bloomUp_.image, level, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false);
+    }
+}
+
 void PostProcess::RecordMeter(VkCommandBuffer cmd, uint32_t viewportWidth,
                               uint32_t viewportHeight, const PostProcessSettings& settings,
                               float deltaSeconds) {
@@ -587,12 +784,23 @@ void PostProcess::RecordMeter(VkCommandBuffer cmd, uint32_t viewportWidth,
                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false);
 }
 
-void PostProcess::RecordResolve(VkCommandBuffer cmd, bool enabled) {
+void PostProcess::RecordResolve(VkCommandBuffer cmd, bool enabled,
+                               const BloomSettings& bloom) {
     if (!IsValid()) {
         return;
     }
     ResolvePush push;
-    push.params = Vec4(enabled ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+    // Kekuatan bloom nol saat ia mati — bukan cabang di shader. Rantai bloom
+    // tetap dibaca descriptor-nya, dan layout-nya tetap harus sah walaupun
+    // hasilnya tidak dipakai.
+    const float strength = bloom.enabled ? std::max(bloom.strength, 0.0f) : 0.0f;
+    // zw memetakan koordinat piksel target tampilan ke uv gambar bloom. Gambar
+    // bloom setengah resolusi **alokasi**, bukan setengah viewport, jadi
+    // pembaginya ukuran alokasi — memakai ukuran viewport akan meregangkan
+    // pendaran setiap kali jendela tidak tepat sebesar alokasinya.
+    push.params = Vec4(enabled ? 1.0f : 0.0f, strength,
+                       0.5f / static_cast<float>(bloomWidth_),
+                       0.5f / static_cast<float>(bloomHeight_));
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, resolvePipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, resolveLayout_, 0, 1,
                             &resolveSets_[exposureIndex_], 0, nullptr);
@@ -609,6 +817,8 @@ void PostProcess::DestroyImages() {
         all.insert(all.end(), reduceSets_.begin(), reduceSets_.end());
         all.insert(all.end(), exposureSets_.begin(), exposureSets_.end());
         all.insert(all.end(), resolveSets_.begin(), resolveSets_.end());
+        all.insert(all.end(), bloomDownSets_.begin(), bloomDownSets_.end());
+        all.insert(all.end(), bloomUpSets_.begin(), bloomUpSets_.end());
         vkFreeDescriptorSets(device_->Handle(), pool_, static_cast<uint32_t>(all.size()),
                              all.data());
         seedSet_ = VK_NULL_HANDLE;
@@ -623,6 +833,17 @@ void PostProcess::DestroyImages() {
     }
     luminanceLevels_.clear();
     luminanceLevels_Count = 0;
+    for (std::vector<VkImageView>* levels : {&bloomDownLevels_, &bloomUpLevels_}) {
+        for (VkImageView& view : *levels) {
+            if (view != VK_NULL_HANDLE) {
+                vkDestroyImageView(device_->Handle(), view, nullptr);
+            }
+        }
+        levels->clear();
+    }
+    bloomDownSets_.clear();
+    bloomUpSets_.clear();
+    bloomLevels_ = 0;
 
     const auto drop = [&](Image& image) {
         if (image.view != VK_NULL_HANDLE) {
@@ -637,6 +858,8 @@ void PostProcess::DestroyImages() {
     };
     drop(scene_);
     drop(luminance_);
+    drop(bloomDown_);
+    drop(bloomUp_);
     for (Image& image : exposure_) {
         drop(image);
     }
@@ -664,12 +887,15 @@ void PostProcess::Destroy() {
     dropPipeline(seedPipeline_, seedLayout_);
     dropPipeline(reducePipeline_, reduceLayout_);
     dropPipeline(exposurePipeline_, exposureLayout_);
+    dropPipeline(bloomDownPipeline_, bloomDownLayout_);
+    dropPipeline(bloomUpPipeline_, bloomUpLayout_);
     dropPipeline(resolvePipeline_, resolveLayout_);
     if (pool_ != VK_NULL_HANDLE) {
         vkDestroyDescriptorPool(device_->Handle(), pool_, nullptr);
         pool_ = VK_NULL_HANDLE;
     }
-    for (VkDescriptorSetLayout* layout : {&oneSourceLayout_, &twoSourceLayout_}) {
+    for (VkDescriptorSetLayout* layout :
+         {&oneSourceLayout_, &twoSourceLayout_, &threeSourceLayout_}) {
         if (*layout != VK_NULL_HANDLE) {
             vkDestroyDescriptorSetLayout(device_->Handle(), *layout, nullptr);
             *layout = VK_NULL_HANDLE;
@@ -683,9 +909,11 @@ void PostProcess::Destroy() {
         vkDestroySampler(device_->Handle(), pointSampler_, nullptr);
         pointSampler_ = VK_NULL_HANDLE;
     }
-    if (vertex_ != VK_NULL_HANDLE) {
-        vkDestroyShaderModule(device_->Handle(), vertex_, nullptr);
-        vertex_ = VK_NULL_HANDLE;
+    for (VkShaderModule* module : {&vertex_, &vertexUv_}) {
+        if (*module != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(device_->Handle(), *module, nullptr);
+            *module = VK_NULL_HANDLE;
+        }
     }
     device_ = nullptr;
 }

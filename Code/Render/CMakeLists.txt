@@ -7,6 +7,7 @@ sim_add_library(Render
         src/Ibl.cpp
         src/IblBaker.cpp
         src/LightCluster.cpp
+        src/Bloom.cpp
         src/DepthPyramid.cpp
         src/Denoise.cpp
         src/PostProcess.cpp
@@ -56,7 +57,10 @@ sim_compile_shaders(SimShadersGrid
         ${CMAKE_SOURCE_DIR}/Shaders/lum_seed.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/lum_reduce.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/exposure.frag.slang
-        ${CMAKE_SOURCE_DIR}/Shaders/tonemap.frag.slang)
+        ${CMAKE_SOURCE_DIR}/Shaders/tonemap.frag.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/fullscreen_uv.vert.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/bloom_down.frag.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/bloom_up.frag.slang)
 # openpbr.slang sengaja tidak ada di daftar ini. Ia modul pustaka tanpa entry
 # point — yang mengompilasinya adalah `AssembleMaterialModule`, yang menanamnya
 # ke dalam modul material lalu menyerahkannya ke ShaderCache. Menambahkannya di

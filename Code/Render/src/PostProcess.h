@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Sim/RHI/Device.h"
+#include "Sim/Render/Bloom.h"
 #include "Sim/Render/Types.h"
 
 #include <array>
@@ -55,6 +56,11 @@ public:
     VkImageView SceneView() const { return sceneView_; }
     VkSampler Sampler() const { return sampler_; }
 
+    /// Membangun rantai bloom dari gambar HDR. Dijalankan sesudah pass adegan
+    /// dan sebelum `RecordResolve`.
+    void RecordBloom(VkCommandBuffer cmd, uint32_t viewportWidth, uint32_t viewportHeight,
+                     const BloomSettings& settings);
+
     /// Mengukur luminansi adegan lalu memajukan eksposur satu langkah waktu.
     /// Dijalankan sesudah seluruh pass adegan dan sebelum `RecordResolve`.
     void RecordMeter(VkCommandBuffer cmd, uint32_t viewportWidth, uint32_t viewportHeight,
@@ -64,7 +70,7 @@ public:
     /// `vkCmdBeginRendering` atas target tampilan — lampiran adalah urusan
     /// graph frame, dan membiarkannya di satu tempat saja adalah alasan graph
     /// itu ada.
-    void RecordResolve(VkCommandBuffer cmd, bool enabled);
+    void RecordResolve(VkCommandBuffer cmd, bool enabled, const BloomSettings& bloom);
 
 private:
     struct Image {
@@ -75,7 +81,8 @@ private:
 
     bool CreatePipeline(const std::filesystem::path& shaderDirectory, const char* fragment,
                         VkDescriptorSetLayout layout, uint32_t pushSize, VkFormat colorFormat,
-                        VkPipelineLayout& outLayout, VkPipeline& outPipeline);
+                        VkPipelineLayout& outLayout, VkPipeline& outPipeline,
+                        VkShaderModule vertex);
     bool CreateSetLayout(uint32_t bindingCount, VkDescriptorSetLayout& outLayout);
     void DestroyImages();
     void WriteSets();
@@ -88,6 +95,9 @@ private:
     rhi::Device* device_ = nullptr;
     VkFormat outputFormat_ = VK_FORMAT_UNDEFINED;
     VkShaderModule vertex_ = VK_NULL_HANDLE;
+    /// Segitiga penutup layar yang juga menghasilkan uv. Bloom mencuplik di
+    /// antara texel, jadi ia butuh koordinat pecahan — bukan hanya posisi piksel.
+    VkShaderModule vertexUv_ = VK_NULL_HANDLE;
     VkSampler sampler_ = VK_NULL_HANDLE;
     /// NEAREST, dipakai rantai reduksi dan pembacaan satu texel. Reduksi
     /// mengambil texel per texel lewat `Load`, dan penyaringan bilinear di
@@ -115,6 +125,27 @@ private:
     VkDescriptorPool pool_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout oneSourceLayout_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout twoSourceLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout threeSourceLayout_ = VK_NULL_HANDLE;
+
+    /// Dua gambar berantai mip, bukan satu. Penaikan membaca tingkat yang lebih
+    /// kecil **dan** tingkat ini sebelum dipadu; membaca serta menulis
+    /// subresource yang sama di dalam satu draw adalah perilaku yang tidak
+    /// terdefinisi, dan hasilnya bukan galat melainkan pendaran yang kadang
+    /// benar.
+    Image bloomDown_;
+    Image bloomUp_;
+    std::vector<VkImageView> bloomDownLevels_;
+    std::vector<VkImageView> bloomUpLevels_;
+    std::vector<VkDescriptorSet> bloomDownSets_;
+    std::vector<VkDescriptorSet> bloomUpSets_;
+    uint32_t bloomLevels_ = 0;
+    uint32_t bloomWidth_ = 0;
+    uint32_t bloomHeight_ = 0;
+
+    VkPipelineLayout bloomDownLayout_ = VK_NULL_HANDLE;
+    VkPipeline bloomDownPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout bloomUpLayout_ = VK_NULL_HANDLE;
+    VkPipeline bloomUpPipeline_ = VK_NULL_HANDLE;
 
     VkDescriptorSet seedSet_ = VK_NULL_HANDLE;
     std::vector<VkDescriptorSet> reduceSets_;

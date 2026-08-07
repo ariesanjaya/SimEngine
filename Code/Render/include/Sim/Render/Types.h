@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Sim/Core/Math.h"
+#include "Sim/Render/Bloom.h"
 #include "Sim/Render/TraceBackend.h"
 
 #include <cstdint>
@@ -66,6 +67,8 @@ struct PostProcessSettings {
     /// keterlambatan saat masuk ke lorong, dan keduanya terlihat.
     float adaptationBrightenSeconds = 0.4f;
     float adaptationDarkenSeconds = 1.2f;
+
+    BloomSettings bloom;
 };
 
 /// Kamera editor. Rotasi disimpan sebagai quaternion supaya tidak ada gimbal

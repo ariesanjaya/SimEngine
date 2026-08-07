@@ -743,6 +743,14 @@ public:
             vkCmdEndRendering(command);
         };
 
+        if (bloomId_ != kInvalidPass) {
+            recorders[bloomId_] = [&](VkCommandBuffer command) {
+                if (desc.post.enabled && desc.post.bloom.enabled) {
+                    post_.RecordBloom(command, target_.Width(), target_.Height(),
+                                      desc.post.bloom);
+                }
+            };
+        }
         if (meterId_ != kInvalidPass) {
             recorders[meterId_] = [&](VkCommandBuffer command) {
                 post_.RecordMeter(command, target_.Width(), target_.Height(), desc.post,
@@ -752,7 +760,7 @@ public:
         if (tonemapId_ != kInvalidPass) {
             recorders[tonemapId_] = [&](VkCommandBuffer command) {
                 BeginDisplayRendering(command);
-                post_.RecordResolve(command, desc.post.enabled);
+                post_.RecordResolve(command, desc.post.enabled, desc.post.bloom);
                 vkCmdEndRendering(command);
             };
         }
@@ -903,7 +911,14 @@ private:
         // adalah eksposur yang berkedip mengikuti jumlah objek di layar.
         meterId_ = kInvalidPass;
         tonemapId_ = kInvalidPass;
+        bloomId_ = kInvalidPass;
         if (post_.IsValid()) {
+            bloomId_ = graph_.AddPass("bloom");
+            graph_.Read(bloomId_, sceneId_, Access::ShaderRead);
+            // Efek samping, alasan yang sama dengan piramida depth: rantai
+            // mip-nya diurus `PostProcess` sendiri, bukan dilacak graph.
+            graph_.SetSideEffect(bloomId_);
+
             meterId_ = graph_.AddPass("post-meter");
             graph_.Read(meterId_, sceneId_, Access::ShaderRead);
             // Efek samping: keluarannya rantai luminansi dan texel eksposur, yang
@@ -2572,6 +2587,7 @@ private:
     ResourceId colorId_ = kInvalidResource;
     ResourceId sceneId_ = kInvalidResource;
     ResourceId depthId_ = kInvalidResource;
+    PassId bloomId_ = kInvalidPass;
     PassId meterId_ = kInvalidPass;
     PassId tonemapId_ = kInvalidPass;
     PassId gridId_ = kInvalidPass;

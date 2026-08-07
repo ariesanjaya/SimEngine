@@ -813,6 +813,36 @@ Diverifikasi di editor, bukan hanya di uji:
 | Adaptasi cepat (τ = 0,4 s) sesudah jeda masukan 0,15 s | selisih terbesar **0,02** dari pecahan |
 | Galat validation layer | **0** |
 
+**Selesai: bloom** (`Code/Render/{include/Sim/Render/Bloom.h,src/Bloom.cpp}`,
+`Shaders/{bloom_down,bloom_up}.frag.slang`). Penurunan 13 cuplikan (Jimenez)
+lalu penaikan tenda 3×3, dengan pembobotan Karis pada penurunan pertama.
+
+Dua keputusan yang punya kasus gagalnya sendiri, dan keduanya sempat saya buat
+terbalik:
+
+- **Di dalam rantai, penaikan memadu.** Yang menambahkan tiap tingkat menaikkan
+  energi seluruh gambar, dan energi itu lalu diukur eksposur otomatis, yang
+  menurunkan eksposur, yang menurunkan bloom — keduanya saling mengejar dan yang
+  terlihat adalah kecerahan yang bergoyang pelan tanpa sebab. Ujinya: gambar
+  konstan lewat seluruh rantai tanpa berubah.
+- **Di ujung, komposit menambahkan.** Ini keharusan yang mengikuti dari
+  ambangnya: rantai ini berambang, jadi di seluruh bagian yang tidak berpendar
+  isinya nol. Bentuk pertama saya memadu di sini juga, dan hasilnya terukur di
+  editor — latar 62/255 menjadi 46/255 tanpa satu pun halo yang muncul, yaitu
+  seluruh adegan meredup begitu bloom dinyalakan.
+
+Satu lagi yang hanya terlihat sebagai gambar, bukan sebagai galat: uv segitiga
+penutup layar membentang 0..1 atas petak yang **digambar**, sedangkan petak
+terpakai sumbernya hanya sebagian dari alokasinya — `RenderTarget` memang
+mengalokasi lebih besar supaya menyeret pemisah dock tidak mengalokasi ulang.
+Menjepit uv ke batas petak (bukan menskalakannya) membuat separuh keluaran
+membaca baris yang sama berulang-ulang: adegan teregang dan terulang di dalam
+pendarannya.
+
+Terukur di editor pada ambang 1,0: tepat di luar tepi kotak terang, bloom
+menambahkan **+22/255**, meluruh mulus ke +1 dalam 30 piksel, dan latar di bawah
+ambang tidak tersentuh sama sekali.
+
 **Satu hal yang belum benar dan sudah tercatat:** lampu belum memakai satuan
 fotometrik. Matahari bawaan beradiansi 3,0, bukan sepuluh ribu cd/m², jadi EV100
 yang berguna di sini berada di sekitar nol alih-alih 13–15. Nilai bawaan

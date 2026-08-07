@@ -13,6 +13,7 @@
 #include "Sim/Render/ShadowAtlas.h"
 #include "Sim/Render/TimeOfDay.h"
 #include "Sim/Render/ToneMap.h"
+#include "Sim/Render/Bloom.h"
 #include "Sim/Render/TieredTrace.h"
 #include "Sim/Render/TraceBackend.h"
 #include "Sim/Render/ShadowCascades.h"
@@ -3565,4 +3566,145 @@ TEST_CASE("adaptasi eksposur mengejar sasaran dengan dua tetapan waktu") {
     b.Reset(0.0f);
     b.Update(1.0f, 0.1f);
     CHECK(1.0f - a.Current() > b.Current());
+}
+
+// --- E8.8: bloom ------------------------------------------------------------
+
+TEST_CASE("gambar konstan lewat seluruh rantai bloom tanpa berubah") {
+    using namespace sim::render;
+
+    // **Ini kriteria terimanya.** Bloom yang mengubah energi gambar akan diukur
+    // eksposur otomatis, yang lalu menurunkan eksposur, yang menurunkan bloom —
+    // keduanya saling mengejar dan yang terlihat adalah kecerahan yang bergoyang
+    // pelan tanpa sebab yang kelihatan.
+    CHECK(BloomChain::DownsampleWeightSum() == doctest::Approx(1.0f).epsilon(1e-6f));
+
+    BloomLevel flat;
+    flat.width = 64;
+    flat.height = 64;
+    flat.pixels.assign(64 * 64, Vec3(2.0f));
+
+    // Turun sekali: konstan tetap konstan, dengan maupun tanpa pembobotan Karis.
+    for (const bool karis : {false, true}) {
+        const BloomLevel half = BloomChain::Downsample(flat, karis);
+        CHECK(half.width == 32);
+        for (const Vec3& pixel : half.pixels) {
+            CHECK(pixel.x == doctest::Approx(2.0f).epsilon(1e-4f));
+        }
+    }
+
+    // Naik kembali: tapis tendanya juga berjumlah satu.
+    BloomLevel target;
+    target.width = 8;
+    target.height = 8;
+    target.pixels.assign(64, Vec3(0.0f));
+    BloomLevel source;
+    source.width = 4;
+    source.height = 4;
+    source.pixels.assign(16, Vec3(3.0f));
+    BloomChain::UpsampleInto(target, source, 1.0f);
+    for (const Vec3& pixel : target.pixels) {
+        CHECK(pixel.x == doctest::Approx(3.0f).epsilon(1e-4f));
+    }
+
+    // Dan rantai penuhnya, dengan ambang di bawah nilainya supaya seluruh gambar
+    // ikut berpendar.
+    BloomSettings settings;
+    settings.threshold = 0.0f;
+    settings.knee = 0.01f;
+    const BloomLevel bloom = BloomChain::Build(flat, settings);
+    CHECK(bloom.width == flat.width);
+    float lowest = 1e9f;
+    float highest = -1e9f;
+    for (const Vec3& pixel : bloom.pixels) {
+        lowest = std::min(lowest, pixel.x);
+        highest = std::max(highest, pixel.x);
+    }
+    CHECK(lowest == doctest::Approx(2.0f).epsilon(0.01f));
+    CHECK(highest == doctest::Approx(2.0f).epsilon(0.01f));
+}
+
+TEST_CASE("ambang bloom berlutut lembut, monoton, dan nol di bawahnya") {
+    using namespace sim::render;
+
+    constexpr float kThreshold = 1.0f;
+    constexpr float kKnee = 0.5f;
+
+    // Jauh di bawah ambang dikurangi lutut: tidak ada sumbangan sama sekali.
+    CHECK(BloomChain::SoftThreshold(0.2f, kThreshold, kKnee) == doctest::Approx(0.0f));
+
+    // Jauh di atas: sumbangannya luminansi dikurangi ambang.
+    const float high = 8.0f;
+    CHECK(BloomChain::SoftThreshold(high, kThreshold, kKnee) * high ==
+          doctest::Approx(high - kThreshold).epsilon(1e-3f));
+
+    // Dan di antaranya monoton serta menyambung — ambang tajam membuat permukaan
+    // yang luminansinya melintasi ambang berkedip antara berpendar dan tidak.
+    float previous = 0.0f;
+    for (float luminance = 0.0f; luminance < 4.0f; luminance += 0.005f) {
+        const float contribution =
+            BloomChain::SoftThreshold(luminance, kThreshold, kKnee) * luminance;
+        CHECK(contribution >= previous - 1e-5f);
+        CHECK(contribution - previous < 0.02f);  // tanpa loncatan
+        previous = contribution;
+    }
+}
+
+TEST_CASE("pembobotan Karis menjinakkan satu piksel yang jauh lebih terang") {
+    using namespace sim::render;
+
+    // Satu piksel sangat terang di tengah lautan gelap. Tanpa pembobotan, ia
+    // mendominasi seluruh kelompok dan muncul sebagai bintik berpendar yang
+    // berkedip begitu kamera bergeser satu piksel.
+    BloomLevel spike;
+    spike.width = 16;
+    spike.height = 16;
+    spike.pixels.assign(256, Vec3(0.05f));
+    spike.At(8, 8) = Vec3(500.0f);
+
+    const BloomLevel plain = BloomChain::Downsample(spike, /*karis=*/false);
+    const BloomLevel tamed = BloomChain::Downsample(spike, /*karis=*/true);
+
+    float plainPeak = 0.0f;
+    float tamedPeak = 0.0f;
+    for (std::size_t i = 0; i < plain.pixels.size(); ++i) {
+        plainPeak = std::max(plainPeak, plain.pixels[i].x);
+        tamedPeak = std::max(tamedPeak, tamed.pixels[i].x);
+    }
+    CHECK(plainPeak > 50.0f);
+    CHECK(tamedPeak < 1.0f);
+
+    // Tapi ia tidak dihilangkan: yang dilakukan pembobotan adalah menurunkan
+    // pengaruh, bukan memotong energi seperti penjepitan nilai maksimum.
+    CHECK(tamedPeak > 0.05f);
+}
+
+TEST_CASE("campuran bloom menambahkan, dan pada kekuatan nol tidak mengubah apa pun") {
+    using namespace sim::render;
+
+    BloomLevel scene;
+    scene.width = 4;
+    scene.height = 4;
+    scene.pixels.assign(16, Vec3(1.0f, 2.0f, 3.0f));
+    BloomLevel bloom = scene;
+    bloom.pixels.assign(16, Vec3(9.0f));
+
+    // **Ditambahkan, bukan dipadu.** Rantainya berambang, jadi di seluruh bagian
+    // yang tidak berpendar isinya nol — memadu dengan nol menggelapkan setiap
+    // piksel yang tidak berpendar, dan yang terlihat adalah seluruh adegan yang
+    // meredup begitu bloom dinyalakan. Bentuk pertama saya memakai paduan, dan
+    // inilah yang terukur di editor: latar 62/255 menjadi 46/255 tanpa satu pun
+    // halo yang muncul.
+    const BloomLevel none = BloomChain::Composite(scene, bloom, 0.0f);
+    CHECK(none.pixels.front().y == doctest::Approx(2.0f));
+    const BloomLevel half = BloomChain::Composite(scene, bloom, 0.5f);
+    CHECK(half.pixels.front().y == doctest::Approx(2.0f + 4.5f));
+
+    // Dan bagian yang tidak berpendar sama sekali tidak tersentuh.
+    BloomLevel dark = bloom;
+    dark.pixels.assign(16, Vec3(0.0f));
+    const BloomLevel untouched = BloomChain::Composite(scene, dark, 0.5f);
+    CHECK(untouched.pixels.front().x == doctest::Approx(1.0f));
+    CHECK(untouched.pixels.front().y == doctest::Approx(2.0f));
+    CHECK(untouched.pixels.front().z == doctest::Approx(3.0f));
 }

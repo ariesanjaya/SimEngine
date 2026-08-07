@@ -109,6 +109,19 @@ public:
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
             ImGui::SliderFloat("Compensation", &context.post.exposureCompensation, -5.0f, 5.0f,
                                "%.2f EV");
+
+            ImGui::Checkbox("Bloom", &context.post.bloom.enabled);
+            if (context.post.bloom.enabled) {
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+                ImGui::SliderFloat("Threshold", &context.post.bloom.threshold, 0.0f, 8.0f,
+                                   "%.2f");
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+                ImGui::SliderFloat("Knee", &context.post.bloom.knee, 0.0f, 2.0f, "%.2f");
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+                ImGui::SliderFloat("Scatter", &context.post.bloom.scatter, 0.0f, 1.0f, "%.2f");
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+                ImGui::SliderFloat("Strength", &context.post.bloom.strength, 0.0f, 1.0f, "%.3f");
+            }
         }
 
         // --- Global illumination (M0) ---
