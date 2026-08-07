@@ -4,6 +4,7 @@
 #include "Sim/Render/Frustum.h"
 #include "Sim/Render/Ibl.h"
 #include "Sim/Render/LightCluster.h"
+#include "Sim/Render/Denoise.h"
 #include "Sim/Render/RadianceCache.h"
 #include "Sim/Render/ScreenProbe.h"
 #include "Sim/Render/ScreenTrace.h"
@@ -3004,4 +3005,132 @@ TEST_CASE("Entri basi direbut, dan yang masih terpakai tidak") {
     }
     REQUIRE(cache.Query(kept, value));
     CHECK(value.x == doctest::Approx(3.0f));
+}
+
+// --- M5: denoise & temporal -------------------------------------------------
+
+TEST_CASE("Reproyeksi menemukan titik dunia di kisi frame sebelumnya") {
+    // Inilah yang membuat riwayat bertahan saat kamera bergerak. Sampai M4
+    // riwayat probe dibuang seluruhnya begitu kamera berpindah: riwayatnya
+    // terikat ke piksel, dan piksel yang sama menunjuk permukaan berbeda.
+    const glm::uvec2 viewport(640, 480);
+    const Mat4 proj = PerspectiveReversedZ(60.0f * kDegToRad, 4.0f / 3.0f, 0.1f, 100.0f);
+    const Mat4 previous =
+        proj * LookAt(Vec3(0.0f, 0.0f, 5.0f), Vec3(0.0f), Vec3(0.0f, 1.0f, 0.0f));
+
+    // Titik di pusat pandangan frame lalu jatuh di tengah layar, yaitu ubin
+    // ke-(20, 15) dari kisi 16 piksel.
+    const ProbeReprojection centre = ReprojectProbe(Vec3(0.0f), previous, viewport, 16);
+    REQUIRE(centre.onScreen);
+    CHECK(centre.tile.x == doctest::Approx(19.5f).epsilon(0.01));
+    CHECK(centre.tile.y == doctest::Approx(14.5f).epsilon(0.01));
+
+    // Titik jauh di samping tidak ada di layar frame lalu — riwayatnya tidak
+    // ada, dan itu berbeda dari riwayat yang bernilai nol.
+    CHECK(!ReprojectProbe(Vec3(50.0f, 0.0f, 0.0f), previous, viewport, 16).onScreen);
+    // Dan yang di belakang kamera juga tidak: koordinat layarnya adalah
+    // pantulan titik itu di seberang layar.
+    CHECK(!ReprojectProbe(Vec3(0.0f, 0.0f, 20.0f), previous, viewport, 16).onScreen);
+}
+
+TEST_CASE("Kernel a-trous menjumlah satu, jadi bidang rata tetap rata") {
+    // Jumlah bobot yang bukan satu membuat penyaring mengubah terang gambarnya,
+    // bukan hanya menghaluskannya — dan perubahan itu bertambah tiap lintasan.
+    float total = 0.0f;
+    for (int dy = -2; dy <= 2; ++dy) {
+        for (int dx = -2; dx <= 2; ++dx) {
+            total += AtrousKernel(dx, dy);
+        }
+    }
+    CHECK(total == doctest::Approx(1.0f).epsilon(1e-5));
+    // Puncaknya di tengah, dan meluruh mulus — kernel kotak menyebarkan tepi
+    // menjadi tangga selebar kernelnya.
+    CHECK(AtrousKernel(0, 0) > AtrousKernel(1, 0));
+    CHECK(AtrousKernel(1, 0) > AtrousKernel(2, 0));
+    CHECK(AtrousKernel(3, 0) == 0.0f);
+}
+
+TEST_CASE("A-trous menghaluskan derau tapi tidak melintasi permukaan") {
+    // Dua bidang sejajar berjarak satu meter, masing-masing berisi nilai yang
+    // berbeda plus derau. Penyaringnya harus menghapus deraunya tanpa
+    // mencampurkan kedua bidang — pencampuran itulah yang terlihat sebagai
+    // cahaya yang merembes menembus sudut ruangan.
+    const glm::uvec2 size(32, 32);
+    const std::size_t count = 32u * 32u;
+    std::vector<Vec3> input(count);
+    std::vector<Vec3> positions(count);
+    std::vector<Vec3> normals(count, Vec3(0.0f, 1.0f, 0.0f));
+    std::vector<uint8_t> valid(count, 1);
+    std::vector<Vec3> output(count);
+
+    for (uint32_t y = 0; y < size.y; ++y) {
+        for (uint32_t x = 0; x < size.x; ++x) {
+            const std::size_t i = static_cast<std::size_t>(y) * size.x + x;
+            // Separuh kiri di bidang y = 0, separuh kanan di bidang y = 1.
+            const bool upper = x >= 16;
+            positions[i] = Vec3(static_cast<float>(x) * 0.05f, upper ? 1.0f : 0.0f,
+                                static_cast<float>(y) * 0.05f);
+            // Derau bergantian +/- 0,4 di sekitar nilai dasarnya.
+            const float noise = ((x + y) % 2 == 0) ? 0.4f : -0.4f;
+            input[i] = Vec3((upper ? 2.0f : 1.0f) + noise);
+        }
+    }
+
+    AtrousSettings settings;
+    AtrousPass(input, positions, normals, valid, size, 1, settings, output);
+
+    // Di tengah tiap bidang deraunya harus hilang.
+    const std::size_t left = 16u * 32u + 6u;
+    const std::size_t right = 16u * 32u + 25u;
+    CHECK(output[left].x == doctest::Approx(1.0f).epsilon(0.1));
+    CHECK(output[right].x == doctest::Approx(2.0f).epsilon(0.1));
+
+    // Dan tepat di kedua sisi batas, nilainya tidak boleh tercampur: yang di
+    // bidang bawah tetap dekat 1, yang di atas tetap dekat 2.
+    const std::size_t belowEdge = 16u * 32u + 15u;
+    const std::size_t aboveEdge = 16u * 32u + 16u;
+    CHECK(output[belowEdge].x < 1.5f);
+    CHECK(output[aboveEdge].x > 1.5f);
+}
+
+TEST_CASE("Jendela akumulasi menentukan waktu respons, dan angkanya bisa disebut") {
+    // **Kriteria selesai M5 diubah menjadi angka di sini.** Rencana menuntut GI
+    // merespons lampu dinyalakan-matikan di bawah 200 ms; pada 60 Hz itu dua
+    // belas frame. Rata-rata berjalan meluruh eksponensial, jadi jendela yang
+    // panjang tidak akan pernah memenuhinya berapa pun bagusnya penyaring
+    // spasialnya — dan itu fakta yang lebih baik diketahui sebelum satu shader
+    // pun ditulis.
+    CHECK(FramesToRespond(1, 0.9f) == 1);
+
+    const uint32_t sixteen = FramesToRespond(16, 0.9f);
+    const uint32_t five = FramesToRespond(5, 0.9f);
+    CHECK(sixteen > five);
+    // Jendela 16 frame — yang dipakai M3 dan M4 — jauh melewati dua belas.
+    CHECK(sixteen > 12);
+    // Jendela lima frame masuk anggaran.
+    CHECK(five <= 12);
+}
+
+TEST_CASE("Penjepitan riwayat memutus pertukaran respons lawan derau") {
+    // Jendela pendek merespons cepat tapi berderau; jendela panjang sebaliknya.
+    // Penjepitan memutus pertukaran itu: selama sampel barunya sejalan dengan
+    // tetangganya, riwayat panjang dipertahankan; begitu adegannya benar-benar
+    // berubah, riwayat yang sudah tidak sejalan dijepit masuk dalam satu frame.
+    const Vec3 mean(1.0f);
+    const Vec3 deviation(0.1f);
+
+    // Riwayat yang masih sejalan tidak disentuh.
+    const Vec3 agreeing(1.05f);
+    CHECK(ClampHistory(agreeing, mean, deviation, 2.0f).x == doctest::Approx(1.05f));
+
+    // Riwayat yang jauh di luar rentang dijepit ke tepinya — bukan dibuang,
+    // karena membuangnya mengembalikan seluruh derau frame tunggal.
+    const Vec3 stale(5.0f);
+    const Vec3 clamped = ClampHistory(stale, mean, deviation, 2.0f);
+    CHECK(clamped.x == doctest::Approx(1.2f));
+
+    // Dan lampu yang dimatikan: riwayat terang, sekitarnya sudah gelap.
+    const Vec3 dark(0.0f);
+    const Vec3 offClamped = ClampHistory(Vec3(1.0f), dark, Vec3(0.02f), 2.0f);
+    CHECK(offClamped.x == doctest::Approx(0.04f));
 }

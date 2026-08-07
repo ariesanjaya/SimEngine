@@ -8,6 +8,7 @@ sim_add_library(Render
         src/IblBaker.cpp
         src/LightCluster.cpp
         src/DepthPyramid.cpp
+        src/Denoise.cpp
         src/ProbeField.cpp
         src/RadianceCache.cpp
         src/ScreenProbe.cpp

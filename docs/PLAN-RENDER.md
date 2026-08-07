@@ -1416,6 +1416,57 @@ menuntut readback — dan cache yang terlalu kecil karena itu masih terlihat
 sebagai gambar yang agak salah, bukan sebagai angka. Itu yang pertama dibutuhkan
 kalau kapasitasnya harus disetel.
 
+#### M5 — Denoise & temporal (berjalan)
+
+**Sudah ada: acuan CPU-nya — reproyeksi, kernel à-trous, dan penjepitan riwayat —
+beserta angka yang mengubah kriteria selesainya menjadi anggaran.**
+
+**Kriteria M5 sudah menjadi angka sebelum satu shader pun ditulis.** Rencana
+menuntut GI merespons lampu dinyalakan-matikan di bawah 200 ms; pada 60 Hz itu
+dua belas frame. `FramesToRespond` menyimulasikan rata-rata berjalan dari riwayat
+yang **sudah penuh** — bukan dari kosong, karena yang ditanyakan adalah respons
+terhadap perubahan di tengah adegan yang sudah menyatu, dan memodelkannya dari
+kosong membuat jawabannya selalu satu frame. Hasilnya:
+
+| jendela akumulasi | frame sampai 90% | milidetik pada 60 Hz |
+|---|---|---|
+| 16 (dipakai M3 dan M4) | **36** | 600 |
+| 5 | **11** | 183 |
+
+Jadi M5 bukan sekadar menambah penyaring: **jendela temporalnya harus dipendekkan
+tiga kali lipat**, dan penyaring spasial serta penjepitan riwayatlah yang membuat
+jendela sependek itu bisa ditoleransi. Itu fakta yang jauh lebih baik diketahui
+sebelum menulis pass daripada sesudahnya.
+
+**Reproyeksi mengikat riwayat ke dunia, bukan ke piksel.** Sampai M4 riwayat
+probe dibuang seluruhnya begitu kamera berpindah — riwayatnya terikat ke piksel,
+dan piksel yang sama menunjuk permukaan yang berbeda. Reproyeksi mencari titik
+dunia yang sama di tempatnya berada frame lalu. Titik yang tidak ada di layar
+frame lalu mengembalikan "tidak ada riwayat", dan itu berbeda dari riwayat yang
+bernilai nol — pelajaran yang sama dengan sinar SDF di M3 dan query cache di M4.
+
+**À-trous, bukan Gaussian bertingkat.** Lintasan ke-n melompat 2ⁿ piksel dengan
+kernel yang sama, jadi dua lintasan menjangkau 20 piksel dengan 50 pengambilan —
+sementara satu Gaussian selebar itu menuntut ratusan. Yang membuat lompatannya
+sah adalah bobot bilateralnya: bobot yang melintasi permukaan bernilai nol.
+Kernelnya B-spline dan jumlah bobotnya tepat satu; kernel kotak menyebarkan tepi
+menjadi tangga selebar kernelnya, dan tangga itu terlihat lebih buruk daripada
+derau yang dihilangkannya. Dinormalkan oleh bobot yang benar-benar dipakai, bukan
+oleh satu: tetangga yang ditolak tidak boleh menggelapkan hasilnya.
+
+**Penjepitan riwayat memutus pertukaran respons lawan derau.** Jendela pendek
+merespons cepat tapi berderau; jendela panjang sebaliknya. Menjepit riwayat ke
+sekitar rerata tetangga memutus pertukaran itu: selama sampel barunya sejalan
+dengan tetangganya, riwayat panjang dipertahankan dan deraunya hilang; begitu
+adegannya benar-benar berubah, riwayat yang sudah tidak sejalan dijepit masuk ke
+rentang baru dalam satu frame. Diuji langsung pada kasus lampu dimatikan.
+
+**Belum ada:** sisi GPU-nya — reproyeksi di pass probe beserta ping-pong riwayat
+yang dituntutnya, target iradiansi layar, dan dua lintasan à-trous di atasnya.
+Ping-pong itu membalik keputusan M3 yang mengerjakan akumulasi lewat blend unit,
+dan pembalikannya beralasan: blending hanya bisa memadu di texel yang sama,
+sedangkan reproyeksi justru membaca texel yang lain.
+
 - **Anggarannya belum didamaikan dengan kriteria terima E8.** 3,0 ms adalah 18%
   dari frame 60 fps, sementara adegan uji E8 — terrain 2×2 km, 200 ribu instance
   vegetasi, 20 lampu berbayang — sudah menuntut sisanya. Keduanya ditulis
