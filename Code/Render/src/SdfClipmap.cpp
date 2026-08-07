@@ -1,6 +1,7 @@
 #include "Sim/Render/SdfClipmap.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 
 namespace sim::render {
@@ -156,6 +157,49 @@ SdfScrollResult SdfClipmap::Scroll(const Vec3& cameraPosition) {
     }
     placed_ = true;
     return result;
+}
+
+void SdfClipmap::SplitWrapped(const SdfScrollRegion& region, std::vector<TexelBox>& out) const {
+    out.clear();
+    const auto resolution = static_cast<int32_t>(settings_.resolution);
+
+    // Tiap sumbu dipecah lebih dulu menjadi potongan yang tidak membungkus,
+    // lalu ketiganya disilangkan. Memecah langsung di ruang tiga dimensi
+    // menuntut delapan cabang yang ditulis tangan; memecah per sumbu lalu
+    // menyilangkannya menghasilkan hal yang sama dengan satu aturan saja.
+    std::array<std::vector<std::pair<int32_t, int32_t>>, 3> spans;
+    for (int axis = 0; axis < 3; ++axis) {
+        int32_t from = region.min[axis];
+        // Selebar teksturnya atau lebih dijepit, bukan dicabangkan. Bentuk
+        // pertama saya memberikan potongan tunggal sepanjang resolusi penuh —
+        // dan potongan itu, begitu dibungkus, berakhir di luar tekstur:
+        // texel 32 ditambah 64 adalah 96 pada tekstur selebar 64. Segfault,
+        // bukan gambar yang salah. Lingkaran di bawah sudah menangani kasusnya
+        // dengan benar tanpa cabang apa pun.
+        const int32_t to = std::min(region.max[axis], from + resolution);
+        while (from < to) {
+            const int32_t offset = FloorMod(from, resolution);
+            const int32_t chunk = std::min(to - from, resolution - offset);
+            spans[static_cast<size_t>(axis)].emplace_back(from, from + chunk);
+            from += chunk;
+        }
+    }
+
+    for (const auto& x : spans[0]) {
+        for (const auto& y : spans[1]) {
+            for (const auto& z : spans[2]) {
+                TexelBox box;
+                box.worldMin = {x.first, y.first, z.first};
+                box.min = {WrapAxis(x.first), WrapAxis(y.first), WrapAxis(z.first)};
+                box.max = {box.min.x + static_cast<uint32_t>(x.second - x.first),
+                           box.min.y + static_cast<uint32_t>(y.second - y.first),
+                           box.min.z + static_cast<uint32_t>(z.second - z.first)};
+                if (box.VoxelCount() > 0) {
+                    out.push_back(box);
+                }
+            }
+        }
+    }
 }
 
 float SdfClipmap::BandRadius(uint32_t cascade) const {

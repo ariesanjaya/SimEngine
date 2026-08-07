@@ -849,10 +849,45 @@ Lompatan yang lebih jauh daripada lebar kaskade menulis ulang seluruh volume
 sekali, bukan tiga lempeng yang saling tumpang tindih penuh — yang justru lebih
 mahal.
 
-**Belum ada:** bake SDF per-mesh menjadi brick sparse, tekstur volume 3D di RHI,
-komposit statis + dinamis ke kaskade, dan sphere tracing yang benar-benar
-membacanya. Kriteria selesai M1 — depth sphere tracing cocok dengan depth buffer
-raster, dan biaya update < 0,5 ms — baru bisa diuji setelah keempatnya ada.
+**Sebuah lempeng di dunia bisa terbelah di dalam tekstur.** Pengalamatan
+toroidal berarti wilayah yang bersambung di dunia melompati tepi tekstur dan
+muncul kembali di sisi seberangnya — sampai delapan potongan bila ketiga
+sumbunya membelah. Menyalinnya sebagai satu kotak akan menimpa texel milik
+bagian dunia yang sama sekali lain.
+
+Bentuk pertama `SplitWrapped` punya cabang khusus untuk wilayah selebar
+teksturnya, dan cabang itu menghasilkan kotak di luar batas: texel 32 ditambah
+64 adalah 96 pada tekstur selebar 64. **Segfault, bukan gambar yang salah** —
+dan test yang menangkapnya adalah yang mengisi seluruh volume, yaitu jalur yang
+dijalankan setiap kali kaskade ditempatkan pertama kali. Cabangnya dibuang;
+lingkaran pemecahnya sudah menangani kasus itu dengan benar tanpa cabang apa pun.
+
+**`SdfVolume` adalah acuan kebenaran, bukan yang dipakai menggambar.** Yang
+menggambar membaca tekstur volume di GPU; yang di CPU menyimpan byte yang sama
+dengan rumus yang sama, cukup lambat untuk test dan cukup sederhana untuk
+dibaca. Kriteria selesai M2 menuntut backend SDF lulus uji ray tunggal terhadap
+referensi CPU — dan referensi itu tidak ada gunanya kalau ia ditulis dari
+pemahaman yang berbeda.
+
+Volume yang belum diisi bernilai jenuh **positif**, bukan nol. Nol berarti
+"permukaan ada di mana-mana" dan membuat sphere tracing berhenti di langkah
+pertama; jenuh positif berarti ruang kosong, yang memang keadaan awal yang
+benar.
+
+**Sphere tracing, bukan langkah tetap.** Langkah tetap menuntut langkah sekecil
+voxel supaya tidak menembus dinding tipis — ratusan langkah untuk melintasi satu
+kaskade. Diuji: menemukan bola pada jarak 1,5 m dengan voxel 5 cm dalam kurang
+dari 20 langkah, bukan 30. Ambang "sudah sampai" diikat ke ukuran voxel kaskade
+tempat titiknya berada, bukan ke satu angka tetap: ambang yang cukup halus untuk
+kaskade terdekat membuat kaskade terkasar berputar ratusan langkah.
+
+`TraceResult::steps` dilaporkan juga saat meleset — heatmap-nya yang menunjukkan
+ray mana yang mahal, dan ray yang mahal justru yang tidak mengenai apa pun.
+
+**Belum ada:** bake SDF per-mesh menjadi brick sparse, tekstur volume 3D di RHI
+beserta unggahan sub-wilayahnya, komposit statis + dinamis ke kaskade, dan pass
+GPU yang membacanya. Kriteria selesai M1 — depth sphere tracing cocok dengan
+depth buffer raster, dan biaya update < 0,5 ms — menunggu keempatnya.
 
 - **Anggarannya belum didamaikan dengan kriteria terima E8.** 3,0 ms adalah 18%
   dari frame 60 fps, sementara adegan uji E8 — terrain 2×2 km, 200 ribu instance

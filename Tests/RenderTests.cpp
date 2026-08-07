@@ -5,6 +5,7 @@
 #include "Sim/Render/Ibl.h"
 #include "Sim/Render/LightCluster.h"
 #include "Sim/Render/SdfClipmap.h"
+#include "Sim/Render/SdfVolume.h"
 #include "Sim/Render/ShadowAtlas.h"
 #include "Sim/Render/TraceBackend.h"
 #include "Sim/Render/ShadowCascades.h"
@@ -1826,4 +1827,225 @@ TEST_CASE("Texel yang dipakai ulang setelah bergeser memang texel yang sama") {
     clipmap.Scroll(Vec3(0.5f, 0.0f, 0.0f));
     const glm::uvec3 after = clipmap.TexelOf(0, sample);
     CHECK(before == after);
+}
+
+// --- Pemecahan wilayah yang membungkus, dan sphere tracing ---------------------
+
+namespace {
+
+/// Bola analitik, dipakai sebagai medan jarak yang jawabannya diketahui.
+SdfVolume::DistanceField SphereField(const Vec3& centre, float radius) {
+    return [centre, radius](const Vec3& p) { return glm::length(p - centre) - radius; };
+}
+
+/// Bidang tanah pada y = height.
+SdfVolume::DistanceField PlaneField(float height) {
+    return [height](const Vec3& p) { return p.y - height; };
+}
+
+SdfVolume MakeVolume(uint32_t resolution = 64, uint32_t cascades = 2,
+                     float finest = 0.1f) {
+    SdfClipmapSettings settings;
+    settings.resolution = resolution;
+    settings.cascadeCount = cascades;
+    settings.finestVoxelSize = finest;
+    settings.voxelScale = 4;
+    SdfVolume volume;
+    volume.Configure(settings);
+    return volume;
+}
+
+}  // namespace
+
+TEST_CASE("Wilayah yang tidak membungkus tetap satu kotak") {
+    SdfClipmap clipmap = MakeClipmap(32, 1);
+    clipmap.Scroll(Vec3(1.6f, 1.6f, 1.6f));  // origin voxel = 0
+
+    SdfScrollRegion region;
+    region.min = glm::ivec3(4, 4, 4);
+    region.max = glm::ivec3(8, 8, 8);
+    std::vector<SdfClipmap::TexelBox> boxes;
+    clipmap.SplitWrapped(region, boxes);
+
+    REQUIRE(boxes.size() == 1);
+    CHECK(boxes[0].min == glm::uvec3(4, 4, 4));
+    CHECK(boxes[0].max == glm::uvec3(8, 8, 8));
+    CHECK(boxes[0].worldMin == glm::ivec3(4, 4, 4));
+}
+
+TEST_CASE("Wilayah yang membelah satu sumbu jadi dua kotak") {
+    // Pengalamatan toroidal berarti wilayah yang bersambung di dunia melompati
+    // tepi tekstur dan muncul kembali di sisi seberangnya. Menyalinnya sebagai
+    // satu kotak akan menimpa texel milik bagian dunia yang sama sekali lain.
+    const SdfClipmap clipmap = MakeClipmap(32, 1);
+    SdfScrollRegion region;
+    region.min = glm::ivec3(30, 0, 0);
+    region.max = glm::ivec3(34, 4, 4);
+    std::vector<SdfClipmap::TexelBox> boxes;
+    clipmap.SplitWrapped(region, boxes);
+
+    REQUIRE(boxes.size() == 2);
+    uint32_t total = 0;
+    for (const SdfClipmap::TexelBox& box : boxes) {
+        total += box.VoxelCount();
+        // Tidak satu pun potongan boleh melewati tepi tekstur.
+        CHECK(box.max.x <= 32u);
+        CHECK(box.max.y <= 32u);
+        CHECK(box.max.z <= 32u);
+    }
+    CHECK(total == 4u * 4u * 4u);
+}
+
+TEST_CASE("Wilayah yang membelah ketiga sumbu jadi delapan kotak") {
+    const SdfClipmap clipmap = MakeClipmap(32, 1);
+    SdfScrollRegion region;
+    region.min = glm::ivec3(30, 30, 30);
+    region.max = glm::ivec3(34, 34, 34);
+    std::vector<SdfClipmap::TexelBox> boxes;
+    clipmap.SplitWrapped(region, boxes);
+
+    CHECK(boxes.size() == 8);
+    uint32_t total = 0;
+    for (const SdfClipmap::TexelBox& box : boxes) {
+        total += box.VoxelCount();
+    }
+    // Delapan potongan yang dijumlahkan tetap wilayah yang sama — tidak ada
+    // voxel yang hilang, dan tidak ada yang terhitung dua kali.
+    CHECK(total == 4u * 4u * 4u);
+}
+
+TEST_CASE("Wilayah selebar tekstur menutupi sumbunya tepat sekali") {
+    const SdfClipmap clipmap = MakeClipmap(32, 1);
+    SdfScrollRegion region;
+    region.min = glm::ivec3(5, 0, 0);
+    region.max = glm::ivec3(5 + 40, 2, 2);  // lebih lebar daripada teksturnya
+    std::vector<SdfClipmap::TexelBox> boxes;
+    clipmap.SplitWrapped(region, boxes);
+
+    uint32_t total = 0;
+    for (const SdfClipmap::TexelBox& box : boxes) {
+        total += box.VoxelCount();
+    }
+    // Dijepit ke lebar tekstur: menulis 40 texel pada sumbu selebar 32 hanya
+    // berarti delapan di antaranya ditimpa dua kali.
+    CHECK(total == 32u * 2u * 2u);
+}
+
+TEST_CASE("Volume mengembalikan jarak yang cocok dengan medan analitiknya") {
+    SdfVolume volume = MakeVolume(64, 1, 0.1f);
+    volume.Clipmap().Scroll(Vec3(0.0f));
+    const Vec3 centre(0.0f, 0.0f, 0.0f);
+    volume.FillAll(SphereField(centre, 1.0f));
+
+    // Di dekat permukaan, di dalam pita yang disimpan, jaraknya harus cocok
+    // dengan jawaban analitiknya dalam batas kuantisasi 8 bit.
+    for (const float radius : {0.85f, 0.95f, 1.0f, 1.1f, 1.25f}) {
+        const Vec3 point = centre + Vec3(radius, 0.0f, 0.0f);
+        float sampled = 0.0f;
+        REQUIRE(volume.Sample(point, sampled));
+        const float exact = radius - 1.0f;
+        INFO("jari-jari ", radius, " sampel ", sampled, " tepat ", exact);
+        // Pita 4 voxel = ±0,4 m dipetakan ke 256 langkah → satu langkah ~3 mm.
+        CHECK(sampled == doctest::Approx(exact).epsilon(0.05).scale(0.05));
+    }
+}
+
+TEST_CASE("Di luar pita nilainya jenuh, bukan membungkus") {
+    SdfVolume volume = MakeVolume(64, 1, 0.1f);
+    volume.Clipmap().Scroll(Vec3(0.0f));
+    volume.FillAll(SphereField(Vec3(0.0f), 0.5f));
+
+    float sampled = 0.0f;
+    REQUIRE(volume.Sample(Vec3(2.5f, 0.0f, 0.0f), sampled));
+    const float band = volume.Clipmap().BandRadius(0);
+    // Jauh dari permukaan: jenuh di tepi pita, bukan melompat ke nilai negatif.
+    CHECK(sampled == doctest::Approx(band).epsilon(0.02));
+    CHECK(sampled > 0.0f);
+}
+
+TEST_CASE("Jarak di dalam benda bertanda negatif") {
+    // Jarak tak bertanda membuat sphere tracing tidak bisa tahu ia sudah di
+    // dalam benda, dan ray yang mulai di dalam dinding tidak pernah keluar.
+    SdfVolume volume = MakeVolume(64, 1, 0.1f);
+    volume.Clipmap().Scroll(Vec3(0.0f));
+    volume.FillAll(SphereField(Vec3(0.0f), 1.0f));
+
+    float sampled = 0.0f;
+    REQUIRE(volume.Sample(Vec3(0.8f, 0.0f, 0.0f), sampled));
+    CHECK(sampled < 0.0f);
+}
+
+TEST_CASE("Pembaruan parsial hanya menulis wilayah yang basi") {
+    // Inilah yang membuktikan penghematan toroidal terwujud, bukan sekadar
+    // tercatat di komentar.
+    SdfVolume volume = MakeVolume(32, 1, 0.1f);
+    volume.Fill(volume.Clipmap().Scroll(Vec3(0.0f)), SphereField(Vec3(0.0f), 1.0f));
+    const uint64_t initial = volume.WrittenVoxels();
+    CHECK(initial == 32u * 32u * 32u);
+
+    volume.ResetWriteCount();
+    volume.Fill(volume.Clipmap().Scroll(Vec3(0.1f, 0.0f, 0.0f)), SphereField(Vec3(0.0f), 1.0f));
+    // Satu lempeng, bukan seluruh volume.
+    CHECK(volume.WrittenVoxels() == 32u * 32u);
+}
+
+TEST_CASE("Sphere tracing menemukan bola pada jarak yang benar") {
+    SdfVolume volume = MakeVolume(128, 1, 0.05f);
+    volume.Clipmap().Scroll(Vec3(0.0f));
+    volume.FillAll(SphereField(Vec3(0.0f, 0.0f, 2.0f), 0.5f));
+
+    const std::unique_ptr<ITraceBackend> backend = CreateSdfTraceBackend(volume);
+    const TraceResult result = backend->Trace(Vec3(0.0f), Vec3(0.0f, 0.0f, 1.0f), 10.0f);
+
+    REQUIRE(result.hit);
+    // Permukaan bola ada di z = 1,5.
+    CHECK(result.distance == doctest::Approx(1.5f).epsilon(0.06));
+    CHECK(result.position.z == doctest::Approx(1.5f).epsilon(0.06));
+    // Sphere tracing, bukan langkah tetap: melintasi 1,5 m dengan voxel 5 cm
+    // butuh 30 langkah kalau langkahnya tetap.
+    CHECK(result.steps < 20u);
+    CHECK(result.steps > 0u);
+}
+
+TEST_CASE("Ray yang meleset melaporkan miss, bukan hit palsu") {
+    SdfVolume volume = MakeVolume(128, 1, 0.05f);
+    volume.Clipmap().Scroll(Vec3(0.0f));
+    volume.FillAll(SphereField(Vec3(0.0f, 0.0f, 2.0f), 0.5f));
+
+    const std::unique_ptr<ITraceBackend> backend = CreateSdfTraceBackend(volume);
+    // Menyerempet jauh di samping bolanya.
+    const TraceResult result = backend->Trace(Vec3(2.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, 1.0f),
+                                              10.0f);
+    CHECK(!result.hit);
+    // Tetap melaporkan langkah: heatmap-nya yang menunjukkan ray mana yang mahal.
+    CHECK(result.steps > 0u);
+}
+
+TEST_CASE("Ray sejajar bidang tanah tidak menembusnya") {
+    // Geometri tipis adalah risiko utama SDF. Bidang tak berhingga bukan
+    // geometri tipis, tapi ia menguji hal yang sama: sphere tracing yang
+    // melangkah lebih jauh daripada jarak yang dijaminnya akan lolos.
+    SdfVolume volume = MakeVolume(128, 1, 0.05f);
+    volume.Clipmap().Scroll(Vec3(0.0f, -1.0f, 0.0f));
+    volume.FillAll(PlaneField(-1.0f));
+
+    const std::unique_ptr<ITraceBackend> backend = CreateSdfTraceBackend(volume);
+    const TraceResult result =
+        backend->Trace(Vec3(0.0f, 0.5f, 0.0f), glm::normalize(Vec3(0.0f, -1.0f, 0.2f)), 5.0f);
+    REQUIRE(result.hit);
+    CHECK(result.position.y == doctest::Approx(-1.0f).epsilon(0.1));
+}
+
+TEST_CASE("Langkah dibatasi, dan batasnya dilaporkan") {
+    SdfVolume volume = MakeVolume(64, 1, 0.1f);
+    volume.Clipmap().Scroll(Vec3(0.0f));
+    // Medan yang selalu mengembalikan nol jarak: setiap langkah maju
+    // sesedikit mungkin. Ini kasus terburuk sphere tracing.
+    volume.FillAll([](const Vec3&) { return 0.0f; });
+
+    const std::unique_ptr<ITraceBackend> backend = CreateSdfTraceBackend(volume, 8);
+    const TraceResult result = backend->Trace(Vec3(0.0f), Vec3(1.0f, 0.0f, 0.0f), 100.0f);
+    // Nol jarak berarti "permukaan di sini", jadi ia hit di langkah pertama.
+    // Yang penting: ia tidak pernah melebihi anggarannya.
+    CHECK(result.steps <= 8u);
 }

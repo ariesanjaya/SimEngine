@@ -109,6 +109,32 @@ public:
     /// Koordinat voxel dunia sebuah titik, pada kaskade tertentu.
     glm::ivec3 VoxelOf(uint32_t cascade, const Vec3& worldPosition) const;
 
+    /// Sebuah wilayah voxel dunia, sudah dipetakan ke kotak texel yang tidak
+    /// membungkus.
+    struct TexelBox {
+        glm::uvec3 min{0};
+        glm::uvec3 max{0};
+        /// Voxel dunia yang bersesuaian dengan `min`. Dibutuhkan pengisi untuk
+        /// tahu titik dunia mana yang sedang ditulisnya.
+        glm::ivec3 worldMin{0};
+
+        uint32_t VoxelCount() const {
+            const glm::uvec3 size = max - min;
+            return size.x * size.y * size.z;
+        }
+    };
+
+    /// Memecah sebuah wilayah menjadi kotak-kotak texel yang tidak membungkus.
+    ///
+    /// **Sebuah lempeng di dunia bisa terbelah di dalam tekstur.** Pengalamatan
+    /// toroidal berarti wilayah yang bersambung di dunia melompati tepi tekstur
+    /// dan muncul kembali di sisi seberangnya — sampai delapan potongan bila
+    /// ketiga sumbunya membelah. Menyalinnya sebagai satu kotak akan menimpa
+    /// texel milik bagian dunia yang sama sekali lain, dan yang terlihat adalah
+    /// permukaan yang muncul di tempat yang salah setelah kamera berjalan cukup
+    /// jauh.
+    void SplitWrapped(const SdfScrollRegion& region, std::vector<TexelBox>& out) const;
+
     /// Rentang jarak yang bisa diwakili satu texel 8-bit pada kaskade ini.
     float BandRadius(uint32_t cascade) const;
     /// Jarak → nilai 0..1 yang disimpan, dan sebaliknya.
