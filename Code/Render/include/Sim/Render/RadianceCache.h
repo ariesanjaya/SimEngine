@@ -59,6 +59,16 @@ struct RadianceCacheSettings {
     uint32_t maxProbe = 4;
     /// Banyaknya frame yang diakumulasi tiap entri.
     uint32_t accumulationFrames = 32;
+    /// Berapa frame sebuah entri boleh tidak tersentuh sebelum slotnya boleh
+    /// direbut kunci lain.
+    ///
+    /// **Tanpa ini cache terisi permanen.** Kamera yang berkeliling meninggalkan
+    /// entri untuk setiap tempat yang pernah dilihatnya, dan entri itu tidak
+    /// pernah dibaca lagi tapi tetap memakai slotnya — sampai seluruh cache
+    /// penuh oleh masa lalu dan setiap penyisipan baru terbuang. Gejalanya GI
+    /// yang bekerja saat editor baru dibuka lalu diam-diam berhenti bekerja
+    /// setelah beberapa menit menjelajah.
+    uint32_t staleFrames = 120;
 };
 
 /// Cache radiansi berbasis hash spasial.
@@ -82,7 +92,7 @@ public:
     /// Mengembalikan false bila slotnya penuh oleh kunci lain sampai batas
     /// probing — sampelnya hilang, dan itu memang perilaku cache yang tetap
     /// ukurannya.
-    bool Insert(const RadianceCacheKey& key, const Vec3& radiance);
+    bool Insert(const RadianceCacheKey& key, const Vec3& radiance, uint32_t frame);
 
     /// Radiansi sebuah kunci.
     ///
@@ -91,6 +101,9 @@ public:
     /// dan nilai nol adalah dua hal berbeda, dan menyamakannya membuat pemakainya
     /// menggelapkan gambar sambil menambah derau.
     bool Query(const RadianceCacheKey& key, Vec3& radiance) const;
+
+    /// Entri yang slotnya direbut karena tidak tersentuh selama `staleFrames`.
+    uint64_t EvictedEntries() const { return evicted_; }
 
     /// Banyaknya entri yang pernah diisi.
     uint32_t LiveEntries() const;
@@ -104,6 +117,7 @@ private:
         RadianceCacheKey key;
         Vec3 radiance{0.0f};
         uint32_t samples = 0;
+        uint32_t lastFrame = 0;
         bool used = false;
     };
 
@@ -113,6 +127,7 @@ private:
     RadianceCacheSettings settings_;
     std::vector<Entry> entries_;
     uint64_t dropped_ = 0;
+    uint64_t evicted_ = 0;
 };
 
 /// Sumbu mayor sebuah normal, 0..5 untuk +X, −X, +Y, −Y, +Z, −Z.

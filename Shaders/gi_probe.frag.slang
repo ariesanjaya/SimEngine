@@ -11,6 +11,7 @@
 
 #include "gi_trace.slang"
 #include "gi_common.slang"
+#include "gi_cache.slang"
 
 struct ProbePush {
     // xy jumlah probe, z ukuran ubin dalam piksel, w akar jumlah ray
@@ -88,11 +89,27 @@ ProbeSh main(float4 position : SV_Position) {
             giProbeRayDirection(ray, frame, probeIndex, pc.grid.w, accumulation);
         TieredHit hit = traceTiered(origin, direction, tMax);
 
+        float3 cameraPosition = shadowParams.cameraPosition.xyz;
+
         float3 radiance;
         if (hit.layer == kLayerSdf) {
-            continue;  // radiansinya belum ada; menunggu hash grid M4
-        }
-        if (hit.layer == kLayerScreen) {
+            // **Inilah yang dibuka M4.** Di M3 sinar ini dibuang dari penaksir
+            // karena clipmap hanya menyimpan jarak. Sekarang cache tahu
+            // radiansi permukaan yang pernah terlihat di layar, jadi permukaan
+            // yang sudah lewat di depan kamera tetap menyumbang cahaya setelah
+            // ia keluar layar. Yang belum pernah terlihat tetap dibuang — "tidak
+            // tahu" masih bukan "hitam".
+            int cascade = cascadeFor(hit.position);
+            if (cascade < 0) {
+                continue;
+            }
+            float3 hitNormal = sdfSurfaceNormal(cascade, hit.position);
+            float3 cached;
+            if (!giCacheQuery(hit.position, hitNormal, cameraPosition, cached)) {
+                continue;
+            }
+            radiance = cached;
+        } else if (hit.layer == kLayerScreen) {
             // **Koordinat texel, bukan uv ternormalisasi.** `RenderTarget`
             // mengalokasi lebih besar daripada yang digambar dan hanya membangun
             // ulang saat melewati ambang, jadi viewport menempati sepetak di
@@ -102,6 +119,14 @@ ProbeSh main(float4 position : SV_Position) {
             // tempat yang salah.
             int2 texel = int2(hit.uv * viewport);
             radiance = litColor.Load(int3(texel, 0)).rgb;
+            // **Yang dilihat layar disimpan supaya bisa dipakai saat ia tidak
+            // lagi terlihat.** Normalnya dibaca dari G-buffer di piksel yang
+            // sama, bukan ditebak dari arah sinar: permukaan yang dikenai
+            // menghadap ke arahnya sendiri, dan arah sinar hanya kebetulan
+            // datang dari sana.
+            float3 hitNormal = octDecode(gbufferNormal.Load(int3(texel, 0)).rg);
+            giCacheInsert(hit.position, hitNormal, cameraPosition, radiance,
+                          uint(shadowParams.cacheDecay.z));
         } else {
             radiance = giSky(direction);
         }

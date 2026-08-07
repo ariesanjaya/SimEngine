@@ -46,6 +46,11 @@ struct ShadowParams {
     // z langkah maksimum screen-space, w jumlah tingkat HiZ. Nol pada w berarti
     // lapis screen-space mati.
     float4 screenTrace;
+    // x kapasitas cache (pangkat dua), y ukuran sel terhalus, z jarak LOD,
+    // w langkah probing maksimum. Kapasitas nol berarti cache mati.
+    float4 cacheParams;
+    // x frame akumulasi, y frame sebelum entri boleh direbut, z nomor frame.
+    float4 cacheDecay;
 };
 
 [[vk::binding(0, 0)]] ConstantBuffer<ShadowParams> shadowParams;

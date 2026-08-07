@@ -1310,7 +1310,7 @@ benar untuk M3: satu probe per 16×16 piksel tanpa penyaring spasial apa pun.
 Yang menghaluskannya A-trous di M5, dan menambahkannya sekarang akan
 menyembunyikan justru apa yang perlu dilihat saat menyetel probe.
 
-#### M4 — Hash grid radiance cache (berjalan)
+#### M4 — Hash grid radiance cache · ✅ selesai
 
 **Sudah ada: acuan CPU-nya, lengkap dan teruji, termasuk uji tungku yang menjadi
 kriteria selesainya.**
@@ -1360,9 +1360,61 @@ menggelapkan adalah faktor yang hilang — pembagi π yang lupa, iradiansi yang
 dikira radiansi, atau entri yang belum terisi dianggap hitam — dan tidak satu pun
 dari ketiganya muncul sebagai galat.
 
-**Belum ada:** sisi GPU-nya — storage buffer entri, penyisipan dari pass probe
-dengan atomik untuk merebut slot, query di `gi_trace.slang` untuk sinar yang
-mengenai lewat SDF, dan peluruhan entri yang tidak lagi terlihat.
+**Entri basi direbut, dan yang masih terpakai tidak.** Tanpa daur ulang, kamera
+yang berkeliling meninggalkan entri untuk setiap tempat yang pernah dilihatnya —
+entri yang tidak pernah dibaca lagi tapi tetap memakai slotnya, sampai seluruh
+cache penuh oleh masa lalu dan setiap penyisipan baru terbuang. Gejalanya GI yang
+bekerja saat editor baru dibuka lalu **diam-diam berhenti bekerja setelah
+beberapa menit menjelajah** — kegagalan yang tidak akan pernah terlihat pada
+tangkapan layar mana pun. Penyisipannya dua lintasan: yang pertama mencari slot
+kosong atau kunci yang sama, yang kedua baru merebut yang basi. Merebut di
+lintasan pertama akan membuang entri hidup yang kebetulan ditemui lebih dulu
+daripada slot kosong di belakangnya.
+
+#### Sisi GPU-nya
+
+Satu storage buffer device-local, 2²⁰ entri × 32 byte = 32 MB, dibersihkan sekali
+dengan `vkCmdFillBuffer` — bukan diunggah dari CPU, karena menyalin 32 MB nol
+melewati PCIe untuk sesuatu yang bisa dituliskan perangkat sendiri dalam sekali
+perintah adalah pekerjaan yang tidak ada yang memintanya. Device-local, bukan
+host-visible: ia dibaca dan ditulis GPU tiap frame.
+
+**Kuncinya disimpan sebagai sidik jari 32-bit, bukan sebagai sel utuh.** Sel utuh
+menuntut tiga `int` lagi per entri, dan dua kunci berbeda yang sidik jarinya
+kebetulan sama hanya menghasilkan satu entri berisi campuran dua tempat — cacat
+yang sudah melekat pada cache lossy, bukan cacat baru. Nol dipakai sebagai
+"kosong", jadi sidik jarinya dipaksa bukan nol.
+
+**Slotnya direbut dengan atomik; isinya ditulis biasa.** Merebut slot harus
+atomik — dua invokasi yang mengklaim slot yang sama bersamaan akan menghasilkan
+dua entri yang saling menimpa kuncinya. Isinya tidak: yang terburuk adalah satu
+sampel dari probe lain hilang, dan itu memang perilaku cache lossy. Atomik float
+menuntut `VK_EXT_shader_atomic_float`, yaitu syarat perangkat baru demi mencegah
+kehilangan yang tidak ada yang bisa melihatnya.
+
+`fragmentStoresAndAtomics` harus dinyalakan di pembuatan device. Pass probe
+menulis dari tahap fragment, dan tanpa fitur itu setiap storage buffer yang tidak
+ditandai `NonWritable` ditolak di pembuatan pipeline — ditemukan validation
+layer, bukan dengan membaca kode.
+
+**Yang dilihat layar disimpan supaya bisa dipakai saat ia tidak lagi terlihat.**
+Sinar yang mengenai lewat lapis layar menyisipkan radiansi permukaan yang
+dikenainya, dengan normal dibaca dari G-buffer di piksel yang sama — bukan
+ditebak dari arah sinar, karena permukaan menghadap ke arahnya sendiri dan arah
+sinar hanya kebetulan datang dari sana. Sinar yang mengenai lewat SDF membacanya
+kembali. Yang belum pernah terlihat tetap dibuang: "tidak tahu" masih bukan
+"hitam".
+
+Diperiksa di Cornell box: iradiansinya jauh lebih terisi daripada M3 — lantai dan
+kedua kotak menerima cahaya yang di M3 hilang bersama sinar SDF yang dibuang —
+dan tetap **0,0% piksel berubah** antar-frame dengan kamera diam (rata-rata
+0,02/255, maksimum 3). Tanpa satu pun pesan lapisan validasi.
+
+**Belum ada:** angka diagnostik dari sisi GPU. `DroppedSamples` dan
+`EvictedEntries` ada di acuan CPU dan diuji di sana, tapi membacanya dari GPU
+menuntut readback — dan cache yang terlalu kecil karena itu masih terlihat
+sebagai gambar yang agak salah, bukan sebagai angka. Itu yang pertama dibutuhkan
+kalau kapasitasnya harus disetel.
 
 - **Anggarannya belum didamaikan dengan kriteria terima E8.** 3,0 ms adalah 18%
   dari frame 60 fps, sementara adegan uji E8 — terrain 2×2 km, 200 ribu instance

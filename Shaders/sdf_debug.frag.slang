@@ -76,18 +76,6 @@ float3 resolveProbes(float2 pixel, float3 world, float3 normal, float tile) {
     return giEvaluateSh(sumR * inverse, sumG * inverse, sumB * inverse, normal);
 }
 
-/// Normal dari gradien medan jarak, beda hingga tengah.
-float3 sdfNormal(int cascade, float3 position) {
-    float h = cascadeVoxelSize(cascade) * 0.5;
-    return normalize(float3(
-        sampleCascadeSdf(cascade, position + float3(h, 0, 0)) -
-            sampleCascadeSdf(cascade, position - float3(h, 0, 0)),
-        sampleCascadeSdf(cascade, position + float3(0, h, 0)) -
-            sampleCascadeSdf(cascade, position - float3(0, h, 0)),
-        sampleCascadeSdf(cascade, position + float3(0, 0, h)) -
-            sampleCascadeSdf(cascade, position - float3(0, 0, h))));
-}
-
 /// Peta warna untuk heatmap: biru → hijau → kuning → merah.
 float3 heat(float t) {
     t = clamp(t, 0.0, 1.0);
@@ -149,7 +137,8 @@ float4 main(SdfDebugVarying input) : SV_Target {
             return float4(0.05, 0.05, 0.06, 1.0);
         }
         int cascade = cascadeFor(hit.position);
-        float3 normal = cascade >= 0 ? sdfNormal(cascade, hit.position) : float3(0.0, 1.0, 0.0);
+        float3 normal =
+            cascade >= 0 ? sdfSurfaceNormal(cascade, hit.position) : float3(0.0, 1.0, 0.0);
         return float4(normal * 0.5 + 0.5, 1.0);
     }
 

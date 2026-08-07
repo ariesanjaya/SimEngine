@@ -2820,8 +2820,8 @@ TEST_CASE("Kunci cache membedakan arah, bukan hanya posisi") {
     CHECK(up.face != down.face);
     CHECK(up.face != side.face);
 
-    cache.Insert(up, Vec3(1.0f, 0.0f, 0.0f));
-    cache.Insert(down, Vec3(0.0f, 1.0f, 0.0f));
+    cache.Insert(up, Vec3(1.0f, 0.0f, 0.0f), 0);
+    cache.Insert(down, Vec3(0.0f, 1.0f, 0.0f), 0);
 
     Vec3 value;
     REQUIRE(cache.Query(up, value));
@@ -2875,7 +2875,7 @@ TEST_CASE("Hash menyebar sel bertetangga ke slot yang berjauhan") {
                 RadianceCacheKey key;
                 key.cell = {x, y, z};
                 key.face = 2;
-                if (cache.Insert(key, Vec3(static_cast<float>(x)))) {
+                if (cache.Insert(key, Vec3(static_cast<float>(x)), 0)) {
                     ++inserted;
                 }
             }
@@ -2946,7 +2946,7 @@ TEST_CASE("Uji tungku: albedo satu di bawah cahaya seragam tidak menggelap") {
             // yang paling sering hilang, dan hilangnya terlihat sebagai adegan
             // yang menggelap tiap pantulan — bukan sebagai galat.
             const Vec3 outgoing = irradiance / 3.14159265358979323846f;
-            cache.Insert(cache.KeyFor(positions[i], normals[i], camera), outgoing);
+            cache.Insert(cache.KeyFor(positions[i], normals[i], camera), outgoing, frame);
         }
     }
 
@@ -2958,4 +2958,50 @@ TEST_CASE("Uji tungku: albedo satu di bawah cahaya seragam tidak menggelap") {
         CHECK(value.y == doctest::Approx(uniform).epsilon(0.1));
         CHECK(value.z == doctest::Approx(uniform).epsilon(0.1));
     }
+}
+
+TEST_CASE("Entri basi direbut, dan yang masih terpakai tidak") {
+    // Tanpa daur ulang, kamera yang berkeliling meninggalkan entri untuk setiap
+    // tempat yang pernah dilihatnya — entri yang tidak pernah dibaca lagi tapi
+    // tetap memakai slotnya, sampai seluruh cache penuh oleh masa lalu.
+    // Gejalanya GI yang bekerja saat editor baru dibuka lalu diam-diam berhenti
+    // bekerja setelah beberapa menit menjelajah.
+    RadianceCacheSettings settings;
+    settings.capacity = 8;
+    settings.maxProbe = 8;   // seluruh cache terjangkau probing
+    settings.staleFrames = 10;
+    RadianceCache cache;
+    cache.Configure(settings);
+
+    // Isi penuh pada frame nol.
+    for (int i = 0; i < 8; ++i) {
+        RadianceCacheKey key;
+        key.cell = {i, 0, 0};
+        REQUIRE(cache.Insert(key, Vec3(static_cast<float>(i)), 0));
+    }
+    CHECK(cache.LiveEntries() == 8);
+
+    // Frame 5: belum basi, jadi kunci baru harus terbuang, bukan merebut.
+    RadianceCacheKey fresh;
+    fresh.cell = {100, 0, 0};
+    CHECK(!cache.Insert(fresh, Vec3(9.0f), 5));
+    CHECK(cache.DroppedSamples() == 1);
+    CHECK(cache.EvictedEntries() == 0);
+
+    // Frame 20: seluruhnya sudah basi, jadi slotnya boleh direbut.
+    CHECK(cache.Insert(fresh, Vec3(9.0f), 20));
+    CHECK(cache.EvictedEntries() == 1);
+    Vec3 value;
+    REQUIRE(cache.Query(fresh, value));
+    CHECK(value.x == doctest::Approx(9.0f));
+
+    // Dan entri yang terus disegarkan tidak pernah direbut walaupun waktu
+    // berjalan jauh — itu yang membedakan daur ulang dari sekadar kedaluwarsa.
+    RadianceCacheKey kept;
+    kept.cell = {3, 0, 0};
+    for (uint32_t frame = 20; frame < 200; ++frame) {
+        REQUIRE(cache.Insert(kept, Vec3(3.0f), frame));
+    }
+    REQUIRE(cache.Query(kept, value));
+    CHECK(value.x == doctest::Approx(3.0f));
 }

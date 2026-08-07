@@ -281,6 +281,18 @@ ScreenHit traceScreen(float3 origin, float3 direction, float tMax) {
 }
 
 
+static /// Normal dari gradien medan jarak, beda hingga tengah.
+float3 sdfSurfaceNormal(int cascade, float3 position) {
+    float h = cascadeVoxelSize(cascade) * 0.5;
+    return normalize(float3(
+        sampleCascadeSdf(cascade, position + float3(h, 0, 0)) -
+            sampleCascadeSdf(cascade, position - float3(h, 0, 0)),
+        sampleCascadeSdf(cascade, position + float3(0, h, 0)) -
+            sampleCascadeSdf(cascade, position - float3(0, h, 0)),
+        sampleCascadeSdf(cascade, position + float3(0, 0, h)) -
+            sampleCascadeSdf(cascade, position - float3(0, 0, h))));
+}
+
 static const int kLayerNone = 0;
 static const int kLayerScreen = 1;
 static const int kLayerSdf = 2;

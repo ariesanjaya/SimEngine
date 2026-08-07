@@ -13,6 +13,7 @@
 #include "Sim/Render/FrameGraph.h"
 #include "Sim/Render/Frustum.h"
 #include "Sim/Render/LightCluster.h"
+#include "Sim/Render/RadianceCache.h"
 #include "Sim/Render/ShadowAtlas.h"
 #include "Sim/Render/TraceBackend.h"
 #include "Sim/Render/ShadowCascades.h"
@@ -81,11 +82,16 @@ struct ShadowUniforms {
     /// z langkah maks screen-space, w jumlah tingkat HiZ. Nol berarti lapis
     /// screen-space mati.
     Vec4 screenTrace{0.0f};
+    /// x kapasitas cache (pangkat dua), y ukuran sel terhalus, z jarak LOD,
+    /// w langkah probing maksimum. Kapasitas nol berarti cache mati.
+    Vec4 cacheParams{0.0f};
+    /// x frame akumulasi, y frame sebelum entri boleh direbut, z nomor frame.
+    Vec4 cacheDecay{0.0f};
 };
-// 6 mat4 + 16 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
+// 6 mat4 + 18 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
 // memperbarui shader-nya menjadi galat kompilasi, bukan bayangan yang bergeser.
-static_assert(sizeof(ShadowUniforms) == 6 * 64 + 16 * 16,
-              "ShadowUniforms harus cocok dengan blok ShadowParams di shadow_common.glsl");
+static_assert(sizeof(ShadowUniforms) == 6 * 64 + 18 * 16,
+              "ShadowUniforms harus cocok dengan blok ShadowParams di shadow_common.slang");
 
 /// Cermin dari `GpuLight` di Shaders/cluster_common.glsl. std430.
 ///
@@ -363,6 +369,7 @@ public:
             hiz_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(), target_.DepthView(),
                        target_.Sampler());
         }
+        CreateRadianceCache();
         if (probes_.Create(device_, shaderDirectory_, shadowSetLayout_)) {
             probes_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(), kNormalFormat);
         }
@@ -538,6 +545,7 @@ public:
         const uint32_t accumulated =
             std::min(probeFrame_ + 1, probeGrid_.Settings().accumulationFrames);
         probeBlend_ = 1.0f / static_cast<float>(accumulated);
+        ++cacheFrame_;
         sdfDebugEnabled_ = desc.gi.enabled && sdfClipmap_.IsValid() &&
                            desc.gi.debugView != GiDebugView::Off;
         sdfVoxelsWritten_ = 0;
@@ -1546,7 +1554,7 @@ private:
         samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
         SIM_VK_CHECK(vkCreateSampler(device_.Handle(), &samplerInfo, nullptr, &shadow_.sampler));
 
-        const std::array<VkDescriptorSetLayoutBinding, 16> bindings{
+        const std::array<VkDescriptorSetLayoutBinding, 17> bindings{
             VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
@@ -1579,6 +1587,8 @@ private:
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
         };
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1593,7 +1603,7 @@ private:
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                                  static_cast<uint32_t>(slots_.size()) * 11},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                 static_cast<uint32_t>(slots_.size()) * 4},
+                                 static_cast<uint32_t>(slots_.size()) * 5},
         };
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1758,6 +1768,13 @@ private:
         // pelanggaran di setiap draw, bahkan pada pass yang tidak membacanya.
         const VkDescriptorImageInfo hizImage = HizDescriptorImage();
         const std::array<VkDescriptorImageInfo, 5> probeImages = ProbeDescriptorImages();
+        // Cache radiansi dipakai bersama seluruh slot: ia riwayat lintas frame,
+        // bukan data per frame. Kalau gagal dibuat, descriptor-nya menunjuk
+        // buffer lampu — descriptor yang dibiarkan kosong adalah pelanggaran di
+        // setiap draw, bahkan pada pass yang tidak membacanya.
+        const VkDescriptorBufferInfo cacheBufferInfo{
+            cache_.buffer != VK_NULL_HANDLE ? cache_.buffer : slots_[0].lightBuffer.Handle(), 0,
+            VK_WHOLE_SIZE};
         std::array<VkDescriptorImageInfo, 3> sdfImages{};
         for (uint32_t cascade = 0; cascade < 3; ++cascade) {
             const bool ready = sdfClipmap_.IsValid() && cascade < sdfClipmap_.CascadeCount();
@@ -1822,6 +1839,12 @@ private:
                 probe.pImageInfo = &probeImages[offset];
                 writes.push_back(probe);
             }
+
+            VkWriteDescriptorSet cache = uniform;
+            cache.dstBinding = 16;
+            cache.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            cache.pBufferInfo = &cacheBufferInfo;
+            writes.push_back(cache);
         }
         vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
@@ -1871,6 +1894,39 @@ private:
                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         }
         return images;
+    }
+
+    /// Cache radiansi: satu buffer device-local, dibersihkan sekali.
+    ///
+    /// **Dibersihkan dengan `vkCmdFillBuffer`, bukan diunggah dari CPU.**
+    /// Kapasitas 2²⁰ entri berarti 32 MB; mengunggahnya lewat staging berarti
+    /// menyalin 32 MB nol melewati PCIe untuk sesuatu yang bisa dituliskan
+    /// perangkat sendiri dalam sekali perintah.
+    void CreateRadianceCache() {
+        cacheSettings_ = RadianceCacheSettings{};
+        // Harus sama persis dengan `GiCacheEntry` di Shaders/gi_cache.slang.
+        constexpr VkDeviceSize kEntryBytes = 32;
+        cache_.bytes = static_cast<VkDeviceSize>(cacheSettings_.capacity) * kEntryBytes;
+
+        VkBufferCreateInfo bufferInfo{};
+        bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+        bufferInfo.size = cache_.bytes;
+        bufferInfo.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+        bufferInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+
+        VmaAllocationCreateInfo allocation{};
+        allocation.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
+        if (vmaCreateBuffer(device_.Allocator(), &bufferInfo, &allocation, &cache_.buffer,
+                            &cache_.allocation, nullptr) != VK_SUCCESS) {
+            SIM_WARN("Render", "radiance cache unavailable; SDF hits stay colourless");
+            cache_.buffer = VK_NULL_HANDLE;
+            cache_.bytes = 0;
+            return;
+        }
+
+        VkCommandBuffer cmd = device_.BeginOneShot();
+        vkCmdFillBuffer(cmd, cache_.buffer, 0, cache_.bytes, 0);
+        device_.EndOneShot(cmd);
     }
 
     /// Menulis ulang binding piramida dan probe saja.
@@ -2182,6 +2238,17 @@ private:
                 : 0.0f;
         uniforms.screenTrace = Vec4(kScreenThickness, kScreenOriginBias, kScreenMaxSteps,
                                     hizLevels);
+        // Kapasitas nol berarti cache mati, dan itu keadaan yang benar saat
+        // buffernya gagal dibuat: sinar SDF lalu kembali dibuang seperti di M3
+        // alih-alih membaca memori yang tidak ada isinya.
+        const float capacity =
+            cache_.buffer != VK_NULL_HANDLE ? static_cast<float>(cacheSettings_.capacity) : 0.0f;
+        uniforms.cacheParams = Vec4(capacity, cacheSettings_.cellSize,
+                                    cacheSettings_.lodDistance,
+                                    static_cast<float>(cacheSettings_.maxProbe));
+        uniforms.cacheDecay = Vec4(static_cast<float>(cacheSettings_.accumulationFrames),
+                                   static_cast<float>(cacheSettings_.staleFrames),
+                                   static_cast<float>(cacheFrame_), 0.0f);
         slot.shadowUniform.Write(&uniforms, sizeof(uniforms));
     }
 
@@ -2259,6 +2326,10 @@ private:
         }
         hiz_.Destroy();
         probes_.Destroy();
+        if (cache_.buffer != VK_NULL_HANDLE) {
+            vmaDestroyBuffer(device_.Allocator(), cache_.buffer, cache_.allocation);
+            cache_.buffer = VK_NULL_HANDLE;
+        }
         cubeBuffer_.Destroy();
         for (VkPipeline* pipeline :
              {&prepassPipeline_, &opaquePipeline_, &transparentPipeline_, &gridPipeline_,
@@ -2291,11 +2362,25 @@ private:
     TraceBackendSelection giBackend_;
     SdfClipmapResource sdfClipmap_;
     DepthPyramid hiz_;
+    /// Cache radiansi hash grid. Riwayat lintas frame, jadi ia bukan per slot —
+    /// dan device-local, bukan host-visible: ia dibaca dan ditulis GPU tiap
+    /// frame, dan memori host-visible akan menyeretnya lewat PCIe.
+    struct RadianceCacheBuffer {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VmaAllocation allocation = VK_NULL_HANDLE;
+        VkDeviceSize bytes = 0;
+    };
+    RadianceCacheBuffer cache_;
+    RadianceCacheSettings cacheSettings_;
+
     ProbeField probes_;
     ProbeGrid probeGrid_;
     uint32_t probeFrame_ = 0;
     Mat4 lastViewProj_{0.0f};
     float probeBlend_ = 1.0f;
+    /// Nomor frame cache. Naik terus, tidak di-reset saat kamera bergerak: entri
+    /// cache terikat ke dunia, bukan ke piksel.
+    uint32_t cacheFrame_ = 0;
     std::filesystem::path shaderDirectory_;
     uint64_t sdfVoxelsWritten_ = 0;
     float sdfUpdateMs_ = 0.0f;

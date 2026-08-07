@@ -40,6 +40,7 @@ void RadianceCache::Configure(const RadianceCacheSettings& settings) {
     settings_.lodDistance = std::max(settings.lodDistance, 1e-3f);
     settings_.maxProbe = std::max(settings.maxProbe, 1u);
     settings_.accumulationFrames = std::max(settings.accumulationFrames, 1u);
+    settings_.staleFrames = std::max(settings.staleFrames, 1u);
     // Dibulatkan ke pangkat dua terdekat ke bawah: slot dipilih dengan masker
     // bit, bukan dengan modulo, dan masker hanya benar pada pangkat dua.
     uint32_t capacity = 1;
@@ -53,6 +54,7 @@ void RadianceCache::Configure(const RadianceCacheSettings& settings) {
 void RadianceCache::Clear() {
     entries_.assign(settings_.capacity, Entry{});
     dropped_ = 0;
+    evicted_ = 0;
 }
 
 RadianceCacheKey RadianceCache::KeyFor(const Vec3& position, const Vec3& normal,
@@ -88,11 +90,15 @@ uint32_t RadianceCache::SlotOf(const RadianceCacheKey& key) const {
     return Mix(hash) & (settings_.capacity - 1);
 }
 
-bool RadianceCache::Insert(const RadianceCacheKey& key, const Vec3& radiance) {
+bool RadianceCache::Insert(const RadianceCacheKey& key, const Vec3& radiance, uint32_t frame) {
     if (entries_.empty()) {
         return false;
     }
     const uint32_t start = SlotOf(key);
+    // Dua lintasan: yang pertama mencari slot kosong atau kunci yang sama, yang
+    // kedua baru merebut yang basi. Merebut di lintasan pertama akan membuang
+    // entri hidup yang kebetulan ditemui lebih dulu daripada slot kosong di
+    // belakangnya.
     for (uint32_t step = 0; step < settings_.maxProbe; ++step) {
         const uint32_t slot = (start + step) & (settings_.capacity - 1);
         Entry& entry = entries_[slot];
@@ -101,6 +107,7 @@ bool RadianceCache::Insert(const RadianceCacheKey& key, const Vec3& radiance) {
             entry.key = key;
             entry.radiance = radiance;
             entry.samples = 1;
+            entry.lastFrame = frame;
             return true;
         }
         if (entry.key == key) {
@@ -111,6 +118,20 @@ bool RadianceCache::Insert(const RadianceCacheKey& key, const Vec3& radiance) {
                 std::min(entry.samples + 1, settings_.accumulationFrames);
             entry.radiance += (radiance - entry.radiance) / static_cast<float>(weight);
             entry.samples = std::min(entry.samples + 1, settings_.accumulationFrames);
+            entry.lastFrame = frame;
+            return true;
+        }
+    }
+
+    for (uint32_t step = 0; step < settings_.maxProbe; ++step) {
+        const uint32_t slot = (start + step) & (settings_.capacity - 1);
+        Entry& entry = entries_[slot];
+        if (frame - entry.lastFrame >= settings_.staleFrames) {
+            entry.key = key;
+            entry.radiance = radiance;
+            entry.samples = 1;
+            entry.lastFrame = frame;
+            ++evicted_;
             return true;
         }
     }

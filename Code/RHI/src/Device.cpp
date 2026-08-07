@@ -279,11 +279,17 @@ bool Device::CreateLogicalDevice() {
     VkPhysicalDeviceFeatures features{};
     features.fillModeNonSolid = VK_TRUE;  // wireframe di viewport editor
     features.wideLines = VK_TRUE;         // garis gizmo & grid
+    // Pass probe GI menulis ke cache radiansi dari tahap fragment, dan merebut
+    // slotnya dengan atomik. Tanpa fitur ini setiap storage buffer yang tidak
+    // ditandai NonWritable ditolak di pembuatan pipeline — ditemukan validation
+    // layer, bukan dengan membaca kode.
+    features.fragmentStoresAndAtomics = VK_TRUE;
 
     VkPhysicalDeviceFeatures supported{};
     vkGetPhysicalDeviceFeatures(physicalDevice_, &supported);
     features.fillModeNonSolid &= supported.fillModeNonSolid;
     features.wideLines &= supported.wideLines;
+    features.fragmentStoresAndAtomics &= supported.fragmentStoresAndAtomics;
 
     // Fitur Vulkan 1.3 yang kita aktifkan sejak sekarang:
     //   - shaderDemoteToHelperInvocation: dibutuhkan segera, karena glslc
