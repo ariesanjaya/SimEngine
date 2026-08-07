@@ -1,4 +1,5 @@
 #include "Sim/Assets/AssetDatabase.h"
+#include "Sim/Core/Log.h"
 #include "Sim/Editor/EditorContext.h"
 #include "Sim/Editor/Icons.h"
 #include "Sim/Editor/NodeGraph.h"
@@ -10,7 +11,11 @@
 #include "Sim/Material/MaterialGraph.h"
 #include "Sim/Material/MaterialInstance.h"
 #include "Sim/Material/MaterialNodeCatalog.h"
+#include "Sim/Material/MaterialParameterBlock.h"
+#include "Sim/Material/MaterialShaderModule.h"
 #include "Sim/Material/MaterialValidation.h"
+#include "Sim/Material/ShaderCache.h"
+#include "Sim/Render/IMaterialPreview.h"
 
 #include <imgui.h>
 #include <imgui_stdlib.h>
@@ -36,6 +41,12 @@ constexpr ImVec4 kHintColor(0.55f, 0.57f, 0.60f, 1.0f);
 constexpr ImVec4 kGroupColor(0.45f, 0.55f, 0.70f, 1.0f);
 
 /// Ukuran grup baru, dan batas bawah yang masih bisa dipegang tepinya.
+/// Daftar override kosong, untuk material yang bukan instance. Sebuah static
+/// alih-alih sementara: `Fill` menerima referensi, dan sementara yang dibuat di
+/// argumen akan mati sebelum sempat dibaca kalau suatu saat pemanggilannya
+/// dipecah.
+const std::vector<ParameterOverride> kNoOverrides;
+
 constexpr float kDefaultGroupSize = 260.0f;
 constexpr float kMinGroupSize = 40.0f;
 /// Jarak antara tepi grup dan node terluar yang dibungkusnya.
@@ -136,7 +147,7 @@ public:
             // Instance tidak punya graph sendiri, jadi tidak ada kanvas untuk
             // digambar. Menampilkan graph induknya di sini akan mengundang
             // suntingan yang tidak akan tersimpan ke mana-mana.
-            DrawInstanceAndSide();
+            DrawInstanceAndSide(context);
         } else {
             DrawCanvasAndSide(context);
         }
@@ -249,7 +260,7 @@ private:
         ImGui::SameLine(0.0f, 0.0f);
 
         if (ImGui::BeginChild("##side", ImVec2(0.0f, 0.0f))) {
-            DrawSidePanel();
+            DrawSidePanel(context, /*withDetails=*/true);
         }
         ImGui::EndChild();
     }
@@ -260,7 +271,7 @@ private:
     /// yang ingin diketahui pemakai instance adalah parameter mana yang
     /// benar-benar dipakai shader — sesuatu yang hanya terjawab dengan melihat
     /// kodenya.
-    void DrawInstanceAndSide() {
+    void DrawInstanceAndSide(EditorContext& context) {
         const float avail = ImGui::GetContentRegionAvail().x;
         const float handle = ImGui::GetStyle().ItemSpacing.x;
         if (sideWidth_ <= 0.0f) {
@@ -281,7 +292,10 @@ private:
         ImGui::SameLine(0.0f, 0.0f);
 
         if (ImGui::BeginChild("##side", ImVec2(0.0f, 0.0f))) {
-            DrawCompiledSlang();
+            // Tanpa tab Details: parameter yang diekspos milik graph induk, dan
+            // menyuntingnya dari sebuah instance akan mengubah setiap instance
+            // lain diam-diam.
+            DrawSidePanel(context, /*withDetails=*/false);
         }
         ImGui::EndChild();
     }
@@ -849,12 +863,16 @@ private:
 
     // --- panel samping ------------------------------------------------------
 
-    void DrawSidePanel() {
+    void DrawSidePanel(EditorContext& context, bool withDetails) {
         if (!ImGui::BeginTabBar("##side")) {
             return;
         }
-        if (ImGui::BeginTabItem("Details")) {
+        if (withDetails && ImGui::BeginTabItem("Details")) {
             DrawDetails();
+            ImGui::EndTabItem();
+        }
+        if (ImGui::BeginTabItem("Preview")) {
+            DrawPreview(context);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Compiled Slang")) {
@@ -1028,6 +1046,211 @@ private:
             return;
         }
         ImGui::TextUnformatted(compiled_.slang.c_str());
+    }
+
+
+    // --- preview ------------------------------------------------------------
+
+    /// Menggambar preview PBR sungguhan: shader yang sama persis dengan yang
+    /// nanti dipakai renderer, dikompilasi lewat `slangc` dan di-cache.
+    ///
+    /// **Panel tidak mengevaluasi shading sendiri sedikit pun.** Itu aturan yang
+    /// dipegang seluruh E7.1 — model shading hanya boleh punya satu implementasi
+    /// — dan preview yang "kira-kira mirip" justru bentuk pelanggaran yang
+    /// paling mahal: selisihnya tidak akan pernah dicari orang karena tidak ada
+    /// yang mengaku salah.
+    void DrawPreview(EditorContext& context) {
+        render::IMaterialPreview* preview = context.materialPreview;
+        if (preview == nullptr) {
+            ImGui::TextColored(kHintColor,
+                               "Preview is unavailable on this device. Editing the graph "
+                               "does not require it.");
+            return;
+        }
+        if (!compiled_.ok) {
+            ImGui::TextColored(kErrorColor, "%s  Fix the errors first — nothing to preview.",
+                               icons::kLogError);
+            return;
+        }
+
+        EnsurePreviewShaders(context, *preview);
+        if (!previewError_.empty()) {
+            ImGui::TextColored(kErrorColor, "%s  %s", icons::kLogError, previewError_.c_str());
+            // Sumbernya tetap ditampilkan: galat slangc menyebut nomor baris,
+            // dan nomor baris tanpa kodenya tidak bisa dipakai siapa pun.
+            ImGui::TextColored(kHintColor, "See the Compiled Slang tab for the source.");
+            return;
+        }
+        if (!preview->HasMaterial()) {
+            ImGui::TextColored(kHintColor, "Compiling…");
+            return;
+        }
+
+        DrawPreviewControls();
+        UploadPreviewParameters(*preview);
+
+        const float width = std::max(ImGui::GetContentRegionAvail().x, 32.0f);
+        const float height = std::max(std::min(width, ImGui::GetContentRegionAvail().y), 32.0f);
+
+        render::MaterialPreviewDesc desc;
+        desc.width = static_cast<uint32_t>(width);
+        desc.height = static_cast<uint32_t>(height);
+        desc.shape = previewShape_;
+        desc.yaw = previewYaw_;
+        desc.pitch = previewPitch_;
+        desc.distance = previewDistance_;
+        const float lightYaw = previewLightYaw_;
+        desc.lightDirection = Vec3(std::sin(lightYaw) * 0.75f, 0.6f, std::cos(lightYaw) * 0.75f);
+        desc.lightRadiance = Vec3(previewExposure_);
+        desc.time = previewTime_;
+        previewTime_ += context.deltaSeconds;
+        preview->Render(desc);
+
+        const render::TextureHandle texture = preview->ColorTarget();
+        if (texture == render::kInvalidTexture) {
+            return;
+        }
+        const Vec2 uv = preview->ColorTargetUvMax();
+
+        // **Tombol tak terlihat dulu, gambarnya menyusul.** `ImGui::Image` bukan
+        // item yang bisa diaktifkan — ia tidak pernah menjadi `IsItemActive()`,
+        // jadi seret di atasnya tidak pernah terbaca. Ini hanya ketahuan dengan
+        // menjalankannya: kodenya terbaca benar, slider di sebelahnya bekerja,
+        // dan yang gagal diam-diam justru satu-satunya interaksi di sini.
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        const ImVec2 size(width, height);
+        ImGui::InvisibleButton("##orbit", size, ImGuiButtonFlags_MouseButtonLeft);
+        const bool active = ImGui::IsItemActive();
+        const bool hovered = ImGui::IsItemHovered();
+        ImGui::GetWindowDrawList()->AddImage(
+            static_cast<ImTextureID>(texture), origin,
+            ImVec2(origin.x + size.x, origin.y + size.y), ImVec2(0.0f, 0.0f),
+            ImVec2(uv.x, uv.y));
+
+        if (hovered) {
+            const float wheel = ImGui::GetIO().MouseWheel;
+            if (wheel != 0.0f) {
+                previewDistance_ = std::clamp(previewDistance_ - wheel * 0.25f, 1.6f, 12.0f);
+            }
+        }
+        // Orbit dengan menyeret di atas gambarnya. Kamera yang mengorbit, bukan
+        // objek yang berputar: arah cahaya tetap terhadap dunia, jadi memutar
+        // preview memperlihatkan bagaimana material menangkap cahaya dari sudut
+        // lain — yang justru yang ingin dilihat.
+        if (active) {
+            const ImVec2 drag = ImGui::GetIO().MouseDelta;
+            previewYaw_ -= drag.x * 0.01f;
+            // Dibatasi sedikit di bawah kutub: tepat di kutub arah "atas" dan
+            // arah pandang sejajar, dan LookAt menghasilkan matriks yang tidak
+            // terdefinisi — preview berkedip hitam alih-alih memberi pesan.
+            previewPitch_ = std::clamp(previewPitch_ + drag.y * 0.01f, -1.5f, 1.5f);
+        }
+    }
+
+    /// Dua baris, bukan satu.
+    ///
+    /// Panel samping ini bisa diseret sempit, dan empat kontrol berlabel dalam
+    /// satu baris membuat label terakhir terpotong tepat pada lebar yang
+    /// dipakai orang. Dua baris tetap terbaca sampai panel jauh lebih sempit
+    /// daripada gambar preview-nya sendiri.
+    void DrawPreviewControls() {
+        const float spacing = ImGui::GetStyle().ItemSpacing.x;
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.0f);
+        const char* shapes[] = {"Sphere", "Cube", "Plane"};
+        int shape = static_cast<int>(previewShape_);
+        if (ImGui::Combo("##shape", &shape, shapes, IM_ARRAYSIZE(shapes))) {
+            previewShape_ = static_cast<render::PreviewShape>(shape);
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Reset View")) {
+            previewYaw_ = 0.0f;
+            previewPitch_ = 0.2f;
+            previewDistance_ = 3.2f;
+        }
+
+        const float half = std::max((ImGui::GetContentRegionAvail().x - spacing) * 0.5f, 40.0f);
+        ImGui::SetNextItemWidth(half - ImGui::CalcTextSize("Light").x - spacing);
+        ImGui::SliderAngle("Light", &previewLightYaw_, -180.0f, 180.0f, "%.0f°");
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(half - ImGui::CalcTextSize("Exposure").x - spacing);
+        ImGui::SliderFloat("Exposure", &previewExposure_, 0.5f, 8.0f, "%.1f");
+    }
+
+    /// Mengompilasi ulang shader preview hanya ketika sumbernya benar-benar
+    /// berubah.
+    ///
+    /// Dibandingkan terhadap teks Slang-nya, bukan terhadap `dirty_`: memindahkan
+    /// sebuah node menandai dokumen kotor tanpa mengubah satu karakter pun kode
+    /// yang dihasilkan, dan membangun ulang pipeline karenanya akan membuat
+    /// menyeret node terasa tersendat.
+    void EnsurePreviewShaders(EditorContext& context, render::IMaterialPreview& preview) {
+        if (compiled_.slang == previewSource_ && (preview.HasMaterial() || !previewError_.empty())) {
+            return;
+        }
+        previewSource_ = compiled_.slang;
+        previewError_.clear();
+
+        if (!cacheReady_) {
+            cacheReady_ = true;
+            const std::string identity = material::SlangCompilerIdentity();
+            if (identity.empty()) {
+                cacheUsable_ = false;
+            } else {
+                cache_.Configure(context.shaderCacheDir, identity);
+                cache_.SetCompiler(material::MakeSlangCompiler());
+                prelude_ = material::LoadOpenPbrPrelude(context.shaderDir);
+                cacheUsable_ = !prelude_.empty();
+                if (!cacheUsable_) {
+                    SIM_WARN("Editor", "openpbr.slang not found in {}", context.shaderDir);
+                }
+            }
+        }
+        if (!cacheUsable_) {
+            previewError_ = prelude_.empty() && !cache_.Statistics().compiles
+                                ? "Shader toolchain unavailable (slangc or openpbr.slang missing)."
+                                : "Shader toolchain unavailable.";
+            preview.ClearMaterial();
+            return;
+        }
+
+        material::MaterialModuleOptions options;
+        options.prelude = prelude_;
+
+        const material::CompileOutput vertex = cache_.Get(
+            material::MakeMaterialRequest(compiled_.slang, material::ShaderStage::Vertex, options));
+        const material::CompileOutput fragment =
+            cache_.Get(material::MakeMaterialRequest(compiled_.slang,
+                                                     material::ShaderStage::Fragment, options));
+        if (!vertex.ok || !fragment.ok) {
+            previewError_ = vertex.ok ? fragment.error : vertex.error;
+            if (previewError_.empty()) {
+                previewError_ = "slangc failed without a message.";
+            }
+            preview.ClearMaterial();
+            return;
+        }
+
+        block_.Build(graph_.parameters);
+        render::MaterialPreviewShaders shaders;
+        shaders.vertexSpirv = vertex.spirv;
+        shaders.fragmentSpirv = fragment.spirv;
+        shaders.parameterBytes = block_.Bytes();
+        shaders.textureCount = static_cast<uint32_t>(compiled_.textures.size());
+        if (!preview.SetMaterial(shaders)) {
+            previewError_ = preview.LastError();
+        }
+    }
+
+    /// Menulis blok uniform dari nilai bawaan parameter, ditimpa override
+    /// instance bila yang dibuka memang sebuah instance.
+    ///
+    /// Inilah yang membuat preview instance memperlihatkan nilai instance-nya,
+    /// bukan nilai induknya — dan keduanya memakai pipeline yang sama, karena
+    /// yang berbeda antara induk dan instance memang hanya isi blok uniformnya.
+    void UploadPreviewParameters(render::IMaterialPreview& preview) {
+        block_.Fill(graph_.parameters, instanceMode_ ? instance_.overrides : kNoOverrides,
+                    parameterBytes_);
+        preview.SetParameters(parameterBytes_);
     }
 
     // --- berkas -------------------------------------------------------------
@@ -1317,6 +1540,25 @@ private:
     Uuid renamingNode_;
     std::string renameBuffer_;
     bool focusRename_ = false;
+
+    // --- preview ---
+    material::ShaderCache cache_;
+    std::string prelude_;
+    bool cacheReady_ = false;
+    bool cacheUsable_ = false;
+    /// Teks Slang yang shader preview-nya sedang terpasang. Perbandingan
+    /// terhadap ini yang memutuskan perlu-tidaknya kompilasi ulang.
+    std::string previewSource_;
+    std::string previewError_;
+    material::MaterialParameterBlock block_;
+    std::vector<uint8_t> parameterBytes_;
+    render::PreviewShape previewShape_ = render::PreviewShape::Sphere;
+    float previewYaw_ = 0.0f;
+    float previewPitch_ = 0.2f;
+    float previewDistance_ = 3.2f;
+    float previewLightYaw_ = 0.7f;
+    float previewExposure_ = 3.0f;
+    float previewTime_ = 0.0f;
 
     std::unordered_map<Uuid, uint64_t> ids_;
     std::unordered_map<uint64_t, Uuid> guids_;

@@ -108,7 +108,7 @@ berarti begitu ada tekstur untuk diindeks — yaitu E8.2. Alias memori transien
 sudah ada di graph dan teruji, tapi belum ada pemakainya: pass pertama yang
 benar-benar menuntut target antara adalah post-process di E8.8.
 
-### E8.2 — Material runtime · 🔨 kedua tahap shader selesai
+### E8.2 — Material runtime · ✅ selesai
 Kompilasi graph `.simmat` → kode shader → SPIR-V, cache di disk berbasis hash graph.
 Material instance jadi uniform buffer + indeks tekstur. Varian shader (skinned,
 instanced, alpha-test) lewat spesialisasi konstanta. **Titik sambung:** Material
@@ -226,9 +226,53 @@ E7.4 memang hanya menghasilkan yaw + skala seragam.
 memakai firstInstance bukan nol tetap mengindeks buffer transform dari nol —
 firstInstance tidak bisa dipakai sebagai offset ke dalamnya.
 
-**Belum ada:** preview PBR di Material Editor. Menuntut instance
-`IViewportRenderer` kedua — jalannya sudah jelas dan dicatat di E7.1, tinggal
-dikerjakan bersama pipeline materialnya.
+#### Preview PBR di Material Editor
+
+**Seam kedua, bukan instance kedua `IViewportRenderer`.** Catatan E7.1 menyebut
+jalan keluarnya "membuat instance KEDUA lewat pabrik yang sudah ada". Itu
+menyelesaikan tabrakan target render, tapi tidak menyelesaikan gunanya:
+`ViewportScene` tidak punya tempat untuk sebuah material — ia daftar
+`MeshInstance` berwarna solid — jadi instance kedua akan menggambar bola abu-abu,
+yaitu persis kekosongan yang membuat preview ditunda sejak awal. Yang dibutuhkan
+preview memang bukan "satu scene lagi" melainkan satu mesh, satu material, satu
+cahaya, dan `IMaterialPreview` menyebutkan tepat itu — tetap bebas Vulkan seperti
+seam pertama.
+
+**Materialnya diserahkan sebagai SPIR-V, bukan sebagai graph.** Preview yang
+mengompilasi sendiri akan menjadi implementasi kedua dari jalur graph → shader,
+dan seluruh E7.1 dipegang satu alasan: model shading hanya boleh punya satu
+implementasi. Yang dilihat preview adalah shader yang sama persis dengan yang
+nanti dipakai renderer.
+
+**Tekstur material sementara memakai tekstur putih 1×1.** Putih, bukan magenta:
+tekstur yang belum dimuat harus membuat material terlihat seperti material tanpa
+tekstur, bukan membuat seluruh preview berteriak. Pemuatan tekstur sungguhan
+masuk bersama sistem tekstur E8.
+
+**Logam tampak hitam kecuali di sorotannya, dan itu benar.** `openpbr.slang`
+baru cahaya langsung; logam tidak punya lobe difus, jadi tanpa IBL tidak ada apa
+pun yang mengisi bagian yang tidak memantulkan cahaya. IBL datang di E8.3.
+
+Tiga hal ditemukan dengan menjalankannya, bukan dengan membaca kode:
+
+- **Depth image tidak pernah dipindahkan layout-nya.** Warna yang salah layout
+  terlihat langsung; depth tidak — preview tetap tergambar benar dan
+  satu-satunya yang memberi tahu adalah validation layer.
+- **Kapabilitas SPIR-V `DrawParameters` tidak diaktifkan device.** Asalnya
+  keputusan yang sengaja diambil: `SV_InstanceID` berarti nomor instance relatif
+  terhadap `firstInstance`, jadi slangc menerjemahkannya jadi
+  `gl_InstanceIndex - gl_BaseInstance`. Kini `shaderDrawParameters` diaktifkan.
+- **`ImGui::Image` bukan item yang bisa diaktifkan**, jadi seret untuk mengorbit
+  kamera tidak pernah terbaca. Kodenya terbaca benar dan slider di sebelahnya
+  bekerja; yang gagal diam-diam justru satu-satunya interaksi di panel itu.
+  Sekarang `InvisibleButton` yang menerima seretnya, dan gambarnya digambar
+  lewat draw list di rect yang sama.
+
+Diverifikasi lewat XTEST pada Debug build: material dibuat, tab **Preview**
+menampilkan bola ber-shading, mengubah **Base Metalness** 0 → 1 lewat node
+Constant mengubah bola menjadi logam, mengganti bentuk dan menggeser sudut
+cahaya bekerja, seret mengorbit kamera, dan cache disk terisi empat berkas
+(dua material × dua tahap). **Nol pesan validation layer.**
 
 ### E8.3 — Lighting & shadow
 IBL (prefilter env + DFG LUT), directional light dengan cascaded shadow map,

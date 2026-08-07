@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Sim/Render/IMaterialPreview.h"
 #include "Sim/Render/IViewportRenderer.h"
 
 #include <filesystem>
@@ -38,5 +39,21 @@ std::unique_ptr<IViewportRenderer> CreateStubRenderer(rhi::Device& device,
 std::unique_ptr<IViewportRenderer> CreateVulkanRenderer(rhi::Device& device,
                                                         rhi::ITextureRegistry& textures,
                                                         const StubRendererDesc& desc);
+
+/// Preview material untuk panel Material Editor: satu mesh, satu material, satu
+/// cahaya, dengan target render sendiri.
+///
+/// Target render sendiri itulah yang menyelesaikan tabrakan yang menahan preview
+/// sejak E7.1 — panel Viewport dan preview keduanya menggambar
+/// `ImGui::Image(ColorTarget())`, dan satu target berarti yang belakangan
+/// menimpa yang duluan pada frame yang sama.
+///
+/// Mengembalikan nullptr bila perangkatnya tidak memenuhi syarat. Panel yang
+/// menerimanya menampilkan pesan, bukan menolak dibuka: menyunting graph
+/// material tidak menuntut preview.
+std::unique_ptr<IMaterialPreview> CreateMaterialPreview(rhi::Device& device,
+                                                        rhi::ITextureRegistry& textures,
+                                                        uint32_t width = 512,
+                                                        uint32_t height = 512);
 
 }  // namespace sim::render

@@ -210,6 +210,15 @@ int main(int /*argc*/, char** /*argv*/) {
         return 1;
     }
 
+    // Preview material: instance kedua dengan target rendernya sendiri.
+    // Null bukan kegagalan fatal — menyunting graph material tidak menuntut
+    // preview, dan panel menampilkan alasannya alih-alih menolak dibuka.
+    std::unique_ptr<render::IMaterialPreview> materialPreview =
+        render::CreateMaterialPreview(device, imguiLayer.Textures());
+    if (materialPreview == nullptr) {
+        SIM_WARN("Editor", "Material preview unavailable; the Material Editor will say so");
+    }
+
     // Kolam dan cache dideklarasikan di sini, sebelum EditorApp, supaya
     // keduanya dihancurkan belakangan: editor menjadwalkan pekerjaan ke kolam
     // dan meminta thumbnail dari cache sepanjang hidupnya.
@@ -229,7 +238,9 @@ int main(int /*argc*/, char** /*argv*/) {
     editor::EditorApp::Config appConfig;
     appConfig.configDir = configDir;
     appConfig.resourceDir = ExecutableDirectory() / "Resources";
+    appConfig.shaderDir = rendererDesc.shaderDirectory;
     appConfig.viewportRenderer = renderer.get();
+    appConfig.materialPreview = materialPreview.get();
     appConfig.frameLimiter = &frameLimiter;
     appConfig.lockedFps = frameLock.hz;
     appConfig.frameLockReason = frameLock.reason;

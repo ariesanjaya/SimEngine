@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Sim/Render/IMaterialPreview.h"
 #include "Sim/Render/IViewportRenderer.h"
 #include "Sim/Render/ThumbnailCache.h"
 #include "Sim/Scene/World.h"
@@ -67,6 +68,11 @@ struct EditorContext {
     bool playing = false;
 
     render::IViewportRenderer* viewportRenderer = nullptr;
+    /// Preview material untuk Material Editor. Target rendernya sendiri, karena
+    /// panel Viewport dan preview keduanya menggambar `ImGui::Image()` dan satu
+    /// target berarti yang belakangan menimpa yang duluan. Null bila perangkat
+    /// tidak mendukungnya — panel wajib memeriksa.
+    render::IMaterialPreview* materialPreview = nullptr;
     /// Pratinjau aset untuk Asset Browser. Dimiliki pemanggil EditorApp.
     render::IThumbnailCache* thumbnails = nullptr;
     const FrameLimiter* frameLimiter = nullptr;
@@ -81,6 +87,18 @@ struct EditorContext {
     /// Folder tempat "Save as Prefab" menulis. Diisi EditorApp; sampai ada
     /// konsep proyek yang sesungguhnya (E5), isinya folder konfigurasi editor.
     std::string prefabDir;
+
+    /// Folder `Shaders` di sebelah executable — berisi `.spv` hasil build dan
+    /// `openpbr.slang` yang ditanam ke setiap modul material. Diisi EditorApp.
+    std::string shaderDir;
+
+    /// Cache SPIR-V hasil kompilasi shader material. Diisi EditorApp.
+    ///
+    /// Di folder konfigurasi editor, bukan di folder proyek: isinya diturunkan
+    /// sepenuhnya dari graph dan bisa dibuang kapan saja, jadi ia tidak boleh
+    /// ikut masuk version control proyek orang. Kosong berarti tanpa lapisan
+    /// disk — kompilasinya tetap jalan, hanya tidak tersimpan antar-jalan.
+    std::string shaderCacheDir;
 
     /// Waktu frame terakhir, dipakai widget yang beranimasi.
     float deltaSeconds = 0.0f;

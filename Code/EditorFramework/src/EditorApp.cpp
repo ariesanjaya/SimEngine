@@ -61,12 +61,15 @@ bool EditorApp::Initialize(const Config& config) {
     context_.notifications = &notifications_;
     context_.world = &world_;
     context_.viewportRenderer = config.viewportRenderer;
+    context_.materialPreview = config.materialPreview;
     context_.thumbnails = config.thumbnails;
     context_.scripts = config.scripts;
     context_.frameLimiter = config.frameLimiter;
     context_.lockedFps = config.lockedFps;
     context_.frameLockReason = config.frameLockReason;
     context_.prefabDir = (configDir_ / "Prefabs").string();
+    context_.shaderCacheDir = (configDir_ / "ShaderCache").string();
+    context_.shaderDir = config.shaderDir.string();
 
     // Disemai sebelum pemindaian pertama, supaya asetnya sudah punya GUID saat
     // CreateStarterLevel() mencarinya di bawah.

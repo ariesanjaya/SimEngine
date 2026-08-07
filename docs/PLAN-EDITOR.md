@@ -910,23 +910,32 @@ Diverifikasi tidak terjadi di sini: `[257, 145]` sebelum dan sesudah putaran
 penuh simpan → tutup → buka → simpan. Grup dibuat dari seleksi lewat tombol
 toolbar maupun **Ctrl+G**, dan judulnya diganti dengan klik ganda di tempat.
 
-**Belum ada: preview — dan ia terhalang, bukan sekadar belum dikerjakan.**
-`IViewportRenderer` adalah satu instance dengan satu target render, dipakai
-bersama panel Viewport. Preview material yang memanggil `Render()` akan menimpa
-gambar Viewport pada frame yang sama, karena keduanya menggambar
-`ImGui::Image(ColorTarget())` dari tekstur yang sama.
+**Preview sudah ada sejak E8.2**, di tab **Preview** panel ini: bentuk
+sphere/cube/plane, sudut cahaya, eksposur, dan orbit kamera dengan menyeret.
 
-Jalan keluarnya kecil dan sudah jelas: `render::CreateStubRenderer()` adalah
-pabrik, jadi composition root bisa membuat instance KEDUA khusus preview dan
-mengirimkannya lewat `EditorContext`. Itu juga bentuk yang benar untuk E8 —
-preview material memang "satu view lagi", bukan kasus khusus.
+Ia sempat terhalang, dan catatan lamanya menyebut jalan keluarnya "membuat
+instance KEDUA `IViewportRenderer` lewat pabrik yang sudah ada". Itu benar untuk
+tabrakan target rendernya — satu instance berarti preview dan Viewport menimpa
+gambar satu sama lain — tapi **tidak menyelesaikan gunanya**: `ViewportScene`
+tidak punya tempat untuk sebuah material, jadi instance kedua akan menggambar
+bola abu-abu. Yang dipakai akhirnya seam kedua, `render::IMaterialPreview`, yang
+menyebutkan apa yang memang dibutuhkan preview: satu mesh, satu material, satu
+cahaya.
 
-Yang menahan bukan itu, melainkan gunanya: `StubRenderer` hanya menggambar grid
-dan wireframe AABB, sehingga preview sekarang tidak akan memperlihatkan apa pun
-tentang materialnya. Menuliskan evaluator OpenPBR kedua di CPU untuk mengisi
-kekosongan itu justru pelanggaran terhadap alasan yang dipegang seluruh E7.1 —
-model shading hanya boleh punya satu implementasi. Karena itu preview menunggu
-E8.2, yang memang menyebutnya sebagai titik sambungnya.
+Yang tidak berubah adalah alasan yang menahannya: **model shading hanya boleh
+punya satu implementasi.** Panel tidak mengevaluasi shading sedikit pun — ia
+menyerahkan SPIR-V hasil `ShaderCache` ke preview, yaitu shader yang sama persis
+dengan yang nanti dipakai renderer. Evaluator OpenPBR kedua di CPU akan
+menghasilkan preview yang "kira-kira mirip", dan selisihnya tidak akan pernah
+dicari orang karena tidak ada yang mengaku salah.
+
+Blok uniformnya diisi dari nilai bawaan parameter lalu ditimpa override
+instance, jadi preview sebuah instance memperlihatkan nilai instance-nya dengan
+pipeline yang sama — yang berbeda antara induk dan instance memang hanya isi
+blok uniformnya.
+
+Tekstur material sementara memakai tekstur putih 1×1; pemuatan tekstur
+sungguhan masuk bersama sistem tekstur E8.
 
 Mode instance di panel terverifikasi lewat XTEST: material dibuat, parameter
 ditambahkan dan disimpan, **New Instance** membuat `.simmatinst` yang membuka

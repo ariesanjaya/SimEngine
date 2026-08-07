@@ -268,8 +268,17 @@ bool Device::CreateLogicalDevice() {
     //   - dynamicRendering & synchronization2: belum dipakai di E1, tapi
     //     mengaktifkannya sekarang membuat E8 tidak perlu menyentuh pembuatan
     //     device lagi.
+    //   - shaderDrawParameters: dituntut shader material, dan asalnya sebuah
+    //     keputusan yang sengaja diambil. `SV_InstanceID` di HLSL/Slang berarti
+    //     nomor instance **relatif terhadap `firstInstance`**, jadi slangc
+    //     menerjemahkannya menjadi `gl_InstanceIndex - gl_BaseInstance` — dan
+    //     `gl_BaseInstance` itulah yang menuntut kapabilitas DrawParameters.
+    //     Ditemukan validation layer, bukan dengan membaca kode.
+    VkPhysicalDeviceVulkan11Features supported11{};
+    supported11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
     VkPhysicalDeviceVulkan13Features supported13{};
     supported13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    supported13.pNext = &supported11;
     VkPhysicalDeviceFeatures2 supported2{};
     supported2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     supported2.pNext = &supported13;
@@ -277,8 +286,13 @@ bool Device::CreateLogicalDevice() {
         vkGetPhysicalDeviceFeatures2(physicalDevice_, &supported2);
     }
 
+    VkPhysicalDeviceVulkan11Features enable11{};
+    enable11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    enable11.shaderDrawParameters = supported11.shaderDrawParameters;
+
     VkPhysicalDeviceVulkan13Features enable13{};
     enable13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
+    enable13.pNext = &enable11;
     enable13.shaderDemoteToHelperInvocation = supported13.shaderDemoteToHelperInvocation;
     enable13.dynamicRendering = supported13.dynamicRendering;
     enable13.synchronization2 = supported13.synchronization2;

@@ -33,7 +33,11 @@ public:
         /// tidak disemai — editor tetap berjalan, level contohnya saja yang
         /// kehilangan modelnya.
         std::filesystem::path resourceDir;
+        /// Folder `Shaders` di sebelah executable. Preview material membacanya
+        /// untuk mengambil `openpbr.slang`.
+        std::filesystem::path shaderDir;
         render::IViewportRenderer* viewportRenderer = nullptr;
+        render::IMaterialPreview* materialPreview = nullptr;
         const FrameLimiter* frameLimiter = nullptr;
         float lockedFps = 60.0f;
         std::string frameLockReason;
