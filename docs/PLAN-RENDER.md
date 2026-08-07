@@ -1416,7 +1416,7 @@ menuntut readback — dan cache yang terlalu kecil karena itu masih terlihat
 sebagai gambar yang agak salah, bukan sebagai angka. Itu yang pertama dibutuhkan
 kalau kapasitasnya harus disetel.
 
-#### M5 — Denoise & temporal (berjalan)
+#### M5 — Denoise & temporal · ✅ selesai
 
 **Sudah ada: acuan CPU-nya — reproyeksi, kernel à-trous, dan penjepitan riwayat —
 beserta angka yang mengubah kriteria selesainya menjadi anggaran.**
@@ -1461,11 +1461,81 @@ dengan tetangganya, riwayat panjang dipertahankan dan deraunya hilang; begitu
 adegannya benar-benar berubah, riwayat yang sudah tidak sejalan dijepit masuk ke
 rentang baru dalam satu frame. Diuji langsung pada kasus lampu dimatikan.
 
-**Belum ada:** sisi GPU-nya — reproyeksi di pass probe beserta ping-pong riwayat
-yang dituntutnya, target iradiansi layar, dan dua lintasan à-trous di atasnya.
-Ping-pong itu membalik keputusan M3 yang mengerjakan akumulasi lewat blend unit,
-dan pembalikannya beralasan: blending hanya bisa memadu di texel yang sama,
-sedangkan reproyeksi justru membaca texel yang lain.
+#### Sisi GPU-nya
+
+**Akumulasi pindah dari blend unit ke shader, membalik keputusan M3.** M3 memadu
+di tempat lewat `vkCmdSetBlendConstants` — tiga tekstur, tanpa ping-pong, tanpa
+pertanyaan "yang mana yang berlaku sekarang". Reproyeksi mematahkannya: blending
+hanya bisa memadu di texel yang sama, sedangkan titik dunia yang sama ada di
+**ubin yang berbeda** begitu kamera bergerak. Riwayatnya disalin ke tekstur
+tersendiri sesudah tiap pass, bukan dibaca lewat set descriptor kedua — salinan
+empat tekstur 80×45 lebih murah daripada satu pertanyaan yang harus dijawab di
+setiap pass yang membacanya.
+
+Riwayat disalin **sebelum** disaring. Menyaring lalu menyimpannya sebagai riwayat
+membuat penyaring memakan keluarannya sendiri frame demi frame, dan hasilnya
+kabur yang terus melebar tanpa batas.
+
+**Penyaringnya bekerja di kisi probe, bukan di resolusi layar.** Derau yang
+terlihat adalah derau per-probe, dan setiap piksel toh sudah menginterpolasi
+empat probe. Menyaring di resolusi layar berarti menyaring 800 ribu piksel untuk
+menghapus derau yang hanya punya 3600 derajat kebebasan.
+
+**Normal probe dikemas ke mantissa sebuah float, bukan lewat `f32tof16`.**
+Intrinsik itu memancarkan kapabilitas SPIR-V Float16 dan Int16, dan keduanya
+menuntut fitur perangkat yang tidak ada di baseline — syarat perangkat baru demi
+mengemas sebuah normal yang hanya dipakai sebagai bobot. Ditemukan validation
+layer. Nilainya selalu di [1,2): eksponennya tetap, jadi tidak ada pola bit yang
+bisa menjadi inf atau NaN, yang payload-nya tidak dijamin selamat melewati
+tekstur.
+
+#### Periode jitter dipisahkan dari jendela akumulasi
+
+Keduanya sempat satu angka, dan itu tampak masuk akal — sampai jendelanya
+dipendekkan dari 16 ke 5 demi kriteria respons, dan urutan jitternya ikut runtuh
+menjadi lima pola yang berulang selamanya. **Uji tungku yang menangkapnya:**
+iradiansi meleset 10% dari πL karena arah yang tersedia tidak lagi menutupi bola
+dengan merata. Keduanya menjawab pertanyaan yang berbeda — yang satu seberapa
+cepat GI merespons perubahan, yang lain berapa banyak pola sampel berbeda yang
+ada sebelum berulang — dan menyatukannya berarti tidak bisa menyetel salah
+satunya tanpa merusak yang lain.
+
+#### Kriteria selesai M5 — terpenuhi
+
+Rencana menyebutnya: "lampu dinyalakan-matikan, GI merespons < 200 ms tanpa
+ghosting yang terlihat."
+
+**Stimulusnya bukan lampu, dan alasannya adalah temuan tersendiri.** Menyalakan
+dan mematikan lampu titik di Cornell box hampir tidak menggerakkan iradiansi sama
+sekali — terukur, bukan diperkirakan: lampunya dihapus dan angkanya bergeser
+0,5 dari 52. Sebabnya suku ambient tetap `0.25` di `box.frag.slang`, yang
+mendominasi warna yang dibaca probe. Suku itu memang penambal sementara sampai
+pipeline material menggantikannya, dan **GI-lah yang seharusnya menggantikannya**
+— yaitu M6. Sampai saat itu, perubahan pencahayaan tidak bisa dipakai sebagai
+stimulus di adegan ini.
+
+Yang dipakai sebagai gantinya: **menghapus dinding hijau**, yaitu menghilangkan
+permukaan terang yang memantul — perubahan mendadak pada radiansi yang masuk,
+persis jenis perubahan yang ditanyakan kriterianya. Diukur pada lantai tepat di
+depannya, memisahkan rembesan warna dari terang biasa lewat selisih kanal hijau
+dan merah:
+
+| waktu | rembesan (G−R) |
+|---|---|
+| 0 ms | −4,96 |
+| 32 ms | −4,96 |
+| **48 ms** | **0,00** |
+| 592 ms | 0,00 |
+
+**48 milidetik, dan tanpa ekor.** Anggarannya 200. Yang membuatnya jauh lebih
+cepat daripada 183 ms yang diramalkan jendela lima frame adalah penjepitan
+riwayat: perubahan sebesar itu tidak diluruhkan pelan-pelan, ia dijepit masuk ke
+rentang baru dalam satu frame. Nilainya langsung ke nol dan tinggal di sana —
+tidak ada ghosting yang meluruh, yang justru gejala yang dilarang kriterianya.
+
+Diperiksa juga bahwa penyaringnya benar-benar bekerja: ubin probe yang masih
+terlihat kasar di M3 dan M4 hilang, dan kestabilan kamera-diam tetap **0,0%
+piksel berubah** antar-frame. Tanpa satu pun pesan lapisan validasi.
 
 - **Anggarannya belum didamaikan dengan kriteria terima E8.** 3,0 ms adalah 18%
   dari frame 60 fps, sementara adegan uji E8 — terrain 2×2 km, 200 ribu instance

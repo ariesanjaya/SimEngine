@@ -51,6 +51,12 @@ struct ShadowParams {
     float4 cacheParams;
     // x frame akumulasi, y frame sebelum entri boleh direbut, z nomor frame.
     float4 cacheDecay;
+    // Dunia -> clip frame SEBELUMNYA. Inilah yang mengikat riwayat probe ke
+    // dunia alih-alih ke piksel.
+    float4x4 previousViewProj;
+    // x jendela akumulasi (frame), y jarak bidang untuk menolak riwayat (meter),
+    // z kosinus normal minimum, w skala penjepitan riwayat.
+    float4 denoise;
 };
 
 [[vk::binding(0, 0)]] ConstantBuffer<ShadowParams> shadowParams;

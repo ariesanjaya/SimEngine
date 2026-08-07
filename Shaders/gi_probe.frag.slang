@@ -22,6 +22,19 @@ struct ProbePush {
 
 [[vk::push_constant]] ConstantBuffer<ProbePush> pc;
 
+/// Riwayat probe frame sebelumnya, dan permukaan tempat riwayat itu duduk.
+///
+/// **Ping-pong tekstur, membalik keputusan M3 yang memadu lewat blend unit.**
+/// Blending hanya bisa memadu di texel yang sama; reproyeksi justru membaca
+/// texel yang lain — titik dunia yang sama ada di ubin yang berbeda begitu
+/// kamera bergerak. Salinannya dibuat sesudah pass ini, jadi descriptor-nya
+/// tetap dan tidak ada pertanyaan "yang mana yang berlaku sekarang".
+[[vk::binding(17, 0)]] Sampler2D historyShR;
+[[vk::binding(18, 0)]] Sampler2D historyShG;
+[[vk::binding(19, 0)]] Sampler2D historyShB;
+/// xyz posisi dunia probe, w normal tersandi oktahedral ke dua setengah-float.
+[[vk::binding(20, 0)]] Sampler2D historySurface;
+
 /// Normal per piksel dari depth prepass, tersandi oktahedral.
 [[vk::binding(11, 0)]] Sampler2D gbufferNormal;
 /// Warna yang sudah tersinari. **Inilah satu-satunya sumber radiansi yang
@@ -36,7 +49,33 @@ struct ProbeSh {
     float4 r : SV_Target0;
     float4 g : SV_Target1;
     float4 b : SV_Target2;
+    /// xyz posisi dunia probe, w normal tersandi. Ditulis supaya frame
+    /// berikutnya bisa memutuskan apakah riwayat ini masih berlaku baginya.
+    float4 surface : SV_Target3;
 };
+
+/// Normal dikemas ke mantissa sebuah float di [1,2), dua belas bit per sumbu.
+///
+/// **Bukan `f32tof16`.** Intrinsik itu memancarkan kapabilitas SPIR-V Float16
+/// dan Int16, dan keduanya menuntut fitur perangkat yang tidak ada di baseline —
+/// syarat perangkat baru demi mengemas sebuah normal yang hanya dipakai sebagai
+/// bobot. Dan `asfloat` atas pola bit sembarang bisa menghasilkan NaN, yang
+/// payload-nya tidak dijamin selamat melewati tekstur.
+///
+/// Nilainya selalu di [1,2): eksponennya tetap, jadi tidak ada pola bit yang
+/// bisa menjadi inf atau NaN. Nol berarti "tidak ada permukaan di sini".
+float packNormal(float3 normal) {
+    float2 oct = saturate(octEncode(normal));
+    uint x = uint(oct.x * 4095.0 + 0.5);
+    uint y = uint(oct.y * 4095.0 + 0.5);
+    return 1.0 + float(x + y * 4096u) / 16777216.0;
+}
+
+float3 unpackNormal(float packed) {
+    uint bits = uint((packed - 1.0) * 16777216.0 + 0.5);
+    float2 oct = float2(float(bits & 4095u), float((bits >> 12) & 4095u)) / 4095.0;
+    return octDecode(oct);
+}
 
 [shader("fragment")]
 ProbeSh main(float4 position : SV_Position) {
@@ -69,10 +108,12 @@ ProbeSh main(float4 position : SV_Position) {
 
     float4 world = mul(shadowParams.invViewProj, float4(uv * 2.0 - 1.0, depth, 1.0));
     float3 origin = world.xyz / world.w;
+    float3 surfaceNormal = octDecode(gbufferNormal.Load(int3(int2(pixel), 0)).rg);
+    output.surface = float4(origin, packNormal(surfaceNormal));
 
     uint rayCount = pc.grid.w * pc.grid.w;
     uint frame = uint(pc.params.x);
-    uint accumulation = uint(pc.params.y);
+    uint jitterPeriod = uint(pc.params.y);
     float tMax = pc.params.z;
 
     // **Sinar yang radiansinya tidak diketahui dibuang, bukan dihitung nol.**
@@ -86,7 +127,7 @@ ProbeSh main(float4 position : SV_Position) {
     uint known = 0u;
     for (uint ray = 0u; ray < rayCount; ++ray) {
         float3 direction =
-            giProbeRayDirection(ray, frame, probeIndex, pc.grid.w, accumulation);
+            giProbeRayDirection(ray, frame, probeIndex, pc.grid.w, jitterPeriod);
         TieredHit hit = traceTiered(origin, direction, tMax);
 
         float3 cameraPosition = shadowParams.cameraPosition.xyz;
@@ -146,5 +187,60 @@ ProbeSh main(float4 position : SV_Position) {
     output.r *= weight;
     output.g *= weight;
     output.b *= weight;
+
+    // --- Reproyeksi riwayat --------------------------------------------------
+    //
+    // **Riwayat diikat ke dunia, bukan ke piksel.** Sampai M4 seluruh riwayat
+    // dibuang begitu kamera berpindah, karena piksel yang sama menunjuk
+    // permukaan yang berbeda. Di sini titik dunia yang sama dicari di tempatnya
+    // berada frame lalu.
+    float window = max(shadowParams.denoise.x, 1.0);
+    float alpha = 1.0;
+
+    float4 previousClip = mul(shadowParams.previousViewProj, float4(origin, 1.0));
+    if (previousClip.w > 1e-6) {
+        float2 previousUv = (previousClip.xy / previousClip.w) * 0.5 + 0.5;
+        if (all(previousUv >= 0.0) && all(previousUv <= 1.0)) {
+            float2 previousPixel = previousUv * viewport;
+            int2 previousProbe = int2(clamp(previousPixel / tile - 0.5 + 0.5, float2(0.0),
+                                            float2(pc.grid.xy) - 1.0));
+
+            float4 previousSurface = historySurface.Load(int3(previousProbe, 0));
+            float3 previousNormal = unpackNormal(previousSurface.w);
+            // Ditolak lewat jarak tegak lurus bidang dan kesamaan normal — sama
+            // dengan bobot interpolasi probe, dan alasannya sama: dua titik di
+            // lantai yang sama boleh berjauhan, dua titik terpisah dinding tidak
+            // boleh berdekatan.
+            float plane = abs(dot(previousSurface.xyz - origin, surfaceNormal));
+            float cosine = dot(previousNormal, surfaceNormal);
+            bool usable = previousSurface.w != 0.0 && plane <= shadowParams.denoise.y &&
+                          cosine >= shadowParams.denoise.z;
+            if (usable) {
+                float4 historyR = historyShR.Load(int3(previousProbe, 0));
+                float4 historyG = historyShG.Load(int3(previousProbe, 0));
+                float4 historyB = historyShB.Load(int3(previousProbe, 0));
+
+                // **Penjepitan riwayat memutus pertukaran respons lawan derau.**
+                // Jendela pendek merespons cepat tapi berderau; jendela panjang
+                // sebaliknya. Selama riwayatnya sejalan dengan sampel frame ini
+                // ia dipertahankan utuh; begitu adegannya benar-benar berubah —
+                // lampu dimatikan — riwayat yang sudah tidak sejalan dijepit
+                // masuk ke rentang baru dalam satu frame, bukan meluruh
+                // perlahan sebagai ghosting.
+                float scale = shadowParams.denoise.w;
+                float4 spreadR = abs(output.r) * scale + 1e-3;
+                float4 spreadG = abs(output.g) * scale + 1e-3;
+                float4 spreadB = abs(output.b) * scale + 1e-3;
+                historyR = clamp(historyR, output.r - spreadR, output.r + spreadR);
+                historyG = clamp(historyG, output.g - spreadG, output.g + spreadG);
+                historyB = clamp(historyB, output.b - spreadB, output.b + spreadB);
+
+                alpha = 1.0 / window;
+                output.r = lerp(historyR, output.r, alpha);
+                output.g = lerp(historyG, output.g, alpha);
+                output.b = lerp(historyB, output.b, alpha);
+            }
+        }
+    }
     return output;
 }

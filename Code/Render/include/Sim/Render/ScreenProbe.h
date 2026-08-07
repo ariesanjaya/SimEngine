@@ -28,8 +28,29 @@ struct ProbeGridSettings {
     uint32_t tileSize = 16;
     /// Akar jumlah ray per probe per frame. 4 berarti 4×4 = 16 arah.
     uint32_t raysPerAxis = 4;
-    /// Banyaknya frame yang diakumulasi. Rencana GI menyebut 8–16.
-    uint32_t accumulationFrames = 16;
+    /// Banyaknya frame yang diakumulasi.
+    ///
+    /// **Lima, bukan enam belas, dan angkanya datang dari pengukuran.** Kriteria
+    /// selesai M5 menuntut GI merespons lampu dinyalakan-matikan di bawah 200 ms
+    /// — dua belas frame pada 60 Hz. `FramesToRespond` menunjukkan jendela 16
+    /// butuh 36 frame (600 ms) dan jendela 5 butuh 11 (183 ms). Rencana GI
+    /// menyebut 8–16, dan angka itu ternyata tidak pernah bisa memenuhi
+    /// kriterianya sendiri; yang membuat jendela sependek ini bisa ditoleransi
+    /// adalah penyaring à-trous dan penjepitan riwayat.
+    uint32_t accumulationFrames = 5;
+    /// Panjang urutan jitter sebelum ia berulang.
+    ///
+    /// **Terpisah dari jendela akumulasi, dan pemisahannya lahir dari sebuah
+    /// kesalahan.** Keduanya sempat satu angka, dan itu tampak masuk akal —
+    /// sampai jendelanya dipendekkan dari 16 ke 5 demi kriteria respons M5, dan
+    /// urutan jitternya ikut runtuh menjadi lima pola yang berulang selamanya.
+    /// Uji tungku yang menangkapnya: iradiansi meleset 10% dari πL karena arah
+    /// yang tersedia tidak lagi menutupi bola dengan merata. Keduanya menjawab
+    /// pertanyaan yang berbeda — yang satu seberapa cepat GI merespons
+    /// perubahan, yang lain berapa banyak pola sampel berbeda yang ada sebelum
+    /// berulang — dan menyatukannya berarti tidak bisa menyetel salah satunya
+    /// tanpa merusak yang lain.
+    uint32_t jitterPeriod = 64;
 };
 
 /// Kisi probe di atas layar: satu probe per ubin `tileSize`×`tileSize` piksel.

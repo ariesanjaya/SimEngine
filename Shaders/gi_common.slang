@@ -63,11 +63,15 @@ float2 giProbeOffset(uint probeIndex) {
 /// Satu ray per sel oktahedral, jadi keenam belasnya menutupi seluruh bola tiap
 /// frame; yang berjitter hanya letaknya di dalam selnya.
 float3 giProbeRayDirection(uint ray, uint frame, uint probeIndex, uint raysPerAxis,
-                           uint accumulationFrames) {
+                           uint jitterPeriod) {
     uint axis = max(raysPerAxis, 1u);
+    uint period = max(jitterPeriod, 1u);
     uint index = ray % (axis * axis);
     float2 cell = float2(float(index % axis), float(index / axis));
-    float2 jitter = giHammersley(frame, accumulationFrames) + giProbeOffset(probeIndex);
+    // Periode jitter terpisah dari jendela akumulasi: yang satu menjawab berapa
+    // banyak pola sampel berbeda yang ada sebelum berulang, yang lain seberapa
+    // cepat GI merespons perubahan.
+    float2 jitter = giHammersley(frame % period, period) + giProbeOffset(probeIndex);
     return octDecode((cell + frac(jitter)) / float(axis));
 }
 

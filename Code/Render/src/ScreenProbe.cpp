@@ -78,6 +78,7 @@ void ProbeGrid::Configure(uint32_t viewportWidth, uint32_t viewportHeight,
     settings_.tileSize = std::max(settings.tileSize, 1u);
     settings_.raysPerAxis = std::max(settings.raysPerAxis, 1u);
     settings_.accumulationFrames = std::max(settings.accumulationFrames, 1u);
+    settings_.jitterPeriod = std::max(settings.jitterPeriod, 1u);
     viewport_ = {viewportWidth, viewportHeight};
     if (viewportWidth == 0 || viewportHeight == 0) {
         counts_ = {0, 0};
@@ -118,7 +119,8 @@ Vec3 ProbeRayDirection(uint32_t ray, uint32_t frame, uint32_t probeIndex,
     // setiap frame. Yang berjitter hanya letaknya di dalam selnya — stratifikasi
     // yang hilang kalau seluruh arah diacak bebas, dan tanpa stratifikasi
     // separuh bola bisa tidak tersampel sama sekali pada sebuah frame.
-    const Vec2 jitter = Hammersley2D(frame, settings.accumulationFrames) +
+    const Vec2 jitter = Hammersley2D(frame % std::max(settings.jitterPeriod, 1u),
+                                     std::max(settings.jitterPeriod, 1u)) +
                         ProbeOffset(probeIndex);
     const Vec2 within(jitter.x - std::floor(jitter.x), jitter.y - std::floor(jitter.y));
 

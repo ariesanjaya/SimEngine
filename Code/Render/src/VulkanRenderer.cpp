@@ -87,10 +87,15 @@ struct ShadowUniforms {
     Vec4 cacheParams{0.0f};
     /// x frame akumulasi, y frame sebelum entri boleh direbut, z nomor frame.
     Vec4 cacheDecay{0.0f};
+    /// Dunia → clip frame sebelumnya.
+    Mat4 previousViewProj{1.0f};
+    /// x jendela akumulasi, y jarak bidang penolakan riwayat, z kosinus normal
+    /// minimum, w skala penjepitan riwayat.
+    Vec4 denoise{0.0f};
 };
-// 6 mat4 + 18 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
+// 7 mat4 + 19 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
 // memperbarui shader-nya menjadi galat kompilasi, bukan bayangan yang bergeser.
-static_assert(sizeof(ShadowUniforms) == 6 * 64 + 18 * 16,
+static_assert(sizeof(ShadowUniforms) == 7 * 64 + 19 * 16,
               "ShadowUniforms harus cocok dengan blok ShadowParams di shadow_common.slang");
 
 /// Cermin dari `GpuLight` di Shaders/cluster_common.glsl. std430.
@@ -532,19 +537,22 @@ public:
         // pengukuran itu sendiri.
         screenTraceEnabled_ = desc.gi.enabled && desc.gi.screenTrace;
 
-        // **Riwayat probe terikat ke piksel, dan piksel yang sama menunjuk
-        // permukaan yang berbeda begitu kamera bergerak.** Sampai reproyeksi
-        // datang di M5, satu-satunya jawaban yang jujur adalah membuangnya:
-        // bobot 1,0 berarti frame ini menggantikan seluruh riwayat. Menyimpannya
-        // akan membuat cahaya terseret mengikuti kamera — ghosting yang justru
-        // paling terlihat pada gerakan paling pelan.
+        // **Riwayat tidak lagi dibuang saat kamera bergerak.** Sampai M4 ia
+        // dibuang seluruhnya, karena riwayatnya terikat ke piksel dan piksel
+        // yang sama menunjuk permukaan yang berbeda. Reproyeksi mengikatnya ke
+        // dunia; validasi bidang dan normal yang menolaknya kalau titik yang
+        // ditemukan ternyata milik permukaan lain. Yang tersisa hanya satu
+        // keadaan yang benar-benar menuntut pembuangan: frame pertama, saat
+        // isinya belum pernah ditulis sama sekali.
         probeGrid_.Configure(target_.Width(), target_.Height(), ProbeGridSettings{});
-        const bool viewMoved = viewProj != lastViewProj_;
+        // **Diambil sebelum ditimpa.** Bentuk pertama saya menyalinnya sesudah
+        // `lastViewProj_` diperbarui, jadi yang dikirim ke shader adalah matriks
+        // frame ini — dan reproyeksi menjadi pemetaan identitas yang tidak
+        // pernah salah dan tidak pernah berguna.
+        previousViewProj_ = probeFrame_ == 0 ? viewProj : lastViewProj_;
         lastViewProj_ = viewProj;
-        probeFrame_ = viewMoved ? 0 : probeFrame_ + 1;
-        const uint32_t accumulated =
-            std::min(probeFrame_ + 1, probeGrid_.Settings().accumulationFrames);
-        probeBlend_ = 1.0f / static_cast<float>(accumulated);
+        probeReset_ = probeFrame_ == 0;
+        ++probeFrame_;
         ++cacheFrame_;
         sdfDebugEnabled_ = desc.gi.enabled && sdfClipmap_.IsValid() &&
                            desc.gi.debugView != GiDebugView::Off;
@@ -650,7 +658,8 @@ public:
         }
         if (probePassId_ != kInvalidPass) {
             recorders[probePassId_] = [&](VkCommandBuffer command) {
-                probes_.Record(command, slot.shadowSet, probeGrid_, probeFrame_, probeBlend_);
+                probes_.Record(command, slot.shadowSet, probeGrid_, probeFrame_,
+                               probeReset_);
             };
         }
         if (giDebugId_ != kInvalidPass) {
@@ -1554,7 +1563,7 @@ private:
         samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
         SIM_VK_CHECK(vkCreateSampler(device_.Handle(), &samplerInfo, nullptr, &shadow_.sampler));
 
-        const std::array<VkDescriptorSetLayoutBinding, 17> bindings{
+        const std::array<VkDescriptorSetLayoutBinding, 21> bindings{
             VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
@@ -1589,6 +1598,14 @@ private:
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{17, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{18, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{19, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{20, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
         };
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1601,7 +1618,7 @@ private:
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                  static_cast<uint32_t>(slots_.size())},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                 static_cast<uint32_t>(slots_.size()) * 11},
+                                 static_cast<uint32_t>(slots_.size()) * 15},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                  static_cast<uint32_t>(slots_.size()) * 5},
         };
@@ -1767,7 +1784,7 @@ private:
         // bayangan sebagai pengganti — descriptor yang dibiarkan kosong adalah
         // pelanggaran di setiap draw, bahkan pada pass yang tidak membacanya.
         const VkDescriptorImageInfo hizImage = HizDescriptorImage();
-        const std::array<VkDescriptorImageInfo, 5> probeImages = ProbeDescriptorImages();
+        const std::array<VkDescriptorImageInfo, 9> probeImages = ProbeDescriptorImages();
         // Cache radiansi dipakai bersama seluruh slot: ia riwayat lintas frame,
         // bukan data per frame. Kalau gagal dibuat, descriptor-nya menunjuk
         // buffer lampu — descriptor yang dibiarkan kosong adalah pelanggaran di
@@ -1833,9 +1850,15 @@ private:
             pyramid.pImageInfo = &hizImage;
             writes.push_back(pyramid);
 
+            // Sembilan image menempati binding 11..15 dan 17..20: 16 dipakai
+            // buffer cache radiansi, dan menyisipkannya di tengah deretan itu
+            // adalah cara paling murah membuat seluruh binding sesudahnya
+            // bergeser satu tanpa satu pun galat.
+            static constexpr std::array<uint32_t, 9> kProbeBindings{11, 12, 13, 14, 15,
+                                                                    17, 18, 19, 20};
             for (uint32_t offset = 0; offset < probeImages.size(); ++offset) {
                 VkWriteDescriptorSet probe = sampled;
-                probe.dstBinding = 11 + offset;
+                probe.dstBinding = kProbeBindings[offset];
                 probe.pImageInfo = &probeImages[offset];
                 writes.push_back(probe);
             }
@@ -1880,19 +1903,23 @@ private:
     /// bayangan sebagai pengganti kalau probe gagal dibuat. Descriptor yang
     /// dibiarkan kosong adalah pelanggaran di setiap draw, bahkan pada pass yang
     /// tidak membacanya.
-    std::array<VkDescriptorImageInfo, 5> ProbeDescriptorImages() const {
+    std::array<VkDescriptorImageInfo, 9> ProbeDescriptorImages() const {
         const bool ready = probes_.IsValid();
         const VkSampler sampler = ready ? probes_.Sampler() : shadow_.sampler;
-        std::array<VkDescriptorImageInfo, 5> images{};
-        images[0] = {sampler, ready ? probes_.NormalView() : shadow_.arrayView,
+        const VkImageView fallback = shadow_.arrayView;
+        std::array<VkDescriptorImageInfo, 9> images{};
+        images[0] = {sampler, ready ? probes_.NormalView() : fallback,
                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-        images[1] = {sampler, ready ? target_.ColorView() : shadow_.arrayView,
+        images[1] = {sampler, ready ? target_.ColorView() : fallback,
                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         for (uint32_t channel = 0; channel < ProbeField::kShChannels; ++channel) {
-            images[2 + channel] = {sampler,
-                                   ready ? probes_.ShView(channel) : shadow_.arrayView,
+            images[2 + channel] = {sampler, ready ? probes_.ShView(channel) : fallback,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            images[5 + channel] = {sampler, ready ? probes_.HistoryShView(channel) : fallback,
                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         }
+        images[8] = {sampler, ready ? probes_.HistorySurfaceView() : fallback,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         return images;
     }
 
@@ -1932,18 +1959,24 @@ private:
     /// Menulis ulang binding piramida dan probe saja.
     void UpdateGiDescriptors() {
         const VkDescriptorImageInfo hiz = HizDescriptorImage();
-        const std::array<VkDescriptorImageInfo, 5> probeImages = ProbeDescriptorImages();
+        const std::array<VkDescriptorImageInfo, 9> probeImages = ProbeDescriptorImages();
         std::vector<VkWriteDescriptorSet> writes;
-        writes.reserve(slots_.size() * 6);
+        writes.reserve(slots_.size() * 11);
         for (const InstanceSlot& slot : slots_) {
-            for (uint32_t binding = 10; binding <= 15; ++binding) {
-                VkWriteDescriptorSet write{};
-                write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-                write.dstSet = slot.shadowSet;
-                write.dstBinding = binding;
-                write.descriptorCount = 1;
-                write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-                write.pImageInfo = binding == 10 ? &hiz : &probeImages[binding - 11];
+            static constexpr std::array<uint32_t, 9> kProbeBindings{11, 12, 13, 14, 15,
+                                                                    17, 18, 19, 20};
+            VkWriteDescriptorSet pyramid{};
+            pyramid.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            pyramid.dstSet = slot.shadowSet;
+            pyramid.dstBinding = 10;
+            pyramid.descriptorCount = 1;
+            pyramid.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            pyramid.pImageInfo = &hiz;
+            writes.push_back(pyramid);
+            for (uint32_t offset = 0; offset < probeImages.size(); ++offset) {
+                VkWriteDescriptorSet write = pyramid;
+                write.dstBinding = kProbeBindings[offset];
+                write.pImageInfo = &probeImages[offset];
                 writes.push_back(write);
             }
         }
@@ -2249,6 +2282,10 @@ private:
         uniforms.cacheDecay = Vec4(static_cast<float>(cacheSettings_.accumulationFrames),
                                    static_cast<float>(cacheSettings_.staleFrames),
                                    static_cast<float>(cacheFrame_), 0.0f);
+        uniforms.previousViewProj = previousViewProj_;
+        uniforms.denoise =
+            Vec4(static_cast<float>(probeGrid_.Settings().accumulationFrames),
+                 kHistoryPlaneDistance, kHistoryNormalCosine, kHistoryClampScale);
         slot.shadowUniform.Write(&uniforms, sizeof(uniforms));
     }
 
@@ -2377,10 +2414,12 @@ private:
     ProbeGrid probeGrid_;
     uint32_t probeFrame_ = 0;
     Mat4 lastViewProj_{0.0f};
-    float probeBlend_ = 1.0f;
+    bool probeReset_ = true;
     /// Nomor frame cache. Naik terus, tidak di-reset saat kamera bergerak: entri
     /// cache terikat ke dunia, bukan ke piksel.
     uint32_t cacheFrame_ = 0;
+    /// Dunia → clip frame sebelumnya, dipakai reproyeksi riwayat probe.
+    Mat4 previousViewProj_{1.0f};
     std::filesystem::path shaderDirectory_;
     uint64_t sdfVoxelsWritten_ = 0;
     float sdfUpdateMs_ = 0.0f;
@@ -2454,6 +2493,14 @@ private:
     static constexpr float kScreenOriginBias = 0.02f;
     /// Normal disandikan oktahedral ke dua kanal 16-bit.
     static constexpr VkFormat kNormalFormat = VK_FORMAT_R16G16_SFLOAT;
+    /// Riwayat yang lebih jauh dari ini di depan bidang piksel ditolak, meter.
+    static constexpr float kHistoryPlaneDistance = 0.15f;
+    /// Kesamaan normal minimum sebelum riwayat ditolak.
+    static constexpr float kHistoryNormalCosine = 0.7f;
+    /// Seberapa longgar riwayat dijepit ke sekitar sampel frame ini. Terlalu
+    /// ketat menghapus riwayat yang masih sah dan mengembalikan deraunya;
+    /// terlalu longgar tidak menjepit apa pun dan ghosting-nya kembali.
+    static constexpr float kHistoryClampScale = 4.0f;
 
     ResourceId atlasId_ = kInvalidResource;
     PassId atlasPassId_ = kInvalidPass;

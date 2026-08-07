@@ -46,6 +46,7 @@ sim_compile_shaders(SimShadersGrid
         ${CMAKE_SOURCE_DIR}/Shaders/hiz_reduce.vert.slang
         ${CMAKE_SOURCE_DIR}/Shaders/hiz_reduce.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/gi_probe.frag.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/gi_filter.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/sdf_debug.vert.slang
         ${CMAKE_SOURCE_DIR}/Shaders/sdf_debug.frag.slang)
 # openpbr.slang sengaja tidak ada di daftar ini. Ia modul pustaka tanpa entry
