@@ -552,6 +552,7 @@ void EditorApp::DrawFrame(float deltaSeconds) {
     // Mendahului panel: hasil pemindaian latar diterapkan di sini, sehingga
     // seluruh panel dalam frame ini melihat daftar aset yang sama.
     assets_.Update(deltaSeconds);
+    ApplyTimeOfDay(deltaSeconds);
     if (context_.thumbnails != nullptr) {
         context_.thumbnails->Update();
     }
@@ -610,6 +611,46 @@ void EditorApp::DrawFrame(float deltaSeconds) {
     DrawLevelDialogs();
     DrawExitPrompt();
     UpdateAutosave(deltaSeconds);
+}
+
+void EditorApp::ApplyTimeOfDay(float deltaSeconds) {
+    if (!context_.timeOfDayEnabled) {
+        return;
+    }
+    context_.timeOfDayClock.Advance(deltaSeconds);
+    context_.sunPlacement.hour = context_.timeOfDayClock.Hour();
+    const render::TimeOfDayState state =
+        render::EvaluateTimeOfDay(context_.timeOfDayPreset, context_.sunPlacement);
+
+    // **Yang digerakkan adalah lampu matahari di scene, bukan sebuah jalur
+    // langit tersendiri.** Arah dan radiance matahari sudah mengalir dari
+    // `LightComponent` ke cascade bayangan sejak E8.3, jadi memutar lampunya
+    // otomatis memutar bayangannya — dan tidak ada satu pun sistem hilir yang
+    // perlu tahu bahwa ada siklus siang-malam sama sekali.
+    for (const auto raw : world_.Registry().view<scene::LightComponent>()) {
+        const auto entity = static_cast<scene::Entity>(raw);
+        auto* light = world_.TryGet<scene::LightComponent>(entity);
+        if (light == nullptr || light->type != scene::LightType::Directional) {
+            continue;
+        }
+        auto* transform = world_.TryGet<scene::TransformComponent>(entity);
+        if (transform == nullptr) {
+            continue;
+        }
+        // Rotasi yang membuat sumbu −Z entity menunjuk **menjauhi** matahari:
+        // lampu directional memancar ke arah hadapnya, sedangkan
+        // `SunPosition::direction` menunjuk dari permukaan ke matahari.
+        // Membalikkannya tidak menghasilkan galat apa pun — hanya adegan yang
+        // tersinari dari arah berlawanan.
+        transform->rotation = render::LookRotation(-state.sun.direction);
+        light->color = state.sunRadiance;
+        // Intensitasnya sudah menyatu ke dalam radiance-nya. Menyimpannya dua
+        // kali berarti dua angka yang bisa berselisih, dan yang satu tidak
+        // terlihat di panel mana pun.
+        light->intensity = 1.0f;
+        world_.MarkTransformDirty(entity);
+        break;
+    }
 }
 
 void EditorApp::DrawLevelDialogs() {

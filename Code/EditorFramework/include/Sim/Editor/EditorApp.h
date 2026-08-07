@@ -133,6 +133,7 @@ private:
 
     enum class Dialog { None, SaveAs, Open };
 
+    void ApplyTimeOfDay(float deltaSeconds);
     void DrawLevelDialogs();
     void DrawExitPrompt();
     void UpdateAutosave(float deltaSeconds);

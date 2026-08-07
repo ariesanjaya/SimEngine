@@ -20,6 +20,7 @@ sim_add_library(Render
         src/ShadowAtlas.cpp
         src/TraceBackend.cpp
         src/ShadowCascades.cpp
+        src/TimeOfDay.cpp
         src/MaterialPreviewMesh.cpp
         src/StubRenderer.cpp
         src/VulkanMaterialPreview.cpp

@@ -2,6 +2,7 @@
 
 #include "Sim/Render/IMaterialPreview.h"
 #include "Sim/Render/IViewportRenderer.h"
+#include "Sim/Render/TimeOfDay.h"
 #include "Sim/Render/ThumbnailCache.h"
 #include "Sim/Scene/World.h"
 
@@ -83,6 +84,20 @@ struct EditorContext {
     /// meneruskannya ke renderer, Statistics menyuntingnya. Pengaturan yang
     /// dimiliki salah satu panel akan hilang begitu panel itu ditutup.
     render::GiSettings gi;
+
+    /// Waktu-hari: preset kurva, jam siklus, dan tempat mataharinya.
+    ///
+    /// Di sini karena alasan yang sama dengan `gi`: dua hal menyentuhnya. Panel
+    /// Time of Day menyuntingnya, dan `EditorApp` menerapkannya ke lampu
+    /// matahari tiap frame — termasuk saat panelnya tertutup, karena siklus
+    /// siang-malam yang berhenti begitu panelnya ditutup bukan siklus.
+    render::TimeOfDayPreset timeOfDayPreset = render::TimeOfDayPreset::Default();
+    render::TimeOfDayClock timeOfDayClock;
+    render::SunPlacement sunPlacement;
+    /// False berarti lampu matahari di scene dibiarkan apa adanya. Editor yang
+    /// diam-diam menimpa nilai yang baru saja disetel tangan adalah editor yang
+    /// tidak bisa dipakai menyetel apa pun.
+    bool timeOfDayEnabled = false;
 
     /// Laju frame yang sedang dikunci, dan alasannya (monitor terlambat).
     float lockedFps = 60.0f;

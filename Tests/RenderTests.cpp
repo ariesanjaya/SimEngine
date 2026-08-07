@@ -11,6 +11,7 @@
 #include "Sim/Render/SdfClipmap.h"
 #include "Sim/Render/SdfVolume.h"
 #include "Sim/Render/ShadowAtlas.h"
+#include "Sim/Render/TimeOfDay.h"
 #include "Sim/Render/TieredTrace.h"
 #include "Sim/Render/TraceBackend.h"
 #include "Sim/Render/ShadowCascades.h"
@@ -3202,4 +3203,189 @@ TEST_CASE("Kompensasi mengembalikan energi yang hilang, bukan menambah energi ba
     CHECK(compensated.multiScatter.x > 0.5f);
     // Dan pantulan tunggalnya memang jauh dari satu — itu defisit yang ditutup.
     CHECK(rough.scale + rough.bias < 0.5f);
+}
+
+// --- E8.8: Time of day ------------------------------------------------------
+
+TEST_CASE("Matahari terbit di timur dan terbenam di barat") {
+    // Yang diminta editor Time-of-Day adalah matahari yang benar-benar berputar.
+    // Arah terbitnya ditentukan lintang dan musim, dan busur yang digambar
+    // tangan tidak bisa menyatakan keduanya.
+    SunPlacement placement;
+    placement.latitudeDegrees = 0.0f;
+    placement.dayOfYear = 80;  // ekuinoks Maret: deklinasi hampir nol
+    placement.northOffsetDegrees = 0.0f;
+
+    placement.hour = 6.0f;
+    const SunPosition sunrise = ComputeSunPosition(placement);
+    CHECK(sunrise.direction.x > 0.99f);                    // +X adalah timur
+    CHECK(std::abs(sunrise.altitude) < 0.05f);             // di horizon
+
+    placement.hour = 12.0f;
+    const SunPosition noon = ComputeSunPosition(placement);
+    CHECK(noon.direction.y > 0.99f);                       // tepat di atas
+    CHECK(noon.altitude > 1.5f);
+
+    placement.hour = 18.0f;
+    const SunPosition sunset = ComputeSunPosition(placement);
+    CHECK(sunset.direction.x < -0.99f);                    // barat
+    CHECK(std::abs(sunset.altitude) < 0.05f);
+
+    placement.hour = 0.0f;
+    CHECK(ComputeSunPosition(placement).altitude < -1.5f); // di bawah kaki
+}
+
+TEST_CASE("Lintang dan musim menentukan arah tengah hari") {
+    // Di belahan utara matahari tengah hari condong ke selatan, di selatan ke
+    // utara. Ini yang membuat bayangan tengah hari jatuh ke arah yang benar
+    // untuk lokasi adegannya — dan yang tidak bisa dinyatakan busur mana pun
+    // yang digambar untuk satu tempat saja.
+    SunPlacement north;
+    north.latitudeDegrees = 52.0f;  // Amsterdam
+    north.dayOfYear = 80;
+    north.hour = 12.0f;
+    // Utara adegan adalah −Z, jadi condong ke selatan berarti +Z.
+    CHECK(ComputeSunPosition(north).direction.z > 0.5f);
+
+    SunPlacement south = north;
+    south.latitudeDegrees = -33.0f;  // Sydney
+    CHECK(ComputeSunPosition(south).direction.z < -0.3f);
+
+    // Dan musim menggesernya: di lintang utara, matahari Juni lebih tinggi
+    // daripada matahari Desember.
+    SunPlacement june = north;
+    june.dayOfYear = 172;
+    SunPlacement december = north;
+    december.dayOfYear = 355;
+    CHECK(ComputeSunPosition(june).altitude > ComputeSunPosition(december).altitude + 0.5f);
+}
+
+TEST_CASE("Utara adegan bisa diputar tanpa memutar adegannya") {
+    // Adegan jarang dibangun menghadap utara sungguhan, dan memutar seluruh
+    // adegan agar cocok jauh lebih mahal daripada memutar mataharinya.
+    SunPlacement placement;
+    placement.latitudeDegrees = 0.0f;
+    placement.dayOfYear = 80;
+    placement.hour = 6.0f;
+
+    const SunPosition unrotated = ComputeSunPosition(placement);
+    placement.northOffsetDegrees = 90.0f;
+    const SunPosition rotated = ComputeSunPosition(placement);
+
+    // Ketinggiannya tidak boleh berubah — memutar utara memutar kompas, bukan
+    // memindahkan matahari naik atau turun.
+    CHECK(rotated.altitude == doctest::Approx(unrotated.altitude).epsilon(0.01));
+    // Tapi arahnya berputar seperempat lingkaran.
+    CHECK(std::abs(glm::dot(Vec3(rotated.direction.x, 0.0f, rotated.direction.z),
+                            Vec3(unrotated.direction.x, 0.0f, unrotated.direction.z))) < 0.05f);
+}
+
+TEST_CASE("Kurva harian siklis melintasi tengah malam") {
+    // Kurva yang berhenti di jam 24 menjadikan tengah malam sebuah loncatan —
+    // dan tengah malam justru saat yang pasti dilewati setiap siklus
+    // siang-malam. Ruas dari kunci terakhir ke kunci pertama itulah yang paling
+    // mudah terlupa.
+    TimeOfDayCurve curve({
+        {6.0f, Vec3(1.0f, 0.0f, 0.0f)},
+        {18.0f, Vec3(0.0f, 1.0f, 0.0f)},
+    });
+
+    // Tepat di kunci: nilainya persis nilai kuncinya.
+    CHECK(curve.Evaluate(6.0f).x == doctest::Approx(1.0f));
+    CHECK(curve.Evaluate(18.0f).y == doctest::Approx(1.0f));
+    // Di tengah siang: separuh jalan.
+    CHECK(curve.Evaluate(12.0f).x == doctest::Approx(0.5f));
+
+    // Melintasi tengah malam: dari jam 18 ke jam 6 berikutnya lewat jam 24,
+    // yaitu dua belas jam. Jam 0 tepat separuh jalan.
+    const Vec3 midnight = curve.Evaluate(0.0f);
+    CHECK(midnight.x == doctest::Approx(0.5f).epsilon(0.02));
+    CHECK(midnight.y == doctest::Approx(0.5f).epsilon(0.02));
+    // Dan tepat sesudah tengah malam nilainya melanjutkan arah yang sama, bukan
+    // melompat balik.
+    CHECK(curve.Evaluate(1.0f).x > midnight.x);
+    CHECK(curve.Evaluate(23.0f).x < midnight.x);
+
+    // Jam di luar rentang dibungkus, bukan dijepit.
+    CHECK(curve.Evaluate(30.0f).x == doctest::Approx(curve.Evaluate(6.0f).x));
+    CHECK(curve.Evaluate(-6.0f).x == doctest::Approx(curve.Evaluate(18.0f).x));
+}
+
+TEST_CASE("Kunci pada jam yang sama diganti, bukan ditumpuk") {
+    // Dua kunci pada jam yang sama membuat hasilnya bergantung urutan
+    // penyisipan — dan itu tidak terlihat di mana pun kecuali pada berkas yang
+    // disimpan lalu dibuka kembali.
+    TimeOfDayCurve curve;
+    curve.Set(8.0f, Vec3(1.0f));
+    curve.Set(8.0f, Vec3(2.0f));
+    CHECK(curve.KeyCount() == 1);
+    CHECK(curve.Evaluate(8.0f).x == doctest::Approx(2.0f));
+
+    // Dan urutannya tetap terjaga berapa pun urutan penyisipannya.
+    curve.Set(3.0f, Vec3(0.0f));
+    curve.Set(20.0f, Vec3(9.0f));
+    REQUIRE(curve.KeyCount() == 3);
+    CHECK(curve.Key(0).hour < curve.Key(1).hour);
+    CHECK(curve.Key(1).hour < curve.Key(2).hour);
+
+    // Kurva kosong mengembalikan nilai mundurnya, bukan nol diam-diam.
+    TimeOfDayCurve empty;
+    CHECK(empty.Evaluate(12.0f, Vec3(7.0f)).x == doctest::Approx(7.0f));
+}
+
+TEST_CASE("Jam siklus berjalan hanya saat diputar, dan membungkus di tengah malam") {
+    // Jam terpisah dari kurvanya: kurva adalah data yang disunting dan disimpan,
+    // jam adalah keadaan yang berjalan.
+    TimeOfDayClock dayClock;
+    dayClock.SetHour(23.5f);
+    dayClock.SetSpeed(1.0f);  // satu jam permainan per detik
+
+    // Berhenti: menyeret slider jam tidak boleh dilawan siklusnya sendiri.
+    dayClock.Advance(10.0f);
+    CHECK(dayClock.Hour() == doctest::Approx(23.5f));
+
+    dayClock.SetPlaying(true);
+    dayClock.Advance(1.0f);
+    CHECK(dayClock.Hour() == doctest::Approx(0.5f));  // membungkus, bukan 24,5
+
+    dayClock.SetHour(30.0f);
+    CHECK(dayClock.Hour() == doctest::Approx(6.0f));
+}
+
+TEST_CASE("Matahari diredam saat terbit dan terbenam, bukan diputus mendadak") {
+    // Matahari yang dimatikan tepat saat menyentuh horizon membuat seluruh
+    // adegan berkedip dalam satu frame — dan kedipan itu jatuh persis pada saat
+    // yang paling diperhatikan orang.
+    const TimeOfDayPreset preset = TimeOfDayPreset::Default();
+    SunPlacement placement;
+    placement.latitudeDegrees = 0.0f;
+    placement.dayOfYear = 80;
+
+    placement.hour = 12.0f;
+    const TimeOfDayState noon = EvaluateTimeOfDay(preset, placement);
+    CHECK(noon.daylight == doctest::Approx(1.0f));
+    CHECK(noon.sunRadiance.x > 3.0f);
+
+    placement.hour = 0.0f;
+    const TimeOfDayState midnight = EvaluateTimeOfDay(preset, placement);
+    CHECK(midnight.daylight == doctest::Approx(0.0f));
+    CHECK(midnight.sunRadiance.x == doctest::Approx(0.0f));
+
+    // Tepat di horizon: separuh, bukan nol dan bukan penuh.
+    placement.hour = 6.0f;
+    const TimeOfDayState sunrise = EvaluateTimeOfDay(preset, placement);
+    CHECK(sunrise.daylight > 0.3f);
+    CHECK(sunrise.daylight < 0.7f);
+
+    // Dan peredamannya monoton: tidak ada saat di mana matahari terbit membuat
+    // adegan lebih gelap daripada semenit sebelumnya.
+    float previous = -1.0f;
+    for (float hour = 5.6f; hour <= 6.4f; hour += 0.05f) {
+        placement.hour = hour;
+        // Bukan `daylight`: itu nama global POSIX di <time.h>, dan -Wshadow
+        // menangkapnya hanya di Release.
+        const float level = EvaluateTimeOfDay(preset, placement).daylight;
+        CHECK(level >= previous - 1e-4f);
+        previous = level;
+    }
 }

@@ -737,6 +737,39 @@ benar-benar berputar. Ini yang menyambungkan langit ke sistem yang sudah ada —
 arah dan radiance matahari sudah mengalir dari `LightComponent` ke cascade
 bayangan sejak E8.3, jadi memutar matahari otomatis memutar bayangannya.
 
+**Selesai** (`Code/Render/{include/Sim/Render/,src/}TimeOfDay.{h,cpp}`,
+`Code/Editor/src/TimeOfDayPanel.cpp`). Yang ada sekarang:
+
+- **Geometri matahari sungguhan**, bukan busur yang digambar tangan: deklinasi
+  dari hari ke berapa dalam setahun, sudut jam dari jamnya, lintang dari
+  tempatnya. Busur yang digambar tangan tidak bisa menyatakan musim, dan bayangan
+  tengah harinya jatuh ke arah yang salah untuk setiap lokasi kecuali yang
+  kebetulan dipakai saat menggambarnya. Terukur di editor: Jakarta (−6,2°) pada
+  titik balik Juni menunjukkan altitude tengah hari 60,4° terhadap 60,35° dari
+  hitungan tangan, dan 16:28 menunjukkan 18,3° terhadap 18,26°.
+- **Vektornya dihitung langsung dalam kerangka horizontal**, bukan lewat azimut
+  lalu dikembalikan ke vektor. Rumus azimut punya pembagian yang tidak
+  terdefinisi tepat di zenit — dan di lintang rendah zenit adalah keadaan yang
+  pasti dilewati. `LookRotation` menangani hal yang sama untuk rotasi entity-nya.
+- **Kurva siklis atas 24 jam.** Ruas dari kunci terakhir ke kunci pertama
+  melintasi tengah malam, dan itulah ruas yang paling mudah terlupa; kurva yang
+  berhenti di jam 24 menjadikan tengah malam sebuah loncatan.
+- **Jam terpisah dari kurvanya.** Kurva adalah data yang disunting dan disimpan,
+  jam adalah keadaan yang berjalan — menyatukannya berarti menggulung waktu ikut
+  mengubah berkas. Terukur: 10 menit per hari memajukan jam 16:32 → 16:42 dalam
+  empat detik nyata.
+- **Peredam terbit-terbenam ±5,7°**, bukan pemutus mendadak: matahari yang
+  dimatikan tepat saat menyentuh horizon membuat seluruh adegan berkedip dalam
+  satu frame, tepat pada saat yang paling diperhatikan orang.
+- **Sakelar "Drive the sun" mati secara bawaan.** Editor yang diam-diam menimpa
+  nilai yang baru saja disetel tangan adalah editor yang tidak bisa dipakai
+  menyetel apa pun.
+
+Kurva yang ada baru yang benar-benar tersambung ke sesuatu — warna dan intensitas
+matahari, warna langit di zenit dan horizon. Parameter Bruneton (Rayleigh, Mie,
+ketinggian lapisan) menyusul bersama pass langitnya: kurva tanpa pembaca adalah
+kurva yang tidak pernah diuji.
+
 Satu hal yang menunggu di sini dan sudah tercatat sejak E8.3:
 `ViewportDesc::exposure` berdiri sebagai pengganti tone mapping. Begitu ACES dan
 eksposur otomatis ada, ia dihapus — dan setiap lampu kembali memakai radiance
