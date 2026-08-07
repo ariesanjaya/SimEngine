@@ -386,3 +386,115 @@ TEST_CASE("memindahkan 100 entity sekaligus tetap jauh di bawah anggaran satu fr
     CHECK(perFrameMs < 1.0);
     CHECK(history.Entries().size() == 1);
 }
+
+// --- penerjemahan lampu ke ruang dunia ---------------------------------------
+
+namespace {
+
+scene::Entity MakeLight(scene::World& world, const char* name, scene::LightType type,
+                        const Quat& rotation = Quat(1.0f, 0.0f, 0.0f, 0.0f)) {
+    const scene::Entity entity = world.Create(name);
+    auto& transform = world.Add<scene::TransformComponent>(entity);
+    transform.position = Vec3(1.0f, 2.0f, 3.0f);
+    transform.rotation = rotation;
+    world.MarkTransformDirty(entity);
+    auto& light = world.Add<scene::LightComponent>(entity);
+    light.type = type;
+    return entity;
+}
+
+}  // namespace
+
+/// Lampu pertama berjenis tertentu. Dicari, bukan diindeks: urutan iterasi
+/// `entt` bukan bagian dari kontrak SceneView, dan test yang mengandaikannya
+/// akan merah karena alasan yang tidak ada hubungannya dengan yang diujinya.
+const render::LightInstance* FindLight(const render::ViewportScene& scene,
+                                       render::LightKind kind) {
+    for (const render::LightInstance& light : scene.lights) {
+        if (light.kind == kind) {
+            return &light;
+        }
+    }
+    return nullptr;
+}
+
+TEST_CASE("Arah lampu directional dibalik, arah spot tidak") {
+    scene::World world;
+    Selection selection;
+
+    // Tanpa rotasi, -Z lokal menghadap ke -Z dunia.
+    MakeLight(world, "Sun", scene::LightType::Directional);
+    MakeLight(world, "Beam", scene::LightType::Spot);
+    MakeLight(world, "Bulb", scene::LightType::Point);
+
+    SceneView view;
+    view.Build(world, selection);
+    const render::ViewportScene scene = view.Scene();
+    REQUIRE(scene.lights.size() == 3);
+
+    const render::LightInstance* sun = FindLight(scene, render::LightKind::Directional);
+    const render::LightInstance* beam = FindLight(scene, render::LightKind::Spot);
+    REQUIRE(sun != nullptr);
+    REQUIRE(beam != nullptr);
+    REQUIRE(FindLight(scene, render::LightKind::Point) != nullptr);
+
+    // **Dua konvensi yang berlawanan, dan keduanya sengaja.** Directional
+    // menyimpan arah KE cahaya — itulah yang dipakai `n·l` dan cascade bayangan.
+    // Spot menyimpan arah pancarnya. Menyamakan keduanya berarti satu tanda yang
+    // harus diingat di setiap pemakaian, dan yang lupa mendapat adegan gelap
+    // atau kerucut yang menyorot ke belakang.
+    CHECK(sun->direction.z == doctest::Approx(1.0f));
+    CHECK(beam->direction.z == doctest::Approx(-1.0f));
+}
+
+TEST_CASE("Rotasi entity memutar arah lampu") {
+    scene::World world;
+    Selection selection;
+    // Yaw 90 derajat: -Z lokal menjadi -X dunia.
+    MakeLight(world, "Beam", scene::LightType::Spot,
+              Quat(Vec3(0.0f, 90.0f * kDegToRad, 0.0f)));
+
+    SceneView view;
+    view.Build(world, selection);
+    const render::ViewportScene scene = view.Scene();
+    REQUIRE(scene.lights.size() == 1);
+    CHECK(scene.lights[0].direction.x == doctest::Approx(-1.0f).epsilon(0.001));
+    CHECK(std::abs(scene.lights[0].direction.z) < 0.001f);
+    // Posisi diambil dari kolom translasi matriks dunia, bukan dari komponen.
+    CHECK(scene.lights[0].position.y == doctest::Approx(2.0f));
+}
+
+TEST_CASE("Sudut kerucut yang tertukar dibetulkan, bukan diteruskan") {
+    scene::World world;
+    Selection selection;
+    const scene::Entity entity = MakeLight(world, "Beam", scene::LightType::Spot);
+    auto* light = world.TryGet<scene::LightComponent>(entity);
+    // Dalam lebih besar daripada luar — sah diketik pengguna, tidak sah dipakai.
+    light->innerAngleRadians = 1.0f;
+    light->outerAngleRadians = 0.4f;
+
+    SceneView view;
+    view.Build(world, selection);
+    const render::ViewportScene scene = view.Scene();
+    REQUIRE(scene.lights.size() == 1);
+
+    // Kosinus mengecil saat sudut membesar, jadi kerucut dalam harus punya
+    // kosinus yang LEBIH BESAR. Kalau keduanya diteruskan apa adanya, pembagi
+    // di shader menjadi negatif dan tepi berkasnya menyala alih-alih memudar.
+    CHECK(scene.lights[0].cosInner > scene.lights[0].cosOuter);
+    CHECK(scene.lights[0].cosOuter == doctest::Approx(std::cos(1.0f)));
+    CHECK(scene.lights[0].cosInner == doctest::Approx(std::cos(0.4f)));
+}
+
+TEST_CASE("Jari-jari sumber sampai ke renderer") {
+    scene::World world;
+    Selection selection;
+    const scene::Entity entity = MakeLight(world, "Bulb", scene::LightType::Point);
+    world.TryGet<scene::LightComponent>(entity)->sourceRadius = 0.5f;
+
+    SceneView view;
+    view.Build(world, selection);
+    const render::ViewportScene scene = view.Scene();
+    REQUIRE(scene.lights.size() == 1);
+    CHECK(scene.lights[0].sourceRadius == doctest::Approx(0.5f));
+}

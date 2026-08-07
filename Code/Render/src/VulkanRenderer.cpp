@@ -55,12 +55,27 @@ static_assert(sizeof(ShadowUniforms) == 4 * 64 + 9 * 16,
               "ShadowUniforms harus cocok dengan blok ShadowParams di shadow_common.glsl");
 
 /// Cermin dari `GpuLight` di Shaders/cluster_common.glsl. std430.
+///
+/// **Yang bisa dihitung CPU dihitung di CPU.** Bukan demi kecepatan — beberapa
+/// pembagian per lampu tidak berarti apa-apa — melainkan supaya shader tidak
+/// punya keputusan aritmetika sendiri yang bisa menyimpang dari sisi C++. Itu
+/// disiplin yang sama dengan skala dan bias irisan cluster, dan alasannya sama:
+/// dua rumus yang setara secara matematis tapi ditulis terpisah akan berselisih
+/// di tepinya, dan selisih itu muncul sebagai lampu yang berperilaku aneh pada
+/// jarak tertentu saja.
+///
+/// Yang ikut ke sini karena itu bukan `range` melainkan `1/range²`, dan bukan
+/// `sourceRadius` melainkan `sourceRadius²` — bentuk yang benar-benar dipakai
+/// shader, sehingga tidak ada lagi kuadrat atau pembagian yang bisa ditulis
+/// berbeda di sana.
 struct GpuLight {
-    Vec4 positionRange{0.0f};
+    /// xyz posisi, w 1/range² — nol berarti lampu tanpa jangkauan berhingga.
+    Vec4 positionInvRangeSq{0.0f};
     Vec4 directionCosOuter{0.0f};
     Vec4 colorCosInner{0.0f};
-    /// x: 0 point, 1 spot. Sisanya cadangan — std430 tetap menyisipkan sampai
-    /// kelipatan 16, jadi medan cadangan ini tidak memakan apa pun.
+    /// x: 0 point, 1 spot. y: jarak minimum kuadrat, yaitu `sourceRadius²`.
+    /// z dan w cadangan — std430 menyisipkan sampai kelipatan 16, jadi keduanya
+    /// tidak memakan apa pun.
     Vec4 kind{0.0f};
 };
 static_assert(sizeof(GpuLight) == 64, "GpuLight harus cocok dengan std430-nya");
@@ -1292,11 +1307,19 @@ private:
             if (gpuLights_.size() >= kMaxClusterLights) {
                 break;
             }
+            const float range = std::max(light.range, 1e-3f);
+            // Jari-jari sumber dijaga di atas batas bawah. Nol berarti sumber
+            // yang benar-benar sebuah titik, dan kuadrat terbalik di sana tidak
+            // punya nilai berhingga sama sekali — bukan angka besar, melainkan
+            // pembagian dengan nol.
+            const float radius = std::max(light.sourceRadius, kMinSourceRadius);
+
             GpuLight gpu;
-            gpu.positionRange = Vec4(light.position, light.range);
+            gpu.positionInvRangeSq = Vec4(light.position, 1.0f / (range * range));
             gpu.directionCosOuter = Vec4(glm::normalize(light.direction), light.cosOuter);
             gpu.colorCosInner = Vec4(light.color * light.intensity, light.cosInner);
-            gpu.kind = Vec4(light.kind == LightKind::Spot ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+            gpu.kind = Vec4(light.kind == LightKind::Spot ? 1.0f : 0.0f, radius * radius, 0.0f,
+                            0.0f);
             gpuLights_.push_back(gpu);
 
             ClusterLight entry;
@@ -1498,6 +1521,10 @@ private:
     std::vector<LineVertex> lineVertices_;
 
     static constexpr std::size_t kMaxClusterLights = 256;
+    /// Jari-jari sumber terkecil yang masih menghasilkan angka berhingga, meter.
+    /// Sama dengan konstanta yang dulu tertanam di shader sebagai `1e-4` —
+    /// akarnya tepat satu sentimeter.
+    static constexpr float kMinSourceRadius = 0.01f;
     /// Cluster berhenti di jarak ini, bukan di `farZ` kamera. Irisan
     /// eksponensial sampai dua kilometer membuat irisan pertama setipis
     /// sentimeter, dan lampu punctual memang tidak relevan di kejauhan.

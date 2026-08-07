@@ -412,3 +412,54 @@ TEST_CASE("Pemakai aset ditemukan lewat reflection, termasuk yang bersarang") {
     // menjawab "hampir semuanya".
     CHECK(EntitiesUsingAsset(world, Uuid{}).empty());
 }
+
+TEST_CASE("Berkas lama tanpa sourceRadius memakai nilai bawaannya") {
+    // Menambah medan ke sebuah komponen tidak menaikkan versi skema: pembacaan
+    // melewatkan medan yang tidak ada di JSON, jadi berkas lama mendapat nilai
+    // bawaan konstruktornya. Test ini yang menjadikan itu janji, bukan
+    // pengamatan — pembacaan yang suatu saat menolak medan yang hilang akan
+    // membuat setiap level yang pernah disimpan gagal dibuka.
+    const std::string legacy = R"({
+  "schemaVersion": 2,
+  "entities": [
+    {
+      "guid": "33333333-4444-4555-8666-777777777777",
+      "components": {
+        "Name": { "name": "Old Lamp" },
+        "Light": { "type": "Point", "intensity": 3.0, "range": 25.0 }
+      }
+    }
+  ]
+})";
+
+    World world;
+    const LevelIoResult result = LoadLevelFromString(world, legacy);
+    REQUIRE(result.ok);
+
+    const Entity entity = world.FindByGuid(Uuid::Parse("33333333-4444-4555-8666-777777777777"));
+    REQUIRE(IsValid(entity));
+    const auto* light = world.TryGet<LightComponent>(entity);
+    REQUIRE(light != nullptr);
+
+    // Yang ada di berkas terbaca apa adanya...
+    CHECK(light->intensity == doctest::Approx(3.0f));
+    CHECK(light->range == doctest::Approx(25.0f));
+    // ...dan yang tidak ada memakai bawaannya, yaitu satu sentimeter — angka
+    // yang dulu tertanam di dalam shader dan kini bisa disunting.
+    CHECK(light->sourceRadius == doctest::Approx(0.01f));
+}
+
+TEST_CASE("sourceRadius bolak-balik lewat berkas") {
+    World world;
+    const Entity entity = world.Create("Lamp");
+    auto& light = world.Add<LightComponent>(entity);
+    light.type = LightType::Point;
+    light.sourceRadius = 0.35f;
+
+    World reloaded;
+    REQUIRE(LoadLevelFromString(reloaded, SaveLevelToString(world)).ok);
+    const auto* loaded = reloaded.TryGet<LightComponent>(
+        reloaded.FindByGuid(world.GuidOf(entity)));
+    REQUIRE(loaded != nullptr);
+    CHECK(loaded->sourceRadius == doctest::Approx(0.35f));
+}

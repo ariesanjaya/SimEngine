@@ -500,6 +500,51 @@ Diverifikasi di GUI: lampu point menghasilkan kolam cahaya dengan peredupan
 mulus sampai batas jangkauannya, tanpa jejak ubin cluster, berdampingan dengan
 bayangan directional. **Nol pesan validation layer.**
 
+#### Model peredupan: perbandingan dengan LightOpt (SIGGRAPH 2026)
+
+Rumus lampu punctual kita dibandingkan dengan [LightOpt: Lights Optimization for
+Real-time Rendering](https://dl.acm.org/doi/10.1145/3799902.3811072) (Chen, Cao,
+Wu, Hu), yang menyatakan modelnya mengikuti Unity, yang mengikuti Frostbite.
+Rumus lighting bukan kontribusi makalah itu — kontribusinya pengoptimal jumlah
+lampu — tapi ia menyebutkan modelnya lengkap, jadi berguna sebagai pembanding.
+
+Bentuk per-lampu **identik**: `E_i = V_i · c_i · I_i · D_i · A_i · (n·ω_i)`, dan
+peredupan sudutnya sama persis sampai ke kuadratnya. Kita juga sama-sama
+mengandaikan `V_i = 1` — bagi mereka penyederhanaan, bagi kita sementara sampai
+atlas bayangan point/spot ada.
+
+**Jendela jaraknya berbeda, dan sengaja dibiarkan berbeda.** Kita kuartik
+(`(1 − (d/r)⁴)²`, Frostbite), mereka kuadratik (`(1 − (d/r)²)²`, Unity).
+Selisihnya 1,56× pada setengah jangkauan dan 2,22× pada 0,7 jangkauan. Keduanya
+sah dan keduanya nol tepat di `range` — dan nol itulah yang membuat penyaringan
+cluster kita eksak. Yang tidak sah adalah mencampur angka intensitas yang
+di-author untuk salah satunya ke yang lain, jadi hal itu ditulis di
+`cluster_common.glsl` supaya tidak ada yang "memperbaikinya" belakangan.
+
+**Yang kita adopsi dari mereka bukan rumusnya, melainkan gagasan bahwa batas
+dekatnya harus sebuah parameter.** Bentuk mereka `a/(a + d²)` terbatas di mana
+pun lewat parameter `a`; kita memakai `1/max(d², minDist²)` dengan `minDist`
+yang dulu tertanam sebagai konstanta `1e-4` di dalam shader — yang akarnya tepat
+satu sentimeter. Jadi angkanya sudah ada, hanya tersembunyi dan tidak bisa
+di-author. Kini ia `LightComponent::sourceRadius`, bawaannya 1 cm, sehingga
+setiap lampu yang sudah ada tampak persis seperti sebelumnya.
+
+`a/(a + d²)` sendiri tidak diadopsi: ia ≈ `a/d²` di kejauhan, jadi `a` merangkap
+skala kecerahan medan jauh — mengadopsinya berarti arti `intensity` berubah
+untuk setiap lampu yang sudah ada, ditukar dengan kehalusan yang tidak terlihat
+pada raster.
+
+**Yang bisa dihitung CPU dipindahkan ke CPU.** `GpuLight` kini membawa
+`1/range²` dan `sourceRadius²`, bukan `range` dan `sourceRadius`, sehingga
+shader tidak punya kuadrat maupun pembagian yang bisa ditulis berbeda dari sisi
+C++ — disiplin yang sama dengan skala dan bias irisan cluster.
+
+Cermin C++ untuk rumus peredupannya **sengaja tidak dibuat**: cermin yang bukan
+kode yang benar-benar berjalan adalah test yang menguji dirinya sendiri, dan ia
+akan tetap hijau setelah shader-nya berubah. Yang diuji adalah bagian yang
+memang hidup di C++ — penerjemahan `LightComponent` menjadi `LightInstance`,
+tempat konvensi arah dan sudut kerucut diputuskan.
+
 **Belum ada:** pembakaran peta prefilter dan LUT ke tekstur GPU, atlas bayangan
 untuk point/spot, dan penyambungan IBL ke pipeline material.
 

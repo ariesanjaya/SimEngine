@@ -108,6 +108,9 @@ struct LightInstance {
     Vec3 color{1.0f};
     float intensity = 1.0f;
     float range = 10.0f;
+    /// Jari-jari sumber, meter. Membatasi peredupan kuadrat terbalik dari dekat:
+    /// cahaya tidak pernah lebih dekat daripada permukaan lampunya sendiri.
+    float sourceRadius = 0.01f;
     float cosInner = 0.9f;
     float cosOuter = 0.8f;
 };

@@ -149,6 +149,19 @@ struct LightComponent {
     float intensity = 1.0f;
     /// Meter. Tidak berarti untuk lampu directional.
     float range = 10.0f;
+
+    /// Jari-jari sumber cahaya, meter. Tidak berarti untuk lampu directional.
+    ///
+    /// **Peredupan kuadrat terbalik meledak di jarak nol, dan jari-jari inilah
+    /// batasnya**: cahaya tidak pernah lebih dekat daripada permukaan lampunya
+    /// sendiri. Sebelum ini angkanya ada tapi tersembunyi — renderer menjepit
+    /// jarak ke 1 cm lewat konstanta di dalam shader, jadi lampu sebesar apa pun
+    /// tetap berperilaku seperti titik seukuran kelereng dan tidak ada yang bisa
+    /// mengubahnya.
+    ///
+    /// Bawaannya sama dengan konstanta yang dulu tersembunyi itu, jadi setiap
+    /// lampu yang sudah ada tampak persis seperti sebelumnya.
+    float sourceRadius = 0.01f;
     float innerAngleRadians = 0.436f;  // 25°
     float outerAngleRadians = 0.611f;  // 35°
     bool castShadows = true;

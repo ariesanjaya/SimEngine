@@ -127,6 +127,7 @@ void SceneView::AppendLight(const scene::LightComponent& light, const Mat4& matr
     instance.color = light.color;
     instance.intensity = light.intensity;
     instance.range = light.range;
+    instance.sourceRadius = light.sourceRadius;
 
     switch (light.type) {
         case scene::LightType::Directional:
@@ -146,8 +147,14 @@ void SceneView::AppendLight(const scene::LightComponent& light, const Mat4& matr
     // Kerucut dalam harus selalu di dalam kerucut luar. Sudut yang tertukar
     // menghasilkan pembagi negatif di shader, dan tepi berkasnya menyala alih-alih
     // memudar.
+    //
+    // Keduanya diambil dari pasangan yang sama, bukan yang satu dari yang lain.
+    // Bentuk pertama saya menjepit `inner` terhadap `outer` yang sudah menjadi
+    // maksimum — hasilnya kedua sudut menjadi sama persis, pembaginya nol, dan
+    // kerucutnya kehilangan seluruh gradasinya. Ditemukan test, bukan dengan
+    // membaca ulang.
     const float outer = std::max(light.outerAngleRadians, light.innerAngleRadians);
-    const float inner = std::min(light.innerAngleRadians, outer);
+    const float inner = std::min(light.outerAngleRadians, light.innerAngleRadians);
     instance.cosOuter = std::cos(outer);
     instance.cosInner = std::cos(inner);
     lights_.push_back(instance);

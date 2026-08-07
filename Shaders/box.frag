@@ -24,6 +24,11 @@ void main() {
     float shadow = sampleShadow(inWorldPosition, normal);
     float viewDepth = dot(inWorldPosition - shadowParams.cameraPosition.xyz,
                           shadowParams.cameraForward.xyz);
+    // `punctual` adalah iradiansi E(x). Ia dijumlahkan ke suku ad-hoc di
+    // sebelahnya tanpa dibagi pi — dan itu konsisten hanya karena seluruh
+    // ekspresi ini memang ad-hoc. Jalur yang benar (albedo/pi * E) ada di
+    // openpbr.slang, dan ke sanalah lampu punctual pindah begitu pipeline
+    // material menggantikan shader ini.
     vec3 punctual = accumulateClusteredLights(gl_FragCoord.xy, inWorldPosition, normal, viewDepth);
     vec3 lit = inColor.rgb * (0.25 + 0.75 * ndotl * shadow + punctual);
     outColor = vec4(lit, inColor.a);
