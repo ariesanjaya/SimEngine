@@ -13,6 +13,7 @@
 #include "Sim/Render/ShadowAtlas.h"
 #include "Sim/Render/TimeOfDay.h"
 #include "Sim/Render/ToneMap.h"
+#include "Sim/Render/Atmosphere.h"
 #include "Sim/Render/Bloom.h"
 #include "Sim/Render/TieredTrace.h"
 #include "Sim/Render/TraceBackend.h"
@@ -3707,4 +3708,150 @@ TEST_CASE("campuran bloom menambahkan, dan pada kekuatan nol tidak mengubah apa 
     CHECK(untouched.pixels.front().x == doctest::Approx(1.0f));
     CHECK(untouched.pixels.front().y == doctest::Approx(2.0f));
     CHECK(untouched.pixels.front().z == doctest::Approx(3.0f));
+}
+
+// --- E8.8: atmosfer Bruneton-Hillaire ---------------------------------------
+
+TEST_CASE("kedalaman optik zenit numerik cocok dengan hitungan analitiknya") {
+    using namespace sim::render;
+
+    const AtmosphereParameters atmosphere;
+    // **Dua cara menghitung angka yang sama.** Untuk lapisan eksponensial,
+    // integral kerapatan sepanjang zenit tepat sama dengan tinggi skalanya;
+    // untuk ozon, luas tendanya. Angka yang hanya dihitung satu cara adalah
+    // angka yang tidak pernah diperiksa — dan seluruh warna langit bergantung
+    // pada angka ini.
+    const Vec3 origin(0.0f, 0.0f, atmosphere.bottomRadius);
+    const Vec3 zenith(0.0f, 0.0f, 1.0f);
+    const Vec3 numeric = IntegrateOpticalDepth(atmosphere, origin, zenith, 4096);
+    const Vec3 analytic = AnalyticZenithOpticalDepth(atmosphere);
+
+    CHECK(numeric.x == doctest::Approx(analytic.x).epsilon(0.005f));
+    CHECK(numeric.y == doctest::Approx(analytic.y).epsilon(0.005f));
+    CHECK(numeric.z == doctest::Approx(analytic.z).epsilon(0.005f));
+
+    // Dan angkanya memang seperti bumi: zenit meneruskan sekitar 94% merah dan
+    // 76% biru. Biru lebih banyak dihamburkan keluar — itulah sebabnya langit
+    // biru dan matahari di zenit sedikit menguning.
+    const Vec3 transmittance = Transmittance(atmosphere, origin, zenith, 4096);
+    CHECK(transmittance.x == doctest::Approx(0.940f).epsilon(0.01f));
+    CHECK(transmittance.y == doctest::Approx(0.868f).epsilon(0.01f));
+    CHECK(transmittance.z == doctest::Approx(0.762f).epsilon(0.01f));
+    CHECK(transmittance.x > transmittance.y);
+    CHECK(transmittance.y > transmittance.z);
+}
+
+TEST_CASE("jalur panjang di dekat horizon memerahkan cahaya yang lewat") {
+    using namespace sim::render;
+
+    const AtmosphereParameters atmosphere;
+    const Vec3 origin(0.0f, 0.0f, atmosphere.bottomRadius + 0.001f);
+
+    // Matahari terbenam: jalurnya jauh lebih panjang, dan biru habis lebih dulu.
+    // Inilah pernyataan numerik dari "matahari terbenam itu merah".
+    float previousRatio = 0.0f;
+    float previousLuminance = 1e9f;
+    for (const float elevation : {60.0f, 30.0f, 10.0f, 2.0f, 0.5f}) {
+        const float radians = elevation * 3.14159265f / 180.0f;
+        const Vec3 direction(std::cos(radians), 0.0f, std::sin(radians));
+        const Vec3 t = Transmittance(atmosphere, origin, direction, 4096);
+
+        // Makin rendah, makin merah — nisbah merah terhadap biru naik terus.
+        const float ratio = t.x / std::max(t.z, 1e-6f);
+        CHECK(ratio > previousRatio);
+        previousRatio = ratio;
+
+        // Dan makin rendah, makin redup seluruhnya.
+        CHECK(t.y < previousLuminance);
+        previousLuminance = t.y;
+    }
+    // Di 0,5° di atas horizon, biru tinggal sebagian kecil dari merah.
+    CHECK(previousRatio > 3.0f);
+}
+
+TEST_CASE("pemetaan uv LUT transmitansi membalik dengan tepat") {
+    using namespace sim::render;
+
+    const AtmosphereParameters atmosphere;
+    // **Pemetaan yang tidak membalik tidak menghasilkan galat apa pun**, hanya
+    // langit yang warnanya masuk akal di tempat yang salah — dan "masuk akal di
+    // tempat yang salah" adalah persis yang tidak terlihat saat memandanginya.
+    // Baris paling atas dilewati, dan itu bukan kelonggaran melainkan
+    // singularitas yang nyata: di sana pemandangnya tepat di puncak atmosfer,
+    // jadi setiap arah ke atas menempuh jarak nol dan seluruh baris memetakan ke
+    // satu titik. Pemetaannya memang tidak injektif di sana — acuan Bruneton pun
+    // begitu — dan LUT-nya tidak pernah dibaca di baris itu.
+    for (int yi = 0; yi < 16; ++yi) {
+        for (int xi = 0; xi <= 16; ++xi) {
+            const Vec2 uv(static_cast<float>(xi) / 16.0f, static_cast<float>(yi) / 16.0f);
+            const TransmittanceParams params = UvToTransmittanceParams(atmosphere, uv);
+            CHECK(params.radius >= atmosphere.bottomRadius - 1e-2f);
+            CHECK(params.radius <= atmosphere.topRadius + 1e-2f);
+            const Vec2 back = TransmittanceParamsToUv(atmosphere, params);
+            CHECK(back.x == doctest::Approx(uv.x).epsilon(0.002f));
+            CHECK(back.y == doctest::Approx(uv.y).epsilon(0.002f));
+        }
+    }
+}
+
+TEST_CASE("pemetaan uv LUT sky-view membalik dan memadat di dekat horizon") {
+    using namespace sim::render;
+
+    const AtmosphereParameters atmosphere;
+    const Vec2 dimensions(192.0f, 108.0f);
+    const float viewHeight = atmosphere.bottomRadius + 0.5f;
+
+    for (int yi = 1; yi < 108; yi += 7) {
+        for (int xi = 1; xi < 192; xi += 11) {
+            const Vec2 uv((static_cast<float>(xi) + 0.5f) / dimensions.x,
+                          (static_cast<float>(yi) + 0.5f) / dimensions.y);
+            const SkyViewParams params =
+                UvToSkyViewParams(atmosphere, uv, viewHeight, dimensions);
+            const float beta = std::asin(atmosphere.bottomRadius / viewHeight);
+            const bool intersectsGround = params.viewZenithAngle > 3.14159265f - beta;
+            const Vec2 back = SkyViewParamsToUv(atmosphere, params, viewHeight,
+                                                intersectsGround, dimensions);
+            CHECK(back.x == doctest::Approx(uv.x).epsilon(0.002f));
+            CHECK(back.y == doctest::Approx(uv.y).epsilon(0.002f));
+        }
+    }
+
+    // Dan pemadatannya nyata: sepuluh persen texel teratas dekat horizon
+    // mencakup jauh lebih sedikit sudut daripada sepuluh persen di tengah.
+    const auto span = [&](float from, float to) {
+        return UvToSkyViewParams(atmosphere, Vec2(0.5f, to), viewHeight, dimensions)
+                   .viewZenithAngle -
+               UvToSkyViewParams(atmosphere, Vec2(0.5f, from), viewHeight, dimensions)
+                   .viewZenithAngle;
+    };
+    CHECK(std::abs(span(0.45f, 0.55f)) < std::abs(span(0.05f, 0.15f)));
+}
+
+TEST_CASE("fungsi fase berintegral satu atas bola") {
+    using namespace sim::render;
+
+    // **Fase yang tidak berintegral satu memindahkan energi masuk atau keluar
+    // dari adegan pada setiap peristiwa hamburan** — dan pada ratusan langkah
+    // raymarch, selisih satu persen menjadi langit yang terlalu terang atau
+    // terlalu gelap tanpa satu pun bagian yang tampak salah sendiri.
+    constexpr int kSteps = 20000;
+    double rayleigh = 0.0;
+    double mie = 0.0;
+    for (int i = 0; i < kSteps; ++i) {
+        const double u = (static_cast<double>(i) + 0.5) / kSteps;
+        const double cosTheta = 1.0 - 2.0 * u;  // seragam dalam cos, seperti bola
+        rayleigh += RayleighPhase(static_cast<float>(cosTheta));
+        mie += MiePhase(static_cast<float>(cosTheta), 0.8f);
+    }
+    // dΩ = 2π d(cosθ), dan langkahnya 2/kSteps dalam cosθ.
+    const double scale = 2.0 * 3.14159265358979 * 2.0 / kSteps;
+    CHECK(rayleigh * scale == doctest::Approx(1.0).epsilon(0.001));
+    CHECK(mie * scale == doctest::Approx(1.0).epsilon(0.01));
+
+    // Mie sangat condong ke depan: ke arah matahari ia puluhan kali fase
+    // Rayleigh (34x pada g = 0,8), dan itulah lingkar terang di sekitar matahari.
+    CHECK(MiePhase(1.0f, 0.8f) > RayleighPhase(1.0f) * 30.0f);
+    // Rayleigh simetris ke depan dan ke belakang; Mie tidak.
+    CHECK(RayleighPhase(1.0f) == doctest::Approx(RayleighPhase(-1.0f)));
+    CHECK(MiePhase(1.0f, 0.8f) > MiePhase(-1.0f, 0.8f) * 100.0f);
 }
