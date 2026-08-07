@@ -2,10 +2,12 @@
 
 #include "Sim/Render/SdfClipmap.h"
 #include "Sim/Render/TraceBackend.h"
+#include "Sim/Render/Types.h"
 
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <span>
 #include <vector>
 
 namespace sim::render {
@@ -68,5 +70,18 @@ private:
 /// merapat hanya di dekat permukaan.
 std::unique_ptr<ITraceBackend> CreateSdfTraceBackend(const SdfVolume& volume,
                                                      uint32_t maxSteps = 64);
+
+/// Medan jarak sebuah himpunan kotak berorientasi.
+///
+/// **Jarak kotak yang diskala tak seragam hanyalah pendekatan.** Jarak yang
+/// diukur di ruang lokal berpadanan dengan antara d·min(skala) dan d·maks(skala)
+/// di dunia; mengalikannya dengan yang **terkecil** membuatnya tidak pernah
+/// melebih-lebihkan ruang kosong — dan itu arah yang aman: sphere tracing yang
+/// melangkah terlalu pendek hanya membuang langkah, sedangkan yang melangkah
+/// terlalu jauh menembus dinding.
+SdfVolume::DistanceField MakeBoxSceneField(std::span<const MeshInstance> meshes,
+                                           std::vector<Mat4>& inverseScratch,
+                                           std::vector<Vec3>& halfExtentScratch,
+                                           std::vector<float>& scaleScratch);
 
 }  // namespace sim::render

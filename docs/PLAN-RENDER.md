@@ -884,10 +884,45 @@ kaskade terdekat membuat kaskade terkasar berputar ratusan langkah.
 `TraceResult::steps` dilaporkan juga saat meleset — heatmap-nya yang menunjukkan
 ray mana yang mahal, dan ray yang mahal justru yang tidak mengenai apa pun.
 
-**Belum ada:** bake SDF per-mesh menjadi brick sparse, tekstur volume 3D di RHI
-beserta unggahan sub-wilayahnya, komposit statis + dinamis ke kaskade, dan pass
-GPU yang membacanya. Kriteria selesai M1 — depth sphere tracing cocok dengan
-depth buffer raster, dan biaya update < 0,5 ms — menunggu keempatnya.
+#### Kaskade di GPU
+
+`rhi::Texture3D` baru. **Yang membedakannya dari `Texture2D` bukan dimensinya
+melainkan pola tulisnya:** clipmap memperbarui lempeng tepi saja, jadi unggahan
+sub-wilayah adalah operasi utamanya, bukan kasus khusus. Mengunggah ulang
+seluruh volume setiap kamera bergerak meniadakan seluruh gunanya pengalamatan
+toroidal.
+
+Sampler-nya `REPEAT`, bukan `CLAMP`. Pengalamatan clipmap memang toroidal:
+koordinat yang melewati tepi harus muncul kembali di sisi seberangnya, dan
+sampler yang menjepit akan mengoles texel tepi sepanjang seluruh sisi.
+
+`UploadRegion` **menolak** sub-wilayah yang melewati tepi alih-alih menjepitnya
+— pemanggil yang belum memecah wilayah toroidalnya harus tahu, bukan mendapat
+gambar yang hampir benar.
+
+**Komposit dan penyandiannya masih di CPU, dan itu batas yang disengaja untuk
+M1.** Bake per-mesh menjadi brick sparse menuntut importir mesh yang baru datang
+di E8.4; selama geometrinya masih kotak, medan jaraknya punya bentuk analitik
+yang tepat — jadi yang diuji benar-benar clipmap dan sphere tracing-nya, bukan
+ketelitian sebuah baker yang belum ada.
+
+Jarak kotak berskala tak seragam dikalikan skala **terkecil**: jarak yang diukur
+di ruang lokal berpadanan dengan antara d·min(skala) dan d·maks(skala) di dunia,
+dan yang terkecil tidak pernah melebih-lebihkan ruang kosong. Bentuk pertama
+saya memakai yang terbesar — arah yang justru menembus dinding.
+
+Resolusinya **64³, bukan 128³** yang diminta rencana. Batasnya bukan memori
+melainkan komposit CPU: medan jaraknya dievaluasi per voxel, dan 128³ berarti
+delapan kali pekerjaan itu. Diukur: dengan GI menyala dan kamera bergerak terus,
+Release tetap **60 fps**, Debug turun ke 42. Angka Debug itu bukan masalah
+kinerja melainkan tanda bahwa komposit CPU memang tidak punya banyak ruang —
+128³ menunggu komposit compute, dan keputusan itu sekarang punya angka untuk
+bersandar.
+
+**Belum ada:** pass GPU yang benar-benar membaca kaskade — sphere tracing di
+shader dan heatmap jumlah langkahnya. Kriteria selesai M1 (depth sphere tracing
+cocok dengan depth buffer raster, biaya update < 0,5 ms) menunggu pass itu; alat
+ukurnya sudah siap sejak M0.
 
 - **Anggarannya belum didamaikan dengan kriteria terima E8.** 3,0 ms adalah 18%
   dari frame 60 fps, sementara adegan uji E8 — terrain 2×2 km, 200 ribu instance

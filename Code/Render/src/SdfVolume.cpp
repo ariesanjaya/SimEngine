@@ -1,6 +1,7 @@
 #include "Sim/Render/SdfVolume.h"
 
 #include <algorithm>
+#include <limits>
 #include <cmath>
 
 namespace sim::render {
@@ -71,7 +72,62 @@ private:
     uint32_t maxSteps_;
 };
 
+/// Jarak bertanda ke sebuah kotak berpusat di titik asal.
+float BoxDistance(const Vec3& point, const Vec3& halfExtent) {
+    const Vec3 q = glm::abs(point) - halfExtent;
+    // Suku pertama benar di luar kotak, yang kedua di dalam. Memakai salah
+    // satunya saja menghasilkan jarak yang salah tepat di sisi yang lain — dan
+    // yang di dalam kotaklah yang menentukan apakah ray yang mulai di dalam
+    // dinding bisa keluar.
+    return glm::length(glm::max(q, Vec3(0.0f))) + std::min(std::max(q.x, std::max(q.y, q.z)), 0.0f);
+}
+
 }  // namespace
+
+SdfVolume::DistanceField MakeBoxSceneField(std::span<const MeshInstance> meshes,
+                                           std::vector<Mat4>& inverseScratch,
+                                           std::vector<Vec3>& halfExtentScratch,
+                                           std::vector<float>& scaleScratch) {
+    inverseScratch.clear();
+    halfExtentScratch.clear();
+    scaleScratch.clear();
+    inverseScratch.reserve(meshes.size());
+    halfExtentScratch.reserve(meshes.size());
+    scaleScratch.reserve(meshes.size());
+
+    for (const MeshInstance& mesh : meshes) {
+        // Kotak batas dipetakan ke kubus satuan, sama seperti yang dilakukan
+        // `Gather` untuk menggambar — supaya yang di-SDF benar-benar bentuk
+        // yang tergambar, bukan bentuk yang mirip.
+        const Vec3 centre = (mesh.boundsMin + mesh.boundsMax) * 0.5f;
+        const Vec3 size = glm::max(mesh.boundsMax - mesh.boundsMin, Vec3(1e-4f));
+        Mat4 model = mesh.transform;
+        model = glm::translate(model, centre);
+        model = glm::scale(model, size);
+
+        const Vec3 scale(glm::length(Vec3(model[0])), glm::length(Vec3(model[1])),
+                         glm::length(Vec3(model[2])));
+        inverseScratch.push_back(glm::inverse(model));
+        halfExtentScratch.push_back(Vec3(0.5f));
+        // Skala **terkecil**, bukan terbesar. Jarak yang diukur di ruang lokal
+        // berpadanan dengan antara d·min(skala) dan d·maks(skala) di dunia;
+        // memakai yang terkecil membuatnya tidak pernah melebih-lebihkan ruang
+        // kosong. Arahnya penting: sphere tracing yang melangkah terlalu pendek
+        // hanya membuang langkah, sedangkan yang melangkah terlalu jauh menembus
+        // dinding.
+        scaleScratch.push_back(std::max(std::min({scale.x, scale.y, scale.z}), 1e-4f));
+    }
+
+    return [&inverseScratch, &halfExtentScratch, &scaleScratch](const Vec3& world) {
+        float nearest = std::numeric_limits<float>::max();
+        for (std::size_t i = 0; i < inverseScratch.size(); ++i) {
+            const Vec3 local = Vec3(inverseScratch[i] * Vec4(world, 1.0f));
+            nearest =
+                std::min(nearest, BoxDistance(local, halfExtentScratch[i]) * scaleScratch[i]);
+        }
+        return nearest;
+    };
+}
 
 void SdfVolume::Configure(const SdfClipmapSettings& settings) {
     clipmap_.Configure(settings);

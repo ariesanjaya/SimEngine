@@ -6,6 +6,7 @@ sim_add_library(RHI
         src/RenderTarget.cpp
         src/Swapchain.cpp
         src/Texture.cpp
+        src/Texture3D.cpp
         src/TextureCube.cpp
         src/VmaImplementation.cpp
     PUBLIC_DEPS

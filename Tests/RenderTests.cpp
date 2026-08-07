@@ -2049,3 +2049,66 @@ TEST_CASE("Langkah dibatasi, dan batasnya dilaporkan") {
     // Yang penting: ia tidak pernah melebihi anggarannya.
     CHECK(result.steps <= 8u);
 }
+
+TEST_CASE("Medan jarak kotak benar di luar maupun di dalam") {
+    // Rumus jarak kotak punya dua suku: yang pertama benar di luar, yang kedua
+    // di dalam. Memakai salah satunya saja menghasilkan jarak yang salah tepat
+    // di sisi yang lain — dan yang di dalam kotaklah yang menentukan apakah ray
+    // yang mulai di dalam dinding bisa keluar.
+    MeshInstance box;
+    box.transform = Mat4(1.0f);
+    box.boundsMin = Vec3(-1.0f);
+    box.boundsMax = Vec3(1.0f);
+    const std::array<MeshInstance, 1> meshes{box};
+
+    std::vector<Mat4> inverses;
+    std::vector<Vec3> halfExtents;
+    std::vector<float> scales;
+    const SdfVolume::DistanceField field =
+        MakeBoxSceneField(meshes, inverses, halfExtents, scales);
+
+    // Di permukaan.
+    CHECK(field(Vec3(1.0f, 0.0f, 0.0f)) == doctest::Approx(0.0f).epsilon(0.001));
+    // Di luar, tegak lurus sebuah sisi.
+    CHECK(field(Vec3(2.0f, 0.0f, 0.0f)) == doctest::Approx(1.0f).epsilon(0.001));
+    // Di luar, di seberang sebuah sudut.
+    CHECK(field(Vec3(2.0f, 2.0f, 2.0f)) == doctest::Approx(std::sqrt(3.0f)).epsilon(0.001));
+    // Di dalam: negatif, dan besarnya jarak ke sisi terdekat.
+    CHECK(field(Vec3(0.0f)) == doctest::Approx(-1.0f).epsilon(0.001));
+    CHECK(field(Vec3(0.5f, 0.0f, 0.0f)) == doctest::Approx(-0.5f).epsilon(0.001));
+}
+
+TEST_CASE("Skala tak seragam tidak pernah melebih-lebihkan ruang kosong") {
+    // Jarak yang diukur di ruang lokal berpadanan dengan antara d·min(skala)
+    // dan d·maks(skala) di dunia. Memakai yang terbesar akan membuat sphere
+    // tracing melangkah lebih jauh daripada ruang yang benar-benar kosong —
+    // dan itu menembus dinding.
+    MeshInstance box;
+    box.transform = glm::scale(Mat4(1.0f), Vec3(4.0f, 1.0f, 4.0f));
+    box.boundsMin = Vec3(-0.5f);
+    box.boundsMax = Vec3(0.5f);
+    const std::array<MeshInstance, 1> meshes{box};
+
+    std::vector<Mat4> inverses;
+    std::vector<Vec3> halfExtents;
+    std::vector<float> scales;
+    const SdfVolume::DistanceField field =
+        MakeBoxSceneField(meshes, inverses, halfExtents, scales);
+
+    // Kotaknya 4×1×4, jadi permukaan atasnya di y = 0,5. Sebuah titik 1 m di
+    // atasnya berjarak tepat 1 m.
+    const float above = field(Vec3(0.0f, 1.5f, 0.0f));
+    CHECK(above <= 1.0f + 1e-3f);
+    CHECK(above > 0.0f);
+
+    // Dan di setiap arah, jaraknya tidak boleh melebihi jarak sesungguhnya ke
+    // permukaan terdekat — diuji dengan menembakkan langkah sebesar jarak itu
+    // dan memastikan titiknya belum melewati permukaan.
+    for (const Vec3 direction : {Vec3(1, 0, 0), Vec3(0, -1, 0), Vec3(0.6f, -0.8f, 0.0f)}) {
+        const Vec3 start(0.0f, 2.0f, 0.0f);
+        const float distance = field(start);
+        const Vec3 stepped = start + glm::normalize(direction) * distance;
+        INFO("arah (", direction.x, ",", direction.y, ",", direction.z, ")");
+        CHECK(field(stepped) >= -1e-3f);
+    }
+}

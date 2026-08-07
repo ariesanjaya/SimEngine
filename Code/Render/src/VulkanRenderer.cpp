@@ -1,6 +1,7 @@
 #include "Sim/Render/RendererFactory.h"
 
 #include "FrameGraphExecutor.h"
+#include "SdfClipmapResource.h"
 #include "Sim/Core/Log.h"
 #include "Sim/RHI/Buffer.h"
 #include "Sim/RHI/Device.h"
@@ -304,6 +305,19 @@ public:
         }
         // Profiler boleh gagal dibuat; renderer tetap jalan tanpa tabel waktu.
         profiler_.Create(device_);
+
+        // 64³ dan bukan 128³ yang diminta rencana. Batasnya bukan memori
+        // melainkan komposit CPU: medan jaraknya dievaluasi per voxel di sini,
+        // dan 128³ berarti delapan kali pekerjaan itu. 128³ menunggu komposit
+        // compute — dan biayanya sekarang terukur, jadi keputusan itu punya
+        // angka untuk bersandar.
+        SdfClipmapSettings sdf;
+        sdf.resolution = 64;
+        sdf.cascadeCount = 3;
+        sdf.finestVoxelSize = 0.1f;
+        if (!sdfClipmap_.Create(device_, sdf)) {
+            SIM_WARN("Render", "SDF clipmap unavailable; GI tracing will have nothing to read");
+        }
         AdoptTargetLayout();
         AdoptShadowLayout();
         AdoptAtlasLayout();
@@ -433,6 +447,14 @@ public:
                 slot.lineBuffer.Reserve(sizeof(LineVertex) * lineVertices_.size()) &&
                 slot.lineBuffer.Write(lineVertices_.data(),
                                       sizeof(LineVertex) * lineVertices_.size());
+        }
+
+        // Clipmap SDF diperbarui hanya saat GI menyala. Membangunnya terus-
+        // menerus untuk fitur yang dimatikan adalah biaya yang tidak ada yang
+        // memintanya — dan biaya itu, di komposit CPU, bukan biaya yang kecil.
+        sdfVoxelsWritten_ = 0;
+        if (desc.gi.enabled && sdfClipmap_.IsValid()) {
+            sdfVoxelsWritten_ = sdfClipmap_.Update(desc.camera.position, scene.meshes);
         }
 
         UpdateClusters(desc, scene, aspect, slot);
@@ -1807,6 +1829,8 @@ private:
     /// adalah pekerjaan yang dibuang setiap frame.
     mutable std::vector<PassTiming> timings_;
     TraceBackendSelection giBackend_;
+    SdfClipmapResource sdfClipmap_;
+    uint64_t sdfVoxelsWritten_ = 0;
     TextureHandle textureHandle_ = kInvalidTexture;
 
     FrameGraph graph_;
