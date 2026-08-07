@@ -92,10 +92,12 @@ struct ShadowUniforms {
     /// x jendela akumulasi, y jarak bidang penolakan riwayat, z kosinus normal
     /// minimum, w skala penjepitan riwayat.
     Vec4 denoise{0.0f};
+    /// x 1 kalau iradiansi GI berlaku, y ukuran ubin probe dalam piksel.
+    Vec4 giParams{0.0f};
 };
-// 7 mat4 + 19 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
+// 7 mat4 + 20 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
 // memperbarui shader-nya menjadi galat kompilasi, bukan bayangan yang bergeser.
-static_assert(sizeof(ShadowUniforms) == 7 * 64 + 19 * 16,
+static_assert(sizeof(ShadowUniforms) == 7 * 64 + 20 * 16,
               "ShadowUniforms harus cocok dengan blok ShadowParams di shadow_common.slang");
 
 /// Cermin dari `GpuLight` di Shaders/cluster_common.glsl. std430.
@@ -373,10 +375,12 @@ public:
         if (hiz_.Create(device_, shaderDirectory_)) {
             hiz_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(), target_.DepthView(),
                        target_.Sampler());
+            hiz_.AdoptLayouts();
         }
         CreateRadianceCache();
         if (probes_.Create(device_, shaderDirectory_, shadowSetLayout_)) {
             probes_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(), kNormalFormat);
+            probes_.AdoptLayouts();
         }
         if (!WriteShadowDescriptors()) {
             return false;
@@ -444,6 +448,12 @@ public:
         // Warna target juga berpindah image saat dialokasi ulang, dan binding 12
         // menunjuknya — jadi descriptor GI ditulis ulang walaupun probe sendiri
         // tidak berubah ukuran.
+        if (hizChanged) {
+            hiz_.AdoptLayouts();
+        }
+        if (probesChanged) {
+            probes_.AdoptLayouts();
+        }
         if (hizChanged || probesChanged) {
             UpdateGiDescriptors();
         }
@@ -659,7 +669,7 @@ public:
         if (probePassId_ != kInvalidPass) {
             recorders[probePassId_] = [&](VkCommandBuffer command) {
                 probes_.Record(command, slot.shadowSet, probeGrid_, probeFrame_,
-                               probeReset_);
+                               sdfClipmap_.Volume().Clipmap().MaxRange(), probeReset_);
             };
         }
         if (giDebugId_ != kInvalidPass) {
@@ -2286,6 +2296,13 @@ private:
         uniforms.denoise =
             Vec4(static_cast<float>(probeGrid_.Settings().accumulationFrames),
                  kHistoryPlaneDistance, kHistoryNormalCosine, kHistoryClampScale);
+        // **Baru berlaku sesudah probe punya isi.** Frame pertama menulis SH
+        // yang belum pernah dipadu dengan apa pun, dan memakainya sebagai
+        // cahaya tak-langsung membuat satu frame gelap gulita setiap kali GI
+        // dinyalakan.
+        const bool giReady = desc.gi.enabled && probes_.IsValid() && probeFrame_ > 1;
+        uniforms.giParams = Vec4(giReady ? 1.0f : 0.0f,
+                                 static_cast<float>(probeGrid_.Settings().tileSize), 0.0f, 0.0f);
         slot.shadowUniform.Write(&uniforms, sizeof(uniforms));
     }
 

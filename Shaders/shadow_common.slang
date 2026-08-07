@@ -57,6 +57,8 @@ struct ShadowParams {
     // x jendela akumulasi (frame), y jarak bidang untuk menolak riwayat (meter),
     // z kosinus normal minimum, w skala penjepitan riwayat.
     float4 denoise;
+    // x 1 kalau iradiansi GI berlaku, y ukuran ubin probe dalam piksel.
+    float4 giParams;
 };
 
 [[vk::binding(0, 0)]] ConstantBuffer<ShadowParams> shadowParams;

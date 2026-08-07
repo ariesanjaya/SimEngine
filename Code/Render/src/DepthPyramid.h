@@ -35,6 +35,12 @@ public:
     bool Adopt(uint32_t allocatedWidth, uint32_t allocatedHeight, VkImageView depthView,
                VkSampler depthSampler);
 
+    /// Memindahkan seluruh mip ke layout yang dijanjikan descriptor-nya, sekali.
+    /// Alasannya sama dengan `ProbeField::AdoptLayouts`: pass forward
+    /// mendeklarasikannya sejak M6, dan Vulkan menuntut layoutnya cocok saat
+    /// submit — bukan saat shader benar-benar membacanya.
+    void AdoptLayouts();
+
     /// Merekam pembangunan seluruh tingkat untuk viewport seukuran ini.
     /// Sesudahnya seluruh mip ada dalam layout `SHADER_READ_ONLY_OPTIMAL`.
     void Record(VkCommandBuffer cmd, uint32_t viewportWidth, uint32_t viewportHeight);

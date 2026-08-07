@@ -301,6 +301,34 @@ bool DepthPyramid::Adopt(uint32_t allocatedWidth, uint32_t allocatedHeight,
     return true;
 }
 
+void DepthPyramid::AdoptLayouts() {
+    if (!IsValid()) {
+        return;
+    }
+    VkCommandBuffer cmd = device_->BeginOneShot();
+    VkImageMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_NONE;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image_;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
+    barrier.subresourceRange.layerCount = 1;
+
+    VkDependencyInfo dependency{};
+    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.imageMemoryBarrierCount = 1;
+    dependency.pImageMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(cmd, &dependency);
+    device_->EndOneShot(cmd);
+}
+
 void DepthPyramid::Record(VkCommandBuffer cmd, uint32_t viewportWidth,
                           uint32_t viewportHeight) {
     if (!IsValid() || viewportWidth == 0 || viewportHeight == 0) {

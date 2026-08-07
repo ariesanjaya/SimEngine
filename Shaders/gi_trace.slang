@@ -17,7 +17,7 @@
 [[vk::binding(7, 0)]] Sampler3D sdfCascade0;
 [[vk::binding(8, 0)]] Sampler3D sdfCascade1;
 [[vk::binding(9, 0)]] Sampler3D sdfCascade2;
-[[vk::binding(10, 0)]] Sampler2D hiZ;
+#include "gi_depth.slang"
 
 float cascadeVoxelSize(int cascade) { return shadowParams.sdfOrigin[cascade].w; }
 

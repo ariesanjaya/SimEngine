@@ -3134,3 +3134,72 @@ TEST_CASE("Penjepitan riwayat memutus pertukaran respons lawan derau") {
     const Vec3 offClamped = ClampHistory(Vec3(1.0f), dark, Vec3(0.02f), 2.0f);
     CHECK(offClamped.x == doctest::Approx(0.04f));
 }
+
+// --- M6: integrasi ke shading OpenPBR ---------------------------------------
+
+TEST_CASE("Uji white furnace lulus untuk seluruh rentang roughness dan metalness") {
+    // **Kriteria selesai M6.** Di dalam tungku putih — lingkungan yang
+    // memancarkan radiansi seragam L dari segala arah — permukaan ber-albedo 1,0
+    // harus memantulkan tepat L, berapa pun kekasaran dan metalness-nya. Yang
+    // membuatnya gagal adalah energi yang hilang, dan energi yang hilang tidak
+    // pernah muncul sebagai galat: ia muncul sebagai logam kasar yang tampak
+    // abu-abu kotor, dan tidak ada penyetelan material yang bisa
+    // memperbaikinya.
+    const DfgLut lut = BakeDfgLut(64, 1024);
+
+    for (const float roughness : {0.0f, 0.1f, 0.25f, 0.5f, 0.75f, 0.9f, 1.0f}) {
+        for (const float metalness : {0.0f, 0.25f, 0.5f, 0.75f, 1.0f}) {
+            for (const float nDotV : {0.15f, 0.5f, 0.95f}) {
+                const DfgTerms dfg = lut.Sample(nDotV, roughness);
+                // Albedo putih, jadi f0 logamnya juga putih; dielektriknya 0,04.
+                const Vec3 white(1.0f);
+                const Vec3 f0 = glm::mix(Vec3(0.04f), white, metalness);
+                const EnergyTerms terms = SplitEnergy(dfg, f0);
+
+                // Di dalam tungku, radiansi spekular dan iradiansi/pi keduanya L.
+                // Totalnya karena itu jumlah ketiga suku dikali albedo untuk yang
+                // difus — dan albedo-nya satu.
+                const Vec3 total = terms.singleScatter + terms.multiScatter +
+                                   terms.diffuse * white;
+                CHECK(total.x == doctest::Approx(1.0f).epsilon(0.02));
+                CHECK(total.y == doctest::Approx(1.0f).epsilon(0.02));
+                CHECK(total.z == doctest::Approx(1.0f).epsilon(0.02));
+            }
+        }
+    }
+}
+
+TEST_CASE("Logam putih tidak menyisakan energi untuk difus") {
+    // Aturan "metal mengambil dari lapis spekular, bukan iradiansi difus" tidak
+    // ditulis sebagai cabang terpisah — ia akibat langsung dari pembagian
+    // energinya. Menuliskannya sebagai cabang berarti dua tempat yang bisa
+    // berselisih; membiarkannya jatuh dari rumus berarti hanya satu.
+    const DfgLut lut = BakeDfgLut(64, 1024);
+    for (const float roughness : {0.05f, 0.4f, 1.0f}) {
+        const EnergyTerms metal = SplitEnergy(lut.Sample(0.6f, roughness), Vec3(1.0f));
+        CHECK(metal.diffuse.x == doctest::Approx(0.0f).epsilon(0.01));
+
+        // Sedangkan dielektrik menyisakan hampir seluruhnya.
+        const EnergyTerms dielectric = SplitEnergy(lut.Sample(0.6f, roughness), Vec3(0.04f));
+        CHECK(dielectric.diffuse.x > 0.85f);
+    }
+}
+
+TEST_CASE("Kompensasi mengembalikan energi yang hilang, bukan menambah energi baru") {
+    // Dua arah kesalahan, dan keduanya sama buruk: tanpa kompensasi permukaan
+    // kasar menggelap, dengan kompensasi yang berlebihan ia bersinar sendiri.
+    // Yang dikembalikan harus persis yang hilang.
+    const DfgLut lut = BakeDfgLut(64, 1024);
+
+    // Pada cermin sempurna tidak ada yang hilang, jadi tidak ada yang perlu
+    // dikembalikan.
+    const EnergyTerms mirror = SplitEnergy(lut.Sample(0.7f, 0.0f), Vec3(1.0f));
+    CHECK(mirror.multiScatter.x == doctest::Approx(0.0f).epsilon(0.02));
+
+    // Pada permukaan paling kasar, yang dikembalikan justru yang paling banyak.
+    const DfgTerms rough = lut.Sample(0.7f, 1.0f);
+    const EnergyTerms compensated = SplitEnergy(rough, Vec3(1.0f));
+    CHECK(compensated.multiScatter.x > 0.5f);
+    // Dan pantulan tunggalnya memang jauh dari satu — itu defisit yang ditutup.
+    CHECK(rough.scale + rough.bias < 0.5f);
+}

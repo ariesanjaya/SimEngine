@@ -159,6 +159,29 @@ DfgTerms IntegrateDfg(float nDotV, float roughness, uint32_t sampleCount) {
     return terms;
 }
 
+EnergyTerms SplitEnergy(const DfgTerms& dfg, const Vec3& f0) {
+    EnergyTerms terms;
+    // Energi pantulan-tunggal untuk permukaan yang memantulkan seluruhnya.
+    const float single = dfg.scale + dfg.bias;
+    terms.singleScatter = f0 * dfg.scale + Vec3(dfg.bias);
+
+    const float missing = 1.0f - single;
+    // Reflektansi rata-rata atas seluruh sudut. Bentuk tertutup 1/21 berasal
+    // dari integral Schlick terhadap kosinus; memakai Fresnel pada satu arah di
+    // sini akan mengembalikan energi yang salah persis di sudut menyerempet.
+    const Vec3 average = f0 + (Vec3(1.0f) - f0) / 21.0f;
+    // Deret geometri pantulan lanjutan: setiap pantulan berikutnya membawa
+    // sisanya lagi, dan jumlah deretnya punya bentuk tertutup.
+    const Vec3 denominator = glm::max(Vec3(1.0f) - missing * average, Vec3(1e-6f));
+    terms.multiScatter = terms.singleScatter * average / denominator * missing;
+
+    // Sisanya, dan hanya sisanya, boleh dipakai difus. Ditulis sebagai
+    // pengurangan, bukan sebagai rumus tersendiri: itu yang membuat ketiganya
+    // berjumlah tepat satu menurut konstruksi, bukan menurut kebetulan.
+    terms.diffuse = glm::max(Vec3(1.0f) - terms.singleScatter - terms.multiScatter, Vec3(0.0f));
+    return terms;
+}
+
 DfgLut BakeDfgLut(uint32_t size, uint32_t sampleCount) {
     DfgLut lut;
     lut.size = std::max(size, 2u);

@@ -1537,6 +1537,64 @@ Diperiksa juga bahwa penyaringnya benar-benar bekerja: ubin probe yang masih
 terlihat kasar di M3 dan M4 hilang, dan kestabilan kamera-diam tetap **0,0%
 piksel berubah** antar-frame. Tanpa satu pun pesan lapisan validasi.
 
+#### M6 — Integrasi ke shading OpenPBR (berjalan)
+
+**Kriteria selesainya terpenuhi di model shading, tapi gambarnya belum benar —
+dan itu dua hal yang berbeda.**
+
+**Uji white furnace lulus untuk seluruh rentang roughness dan metalness.** Yang
+menghalanginya adalah energi yang hilang, dan hilangnya besar: terukur dengan LUT
+DFG engine ini sendiri, logam putih kehilangan 1,9% energinya pada kekasaran 0,2,
+27,6% pada 0,6, dan **63,9% pada 1,0**. Itu bukan kesalahan kecil — itu logam
+kasar yang tampak abu-abu kotor, dan tidak ada penyetelan material yang bisa
+memperbaikinya karena energinya hilang sebelum sampai ke penyetelan.
+
+Kompensasinya membagi energi lingkungan menjadi tiga suku yang **berjumlah tepat
+satu menurut konstruksi**: pantulan tunggal, pantulan lanjutan, dan sisa untuk
+difus. Sisanya ditulis sebagai pengurangan, bukan sebagai rumus tersendiri —
+itulah yang membuat jumlahnya satu karena konstruksi, bukan karena kebetulan.
+Diuji pada 7 kekasaran × 5 metalness × 3 sudut pandang.
+
+Aturan "metal mengambil dari lapis spekular, bukan iradiansi difus" **tidak
+ditulis sebagai cabang**. Untuk logam putih, sisa untuk difus jatuh ke nol dengan
+sendirinya dari rumusnya. Cabang berarti dua tempat yang bisa berselisih.
+
+#### Satu bug yang membatalkan sebagian penilaian M3–M5
+
+`tMax` yang dikirim ke pass probe **selalu nol sejak pass itu lahir**, dan nol
+tidak menghasilkan galat apa pun. `traceScreen` menyerah seketika; lalu
+`traceSdf` "mengenai" permukaan tempat sinarnya berangkat pada langkah nol —
+karena titik asalnya memang di permukaan. Setiap probe karena itu mengembalikan
+**warna pikselnya sendiri**.
+
+Yang membuatnya mahal adalah hasilnya tampak masuk akal: kabur, berwarna benar di
+dekat dinding berwarna, stabil terhadap waktu, dan merespons perubahan adegan.
+Seluruh bukti visual M3–M5 konsisten dengannya. Yang tidak dilakukannya hanyalah
+memantulkan cahaya — dan itu satu-satunya hal yang seharusnya dilakukannya.
+
+Pengukuran yang tetap berlaku: kestabilan temporal, waktu respons, hilangnya ubin
+probe oleh à-trous, dan seluruh test acuan CPU — semuanya menguji mekanisme yang
+memang bekerja. Yang **tidak** lagi berlaku adalah penilaian "color bleeding
+benar" pada M3: yang terlihat merah di dekat dinding merah adalah piksel dinding
+merah itu sendiri, bukan cahaya yang memantul darinya.
+
+#### Yang masih salah
+
+Dengan `tMax` diperbaiki dan iradiansi GI menggantikan ambient tetap `0.25` di
+`box.frag.slang`, dinding Cornell box masih **hitam**. Lantainya menerima
+matahari dan memantul, tetapi pantulan itu tidak sampai ke dinding. Sebabnya
+belum ditemukan, dan menebaknya lebih jauh tanpa alat ukur baru hanya akan
+menambah tebakan.
+
+Yang dibutuhkan berikutnya adalah alat, bukan tebakan: tampilan debug yang
+memperlihatkan **isi sebuah probe** — arah dan radiansi keenam belas sinarnya —
+bukan hasil interpolasinya. Tampilan lapis dan heatmap langkah menjawab
+pertanyaan tentang penelusuran; tidak satu pun menjawab "apa yang dilihat probe
+ini".
+
+**GI tetap mati secara bawaan**, jadi viewport tanpa GI tidak berubah sama sekali:
+`kFallbackAmbient` yang berlaku, persis seperti sebelumnya.
+
 - **Anggarannya belum didamaikan dengan kriteria terima E8.** 3,0 ms adalah 18%
   dari frame 60 fps, sementara adegan uji E8 — terrain 2×2 km, 200 ribu instance
   vegetasi, 20 lampu berbayang — sudah menuntut sisanya. Keduanya ditulis

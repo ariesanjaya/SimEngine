@@ -98,6 +98,36 @@ struct DfgLut {
 /// interpolasinya jauh di bawah kesalahan pendekatan split-sum itu sendiri.
 DfgLut BakeDfgLut(uint32_t size = 64, uint32_t sampleCount = 1024);
 
+/// Pembagian energi lingkungan sebuah permukaan menjadi tiga suku.
+///
+/// **Split-sum satu-pantulan kehilangan energi, dan kehilangannya besar.**
+/// GGX yang hanya menghitung satu pantulan mikrofaset membuang cahaya yang di
+/// permukaan nyata memantul lagi di lereng sebelah. Terukur dengan LUT DFG
+/// engine ini sendiri: logam putih kehilangan 1,9% energinya pada kekasaran 0,2,
+/// 27,6% pada 0,6, dan **63,9% pada 1,0**. Itu bukan kesalahan kecil yang bisa
+/// diabaikan — itu logam kasar yang tampak abu-abu kotor alih-alih putih, dan
+/// tidak ada penyetelan material yang bisa memperbaikinya karena energinya
+/// memang hilang sebelum sampai ke penyetelan.
+///
+/// Kompensasinya mengikuti Fdez-Agüera: energi yang hilang dari pantulan pertama
+/// dikembalikan sebagai pantulan lanjutan yang tersebar merata. Sifat yang
+/// membuatnya sah — dan yang diuji — adalah bahwa ketiga suku ini berjumlah
+/// **tepat satu** untuk albedo satu, pada kekasaran dan metalness berapa pun.
+struct EnergyTerms {
+    /// Spekular pantulan-tunggal. Dikalikan radiansi spekular terprafilter.
+    Vec3 singleScatter{0.0f};
+    /// Spekular pantulan-lanjutan. Dikalikan iradiansi, karena pantulan
+    /// berikutnya sudah kehilangan arahnya.
+    Vec3 multiScatter{0.0f};
+    /// Sisa yang boleh dipakai difus, sebelum dikalikan albedo. Nol untuk logam
+    /// putih — dan itu bukan aturan yang ditulis terpisah melainkan akibat
+    /// langsung dari rumusnya.
+    Vec3 diffuse{0.0f};
+};
+
+/// Membagi energi lingkungan dari suku DFG dan reflektansi tegak lurus.
+EnergyTerms SplitEnergy(const DfgTerms& dfg, const Vec3& f0);
+
 // --- Irradiance sebagai harmonik bola ----------------------------------------
 
 /// Sembilan koefisien RGB, orde dua.

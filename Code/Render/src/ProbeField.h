@@ -37,14 +37,34 @@ public:
     /// yang menunjuknya.
     bool Adopt(uint32_t allocatedWidth, uint32_t allocatedHeight, VkFormat normalFormat);
 
+    /// Memindahkan seluruh image ke layout yang dijanjikan descriptor-nya,
+    /// sekali, saat baru dibuat.
+    ///
+    /// **Wajib walaupun shader-nya belum tentu membacanya.** Pass forward
+    /// mendeklarasikan tekstur ini di descriptor set-nya sejak M6, dan Vulkan
+    /// menuntut layout-nya cocok pada saat submit — bukan pada saat shader
+    /// benar-benar mengambil sampel. Tanpa ini, frame pertama sebelum GI menyala
+    /// melanggar di setiap draw. Pola yang sama dengan `AdoptShadowLayout`.
+    void AdoptLayouts();
+
     /// Barrier target normal di kedua ujung depth prepass.
     void RecordNormalBegin(VkCommandBuffer cmd);
     void RecordNormalEnd(VkCommandBuffer cmd);
 
     /// Menelusuri seluruh probe, memadunya dengan riwayat yang direproyeksi,
     /// menyalin hasilnya ke riwayat, lalu menyaringnya dua lintasan.
+    /// `traceRange` adalah jangkauan maksimum tiap sinar, meter.
+    ///
+    /// **Wajib, dan pernah lupa diisi.** Ia sempat tertinggal nol sejak pass ini
+    /// lahir, dan nol tidak menghasilkan galat apa pun: `traceScreen` menyerah
+    /// seketika, lalu `traceSdf` "mengenai" permukaan tempat sinarnya berangkat
+    /// pada langkah nol — karena titik asalnya memang di permukaan. Setiap probe
+    /// karena itu mengembalikan warna pikselnya sendiri, dan hasilnya tampak
+    /// seperti GI yang masuk akal: kabur, berwarna benar di dekat dinding
+    /// berwarna, dan stabil. Yang tidak dilakukannya hanyalah memantulkan
+    /// cahaya.
     void Record(VkCommandBuffer cmd, VkDescriptorSet frameSet, const ProbeGrid& grid,
-                uint32_t frameIndex, bool resetHistory);
+                uint32_t frameIndex, float traceRange, bool resetHistory);
 
     bool IsValid() const { return normalImage_ != VK_NULL_HANDLE; }
     VkImageView NormalView() const { return normalView_; }

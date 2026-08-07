@@ -294,16 +294,36 @@ float3 evaluateOpenPBR_IBL(OpenPBRSurface surface, ShadingFrame frame, float3 ir
     const float3 dielectricF0 = float3(iorToF0(surface.specularIor)) * surface.specularColor;
     const float3 f0 = lerp(dielectricF0, surface.baseColor, surface.baseMetalness);
 
-    const float3 specular =
-        environmentSpecular(f0, dfg, prefilteredBase) * surface.specularWeight;
-
-    // Energi yang tidak dipantulkan spekular saja yang sampai ke difus. Dipakai
-    // suku DFG yang sama, bukan Fresnel pada satu arah: yang mengenai permukaan
-    // di sini datang dari segala arah, dan Fresnel satu arah akan meloloskan
-    // terlalu banyak energi ke difus pada permukaan kasar.
-    const float3 specularEnergy = f0 * dfg.x + dfg.y;
+    // **Pembagian energi tiga suku, cermin dari `SplitEnergy` di sisi C++.**
+    // Split-sum satu-pantulan membuang cahaya yang di permukaan nyata memantul
+    // lagi di lereng sebelah, dan buangannya besar: logam putih kehilangan 27,6%
+    // energinya pada kekasaran 0,6 dan 63,9% pada 1,0. Itu bukan kesalahan kecil
+    // — itu logam kasar yang tampak abu-abu kotor, dan tidak ada penyetelan
+    // material yang bisa memperbaikinya karena energinya hilang sebelum sampai
+    // ke penyetelan.
+    const float3 singleScatter = f0 * dfg.x + dfg.y;
+    const float missing = 1.0 - (dfg.x + dfg.y);
+    // Reflektansi rata-rata atas seluruh sudut. Bentuk tertutup 1/21 dari
+    // integral Schlick terhadap kosinus; Fresnel pada satu arah akan
+    // mengembalikan energi yang salah persis di sudut menyerempet.
+    const float3 average = f0 + (float3(1.0) - f0) / 21.0;
+    const float3 multiScatter =
+        singleScatter * average / max(float3(1.0) - missing * average, float3(1e-6)) * missing;
+    // Sisanya, dan hanya sisanya, boleh dipakai difus. Ditulis sebagai
+    // pengurangan supaya ketiganya berjumlah tepat satu menurut konstruksi —
+    // dan itu yang membuat uji white furnace lulus di seluruh rentang.
+    //
+    // Logam putih menyisakan nol di sini dengan sendirinya. Aturan "metal
+    // mengambil dari lapis spekular, bukan iradiansi difus" karena itu tidak
+    // perlu ditulis sebagai cabang tersendiri — cabang berarti dua tempat yang
+    // bisa berselisih.
     const float3 diffuseEnergy =
-        (float3(1.0) - specularEnergy) * (1.0 - surface.baseMetalness);
+        max(float3(1.0) - singleScatter - multiScatter, float3(0.0)) *
+        (1.0 - surface.baseMetalness);
+
+    const float3 specular =
+        (environmentSpecular(f0, dfg, prefilteredBase) + multiScatter * (irradiance / kPi)) *
+        surface.specularWeight;
     float3 result =
         surface.baseColor * (irradiance / kPi) * diffuseEnergy * surface.baseWeight + specular;
 
