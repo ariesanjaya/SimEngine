@@ -808,7 +808,7 @@ dijalankan sekali pun selama pengembangannya.
 — heatmap yang kosong adalah jawaban benar untuk backend yang memang tidak
 melangkah, bukan angka yang mengarang.
 
-#### M1 — SDF clipmap global (berjalan)
+#### M1 — SDF clipmap global · ✅ selesai
 
 **Sudah ada:** `SdfClipmap` — pengalamatan, pemilihan kaskade, toroidal scroll,
 dan penyandian jarak. Seluruhnya teruji tanpa GPU, mengikuti pola yang sama
@@ -900,6 +900,20 @@ sampler yang menjepit akan mengoles texel tepi sepanjang seluruh sisi.
 — pemanggil yang belum memecah wilayah toroidalnya harus tahu, bukan mendapat
 gambar yang hampir benar.
 
+**Unggahannya direkam ke command buffer frame, bukan disubmit sendiri.**
+`UploadRegion` menyubmit lalu menunggu queue idle — bentuk yang benar untuk
+pengisian sekali di waktu setup dan salah untuk apa pun yang berulang tiap
+frame. Clipmap menulis belasan wilayah per frame, jadi bentuk pertama saya
+menunggu queue idle belasan kali per frame: **3,98 ms untuk 16 ribu voxel,
+hampir seluruhnya menunggu.** Sekarang seluruh wilayah dikemas ke satu buffer
+staging per slot frame, dan `RecordRegionCopy` merekam salinannya ke command
+buffer frame di depan pass mana pun. Barrier-nya per tekstur, bukan per
+wilayah.
+
+Buffer staging-nya **per slot frame**: isinya masih dibaca GPU sampai submit
+slot itu selesai, dan satu buffer bersama akan ditimpa frame berikutnya di
+tengah salinan frame ini.
+
 **Komposit dan penyandiannya masih di CPU, dan itu batas yang disengaja untuk
 M1.** Bake per-mesh menjadi brick sparse menuntut importir mesh yang baru datang
 di E8.4; selama geometrinya masih kotak, medan jaraknya punya bentuk analitik
@@ -911,13 +925,62 @@ di ruang lokal berpadanan dengan antara d·min(skala) dan d·maks(skala) di duni
 dan yang terkecil tidak pernah melebih-lebihkan ruang kosong. Bentuk pertama
 saya memakai yang terbesar — arah yang justru menembus dinding.
 
+#### Komposit CPU: dari 48 ns menjadi 12 ns per voxel
+
+Anggaran 0,4 ms untuk pembaruan clipmap tidak bisa dipenuhi dengan medan jarak
+berbentuk `std::function` yang dipanggil sekali per voxel. Empat perubahan,
+masing-masing diukur, bukan diperkirakan:
+
+**Medan jaraknya kelas, bukan `std::function`.** Pemanggilan tak langsung per
+voxel menghalangi inlining seluruh rumus jaraknya. 48 → 15 ns/voxel.
+
+**Basis lokal tiap mesh dihitung per kotak texel, bukan per baris.** Sebuah
+kotak di dunia tetap kotak di ruang lokal — transformasinya affine — jadi satu
+titik asal dan tiga vektor langkah menjangkau seluruh isinya. Bentuk per baris
+membayar dua perkalian matriks 4×4 per mesh untuk setiap baris.
+
+**Baris mengikuti sumbu terpanjang kotak, bukan selalu X.** Ini yang paling
+besar dampaknya, dan yang paling tidak terlihat dari kode: gerakan kamera satu
+voxel menghasilkan lempeng setebal satu voxel, dan pembagian toroidalnya
+memecah lempeng itu menjadi kotak seperti **1×56×9**. Dengan baris dipatok ke X,
+itu 504 baris berisi satu voxel — seluruh biaya per baris tanpa satu pun voxel
+untuk membaginya. Dicatat dengan mencetak bentuk tiap kotak yang benar-benar
+dikirim, bukan dengan menebak bentuk apa yang mungkin muncul.
+
+**Penyandian jaraknya dijabarkan di jalur per voxel.**
+`SdfClipmap::EncodeDistance` ada di unit terjemahan lain, jadi ia tidak bisa
+di-inline — dan sebuah panggilan yang tak bisa di-inline, dikali puluhan ribu
+voxel, berharga lebih mahal daripada rumus di dalamnya. Pengemasan ke buffer
+staging juga berhenti memanggil `At` per voxel: kotak texel rapat pada sumbu X,
+jadi tiap barisnya satu salinan.
+
+Membuang mesh yang tidak mungkin menyentuh sebuah baris memakai kotak batas
+dunianya, dikali **min(skala)/maks(skala)**. Faktor itu bukan kerapian: nilai
+yang disimpan adalah d·min(skala), sedangkan jarak ke kotak batas adalah jarak
+dunia — dan tanpa faktornya, mesh yang diskala tak seragam akan dibuang padahal
+jaraknya di ruang lokal masih di dalam pita. Lubang di medan jarak adalah
+dinding yang bisa ditembus sphere tracing.
+
 Resolusinya **64³, bukan 128³** yang diminta rencana. Batasnya bukan memori
 melainkan komposit CPU: medan jaraknya dievaluasi per voxel, dan 128³ berarti
-delapan kali pekerjaan itu. Diukur: dengan GI menyala dan kamera bergerak terus,
-Release tetap **60 fps**, Debug turun ke 42. Angka Debug itu bukan masalah
-kinerja melainkan tanda bahwa komposit CPU memang tidak punya banyak ruang —
-128³ menunggu komposit compute, dan keputusan itu sekarang punya angka untuk
-bersandar.
+delapan kali pekerjaan itu. Sesudah empat perubahan di atas, frame terberat saat
+kamera terbang penuh memakai **0,49 ms** — di dalam anggaran, tapi hanya dengan
+sisa 0,01 ms. Delapan kali pekerjaan itu jelas tidak muat; 128³ menunggu komposit
+compute, dan keputusan itu sekarang punya angka untuk bersandar.
+
+**Biaya pembaruan clipmap terlihat di panel Statistics**, sebagai angka frame ini
+dan puncak dua detik terakhir. Puncaknya bukan kemewahan: yang dibatasi anggaran
+adalah frame saat kamera melintasi batas voxel, dan frame itu satu di antara
+belasan — angka sesaat memperlihatkannya hanya kalau kebetulan terbaca pada frame
+yang tepat. Angka ini di CPU, jadi ia tidak muncul di tabel pass GPU.
+
+**Satu frame masih jauh di luar anggaran, dan itu disengaja:** menyalakan GI atau
+melompatkan kamera lebih jauh daripada lebar clipmap menulis seluruh isi ketiga
+kaskade sekaligus — 786 ribu voxel, **8,5 ms**. Menyicilnya ke beberapa frame
+berarti beberapa frame pertama menelusuri medan yang separuh kosong, dan itu
+menukar satu hentakan yang terlihat dengan cahaya yang salah yang tidak terlihat.
+Pilihan itu bisa ditinjau ulang setelah M5 punya denoiser yang menyembunyikan
+transisi.
 
 #### Pass debug: sphere tracing di shader
 
@@ -950,10 +1013,26 @@ satu ray per piksel ≈ **0,9 ms**. Sebagai pembanding, anggaran screen probe di
 rencana adalah 1,4 ms untuk 16 ray per probe pada ubin 16×16 — yaitu seperenam
 belas jumlah ray ini.
 
-**Belum ada:** perbandingan berdampingan depth sphere tracing terhadap depth
-buffer raster sebagai angka, bukan sebagai penilaian mata; bake SDF per-mesh
-(menunggu importir mesh E8.4); dan komposit compute yang membuka 128³. Kriteria
-selesai M1 tinggal yang pertama.
+#### Kriteria selesai M1 — terpenuhi
+
+**Depth sphere tracing cocok dengan raster: sebagai angka, bukan penilaian
+mata.** Rencana menyebut "uji visual side-by-side"; yang dipakai adalah
+perpotongan sinar-kotak analitik — kebenaran yang sama dengan yang dirasterkan,
+tanpa perlu membaca depth buffer. 25 sinar menembus SDF sebuah kotak 2×2×2 pada
+voxel 0,05 m, dan tiap sinar harus sepakat soal kena/meleset serta berselisih
+**kurang dari dua voxel**. Dua, bukan satu: satu untuk kuantisasi 8-bit, satu
+untuk ambang berhenti sphere tracing yang memang setengah voxel di depan
+permukaan. Ada juga sinar yang lewat di samping kotak — kesepakatan soal meleset
+tidak lebih murah daripada kesepakatan soal kena.
+
+**Biaya pembaruan < 0,5 ms saat kamera bergerak cepat:** frame terberat 0,49 ms
+pada adegan uji, terbaca langsung di panel Statistics. Angka itu berasal dari
+0,44 ms nilai tengah dan 0,49 ms puncak — bukan dari satu tangkapan yang
+kebetulan bagus.
+
+**Belum ada:** bake SDF per-mesh menjadi brick sparse (menunggu importir mesh
+E8.4) dan komposit compute yang membuka 128³. Keduanya di luar kriteria selesai
+M1 dan tercatat di M2 dan seterusnya.
 
 - **Anggarannya belum didamaikan dengan kriteria terima E8.** 3,0 ms adalah 18%
   dari frame 60 fps, sementara adegan uji E8 — terrain 2×2 km, 200 ribu instance

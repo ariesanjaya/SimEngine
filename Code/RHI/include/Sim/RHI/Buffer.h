@@ -35,6 +35,11 @@ public:
     /// Menyalin data ke buffer. Mengembalikan false bila tidak muat.
     bool Write(const void* data, VkDeviceSize bytes);
 
+    /// Menyalin data mulai `offset`. Dipakai pemanggil yang mengemas banyak
+    /// potongan ke satu buffer supaya bisa disalin dengan satu command buffer
+    /// alih-alih satu submit per potongan.
+    bool WriteAt(VkDeviceSize offset, const void* data, VkDeviceSize bytes);
+
     VkBuffer Handle() const { return buffer_; }
     VkDeviceSize Capacity() const { return capacity_; }
     bool IsValid() const { return buffer_ != VK_NULL_HANDLE; }

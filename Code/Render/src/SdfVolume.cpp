@@ -1,6 +1,7 @@
 #include "Sim/Render/SdfVolume.h"
 
 #include <algorithm>
+#include <array>
 #include <limits>
 #include <cmath>
 
@@ -72,9 +73,12 @@ private:
     uint32_t maxSteps_;
 };
 
-/// Jarak bertanda ke sebuah kotak berpusat di titik asal.
-float BoxDistance(const Vec3& point, const Vec3& halfExtent) {
-    const Vec3 q = glm::abs(point) - halfExtent;
+/// Jarak bertanda ke sebuah kotak setengah-lebar 0,5 berpusat di titik asal.
+///
+/// Selalu kubus satuan: matriks modelnyalah yang membawa ukuran dan orientasi
+/// benda, persis seperti yang dilakukan `Gather` untuk menggambar.
+inline float UnitBoxDistance(const Vec3& point) {
+    const Vec3 q = glm::abs(point) - Vec3(0.5f);
     // Suku pertama benar di luar kotak, yang kedua di dalam. Memakai salah
     // satunya saja menghasilkan jarak yang salah tepat di sisi yang lain — dan
     // yang di dalam kotaklah yang menentukan apakah ray yang mulai di dalam
@@ -82,18 +86,18 @@ float BoxDistance(const Vec3& point, const Vec3& halfExtent) {
     return glm::length(glm::max(q, Vec3(0.0f))) + std::min(std::max(q.x, std::max(q.y, q.z)), 0.0f);
 }
 
+/// Jarak antara dua kotak sejajar sumbu. Nol bila bersinggungan atau tumpang
+/// tindih.
+inline float AabbDistance(const Vec3& aMin, const Vec3& aMax, const Vec3& bMin, const Vec3& bMax) {
+    const Vec3 gap = glm::max(glm::max(bMin - aMax, aMin - bMax), Vec3(0.0f));
+    return glm::length(gap);
+}
+
 }  // namespace
 
-SdfVolume::DistanceField MakeBoxSceneField(std::span<const MeshInstance> meshes,
-                                           std::vector<Mat4>& inverseScratch,
-                                           std::vector<Vec3>& halfExtentScratch,
-                                           std::vector<float>& scaleScratch) {
-    inverseScratch.clear();
-    halfExtentScratch.clear();
-    scaleScratch.clear();
-    inverseScratch.reserve(meshes.size());
-    halfExtentScratch.reserve(meshes.size());
-    scaleScratch.reserve(meshes.size());
+void BoxSceneField::Build(std::span<const MeshInstance> meshes) {
+    entries_.clear();
+    entries_.reserve(meshes.size());
 
     for (const MeshInstance& mesh : meshes) {
         // Kotak batas dipetakan ke kubus satuan, sama seperti yang dilakukan
@@ -107,26 +111,95 @@ SdfVolume::DistanceField MakeBoxSceneField(std::span<const MeshInstance> meshes,
 
         const Vec3 scale(glm::length(Vec3(model[0])), glm::length(Vec3(model[1])),
                          glm::length(Vec3(model[2])));
-        inverseScratch.push_back(glm::inverse(model));
-        halfExtentScratch.push_back(Vec3(0.5f));
-        // Skala **terkecil**, bukan terbesar. Jarak yang diukur di ruang lokal
-        // berpadanan dengan antara d·min(skala) dan d·maks(skala) di dunia;
-        // memakai yang terkecil membuatnya tidak pernah melebih-lebihkan ruang
-        // kosong. Arahnya penting: sphere tracing yang melangkah terlalu pendek
-        // hanya membuang langkah, sedangkan yang melangkah terlalu jauh menembus
-        // dinding.
-        scaleScratch.push_back(std::max(std::min({scale.x, scale.y, scale.z}), 1e-4f));
-    }
+        const float smallest = std::max(std::min({scale.x, scale.y, scale.z}), 1e-4f);
+        const float largest = std::max({scale.x, scale.y, scale.z, 1e-4f});
 
-    return [&inverseScratch, &halfExtentScratch, &scaleScratch](const Vec3& world) {
-        float nearest = std::numeric_limits<float>::max();
-        for (std::size_t i = 0; i < inverseScratch.size(); ++i) {
-            const Vec3 local = Vec3(inverseScratch[i] * Vec4(world, 1.0f));
-            nearest =
-                std::min(nearest, BoxDistance(local, halfExtentScratch[i]) * scaleScratch[i]);
+        Entry entry;
+        entry.inverse = glm::inverse(model);
+        entry.scale = smallest;
+        entry.anisotropy = smallest / largest;
+
+        // Kotak batas di ruang dunia: delapan pojok kubus satuan lewat matriks
+        // model. Dipakai membuang mesh yang tidak mungkin menyentuh sebuah
+        // baris — dan pembuangan itulah yang membuat adegan besar tidak
+        // membayar seluruh isinya untuk tiap voxel.
+        entry.boundsMin = Vec3(std::numeric_limits<float>::max());
+        entry.boundsMax = Vec3(std::numeric_limits<float>::lowest());
+        for (int corner = 0; corner < 8; ++corner) {
+            const Vec3 local(corner & 1 ? 0.5f : -0.5f, corner & 2 ? 0.5f : -0.5f,
+                             corner & 4 ? 0.5f : -0.5f);
+            const Vec3 world = Vec3(model * Vec4(local, 1.0f));
+            entry.boundsMin = glm::min(entry.boundsMin, world);
+            entry.boundsMax = glm::max(entry.boundsMax, world);
         }
-        return nearest;
-    };
+        entries_.push_back(entry);
+    }
+}
+
+float BoxSceneField::Distance(const Vec3& world) const {
+    float nearest = std::numeric_limits<float>::max();
+    for (const Entry& entry : entries_) {
+        const Vec3 local = Vec3(entry.inverse * Vec4(world, 1.0f));
+        nearest = std::min(nearest, UnitBoxDistance(local) * entry.scale);
+    }
+    return nearest;
+}
+
+void BoxSceneField::BeginBox(const Vec3& origin, const Vec3& rowStep, const Vec3& outerStep,
+                            const Vec3& planeStep, uint32_t count, float band) {
+    boxOrigin_ = origin;
+    boxRowStep_ = rowStep;
+    boxOuterStep_ = outerStep;
+    boxPlaneStep_ = planeStep;
+    boxCount_ = count;
+    boxBand_ = band;
+
+    // Sebuah kotak texel di dunia tetap kotak di ruang lokal: transformasinya
+    // affine. Jadi seluruh isi kotak dijangkau dari satu titik asal dan tiga
+    // vektor langkah — dan ketiganya cukup dihitung sekali, di sini.
+    locals_.resize(entries_.size());
+    for (std::size_t i = 0; i < entries_.size(); ++i) {
+        const Mat4& inverse = entries_[i].inverse;
+        locals_[i].origin = Vec3(inverse * Vec4(origin, 1.0f));
+        // w = 0: arah, tanpa translasi.
+        locals_[i].rowStep = Vec3(inverse * Vec4(rowStep, 0.0f));
+        locals_[i].outerStep = Vec3(inverse * Vec4(outerStep, 0.0f));
+        locals_[i].planeStep = Vec3(inverse * Vec4(planeStep, 0.0f));
+    }
+}
+
+void BoxSceneField::Row(uint32_t outer, uint32_t plane, float* out) const {
+    for (uint32_t i = 0; i < boxCount_; ++i) {
+        out[i] = std::numeric_limits<float>::max();
+    }
+    if (boxCount_ == 0) {
+        return;
+    }
+    const Vec3 start = boxOrigin_ + boxOuterStep_ * static_cast<float>(outer) +
+                       boxPlaneStep_ * static_cast<float>(plane);
+    const Vec3 last = start + boxRowStep_ * static_cast<float>(boxCount_ - 1);
+    const Vec3 rowMin = glm::min(start, last);
+    const Vec3 rowMax = glm::max(start, last);
+
+    for (std::size_t i = 0; i < entries_.size(); ++i) {
+        const Entry& entry = entries_[i];
+        // Nilai yang akan disimpan tidak pernah lebih kecil daripada jarak
+        // dunia dikali `anisotropy`; kalau batas bawah itu saja sudah di luar
+        // pita, seluruh baris akan dijepit ke nilai jenuh — jadi mesh ini tidak
+        // punya apa pun untuk disumbangkan.
+        if (AabbDistance(rowMin, rowMax, entry.boundsMin, entry.boundsMax) * entry.anisotropy >=
+            boxBand_) {
+            continue;
+        }
+
+        const Local& local = locals_[i];
+        const Vec3 base = local.origin + local.outerStep * static_cast<float>(outer) +
+                          local.planeStep * static_cast<float>(plane);
+        for (uint32_t x = 0; x < boxCount_; ++x) {
+            const Vec3 point = base + local.rowStep * static_cast<float>(x);
+            out[x] = std::min(out[x], UnitBoxDistance(point) * entry.scale);
+        }
+    }
 }
 
 void SdfVolume::Configure(const SdfClipmapSettings& settings) {
@@ -149,47 +222,144 @@ void SdfVolume::Configure(const SdfClipmapSettings& settings) {
     written_ = 0;
 }
 
-void SdfVolume::WriteBox(uint32_t cascade, const SdfClipmap::TexelBox& box,
-                         const DistanceField& field) {
+template <typename Field>
+void SdfVolume::WriteBoxRows(uint32_t cascade, const SdfClipmap::TexelBox& box, Field& field) {
     const uint32_t resolution = clipmap_.Settings().resolution;
     const float voxel = clipmap_.VoxelSize(cascade);
+    const glm::uvec3 extent = box.max - box.min;
+    if (extent.x == 0 || extent.y == 0 || extent.z == 0) {
+        return;
+    }
+
+    // **Baris mengikuti sumbu terpanjang kotak, bukan selalu X.** Biaya per
+    // baris — satu uji kotak batas dan satu basis lokal per mesh — hanya
+    // terbagi kalau barisnya panjang. Lempeng setebal satu voxel di sumbu X,
+    // bentuk yang dihasilkan setiap gerakan kamera, akan memberikan ribuan
+    // baris berisi satu voxel kalau arahnya dipatok.
+    uint32_t major = 0;
+    if (extent.y > extent[major]) {
+        major = 1;
+    }
+    if (extent.z > extent[major]) {
+        major = 2;
+    }
+    const uint32_t outerAxis = (major + 1) % 3;
+    const uint32_t planeAxis = (major + 2) % 3;
+    const uint32_t count = extent[major];
+
+    // Langkah indeks di dalam `data_`: X tercepat, lalu Y, lalu Z.
+    const std::array<std::size_t, 3> strides{
+        1, resolution, static_cast<std::size_t>(resolution) * resolution};
+    const auto axisStep = [voxel](uint32_t axis) {
+        Vec3 step(0.0f);
+        step[static_cast<int>(axis)] = voxel;
+        return step;
+    };
+
+    rowScratch_.resize(count);
     std::vector<uint8_t>& target = data_[cascade];
 
-    for (uint32_t z = box.min.z; z < box.max.z; ++z) {
-        for (uint32_t y = box.min.y; y < box.max.y; ++y) {
-            for (uint32_t x = box.min.x; x < box.max.x; ++x) {
-                const glm::ivec3 worldVoxel =
-                    box.worldMin + glm::ivec3(static_cast<int32_t>(x - box.min.x),
-                                              static_cast<int32_t>(y - box.min.y),
-                                              static_cast<int32_t>(z - box.min.z));
-                // Pusat voxel, bukan pojoknya. Sampel di pojok menggeser seluruh
-                // medan setengah voxel — cukup untuk membuat permukaan tampak
-                // bergeser terhadap geometri yang menghasilkannya.
-                const Vec3 world = (Vec3(static_cast<float>(worldVoxel.x),
-                                         static_cast<float>(worldVoxel.y),
-                                         static_cast<float>(worldVoxel.z)) +
-                                    Vec3(0.5f)) *
-                                   voxel;
-                const float encoded = clipmap_.EncodeDistance(cascade, field(world));
-                const std::size_t index =
-                    (static_cast<std::size_t>(z) * resolution + y) * resolution + x;
-                target[index] = static_cast<uint8_t>(std::lround(encoded * 255.0f));
-                ++written_;
+    // Pusat voxel, bukan pojoknya. Sampel di pojok menggeser seluruh medan
+    // setengah voxel — cukup untuk membuat permukaan tampak bergeser terhadap
+    // geometri yang menghasilkannya.
+    const Vec3 origin = (Vec3(static_cast<float>(box.worldMin.x),
+                              static_cast<float>(box.worldMin.y),
+                              static_cast<float>(box.worldMin.z)) +
+                         Vec3(0.5f)) *
+                        voxel;
+    field.BeginBox(origin, axisStep(major), axisStep(outerAxis), axisStep(planeAxis), count,
+                   clipmap_.BandRadius(cascade));
+
+    // Penyandiannya dijabarkan di sini alih-alih memanggil
+    // `SdfClipmap::EncodeDistance`. Fungsi itu ada di unit terjemahan lain, jadi
+    // ia tidak bisa di-inline — dan ini jalur per voxel, tempat sebuah panggilan
+    // yang tak bisa di-inline berharga lebih mahal daripada rumus di dalamnya.
+    const float encodeScale = 255.0f / (clipmap_.BandRadius(cascade) * 2.0f);
+    const std::size_t rowStride = strides[major];
+    for (uint32_t plane = 0; plane < extent[planeAxis]; ++plane) {
+        for (uint32_t outer = 0; outer < extent[outerAxis]; ++outer) {
+            field.Row(outer, plane, rowScratch_.data());
+
+            const std::size_t base = static_cast<std::size_t>(box.min.z) * strides[2] +
+                                     static_cast<std::size_t>(box.min.y) * strides[1] +
+                                     box.min.x + outer * strides[outerAxis] +
+                                     plane * strides[planeAxis];
+            for (uint32_t i = 0; i < count; ++i) {
+                const float encoded =
+                    std::clamp(rowScratch_[i] * encodeScale + 127.5f, 0.0f, 255.0f);
+                target[base + i * rowStride] = static_cast<uint8_t>(encoded + 0.5f);
             }
+            written_ += count;
+        }
+    }
+}
+
+namespace {
+
+/// Membungkus `DistanceField` menjadi bentuk penelusur kotak. Dipakai test yang
+/// memberi medan sembarang; jalur yang dipakai renderer memakai `BoxSceneField`
+/// yang tidak melewati satu pun pemanggilan tak langsung.
+struct PointField {
+    const SdfVolume::DistanceField& field;
+    Vec3 origin{0.0f};
+    Vec3 stepX{0.0f};
+    Vec3 stepY{0.0f};
+    Vec3 stepZ{0.0f};
+    uint32_t count = 0;
+
+    void BeginBox(const Vec3& boxOrigin, const Vec3& x, const Vec3& y, const Vec3& z,
+                  uint32_t width, float) {
+        origin = boxOrigin;
+        stepX = x;
+        stepY = y;
+        stepZ = z;
+        count = width;
+    }
+
+    void Row(uint32_t y, uint32_t z, float* out) const {
+        const Vec3 base = origin + stepY * static_cast<float>(y) + stepZ * static_cast<float>(z);
+        for (uint32_t i = 0; i < count; ++i) {
+            out[i] = field(base + stepX * static_cast<float>(i));
+        }
+    }
+};
+
+}  // namespace
+
+void SdfVolume::Fill(const SdfScrollResult& scroll, BoxSceneField& field) {
+    for (const SdfScrollRegion& region : scroll.regions) {
+        clipmap_.SplitWrapped(region, boxes_);
+        for (const SdfClipmap::TexelBox& box : boxes_) {
+            WriteBoxRows(region.cascade, box, field);
         }
     }
 }
 
 void SdfVolume::Fill(const SdfScrollResult& scroll, const DistanceField& field) {
+    PointField walker{field};
     for (const SdfScrollRegion& region : scroll.regions) {
         clipmap_.SplitWrapped(region, boxes_);
         for (const SdfClipmap::TexelBox& box : boxes_) {
-            WriteBox(region.cascade, box, field);
+            WriteBoxRows(region.cascade, box, walker);
         }
     }
 }
 
+void SdfVolume::FillAll(BoxSceneField& field) {
+    ForEachCascadeBox([&](uint32_t cascade, const SdfClipmap::TexelBox& box) {
+        WriteBoxRows(cascade, box, field);
+    });
+}
+
 void SdfVolume::FillAll(const DistanceField& field) {
+    PointField walker{field};
+    ForEachCascadeBox([&](uint32_t cascade, const SdfClipmap::TexelBox& box) {
+        WriteBoxRows(cascade, box, walker);
+    });
+}
+
+template <typename Visit>
+void SdfVolume::ForEachCascadeBox(Visit&& visit) {
     const uint32_t resolution = clipmap_.Settings().resolution;
     for (uint32_t cascade = 0; cascade < clipmap_.CascadeCount(); ++cascade) {
         SdfScrollRegion region;
@@ -198,7 +368,7 @@ void SdfVolume::FillAll(const DistanceField& field) {
         region.max = region.min + glm::ivec3(static_cast<int32_t>(resolution));
         clipmap_.SplitWrapped(region, boxes_);
         for (const SdfClipmap::TexelBox& box : boxes_) {
-            WriteBox(cascade, box, field);
+            visit(cascade, box);
         }
     }
 }

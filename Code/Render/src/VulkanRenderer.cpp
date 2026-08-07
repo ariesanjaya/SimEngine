@@ -16,6 +16,7 @@
 #include "Sim/Render/ShadowCascades.h"
 
 #include <algorithm>
+#include <chrono>
 #include <array>
 #include <limits>
 #include <cstddef>
@@ -327,6 +328,18 @@ public:
         sdf.finestVoxelSize = 0.1f;
         if (!sdfClipmap_.Create(device_, sdf)) {
             SIM_WARN("Render", "SDF clipmap unavailable; GI tracing will have nothing to read");
+        } else {
+            // Dipesan sekali sebesar kasus terburuknya — seluruh isi setiap
+            // kaskade, yaitu saat kamera melompat lebih jauh daripada lebar
+            // clipmap-nya. Membiarkannya tumbuh sendiri berarti buffer dibuat
+            // ulang pada frame lompatan itu, tepat pada frame yang paling
+            // tidak punya waktu luang.
+            for (InstanceSlot& slot : slots_) {
+                if (!slot.sdfStaging.Create(device_, VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+                                            sdfClipmap_.StagingBytes())) {
+                    return false;
+                }
+            }
         }
         if (!WriteShadowDescriptors()) {
             return false;
@@ -468,8 +481,14 @@ public:
         sdfDebugEnabled_ = desc.gi.enabled && sdfClipmap_.IsValid() &&
                            desc.gi.debugView != GiDebugView::Off;
         sdfVoxelsWritten_ = 0;
+        sdfUpdateMs_ = 0.0f;
         if (desc.gi.enabled && sdfClipmap_.IsValid()) {
-            sdfVoxelsWritten_ = sdfClipmap_.Update(desc.camera.position, scene.meshes);
+            const auto started = std::chrono::steady_clock::now();
+            sdfVoxelsWritten_ =
+                sdfClipmap_.Update(desc.camera.position, scene.meshes, slot.sdfStaging);
+            sdfUpdateMs_ = std::chrono::duration<float, std::milli>(
+                               std::chrono::steady_clock::now() - started)
+                               .count();
         }
 
         UpdateClusters(desc, scene, aspect, slot);
@@ -478,6 +497,10 @@ public:
 
         VkCommandBuffer cmd = device_.BeginTransient();
         profiler_.BeginFrame(cmd);
+        // Sebelum pass mana pun, supaya kaskade yang dibaca `gi-sdf-debug` dan
+        // nanti pass GI adalah kaskade posisi kamera frame ini — bukan posisi
+        // frame sebelumnya.
+        sdfClipmap_.RecordUploads(cmd);
         executor_.Clear();
         executor_.Bind(colorId_, BoundImage{target_.ColorImage(), target_.ColorView(),
                                             VK_IMAGE_ASPECT_COLOR_BIT});
@@ -601,6 +624,8 @@ public:
     const char* Name() const override { return "VulkanRenderer"; }
 
     TraceBackendSelection GiBackend() const override { return giBackend_; }
+    float SdfUpdateMilliseconds() const override { return sdfUpdateMs_; }
+    uint64_t SdfVoxelsWritten() const override { return sdfVoxelsWritten_; }
 
     std::span<const PassTiming> PassTimings() const override {
         timings_.clear();
@@ -624,6 +649,10 @@ private:
         rhi::DynamicBuffer clusterRangeBuffer;
         rhi::DynamicBuffer clusterIndexBuffer;
         rhi::DynamicBuffer shadowFaceBuffer;
+        // Staging clipmap SDF. Per slot karena isinya masih dibaca GPU sampai
+        // submit slot ini selesai; satu buffer bersama akan ditimpa frame
+        // berikutnya di tengah salinan frame ini.
+        rhi::DynamicBuffer sdfStaging;
         VkDescriptorSet shadowSet = VK_NULL_HANDLE;
         uint64_t submitId = 0;
     };
@@ -1940,6 +1969,7 @@ private:
     TraceBackendSelection giBackend_;
     SdfClipmapResource sdfClipmap_;
     uint64_t sdfVoxelsWritten_ = 0;
+    float sdfUpdateMs_ = 0.0f;
     bool sdfDebugEnabled_ = false;
     PassId giDebugId_ = kInvalidPass;
     TextureHandle textureHandle_ = kInvalidTexture;

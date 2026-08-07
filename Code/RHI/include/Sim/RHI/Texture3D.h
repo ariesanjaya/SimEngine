@@ -31,11 +31,25 @@ public:
     /// Menulis sebuah kotak sub-wilayah. `texels` berisi `extent` texel rapat,
     /// urutan X tercepat.
     ///
-    /// Memblokir sampai selesai. Untuk clipmap itu justru yang diinginkan:
-    /// isinya dibaca pass di frame yang sama, dan menunda unggahannya berarti
-    /// satu frame membaca voxel milik posisi kamera yang lama.
+    /// **Menyubmit sendiri lalu menunggu queue idle.** Bentuk itu benar untuk
+    /// pengisian sekali di waktu setup dan salah untuk apa pun yang berulang
+    /// tiap frame — pemanggil per-frame memakai `RecordRegionCopy` dan merekam
+    /// ke command buffer frame.
     bool UploadRegion(const glm::uvec3& offset, const glm::uvec3& extent,
                       std::span<const std::byte> texels);
+
+    /// Merekam salinan sebuah sub-wilayah dari buffer staging milik pemanggil.
+    ///
+    /// Pemanggil bertanggung jawab atas barrier di kedua ujung rangkaian
+    /// salinan — lihat `RecordTransition`. Memisahnya begitu disengaja: clipmap
+    /// menyalin belasan wilayah ke tiga tekstur tiap frame, dan barrier per
+    /// wilayah akan memecah rangkaian salinan itu menjadi belasan titik
+    /// sinkronisasi yang tidak satu pun dibutuhkan.
+    void RecordRegionCopy(VkCommandBuffer cmd, VkBuffer source, VkDeviceSize sourceOffset,
+                          const glm::uvec3& offset, const glm::uvec3& extent) const;
+
+    /// Barrier layout, untuk membingkai rangkaian `RecordRegionCopy`.
+    void RecordTransition(VkCommandBuffer cmd, VkImageLayout from, VkImageLayout to);
 
     VkImageView View() const { return view_; }
     VkSampler Sampler() const { return sampler_; }
@@ -43,8 +57,6 @@ public:
     bool IsValid() const { return image_ != VK_NULL_HANDLE; }
 
 private:
-    void Transition(VkCommandBuffer cmd, VkImageLayout from, VkImageLayout to);
-
     Device* device_ = nullptr;
     VkImage image_ = VK_NULL_HANDLE;
     VmaAllocation allocation_ = VK_NULL_HANDLE;

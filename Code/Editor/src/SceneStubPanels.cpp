@@ -112,6 +112,29 @@ public:
             // perbedaan yang tidak ditampilkan adalah perbedaan yang tidak
             // diketahui siapa pun.
             ImGui::Text("Active  : %s", render::ToString(selection.kind));
+            // Biaya komposit clipmap. Di CPU, jadi ia tidak muncul di tabel
+            // pass GPU di atas — dan justru angka inilah yang dibatasi anggaran
+            // 0,4 ms rencana GI.
+            const uint64_t voxels = context.viewportRenderer->SdfVoxelsWritten();
+            const float updateMs = context.viewportRenderer->SdfUpdateMilliseconds();
+            if (context.gi.enabled) {
+                // **Puncak jendela, bukan hanya angka frame ini.** Yang dibatasi
+                // anggaran adalah frame terberat — yaitu frame saat kamera
+                // melintasi batas voxel — dan frame itu satu di antara belasan.
+                // Angka sesaat memperlihatkannya hanya kalau kebetulan terbaca
+                // pada frame yang tepat.
+                sdfHistory_[sdfCursor_] = {updateMs, voxels};
+                sdfCursor_ = (sdfCursor_ + 1) % sdfHistory_.size();
+                const SdfSample peak = *std::max_element(
+                    sdfHistory_.begin(), sdfHistory_.end(),
+                    [](const SdfSample& a, const SdfSample& b) { return a.ms < b.ms; });
+                ImGui::Text("SDF CPU : %.3f ms  (%llu voxels)", static_cast<double>(updateMs),
+                            static_cast<unsigned long long>(voxels));
+                ImGui::Text("SDF peak: %.3f ms  (%llu voxels)", static_cast<double>(peak.ms),
+                            static_cast<unsigned long long>(peak.voxels));
+            } else {
+                sdfHistory_.fill({});
+            }
             if (selection.fellBack) {
                 ImGui::TextColored(ImVec4(0.94f, 0.72f, 0.35f, 1.0f), "%s",
                                    selection.reason.c_str());
@@ -126,6 +149,17 @@ public:
         ImGui::Text("History : %zu steps",
                     context.history != nullptr ? context.history->Entries().size() : 0u);
     }
+
+private:
+    struct SdfSample {
+        float ms = 0.0f;
+        uint64_t voxels = 0;
+    };
+
+    // Dua detik pada 60 Hz: cukup panjang untuk memuat lintasan batas voxel,
+    // cukup pendek untuk melupakan pembangunan penuh saat GI baru dinyalakan.
+    std::array<SdfSample, 120> sdfHistory_{};
+    std::size_t sdfCursor_ = 0;
 };
 
 }  // namespace

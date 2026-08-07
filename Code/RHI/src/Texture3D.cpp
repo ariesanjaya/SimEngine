@@ -47,7 +47,7 @@ bool Texture3D::Create(Device& device, const glm::uvec3& extent, VkFormat format
     // membaca image dalam layout yang tidak sah — dan clipmap memang punya
     // kaskade yang tidak tersentuh selama kamera tidak bergerak.
     VkCommandBuffer cmd = device_->BeginOneShot();
-    Transition(cmd, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    RecordTransition(cmd, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
     device_->EndOneShot(cmd);
 
     VkImageViewCreateInfo viewInfo{};
@@ -76,7 +76,7 @@ bool Texture3D::Create(Device& device, const glm::uvec3& extent, VkFormat format
     return true;
 }
 
-void Texture3D::Transition(VkCommandBuffer cmd, VkImageLayout from, VkImageLayout to) {
+void Texture3D::RecordTransition(VkCommandBuffer cmd, VkImageLayout from, VkImageLayout to) {
     const bool toTransfer = to == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     VkImageMemoryBarrier2 barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
@@ -136,22 +136,33 @@ bool Texture3D::UploadRegion(const glm::uvec3& offset, const glm::uvec3& extent,
     }
 
     VkCommandBuffer cmd = device_->BeginOneShot();
-    Transition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    RecordTransition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    RecordRegionCopy(cmd, staging.Handle(), 0, offset, extent);
+    RecordTransition(cmd, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
+    device_->EndOneShot(cmd);
+    return true;
+}
 
+void Texture3D::RecordRegionCopy(VkCommandBuffer cmd, VkBuffer source, VkDeviceSize sourceOffset,
+                                 const glm::uvec3& offset, const glm::uvec3& extent) const {
+    if (offset.x + extent.x > extent_.x || offset.y + extent.y > extent_.y ||
+        offset.z + extent.z > extent_.z) {
+        // Ditolak, bukan dijepit — alasannya sama dengan di `UploadRegion`, dan
+        // di sini lebih penting lagi: yang direkam ke command buffer frame tidak
+        // punya nilai balik yang bisa diperiksa pemanggilnya.
+        SIM_ERROR("RHI", "volume upload region leaves the texture");
+        return;
+    }
     VkBufferImageCopy region{};
+    region.bufferOffset = sourceOffset;
     region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     region.imageSubresource.layerCount = 1;
     region.imageOffset = {static_cast<int32_t>(offset.x), static_cast<int32_t>(offset.y),
                           static_cast<int32_t>(offset.z)};
     region.imageExtent = {extent.x, extent.y, extent.z};
-    vkCmdCopyBufferToImage(cmd, staging.Handle(), image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
-                           &region);
-
-    Transition(cmd, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    device_->EndOneShot(cmd);
-    return true;
+    vkCmdCopyBufferToImage(cmd, source, image_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 }
 
 void Texture3D::Destroy() {

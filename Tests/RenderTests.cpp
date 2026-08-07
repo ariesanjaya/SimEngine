@@ -2061,11 +2061,9 @@ TEST_CASE("Medan jarak kotak benar di luar maupun di dalam") {
     box.boundsMax = Vec3(1.0f);
     const std::array<MeshInstance, 1> meshes{box};
 
-    std::vector<Mat4> inverses;
-    std::vector<Vec3> halfExtents;
-    std::vector<float> scales;
-    const SdfVolume::DistanceField field =
-        MakeBoxSceneField(meshes, inverses, halfExtents, scales);
+    BoxSceneField built;
+    built.Build(meshes);
+    const auto field = [&built](const Vec3& point) { return built.Distance(point); };
 
     // Di permukaan.
     CHECK(field(Vec3(1.0f, 0.0f, 0.0f)) == doctest::Approx(0.0f).epsilon(0.001));
@@ -2089,11 +2087,9 @@ TEST_CASE("Skala tak seragam tidak pernah melebih-lebihkan ruang kosong") {
     box.boundsMax = Vec3(0.5f);
     const std::array<MeshInstance, 1> meshes{box};
 
-    std::vector<Mat4> inverses;
-    std::vector<Vec3> halfExtents;
-    std::vector<float> scales;
-    const SdfVolume::DistanceField field =
-        MakeBoxSceneField(meshes, inverses, halfExtents, scales);
+    BoxSceneField built;
+    built.Build(meshes);
+    const auto field = [&built](const Vec3& point) { return built.Distance(point); };
 
     // Kotaknya 4×1×4, jadi permukaan atasnya di y = 0,5. Sebuah titik 1 m di
     // atasnya berjarak tepat 1 m.
@@ -2112,3 +2108,139 @@ TEST_CASE("Skala tak seragam tidak pernah melebih-lebihkan ruang kosong") {
         CHECK(field(stepped) >= -1e-3f);
     }
 }
+
+// --- Kriteria selesai M1: depth SDF terhadap kebenaran raster -----------------
+
+namespace {
+
+/// Perpotongan sinar dengan kotak berorientasi — kebenaran analitiknya.
+///
+/// Ini yang menggantikan "uji visual berdampingan" yang disebut rencana. Depth
+/// buffer raster berisi perpotongan sinar dengan segitiga; untuk geometri kotak
+/// perpotongan itu punya bentuk tertutup, jadi ia bisa dibandingkan sebagai
+/// angka alih-alih sebagai penilaian mata. Test yang bisa gagal sendiri lebih
+/// berguna daripada dua tangkapan layar yang harus ditatap orang.
+bool RayBoxDistance(const Vec3& origin, const Vec3& direction, const Mat4& model,
+                    const Vec3& halfExtent, float& outDistance) {
+    const Mat4 inverse = glm::inverse(model);
+    const Vec3 localOrigin = Vec3(inverse * Vec4(origin, 1.0f));
+    const Vec3 localDirection = Vec3(inverse * Vec4(direction, 0.0f));
+
+    float tMin = -std::numeric_limits<float>::max();
+    float tMax = std::numeric_limits<float>::max();
+    for (int axis = 0; axis < 3; ++axis) {
+        if (std::abs(localDirection[axis]) < 1e-8f) {
+            if (std::abs(localOrigin[axis]) > halfExtent[axis]) {
+                return false;
+            }
+            continue;
+        }
+        const float inverseDirection = 1.0f / localDirection[axis];
+        float near = (-halfExtent[axis] - localOrigin[axis]) * inverseDirection;
+        float far = (halfExtent[axis] - localOrigin[axis]) * inverseDirection;
+        if (near > far) {
+            std::swap(near, far);
+        }
+        tMin = std::max(tMin, near);
+        tMax = std::min(tMax, far);
+        if (tMin > tMax) {
+            return false;
+        }
+    }
+    if (tMax < 0.0f) {
+        return false;
+    }
+    // Jarak diukur di ruang lokal, dan modelnya berskala seragam pada test ini,
+    // jadi t yang sama berlaku di dunia.
+    outDistance = tMin >= 0.0f ? tMin : tMax;
+    return true;
+}
+
+}  // namespace
+
+TEST_CASE("Depth sphere tracing cocok dengan perpotongan analitiknya") {
+    // Adegan: sebuah kotak 2×2×2 di depan kamera, dan bidang tanah.
+    MeshInstance box;
+    box.transform = glm::translate(Mat4(1.0f), Vec3(0.0f, 0.0f, 4.0f));
+    box.boundsMin = Vec3(-1.0f);
+    box.boundsMax = Vec3(1.0f);
+    const std::array<MeshInstance, 1> meshes{box};
+
+    SdfClipmapSettings settings;
+    settings.resolution = 128;
+    settings.cascadeCount = 2;
+    settings.finestVoxelSize = 0.05f;
+    SdfVolume volume;
+    volume.Configure(settings);
+    volume.Clipmap().Scroll(Vec3(0.0f, 0.0f, 3.0f));
+
+    BoxSceneField field;
+    field.Build(meshes);
+    volume.FillAll(field);
+
+    const std::unique_ptr<ITraceBackend> backend = CreateSdfTraceBackend(volume, 96);
+    const Mat4 model = glm::scale(glm::translate(Mat4(1.0f), Vec3(0.0f, 0.0f, 4.0f)), Vec3(2.0f));
+
+    const float voxel = volume.Clipmap().VoxelSize(0);
+    int compared = 0;
+    float worst = 0.0f;
+
+    // Kisi sinar yang menyapu permukaan depan kotak.
+    for (const float x : {-0.6f, -0.3f, 0.0f, 0.3f, 0.6f}) {
+        for (const float y : {-0.6f, -0.3f, 0.0f, 0.3f, 0.6f}) {
+            const Vec3 origin(0.0f, 0.0f, 0.5f);
+            const Vec3 direction = glm::normalize(Vec3(x, y, 3.0f));
+
+            float analytic = 0.0f;
+            const bool analyticHit =
+                RayBoxDistance(origin, direction, model, Vec3(0.5f), analytic);
+            const TraceResult traced = backend->Trace(origin, direction, 20.0f);
+
+            INFO("sinar (", x, ",", y, ")");
+            // Sepakat soal kena atau tidaknya lebih dulu — selisih jarak pada
+            // sinar yang salah satunya bilang meleset tidak berarti apa-apa.
+            REQUIRE(traced.hit == analyticHit);
+            if (!analyticHit) {
+                continue;
+            }
+            const float error = std::abs(traced.distance - analytic);
+            worst = std::max(worst, error);
+            ++compared;
+            // Dua voxel: satu untuk kuantisasi 8-bit, satu untuk ambang berhenti
+            // sphere tracing yang memang setengah voxel di depan permukaan.
+            CHECK(error < voxel * 2.0f);
+        }
+    }
+    REQUIRE(compared >= 20);
+    INFO("selisih terburuk ", worst, " m pada voxel ", voxel, " m");
+    CHECK(worst < voxel * 2.0f);
+}
+
+TEST_CASE("Sinar yang melewati sisi kotak sepakat soal meleset") {
+    MeshInstance box;
+    box.transform = glm::translate(Mat4(1.0f), Vec3(0.0f, 0.0f, 4.0f));
+    box.boundsMin = Vec3(-0.5f);
+    box.boundsMax = Vec3(0.5f);
+    const std::array<MeshInstance, 1> meshes{box};
+
+    SdfClipmapSettings settings;
+    settings.resolution = 128;
+    settings.cascadeCount = 1;
+    settings.finestVoxelSize = 0.05f;
+    SdfVolume volume;
+    volume.Configure(settings);
+    volume.Clipmap().Scroll(Vec3(0.0f, 0.0f, 3.0f));
+
+    BoxSceneField field;
+    field.Build(meshes);
+    volume.FillAll(field);
+
+    const std::unique_ptr<ITraceBackend> backend = CreateSdfTraceBackend(volume, 96);
+    // Jauh di samping kotaknya: harus meleset, bukan mengenai sesuatu yang tidak
+    // ada. Permukaan hantu adalah gejala paling khas medan jarak yang salah
+    // disandikan.
+    const TraceResult wide =
+        backend->Trace(Vec3(0.0f, 0.0f, 0.5f), glm::normalize(Vec3(1.0f, 0.0f, 1.0f)), 20.0f);
+    CHECK(!wide.hit);
+}
+

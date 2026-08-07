@@ -64,6 +64,17 @@ public:
     /// tidak mendukung timestamp, atau selama beberapa frame pertama.
     virtual std::span<const PassTiming> PassTimings() const { return {}; }
 
+    /// Biaya pembaruan clipmap SDF di CPU, milidetik, beserta jumlah voxel
+    /// yang ditulis frame terakhir.
+    ///
+    /// **CPU, bukan GPU, dan karena itu tidak muncul di `PassTimings`.**
+    /// Komposit clipmap masih berjalan di CPU sampai ia pindah ke compute, dan
+    /// biaya yang tidak muncul di tabel mana pun adalah biaya yang tidak ada
+    /// yang mengawasinya — sementara justru angka inilah yang dibatasi anggaran
+    /// 0,4 ms rencana GI.
+    virtual float SdfUpdateMilliseconds() const { return 0.0f; }
+    virtual uint64_t SdfVoxelsWritten() const { return 0; }
+
     /// Backend trace yang **benar-benar dipakai**, beserta alasannya. Berbeda
     /// dari yang diminta lewat `ViewportDesc::gi` bila permintaannya tidak bisa
     /// dipenuhi perangkat ini.

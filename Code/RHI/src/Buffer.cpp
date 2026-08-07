@@ -72,6 +72,21 @@ bool DynamicBuffer::Write(const void* data, VkDeviceSize bytes) {
     return true;
 }
 
+bool DynamicBuffer::WriteAt(VkDeviceSize offset, const void* data, VkDeviceSize bytes) {
+    if (bytes == 0) {
+        return true;
+    }
+    // **Tidak memanggil `Reserve`.** Membuat ulang buffer di tengah pengemasan
+    // akan membuang potongan yang sudah ditulis sebelumnya, dan pemanggilnya
+    // sudah menyimpan offset ke buffer yang lama. Pemanggil yang mengemas harus
+    // memesan kapasitasnya lebih dulu, sekali.
+    if (mapped_ == nullptr || offset + bytes > capacity_) {
+        return false;
+    }
+    std::memcpy(static_cast<std::byte*>(mapped_) + offset, data, bytes);
+    return true;
+}
+
 void DynamicBuffer::Destroy() {
     if (device_ == nullptr || buffer_ == VK_NULL_HANDLE) {
         return;
