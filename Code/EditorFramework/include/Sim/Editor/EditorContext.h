@@ -90,6 +90,14 @@ struct EditorContext {
     /// mengalirkannya ke renderer.
     render::PostProcessSettings post;
 
+    /// Pengaturan langit atmosferik. Di sini karena alasan yang sama dengan
+    /// `gi` dan `post`.
+    struct SkySettings {
+        bool enabled = false;
+        float intensity = 20.0f;
+        float cameraHeightKm = 0.5f;
+    } sky;
+
     /// Waktu-hari: preset kurva, jam siklus, dan tempat mataharinya.
     ///
     /// Di sini karena alasan yang sama dengan `gi`: dua hal menyentuhnya. Panel

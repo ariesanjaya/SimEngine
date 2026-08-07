@@ -80,6 +80,16 @@ public:
         }
 
 
+        // --- Langit (E8.8) ---
+        ImGui::Separator();
+        ImGui::Checkbox("Sky", &context.sky.enabled);
+        if (context.sky.enabled) {
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+            ImGui::SliderFloat("Sky gain", &context.sky.intensity, 0.0f, 100.0f, "%.0f");
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+            ImGui::SliderFloat("Altitude", &context.sky.cameraHeightKm, 0.0f, 20.0f, "%.2f km");
+        }
+
         // --- Post-process (E8.8) ---
         //
         // Sakelar mode ada di sini, bukan tersembunyi, karena eksposur otomatis

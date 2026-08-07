@@ -21,6 +21,7 @@ sim_add_library(Render
         src/SdfVolume.cpp
         src/TieredTrace.cpp
         src/ShadowAtlas.cpp
+        src/SkyAtmosphere.cpp
         src/TraceBackend.cpp
         src/ShadowCascades.cpp
         src/TimeOfDay.cpp
@@ -61,7 +62,11 @@ sim_compile_shaders(SimShadersGrid
         ${CMAKE_SOURCE_DIR}/Shaders/tonemap.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/fullscreen_uv.vert.slang
         ${CMAKE_SOURCE_DIR}/Shaders/bloom_down.frag.slang
-        ${CMAKE_SOURCE_DIR}/Shaders/bloom_up.frag.slang)
+        ${CMAKE_SOURCE_DIR}/Shaders/bloom_up.frag.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/sky_transmittance.frag.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/sky_multiscatter.frag.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/sky_view.frag.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/sky_draw.frag.slang)
 # openpbr.slang sengaja tidak ada di daftar ini. Ia modul pustaka tanpa entry
 # point — yang mengompilasinya adalah `AssembleMaterialModule`, yang menanamnya
 # ke dalam modul material lalu menyerahkannya ke ShaderCache. Menambahkannya di

@@ -123,6 +123,21 @@ struct ViewportDesc {
     Vec3 sunRadiance{3.0f};
     bool castShadows = true;
 
+    /// Langit atmosferik. Saat mati, latar viewport tetap `clearColor`.
+    ///
+    /// **Menyala secara bawaan tidak otomatis benar**: langit menggantikan warna
+    /// latar yang selama ini disetel pemakai, dan editor yang mengganti latar
+    /// sendiri tanpa diminta sulit dibedakan dari editor yang rusak. Sakelarnya
+    /// karena itu ada, dan bawaannya mati sampai matahari benar-benar disetir
+    /// Time-of-Day.
+    bool skyEnabled = false;
+    /// Pengali radiansi langit. Atmosfer Bruneton menghasilkan angka dalam
+    /// satuannya sendiri; sampai lampu memakai satuan fotometrik, angka ini yang
+    /// menjembatani keduanya.
+    float skyIntensity = 20.0f;
+    /// Ketinggian kamera di atas permukaan laut, kilometer.
+    float cameraHeightKm = 0.5f;
+
     /// Pengaturan post-process: eksposur, operator nada, dan yang menyusul di
     /// atasnya.
     PostProcessSettings post;

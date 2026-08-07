@@ -813,6 +813,40 @@ Diverifikasi di editor, bukan hanya di uji:
 | Adaptasi cepat (τ = 0,4 s) sesudah jeda masukan 0,15 s | selisih terbesar **0,02** dari pecahan |
 | Galat validation layer | **0** |
 
+**Selesai: langit Bruneton-Hillaire**
+(`Code/Render/src/SkyAtmosphere.{h,cpp}`,
+`Shaders/sky_{common,transmittance.frag,multiscatter.frag,view.frag,draw.frag}.slang`),
+mengikuti `/home/arie/SDK/atmosphere-bac`.
+
+**Tiga LUT dengan tiga umur yang berbeda, dan itu inti rancangannya.**
+Transmitansi hanya bergantung pada parameter atmosfer, jadi ia dibangun sekali.
+Multiscattering bergantung pada matahari, jadi ia dibangun ulang saat matahari
+bergeser lebih dari setengah derajat — bukan "saat berubah sama sekali", karena
+matahari yang digerakkan slider bergeser sedikit tiap frame dan membangun ulang
+untuk pergeseran sekecil itu berarti membangun ulang tiap frame. Sky-view
+bergantung pada matahari **dan** ketinggian kamera, jadi ia dibangun tiap frame —
+tapi ukurannya 192×108, sepersekian dari satu layar.
+
+Cakram matahari digambar di dalam pass ini, bukan sebagai objek: ia berada di
+jarak tak hingga, dan objek di jarak tak hingga adalah objek yang setiap sistem
+culling, bayangan, dan depth harus punya kekecualian untuknya.
+
+Terukur di editor, dengan matahari disetir panel Time-of-Day:
+
+| Jam | Nisbah merah/biru di horizon |
+| --- | --- |
+| 12:00 | 0,52 (biru) |
+| 16:00 | 0,70 |
+| 17:30 | **1,30** (jingga) |
+
+Biaya pass `sky`: **0,29 ms**. Nol galat validation layer. Sakelarnya mati
+secara bawaan: langit menggantikan warna latar yang selama ini disetel pemakai,
+dan editor yang mengganti latar sendiri tanpa diminta sulit dibedakan dari editor
+yang rusak.
+
+**Yang belum ada dari acuan itu:** aerial perspective (LUT 3D kabut jarak jauh)
+dan awan volumetrik. Keduanya berdiri di atas LUT yang sekarang sudah ada.
+
 **Selesai: bloom** (`Code/Render/{include/Sim/Render/Bloom.h,src/Bloom.cpp}`,
 `Shaders/{bloom_down,bloom_up}.frag.slang`). Penurunan 13 cuplikan (Jimenez)
 lalu penaikan tenda 3×3, dengan pembobotan Karis pada penurunan pertama.

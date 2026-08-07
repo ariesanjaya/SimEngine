@@ -2,6 +2,7 @@
 
 #include "DepthPyramid.h"
 #include "PostProcess.h"
+#include "SkyAtmosphere.h"
 #include "FrameGraphExecutor.h"
 #include "ProbeField.h"
 #include "SdfClipmapResource.h"
@@ -385,6 +386,9 @@ public:
             post_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight());
             post_.AdoptLayouts();
         }
+        if (sky_.Create(device_, shaderDirectory_, PostProcess::kSceneFormat)) {
+            sky_.AdoptLayouts();
+        }
         CreateRadianceCache();
         if (probes_.Create(device_, shaderDirectory_, shadowSetLayout_)) {
             probes_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(), kNormalFormat);
@@ -607,7 +611,7 @@ public:
 
         UpdateClusters(desc, scene, aspect, slot);
         UpdateShadowUniforms(desc, viewProj, slot);
-        BuildGraph();
+        BuildGraph(desc);
 
         VkCommandBuffer cmd = device_.BeginTransient();
         profiler_.BeginFrame(cmd);
@@ -645,12 +649,26 @@ public:
         recorders[atlasPassId_] = [&](VkCommandBuffer command) {
             RecordAtlasPass(command, slot, casterCount_);
         };
+        if (skyId_ != kInvalidPass) {
+            recorders[skyId_] = [&](VkCommandBuffer command) {
+                sky_.RecordLuts(command, sunDirection_, desc.cameraHeightKm);
+                // DONT_CARE, bukan CLEAR: langit menutupi setiap piksel, jadi
+                // membersihkannya lebih dulu berarti menulis seluruh gambar dua
+                // kali untuk hasil yang sama.
+                BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/false,
+                               /*writeColor=*/true, /*useDepth=*/false);
+                sky_.RecordDraw(command, invViewProj, desc.camera.position,
+                                desc.cameraHeightKm, sunDirection_, sunRadiance_,
+                                desc.skyIntensity);
+                vkCmdEndRendering(command);
+            };
+        }
         recorders[gridId_] = [&](VkCommandBuffer command) {
             // Grid membersihkan warna dan menjadi latar. Ia tidak menyentuh depth
             // sama sekali, jadi apa pun yang digambar sesudahnya menutupinya tanpa
             // uji apa pun.
-            BeginRendering(command, desc, /*clearColor=*/true, /*loadDepth=*/false,
-                           /*writeColor=*/true, /*useDepth=*/false);
+            BeginRendering(command, desc, /*clearColor=*/skyId_ == kInvalidPass,
+                           /*loadDepth=*/false, /*writeColor=*/true, /*useDepth=*/false);
             if (desc.showGrid && gridPipeline_ != VK_NULL_HANDLE) {
                 GridPush push{};
                 push.invViewProj = invViewProj;
@@ -821,7 +839,7 @@ private:
     /// menghemat beberapa mikrodetik dan menukar itu dengan pertanyaan "graph
     /// mana yang berlaku sekarang" setiap kali sebuah pass menjadi bersyarat —
     /// dan pass bersyarat justru alasan graph ini ada.
-    void BuildGraph() {
+    void BuildGraph(const ViewportDesc& desc) {
         graph_.Clear();
         colorId_ = graph_.Import("viewport-color", Access::Present);
         // Gambar HDR yang ditulis seluruh pass adegan. ShaderRead sebagai
@@ -840,6 +858,17 @@ private:
 
         atlasPassId_ = graph_.AddPass("shadow-atlas");
         graph_.Write(atlasPassId_, atlasId_, Access::DepthWrite);
+
+        // Langit lebih dulu, dan ia yang mengisi setiap piksel. Grid lalu tidak
+        // perlu membersihkan warna — dua clear pada gambar yang sama dalam satu
+        // frame adalah pekerjaan yang salah satunya pasti terbuang.
+        skyId_ = kInvalidPass;
+        if (desc.skyEnabled && sky_.IsValid()) {
+            skyId_ = graph_.AddPass("sky");
+            graph_.Write(skyId_, sceneId_, Access::ColorWrite);
+            // LUT-nya diurus `SkyAtmosphere` sendiri, bukan dilacak graph.
+            graph_.SetSideEffect(skyId_);
+        }
 
         gridId_ = graph_.AddPass("grid");
         graph_.Write(gridId_, sceneId_, Access::ColorWrite);
@@ -2507,6 +2536,8 @@ private:
             slot.sdfStaging.Destroy();
         }
         hiz_.Destroy();
+        post_.Destroy();
+        sky_.Destroy();
         probes_.Destroy();
         if (cache_.buffer != VK_NULL_HANDLE) {
             vmaDestroyBuffer(device_.Allocator(), cache_.buffer, cache_.allocation);
@@ -2545,6 +2576,7 @@ private:
     SdfClipmapResource sdfClipmap_;
     DepthPyramid hiz_;
     PostProcess post_;
+    SkyAtmosphere sky_;
     /// Langkah waktu frame ini, dipakai adaptasi eksposur.
     float deltaSeconds_ = 0.0f;
     std::chrono::steady_clock::time_point lastFrameTime_{};
@@ -2587,6 +2619,7 @@ private:
     ResourceId colorId_ = kInvalidResource;
     ResourceId sceneId_ = kInvalidResource;
     ResourceId depthId_ = kInvalidResource;
+    PassId skyId_ = kInvalidPass;
     PassId bloomId_ = kInvalidPass;
     PassId meterId_ = kInvalidPass;
     PassId tonemapId_ = kInvalidPass;

@@ -150,6 +150,9 @@ public:
         desc.showGrid = showGrid_;
         desc.gi = context.gi;
         desc.post = context.post;
+        desc.skyEnabled = context.sky.enabled;
+        desc.skyIntensity = context.sky.intensity;
+        desc.cameraHeightKm = context.sky.cameraHeightKm;
         camera_.ApplyTo(desc.camera);
         desc.camera.orthographic = orthographic_;
         desc.camera.orthoHeight = camera_.distance;
