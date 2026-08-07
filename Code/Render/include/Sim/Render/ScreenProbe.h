@@ -29,7 +29,7 @@ struct ProbeGridSettings {
     /// Akar jumlah ray per probe per frame. 4 berarti 4×4 = 16 arah.
     uint32_t raysPerAxis = 4;
     /// Banyaknya frame yang diakumulasi. Rencana GI menyebut 8–16.
-    uint32_t accumulationFrames = 12;
+    uint32_t accumulationFrames = 16;
 };
 
 /// Kisi probe di atas layar: satu probe per ubin `tileSize`×`tileSize` piksel.

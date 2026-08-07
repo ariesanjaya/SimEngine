@@ -8,6 +8,7 @@ sim_add_library(Render
         src/IblBaker.cpp
         src/LightCluster.cpp
         src/DepthPyramid.cpp
+        src/ProbeField.cpp
         src/ScreenProbe.cpp
         src/ScreenTrace.cpp
         src/SdfClipmap.cpp
@@ -38,8 +39,11 @@ sim_compile_shaders(SimShadersGrid
         ${CMAKE_SOURCE_DIR}/Shaders/box.vert.slang
         ${CMAKE_SOURCE_DIR}/Shaders/box.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/shadow.vert.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/prepass.vert.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/prepass.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/hiz_reduce.vert.slang
         ${CMAKE_SOURCE_DIR}/Shaders/hiz_reduce.frag.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/gi_probe.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/sdf_debug.vert.slang
         ${CMAKE_SOURCE_DIR}/Shaders/sdf_debug.frag.slang)
 # openpbr.slang sengaja tidak ada di daftar ini. Ia modul pustaka tanpa entry

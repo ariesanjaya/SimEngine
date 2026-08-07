@@ -26,7 +26,9 @@ std::size_t BuildTree(World& world, int roots, int depth, int branch) {
     std::vector<Entity> current;
     for (int r = 0; r < roots; ++r) {
         const Entity entity = world.Create("Root" + std::to_string(r));
-        world.Add<MeshRendererComponent>(entity, MeshRendererComponent{{}, {}, true, false});
+        MeshRendererComponent mesh;
+        mesh.receiveShadows = false;
+        world.Add<MeshRendererComponent>(entity, mesh);
         current.push_back(entity);
         ++created;
     }

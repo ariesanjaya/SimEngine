@@ -78,6 +78,7 @@ void SceneView::Build(scene::World& world, const Selection& selection) {
             instance.color = kMeshColor;
             instance.selected = selected;
             if (const auto* renderer = world.TryGet<scene::MeshRendererComponent>(entity)) {
+                instance.color = Vec4(renderer->baseColor, 1.0f);
                 instance.castShadows = renderer->castShadows;
                 instance.receiveShadows = renderer->receiveShadows;
             }

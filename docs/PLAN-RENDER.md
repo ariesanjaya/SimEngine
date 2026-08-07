@@ -1139,7 +1139,7 @@ sampai), dan satu untuk lapis mana yang menjawab — dengan geometri SDF sengaja
 diletakkan di luar layar supaya lapisnya terbaca dari lapisnya sendiri, bukan
 disimpulkan dari jaraknya.
 
-#### M3 — Screen probe (berjalan)
+#### M3 — Screen probe · ✅ selesai
 
 **Sudah ada: acuan CPU-nya, lengkap dan teruji.** Pemetaan oktahedral, kisi
 probe, arah ray berjitter, integrasi iradiansi, proyeksi SH, akumulasi temporal,
@@ -1241,14 +1241,74 @@ Pelacakan dependensi lewat `-depfile`: menyentuh `shadow_common.slang` membangun
 ulang tepat dua shader yang menyertakannya, bukan seluruhnya dan bukan tidak
 sama sekali.
 
-**Belum ada:** seluruh sisi GPU-nya — G-buffer normal dari depth prepass, pass
-penelusur probe yang menembakkan 16 ray dan memproyeksikannya ke SH, ping-pong
-akumulasi temporal, pass resolve yang menginterpolasi probe ke piksel, dan
-tampilan debug Irradiance yang menampilkannya. Beserta adegan Cornell box yang
-menjadi kriteria selesainya. Radiansi untuk sinar yang mengenai lewat lapis SDF
-juga belum ada dan memang belum bisa ada: yang memberinya warna adalah hash grid
-di M4, dan sampai saat itu hanya sinar yang mengenai lewat lapis layar yang
-membawa warna.
+#### Sisi GPU-nya
+
+**Depth prepass sekarang menulis normal, dan itu membalik keputusan lama.**
+Prepass sebelumnya berjalan tanpa tahap fragment sama sekali — bentuk yang benar
+selama tidak ada yang membutuhkan keluarannya. Screen probe membutuhkannya:
+penempatan probe dan bobot interpolasinya sama-sama menuntut normal per piksel
+dari permukaan yang benar-benar terlihat, dan menurunkannya dari turunan depth
+menghasilkan normal yang ngawur tepat di siluet — yaitu tempat probe paling
+sering salah tempat. Yang hilang jalur depth-only; yang didapat normal tanpa satu
+pun draw tambahan. Disandikan oktahedral ke dua kanal 16-bit: normal satuan hanya
+punya dua derajat kebebasan.
+
+Prepass punya tahap vertex sendiri, bukan milik pass forward. Menyalurkan warna
+dan bendera lewat sana berarti tahap vertex mengeluarkan varying yang tidak ada
+yang membaca — dan itu peringatan validasi di setiap pembuatan pipeline. Tiap
+pipeline sekarang menyebutkan atribut vertex mana yang benar-benar dibacanya
+lewat sebuah masker, menggantikan pengendusan "ini pipeline bayangan" yang
+sempat ada.
+
+**Akumulasi temporalnya dikerjakan blend unit, bukan ping-pong tekstur.** Bentuk
+yang lazim menyimpan dua salinan dan bergantian membaca yang satu sambil menulis
+yang lain — enam tekstur, dua set descriptor, dan satu pertanyaan "yang mana yang
+berlaku sekarang" di setiap pass. Yang dibutuhkan hanyalah `dst = src·c + dst·
+(1−c)`, dan itu persis yang dilakukan blending dengan konstanta. Konstantanya
+disetel per frame lewat `vkCmdSetBlendConstants`, jadi ia mengikuti
+`AccumulateProbe` di sisi C++ angka demi angka — termasuk 1,0 pada frame pertama
+dan setiap kali kamera berpindah, yang artinya "buang seluruh riwayat".
+Reproyeksi datang di M5; sampai saat itu membuang riwayat adalah satu-satunya
+jawaban yang jujur, karena riwayat probe terikat ke piksel dan piksel yang sama
+menunjuk permukaan yang berbeda begitu kamera bergerak.
+
+Tidak ada pass resolve tersendiri: tampilan Irradiance menginterpolasi probe ke
+piksel langsung di dalam pass debug. Pass resolve baru berguna saat shading
+memakainya, dan itu M6.
+
+**Sinar yang radiansinya tidak diketahui dibuang, bukan dihitung nol.** Ini
+perubahan yang paling menentukan, dan ia ditemukan lewat pengukuran, bukan lewat
+membaca kode. Sinar yang mengenai lewat lapis SDF tidak punya warna sampai hash
+grid M4. Menghitungnya sebagai hitam bukan sekadar membuat gambarnya lebih gelap
+— **ia menjadikan jenjang penelusuran itu sendiri sumber derau**: permukaan yang
+sama mengembalikan warnanya kalau lapis layar menjawab dan nol kalau SDF yang
+menjawab, dan mana yang menjawab berubah tiap frame karena arahnya berjitter.
+Terukur: dengan sinar SDF dihitung nol, **25,5% piksel berubah lebih dari 4/255
+antar-frame** walaupun kamera diam. Dengan sinar itu dibuang dari penaksir,
+**0,0%**.
+
+#### Kriteria selesai M3 — terpenuhi
+
+Rencana menyebutnya: "Cornell box menunjukkan color bleeding yang benar dan
+stabil (tidak berdenyut) saat kamera diam."
+
+Cornell box-nya berkas data, bukan kode: `Resources/Levels/cornell.simlevel`,
+tujuh kotak dan satu lampu titik. Itu menuntut satu hal yang belum ada — warna
+per-mesh. `MeshRendererComponent::baseColor` mengisinya sampai pipeline material
+menggantikan shader kotak; tanpa itu seluruh dunia berwarna sama, dan tidak ada
+adegan uji GI yang bisa memperlihatkan color bleeding sama sekali.
+
+**Color bleeding: benar.** Dinding kiri merah membias merah ke lantai dan sisi
+kiri kotak; dinding kanan hijau membias hijau ke sisi kanannya.
+
+**Stabil: diukur, bukan dinilai mata.** Dua tangkapan berjarak 1,5 detik dengan
+kamera diam, dibandingkan piksel demi piksel: selisih rata-rata **0,02/255**,
+maksimum 5, dan **nol persen** piksel berubah lebih dari 4/255.
+
+**Yang masih terlihat kasar adalah ubin probe**, dan itu memang keadaan yang
+benar untuk M3: satu probe per 16×16 piksel tanpa penyaring spasial apa pun.
+Yang menghaluskannya A-trous di M5, dan menambahkannya sekarang akan
+menyembunyikan justru apa yang perlu dilihat saat menyetel probe.
 
 - **Anggarannya belum didamaikan dengan kriteria terima E8.** 3,0 ms adalah 18%
   dari frame 60 fps, sementara adegan uji E8 — terrain 2×2 km, 200 ribu instance

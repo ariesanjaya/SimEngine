@@ -81,6 +81,32 @@ float4 giShBasis(float3 direction) {
 static const float4 kGiCosineConvolution =
     float4(3.14159265, 2.09439510, 2.09439510, 2.09439510);
 
+/// Bobot sebuah probe untuk sebuah piksel.
+///
+/// **Jaraknya diukur tegak lurus bidang piksel, bukan sebagai jarak lurus.**
+/// Dua titik di lantai yang sama bisa berjarak beberapa meter dan tetap
+/// merupakan permukaan yang sama; dua titik yang berjarak sepuluh sentimeter
+/// tapi terpisah dinding bukan. Memakai jarak lurus membuat cahaya merembes
+/// menembus sudut ruangan.
+///
+/// Cermin `ProbeWeight` di `ScreenProbe.cpp`.
+float giProbeWeight(float3 probePosition, float3 probeNormal, float3 pixelPosition,
+                    float3 pixelNormal, float planeDistance, float normalCosine) {
+    float cosine = dot(probeNormal, pixelNormal);
+    if (cosine < normalCosine) {
+        return 0.0;
+    }
+    float plane = abs(dot(probePosition - pixelPosition, pixelNormal));
+    if (plane > planeDistance) {
+        return 0.0;
+    }
+    // Melandai, bukan memotong tegak. Bobot yang melompat dari satu ke nol
+    // membuat batas tempat sebuah probe mulai diabaikan terlihat sebagai garis.
+    float planeWeight = 1.0 - plane / max(planeDistance, 1e-6);
+    float normalWeight = (cosine - normalCosine) / max(1.0 - normalCosine, 1e-6);
+    return planeWeight * normalWeight;
+}
+
 /// Iradiansi pada sebuah normal dari SH orde satu, satu float4 per kanal.
 float3 giEvaluateSh(float4 shR, float4 shG, float4 shB, float3 normal) {
     float4 basis = giShBasis(normal) * kGiCosineConvolution;

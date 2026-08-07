@@ -75,6 +75,15 @@ struct MeshRendererComponent {
     /// nama atau memindahkan mesh tidak menyentuh satu pun berkas level.
     AssetRef mesh;
     AssetRef material;
+    /// Warna dasar sementara, dipakai renderer sampai pipeline material
+    /// menggantikan shader kotak.
+    ///
+    /// **Di komponen mesh, bukan di material.** Material sungguhan datang lewat
+    /// `material` di atas dan akan menggantikannya; sampai saat itu satu-satunya
+    /// cara sebuah adegan bisa punya permukaan yang berbeda warna adalah lewat
+    /// sini — dan tanpa itu tidak ada adegan uji GI yang bisa memperlihatkan
+    /// color bleeding, karena seluruh dunia berwarna sama.
+    Vec3 baseColor{0.62f, 0.65f, 0.70f};
     bool castShadows = true;
     bool receiveShadows = true;
     /// Menggeser pemilihan tingkat detail: negatif memilih mesh yang lebih

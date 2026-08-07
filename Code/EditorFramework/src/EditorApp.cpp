@@ -465,13 +465,14 @@ void EditorApp::CreateStarterLevel() {
     const scene::Entity environment = world_.Create("Environment");
 
     const scene::Entity ground = world_.Create("Ground", environment);
-    world_.Add<scene::MeshRendererComponent>(
-        ground, scene::MeshRendererComponent{{}, {}, false, true});
+    scene::MeshRendererComponent groundMesh;
+    groundMesh.castShadows = false;
+    world_.Add<scene::MeshRendererComponent>(ground, groundMesh);
     world_.Add<scene::StaticFlagComponent>(ground, scene::StaticFlagComponent{true});
 
     const scene::Entity ball = world_.Create("Shader Ball", environment);
     world_.TryGet<scene::TransformComponent>(ball)->position = Vec3(0.0f, 1.0f, 0.0f);
-    scene::MeshRendererComponent ballMesh{{}, {}, true, true};
+    scene::MeshRendererComponent ballMesh;
     // Model shader ball bawaan, kalau proyeknya punya. Dicari lewat jalur, bukan
     // GUID tetap: GUID lahir dari berkas `.meta` di samping asetnya, jadi
     // menuliskannya di sini akan mengikat kode ke satu salinan berkas tertentu.

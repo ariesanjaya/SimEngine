@@ -2,6 +2,7 @@
 
 #include "DepthPyramid.h"
 #include "FrameGraphExecutor.h"
+#include "ProbeField.h"
 #include "SdfClipmapResource.h"
 #include "Sim/Core/Log.h"
 #include "Sim/RHI/Buffer.h"
@@ -362,6 +363,9 @@ public:
             hiz_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(), target_.DepthView(),
                        target_.Sampler());
         }
+        if (probes_.Create(device_, shaderDirectory_, shadowSetLayout_)) {
+            probes_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(), kNormalFormat);
+        }
         if (!WriteShadowDescriptors()) {
             return false;
         }
@@ -421,9 +425,15 @@ public:
         // descriptor yang menyebut yang lama harus ditulis ulang. Aman
         // dilakukan di sini: `RenderTarget::Resize` menunggu device idle sebelum
         // mengalokasi ulang, jadi tidak ada frame yang masih memakainya.
-        if (hiz_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(), target_.DepthView(),
-                       target_.Sampler())) {
-            UpdateHizDescriptors();
+        const bool hizChanged = hiz_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(),
+                                           target_.DepthView(), target_.Sampler());
+        const bool probesChanged =
+            probes_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(), kNormalFormat);
+        // Warna target juga berpindah image saat dialokasi ulang, dan binding 12
+        // menunjuknya — jadi descriptor GI ditulis ulang walaupun probe sendiri
+        // tidak berubah ukuran.
+        if (hizChanged || probesChanged) {
+            UpdateGiDescriptors();
         }
     }
 
@@ -514,6 +524,20 @@ public:
         // mengukur harganya, jadi biaya yang tertinggal akan mengaburkan
         // pengukuran itu sendiri.
         screenTraceEnabled_ = desc.gi.enabled && desc.gi.screenTrace;
+
+        // **Riwayat probe terikat ke piksel, dan piksel yang sama menunjuk
+        // permukaan yang berbeda begitu kamera bergerak.** Sampai reproyeksi
+        // datang di M5, satu-satunya jawaban yang jujur adalah membuangnya:
+        // bobot 1,0 berarti frame ini menggantikan seluruh riwayat. Menyimpannya
+        // akan membuat cahaya terseret mengikuti kamera — ghosting yang justru
+        // paling terlihat pada gerakan paling pelan.
+        probeGrid_.Configure(target_.Width(), target_.Height(), ProbeGridSettings{});
+        const bool viewMoved = viewProj != lastViewProj_;
+        lastViewProj_ = viewProj;
+        probeFrame_ = viewMoved ? 0 : probeFrame_ + 1;
+        const uint32_t accumulated =
+            std::min(probeFrame_ + 1, probeGrid_.Settings().accumulationFrames);
+        probeBlend_ = 1.0f / static_cast<float>(accumulated);
         sdfDebugEnabled_ = desc.gi.enabled && sdfClipmap_.IsValid() &&
                            desc.gi.debugView != GiDebugView::Off;
         sdfVoxelsWritten_ = 0;
@@ -586,12 +610,13 @@ public:
             vkCmdEndRendering(command);
         };
         recorders[prepassId_] = [&](VkCommandBuffer command) {
-            BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/false,
-                           /*writeColor=*/false);
+            probes_.RecordNormalBegin(command);
+            BeginPrepassRendering(command, desc);
             if (slotReady && opaqueCount > 0) {
                 DrawInstances(command, prepassPipeline_, push, slot, 0, opaqueCount);
             }
             vkCmdEndRendering(command);
+            probes_.RecordNormalEnd(command);
         };
         recorders[opaqueId_] = [&](VkCommandBuffer command) {
             BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/true,
@@ -615,6 +640,11 @@ public:
                 hiz_.Record(command, target_.Width(), target_.Height());
             };
         }
+        if (probePassId_ != kInvalidPass) {
+            recorders[probePassId_] = [&](VkCommandBuffer command) {
+                probes_.Record(command, slot.shadowSet, probeGrid_, probeFrame_, probeBlend_);
+            };
+        }
         if (giDebugId_ != kInvalidPass) {
             recorders[giDebugId_] = [&](VkCommandBuffer command) {
                 BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/false,
@@ -624,8 +654,10 @@ public:
                     push.invViewProj = invViewProj;
                     // w = 1: reversed-Z, bidang dekat ada di depth 1.
                     push.cameraPosition = Vec4(desc.camera.position, 1.0f);
-                    push.params = Vec4(static_cast<float>(desc.gi.debugView),
-                                       sdfClipmap_.Volume().Clipmap().MaxRange(), 0.0f, 0.0f);
+                    push.params = Vec4(
+                        static_cast<float>(desc.gi.debugView),
+                        sdfClipmap_.Volume().Clipmap().MaxRange(),
+                        static_cast<float>(probeGrid_.Settings().tileSize), 0.0f);
                     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                       sdfDebugPipeline_);
                     vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -766,6 +798,21 @@ private:
         graph_.Read(linesId_, depthId_, Access::DepthWrite);
         graph_.Write(linesId_, colorId_, Access::ColorWrite);
 
+        // Pass probe berjalan **sesudah** forward-opaque, dan itu bukan urutan
+        // yang bebas dipilih: satu-satunya sumber radiansi yang dimiliki M3
+        // adalah buffer warna yang sudah dinaungi dan disinari pass itu. Sinar
+        // yang mengenai lewat lapis layar membacanya; yang mengenai lewat SDF
+        // belum punya warna sampai hash grid M4.
+        probePassId_ = kInvalidPass;
+        if (giEnabled_ && probes_.IsValid() && hiz_.IsValid()) {
+            probePassId_ = graph_.AddPass("gi-probe-trace");
+            graph_.Read(probePassId_, colorId_, Access::ShaderRead);
+            graph_.Read(probePassId_, depthId_, Access::ShaderRead);
+            // Efek samping: keluarannya tekstur SH yang layout-nya diurus
+            // `ProbeField` sendiri, bukan resource yang dilacak graph.
+            graph_.SetSideEffect(probePassId_);
+        }
+
         // Pass bersyarat: hanya ada saat debug view menyala. Graph yang
         // dibangun ulang tiap frame membuat ini sekadar sebuah `if` — dan pass
         // bersyarat justru alasan graph ini ada.
@@ -894,6 +941,54 @@ private:
         const VkRect2D scissor{{0, 0}, {target_.Width(), target_.Height()}};
         vkCmdSetViewport(cmd, 0, 1, &viewport);
         vkCmdSetScissor(cmd, 0, 1, &scissor);
+    }
+
+    /// Depth prepass: depth target plus lampiran normal G-buffer.
+    ///
+    /// Lampirannya bukan warna viewport, jadi ia tidak bisa memakai
+    /// `BeginRendering` yang dipakai pass lain — formatnya berbeda, dan
+    /// pipeline yang formatnya tidak cocok dengan lampiran yang dipasang adalah
+    /// ketidakcocokan yang hanya dilaporkan validation layer.
+    void BeginPrepassRendering(VkCommandBuffer cmd, const ViewportDesc& desc) {
+        VkRenderingAttachmentInfo normal{};
+        normal.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        normal.imageView = probes_.NormalView();
+        normal.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        // CLEAR: piksel yang tidak tertutupi geometri apa pun harus punya normal
+        // yang jelas-jelas bukan normal — nol panjang, yang ditolak pemakainya —
+        // bukan sisa frame sebelumnya.
+        normal.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        normal.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        normal.clearValue.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+
+        VkRenderingAttachmentInfo depth{};
+        depth.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        depth.imageView = target_.DepthView();
+        depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        // Nol, bukan satu: pada reversed-Z yang terjauh adalah nol.
+        depth.clearValue.depthStencil = {0.0f, 0};
+
+        VkRenderingInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+        info.renderArea.extent = {target_.Width(), target_.Height()};
+        info.layerCount = 1;
+        info.colorAttachmentCount = probes_.IsValid() ? 1u : 0u;
+        info.pColorAttachments = probes_.IsValid() ? &normal : nullptr;
+        info.pDepthAttachment = &depth;
+        vkCmdBeginRendering(cmd, &info);
+
+        const VkViewport viewport{0.0f,
+                                  0.0f,
+                                  static_cast<float>(target_.Width()),
+                                  static_cast<float>(target_.Height()),
+                                  0.0f,
+                                  1.0f};
+        const VkRect2D scissor{{0, 0}, {target_.Width(), target_.Height()}};
+        vkCmdSetViewport(cmd, 0, 1, &viewport);
+        vkCmdSetScissor(cmd, 0, 1, &scissor);
+        (void)desc;
     }
 
     void DrawInstances(VkCommandBuffer cmd, VkPipeline pipeline, const BoxPush& push,
@@ -1154,18 +1249,38 @@ private:
         // dengan prepass: shader fragment yang menulis ke lampiran warna yang
         // tidak dipasang adalah peringatan validasi berulang, dan menghapusnya
         // juga jalur yang lebih cepat.
+        // Atribut 0 dan 2..5: posisi dan keempat kolom matriks. Normal, warna,
+        // dan bendera tidak dibaca pass bayangan.
         shadowPipeline_ =
             BuildPipeline(shadowVertex, VK_NULL_HANDLE, /*depthWrite=*/true,
                           VK_COMPARE_OP_LESS_OR_EQUAL, /*blend=*/false, /*colorWrite=*/false,
-                          shadowLayout_, kShadowFormat);
+                          shadowLayout_, kShadowFormat, /*colorAttachment=*/VK_FORMAT_UNDEFINED,
+                          /*attributeMask=*/0b0011'1101u);
         vkDestroyShaderModule(device_.Handle(), shadowVertex, nullptr);
 
         // Tiga pipeline dari satu pasang shader. Yang berbeda hanya keadaan
         // depth dan blending — dan itu memang perbedaan antara prepass, opaque,
         // dan transparan.
-        prepassPipeline_ = BuildPipeline(vertex, fragment, /*depthWrite=*/true,
+        // Prepass memakai shader fragmennya sendiri, bukan shader forward:
+        // yang ditulisnya hanya normal, dan menjalankan seluruh pencahayaan
+        // lalu membuangnya adalah persis pekerjaan yang prepass ada untuk
+        // menghindarinya.
+        VkShaderModule prepassVertex =
+            CreateShaderModule(device_.Handle(), shaderDirectory / "prepass.vert.spv");
+        VkShaderModule prepassFragment =
+            CreateShaderModule(device_.Handle(), shaderDirectory / "prepass.frag.spv");
+        // Atribut 0..5: posisi, normal, dan keempat kolom matriks. Warna dan
+        // bendera tidak dibacanya.
+        prepassPipeline_ = BuildPipeline(prepassVertex, prepassFragment, /*depthWrite=*/true,
                                          VK_COMPARE_OP_GREATER, /*blend=*/false,
-                                         /*colorWrite=*/false);
+                                         /*colorWrite=*/true, /*layout=*/VK_NULL_HANDLE,
+                                         /*depthFormat=*/VK_FORMAT_UNDEFINED, kNormalFormat,
+                                         /*attributeMask=*/0b0011'1111u);
+        for (VkShaderModule module : {prepassVertex, prepassFragment}) {
+            if (module != VK_NULL_HANDLE) {
+                vkDestroyShaderModule(device_.Handle(), module, nullptr);
+            }
+        }
         // Uji EQUAL, bukan GREATER: depth-nya sudah diisi prepass, jadi hanya
         // fragmen yang benar-benar terlihat yang boleh menjalankan shader.
         // Itulah gunanya prepass — bukan menghemat depth test, melainkan
@@ -1193,7 +1308,9 @@ private:
     VkPipeline BuildPipeline(VkShaderModule vertex, VkShaderModule fragment, bool depthWrite,
                              VkCompareOp depthCompare, bool blend, bool colorWrite,
                              VkPipelineLayout layout = VK_NULL_HANDLE,
-                             VkFormat depthFormat = VK_FORMAT_UNDEFINED) {
+                             VkFormat depthFormat = VK_FORMAT_UNDEFINED,
+                             VkFormat colorAttachment = VK_FORMAT_UNDEFINED,
+                             uint32_t attributeMask = 0xFFu) {
         std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
         stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -1235,9 +1352,9 @@ private:
             VkVertexInputAttributeDescription{7, 1, VK_FORMAT_R32_UINT,
                                               offsetof(BoxInstance, flags)},
         };
-        // Pass bayangan hanya membaca posisi dan keempat kolom matriks model —
-        // normal, warna, dan bendera tidak disentuhnya. Buffer-nya sama dan
-        // stride-nya sama; yang berbeda hanya atribut mana yang diambil.
+        // Tiap pipeline menyebutkan atribut mana yang benar-benar dibacanya.
+        // Buffer-nya sama dan stride-nya sama; yang berbeda hanya atribut yang
+        // diambil.
         //
         // **Menyebutkannya jadi wajib setelah shader-nya pindah ke Slang.**
         // glslang mempertahankan input yang dideklarasikan walaupun tidak
@@ -1250,12 +1367,9 @@ private:
         std::array<VkVertexInputAttributeDescription, 8> used{};
         uint32_t usedCount = 0;
         for (const VkVertexInputAttributeDescription& attribute : attributes) {
-            const bool shadowOnly = fragment == VK_NULL_HANDLE && !colorWrite;
-            if (shadowOnly && (attribute.location == 1 || attribute.location == 6 ||
-                               attribute.location == 7)) {
-                continue;
+            if ((attributeMask & (1u << attribute.location)) != 0u) {
+                used[usedCount++] = attribute;
             }
-            used[usedCount++] = attribute;
         }
 
         VkPipelineVertexInputStateCreateInfo vertexInput{};
@@ -1332,7 +1446,8 @@ private:
         // yang terlihat adalah prepass yang kadang jalan dan kadang tidak,
         // bergantung driver. Ditemukan lewat validation, bukan dengan membaca
         // kode.
-        const VkFormat colorFormat = target_.ColorFormat();
+        const VkFormat colorFormat =
+            colorAttachment != VK_FORMAT_UNDEFINED ? colorAttachment : target_.ColorFormat();
         VkPipelineRenderingCreateInfo rendering{};
         rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
         rendering.colorAttachmentCount = colorWrite ? 1u : 0u;
@@ -1431,7 +1546,7 @@ private:
         samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
         SIM_VK_CHECK(vkCreateSampler(device_.Handle(), &samplerInfo, nullptr, &shadow_.sampler));
 
-        const std::array<VkDescriptorSetLayoutBinding, 11> bindings{
+        const std::array<VkDescriptorSetLayoutBinding, 16> bindings{
             VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
@@ -1454,6 +1569,16 @@ private:
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{11, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{12, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{13, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{14, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{15, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
         };
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1466,7 +1591,7 @@ private:
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                  static_cast<uint32_t>(slots_.size())},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                 static_cast<uint32_t>(slots_.size()) * 6},
+                                 static_cast<uint32_t>(slots_.size()) * 11},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                  static_cast<uint32_t>(slots_.size()) * 4},
         };
@@ -1617,7 +1742,7 @@ private:
         // dibebaskan — kerusakan yang tidak muncul sebagai galat validasi.
         std::vector<VkDescriptorBufferInfo> buffers(slots_.size() * 5);
         std::vector<VkWriteDescriptorSet> writes;
-        writes.reserve(slots_.size() * 12);
+        writes.reserve(slots_.size() * 17);
         // SHADER_READ_ONLY, bukan DEPTH_READ_ONLY. Keduanya sah untuk mengambil
         // sampel dari image depth, tapi yang berlaku adalah yang disimpulkan
         // frame graph dari `Access::ShaderRead` — dan descriptor yang menyebut
@@ -1632,6 +1757,7 @@ private:
         // bayangan sebagai pengganti — descriptor yang dibiarkan kosong adalah
         // pelanggaran di setiap draw, bahkan pada pass yang tidak membacanya.
         const VkDescriptorImageInfo hizImage = HizDescriptorImage();
+        const std::array<VkDescriptorImageInfo, 5> probeImages = ProbeDescriptorImages();
         std::array<VkDescriptorImageInfo, 3> sdfImages{};
         for (uint32_t cascade = 0; cascade < 3; ++cascade) {
             const bool ready = sdfClipmap_.IsValid() && cascade < sdfClipmap_.CascadeCount();
@@ -1689,6 +1815,13 @@ private:
             pyramid.dstBinding = 10;
             pyramid.pImageInfo = &hizImage;
             writes.push_back(pyramid);
+
+            for (uint32_t offset = 0; offset < probeImages.size(); ++offset) {
+                VkWriteDescriptorSet probe = sampled;
+                probe.dstBinding = 11 + offset;
+                probe.pImageInfo = &probeImages[offset];
+                writes.push_back(probe);
+            }
         }
         vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
@@ -1715,6 +1848,48 @@ private:
             write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
             write.pImageInfo = &image;
             writes.push_back(write);
+        }
+        vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
+                               writes.data(), 0, nullptr);
+    }
+
+    /// Normal G-buffer, warna tersinari, dan tiga kanal SH probe — atau peta
+    /// bayangan sebagai pengganti kalau probe gagal dibuat. Descriptor yang
+    /// dibiarkan kosong adalah pelanggaran di setiap draw, bahkan pada pass yang
+    /// tidak membacanya.
+    std::array<VkDescriptorImageInfo, 5> ProbeDescriptorImages() const {
+        const bool ready = probes_.IsValid();
+        const VkSampler sampler = ready ? probes_.Sampler() : shadow_.sampler;
+        std::array<VkDescriptorImageInfo, 5> images{};
+        images[0] = {sampler, ready ? probes_.NormalView() : shadow_.arrayView,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        images[1] = {sampler, ready ? target_.ColorView() : shadow_.arrayView,
+                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        for (uint32_t channel = 0; channel < ProbeField::kShChannels; ++channel) {
+            images[2 + channel] = {sampler,
+                                   ready ? probes_.ShView(channel) : shadow_.arrayView,
+                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        }
+        return images;
+    }
+
+    /// Menulis ulang binding piramida dan probe saja.
+    void UpdateGiDescriptors() {
+        const VkDescriptorImageInfo hiz = HizDescriptorImage();
+        const std::array<VkDescriptorImageInfo, 5> probeImages = ProbeDescriptorImages();
+        std::vector<VkWriteDescriptorSet> writes;
+        writes.reserve(slots_.size() * 6);
+        for (const InstanceSlot& slot : slots_) {
+            for (uint32_t binding = 10; binding <= 15; ++binding) {
+                VkWriteDescriptorSet write{};
+                write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                write.dstSet = slot.shadowSet;
+                write.dstBinding = binding;
+                write.descriptorCount = 1;
+                write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+                write.pImageInfo = binding == 10 ? &hiz : &probeImages[binding - 11];
+                writes.push_back(write);
+            }
         }
         vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
@@ -2083,6 +2258,7 @@ private:
             slot.sdfStaging.Destroy();
         }
         hiz_.Destroy();
+        probes_.Destroy();
         cubeBuffer_.Destroy();
         for (VkPipeline* pipeline :
              {&prepassPipeline_, &opaquePipeline_, &transparentPipeline_, &gridPipeline_,
@@ -2115,12 +2291,18 @@ private:
     TraceBackendSelection giBackend_;
     SdfClipmapResource sdfClipmap_;
     DepthPyramid hiz_;
+    ProbeField probes_;
+    ProbeGrid probeGrid_;
+    uint32_t probeFrame_ = 0;
+    Mat4 lastViewProj_{0.0f};
+    float probeBlend_ = 1.0f;
     std::filesystem::path shaderDirectory_;
     uint64_t sdfVoxelsWritten_ = 0;
     float sdfUpdateMs_ = 0.0f;
     bool sdfDebugEnabled_ = false;
     PassId giDebugId_ = kInvalidPass;
     PassId hizPassId_ = kInvalidPass;
+    PassId probePassId_ = kInvalidPass;
     bool giEnabled_ = false;
     bool screenTraceEnabled_ = false;
     TextureHandle textureHandle_ = kInvalidTexture;
@@ -2185,6 +2367,8 @@ private:
     /// Dorongan awal sinar, meter — supaya permukaan asalnya sendiri tidak
     /// menghalangi sinarnya.
     static constexpr float kScreenOriginBias = 0.02f;
+    /// Normal disandikan oktahedral ke dua kanal 16-bit.
+    static constexpr VkFormat kNormalFormat = VK_FORMAT_R16G16_SFLOAT;
 
     ResourceId atlasId_ = kInvalidResource;
     PassId atlasPassId_ = kInvalidPass;
