@@ -1518,7 +1518,7 @@ benar-benar berlaku, dan menanam/menghapus langsung di viewport 3D. Ketiganya
 menunggu E8; jarak LOD, billboard, dan cull sudah tersimpan di `.simveg` dan
 tinggal dibaca perendernya.
 
-### E7.5 — Animation Editor · ~6 sesi
+### E7.5 — Animation Editor · ~6 sesi · 🔨 fondasi runtime (rangka, klip, pose)
 
 - **Skeleton view**: pohon bone, bind pose, retarget mapping ke rig standar.
 - **Timeline / Dope Sheet**: track per-bone/per-properti, keyframe (pindah, salin,
@@ -1533,6 +1533,57 @@ tinggal dibaca perendernya.
   keyframe bisa di-undo; kondisi transisi tersimpan/dimuat identik; event pada
   timeline memanggil fungsi Lua saat preview mencapai frame tersebut; blend tree 2D
   menghasilkan bobot yang benar pada titik uji.
+
+**Sudah ada:** modul `Sim::Animation` (`Code/Animation`) — rangka berurutan
+topologis dengan bind pose dan kamus retarget, klip berbasis `Curve` yang sama
+dengan Particle dan Terrain, pencampuran pose beserta bone mask dan layer aditif,
+event, penanda fase, root motion, dan format `.simskel`/`.simanim`. 30 test.
+Kriteria "scrub mulus" **terukur**: rig 100 bone, 900 track, 162 ribu kunci,
+posisi acak — **0,095 ms per frame** (Release; 0,57 ms pada Debug), berbanding
+anggaran 16,7 ms satu frame 60 Hz.
+
+**Rotasi ditulis sebagai tiga kurva Euler dan dipakai sebagai kuaternion.** Ini
+pemisahan yang disengaja antara bentuk penulisan dan bentuk pemakaian. Menulis
+menuntut kanal skalar — dope sheet, tangen, dan "geser kunci ini tiga frame"
+hanya punya arti pada angka tunggal terhadap waktu, dan tidak ada penyunting
+kurva yang bisa menampilkan kuaternion; setiap DCC memperlihatkan Euler kepada
+animator karena alasan yang sama. Memakai menuntut kuaternion, karena dua sudut
+Euler yang dicampur komponen demi komponen tidak menghasilkan rotasi di
+antaranya. Kurvanya karena itu dicuplik menjadi kuaternion saat sampling, dan
+seluruh pencampuran terjadi sesudah itu. Yang dibayar: gimbal lock menjadi sifat
+kurva yang ditulis — terlihat dan bisa dikendalikan penulisnya, sama seperti di
+DCC mana pun.
+
+**Track menunjuk bone lewat nama, bukan indeks.** Indeks bergeser begitu ada bone
+disisipkan, dan track yang bergeser menganimasikan tulang yang salah tanpa ada
+yang menyadarinya. Nama juga yang membuat retargeting mungkin sama sekali:
+pemetaannya dihitung sekali ke dalam `ClipBinding`, terpisah dari klipnya —
+karena satu klip bisa dipasang ke lebih dari satu rangka, dan itu persis arti
+retargeting. Kamus dua rig disusun lewat nama rig standar yang dicatat
+masing-masing, jadi N rig menuntut N kamus, bukan N².
+
+**Dua hal masuk lingkup yang tidak disebut daftar di atas**, keduanya dari membaca
+Esoterica (lihat `docs/DEPENDENCIES.md`):
+
+- **Penanda fase.** Dicampur pada waktu ternormalisasi yang sama, klip jalan dan
+  klip lari berada pada fase langkah yang berbeda — kaki kiri menapak di satu
+  klip sementara di klip lain sedang terangkat, dan hasilnya kaki yang menggeser
+  di tanah. Penanda fase memetakan waktu satu klip ke waktu berfase sama pada
+  klip lain, jadi yang dicampur selalu menapak dengan menapak.
+- **Root motion.** Tanpanya karakter berjalan di tempat sementara kapsul
+  fisikanya diam, atau meluncur karena kecepatan kapsulnya tidak pernah cocok
+  dengan langkah kakinya.
+
+**Event memakai selang setengah terbuka `[from, to)`.** Itu yang membuat sebuah
+event menyala tepat sekali per lintasan: dengan selang tertutup ia menyala dua
+kali di batas frame, dan dengan selang terbuka event pada waktu 0 tidak pernah
+menyala. Frame yang tersendat dan melompati lima event menyalakan kelimanya —
+event yang hilang di mesin lambat adalah bug yang hanya muncul di mesin lambat.
+
+**Belum ada:** state machine beserta transisi berkondisi, blend tree 1D/2D,
+layer, IK, panel penyuntingnya, dan penyaluran event ke Lua. Preview pada mesh
+skinned menunggu E8; `Pose::ComputeSkinning` sudah menghasilkan matriks yang
+tinggal diunggah.
 
 ---
 

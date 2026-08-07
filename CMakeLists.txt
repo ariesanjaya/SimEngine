@@ -63,6 +63,9 @@ add_subdirectory(Code/Terrain)
 # Vegetation: sebaran instance deterministik dari aturan penempatan di atas
 # terrain, peta kepadatan yang dicat, dan format `.simveg` (E7.4).
 add_subdirectory(Code/Vegetation)
+# Animation: rangka, klip berbasis kurva, pencampuran pose, dan graph state
+# machine untuk `.simskel`/`.simanim`/`.simanimgraph` (E7.5).
+add_subdirectory(Code/Animation)
 if(SIM_WITH_LUA)
     add_subdirectory(Code/Script)
 endif()

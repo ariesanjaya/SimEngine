@@ -46,6 +46,14 @@ sim_add_test(SimVegetationTests
     DEPS
         Sim::Vegetation)
 
+# Animation: rangka berurutan topologis, klip berbasis kurva, pencampuran pose,
+# penanda fase, root motion, dan format `.simskel`/`.simanim`.
+sim_add_test(SimAnimationTests
+    SOURCES
+        AnimationTests.cpp
+    DEPS
+        Sim::Animation)
+
 # Particle: model efek `.simfx`, kurva/gradient, dan simulasi CPU deterministik.
 sim_add_test(SimParticleTests
     SOURCES

@@ -107,6 +107,23 @@ Ditambahkan saat dibutuhkan, dicatat di sini supaya keputusannya tidak diulang:
 | **Tracy** | profiler (opsional, `SIM_WITH_TRACY`) |
 | **slang** | bahasa shader (sudah tersedia sebagai `slangc` di Vulkan SDK) |
 
+## Yang sengaja tidak dipakai
+
+Dicatat supaya keputusannya tidak ditimbang ulang tiap kali namanya muncul.
+
+| Kandidat | Untuk | Kenapa tidak |
+|---|---|---|
+| **EmotionFX** (O3DE) | sistem animasi E7.5 | Bukan pustaka lepas melainkan sebuah *Gem*: setiap Gem diturunkan dari `AZ::Module` milik AzCore, jadi memakainya berarti ikut membawa refleksi, EBus, dan `AZ::Data::Asset` milik O3DE — ketiganya bertabrakan langsung dengan `Sim::Reflect`, `AssetDatabase`, dan scene EnTT yang sudah ada. Editornya juga Qt, sedangkan panel di sini Dear ImGui, jadi sisi editornya tetap harus ditulis ulang. Lisensinya (Apache-2.0/MIT) bukan penghalangnya; kopel arsitekturnya yang jadi penghalang. |
+| **ozz-animation** | runtime sampling/blending E7.5 | MIT dan benar-benar lepas, tapi ia menyatakan dirinya *bukan* blend tree tingkat tinggi — yang disediakannya matematika sampling/blending/IK, sementara isi terbesar E7.5 justru state machine, transisi berkondisi, dan blend tree. Format binernya juga melawan pola aset `.sim*` JSON + berkas pendamping. Layak ditimbang ulang di E8 kalau impor rig ternyata berat. |
+| **Esoterica** (`/home/arie/SDK/Esoterica`) | sistem animasi E7.5 | MIT dan tooling-nya Dear ImGui — kandidat terdekat yang pernah ditimbang — tapi tidak bisa dipakai di sini: `Code/Base/Platform/` hanya berisi Win32 (tidak ada satu pun jalur POSIX di kodenya sendiri), build-nya MSBuild tanpa CMake sama sekali, dan `Engine/Animation` terkopel ke `Base` (362 ribu baris) lewat sistem resource, `Time`, `Quantization`, serta refleksi `EE_REFLECT_TYPE`/`EE_SERIALIZE` yang dibangkitkan generator libclang. Memakainya berarti mem-port sebuah engine ke Linux + CMake lebih dulu. |
+
+**Esoterica tetap dipakai sebagai acuan desain**, bukan dependensi — lisensinya
+mengizinkan membaca dan mengadaptasi dengan atribusi, dan README-nya memang
+memposisikan diri begitu. Dua konsep diambil dari sana ke dalam lingkup E7.5 yang
+tadinya tidak menyebutnya: **sync track** (blending tersinkron, tanpanya blend
+jalan↔lari membuat kaki menggeser di tanah karena dua klip dicampur pada fase
+langkah yang berbeda) dan **root motion**.
+
 ## Toolchain terverifikasi
 
 Diperiksa pada 2 Agustus 2026 di mesin ini:
@@ -142,3 +159,4 @@ source /home/arie/SDK/vulkan-sdk-1.4.350.1/setup-env.sh
 | `/home/arie/SDK/rencana-implementasi-gi.md` | Rencana global illumination: `ITraceBackend` dengan dua implementasi (SDF clipmap / ray query), screen probe, hash grid radiance cache. Anggaran 3,0 ms @ 1080p, baseline GTX 1660 Super. Belum masuk roadmap — lihat catatan di PLAN-RENDER.md |
 | [`adobe/openpbr-bsdf`](https://github.com/adobe/openpbr-bsdf) | Implementasi acuan OpenPBR 1.1 dari Adobe. **Untuk path tracing, bukan real time** — README-nya menyatakan "designed for unidirectional path tracing", dan isinya evaluate + sample + PDF, 7 tabel kompensasi energi, integrasi volumetrik, sampling panjang gelombang. Dipakai sebagai acuan kebenaran, bukan sebagai kode yang dipakai ulang |
 | `/home/arie/SDK/openpbr_dfg.slang` | Generator LUT split-sum (DFG) untuk berkas di atas. RG16F 128², `E_spec = F0*dfg.x + dfg.y`; deterministik, jadi boleh di-bake sekali dan di-ship |
+| `/home/arie/SDK/atmosphere-bac` | Hamburan atmosfer & awan volumetrik untuk langit E8 ([MatejSakmary](https://github.com/MatejSakmary/atmosphere-bac), Apache-2.0, skripsi S1 beserta [teksnya](https://github.com/MatejSakmary/atmosphere-bac-text)). Vulkan + GLSL, CMake + preset, dikembangkan di Linux — jadi ia bisa dibaca *dan* dijalankan di mesin ini, tidak seperti acuan yang hanya bisa dibaca. Isinya rangkaian LUT model Bruneton yang memang dipakai engine mana pun: `transmittanceLUT` → `multiscatteringLUT` → `skyviewLUT` → `aerialPerspectiveLUT`, lalu awan, terrain, dan komposisi akhir dengan histogram eksposur. Aset teksturnya tidak ikut di repo (diunduh terpisah), jadi menjalankannya butuh langkah itu dulu |
