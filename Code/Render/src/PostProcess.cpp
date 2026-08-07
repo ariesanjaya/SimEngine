@@ -1,0 +1,693 @@
+#include "PostProcess.h"
+
+#include "Sim/Core/Log.h"
+
+#include <algorithm>
+#include <cstring>
+#include <fstream>
+
+namespace sim::render {
+namespace {
+
+constexpr VkFormat kLuminanceFormat = VK_FORMAT_R16_SFLOAT;
+/// **32 bit, bukan 16.** Eksposur adegan siang hari cerah berada di sekitar
+/// 1,3·10⁻⁵, dan nilai normal terkecil half-float adalah 6·10⁻⁵ — seluruh
+/// rentang siang hari akan menjadi nol atau subnormal. Yang terlihat bukan
+/// galat melainkan layar hitam di bawah matahari.
+constexpr VkFormat kExposureFormat = VK_FORMAT_R32_SFLOAT;
+
+struct SeedPush {
+    float viewportUvMaxX = 1.0f;
+    float viewportUvMaxY = 1.0f;
+    int32_t seedWidth = 0;
+    int32_t seedHeight = 0;
+};
+
+struct ReducePush {
+    int32_t sourceWidth = 0;
+    int32_t sourceHeight = 0;
+};
+
+struct ExposurePush {
+    Vec4 params{0.0f};
+    Vec4 adaptation{0.0f};
+};
+
+struct ResolvePush {
+    Vec4 params{0.0f};
+};
+
+std::vector<uint32_t> ReadSpirv(const std::filesystem::path& path) {
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
+    if (!file) {
+        SIM_ERROR("Render", "cannot open shader {}", path.string());
+        return {};
+    }
+    const std::streamsize size = file.tellg();
+    if (size <= 0 || size % 4 != 0) {
+        return {};
+    }
+    std::vector<uint32_t> code(static_cast<std::size_t>(size) / 4);
+    file.seekg(0);
+    file.read(reinterpret_cast<char*>(code.data()), size);
+    return code;
+}
+
+VkShaderModule LoadModule(VkDevice device, const std::filesystem::path& path) {
+    const std::vector<uint32_t> code = ReadSpirv(path);
+    if (code.empty()) {
+        return VK_NULL_HANDLE;
+    }
+    VkShaderModuleCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    info.codeSize = code.size() * sizeof(uint32_t);
+    info.pCode = code.data();
+    VkShaderModule module = VK_NULL_HANDLE;
+    if (vkCreateShaderModule(device, &info, nullptr, &module) != VK_SUCCESS) {
+        return VK_NULL_HANDLE;
+    }
+    return module;
+}
+
+}  // namespace
+
+bool PostProcess::CreateSetLayout(uint32_t bindingCount, VkDescriptorSetLayout& outLayout) {
+    std::array<VkDescriptorSetLayoutBinding, 2> bindings{};
+    for (uint32_t i = 0; i < bindingCount; ++i) {
+        bindings[i].binding = i;
+        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[i].descriptorCount = 1;
+        bindings[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    info.bindingCount = bindingCount;
+    info.pBindings = bindings.data();
+    return vkCreateDescriptorSetLayout(device_->Handle(), &info, nullptr, &outLayout) ==
+           VK_SUCCESS;
+}
+
+bool PostProcess::CreatePipeline(const std::filesystem::path& shaderDirectory,
+                                 const char* fragmentName, VkDescriptorSetLayout setLayout,
+                                 uint32_t pushSize, VkFormat colorFormat,
+                                 VkPipelineLayout& outLayout, VkPipeline& outPipeline) {
+    VkPushConstantRange range{};
+    range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    range.size = pushSize;
+    VkPipelineLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layoutInfo.setLayoutCount = 1;
+    layoutInfo.pSetLayouts = &setLayout;
+    layoutInfo.pushConstantRangeCount = 1;
+    layoutInfo.pPushConstantRanges = &range;
+    if (vkCreatePipelineLayout(device_->Handle(), &layoutInfo, nullptr, &outLayout) !=
+        VK_SUCCESS) {
+        return false;
+    }
+
+    VkShaderModule fragment = LoadModule(device_->Handle(), shaderDirectory / fragmentName);
+    if (fragment == VK_NULL_HANDLE) {
+        return false;
+    }
+
+    const std::array<VkPipelineShaderStageCreateInfo, 2> stages{
+        VkPipelineShaderStageCreateInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                        nullptr, 0, VK_SHADER_STAGE_VERTEX_BIT, vertex_, "main",
+                                        nullptr},
+        VkPipelineShaderStageCreateInfo{VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO,
+                                        nullptr, 0, VK_SHADER_STAGE_FRAGMENT_BIT, fragment,
+                                        "main", nullptr}};
+
+    VkPipelineVertexInputStateCreateInfo vertexInput{};
+    vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+
+    VkPipelineInputAssemblyStateCreateInfo assembly{};
+    assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+
+    VkPipelineViewportStateCreateInfo viewport{};
+    viewport.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewport.viewportCount = 1;
+    viewport.scissorCount = 1;
+
+    VkPipelineRasterizationStateCreateInfo raster{};
+    raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.cullMode = VK_CULL_MODE_NONE;
+    raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    raster.lineWidth = 1.0f;
+
+    VkPipelineMultisampleStateCreateInfo multisample{};
+    multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+
+    VkPipelineColorBlendAttachmentState attachment{};
+    attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo blend{};
+    blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    blend.attachmentCount = 1;
+    blend.pAttachments = &attachment;
+
+    const std::array<VkDynamicState, 2> dynamicStates{VK_DYNAMIC_STATE_VIEWPORT,
+                                                      VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic{};
+    dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamic.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
+    dynamic.pDynamicStates = dynamicStates.data();
+
+    VkFormat format = colorFormat;
+    VkPipelineRenderingCreateInfo rendering{};
+    rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
+    rendering.colorAttachmentCount = 1;
+    rendering.pColorAttachmentFormats = &format;
+
+    VkGraphicsPipelineCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    info.pNext = &rendering;
+    info.stageCount = static_cast<uint32_t>(stages.size());
+    info.pStages = stages.data();
+    info.pVertexInputState = &vertexInput;
+    info.pInputAssemblyState = &assembly;
+    info.pViewportState = &viewport;
+    info.pRasterizationState = &raster;
+    info.pMultisampleState = &multisample;
+    info.pColorBlendState = &blend;
+    info.pDynamicState = &dynamic;
+    info.layout = outLayout;
+
+    const VkResult result = vkCreateGraphicsPipelines(device_->Handle(), VK_NULL_HANDLE, 1, &info,
+                                                      nullptr, &outPipeline);
+    vkDestroyShaderModule(device_->Handle(), fragment, nullptr);
+    if (result != VK_SUCCESS) {
+        SIM_ERROR("Render", "cannot create post-process pipeline {}", fragmentName);
+        outPipeline = VK_NULL_HANDLE;
+        return false;
+    }
+    return true;
+}
+
+bool PostProcess::Create(rhi::Device& device, const std::filesystem::path& shaderDirectory,
+                         VkFormat outputFormat) {
+    Destroy();
+    device_ = &device;
+    outputFormat_ = outputFormat;
+
+    vertex_ = LoadModule(device_->Handle(), shaderDirectory / "fullscreen.vert.spv");
+    if (vertex_ == VK_NULL_HANDLE) {
+        SIM_ERROR("Render", "post-process needs fullscreen.vert.spv");
+        return false;
+    }
+
+    VkSamplerCreateInfo samplerInfo{};
+    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerInfo.magFilter = VK_FILTER_LINEAR;
+    samplerInfo.minFilter = VK_FILTER_LINEAR;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    samplerInfo.maxLod = VK_LOD_CLAMP_NONE;
+    if (vkCreateSampler(device_->Handle(), &samplerInfo, nullptr, &sampler_) != VK_SUCCESS) {
+        return false;
+    }
+    samplerInfo.magFilter = VK_FILTER_NEAREST;
+    samplerInfo.minFilter = VK_FILTER_NEAREST;
+    if (vkCreateSampler(device_->Handle(), &samplerInfo, nullptr, &pointSampler_) != VK_SUCCESS) {
+        return false;
+    }
+
+    if (!CreateSetLayout(1, oneSourceLayout_) || !CreateSetLayout(2, twoSourceLayout_)) {
+        return false;
+    }
+
+    // Satu set petak awal, satu per tingkat reduksi, dua eksposur, dua
+    // penyelesaian.
+    constexpr uint32_t kMaxSets = 1 + 16 + 2 + 2;
+    const VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxSets * 2};
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.maxSets = kMaxSets;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &size;
+    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    if (vkCreateDescriptorPool(device_->Handle(), &poolInfo, nullptr, &pool_) != VK_SUCCESS) {
+        return false;
+    }
+
+    if (!CreatePipeline(shaderDirectory, "lum_seed.frag.spv", oneSourceLayout_, sizeof(SeedPush),
+                        kLuminanceFormat, seedLayout_, seedPipeline_) ||
+        !CreatePipeline(shaderDirectory, "lum_reduce.frag.spv", oneSourceLayout_,
+                        sizeof(ReducePush), kLuminanceFormat, reduceLayout_, reducePipeline_) ||
+        !CreatePipeline(shaderDirectory, "exposure.frag.spv", twoSourceLayout_,
+                        sizeof(ExposurePush), kExposureFormat, exposureLayout_,
+                        exposurePipeline_) ||
+        !CreatePipeline(shaderDirectory, "tonemap.frag.spv", twoSourceLayout_,
+                        sizeof(ResolvePush), outputFormat_, resolveLayout_, resolvePipeline_)) {
+        return false;
+    }
+    return true;
+}
+
+bool PostProcess::Adopt(uint32_t allocatedWidth, uint32_t allocatedHeight) {
+    if (device_ == nullptr || resolvePipeline_ == VK_NULL_HANDLE || allocatedWidth == 0 ||
+        allocatedHeight == 0) {
+        return false;
+    }
+    if (sceneImage_ != VK_NULL_HANDLE && allocatedWidth_ == allocatedWidth &&
+        allocatedHeight_ == allocatedHeight) {
+        return false;
+    }
+    DestroyImages();
+    allocatedWidth_ = allocatedWidth;
+    allocatedHeight_ = allocatedHeight;
+
+    const auto make = [&](Image& target, VkFormat format, uint32_t width, uint32_t height,
+                          uint32_t mips, bool clearable = false) {
+        VkImageCreateInfo imageInfo{};
+        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageInfo.imageType = VK_IMAGE_TYPE_2D;
+        imageInfo.format = format;
+        imageInfo.extent = {width, height, 1};
+        imageInfo.mipLevels = mips;
+        imageInfo.arrayLayers = 1;
+        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        // Hanya texel eksposur yang dibersihkan lewat `vkCmdClearColorImage`, dan
+        // Vulkan menuntut penanda pemakaiannya disebutkan saat gambar dibuat —
+        // bukan saat perintahnya direkam.
+        if (clearable) {
+            imageInfo.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        }
+        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        VmaAllocationCreateInfo allocation{};
+        allocation.usage = VMA_MEMORY_USAGE_AUTO;
+        if (vmaCreateImage(device_->Allocator(), &imageInfo, &allocation, &target.image,
+                           &target.allocation, nullptr) != VK_SUCCESS) {
+            target.image = VK_NULL_HANDLE;
+            return false;
+        }
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = target.image;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = format;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewInfo.subresourceRange.levelCount = mips;
+        viewInfo.subresourceRange.layerCount = 1;
+        return vkCreateImageView(device_->Handle(), &viewInfo, nullptr, &target.view) ==
+               VK_SUCCESS;
+    };
+
+    if (!make(scene_, kSceneFormat, allocatedWidth_, allocatedHeight_, 1)) {
+        SIM_ERROR("Render", "cannot allocate the HDR scene colour target");
+        return false;
+    }
+    sceneImage_ = scene_.image;
+    sceneView_ = scene_.view;
+
+    luminanceLevels_Count = 0;
+    for (uint32_t size = kSeedSize; size >= 1; size /= 2) {
+        ++luminanceLevels_Count;
+        if (size == 1) {
+            break;
+        }
+    }
+    if (!make(luminance_, kLuminanceFormat, kSeedSize, kSeedSize, luminanceLevels_Count)) {
+        SIM_ERROR("Render", "cannot allocate the luminance chain");
+        return false;
+    }
+    luminanceLevels_.resize(luminanceLevels_Count);
+    for (uint32_t level = 0; level < luminanceLevels_Count; ++level) {
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = luminance_.image;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = kLuminanceFormat;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        viewInfo.subresourceRange.baseMipLevel = level;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.layerCount = 1;
+        if (vkCreateImageView(device_->Handle(), &viewInfo, nullptr, &luminanceLevels_[level]) !=
+            VK_SUCCESS) {
+            return false;
+        }
+    }
+
+    for (Image& image : exposure_) {
+        if (!make(image, kExposureFormat, 1, 1, 1, /*clearable=*/true)) {
+            SIM_ERROR("Render", "cannot allocate the exposure texels");
+            return false;
+        }
+    }
+
+    WriteSets();
+    return true;
+}
+
+void PostProcess::WriteSets() {
+    const uint32_t reduceCount = luminanceLevels_Count > 0 ? luminanceLevels_Count - 1 : 0;
+    std::vector<VkDescriptorSetLayout> layouts(1 + reduceCount, oneSourceLayout_);
+    std::vector<VkDescriptorSet> sets(layouts.size());
+    VkDescriptorSetAllocateInfo allocateInfo{};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocateInfo.descriptorPool = pool_;
+    allocateInfo.descriptorSetCount = static_cast<uint32_t>(layouts.size());
+    allocateInfo.pSetLayouts = layouts.data();
+    if (vkAllocateDescriptorSets(device_->Handle(), &allocateInfo, sets.data()) != VK_SUCCESS) {
+        SIM_ERROR("Render", "cannot allocate post-process descriptor sets");
+        return;
+    }
+    seedSet_ = sets[0];
+    reduceSets_.assign(sets.begin() + 1, sets.end());
+
+    const std::array<VkDescriptorSetLayout, 4> pairLayouts{twoSourceLayout_, twoSourceLayout_,
+                                                           twoSourceLayout_, twoSourceLayout_};
+    std::array<VkDescriptorSet, 4> pairSets{};
+    allocateInfo.descriptorSetCount = static_cast<uint32_t>(pairLayouts.size());
+    allocateInfo.pSetLayouts = pairLayouts.data();
+    if (vkAllocateDescriptorSets(device_->Handle(), &allocateInfo, pairSets.data()) !=
+        VK_SUCCESS) {
+        SIM_ERROR("Render", "cannot allocate post-process descriptor sets");
+        return;
+    }
+    exposureSets_ = {pairSets[0], pairSets[1]};
+    resolveSets_ = {pairSets[2], pairSets[3]};
+
+    std::vector<VkDescriptorImageInfo> images;
+    std::vector<VkWriteDescriptorSet> writes;
+    images.reserve(2 + reduceCount + 4 + 4);
+    const auto push = [&](VkDescriptorSet set, uint32_t binding, VkSampler sampler,
+                          VkImageView view) {
+        images.push_back({sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL});
+        VkWriteDescriptorSet write{};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = set;
+        write.dstBinding = binding;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes.push_back(write);
+    };
+
+    // Petak awal membaca gambar HDR dengan penyaringan bilinear: cuplikannya
+    // jatuh di antara texel, dan itu memang yang diinginkan.
+    push(seedSet_, 0, sampler_, sceneView_);
+    for (uint32_t level = 0; level < reduceCount; ++level) {
+        push(reduceSets_[level], 0, pointSampler_, luminanceLevels_[level]);
+    }
+    for (uint32_t i = 0; i < 2; ++i) {
+        push(exposureSets_[i], 0, pointSampler_, luminanceLevels_[luminanceLevels_Count - 1]);
+        push(exposureSets_[i], 1, pointSampler_, exposure_[1 - i].view);
+        push(resolveSets_[i], 0, pointSampler_, sceneView_);
+        push(resolveSets_[i], 1, pointSampler_, exposure_[i].view);
+    }
+    for (std::size_t i = 0; i < writes.size(); ++i) {
+        writes[i].pImageInfo = &images[i];
+    }
+    vkUpdateDescriptorSets(device_->Handle(), static_cast<uint32_t>(writes.size()), writes.data(),
+                           0, nullptr);
+}
+
+void PostProcess::AdoptLayouts() {
+    if (!IsValid()) {
+        return;
+    }
+    VkCommandBuffer cmd = device_->BeginOneShot();
+
+    const auto barrier = [&](VkImage image, VkImageLayout from, VkImageLayout to,
+                             VkAccessFlags2 srcAccess, VkAccessFlags2 dstAccess,
+                             VkPipelineStageFlags2 srcStage, VkPipelineStageFlags2 dstStage) {
+        VkImageMemoryBarrier2 info{};
+        info.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        info.srcStageMask = srcStage;
+        info.srcAccessMask = srcAccess;
+        info.dstStageMask = dstStage;
+        info.dstAccessMask = dstAccess;
+        info.oldLayout = from;
+        info.newLayout = to;
+        info.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        info.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        info.image = image;
+        info.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        info.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
+        info.subresourceRange.layerCount = 1;
+        VkDependencyInfo dependency{};
+        dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dependency.imageMemoryBarrierCount = 1;
+        dependency.pImageMemoryBarriers = &info;
+        vkCmdPipelineBarrier2(cmd, &dependency);
+    };
+
+    barrier(scene_.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_ACCESS_2_NONE, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+    barrier(luminance_.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_ACCESS_2_NONE, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT,
+            VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+
+    // Kedua texel eksposur dinolkan. Nol berarti "belum ada riwayat", dan itu
+    // satu-satunya cara pass eksposur tahu bahwa frame ini harus mendarat di
+    // sasarannya. Memori yang belum ditulis bisa berisi apa saja — termasuk
+    // angka yang tampak masuk akal, yang lalu bertahan lewat riwayatnya sendiri.
+    for (Image& image : exposure_) {
+        barrier(image.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_ACCESS_2_NONE, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_2_CLEAR_BIT);
+        const VkClearColorValue clear{{0.0f, 0.0f, 0.0f, 0.0f}};
+        VkImageSubresourceRange range{};
+        range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        range.levelCount = 1;
+        range.layerCount = 1;
+        vkCmdClearColorImage(cmd, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &clear, 1,
+                             &range);
+        barrier(image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                VK_ACCESS_2_SHADER_SAMPLED_READ_BIT, VK_PIPELINE_STAGE_2_CLEAR_BIT,
+                VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT);
+    }
+    device_->EndOneShot(cmd);
+    exposureIndex_ = 0;
+}
+
+void PostProcess::Transition(VkCommandBuffer cmd, VkImage image, uint32_t baseMip,
+                             VkImageLayout from, VkImageLayout to, bool toAttachment) {
+    VkImageMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    if (toAttachment) {
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        barrier.srcAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        barrier.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    } else {
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        barrier.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        barrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    }
+    barrier.oldLayout = from;
+    barrier.newLayout = to;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.baseMipLevel = baseMip;
+    barrier.subresourceRange.levelCount = 1;
+    barrier.subresourceRange.layerCount = 1;
+
+    VkDependencyInfo dependency{};
+    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.imageMemoryBarrierCount = 1;
+    dependency.pImageMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(cmd, &dependency);
+}
+
+void PostProcess::DrawInto(VkCommandBuffer cmd, VkImageView target, uint32_t width,
+                           uint32_t height, VkPipeline pipeline, VkPipelineLayout layout,
+                           VkDescriptorSet set, const void* push, uint32_t pushSize) {
+    VkRenderingAttachmentInfo color{};
+    color.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+    color.imageView = target;
+    color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    color.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+    VkRenderingInfo rendering{};
+    rendering.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+    rendering.renderArea = {{0, 0}, {width, height}};
+    rendering.layerCount = 1;
+    rendering.colorAttachmentCount = 1;
+    rendering.pColorAttachments = &color;
+    vkCmdBeginRendering(cmd, &rendering);
+
+    const VkViewport viewport{0.0f, 0.0f, static_cast<float>(width), static_cast<float>(height),
+                              0.0f, 1.0f};
+    const VkRect2D scissor{{0, 0}, {width, height}};
+    vkCmdSetViewport(cmd, 0, 1, &viewport);
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, nullptr);
+    vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0, pushSize, push);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRendering(cmd);
+}
+
+void PostProcess::RecordMeter(VkCommandBuffer cmd, uint32_t viewportWidth,
+                              uint32_t viewportHeight, const PostProcessSettings& settings,
+                              float deltaSeconds) {
+    if (!IsValid() || viewportWidth == 0 || viewportHeight == 0) {
+        return;
+    }
+
+    // Petak awal.
+    Transition(cmd, luminance_.image, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, true);
+    SeedPush seed;
+    seed.viewportUvMaxX = static_cast<float>(viewportWidth) / static_cast<float>(allocatedWidth_);
+    seed.viewportUvMaxY =
+        static_cast<float>(viewportHeight) / static_cast<float>(allocatedHeight_);
+    seed.seedWidth = static_cast<int32_t>(kSeedSize);
+    seed.seedHeight = static_cast<int32_t>(kSeedSize);
+    DrawInto(cmd, luminanceLevels_[0], kSeedSize, kSeedSize, seedPipeline_, seedLayout_, seedSet_,
+             &seed, sizeof(seed));
+    Transition(cmd, luminance_.image, 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false);
+
+    // Rantai reduksi. Barrier per tingkat, bukan satu di akhir: yang dibaca dan
+    // yang ditulis adalah gambar yang sama.
+    uint32_t sourceSize = kSeedSize;
+    for (uint32_t level = 1; level < luminanceLevels_Count; ++level) {
+        const uint32_t levelSize = std::max(sourceSize / 2u, 1u);
+        Transition(cmd, luminance_.image, level, VK_IMAGE_LAYOUT_UNDEFINED,
+                   VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, true);
+        ReducePush push;
+        push.sourceWidth = static_cast<int32_t>(sourceSize);
+        push.sourceHeight = static_cast<int32_t>(sourceSize);
+        DrawInto(cmd, luminanceLevels_[level], levelSize, levelSize, reducePipeline_,
+                 reduceLayout_, reduceSets_[level - 1], &push, sizeof(push));
+        Transition(cmd, luminance_.image, level, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false);
+        sourceSize = levelSize;
+    }
+
+    // Eksposur, ke texel yang bukan sedang dibaca.
+    exposureIndex_ = 1 - exposureIndex_;
+    ExposurePush push;
+    push.params = Vec4(settings.exposureMode == ExposureMode::Manual ? 1.0f : 0.0f,
+                       settings.manualEv100, settings.exposureCompensation,
+                       std::max(deltaSeconds, 0.0f));
+    push.adaptation = Vec4(settings.adaptationBrightenSeconds, settings.adaptationDarkenSeconds,
+                           0.0f, 0.0f);
+    Transition(cmd, exposure_[exposureIndex_].image, 0, VK_IMAGE_LAYOUT_UNDEFINED,
+               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, true);
+    DrawInto(cmd, exposure_[exposureIndex_].view, 1, 1, exposurePipeline_, exposureLayout_,
+             exposureSets_[exposureIndex_], &push, sizeof(push));
+    Transition(cmd, exposure_[exposureIndex_].image, 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false);
+}
+
+void PostProcess::RecordResolve(VkCommandBuffer cmd, bool enabled) {
+    if (!IsValid()) {
+        return;
+    }
+    ResolvePush push;
+    push.params = Vec4(enabled ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, resolvePipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, resolveLayout_, 0, 1,
+                            &resolveSets_[exposureIndex_], 0, nullptr);
+    vkCmdPushConstants(cmd, resolveLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+}
+
+void PostProcess::DestroyImages() {
+    if (device_ == nullptr) {
+        return;
+    }
+    if (seedSet_ != VK_NULL_HANDLE) {
+        std::vector<VkDescriptorSet> all{seedSet_};
+        all.insert(all.end(), reduceSets_.begin(), reduceSets_.end());
+        all.insert(all.end(), exposureSets_.begin(), exposureSets_.end());
+        all.insert(all.end(), resolveSets_.begin(), resolveSets_.end());
+        vkFreeDescriptorSets(device_->Handle(), pool_, static_cast<uint32_t>(all.size()),
+                             all.data());
+        seedSet_ = VK_NULL_HANDLE;
+        reduceSets_.clear();
+        exposureSets_ = {};
+        resolveSets_ = {};
+    }
+    for (VkImageView& view : luminanceLevels_) {
+        if (view != VK_NULL_HANDLE) {
+            vkDestroyImageView(device_->Handle(), view, nullptr);
+        }
+    }
+    luminanceLevels_.clear();
+    luminanceLevels_Count = 0;
+
+    const auto drop = [&](Image& image) {
+        if (image.view != VK_NULL_HANDLE) {
+            vkDestroyImageView(device_->Handle(), image.view, nullptr);
+            image.view = VK_NULL_HANDLE;
+        }
+        if (image.image != VK_NULL_HANDLE) {
+            vmaDestroyImage(device_->Allocator(), image.image, image.allocation);
+            image.image = VK_NULL_HANDLE;
+            image.allocation = VK_NULL_HANDLE;
+        }
+    };
+    drop(scene_);
+    drop(luminance_);
+    for (Image& image : exposure_) {
+        drop(image);
+    }
+    sceneImage_ = VK_NULL_HANDLE;
+    sceneView_ = VK_NULL_HANDLE;
+    allocatedWidth_ = 0;
+    allocatedHeight_ = 0;
+}
+
+void PostProcess::Destroy() {
+    if (device_ == nullptr) {
+        return;
+    }
+    DestroyImages();
+    const auto dropPipeline = [&](VkPipeline& pipeline, VkPipelineLayout& layout) {
+        if (pipeline != VK_NULL_HANDLE) {
+            vkDestroyPipeline(device_->Handle(), pipeline, nullptr);
+            pipeline = VK_NULL_HANDLE;
+        }
+        if (layout != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device_->Handle(), layout, nullptr);
+            layout = VK_NULL_HANDLE;
+        }
+    };
+    dropPipeline(seedPipeline_, seedLayout_);
+    dropPipeline(reducePipeline_, reduceLayout_);
+    dropPipeline(exposurePipeline_, exposureLayout_);
+    dropPipeline(resolvePipeline_, resolveLayout_);
+    if (pool_ != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(device_->Handle(), pool_, nullptr);
+        pool_ = VK_NULL_HANDLE;
+    }
+    for (VkDescriptorSetLayout* layout : {&oneSourceLayout_, &twoSourceLayout_}) {
+        if (*layout != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(device_->Handle(), *layout, nullptr);
+            *layout = VK_NULL_HANDLE;
+        }
+    }
+    if (sampler_ != VK_NULL_HANDLE) {
+        vkDestroySampler(device_->Handle(), sampler_, nullptr);
+        sampler_ = VK_NULL_HANDLE;
+    }
+    if (pointSampler_ != VK_NULL_HANDLE) {
+        vkDestroySampler(device_->Handle(), pointSampler_, nullptr);
+        pointSampler_ = VK_NULL_HANDLE;
+    }
+    if (vertex_ != VK_NULL_HANDLE) {
+        vkDestroyShaderModule(device_->Handle(), vertex_, nullptr);
+        vertex_ = VK_NULL_HANDLE;
+    }
+    device_ = nullptr;
+}
+
+}  // namespace sim::render

@@ -9,6 +9,7 @@ sim_add_library(Render
         src/LightCluster.cpp
         src/DepthPyramid.cpp
         src/Denoise.cpp
+        src/PostProcess.cpp
         src/ProbeField.cpp
         src/RadianceCache.cpp
         src/ScreenProbe.cpp
@@ -21,6 +22,7 @@ sim_add_library(Render
         src/TraceBackend.cpp
         src/ShadowCascades.cpp
         src/TimeOfDay.cpp
+        src/ToneMap.cpp
         src/MaterialPreviewMesh.cpp
         src/StubRenderer.cpp
         src/VulkanMaterialPreview.cpp
@@ -49,7 +51,12 @@ sim_compile_shaders(SimShadersGrid
         ${CMAKE_SOURCE_DIR}/Shaders/gi_probe.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/gi_filter.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/sdf_debug.vert.slang
-        ${CMAKE_SOURCE_DIR}/Shaders/sdf_debug.frag.slang)
+        ${CMAKE_SOURCE_DIR}/Shaders/sdf_debug.frag.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/fullscreen.vert.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/lum_seed.frag.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/lum_reduce.frag.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/exposure.frag.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/tonemap.frag.slang)
 # openpbr.slang sengaja tidak ada di daftar ini. Ia modul pustaka tanpa entry
 # point — yang mengompilasinya adalah `AssembleMaterialModule`, yang menanamnya
 # ke dalam modul material lalu menyerahkannya ke ShaderCache. Menambahkannya di

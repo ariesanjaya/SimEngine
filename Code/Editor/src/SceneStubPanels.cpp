@@ -80,6 +80,37 @@ public:
         }
 
 
+        // --- Post-process (E8.8) ---
+        //
+        // Sakelar mode ada di sini, bukan tersembunyi, karena eksposur otomatis
+        // punya satu kasus di mana ia justru menghalangi: menyetel material dan
+        // lampu. Setiap kali sebuah lampu dicerahkan, pengukur mengimbanginya —
+        // dan yang terlihat adalah lampu yang "tidak berpengaruh apa-apa".
+        ImGui::Separator();
+        ImGui::Checkbox("Post-process", &context.post.enabled);
+        if (context.post.enabled) {
+            const char* modes[] = {"Automatic", "Manual"};
+            int mode = static_cast<int>(context.post.exposureMode);
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+            if (ImGui::Combo("Exposure", &mode, modes, IM_ARRAYSIZE(modes))) {
+                context.post.exposureMode = static_cast<render::ExposureMode>(mode);
+            }
+            if (context.post.exposureMode == render::ExposureMode::Manual) {
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+                ImGui::SliderFloat("EV100", &context.post.manualEv100, -8.0f, 8.0f, "%.1f");
+            } else {
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+                ImGui::SliderFloat("Adapt bright", &context.post.adaptationBrightenSeconds, 0.0f,
+                                   4.0f, "%.2f s");
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+                ImGui::SliderFloat("Adapt dark", &context.post.adaptationDarkenSeconds, 0.0f,
+                                   4.0f, "%.2f s");
+            }
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+            ImGui::SliderFloat("Compensation", &context.post.exposureCompensation, -5.0f, 5.0f,
+                               "%.2f EV");
+        }
+
         // --- Global illumination (M0) ---
         //
         // Pemilih backend terlihat sejak sekarang, bukan nanti bersama backend

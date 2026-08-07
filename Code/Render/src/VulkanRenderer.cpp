@@ -1,6 +1,7 @@
 #include "Sim/Render/RendererFactory.h"
 
 #include "DepthPyramid.h"
+#include "PostProcess.h"
 #include "FrameGraphExecutor.h"
 #include "ProbeField.h"
 #include "SdfClipmapResource.h"
@@ -377,6 +378,13 @@ public:
                        target_.Sampler());
             hiz_.AdoptLayouts();
         }
+        // Post-process dibuat sebelum pipeline adegan mana pun dipakai: seluruh
+        // pass adegan sekarang menggambar ke gambar HDR miliknya, bukan ke target
+        // yang disampel UI.
+        if (post_.Create(device_, shaderDirectory_, target_.ColorFormat())) {
+            post_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight());
+            post_.AdoptLayouts();
+        }
         CreateRadianceCache();
         if (probes_.Create(device_, shaderDirectory_, shadowSetLayout_)) {
             probes_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(), kNormalFormat);
@@ -445,6 +453,11 @@ public:
                                            target_.DepthView(), target_.Sampler());
         const bool probesChanged =
             probes_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(), kNormalFormat);
+        const bool postChanged =
+            post_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight());
+        if (postChanged) {
+            post_.AdoptLayouts();
+        }
         // Warna target juga berpindah image saat dialokasi ulang, dan binding 12
         // menunjuknya — jadi descriptor GI ditulis ulang walaupun probe sendiri
         // tidak berubah ukuran.
@@ -454,7 +467,7 @@ public:
         if (probesChanged) {
             probes_.AdoptLayouts();
         }
-        if (hizChanged || probesChanged) {
+        if (hizChanged || probesChanged || postChanged) {
             UpdateGiDescriptors();
         }
     }
@@ -566,6 +579,21 @@ public:
         ++cacheFrame_;
         sdfDebugEnabled_ = desc.gi.enabled && sdfClipmap_.IsValid() &&
                            desc.gi.debugView != GiDebugView::Off;
+        // Langkah waktu diukur di sini, bukan diterima dari pemanggil.
+        // `IViewportRenderer::Render` tidak punya parameter waktu, dan
+        // menambahkannya berarti setiap pemanggil harus tahu bahwa eksposur
+        // beradaptasi. Dijepit ke 0,25 detik: satu hentakan panjang — memuat
+        // level, membangun pipeline — akan menjadi satu langkah adaptasi raksasa,
+        // dan yang terlihat adalah kilatan terang tepat sesudah level terbuka.
+        {
+            const auto now = std::chrono::steady_clock::now();
+            deltaSeconds_ =
+                hasLastFrameTime_
+                    ? std::min(std::chrono::duration<float>(now - lastFrameTime_).count(), 0.25f)
+                    : 0.0f;
+            lastFrameTime_ = now;
+            hasLastFrameTime_ = true;
+        }
         sdfVoxelsWritten_ = 0;
         sdfUpdateMs_ = 0.0f;
         if (desc.gi.enabled && sdfClipmap_.IsValid()) {
@@ -589,6 +617,8 @@ public:
         sdfClipmap_.RecordUploads(cmd);
         executor_.Clear();
         executor_.Bind(colorId_, BoundImage{target_.ColorImage(), target_.ColorView(),
+                                            VK_IMAGE_ASPECT_COLOR_BIT});
+        executor_.Bind(sceneId_, BoundImage{post_.SceneImage(), post_.SceneView(),
                                             VK_IMAGE_ASPECT_COLOR_BIT});
         executor_.Bind(depthId_, BoundImage{target_.DepthImage(), target_.DepthView(),
                                             VK_IMAGE_ASPECT_DEPTH_BIT});
@@ -713,6 +743,20 @@ public:
             vkCmdEndRendering(command);
         };
 
+        if (meterId_ != kInvalidPass) {
+            recorders[meterId_] = [&](VkCommandBuffer command) {
+                post_.RecordMeter(command, target_.Width(), target_.Height(), desc.post,
+                                  deltaSeconds_);
+            };
+        }
+        if (tonemapId_ != kInvalidPass) {
+            recorders[tonemapId_] = [&](VkCommandBuffer command) {
+                BeginDisplayRendering(command);
+                post_.RecordResolve(command, desc.post.enabled);
+                vkCmdEndRendering(command);
+            };
+        }
+
         if (!executor_.Execute(compiled_, cmd, recorders, &profiler_)) {
             SIM_ERROR("Render", "frame graph execution failed: {}", compiled_.error);
         }
@@ -772,6 +816,10 @@ private:
     void BuildGraph() {
         graph_.Clear();
         colorId_ = graph_.Import("viewport-color", Access::Present);
+        // Gambar HDR yang ditulis seluruh pass adegan. ShaderRead sebagai
+        // keadaan awal: frame ini menimpanya sementara pass tone mapping frame
+        // sebelumnya masih membacanya.
+        sceneId_ = graph_.Import("scene-color", Access::ShaderRead);
         depthId_ = graph_.Import("viewport-depth", Access::None);
         // ShaderRead, bukan None: frame ini menulis ulang peta yang masih
         // dibaca fragment shader frame sebelumnya, dan `None` berarti "tidak
@@ -786,7 +834,7 @@ private:
         graph_.Write(atlasPassId_, atlasId_, Access::DepthWrite);
 
         gridId_ = graph_.AddPass("grid");
-        graph_.Write(gridId_, colorId_, Access::ColorWrite);
+        graph_.Write(gridId_, sceneId_, Access::ColorWrite);
 
         prepassId_ = graph_.AddPass("depth-prepass");
         graph_.Write(prepassId_, depthId_, Access::DepthWrite);
@@ -813,17 +861,17 @@ private:
         graph_.Read(opaqueId_, depthId_, Access::DepthWrite);
         graph_.Read(opaqueId_, shadowId_, Access::ShaderRead);
         graph_.Read(opaqueId_, atlasId_, Access::ShaderRead);
-        graph_.Write(opaqueId_, colorId_, Access::ColorWrite);
+        graph_.Write(opaqueId_, sceneId_, Access::ColorWrite);
 
         transparentId_ = graph_.AddPass("forward-transparent");
         graph_.Read(transparentId_, depthId_, Access::DepthWrite);
         graph_.Read(transparentId_, shadowId_, Access::ShaderRead);
         graph_.Read(transparentId_, atlasId_, Access::ShaderRead);
-        graph_.Write(transparentId_, colorId_, Access::ColorWrite);
+        graph_.Write(transparentId_, sceneId_, Access::ColorWrite);
 
         linesId_ = graph_.AddPass("lines");
         graph_.Read(linesId_, depthId_, Access::DepthWrite);
-        graph_.Write(linesId_, colorId_, Access::ColorWrite);
+        graph_.Write(linesId_, sceneId_, Access::ColorWrite);
 
         // Pass probe berjalan **sesudah** forward-opaque, dan itu bukan urutan
         // yang bebas dipilih: satu-satunya sumber radiansi yang dimiliki M3
@@ -833,7 +881,7 @@ private:
         probePassId_ = kInvalidPass;
         if (giEnabled_ && probes_.IsValid() && hiz_.IsValid()) {
             probePassId_ = graph_.AddPass("gi-probe-trace");
-            graph_.Read(probePassId_, colorId_, Access::ShaderRead);
+            graph_.Read(probePassId_, sceneId_, Access::ShaderRead);
             graph_.Read(probePassId_, depthId_, Access::ShaderRead);
             // Efek samping: keluarannya tekstur SH yang layout-nya diurus
             // `ProbeField` sendiri, bukan resource yang dilacak graph.
@@ -846,10 +894,31 @@ private:
         giDebugId_ = kInvalidPass;
         if (sdfDebugEnabled_) {
             giDebugId_ = graph_.AddPass("gi-sdf-debug");
-            graph_.Write(giDebugId_, colorId_, Access::ColorWrite);
+            graph_.Write(giDebugId_, sceneId_, Access::ColorWrite);
+        }
+
+        // Pengukuran luminansi dan eksposur. Sesudah seluruh pass adegan, karena
+        // yang diukur adalah adegan yang sudah jadi — mengukurnya lebih awal
+        // berarti mengukur gambar yang setengah tergambar, dan yang terlihat
+        // adalah eksposur yang berkedip mengikuti jumlah objek di layar.
+        meterId_ = kInvalidPass;
+        tonemapId_ = kInvalidPass;
+        if (post_.IsValid()) {
+            meterId_ = graph_.AddPass("post-meter");
+            graph_.Read(meterId_, sceneId_, Access::ShaderRead);
+            // Efek samping: keluarannya rantai luminansi dan texel eksposur, yang
+            // layout-nya diurus `PostProcess` sendiri. Tanpa penanda ini graph
+            // menyimpulkan pass ini tidak menghasilkan apa pun dan membuangnya —
+            // eksposur lalu membeku pada nilai frame pertama, tanpa satu pun galat.
+            graph_.SetSideEffect(meterId_);
+
+            tonemapId_ = graph_.AddPass("tonemap");
+            graph_.Read(tonemapId_, sceneId_, Access::ShaderRead);
+            graph_.Write(tonemapId_, colorId_, Access::ColorWrite);
         }
 
         graph_.SetOutput(colorId_, Access::Present);
+        graph_.SetOutput(sceneId_, Access::ShaderRead);
         // Peta bayangan harus kembali ke keadaan awalnya, karena itulah keadaan
         // yang diandaikan impor frame berikutnya.
         graph_.SetOutput(shadowId_, Access::ShaderRead);
@@ -931,7 +1000,10 @@ private:
                         bool loadDepth, bool writeColor, bool useDepth = true) {
         VkRenderingAttachmentInfo color{};
         color.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
-        color.imageView = target_.ColorView();
+        // **Gambar HDR, bukan target yang disampel UI.** Seluruh pass adegan
+        // menulis radiance apa adanya ke sini; yang memetakannya ke layar adalah
+        // pass `tonemap` di ujung graph.
+        color.imageView = post_.SceneView();
         color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         color.loadOp = clearColor ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD;
         color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -957,6 +1029,38 @@ private:
         info.colorAttachmentCount = writeColor || clearColor ? 1u : 0u;
         info.pColorAttachments = writeColor || clearColor ? &color : nullptr;
         info.pDepthAttachment = useDepth ? &depth : nullptr;
+        vkCmdBeginRendering(cmd, &info);
+
+        const VkViewport viewport{0.0f,
+                                  0.0f,
+                                  static_cast<float>(target_.Width()),
+                                  static_cast<float>(target_.Height()),
+                                  0.0f,
+                                  1.0f};
+        const VkRect2D scissor{{0, 0}, {target_.Width(), target_.Height()}};
+        vkCmdSetViewport(cmd, 0, 1, &viewport);
+        vkCmdSetScissor(cmd, 0, 1, &scissor);
+    }
+
+    /// Lampiran untuk pass tone mapping: target 8-bit yang disampel UI.
+    ///
+    /// Terpisah dari `BeginRendering` karena gambarnya berbeda dan formatnya
+    /// berbeda — dan pipeline yang formatnya tidak cocok dengan lampiran yang
+    /// dipasang adalah ketidakcocokan yang hanya dilaporkan validation layer.
+    void BeginDisplayRendering(VkCommandBuffer cmd) {
+        VkRenderingAttachmentInfo color{};
+        color.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        color.imageView = target_.ColorView();
+        color.imageLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        color.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+
+        VkRenderingInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+        info.renderArea.extent = {target_.Width(), target_.Height()};
+        info.layerCount = 1;
+        info.colorAttachmentCount = 1;
+        info.pColorAttachments = &color;
         vkCmdBeginRendering(cmd, &info);
 
         const VkViewport viewport{0.0f,
@@ -1181,7 +1285,7 @@ private:
         dynamic.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
         dynamic.pDynamicStates = dynamicStates.data();
 
-        const VkFormat colorFormat = target_.ColorFormat();
+        const VkFormat colorFormat = PostProcess::kSceneFormat;
         VkPipelineRenderingCreateInfo rendering{};
         rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
         rendering.colorAttachmentCount = 1;
@@ -1473,8 +1577,9 @@ private:
         // yang terlihat adalah prepass yang kadang jalan dan kadang tidak,
         // bergantung driver. Ditemukan lewat validation, bukan dengan membaca
         // kode.
-        const VkFormat colorFormat =
-            colorAttachment != VK_FORMAT_UNDEFINED ? colorAttachment : target_.ColorFormat();
+        const VkFormat colorFormat = colorAttachment != VK_FORMAT_UNDEFINED
+                                         ? colorAttachment
+                                         : PostProcess::kSceneFormat;
         VkPipelineRenderingCreateInfo rendering{};
         rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
         rendering.colorAttachmentCount = colorWrite ? 1u : 0u;
@@ -1914,13 +2019,17 @@ private:
     /// dibiarkan kosong adalah pelanggaran di setiap draw, bahkan pada pass yang
     /// tidak membacanya.
     std::array<VkDescriptorImageInfo, 9> ProbeDescriptorImages() const {
-        const bool ready = probes_.IsValid();
+        const bool ready = probes_.IsValid() && post_.IsValid();
         const VkSampler sampler = ready ? probes_.Sampler() : shadow_.sampler;
         const VkImageView fallback = shadow_.arrayView;
         std::array<VkDescriptorImageInfo, 9> images{};
         images[0] = {sampler, ready ? probes_.NormalView() : fallback,
                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-        images[1] = {sampler, ready ? target_.ColorView() : fallback,
+        // **Radiansi HDR, bukan target tampilan.** Sinar yang mengenai lewat
+        // lapis layar membaca warna yang sudah dinaungi — dan sejak pass tone
+        // mapping ada, warna di target tampilan sudah dipetakan dan di-encode
+        // sRGB. Memantulkannya berarti memantulkan gambar layar, bukan cahaya.
+        images[1] = {sampler, ready ? post_.SceneView() : fallback,
                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         for (uint32_t channel = 0; channel < ProbeField::kShChannels; ++channel) {
             images[2 + channel] = {sampler, ready ? probes_.ShView(channel) : fallback,
@@ -2098,7 +2207,6 @@ private:
     /// ditangani terpisah bersama cascade bayangannya.
     void UpdateClusters(const ViewportDesc& desc, const ViewportScene& scene, float aspect,
                         InstanceSlot& slot) {
-        const float exposure = std::max(desc.exposure, 0.0f);
         gpuLights_.clear();
         clusterLights_.clear();
         for (uint32_t sceneIndex = 0; sceneIndex < scene.lights.size(); ++sceneIndex) {
@@ -2123,7 +2231,12 @@ private:
             // berbeda adalah ketidakcocokan yang paling sulit dilacak: setiap
             // lampu terlihat masuk akal sendiri-sendiri.
             gpu.colorCosInner =
-                Vec4(light.color * light.intensity * exposure, light.cosInner);
+                // Radiance apa adanya. **Pengali eksposur yang dulu ada di sini
+                // sudah hilang bersama `ViewportDesc::exposure`:** ia penambal
+                // untuk tidak adanya operator nada, dan operatornya sekarang ada
+                // di ujung graph. Lampu yang tetap dikalikan di sini akan
+                // dikalikan dua kali.
+                Vec4(light.color * light.intensity, light.cosInner);
             // Indeks entri atlas dan bias normalnya. Biasnya dalam satuan
             // dunia dan dihitung di sini karena ia bergantung pada ukuran ubin
             // yang baru diputuskan pengalokasi — ubin yang lebih kecil menuntut
@@ -2239,7 +2352,7 @@ private:
         uniforms.lightDirection = Vec4(sun, static_cast<float>(cascades_.count));
         uniforms.cameraPosition =
             Vec4(desc.camera.position, sunCastsShadows_ && cascades_.count > 0 ? 1.0f : 0.0f);
-        uniforms.sunRadiance = Vec4(sunRadiance_ * std::max(desc.exposure, 0.0f), 0.0f);
+        uniforms.sunRadiance = Vec4(sunRadiance_, 0.0f);
         uniforms.cameraForward = Vec4(desc.camera.Forward(), kNormalBiasTexels);
         uniforms.clusterCounts = Vec4(static_cast<float>(clusterGrid_.TilesX()),
                                       static_cast<float>(clusterGrid_.TilesY()),
@@ -2416,6 +2529,11 @@ private:
     TraceBackendSelection giBackend_;
     SdfClipmapResource sdfClipmap_;
     DepthPyramid hiz_;
+    PostProcess post_;
+    /// Langkah waktu frame ini, dipakai adaptasi eksposur.
+    float deltaSeconds_ = 0.0f;
+    std::chrono::steady_clock::time_point lastFrameTime_{};
+    bool hasLastFrameTime_ = false;
     /// Cache radiansi hash grid. Riwayat lintas frame, jadi ia bukan per slot —
     /// dan device-local, bukan host-visible: ia dibaca dan ditulis GPU tiap
     /// frame, dan memori host-visible akan menyeretnya lewat PCIe.
@@ -2452,7 +2570,10 @@ private:
     CompiledGraph compiled_;
     FrameGraphExecutor executor_;
     ResourceId colorId_ = kInvalidResource;
+    ResourceId sceneId_ = kInvalidResource;
     ResourceId depthId_ = kInvalidResource;
+    PassId meterId_ = kInvalidPass;
+    PassId tonemapId_ = kInvalidPass;
     PassId gridId_ = kInvalidPass;
     PassId prepassId_ = kInvalidPass;
     PassId linesId_ = kInvalidPass;

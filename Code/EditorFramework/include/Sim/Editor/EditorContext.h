@@ -85,6 +85,11 @@ struct EditorContext {
     /// dimiliki salah satu panel akan hilang begitu panel itu ditutup.
     render::GiSettings gi;
 
+    /// Pengaturan post-process. Di sini karena alasan yang sama dengan `gi`:
+    /// dua tempat menyentuhnya — panel yang menyuntingnya dan viewport yang
+    /// mengalirkannya ke renderer.
+    render::PostProcessSettings post;
+
     /// Waktu-hari: preset kurva, jam siklus, dan tempat mataharinya.
     ///
     /// Di sini karena alasan yang sama dengan `gi`: dua hal menyentuhnya. Panel

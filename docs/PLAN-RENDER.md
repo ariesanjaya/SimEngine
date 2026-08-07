@@ -770,10 +770,55 @@ matahari, warna langit di zenit dan horizon. Parameter Bruneton (Rayleigh, Mie,
 ketinggian lapisan) menyusul bersama pass langitnya: kurva tanpa pembaca adalah
 kurva yang tidak pernah diuji.
 
-Satu hal yang menunggu di sini dan sudah tercatat sejak E8.3:
-`ViewportDesc::exposure` berdiri sebagai pengganti tone mapping. Begitu ACES dan
-eksposur otomatis ada, ia dihapus — dan setiap lampu kembali memakai radiance
-sungguhannya tanpa pengali.
+**Selesai: rantai HDR, ACES, dan eksposur otomatis**
+(`Code/Render/{include/Sim/Render/ToneMap.h,src/ToneMap.cpp,src/PostProcess.{h,cpp}}`,
+`Shaders/{fullscreen.vert,tonemap_common,lum_seed.frag,lum_reduce.frag,exposure.frag,tonemap.frag}.slang`).
+
+`ViewportDesc::exposure` **sudah dihapus**, seperti yang direncanakan di sini
+sejak E8.3. Yang menggantikannya:
+
+- **Target warna adegan menjadi `R16G16B16A16_SFLOAT`.** Seluruh pass adegan
+  menulis radiance apa adanya ke sana; yang memetakannya ke layar adalah pass
+  `tonemap` di ujung graph. Lampu tidak lagi dikalikan pengali eksposur di dua
+  tempat.
+- **Encode sRGB, yang sebelumnya tidak dilakukan siapa pun.** Swapchain-nya
+  UNORM — sengaja, karena ImGui menggambar UI dengan warna yang sudah dalam
+  ruang sRGB — jadi tidak ada satu pun tempat lain yang meng-encode. Sebelum
+  pass ini viewport menampilkan nilai linier apa adanya: seluruh adegan lebih
+  gelap dan lebih kontras daripada yang dimaksud, merata, sehingga tidak
+  terlihat sebagai kesalahan melainkan sebagai gaya. Terukur pada adegan bawaan:
+  muka kotak yang tersinari 98/255 menjadi 191/255, dan kedua mukanya tetap
+  terbedakan (191 lawan 171) alih-alih terpotong putih.
+- **Pengukuran luminansi lewat rantai reduksi grafis, bukan histogram compute.**
+  Bukan karena histogram lebih buruk melainkan karena belum ada satu pun compute
+  pipeline di engine ini, dan yang pertama akan membawa serta storage buffer,
+  barrier compute, dan seluruh jalur yang belum pernah dijalankan sekali pun.
+  Rantai reduksi memakai bentuk yang sudah berjalan di `DepthPyramid`, dan
+  rata-rata geometrik yang dihasilkannya justru yang diinginkan: satu sorotan
+  spekular tidak menggelapkan seluruh adegan.
+- **Petak awal 256×256 berukuran tetap, bukan seukuran viewport.** Penurunan 2×2
+  atas ukuran ganjil harus membuang satu baris atau menimbang tiga texel, dan
+  keduanya memasukkan bias yang bergantung ukuran jendela — eksposur yang
+  bergeser sedikit saat pemisah dock digeser tidak akan pernah dicurigai siapa
+  pun.
+- **Dua tetapan waktu adaptasi**, bukan satu: satu tetapan memaksa memilih antara
+  kedipan saat berbalik menghadap matahari dan keterlambatan saat masuk ke
+  lorong.
+
+Diverifikasi di editor, bukan hanya di uji:
+
+| Yang diukur | Hasil |
+| --- | --- |
+| Enam stop EV manual (−3…+3), piksel terhadap model CPU | selisih terbesar **1/255** |
+| Adaptasi cepat (τ = 0,4 s) sesudah jeda masukan 0,15 s | selisih terbesar **0,02** dari pecahan |
+| Galat validation layer | **0** |
+
+**Satu hal yang belum benar dan sudah tercatat:** lampu belum memakai satuan
+fotometrik. Matahari bawaan beradiansi 3,0, bukan sepuluh ribu cd/m², jadi EV100
+yang berguna di sini berada di sekitar nol alih-alih 13–15. Nilai bawaan
+`manualEv100` pertama saya adalah 13, dan hasilnya viewport hitam pekat tanpa
+satu pun galat. Label "EV100" baru berarti harfiah begitu lampu memakai satuan
+sungguhan.
 
 **Kriteria terima E8 (keseluruhan).** Scene uji berisi terrain 2×2 km, 200 ribu
 instance vegetasi, 20 lampu berbayang, karakter ber-animasi, dan tiga sistem partikel

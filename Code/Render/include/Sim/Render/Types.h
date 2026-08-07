@@ -22,6 +22,52 @@ enum class DrawMode : uint8_t {
     Wireframe,
 };
 
+enum class ExposureMode : uint8_t {
+    /// Diukur dari adegan tiap frame, lalu diadaptasi terhadap waktu.
+    Automatic,
+    /// EV100 yang disetel tangan. Dibutuhkan justru saat menyetel material dan
+    /// lampu: eksposur yang bergerak sendiri membuat setiap perubahan
+    /// kecerahan dilawan oleh pengukurnya, dan yang terlihat adalah lampu yang
+    /// "tidak berpengaruh apa-apa".
+    Manual,
+};
+
+/// Pengaturan rantai post-process.
+///
+/// **Menggantikan `ViewportDesc::exposure` yang berdiri sejak E8.3.** Angka itu
+/// satu pengali yang dipakai kedua jalur cahaya supaya radiance sungguhan tidak
+/// terpotong putih pada target 8-bit — sebuah penambal untuk tidak adanya
+/// operator nada. Sekarang operatornya ada, jadi lampu kembali memakai radiance
+/// sungguhannya dan yang memetakannya ke layar adalah pass tersendiri.
+struct PostProcessSettings {
+    /// Saat mati, isi HDR disalin apa adanya ke target tampilan — dijepit, tanpa
+    /// operator nada dan tanpa encode sRGB. Dipakai membandingkan.
+    bool enabled = true;
+
+    ExposureMode exposureMode = ExposureMode::Automatic;
+
+    /// EV100 saat manual.
+    ///
+    /// **Nol, bukan 13.** EV100 sungguhan untuk siang hari ada di sekitar 13-15,
+    /// dan itu memang nilai pertama yang saya tulis — hasilnya viewport hitam
+    /// pekat tanpa satu pun galat. Sebabnya: lampu di engine ini belum dalam
+    /// satuan fotometrik. Matahari bawaan beradiansi 3,0, bukan sepuluh ribu
+    /// cd/m², jadi EV100 yang dihitung dari angka-angka itu berada di sekitar
+    /// nol. Rentang yang berguna di sini kira-kira -8 sampai +8, dan label
+    /// "EV100" baru berarti harfiah begitu lampu memakai satuan sungguhan.
+    float manualEv100 = 0.0f;
+
+    /// Kompensasi dalam stop, berlaku pada kedua mode. Positif berarti lebih
+    /// terang.
+    float exposureCompensation = 0.0f;
+
+    /// Tetapan waktu adaptasi, detik. **Dua, bukan satu:** satu tetapan waktu
+    /// memaksa memilih antara kedipan saat berbalik menghadap matahari dan
+    /// keterlambatan saat masuk ke lorong, dan keduanya terlihat.
+    float adaptationBrightenSeconds = 0.4f;
+    float adaptationDarkenSeconds = 1.2f;
+};
+
 /// Kamera editor. Rotasi disimpan sebagai quaternion supaya tidak ada gimbal
 /// lock saat kamera fly diarahkan lurus ke atas/bawah.
 struct Camera {
@@ -74,23 +120,9 @@ struct ViewportDesc {
     Vec3 sunRadiance{3.0f};
     bool castShadows = true;
 
-    /// Pengali eksposur, dipakai seragam oleh matahari dan lampu punctual.
-    ///
-    /// **Berdiri sebagai pengganti tone mapping sampai E8.8.** Target warna
-    /// viewport 8-bit dan tidak ada satu pun operator nada di antaranya, jadi
-    /// radiance sungguhan — matahari bawaan bernilai 3,0 — akan terpotong putih.
-    /// Yang salah bukan angkanya melainkan tidak adanya yang memetakannya.
-    ///
-    /// Sebuah parameter, bukan konstanta di dalam shader, karena alasan yang
-    /// sama dengan `sourceRadius`: angka yang tersembunyi tidak bisa disetel
-    /// siapa pun dan akan dikira bagian dari model. Bawaannya dipilih supaya
-    /// matahari bawaan menghasilkan tepat 0,75 — nilai yang dulu ditulis
-    /// langsung di `box.frag` — sehingga adegan yang ada tidak berubah rupa.
-    ///
-    /// **Berlaku untuk kedua jalur cahaya.** Matahari dan lampu punctual pada
-    /// skala yang berbeda adalah persis jenis ketidakcocokan yang paling sulit
-    /// dilacak: setiap lampu terlihat masuk akal sendiri-sendiri.
-    float exposure = 0.25f;
+    /// Pengaturan post-process: eksposur, operator nada, dan yang menyusul di
+    /// atasnya.
+    PostProcessSettings post;
 
     /// Pengaturan global illumination. Mengalir dari editor ke renderer;
     /// backend yang **akhirnya** dipakai mengalir balik lewat

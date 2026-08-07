@@ -12,6 +12,7 @@
 #include "Sim/Render/SdfVolume.h"
 #include "Sim/Render/ShadowAtlas.h"
 #include "Sim/Render/TimeOfDay.h"
+#include "Sim/Render/ToneMap.h"
 #include "Sim/Render/TieredTrace.h"
 #include "Sim/Render/TraceBackend.h"
 #include "Sim/Render/ShadowCascades.h"
@@ -22,6 +23,7 @@
 #include <array>
 #include <cmath>
 #include <string>
+#include <utility>
 #include <vector>
 
 using namespace sim;
@@ -3388,4 +3390,179 @@ TEST_CASE("Matahari diredam saat terbit dan terbenam, bukan diputus mendadak") {
         CHECK(level >= previous - 1e-4f);
         previous = level;
     }
+}
+
+// --- E8.8: operator nada dan eksposur ----------------------------------------
+
+TEST_CASE("kurva ACES monoton, mulai dari nol, dan menyisakan ruang di atas putih") {
+    using namespace sim::render;
+
+    CHECK(AcesCurve(0.0f) == 0.0f);
+
+    // Monoton di seluruh rentang yang dipakai. Kurva nada yang berbalik arah
+    // membuat bagian yang lebih terang digambar lebih gelap — dan itu terlihat
+    // sebagai pita gelap di tengah sorotan, bukan sebagai galat.
+    float previous = -1.0f;
+    for (float v = 0.0f; v < 40.0f; v += 0.01f) {
+        const float mapped = AcesCurve(v);
+        CHECK(mapped >= previous - 1e-6f);
+        previous = mapped;
+    }
+
+    // Titik putihnya jauh di atas 1. Inilah yang membedakan operator nada dari
+    // pemotongan: ada rentang di atas putih layar yang masih terbedakan.
+    const float white = AcesWhitePoint();
+    CHECK(white > 20.0f);
+    CHECK(white < 30.0f);
+    CHECK(AcesCurve(white) == doctest::Approx(1.0f).epsilon(0.001f));
+    CHECK(AcesCurve(white * 0.5f) < 0.999f);
+}
+
+TEST_CASE("ACES menahan rona sorotan berwarna yang akan dipatahkan pemotongan") {
+    using namespace sim::render;
+
+    // Matahari jingga jauh di atas putih. Pemotongan per kanal akan mendorong
+    // hijau dan biru sampai bertemu merah — jingga menjadi putih. ACES boleh
+    // memutihkannya, tapi urutan kanalnya harus bertahan.
+    const Vec3 orange(12.0f, 5.0f, 1.0f);
+    const Vec3 mapped = AcesToneMap(orange);
+    CHECK(mapped.x > mapped.y);
+    CHECK(mapped.y > mapped.z);
+    CHECK(mapped.x <= 1.0f);
+
+    // Pembanding: pemotongan mentah menyamakan merah dan hijau, yaitu persis
+    // pergeseran rona yang dihindari.
+    const Vec3 clipped = glm::clamp(orange, Vec3(0.0f), Vec3(1.0f));
+    CHECK(clipped.x == doctest::Approx(clipped.y));
+
+    // Abu-abu tetap abu-abu: matriks yang tertranspos akan mewarnainya.
+    const Vec3 grey = AcesToneMap(Vec3(0.5f));
+    CHECK(grey.x == doctest::Approx(grey.y).epsilon(0.002f));
+    CHECK(grey.y == doctest::Approx(grey.z).epsilon(0.002f));
+}
+
+TEST_CASE("eksposur otomatis tidak bergantung skala adegan") {
+    using namespace sim::render;
+
+    // **Ini kriteria terimanya.** Adegan seragam berluminansi berapa pun, sesudah
+    // diukur dan dikalikan, harus mendarat di angka yang sama. Kalau tidak,
+    // menaikkan seluruh lampu sepuluh kali lipat akan mengubah gambar — dan
+    // eksposur yang bergantung skala terlihat benar pada satu adegan saja.
+    for (const float luminance : {0.001f, 0.05f, 0.18f, 1.0f, 40.0f, 5000.0f}) {
+        const float exposure = AutoExposure(luminance);
+        CHECK(luminance * exposure == doctest::Approx(1.0f / 9.6f).epsilon(1e-4f));
+    }
+
+    // Kompensasi bekerja dalam stop: +1 stop tepat dua kali lebih terang.
+    const float base = AutoExposure(0.18f, 0.0f);
+    CHECK(AutoExposure(0.18f, 1.0f) == doctest::Approx(base * 2.0f).epsilon(1e-4f));
+    CHECK(AutoExposure(0.18f, -2.0f) == doctest::Approx(base * 0.25f).epsilon(1e-4f));
+}
+
+TEST_CASE("rantai reduksi log-luminansi memulihkan rata-rata geometrik") {
+    using namespace sim::render;
+    using Reducer = LogLuminanceReducer;
+
+    CHECK(Reducer::LevelCount() == 8);  // 256 -> 1
+
+    // Rata-rata 2×2 berjenjang atas petak pangkat dua sama persis dengan
+    // rata-rata datarnya. Kalau tidak, eksposur akan bergantung pada di mana
+    // sebuah piksel terang kebetulan berada, bukan pada seberapa terang ia.
+    std::vector<float> level(16 * 16);
+    for (std::size_t i = 0; i < level.size(); ++i) {
+        level[i] = static_cast<float>(i % 37) * 0.1f - 1.0f;
+    }
+    double flat = 0.0;
+    for (const float value : level) {
+        flat += static_cast<double>(value);
+    }
+    flat /= static_cast<double>(level.size());
+
+    std::vector<float> reduced = level;
+    for (uint32_t size = 16; size > 1; size /= 2) {
+        reduced = Reducer::ReduceLevel(reduced, size);
+    }
+    CHECK(reduced.size() == 1);
+    CHECK(reduced.front() == doctest::Approx(static_cast<float>(flat)).epsilon(1e-5f));
+
+    // Gambar seragam kembali sebagai luminansinya sendiri, pada ukuran viewport
+    // yang genap maupun ganjil. Ukuran ganjil adalah alasan rantainya berangkat
+    // dari petak tetap: eksposur yang bergeser saat pemisah dock digeser tidak
+    // akan pernah dicurigai siapa pun.
+    for (const float luminance : {0.02f, 0.18f, 4.0f, 250.0f}) {
+        for (const auto size : {std::pair<uint32_t, uint32_t>{64, 64},
+                                std::pair<uint32_t, uint32_t>{101, 57}}) {
+            const std::vector<Vec3> pixels(
+                static_cast<std::size_t>(size.first) * size.second, Vec3(luminance));
+            const float measured = Reducer::Reduce(pixels, size.first, size.second);
+            const float expected = luminance * (0.2126f + 0.7152f + 0.0722f);
+            CHECK(measured == doctest::Approx(expected).epsilon(0.02f));
+        }
+    }
+}
+
+TEST_CASE("pengukuran luminansi tahan piksel hitam dan sorotan tunggal") {
+    using namespace sim::render;
+    using Reducer = LogLuminanceReducer;
+
+    // Piksel hitam tidak menghasilkan NaN. log2(0) adalah negatif tak hingga,
+    // dan satu saja sudah cukup meracuni seluruh rata-rata — yang muncul sebagai
+    // layar hitam atau putih penuh, bukan sebagai galat.
+    std::vector<Vec3> withBlack(64 * 64, Vec3(0.5f));
+    withBlack[100] = Vec3(0.0f);
+    const float measured = Reducer::Reduce(withBlack, 64, 64);
+    CHECK(std::isfinite(measured));
+    CHECK(measured > 0.0f);
+    CHECK(measured == doctest::Approx(Luminance(Vec3(0.5f))).epsilon(0.05f));
+
+    // Satu sorotan sangat terang di antara ribuan piksel redup hampir tidak
+    // menggeser pengukuran — inilah yang tidak dimiliki rata-rata aritmetik.
+    std::vector<Vec3> withSpike(64 * 64, Vec3(0.1f));
+    withSpike[500] = Vec3(10000.0f);
+    const float spiked = Reducer::Reduce(withSpike, 64, 64);
+    const float clean = Reducer::Reduce(std::vector<Vec3>(64 * 64, Vec3(0.1f)), 64, 64);
+    CHECK(spiked < clean * 1.05f);
+
+    // Pembanding: rata-rata aritmetik atas gambar yang sama meleset lebih dari
+    // dua kali lipat, dan itu terlihat sebagai seluruh adegan yang menggelap.
+    double arithmetic = 0.0;
+    for (const Vec3& pixel : withSpike) {
+        arithmetic += static_cast<double>(Luminance(pixel));
+    }
+    arithmetic /= static_cast<double>(withSpike.size());
+    CHECK(arithmetic > clean * 2.0);
+}
+
+TEST_CASE("adaptasi eksposur mengejar sasaran dengan dua tetapan waktu") {
+    using namespace sim::render;
+
+    // Frame pertama tidak beradaptasi — ia mendarat. Memulai dari nilai lain
+    // berarti setiap kali viewport dibuka adegannya menyala dari gelap.
+    ExposureAdaptation adaptation(0.5f, 2.0f);
+    CHECK_FALSE(adaptation.Ready());
+    CHECK(adaptation.Update(0.25f, 0.016f) == doctest::Approx(0.25f));
+    CHECK(adaptation.Ready());
+
+    // Satu tetapan waktu menempuh 63,2% jaraknya, menurut definisinya.
+    ExposureAdaptation brighten(0.5f, 2.0f);
+    brighten.Reset(1.0f);
+    // Sasaran lebih kecil berarti adegan menjadi lebih terang → tetapan cepat.
+    brighten.Update(0.0f, 0.5f);
+    CHECK(brighten.Current() == doctest::Approx(1.0f - 0.6321f).epsilon(0.01f));
+
+    ExposureAdaptation darken(0.5f, 2.0f);
+    darken.Reset(0.0f);
+    darken.Update(1.0f, 2.0f);
+    CHECK(darken.Current() == doctest::Approx(0.6321f).epsilon(0.01f));
+
+    // Dan arah terang memang lebih cepat daripada arah gelap pada langkah waktu
+    // yang sama — satu tetapan waktu memaksa memilih antara kedipan dan
+    // keterlambatan.
+    ExposureAdaptation a(0.5f, 2.0f);
+    a.Reset(1.0f);
+    a.Update(0.0f, 0.1f);
+    ExposureAdaptation b(0.5f, 2.0f);
+    b.Reset(0.0f);
+    b.Update(1.0f, 0.1f);
+    CHECK(1.0f - a.Current() > b.Current());
 }
