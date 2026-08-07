@@ -97,8 +97,10 @@ public:
             context.gi.backend = static_cast<render::TraceBackendPreference>(backend);
         }
 
-        const char* views[] = {"Off",        "Albedo",    "Normal",
-                               "Irradiance", "Ray count", "March steps"};
+        ImGui::Checkbox("Screen-space layer", &context.gi.screenTrace);
+
+        const char* views[] = {"Off",       "Albedo",      "Normal",     "Irradiance",
+                               "Ray count", "March steps", "Trace layer"};
         int view = static_cast<int>(context.gi.debugView);
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
         if (ImGui::Combo("Debug view", &view, views, IM_ARRAYSIZE(views))) {

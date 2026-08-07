@@ -22,6 +22,14 @@ layout(set = 0, binding = 0) uniform ShadowParams {
     vec4 sdfOrigin[4];
     // x resolusi, y jumlah kaskade, z lebar pita dalam voxel, w langkah maksimum
     vec4 sdfParams;
+    // Dunia -> clip. Dipakai lapis screen-space untuk memproyeksikan sinar ke
+    // layar. Di UBO, bukan di push constant: batas push constant yang dijamin
+    // Vulkan hanya 128 byte, dan dua matriks saja sudah menghabiskannya.
+    mat4 viewProj;
+    // x ketebalan yang diandaikan (meter), y dorongan awal (meter),
+    // z langkah maksimum screen-space, w jumlah tingkat HiZ. Nol pada w berarti
+    // lapis screen-space mati.
+    vec4 screenTrace;
 } shadowParams;
 
 layout(set = 0, binding = 1) uniform sampler2DArrayShadow shadowMap;

@@ -30,9 +30,31 @@ enum class TraceBackendKind : uint8_t {
 
 const char* ToString(TraceBackendKind kind);
 
+/// Lapis mana yang menjawab sebuah penelusuran.
+///
+/// **Ikut di hasil supaya jenjangnya bisa dilihat, bukan hanya dipercaya.**
+/// Jenjang yang tidak terlihat adalah jenjang yang diam-diam berhenti dipakai —
+/// dan lapis screen-space yang tidak pernah mengenai apa pun tampak persis sama
+/// dengan lapis screen-space yang bekerja sempurna.
+enum class TraceLayer : uint8_t {
+    /// Belum ditelusuri sama sekali.
+    None,
+    /// Depth buffer layar.
+    Screen,
+    /// Clipmap SDF global.
+    Sdf,
+    /// Tidak ada satu lapis pun yang mengenai: yang tersisa adalah langit.
+    Sky,
+};
+
+const char* ToString(TraceLayer layer);
+
 /// Hasil satu penelusuran.
 struct TraceResult {
     bool hit = false;
+    /// Lapis yang menjawab. Berarti juga saat `hit` false: `Sky` adalah jawaban,
+    /// `None` adalah ketiadaan jawaban.
+    TraceLayer layer = TraceLayer::None;
     /// Jarak sepanjang sinar. Tidak berarti bila `hit` false.
     float distance = 0.0f;
     Vec3 position{0.0f};
@@ -125,6 +147,12 @@ enum class GiDebugView : uint8_t {
     RayCount,
     /// Heatmap jumlah langkah march. Yang paling sering dipakai.
     MarchSteps,
+    /// Lapis mana yang menjawab tiap sinar: layar, SDF, atau langit.
+    ///
+    /// Jenjang yang tidak terlihat adalah jenjang yang diam-diam berhenti
+    /// dipakai — dan lapis screen-space yang tidak pernah mengenai apa pun
+    /// tampak persis sama dengan lapis screen-space yang bekerja sempurna.
+    TraceLayers,
 };
 
 const char* ToString(GiDebugView view);
@@ -134,6 +162,13 @@ struct GiSettings {
     bool enabled = false;
     TraceBackendPreference backend = TraceBackendPreference::Auto;
     GiDebugView debugView = GiDebugView::Off;
+    /// Lapis screen-space di depan SDF.
+    ///
+    /// **Bukan tombol kualitas melainkan alat ukur.** Mematikannya membuat
+    /// setiap sinar berjalan penuh di SDF, jadi selisih dua angka di tabel waktu
+    /// GPU adalah harga sebenarnya dari lapis pertama — dan tanpa cara
+    /// mematikannya, harga itu hanya bisa diperkirakan.
+    bool screenTrace = true;
 };
 
 }  // namespace sim::render

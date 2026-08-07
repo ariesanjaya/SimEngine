@@ -4,9 +4,11 @@
 #include "Sim/Render/Frustum.h"
 #include "Sim/Render/Ibl.h"
 #include "Sim/Render/LightCluster.h"
+#include "Sim/Render/ScreenTrace.h"
 #include "Sim/Render/SdfClipmap.h"
 #include "Sim/Render/SdfVolume.h"
 #include "Sim/Render/ShadowAtlas.h"
+#include "Sim/Render/TieredTrace.h"
 #include "Sim/Render/TraceBackend.h"
 #include "Sim/Render/ShadowCascades.h"
 
@@ -2244,3 +2246,305 @@ TEST_CASE("Sinar yang melewati sisi kotak sepakat soal meleset") {
     CHECK(!wide.hit);
 }
 
+
+// --- M2: lapis screen-space -------------------------------------------------
+
+namespace {
+
+/// Depth buffer sintetis: sebuah bidang tegak lurus sumbu Z pada `planeZ`,
+/// dirasterkan dengan menembakkan satu sinar per piksel.
+///
+/// **Dibangun dari perpotongan analitik, bukan dari rasterizer.** Yang diuji di
+/// sini adalah penelusurnya; depth buffer yang dihasilkan jalur lain akan
+/// membuat kegagalan mereka tampak sebagai kegagalan penelusur.
+std::vector<float> RasterizePlane(const Mat4& viewProj, const Mat4& invViewProj, uint32_t width,
+                                  uint32_t height, float planeZ, const Vec2& halfExtent) {
+    std::vector<float> depth(static_cast<std::size_t>(width) * height, 0.0f);
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            const Vec2 uv((static_cast<float>(x) + 0.5f) / static_cast<float>(width),
+                          (static_cast<float>(y) + 0.5f) / static_cast<float>(height));
+            const Vec4 ndc(uv.x * 2.0f - 1.0f, uv.y * 2.0f - 1.0f, 0.5f, 1.0f);
+            const Vec4 point = invViewProj * ndc;
+            const Vec3 world = Vec3(point) / point.w;
+            // Kamera di titik asal menghadap -Z, jadi sinar melalui piksel ini
+            // adalah arah ke titik yang barusan dibalik proyeksinya.
+            const Vec3 ray = glm::normalize(world);
+            if (std::abs(ray.z) < 1e-6f) {
+                continue;
+            }
+            const float t = planeZ / ray.z;
+            if (t <= 0.0f) {
+                continue;
+            }
+            const Vec3 hit = ray * t;
+            if (std::abs(hit.x) > halfExtent.x || std::abs(hit.y) > halfExtent.y) {
+                continue;  // di luar bidang: langit, depth reversed-Z nol
+            }
+            const Vec4 clip = viewProj * Vec4(hit, 1.0f);
+            depth[static_cast<std::size_t>(y) * width + x] = clip.z / clip.w;
+        }
+    }
+    return depth;
+}
+
+}  // namespace
+
+TEST_CASE("Mip HiZ menyimpan permukaan terdekat, bukan terjauh") {
+    // Reversed-Z: depth terbesar berarti paling dekat. Mip yang menyimpan yang
+    // terkecil membuat tiap sel melaporkan permukaan terjauhnya sebagai
+    // penghalang, dan tiap sinar menembus geometri yang justru paling dekat.
+    const std::vector<float> depth{0.1f, 0.9f, 0.2f, 0.3f,
+                                   0.4f, 0.5f, 0.6f, 0.7f,
+                                   0.0f, 0.0f, 0.0f, 0.0f,
+                                   0.0f, 0.0f, 0.0f, 0.0f};
+    HiZPyramid pyramid;
+    pyramid.Build(4, 4, depth);
+
+    REQUIRE(pyramid.LevelCount() == 3);
+    CHECK(pyramid.Size(1) == glm::uvec2(2, 2));
+    CHECK(pyramid.Size(2) == glm::uvec2(1, 1));
+
+    CHECK(pyramid.At(1, 0, 0) == doctest::Approx(0.9f));
+    CHECK(pyramid.At(1, 1, 0) == doctest::Approx(0.7f));
+    CHECK(pyramid.At(2, 0, 0) == doctest::Approx(0.9f));
+}
+
+TEST_CASE("Mip HiZ tidak membuang baris terakhir dari ukuran ganjil") {
+    // Ukuran tiap tingkat mengikuti aturan mip Vulkan — dibulatkan ke bawah —
+    // karena bentuk yang membulatkannya ke atas menghasilkan satu tingkat lebih
+    // banyak daripada yang boleh dimiliki sebuah image, dan `vkCreateImage`
+    // menolaknya. Barisnya tetap tidak boleh hilang: yang berubah bukan
+    // ukurannya melainkan cakupannya, dan texel terakhir merangkum sisa
+    // barisnya.
+    std::vector<float> depth(9, 0.1f);
+    depth[8] = 0.95f;  // pojok kanan bawah, satu-satunya texel di baris ganjil
+    HiZPyramid pyramid;
+    pyramid.Build(3, 3, depth);
+
+    REQUIRE(pyramid.LevelCount() == 2);
+    CHECK(pyramid.Size(1) == glm::uvec2(1, 1));
+    CHECK(pyramid.At(1, 0, 0) == doctest::Approx(0.95f));
+    // Dan jumlah tingkatnya persis yang diizinkan Vulkan untuk ukuran itu.
+    CHECK(HiZPyramid::LevelsFor(3, 3) == 2);
+    CHECK(HiZPyramid::LevelsFor(1280, 768) == 11);
+}
+
+TEST_CASE("Penelusuran screen-space menemukan dinding di depan kamera") {
+    constexpr uint32_t kWidth = 64;
+    constexpr uint32_t kHeight = 64;
+    const Mat4 view = LookAt(Vec3(0.0f), Vec3(0.0f, 0.0f, -1.0f), Vec3(0.0f, 1.0f, 0.0f));
+    const Mat4 proj = PerspectiveReversedZ(60.0f * kDegToRad, 1.0f, 0.1f, 100.0f);
+    ScreenTraceView screen;
+    screen.viewProj = proj * view;
+    screen.invViewProj = glm::inverse(screen.viewProj);
+
+    const std::vector<float> depth =
+        RasterizePlane(screen.viewProj, screen.invViewProj, kWidth, kHeight, -10.0f,
+                       Vec2(100.0f));
+    HiZPyramid pyramid;
+    pyramid.Build(kWidth, kHeight, depth);
+
+    ScreenTraceSettings settings;
+    settings.thickness = 1.0f;
+
+    // Sinar dari titik di depan dinding, menuju dinding.
+    const ScreenTraceResult straight = TraceScreenSpace(
+        pyramid, screen, Vec3(0.0f, 0.0f, -1.0f), Vec3(0.0f, 0.0f, -1.0f), 30.0f, settings);
+    REQUIRE(straight.hit);
+    CHECK(straight.distance == doctest::Approx(9.0f).epsilon(0.02));
+    CHECK(straight.steps <= settings.maxSteps);
+
+    // Miring, tapi tetap mengenai dinding yang sama: jaraknya lebih jauh persis
+    // sebesar 1/cos.
+    const Vec3 slanted = glm::normalize(Vec3(0.3f, 0.0f, -1.0f));
+    const ScreenTraceResult oblique =
+        TraceScreenSpace(pyramid, screen, Vec3(0.0f, 0.0f, -1.0f), slanted, 30.0f, settings);
+    REQUIRE(oblique.hit);
+    CHECK(oblique.distance == doctest::Approx(9.0f / slanted.z * -1.0f).epsilon(0.05));
+}
+
+TEST_CASE("Sinar yang keluar layar dilaporkan sebagai tidak tahu, bukan sebagai kosong") {
+    // Membedakan keduanya adalah seluruh gunanya jenjang: yang keluar layar
+    // harus diteruskan ke SDF, sedangkan yang benar-benar kosong sudah merupakan
+    // jawaban. Menyamakannya menghasilkan lubang gelap tepat di tepi layar.
+    constexpr uint32_t kSize = 64;
+    const Mat4 view = LookAt(Vec3(0.0f), Vec3(0.0f, 0.0f, -1.0f), Vec3(0.0f, 1.0f, 0.0f));
+    const Mat4 proj = PerspectiveReversedZ(60.0f * kDegToRad, 1.0f, 0.1f, 100.0f);
+    ScreenTraceView screen;
+    screen.viewProj = proj * view;
+    screen.invViewProj = glm::inverse(screen.viewProj);
+
+    const std::vector<float> depth = RasterizePlane(screen.viewProj, screen.invViewProj, kSize,
+                                                    kSize, -10.0f, Vec2(100.0f));
+    HiZPyramid pyramid;
+    pyramid.Build(kSize, kSize, depth);
+
+    // Menjauh dari kamera ke samping: keluar layar sebelum mengenai apa pun.
+    const ScreenTraceResult sideways =
+        TraceScreenSpace(pyramid, screen, Vec3(0.0f, 0.0f, -1.0f),
+                         glm::normalize(Vec3(1.0f, 0.0f, -0.05f)), 30.0f, ScreenTraceSettings{});
+    CHECK(!sideways.hit);
+    CHECK(sideways.leftScreen);
+
+    // Ke belakang kamera: tidak punya proyeksi yang berarti sama sekali.
+    const ScreenTraceResult behind =
+        TraceScreenSpace(pyramid, screen, Vec3(0.0f, 0.0f, -1.0f), Vec3(0.0f, 0.0f, 1.0f), 30.0f,
+                         ScreenTraceSettings{});
+    CHECK(!behind.hit);
+    CHECK(behind.leftScreen);
+}
+
+TEST_CASE("Sinar yang lewat di belakang dinding tidak mengenai siluetnya") {
+    // Depth buffer hanya menyimpan permukaan terdepan. Tanpa uji ketebalan,
+    // setiap sinar yang lewat jauh di belakang sebuah benda melaporkan kena di
+    // tepinya — cacat khas penelusuran screen-space.
+    constexpr uint32_t kSize = 128;
+    const Mat4 view = LookAt(Vec3(0.0f), Vec3(0.0f, 0.0f, -1.0f), Vec3(0.0f, 1.0f, 0.0f));
+    const Mat4 proj = PerspectiveReversedZ(60.0f * kDegToRad, 1.0f, 0.1f, 100.0f);
+    ScreenTraceView screen;
+    screen.viewProj = proj * view;
+    screen.invViewProj = glm::inverse(screen.viewProj);
+
+    // Papan sempit di tengah layar, pada z = -5.
+    const std::vector<float> depth =
+        RasterizePlane(screen.viewProj, screen.invViewProj, kSize, kSize, -5.0f, Vec2(1.0f));
+    HiZPyramid pyramid;
+    pyramid.Build(kSize, kSize, depth);
+
+    ScreenTraceSettings thin;
+    thin.thickness = 0.25f;
+    // Mulai dari sisi kanan papan, jauh di belakangnya, mengarah melintas.
+    const ScreenTraceResult behind = TraceScreenSpace(
+        pyramid, screen, Vec3(2.5f, 0.0f, -20.0f), glm::normalize(Vec3(-1.0f, 0.0f, 0.0f)),
+        10.0f, thin);
+    CHECK(!behind.hit);
+
+    // Ketebalan yang sangat besar membuat papan yang sama menjadi penghalang.
+    // Uji ini yang membuktikan gagalnya yang di atas memang karena ketebalan,
+    // bukan karena sinarnya tidak pernah sampai ke sana.
+    ScreenTraceSettings thick;
+    thick.thickness = 100.0f;
+    const ScreenTraceResult swallowed = TraceScreenSpace(
+        pyramid, screen, Vec3(2.5f, 0.0f, -20.0f), glm::normalize(Vec3(-1.0f, 0.0f, 0.0f)),
+        10.0f, thick);
+    CHECK(swallowed.hit);
+}
+
+TEST_CASE("Jenjang menjawab dengan lapis yang benar") {
+    constexpr uint32_t kSize = 64;
+    const Mat4 view = LookAt(Vec3(0.0f), Vec3(0.0f, 0.0f, -1.0f), Vec3(0.0f, 1.0f, 0.0f));
+    const Mat4 proj = PerspectiveReversedZ(60.0f * kDegToRad, 1.0f, 0.1f, 100.0f);
+    ScreenTraceView screen;
+    screen.viewProj = proj * view;
+    screen.invViewProj = glm::inverse(screen.viewProj);
+
+    const std::vector<float> depth =
+        RasterizePlane(screen.viewProj, screen.invViewProj, kSize, kSize, -6.0f, Vec2(2.0f));
+    HiZPyramid pyramid;
+    pyramid.Build(kSize, kSize, depth);
+
+    // SDF berisi kotak yang sama sekali berbeda tempatnya: di samping kamera,
+    // jauh di luar layar. Dengan begitu, lapis mana yang menjawab bisa dibaca
+    // dari lapisnya sendiri, bukan disimpulkan dari jaraknya.
+    MeshInstance box;
+    box.transform = glm::scale(glm::translate(Mat4(1.0f), Vec3(6.0f, 0.0f, 0.0f)), Vec3(2.0f));
+    box.boundsMin = Vec3(-1.0f);
+    box.boundsMax = Vec3(1.0f);
+    const std::array<MeshInstance, 1> meshes{box};
+
+    SdfClipmapSettings clipmap;
+    clipmap.resolution = 64;
+    clipmap.cascadeCount = 2;
+    clipmap.finestVoxelSize = 0.1f;
+    SdfVolume volume;
+    volume.Configure(clipmap);
+    volume.Clipmap().Scroll(Vec3(3.0f, 0.0f, 0.0f));
+    BoxSceneField field;
+    field.Build(meshes);
+    volume.FillAll(field);
+
+    TieredTraceSettings settings;
+    settings.screen.thickness = 1.0f;
+    const std::unique_ptr<ITraceBackend> tiered =
+        CreateTieredTraceBackend(pyramid, screen, volume, settings);
+    CHECK(tiered->Kind() == TraceBackendKind::Sdf);
+
+    // Ke depan, ke papan yang terlihat: dijawab layar.
+    const TraceResult onScreen =
+        tiered->Trace(Vec3(0.0f, 0.0f, -1.0f), Vec3(0.0f, 0.0f, -1.0f), 30.0f);
+    CHECK(onScreen.hit);
+    CHECK(onScreen.layer == TraceLayer::Screen);
+
+    // Ke samping, keluar layar, ke kotak yang hanya ada di SDF: dijawab SDF.
+    const TraceResult offScreen =
+        tiered->Trace(Vec3(3.0f, 0.0f, 0.0f), Vec3(1.0f, 0.0f, 0.0f), 20.0f);
+    CHECK(offScreen.hit);
+    CHECK(offScreen.layer == TraceLayer::Sdf);
+
+    // Lurus ke atas: tidak ada apa pun di kedua lapis. `Sky` adalah jawaban,
+    // bukan ketiadaan jawaban.
+    const TraceResult nothing =
+        tiered->Trace(Vec3(3.0f, 0.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f), 20.0f);
+    CHECK(!nothing.hit);
+    CHECK(nothing.layer == TraceLayer::Sky);
+}
+
+TEST_CASE("Mematikan lapis layar membuat jawabannya turun ke SDF") {
+    // Bukan tombol kualitas: ia alat untuk melihat berapa banyak yang sebenarnya
+    // dijawab lapis pertama. Alat itu hanya berarti kalau mematikannya
+    // benar-benar mengubah lapis yang menjawab.
+    constexpr uint32_t kSize = 64;
+    const Mat4 view = LookAt(Vec3(0.0f), Vec3(0.0f, 0.0f, -1.0f), Vec3(0.0f, 1.0f, 0.0f));
+    const Mat4 proj = PerspectiveReversedZ(60.0f * kDegToRad, 1.0f, 0.1f, 100.0f);
+    ScreenTraceView screen;
+    screen.viewProj = proj * view;
+    screen.invViewProj = glm::inverse(screen.viewProj);
+
+    MeshInstance box;
+    box.transform = glm::scale(glm::translate(Mat4(1.0f), Vec3(0.0f, 0.0f, -4.0f)), Vec3(2.0f));
+    box.boundsMin = Vec3(-1.0f);
+    box.boundsMax = Vec3(1.0f);
+    const std::array<MeshInstance, 1> meshes{box};
+
+    SdfClipmapSettings clipmap;
+    clipmap.resolution = 64;
+    clipmap.cascadeCount = 2;
+    clipmap.finestVoxelSize = 0.1f;
+    SdfVolume volume;
+    volume.Configure(clipmap);
+    volume.Clipmap().Scroll(Vec3(0.0f, 0.0f, -3.0f));
+    BoxSceneField field;
+    field.Build(meshes);
+    volume.FillAll(field);
+
+    // Kotaknya berskala dua DAN kotak batasnya selebar dua, dan `BoxSceneField`
+    // mengalikan keduanya — jadi sisi depannya di z = -2, bukan -3. Papan
+    // rasternya diletakkan di sana supaya kedua lapis benar-benar menggambarkan
+    // permukaan yang sama.
+    const std::vector<float> depth =
+        RasterizePlane(screen.viewProj, screen.invViewProj, kSize, kSize, -2.0f, Vec2(2.0f));
+    HiZPyramid pyramid;
+    pyramid.Build(kSize, kSize, depth);
+
+    TieredTraceSettings withScreen;
+    withScreen.screen.thickness = 1.0f;
+    const TraceResult layered =
+        CreateTieredTraceBackend(pyramid, screen, volume, withScreen)
+            ->Trace(Vec3(0.0f, 0.0f, -1.0f), Vec3(0.0f, 0.0f, -1.0f), 20.0f);
+    REQUIRE(layered.hit);
+    CHECK(layered.layer == TraceLayer::Screen);
+
+    TieredTraceSettings sdfOnly = withScreen;
+    sdfOnly.screenEnabled = false;
+    const TraceResult direct = CreateTieredTraceBackend(pyramid, screen, volume, sdfOnly)
+                                   ->Trace(Vec3(0.0f, 0.0f, -1.0f), Vec3(0.0f, 0.0f, -1.0f),
+                                           20.0f);
+    REQUIRE(direct.hit);
+    CHECK(direct.layer == TraceLayer::Sdf);
+    // Keduanya menemukan permukaan depan yang sama. Selisihnya paling banyak
+    // satu voxel SDF — dan itulah gunanya membandingkannya: dua lapis yang
+    // menjawab jarak yang berbeda untuk permukaan yang sama adalah dua lapis
+    // yang akan berkedip bergantian saat kamera bergerak.
+    CHECK(direct.distance == doctest::Approx(layered.distance).epsilon(0.2));
+}

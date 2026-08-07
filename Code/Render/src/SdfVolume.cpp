@@ -49,6 +49,7 @@ public:
             const float voxel = volume_.Clipmap().VoxelSize(static_cast<uint32_t>(cascade));
             if (distance < voxel * 0.5f) {
                 result.hit = true;
+                result.layer = TraceLayer::Sdf;
                 result.distance = travelled;
                 result.position = position;
                 result.steps = step + 1;

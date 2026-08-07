@@ -163,7 +163,11 @@ bool RenderTarget::CreateAttachments() {
     SIM_VK_CHECK(vkCreateImageView(device_->Handle(), &viewInfo, nullptr, &colorView_));
 
     imageInfo.format = depthFormat_;
-    imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    // SAMPLED ikut: piramida HiZ membaca depth buffer ini sebagai tekstur.
+    // Tanpa itu, lapis screen-space GI tidak punya apa pun untuk ditelusuri —
+    // dan kekurangannya muncul sebagai galat pembuatan image view, jauh dari
+    // tempat yang sebenarnya membutuhkannya.
+    imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
     SIM_VK_CHECK(vmaCreateImage(device_->Allocator(), &imageInfo, &allocationInfo, &depthImage_,
                                 &depthAllocation_, nullptr));
 

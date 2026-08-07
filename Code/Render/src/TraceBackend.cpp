@@ -29,6 +29,20 @@ const char* ToString(TraceBackendKind kind) {
     return "None";
 }
 
+const char* ToString(TraceLayer layer) {
+    switch (layer) {
+        case TraceLayer::None:
+            return "None";
+        case TraceLayer::Screen:
+            return "Screen";
+        case TraceLayer::Sdf:
+            return "SDF";
+        case TraceLayer::Sky:
+            return "Sky";
+    }
+    return "None";
+}
+
 const char* ToString(TraceBackendPreference preference) {
     switch (preference) {
         case TraceBackendPreference::Auto:
@@ -53,6 +67,8 @@ const char* ToString(GiDebugView view) {
             return "Irradiance";
         case GiDebugView::RayCount:
             return "Ray count";
+        case GiDebugView::TraceLayers:
+            return "Trace layer";
         case GiDebugView::MarchSteps:
             return "March steps";
     }

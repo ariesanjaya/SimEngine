@@ -1,5 +1,6 @@
 #include "Sim/Render/RendererFactory.h"
 
+#include "DepthPyramid.h"
 #include "FrameGraphExecutor.h"
 #include "SdfClipmapResource.h"
 #include "Sim/Core/Log.h"
@@ -68,10 +69,18 @@ struct ShadowUniforms {
     std::array<Vec4, 4> sdfOrigin{};
     /// x resolusi, y jumlah kaskade, z lebar pita dalam voxel, w langkah maks.
     Vec4 sdfParams{0.0f};
+    /// Dunia → clip. Dipakai lapis screen-space untuk memproyeksikan sinar ke
+    /// layar. Di sini, bukan di push constant: batas push constant yang dijamin
+    /// Vulkan hanya 128 byte, dan dua matriks saja sudah menghabiskannya.
+    Mat4 viewProj{1.0f};
+    /// x ketebalan yang diandaikan (meter), y dorongan awal (meter),
+    /// z langkah maks screen-space, w jumlah tingkat HiZ. Nol berarti lapis
+    /// screen-space mati.
+    Vec4 screenTrace{0.0f};
 };
-// 4 mat4 + 6 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
+// 5 mat4 + 16 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
 // memperbarui shader-nya menjadi galat kompilasi, bukan bayangan yang bergeser.
-static_assert(sizeof(ShadowUniforms) == 4 * 64 + 15 * 16,
+static_assert(sizeof(ShadowUniforms) == 5 * 64 + 16 * 16,
               "ShadowUniforms harus cocok dengan blok ShadowParams di shadow_common.glsl");
 
 /// Cermin dari `GpuLight` di Shaders/cluster_common.glsl. std430.
@@ -291,6 +300,7 @@ public:
         if (!target_.Create(device_, desc.initialWidth, desc.initialHeight)) {
             return false;
         }
+        shaderDirectory_ = desc.shaderDirectory;
         if (!CreateCube() || !CreateShadowMap() || !CreateShadowAtlas() ||
             !CreatePipelines(desc.shaderDirectory) ||
             !CreateOverlayPipelines(desc.shaderDirectory)) {
@@ -340,6 +350,14 @@ public:
                     return false;
                 }
             }
+        }
+        // Piramida depth dibuat sebelum descriptor ditulis, alasan yang sama
+        // dengan clipmap: descriptor yang menunjuk tekstur pengganti tidak
+        // menghasilkan galat apa pun, hanya penelusuran yang membaca peta
+        // bayangan alih-alih depth buffer.
+        if (hiz_.Create(device_, shaderDirectory_)) {
+            hiz_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(), target_.DepthView(),
+                       target_.Sampler());
         }
         if (!WriteShadowDescriptors()) {
             return false;
@@ -396,6 +414,14 @@ public:
         // Resize membangun image baru, jadi janji layoutnya harus dibuat ulang.
         AdoptTargetLayout();
         RefreshTextureHandle();
+        // Piramidanya menunjuk image depth yang baru saja dibuat ulang, jadi
+        // descriptor yang menyebut yang lama harus ditulis ulang. Aman
+        // dilakukan di sini: `RenderTarget::Resize` menunggu device idle sebelum
+        // mengalokasi ulang, jadi tidak ada frame yang masih memakainya.
+        if (hiz_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(), target_.DepthView(),
+                       target_.Sampler())) {
+            UpdateHizDescriptors();
+        }
     }
 
     void Render(const ViewportDesc& desc, const ViewportScene& scene) override {
@@ -478,6 +504,13 @@ public:
         // Clipmap SDF diperbarui hanya saat GI menyala. Membangunnya terus-
         // menerus untuk fitur yang dimatikan adalah biaya yang tidak ada yang
         // memintanya — dan biaya itu, di komposit CPU, bukan biaya yang kecil.
+        giEnabled_ = desc.gi.enabled;
+        // Piramida dibangun hanya kalau ada yang membacanya. Membangunnya saat
+        // lapis screen-space dimatikan adalah 0,1 ms untuk tekstur yang tidak
+        // dibaca satu sinar pun — dan mematikan lapis itu justru dilakukan untuk
+        // mengukur harganya, jadi biaya yang tertinggal akan mengaburkan
+        // pengukuran itu sendiri.
+        screenTraceEnabled_ = desc.gi.enabled && desc.gi.screenTrace;
         sdfDebugEnabled_ = desc.gi.enabled && sdfClipmap_.IsValid() &&
                            desc.gi.debugView != GiDebugView::Off;
         sdfVoxelsWritten_ = 0;
@@ -492,7 +525,7 @@ public:
         }
 
         UpdateClusters(desc, scene, aspect, slot);
-        UpdateShadowUniforms(desc, slot);
+        UpdateShadowUniforms(desc, viewProj, slot);
         BuildGraph();
 
         VkCommandBuffer cmd = device_.BeginTransient();
@@ -516,7 +549,13 @@ public:
         const BoxPush push{viewProj};
 
         const Mat4 invViewProj = glm::inverse(viewProj);
-        std::array<FrameGraphExecutor::Recorder, 8> recorders{};
+        // Ukurannya diambil dari graph, bukan dihitung tangan. Bentuk pertama
+        // saya memakai larik tetap delapan, dan pass kesembilan — `hiz-build` —
+        // menulis di luarnya: **stack corruption, bukan galat.** Angka yang
+        // harus diperbarui setiap kali sebuah pass ditambahkan adalah angka yang
+        // suatu saat lupa diperbarui.
+        recorders_.assign(static_cast<std::size_t>(graph_.PassCount()), {});
+        std::span<FrameGraphExecutor::Recorder> recorders(recorders_);
         recorders[shadowPassId_] = [&](VkCommandBuffer command) {
             RecordShadowPass(command, slot, casterCount_);
         };
@@ -568,6 +607,11 @@ public:
             }
             vkCmdEndRendering(command);
         };
+        if (hizPassId_ != kInvalidPass) {
+            recorders[hizPassId_] = [&](VkCommandBuffer command) {
+                hiz_.Record(command, target_.Width(), target_.Height());
+            };
+        }
         if (giDebugId_ != kInvalidPass) {
             recorders[giDebugId_] = [&](VkCommandBuffer command) {
                 BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/false,
@@ -684,6 +728,24 @@ private:
 
         prepassId_ = graph_.AddPass("depth-prepass");
         graph_.Write(prepassId_, depthId_, Access::DepthWrite);
+
+        // Piramida dibangun dari depth prepass, bukan dari depth akhir. Yang
+        // ditelusuri lapis screen-space adalah permukaan buram; yang tembus
+        // pandang tidak menghalangi cahaya dan tidak menulis depth yang berarti
+        // untuknya. Pass ini juga bersyarat: tanpa GI tidak ada yang membacanya.
+        hizPassId_ = kInvalidPass;
+        if (screenTraceEnabled_ && hiz_.IsValid()) {
+            hizPassId_ = graph_.AddPass("hiz-build");
+            graph_.Read(hizPassId_, depthId_, Access::ShaderRead);
+            // **Efek samping, karena keluarannya bukan resource graph.** Piramida
+            // mengurus perpindahan layout tiap mip-nya sendiri — graph melacak
+            // resource sebagai satu kesatuan, sementara pembangunan piramida
+            // membaca satu mip sambil menulis mip berikutnya. Tanpa penanda ini
+            // graph menyimpulkan pass ini tidak menghasilkan apa pun dan
+            // membuangnya: penelusuran lalu membaca piramida frame sebelumnya,
+            // tanpa satu pun galat.
+            graph_.SetSideEffect(hizPassId_);
+        }
 
         opaqueId_ = graph_.AddPass("forward-opaque");
         graph_.Read(opaqueId_, depthId_, Access::DepthWrite);
@@ -1343,7 +1405,7 @@ private:
         samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
         SIM_VK_CHECK(vkCreateSampler(device_.Handle(), &samplerInfo, nullptr, &shadow_.sampler));
 
-        const std::array<VkDescriptorSetLayoutBinding, 10> bindings{
+        const std::array<VkDescriptorSetLayoutBinding, 11> bindings{
             VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
@@ -1364,6 +1426,8 @@ private:
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{10, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
         };
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1376,7 +1440,7 @@ private:
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                  static_cast<uint32_t>(slots_.size())},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                 static_cast<uint32_t>(slots_.size()) * 5},
+                                 static_cast<uint32_t>(slots_.size()) * 6},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                  static_cast<uint32_t>(slots_.size()) * 4},
         };
@@ -1527,7 +1591,7 @@ private:
         // dibebaskan — kerusakan yang tidak muncul sebagai galat validasi.
         std::vector<VkDescriptorBufferInfo> buffers(slots_.size() * 5);
         std::vector<VkWriteDescriptorSet> writes;
-        writes.reserve(slots_.size() * 7);
+        writes.reserve(slots_.size() * 12);
         // SHADER_READ_ONLY, bukan DEPTH_READ_ONLY. Keduanya sah untuk mengambil
         // sampel dari image depth, tapi yang berlaku adalah yang disimpulkan
         // frame graph dari `Access::ShaderRead` — dan descriptor yang menyebut
@@ -1541,6 +1605,7 @@ private:
         // Kaskade SDF. Kalau clipmap gagal dibuat, ketiganya memakai peta
         // bayangan sebagai pengganti — descriptor yang dibiarkan kosong adalah
         // pelanggaran di setiap draw, bahkan pada pass yang tidak membacanya.
+        const VkDescriptorImageInfo hizImage = HizDescriptorImage();
         std::array<VkDescriptorImageInfo, 3> sdfImages{};
         for (uint32_t cascade = 0; cascade < 3; ++cascade) {
             const bool ready = sdfClipmap_.IsValid() && cascade < sdfClipmap_.CascadeCount();
@@ -1593,10 +1658,50 @@ private:
                 volume.pImageInfo = &sdfImages[cascade];
                 writes.push_back(volume);
             }
+
+            VkWriteDescriptorSet pyramid = sampled;
+            pyramid.dstBinding = 10;
+            pyramid.pImageInfo = &hizImage;
+            writes.push_back(pyramid);
         }
         vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
         return true;
+    }
+
+    /// Menulis ulang binding piramida saja.
+    ///
+    /// **Bukan `WriteShadowDescriptors` lagi.** Fungsi itu mengalokasi set baru
+    /// dari pool yang hanya cukup untuk satu putaran, jadi memanggilnya kedua
+    /// kali kehabisan pool — kegagalan yang muncul sebagai layar yang berhenti
+    /// diperbarui setelah panel diseret, bukan sebagai galat di tempat yang
+    /// benar.
+    void UpdateHizDescriptors() {
+        const VkDescriptorImageInfo image = HizDescriptorImage();
+        std::vector<VkWriteDescriptorSet> writes;
+        writes.reserve(slots_.size());
+        for (const InstanceSlot& slot : slots_) {
+            VkWriteDescriptorSet write{};
+            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet = slot.shadowSet;
+            write.dstBinding = 10;
+            write.descriptorCount = 1;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            write.pImageInfo = &image;
+            writes.push_back(write);
+        }
+        vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
+                               writes.data(), 0, nullptr);
+    }
+
+    /// Piramida depth, atau peta bayangan sebagai pengganti kalau ia gagal
+    /// dibuat. Descriptor yang dibiarkan kosong adalah pelanggaran di setiap
+    /// draw, bahkan pada pass yang tidak membacanya.
+    VkDescriptorImageInfo HizDescriptorImage() const {
+        const bool ready = hiz_.IsValid();
+        return {ready ? hiz_.Sampler() : shadow_.sampler,
+                ready ? hiz_.View() : shadow_.arrayView,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
     }
 
     /// Peta bayangan diimpor graph sebagai `ShaderRead`, sama seperti target
@@ -1810,7 +1915,8 @@ private:
         }
     }
 
-    void UpdateShadowUniforms(const ViewportDesc& desc, InstanceSlot& slot) {
+    void UpdateShadowUniforms(const ViewportDesc& desc, const Mat4& viewProj,
+                              InstanceSlot& slot) {
         ShadowUniforms uniforms;
         for (int i = 0; i < cascades_.count; ++i) {
             const Cascade& cascade = cascades_.cascades[static_cast<size_t>(i)];
@@ -1863,6 +1969,17 @@ private:
         uniforms.sdfParams = Vec4(static_cast<float>(clipmap.Settings().resolution),
                                   static_cast<float>(clipmap.CascadeCount()),
                                   clipmap.Settings().bandVoxels, kSdfMaxSteps);
+        uniforms.viewProj = viewProj;
+        // Nol tingkat berarti lapis screen-space mati, dan itulah keadaan yang
+        // benar saat piramidanya gagal dibuat: penelusur lalu langsung memakai
+        // SDF alih-alih membaca tekstur yang tidak ada isinya.
+        const float hizLevels =
+            hiz_.IsValid() && desc.gi.screenTrace
+                ? static_cast<float>(
+                      DepthPyramid::LevelsFor(target_.Width(), target_.Height()))
+                : 0.0f;
+        uniforms.screenTrace = Vec4(kScreenThickness, kScreenOriginBias, kScreenMaxSteps,
+                                    hizLevels);
         slot.shadowUniform.Write(&uniforms, sizeof(uniforms));
     }
 
@@ -1936,7 +2053,9 @@ private:
             slot.clusterRangeBuffer.Destroy();
             slot.clusterIndexBuffer.Destroy();
             slot.shadowFaceBuffer.Destroy();
+            slot.sdfStaging.Destroy();
         }
+        hiz_.Destroy();
         cubeBuffer_.Destroy();
         for (VkPipeline* pipeline :
              {&prepassPipeline_, &opaquePipeline_, &transparentPipeline_, &gridPipeline_,
@@ -1968,10 +2087,15 @@ private:
     mutable std::vector<PassTiming> timings_;
     TraceBackendSelection giBackend_;
     SdfClipmapResource sdfClipmap_;
+    DepthPyramid hiz_;
+    std::filesystem::path shaderDirectory_;
     uint64_t sdfVoxelsWritten_ = 0;
     float sdfUpdateMs_ = 0.0f;
     bool sdfDebugEnabled_ = false;
     PassId giDebugId_ = kInvalidPass;
+    PassId hizPassId_ = kInvalidPass;
+    bool giEnabled_ = false;
+    bool screenTraceEnabled_ = false;
     TextureHandle textureHandle_ = kInvalidTexture;
 
     FrameGraph graph_;
@@ -1990,6 +2114,8 @@ private:
     VkPipelineLayout lineLayout_ = VK_NULL_HANDLE;
     VkPipeline linePipeline_ = VK_NULL_HANDLE;
     std::vector<LineVertex> lineVertices_;
+    /// Dipakai ulang tiap frame; ukurannya mengikuti jumlah pass graph.
+    std::vector<FrameGraphExecutor::Recorder> recorders_;
 
     static constexpr std::size_t kMaxClusterLights = 256;
     /// Jari-jari sumber terkecil yang masih menghasilkan angka berhingga, meter.
@@ -2024,6 +2150,14 @@ private:
     /// Anggaran langkah sphere tracing. Angka yang paling sering disetel saat
     /// menyeimbangkan kualitas dan biaya, jadi ia disebut sekali di sini.
     static constexpr float kSdfMaxSteps = 48.0f;
+    /// Anggaran langkah lapis screen-space. Rencana GI menyebut 16, dan angka
+    /// itulah yang membuat fallback ke SDF bukan kemewahan melainkan keharusan.
+    static constexpr float kScreenMaxSteps = 16.0f;
+    /// Ketebalan yang diandaikan untuk permukaan di depth buffer, meter.
+    static constexpr float kScreenThickness = 0.5f;
+    /// Dorongan awal sinar, meter — supaya permukaan asalnya sendiri tidak
+    /// menghalangi sinarnya.
+    static constexpr float kScreenOriginBias = 0.02f;
 
     ResourceId atlasId_ = kInvalidResource;
     PassId atlasPassId_ = kInvalidPass;

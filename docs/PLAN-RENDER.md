@@ -1034,6 +1034,111 @@ kebetulan bagus.
 E8.4) dan komposit compute yang membuka 128³. Keduanya di luar kriteria selesai
 M1 dan tercatat di M2 dan seterusnya.
 
+#### M2 — Lapis screen-space · ✅ selesai
+
+**Depth buffer ditanya lebih dulu, lalu SDF, lalu langit.** Urutannya bukan soal
+biaya melainkan ketelitian: depth buffer punya resolusi geometri sungguhan —
+satu piksel — sedangkan voxel SDF terhalus sepuluh sentimeter, dan yang hilang di
+SDF justru detail yang paling terlihat, yaitu di dekat perpotongan permukaan.
+
+**Meleset di lapis pertama bukan jawaban.** Sinar yang keluar layar, atau yang
+tersembunyi di balik permukaan lain, tidak berarti "tidak ada apa-apa di sana" —
+ia berarti "layar tidak tahu". Membedakan keduanya adalah seluruh gunanya
+jenjang ini; menyamakannya menghasilkan lubang gelap tepat di tepi layar, cacat
+khas GI screen-space. `ScreenTraceResult::leftScreen` yang membawa perbedaan itu,
+dan ia diuji langsung.
+
+**Piramida HiZ menyimpan yang TERBESAR, bukan terkecil.** Reversed-Z: depth
+terbesar adalah permukaan yang paling dekat, dan itulah yang harus diketahui
+penelusur — sebuah sel boleh dilompati hanya kalau sinarnya masih di depan
+permukaan terdekat di dalamnya. Menyimpan yang terkecil membuat tiap sel
+melaporkan permukaan terjauhnya sebagai penghalang, dan tiap sinar menembus
+geometri yang justru paling dekat.
+
+**Ukuran tiap tingkat mengikuti aturan mip Vulkan: dibulatkan ke bawah.** Bentuk
+pertama saya membulatkannya ke atas supaya baris terakhir dari ukuran ganjil
+tidak hilang, dan itu menghasilkan satu tingkat lebih banyak daripada yang boleh
+dimiliki sebuah image — 1280×768 memberi 12 sementara Vulkan mengizinkan 11, dan
+`vkCreateImage` menolaknya. Barisnya tetap tidak boleh hilang, jadi yang berubah
+bukan ukurannya melainkan cakupannya: texel **terakhir** sebuah baris merangkum
+tiga texel sumber, bukan dua.
+
+**Uji ketebalan dilakukan di tempat sinar MASUK sebuah piksel, bukan keluarnya.**
+Depth buffer hanya menyimpan permukaan terdepan, jadi sinar yang lewat di
+belakang sebuah benda akan melaporkan kena di siluetnya. Yang membedakan
+"memotong permukaan" dari "lewat di belakangnya" adalah keadaan saat masuk: sinar
+yang masuk sudah di belakang permukaan tidak memotongnya. Bentuk pertama saya
+mengujinya di tempat keluar, dan itu menolak setiap perpotongan yang sah pada sel
+yang lebar — termasuk seluruh sinar yang mengarah lurus menjauhi kamera, yang
+bayangannya di layar adalah satu titik.
+
+Ketebalannya **diukur dalam meter lewat `invViewProj`**, bukan dalam satuan
+depth. Depth reversed-Z sangat tidak linear: satu ambang tetap dalam satuan depth
+berarti sentimeter di dekat kamera dan ratusan meter di kejauhan.
+
+Sinar didorong maju 2 cm dari titik asalnya sebelum ditelusuri, dan **dorongan
+itu dalam meter, bukan piksel**: sinar yang mengarah lurus menjauhi kamera tidak
+bergerak satu piksel pun di layar, dan dorongan yang diukur di layar tidak
+menggerakkannya sama sekali.
+
+**Penelusuran berjalan lurus di ruang NDC.** Bayangan sebuah ruas garis di layar
+tetap ruas garis lurus, dan depth NDC ikut linear terhadap parameter yang sama —
+sifat proyeksi perspektif yang juga dipakai rasterizer saat menginterpolasi
+depth. Jadi tidak ada langkah yang perlu dikembalikan ke ruang dunia di tengah
+lingkaran.
+
+**Debug view "Trace layer" ada sejak lapis ini ada.** Hijau untuk layar, biru
+untuk SDF, abu-abu untuk langit. Jenjang yang tidak terlihat adalah jenjang yang
+diam-diam berhenti dipakai — dan lapis screen-space yang tidak pernah mengenai
+apa pun tampak persis sama dengan yang bekerja sempurna. Terbukti langsung di
+editor: kotak uji berwarna hijau dengan tepi biru setipis siluetnya, yaitu
+piksel tempat depth buffer kehilangan permukaannya dan SDF mengambil alih.
+
+Sakelar "Screen-space layer" **bukan tombol kualitas melainkan alat ukur**:
+mematikannya membuat seluruh gambar menjadi biru, dan itu satu-satunya cara
+membuktikan lapis pertama benar-benar yang menjawab. Pass `hiz-build` ikut hilang
+dari graph saat lapisnya mati — pass yang hasilnya tidak dibaca siapa pun justru
+yang frame graph ini ada untuk mencegahnya.
+
+Biaya terukur di Release, 1277×431: `hiz-build` **0,07–0,12 ms** untuk sebelas
+tingkat, dan `gi-sdf-debug` **0,42–0,56 ms**. Selisih antara jenjang penuh dan
+SDF saja **tenggelam di dalam sebaran itu** pada adegan uji yang isinya dua
+kubus: kebanyakan sinar tidak mengenai apa pun di kedua lapis. Angka yang jujur
+di sini adalah "belum terukur", bukan angka yang dipilih dari satu tangkapan yang
+kebetulan mendukung.
+
+#### Dua kesalahan yang tidak muncul sebagai galat
+
+**`std::array<Recorder, 8>` untuk graph yang punya sembilan pass.** Angka delapan
+itu dihitung tangan dan cocok sampai `hiz-build` lahir; pass kesembilan menulis
+di luar larik. **Stack corruption, bukan galat** — editornya mati dengan SIGSEGV
+di tempat yang tidak ada hubungannya. Sekarang ukurannya diambil dari
+`graph_.PassCount()`, karena angka yang harus diperbarui setiap kali sebuah pass
+ditambahkan adalah angka yang suatu saat lupa diperbarui.
+
+**Pass tanpa keluaran dibuang graph.** `hiz-build` tidak menulis satu pun resource
+yang dilacak graph — piramida mengurus perpindahan layout tiap mip-nya sendiri,
+karena graph melacak resource sebagai satu kesatuan sementara pembangunan
+piramida membaca satu mip sambil menulis mip berikutnya. Graph menyimpulkan pass
+itu tidak menghasilkan apa pun dan membuangnya; penelusuran lalu membaca piramida
+frame sebelumnya **tanpa satu pun galat**, dan gejalanya cuma satu: lapis
+screen-space tidak pernah menjawab. `SetSideEffect` yang menandainya — dan
+mekanisme itu memang sudah ada di graph justru untuk pass semacam ini.
+
+#### Kriteria selesai M2 — terpenuhi
+
+Rencana menyebutnya langsung: **`SdfTraceBackend` lengkap dan lulus uji ray
+tunggal terhadap referensi CPU.** "Lengkap" berarti jenjangnya utuh — jalur yang
+disebut rencana sebagai SDF memang "screen-space HiZ + SDF clipmap global", bukan
+SDF saja. Enam test baru menguncinya: dua untuk aturan reduksi mip, satu untuk
+dinding di depan kamera (lurus dan miring, dengan jarak dicocokkan ke 1/cos),
+satu untuk perbedaan antara meleset-keluar-layar dan meleset-karena-kosong, satu
+untuk sinar yang lewat di belakang papan (dengan ketebalan besar sebagai kontrol,
+supaya gagalnya terbukti karena ketebalan dan bukan karena sinarnya tidak pernah
+sampai), dan satu untuk lapis mana yang menjawab — dengan geometri SDF sengaja
+diletakkan di luar layar supaya lapisnya terbaca dari lapisnya sendiri, bukan
+disimpulkan dari jaraknya.
+
 - **Anggarannya belum didamaikan dengan kriteria terima E8.** 3,0 ms adalah 18%
   dari frame 60 fps, sementara adegan uji E8 — terrain 2×2 km, 200 ribu instance
   vegetasi, 20 lampu berbayang — sudah menuntut sisanya. Keduanya ditulis
