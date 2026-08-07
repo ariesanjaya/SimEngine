@@ -4,6 +4,7 @@
 #include "Sim/Render/Frustum.h"
 #include "Sim/Render/Ibl.h"
 #include "Sim/Render/LightCluster.h"
+#include "Sim/Render/ShadowAtlas.h"
 #include "Sim/Render/ShadowCascades.h"
 
 #include <doctest/doctest.h>
@@ -1247,4 +1248,255 @@ TEST_CASE("Prefilter mip 0 lingkungan konstan sama dengan konstantanya") {
             CHECK(filtered.z == doctest::Approx(0.75f).epsilon(0.002));
         }
     }
+}
+
+// --- Atlas bayangan point/spot ------------------------------------------------
+
+namespace {
+
+LightInstance MakeSpot(const Vec3& position, float range, const Vec3& direction) {
+    LightInstance light;
+    light.kind = LightKind::Spot;
+    light.position = position;
+    light.direction = glm::normalize(direction);
+    light.range = range;
+    light.cosOuter = std::cos(35.0f * kDegToRad);
+    light.cosInner = std::cos(25.0f * kDegToRad);
+    return light;
+}
+
+LightInstance MakePoint(const Vec3& position, float range) {
+    LightInstance light;
+    light.kind = LightKind::Point;
+    light.position = position;
+    light.range = range;
+    return light;
+}
+
+/// Apakah ada dua ubin yang bertindihan. Inilah properti yang membuat atlas
+/// benar; sisanya soal kualitas.
+bool TilesOverlap(const ShadowAtlasResult& atlas) {
+    for (std::size_t i = 0; i < atlas.entries.size(); ++i) {
+        for (std::size_t j = i + 1; j < atlas.entries.size(); ++j) {
+            const ShadowAtlasEntry& a = atlas.entries[i];
+            const ShadowAtlasEntry& b = atlas.entries[j];
+            const bool apart = a.x + a.size <= b.x || b.x + b.size <= a.x ||
+                               a.y + a.size <= b.y || b.y + b.size <= a.y;
+            if (!apart) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+TEST_CASE("Ubin atlas tidak pernah bertindihan dan tetap di dalam batasnya") {
+    ShadowAtlasSettings settings;
+    settings.resolution = 2048;
+    settings.maxTile = 512;
+    settings.minTile = 128;
+
+    // Campuran jarak supaya ukuran ubinnya beragam — di situlah pengalokasi
+    // pangkat dua paling mungkin salah.
+    std::vector<LightInstance> lights;
+    for (int i = 0; i < 12; ++i) {
+        const float distance = 2.0f + static_cast<float>(i) * 4.0f;
+        lights.push_back(MakePoint(Vec3(distance, 0.0f, 0.0f), 8.0f));
+        lights.push_back(MakeSpot(Vec3(0.0f, distance, 0.0f), 12.0f, Vec3(0.0f, -1.0f, 0.0f)));
+    }
+
+    const ShadowAtlasResult atlas = AllocateShadowAtlas(lights, Vec3(0.0f), settings);
+    REQUIRE(!atlas.entries.empty());
+    CHECK(!TilesOverlap(atlas));
+    for (const ShadowAtlasEntry& entry : atlas.entries) {
+        INFO("ubin ", entry.x, ",", entry.y, " ukuran ", entry.size);
+        CHECK(entry.x + entry.size <= settings.resolution);
+        CHECK(entry.y + entry.size <= settings.resolution);
+        // Keselarasan itu sendiri yang mencegah tindihan; diuji terpisah supaya
+        // kegagalannya menunjuk sebabnya, bukan gejalanya.
+        CHECK(entry.x % entry.size == 0);
+        CHECK(entry.y % entry.size == 0);
+    }
+}
+
+TEST_CASE("Lampu yang lebih dekat mendapat ubin yang lebih besar") {
+    ShadowAtlasSettings settings;
+    const std::array<LightInstance, 2> lights{MakeSpot(Vec3(0.0f, 0.0f, 3.0f), 10.0f,
+                                                       Vec3(0.0f, 0.0f, -1.0f)),
+                                              MakeSpot(Vec3(0.0f, 0.0f, 200.0f), 10.0f,
+                                                       Vec3(0.0f, 0.0f, -1.0f))};
+    const ShadowAtlasResult atlas = AllocateShadowAtlas(lights, Vec3(0.0f), settings);
+    REQUIRE(atlas.entries.size() == 2);
+
+    // Ukuran tetap untuk semua akan memberi lampu di ujung ruangan resolusi
+    // yang sama dengan yang memenuhi layar.
+    const int32_t nearFirst = atlas.firstEntry[0];
+    const int32_t farFirst = atlas.firstEntry[1];
+    REQUIRE(nearFirst >= 0);
+    REQUIRE(farFirst >= 0);
+    CHECK(atlas.entries[static_cast<size_t>(nearFirst)].size >
+          atlas.entries[static_cast<size_t>(farFirst)].size);
+}
+
+TEST_CASE("Point light memakai enam muka, spot satu") {
+    ShadowAtlasSettings settings;
+    const std::array<LightInstance, 2> lights{
+        MakePoint(Vec3(0.0f, 0.0f, 5.0f), 10.0f),
+        MakeSpot(Vec3(5.0f, 0.0f, 0.0f), 10.0f, Vec3(-1.0f, 0.0f, 0.0f))};
+    const ShadowAtlasResult atlas = AllocateShadowAtlas(lights, Vec3(0.0f), settings);
+    REQUIRE(atlas.entries.size() == 7);
+
+    int pointFaces = 0;
+    int spotFaces = 0;
+    for (const ShadowAtlasEntry& entry : atlas.entries) {
+        (entry.light == 0 ? pointFaces : spotFaces) += 1;
+    }
+    CHECK(pointFaces == 6);
+    CHECK(spotFaces == 1);
+}
+
+TEST_CASE("Directional dan yang tidak menjatuhkan bayangan tidak masuk atlas") {
+    ShadowAtlasSettings settings;
+    LightInstance sun;
+    sun.kind = LightKind::Directional;
+    LightInstance quiet = MakePoint(Vec3(0.0f, 0.0f, 3.0f), 10.0f);
+    quiet.castShadows = false;
+    const std::array<LightInstance, 3> lights{sun, quiet,
+                                              MakeSpot(Vec3(3.0f, 0.0f, 0.0f), 10.0f,
+                                                       Vec3(-1.0f, 0.0f, 0.0f))};
+
+    const ShadowAtlasResult atlas = AllocateShadowAtlas(lights, Vec3(0.0f), settings);
+    // Directional punya cascade-nya sendiri; memasukkannya ke atlas berarti
+    // membakar tempat untuk bayangan yang sudah digambar di tempat lain.
+    CHECK(atlas.firstEntry[0] == -1);
+    CHECK(atlas.firstEntry[1] == -1);
+    CHECK(atlas.firstEntry[2] >= 0);
+    CHECK(atlas.entries.size() == 1);
+    // Keduanya memang tidak meminta, jadi tidak ada yang "gagal".
+    CHECK(atlas.dropped == 0);
+}
+
+TEST_CASE("Atlas yang penuh melaporkan yang tidak kebagian") {
+    ShadowAtlasSettings settings;
+    settings.resolution = 512;
+    settings.maxTile = 256;
+    settings.minTile = 256;  // hanya empat ubin muat
+    settings.maxFaces = 64;
+
+    std::vector<LightInstance> lights;
+    for (int i = 0; i < 10; ++i) {
+        lights.push_back(MakeSpot(Vec3(static_cast<float>(i), 0.0f, 2.0f), 10.0f,
+                                  Vec3(0.0f, 0.0f, -1.0f)));
+    }
+    const ShadowAtlasResult atlas = AllocateShadowAtlas(lights, Vec3(0.0f), settings);
+    CHECK(atlas.entries.size() == 4);
+    // Dilaporkan, bukan didiamkan: lampu yang diam-diam kehilangan bayangannya
+    // terlihat sebagai benda yang mengambang.
+    CHECK(atlas.dropped == 6);
+    CHECK(!TilesOverlap(atlas));
+}
+
+TEST_CASE("Point light yang tidak muat seluruh mukanya dibatalkan seluruhnya") {
+    ShadowAtlasSettings settings;
+    settings.resolution = 512;
+    settings.maxTile = 256;
+    settings.minTile = 256;  // empat ubin; sebuah point butuh enam
+    const std::array<LightInstance, 1> lights{MakePoint(Vec3(0.0f, 0.0f, 2.0f), 10.0f)};
+
+    const ShadowAtlasResult atlas = AllocateShadowAtlas(lights, Vec3(0.0f), settings);
+    // Empat dari enam muka menghasilkan bayangan yang berhenti di tengah udara,
+    // dan itu lebih buruk daripada tidak ada bayangan sama sekali.
+    CHECK(atlas.entries.empty());
+    CHECK(atlas.firstEntry[0] == -1);
+    CHECK(atlas.dropped == 1);
+}
+
+TEST_CASE("Batas jumlah muka membatasi biaya pass, dan urutannya deterministik") {
+    ShadowAtlasSettings settings;
+    settings.maxFaces = 3;
+    std::vector<LightInstance> lights;
+    for (int i = 0; i < 8; ++i) {
+        lights.push_back(MakeSpot(Vec3(0.0f, 0.0f, 2.0f + static_cast<float>(i)), 10.0f,
+                                  Vec3(0.0f, 0.0f, -1.0f)));
+    }
+
+    const ShadowAtlasResult first = AllocateShadowAtlas(lights, Vec3(0.0f), settings);
+    CHECK(first.entries.size() == 3);
+    CHECK(first.dropped == 5);
+    // Yang terdekat yang menang — dan lampu 0 memang yang terdekat.
+    CHECK(first.firstEntry[0] >= 0);
+
+    // Dijalankan dua kali harus menghasilkan penempatan yang sama persis. Urutan
+    // yang bergoyang membuat lampu bergantian kehilangan bayangan, dan kedipan
+    // itu jauh lebih mencolok daripada bayangan yang memang tidak ada.
+    const ShadowAtlasResult again = AllocateShadowAtlas(lights, Vec3(0.0f), settings);
+    REQUIRE(again.entries.size() == first.entries.size());
+    for (std::size_t i = 0; i < first.entries.size(); ++i) {
+        CHECK(again.entries[i].light == first.entries[i].light);
+        CHECK(again.entries[i].x == first.entries[i].x);
+        CHECK(again.entries[i].y == first.entries[i].y);
+    }
+}
+
+TEST_CASE("Keenam muka point light menutupi seluruh arah tanpa NaN") {
+    const LightInstance light = MakePoint(Vec3(1.0f, 2.0f, 3.0f), 20.0f);
+
+    // Muka +Y dan -Y memandang lurus sepanjang Y, dan LookAt dengan atas yang
+    // sejajar arah pandang menghasilkan matriks yang tidak terdefinisi. Dua dari
+    // enam muka lalu berisi NaN, dan bayangannya hilang hanya di atas dan di
+    // bawah lampu — gejala yang mudah dikira masalah bias.
+    for (uint32_t face = 0; face < 6; ++face) {
+        const Mat4 matrix = ShadowFaceMatrix(light, face, 0.05f);
+        INFO("muka ", face);
+        for (int column = 0; column < 4; ++column) {
+            for (int row = 0; row < 4; ++row) {
+                CHECK(std::isfinite(matrix[column][row]));
+            }
+        }
+        // Titik satu meter di depan muka ini harus jatuh di dalam kubus satuan.
+        const Vec3 ahead = light.position + ShadowFaceDirection(face) * 1.0f;
+        const Vec4 clip = matrix * Vec4(ahead, 1.0f);
+        REQUIRE(clip.w > 0.0f);
+        const Vec3 ndc = Vec3(clip) / clip.w;
+        CHECK(std::abs(ndc.x) < 0.01f);
+        CHECK(std::abs(ndc.y) < 0.01f);
+        CHECK(ndc.z > 0.0f);
+        CHECK(ndc.z < 1.0f);
+    }
+}
+
+TEST_CASE("Frustum spot mengikuti sudut kerucutnya") {
+    const LightInstance narrow = MakeSpot(Vec3(0.0f), 20.0f, Vec3(0.0f, 0.0f, -1.0f));
+    const Mat4 matrix = ShadowFaceMatrix(narrow, 0, 0.05f);
+
+    // Tepat di sumbu berkas: tengah peta.
+    const Vec4 centre = matrix * Vec4(0.0f, 0.0f, -5.0f, 1.0f);
+    CHECK(std::abs(centre.x / centre.w) < 0.01f);
+
+    // Di dalam kerucut 35°, masih di dalam peta.
+    const float inside = std::tan(30.0f * kDegToRad) * 5.0f;
+    const Vec4 near = matrix * Vec4(inside, 0.0f, -5.0f, 1.0f);
+    CHECK(std::abs(near.x / near.w) < 1.0f);
+
+    // Jauh di luar kerucut: keluar peta. Frustum yang jauh lebih lebar daripada
+    // kerucutnya membuang resolusi pada daerah yang tidak pernah tersinari.
+    const float outside = std::tan(60.0f * kDegToRad) * 5.0f;
+    const Vec4 far = matrix * Vec4(outside, 0.0f, -5.0f, 1.0f);
+    CHECK(std::abs(far.x / far.w) > 1.0f);
+}
+
+TEST_CASE("Kepentingan bayangan naik saat lampu mendekat") {
+    const LightInstance light = MakePoint(Vec3(0.0f, 0.0f, 0.0f), 10.0f);
+    CHECK(ShadowImportance(light, Vec3(0.0f, 0.0f, 100.0f)) <
+          ShadowImportance(light, Vec3(0.0f, 0.0f, 30.0f)));
+    // Kamera di dalam jangkauannya: lampu itu mengenai seluruh layar.
+    CHECK(ShadowImportance(light, Vec3(0.0f, 0.0f, 5.0f)) == doctest::Approx(1.0f));
+    // Dan tidak pernah tak hingga meski kamera tepat di posisinya.
+    CHECK(std::isfinite(ShadowImportance(light, Vec3(0.0f))));
+
+    LightInstance sun;
+    sun.kind = LightKind::Directional;
+    CHECK(ShadowImportance(sun, Vec3(0.0f)) == doctest::Approx(0.0f));
 }

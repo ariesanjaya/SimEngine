@@ -7,6 +7,7 @@ sim_add_library(Render
         src/Ibl.cpp
         src/IblBaker.cpp
         src/LightCluster.cpp
+        src/ShadowAtlas.cpp
         src/ShadowCascades.cpp
         src/MaterialPreviewMesh.cpp
         src/StubRenderer.cpp
