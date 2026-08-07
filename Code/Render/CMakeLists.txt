@@ -33,7 +33,9 @@ sim_compile_shaders(SimShadersGrid
         ${CMAKE_SOURCE_DIR}/Shaders/line.frag
         ${CMAKE_SOURCE_DIR}/Shaders/box.vert
         ${CMAKE_SOURCE_DIR}/Shaders/box.frag
-        ${CMAKE_SOURCE_DIR}/Shaders/shadow.vert)
+        ${CMAKE_SOURCE_DIR}/Shaders/shadow.vert
+        ${CMAKE_SOURCE_DIR}/Shaders/sdf_debug.vert
+        ${CMAKE_SOURCE_DIR}/Shaders/sdf_debug.frag)
 # openpbr.slang sengaja tidak ada di daftar ini. Ia modul pustaka tanpa entry
 # point — yang mengompilasinya adalah `AssembleMaterialModule`, yang menanamnya
 # ke dalam modul material lalu menyerahkannya ke ShaderCache. Menambahkannya di

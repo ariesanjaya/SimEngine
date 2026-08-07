@@ -30,6 +30,15 @@ struct BoxPush {
     Mat4 viewProj;
 };
 
+/// Harus sama persis dengan blok push_constant di Shaders/sdf_debug.{vert,frag}.
+struct SdfDebugPush {
+    Mat4 invViewProj{1.0f};
+    /// xyz posisi kamera, w depth bidang dekat.
+    Vec4 cameraPosition{0.0f};
+    /// x jenis debug view, y jangkauan trace maksimum.
+    Vec4 params{0.0f};
+};
+
 /// Harus sama persis dengan blok `ShadowParams` di Shaders/shadow_common.glsl.
 ///
 /// **ABI, dan std140.** Selisih satu sisipan tidak menghasilkan galat apa pun —
@@ -54,10 +63,14 @@ struct ShadowUniforms {
     Vec4 clusterDepth{0.0f};
     /// xy ukuran viewport dalam piksel.
     Vec4 viewportSize{0.0f};
+    /// Kaskade SDF: xyz titik asal dunia, w ukuran voxel.
+    std::array<Vec4, 4> sdfOrigin{};
+    /// x resolusi, y jumlah kaskade, z lebar pita dalam voxel, w langkah maks.
+    Vec4 sdfParams{0.0f};
 };
 // 4 mat4 + 6 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
 // memperbarui shader-nya menjadi galat kompilasi, bukan bayangan yang bergeser.
-static_assert(sizeof(ShadowUniforms) == 4 * 64 + 10 * 16,
+static_assert(sizeof(ShadowUniforms) == 4 * 64 + 15 * 16,
               "ShadowUniforms harus cocok dengan blok ShadowParams di shadow_common.glsl");
 
 /// Cermin dari `GpuLight` di Shaders/cluster_common.glsl. std430.
@@ -300,9 +313,6 @@ public:
                 return false;
             }
         }
-        if (!WriteShadowDescriptors()) {
-            return false;
-        }
         // Profiler boleh gagal dibuat; renderer tetap jalan tanpa tabel waktu.
         profiler_.Create(device_);
 
@@ -317,6 +327,9 @@ public:
         sdf.finestVoxelSize = 0.1f;
         if (!sdfClipmap_.Create(device_, sdf)) {
             SIM_WARN("Render", "SDF clipmap unavailable; GI tracing will have nothing to read");
+        }
+        if (!WriteShadowDescriptors()) {
+            return false;
         }
         AdoptTargetLayout();
         AdoptShadowLayout();
@@ -452,6 +465,8 @@ public:
         // Clipmap SDF diperbarui hanya saat GI menyala. Membangunnya terus-
         // menerus untuk fitur yang dimatikan adalah biaya yang tidak ada yang
         // memintanya — dan biaya itu, di komposit CPU, bukan biaya yang kecil.
+        sdfDebugEnabled_ = desc.gi.enabled && sdfClipmap_.IsValid() &&
+                           desc.gi.debugView != GiDebugView::Off;
         sdfVoxelsWritten_ = 0;
         if (desc.gi.enabled && sdfClipmap_.IsValid()) {
             sdfVoxelsWritten_ = sdfClipmap_.Update(desc.camera.position, scene.meshes);
@@ -478,7 +493,7 @@ public:
         const BoxPush push{viewProj};
 
         const Mat4 invViewProj = glm::inverse(viewProj);
-        std::array<FrameGraphExecutor::Recorder, 7> recorders{};
+        std::array<FrameGraphExecutor::Recorder, 8> recorders{};
         recorders[shadowPassId_] = [&](VkCommandBuffer command) {
             RecordShadowPass(command, slot, casterCount_);
         };
@@ -530,6 +545,29 @@ public:
             }
             vkCmdEndRendering(command);
         };
+        if (giDebugId_ != kInvalidPass) {
+            recorders[giDebugId_] = [&](VkCommandBuffer command) {
+                BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/false,
+                               /*writeColor=*/true, /*useDepth=*/false);
+                if (sdfDebugPipeline_ != VK_NULL_HANDLE) {
+                    SdfDebugPush push;
+                    push.invViewProj = invViewProj;
+                    // w = 1: reversed-Z, bidang dekat ada di depth 1.
+                    push.cameraPosition = Vec4(desc.camera.position, 1.0f);
+                    push.params = Vec4(static_cast<float>(desc.gi.debugView),
+                                       sdfClipmap_.Volume().Clipmap().MaxRange(), 0.0f, 0.0f);
+                    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                      sdfDebugPipeline_);
+                    vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            sdfDebugLayout_, 0, 1, &slot.shadowSet, 0, nullptr);
+                    vkCmdPushConstants(command, sdfDebugLayout_,
+                                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                       0, sizeof(SdfDebugPush), &push);
+                    vkCmdDraw(command, 3, 1, 0, 0);
+                }
+                vkCmdEndRendering(command);
+            };
+        }
         recorders[linesId_] = [&](VkCommandBuffer command) {
             BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/true,
                            /*writeColor=*/true);
@@ -633,6 +671,15 @@ private:
         linesId_ = graph_.AddPass("lines");
         graph_.Read(linesId_, depthId_, Access::DepthWrite);
         graph_.Write(linesId_, colorId_, Access::ColorWrite);
+
+        // Pass bersyarat: hanya ada saat debug view menyala. Graph yang
+        // dibangun ulang tiap frame membuat ini sekadar sebuah `if` — dan pass
+        // bersyarat justru alasan graph ini ada.
+        giDebugId_ = kInvalidPass;
+        if (sdfDebugEnabled_) {
+            giDebugId_ = graph_.AddPass("gi-sdf-debug");
+            graph_.Write(giDebugId_, colorId_, Access::ColorWrite);
+        }
 
         graph_.SetOutput(colorId_, Access::Present);
         // Peta bayangan harus kembali ke keadaan awalnya, karena itulah keadaan
@@ -977,6 +1024,31 @@ private:
         SIM_VK_CHECK(
             vkCreatePipelineLayout(device_.Handle(), &shadowLayoutInfo, nullptr, &shadowLayout_));
 
+        VkShaderModule sdfVertex =
+            CreateShaderModule(device_.Handle(), shaderDirectory / "sdf_debug.vert.spv");
+        VkShaderModule sdfFragment =
+            CreateShaderModule(device_.Handle(), shaderDirectory / "sdf_debug.frag.spv");
+        if (sdfVertex != VK_NULL_HANDLE && sdfFragment != VK_NULL_HANDLE) {
+            VkPushConstantRange sdfRange{};
+            sdfRange.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+            sdfRange.size = sizeof(SdfDebugPush);
+            VkPipelineLayoutCreateInfo sdfLayoutInfo{};
+            sdfLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+            sdfLayoutInfo.pushConstantRangeCount = 1;
+            sdfLayoutInfo.pPushConstantRanges = &sdfRange;
+            sdfLayoutInfo.setLayoutCount = 1;
+            sdfLayoutInfo.pSetLayouts = &shadowSetLayout_;
+            SIM_VK_CHECK(vkCreatePipelineLayout(device_.Handle(), &sdfLayoutInfo, nullptr,
+                                                &sdfDebugLayout_));
+            // Tanpa vertex input dan tanpa depth: ia menimpa seluruh layar dan
+            // memang dimaksudkan menutupi apa pun yang sudah tergambar.
+            sdfDebugPipeline_ = BuildOverlayPipeline(sdfVertex, sdfFragment, sdfDebugLayout_,
+                                                     VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST,
+                                                     /*useDepth=*/false, /*vertexInput=*/false);
+            vkDestroyShaderModule(device_.Handle(), sdfVertex, nullptr);
+            vkDestroyShaderModule(device_.Handle(), sdfFragment, nullptr);
+        }
+
         VkShaderModule shadowVertex =
             CreateShaderModule(device_.Handle(), shaderDirectory / "shadow.vert.spv");
         if (shadowVertex == VK_NULL_HANDLE) {
@@ -1242,7 +1314,7 @@ private:
         samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
         SIM_VK_CHECK(vkCreateSampler(device_.Handle(), &samplerInfo, nullptr, &shadow_.sampler));
 
-        const std::array<VkDescriptorSetLayoutBinding, 7> bindings{
+        const std::array<VkDescriptorSetLayoutBinding, 10> bindings{
             VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
@@ -1257,6 +1329,12 @@ private:
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{8, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{9, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
         };
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -1269,7 +1347,7 @@ private:
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                  static_cast<uint32_t>(slots_.size())},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                 static_cast<uint32_t>(slots_.size()) * 2},
+                                 static_cast<uint32_t>(slots_.size()) * 5},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                  static_cast<uint32_t>(slots_.size()) * 4},
         };
@@ -1431,6 +1509,16 @@ private:
                                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
         const VkDescriptorImageInfo atlasImage{atlas_.sampler, atlas_.view,
                                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        // Kaskade SDF. Kalau clipmap gagal dibuat, ketiganya memakai peta
+        // bayangan sebagai pengganti — descriptor yang dibiarkan kosong adalah
+        // pelanggaran di setiap draw, bahkan pada pass yang tidak membacanya.
+        std::array<VkDescriptorImageInfo, 3> sdfImages{};
+        for (uint32_t cascade = 0; cascade < 3; ++cascade) {
+            const bool ready = sdfClipmap_.IsValid() && cascade < sdfClipmap_.CascadeCount();
+            sdfImages[cascade] = {ready ? sdfClipmap_.Texture(cascade).Sampler() : shadow_.sampler,
+                                  ready ? sdfClipmap_.Texture(cascade).View() : shadow_.arrayView,
+                                  VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        }
 
         for (std::size_t i = 0; i < slots_.size(); ++i) {
             slots_[i].shadowSet = sets[i];
@@ -1469,6 +1557,13 @@ private:
             atlas.dstBinding = 6;
             atlas.pImageInfo = &atlasImage;
             writes.push_back(atlas);
+
+            for (uint32_t cascade = 0; cascade < 3; ++cascade) {
+                VkWriteDescriptorSet volume = sampled;
+                volume.dstBinding = 7 + cascade;
+                volume.pImageInfo = &sdfImages[cascade];
+                writes.push_back(volume);
+            }
         }
         vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
@@ -1725,6 +1820,20 @@ private:
         uniforms.clusterDepth = Vec4(scale, -scale * std::log(first.x), first.x, last.y);
         uniforms.viewportSize = Vec4(static_cast<float>(target_.Width()),
                                      static_cast<float>(target_.Height()), 0.0f, 0.0f);
+        // Parameter clipmap. Titik asalnya berubah tiap kali kamera menggeser
+        // sebuah kaskade, jadi ia diunggah tiap frame bersama sisanya alih-alih
+        // disimpan — dan satu frame yang memakai titik asal lama membaca voxel
+        // milik posisi yang sudah ditinggalkan.
+        const SdfClipmap& clipmap = sdfClipmap_.Volume().Clipmap();
+        for (uint32_t cascade = 0; cascade < kMaxSdfCascades; ++cascade) {
+            if (cascade < clipmap.CascadeCount()) {
+                uniforms.sdfOrigin[cascade] =
+                    Vec4(clipmap.WorldOrigin(cascade), clipmap.VoxelSize(cascade));
+            }
+        }
+        uniforms.sdfParams = Vec4(static_cast<float>(clipmap.Settings().resolution),
+                                  static_cast<float>(clipmap.CascadeCount()),
+                                  clipmap.Settings().bandVoxels, kSdfMaxSteps);
         slot.shadowUniform.Write(&uniforms, sizeof(uniforms));
     }
 
@@ -1802,7 +1911,7 @@ private:
         cubeBuffer_.Destroy();
         for (VkPipeline* pipeline :
              {&prepassPipeline_, &opaquePipeline_, &transparentPipeline_, &gridPipeline_,
-              &linePipeline_, &shadowPipeline_}) {
+              &linePipeline_, &shadowPipeline_, &sdfDebugPipeline_}) {
             if (*pipeline != VK_NULL_HANDLE) {
                 vkDestroyPipeline(device_.Handle(), *pipeline, nullptr);
                 *pipeline = VK_NULL_HANDLE;
@@ -1811,7 +1920,7 @@ private:
         DestroyShadowMap();
         DestroyShadowAtlas();
         for (VkPipelineLayout* layout :
-             {&pipelineLayout_, &gridLayout_, &lineLayout_, &shadowLayout_}) {
+             {&pipelineLayout_, &gridLayout_, &lineLayout_, &shadowLayout_, &sdfDebugLayout_}) {
             if (*layout != VK_NULL_HANDLE) {
                 vkDestroyPipelineLayout(device_.Handle(), *layout, nullptr);
                 *layout = VK_NULL_HANDLE;
@@ -1831,6 +1940,8 @@ private:
     TraceBackendSelection giBackend_;
     SdfClipmapResource sdfClipmap_;
     uint64_t sdfVoxelsWritten_ = 0;
+    bool sdfDebugEnabled_ = false;
+    PassId giDebugId_ = kInvalidPass;
     TextureHandle textureHandle_ = kInvalidTexture;
 
     FrameGraph graph_;
@@ -1880,6 +1991,10 @@ private:
     ShadowAtlasSettings atlasSettings_;
     ShadowAtlasResult atlasAllocation_;
     std::vector<GpuShadowFace> gpuFaces_;
+    /// Anggaran langkah sphere tracing. Angka yang paling sering disetel saat
+    /// menyeimbangkan kualitas dan biaya, jadi ia disebut sekali di sini.
+    static constexpr float kSdfMaxSteps = 48.0f;
+
     ResourceId atlasId_ = kInvalidResource;
     PassId atlasPassId_ = kInvalidPass;
 
@@ -1888,6 +2003,8 @@ private:
     VkDescriptorPool shadowPool_ = VK_NULL_HANDLE;
     VkPipelineLayout shadowLayout_ = VK_NULL_HANDLE;
     VkPipeline shadowPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout sdfDebugLayout_ = VK_NULL_HANDLE;
+    VkPipeline sdfDebugPipeline_ = VK_NULL_HANDLE;
     ResourceId shadowId_ = kInvalidResource;
     PassId shadowPassId_ = kInvalidPass;
     CascadeSet cascades_;

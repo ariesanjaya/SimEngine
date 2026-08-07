@@ -919,10 +919,41 @@ kinerja melainkan tanda bahwa komposit CPU memang tidak punya banyak ruang —
 128³ menunggu komposit compute, dan keputusan itu sekarang punya angka untuk
 bersandar.
 
-**Belum ada:** pass GPU yang benar-benar membaca kaskade — sphere tracing di
-shader dan heatmap jumlah langkahnya. Kriteria selesai M1 (depth sphere tracing
-cocok dengan depth buffer raster, biaya update < 0,5 ms) menunggu pass itu; alat
-ukurnya sudah siap sejak M0.
+#### Pass debug: sphere tracing di shader
+
+Pass full-screen yang menelusuri kaskade dan menggambar hasilnya. **Rumusnya
+harus sama dengan `SdfTraceBackend` di sisi C++** — yang di CPU adalah acuan yang
+sudah diuji terhadap medan analitik, yang di shader adalah yang benar-benar
+dipakai, dan dua rumus yang ditulis terpisah berselisih tepat di kasus yang
+paling sulit dilihat.
+
+Pass-nya **bersyarat**: ia hanya ada di graph saat debug view menyala. Graph yang
+dibangun ulang tiap frame membuat itu sekadar sebuah `if` — dan pass bersyarat
+justru alasan graph ini ada.
+
+Sampler dipilih lewat cabang, bukan ternary: GLSL tidak mengizinkan sampler
+sebagai nilai ekspresi. Larik sampler akan lebih rapi tapi menuntut indeks yang
+seragam di seluruh subgroup, dan indeks kaskade memang berbeda antar-piksel.
+
+**Heatmap-nya langsung memberi tahu sesuatu.** Seluruh layar hijau, artinya
+setiap ray memakai 15–24 dari 48 langkah — termasuk ray yang tidak mengenai apa
+pun. Sebabnya pita jarak yang sempit: nilai di luar pita jenuh pada `bandVoxels`
+× ukuran voxel, jadi langkah terpanjang di ruang kosong adalah 0,4 m di kaskade
+terhalus. Melintasi kaskade 0 sejauh 6,4 m karena itu butuh belasan langkah, dan
+tidak ada sphere tracing yang bisa melompatinya. Itu pertukaran yang melekat
+pada SDF berpita, dan ia terlihat pada alat pertama yang dibuat untuk
+melihatnya — persis gunanya.
+
+Biaya terukur: total GPU **1,348 ms** dengan pass debug aktif versus **0,433 ms**
+tanpa, di 1277×614 dengan anggaran 48 langkah. Jadi sphere tracing layar penuh
+satu ray per piksel ≈ **0,9 ms**. Sebagai pembanding, anggaran screen probe di
+rencana adalah 1,4 ms untuk 16 ray per probe pada ubin 16×16 — yaitu seperenam
+belas jumlah ray ini.
+
+**Belum ada:** perbandingan berdampingan depth sphere tracing terhadap depth
+buffer raster sebagai angka, bukan sebagai penilaian mata; bake SDF per-mesh
+(menunggu importir mesh E8.4); dan komposit compute yang membuka 128³. Kriteria
+selesai M1 tinggal yang pertama.
 
 - **Anggarannya belum didamaikan dengan kriteria terima E8.** 3,0 ms adalah 18%
   dari frame 60 fps, sementara adegan uji E8 — terrain 2×2 km, 200 ribu instance

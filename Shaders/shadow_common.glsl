@@ -18,6 +18,10 @@ layout(set = 0, binding = 0) uniform ShadowParams {
     vec4 clusterCounts;      // xyz: tilesX, tilesY, slices; w: jumlah lampu
     vec4 clusterDepth;       // x: skala irisan, y: bias irisan, z: near, w: far
     vec4 viewportSize;       // xy: piksel
+    // Kaskade SDF clipmap. xyz titik asal dunia, w ukuran voxel.
+    vec4 sdfOrigin[4];
+    // x resolusi, y jumlah kaskade, z lebar pita dalam voxel, w langkah maksimum
+    vec4 sdfParams;
 } shadowParams;
 
 layout(set = 0, binding = 1) uniform sampler2DArrayShadow shadowMap;
