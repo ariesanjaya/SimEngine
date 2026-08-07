@@ -46,6 +46,14 @@ public:
     VkRenderPass RenderPass() const { return renderPass_; }
     VkFramebuffer Framebuffer() const { return framebuffer_; }
     VkImageView ColorView() const { return colorView_; }
+    /// Image mentahnya. Dibutuhkan barrier layout: barrier bekerja pada image,
+    /// bukan pada view — dan renderer yang memakai dynamic rendering harus
+    /// memindahkan target ini dari SHADER_READ_ONLY ke COLOR_ATTACHMENT dan
+    /// kembali setiap frame.
+    VkImage ColorImage() const { return colorImage_; }
+    VkImage DepthImage() const { return depthImage_; }
+    VkImageView DepthView() const { return depthView_; }
+    VkFormat DepthFormat() const { return depthFormat_; }
     VkSampler Sampler() const { return sampler_; }
     VkFormat ColorFormat() const { return kColorFormat; }
 

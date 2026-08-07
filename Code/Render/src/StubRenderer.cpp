@@ -200,6 +200,7 @@ public:
             GridPush push{};
             push.invViewProj = glm::inverse(viewProj);
             push.cameraPos = Vec4(desc.camera.position, 1.0f);
+            // w = 0: proyeksi biasa, bidang dekat di depth 0.
             push.params = Vec4(desc.gridCellSize, desc.gridFadeDistance, 1.0f, 0.0f);
             vkCmdPushConstants(cmd, pipelineLayout_,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,

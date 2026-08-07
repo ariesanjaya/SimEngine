@@ -195,8 +195,16 @@ int main(int /*argc*/, char** /*argv*/) {
 
     render::StubRendererDesc rendererDesc;
     rendererDesc.shaderDirectory = ExecutableDirectory() / "Shaders";
+    // Renderer sungguhan lebih dulu; stub adalah jalur mundurnya, bukan
+    // sebaliknya. `CreateVulkanRenderer` mengembalikan nullptr kalau perangkatnya
+    // tidak memenuhi syarat — dan editor yang menolak jalan di mesin lama tidak
+    // bisa dipakai menyunting data, padahal seluruh E2..E7 memang tidak menuntut
+    // renderer sungguhan.
     std::unique_ptr<render::IViewportRenderer> renderer =
-        render::CreateStubRenderer(device, imguiLayer.Textures(), rendererDesc);
+        render::CreateVulkanRenderer(device, imguiLayer.Textures(), rendererDesc);
+    if (renderer == nullptr) {
+        renderer = render::CreateStubRenderer(device, imguiLayer.Textures(), rendererDesc);
+    }
     if (renderer == nullptr) {
         SIM_CRITICAL("Editor", "Failed to create viewport renderer");
         return 1;

@@ -18,7 +18,7 @@ Artinya E8 adalah menulis implementasi kedua dari satu antarmuka yang sudah mapa
 
 ## E8 — Renderer
 
-### E8.1 — Render graph & pass dasar · 🔨 graph & culling selesai, pass Vulkan belum
+### E8.1 — Render graph & pass dasar · 🔨 semuanya kecuali bindless
 Frame graph sederhana (deklarasi pass + resource, penyusunan barrier otomatis),
 depth prepass, forward opaque, transparan tersortir, resolve. Kamera & frustum
 culling. Bindless descriptor untuk tekstur (`VK_EXT_descriptor_indexing`).
@@ -61,9 +61,52 @@ bidangnya diturunkan dari matriks view-proj apa adanya, jadi yang berubah hanya
 isi matriksnya sementara volume yang dibatasi tetap sama. Itu dikunci test yang
 membandingkan keputusan "di dalam/di luar" kedua proyeksi pada ribuan titik.
 
-**Belum ada:** eksekusi Vulkan-nya — depth prepass, forward opaque, transparan
-tersortir, resolve, dan bindless descriptor. Yang sudah ada adalah kerangka yang
-menentukan urutan, barrier, dan memorinya.
+**`VulkanRenderer` menjalankannya.** Lima pass lewat graph — grid, depth
+prepass, forward opaque, transparan tersortir, garis bantu — dengan dynamic
+rendering dan `synchronization2` (keduanya sudah dinyalakan `Device` sejak E1).
+Ia dipilih lebih dulu di composition root, dan `StubRenderer` menjadi jalur
+mundurnya kalau perangkatnya bukan Vulkan 1.3.
+
+**Yang digambar masih kotak, dan itu bukan penambal yang malas.**
+`ViewportScene::MeshInstance` belum membawa geometri sama sekali — hanya
+transform, kotak batas, dan warna — karena importir mesh baru datang di E8.4.
+Yang dibuktikan E8.1 bukan "mesh terlihat benar" melainkan bahwa graph
+benar-benar menjalankan pass Vulkan dengan barrier yang disimpulkannya sendiri.
+Kotak cukup untuk itu; begitu mesh masuk, yang berganti hanya sumber vertex-nya.
+
+**Prepass jalan tanpa fragment shader sama sekali**, dan opaque mengujinya
+dengan `EQUAL`. Itulah guna prepass yang sebenarnya: bukan menghemat depth test,
+melainkan menghemat shading yang akan ditimpa.
+
+**Tiga bug ditemukan dengan menjalankannya, bukan dengan membaca kode:**
+
+1. *Arah muka.* `VK_FRONT_FACE_CLOCKWISE` terlihat benar di atas kertas — matriks
+   proyeksi membalik Y, jadi lilitan segitiga ikut terbalik. Salah: arah muka
+   dinilai di ruang framebuffer, yang sumbu Y-nya memang sudah menghadap ke
+   bawah, jadi pembalikan di proyeksi justru meniadakannya. Terlihat sebagai
+   kotak yang memperlihatkan sisi dalamnya.
+2. *Layout awal target.* Graph menyatakan target warna dimulai dalam keadaan
+   `Present`; itu benar untuk setiap frame kecuali yang pertama, karena image
+   yang baru dibuat berada di UNDEFINED. Ditemukan validation layer, dan hanya
+   muncul kalau panel Viewport kebetulan tertutup jendela lain pada frame
+   pertama.
+3. *Prepass menyatakan lampiran warna yang tidak dipasangnya.* Tanpa validation
+   layer, yang terlihat adalah prepass yang jalan di satu driver dan tidak di
+   driver lain.
+
+Sesudah ketiganya: **nol pesan validation** pada build Debug, termasuk saat
+kamera diputar dan viewport diubah ukurannya.
+
+**Grid dan garis bantu ikut dibawa**, bukan ditinggalkan. Renderer baru yang
+menghapus cara utama orang membaca skala dan orientasi bukan kemajuan. Shader
+grid kini menerima nilai depth bidang dekat sebagai push constant — 0 pada
+proyeksi biasa, 1 pada reversed-Z — sehingga kedua renderer memakai shader yang
+sama tanpa satu pun menebak.
+
+**Belum ada:** bindless descriptor (`VK_EXT_descriptor_indexing`), yang baru
+berarti begitu ada tekstur untuk diindeks — yaitu E8.2. Alias memori transien
+sudah ada di graph dan teruji, tapi belum ada pemakainya: pass pertama yang
+benar-benar menuntut target antara adalah post-process di E8.8.
 
 ### E8.2 — Material runtime
 Kompilasi graph `.simmat` → kode shader → SPIR-V, cache di disk berbasis hash graph.

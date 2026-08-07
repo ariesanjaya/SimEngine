@@ -28,4 +28,15 @@ std::unique_ptr<IViewportRenderer> CreateStubRenderer(rhi::Device& device,
                                                       rhi::ITextureRegistry& textures,
                                                       const StubRendererDesc& desc);
 
+/// Renderer Vulkan E8. Menjalankan frame graph: depth prepass, forward opaque,
+/// transparan tersortir — dengan reversed-Z dan barrier yang disimpulkan graph.
+///
+/// Mengembalikan nullptr bila perangkatnya tidak memenuhi syarat (Vulkan 1.3),
+/// dan pemanggil jatuh kembali ke `CreateStubRenderer`. Jatuh kembali, bukan
+/// gagal: editor yang menolak jalan di mesin lama tidak bisa dipakai menyunting
+/// data, padahal seluruh E2..E7 memang tidak menuntut renderer sungguhan.
+std::unique_ptr<IViewportRenderer> CreateVulkanRenderer(rhi::Device& device,
+                                                        rhi::ITextureRegistry& textures,
+                                                        const StubRendererDesc& desc);
+
 }  // namespace sim::render

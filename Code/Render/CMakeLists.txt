@@ -1,6 +1,8 @@
 sim_add_library(Render
     SOURCES
         src/FrameGraph.cpp
+        src/FrameGraphExecutor.cpp
+        src/VulkanRenderer.cpp
         src/Frustum.cpp
         src/StubRenderer.cpp
         src/ThumbnailCache.cpp
@@ -17,6 +19,8 @@ sim_compile_shaders(SimShadersGrid
         ${CMAKE_SOURCE_DIR}/Shaders/grid.vert
         ${CMAKE_SOURCE_DIR}/Shaders/grid.frag
         ${CMAKE_SOURCE_DIR}/Shaders/line.vert
-        ${CMAKE_SOURCE_DIR}/Shaders/line.frag)
+        ${CMAKE_SOURCE_DIR}/Shaders/line.frag
+        ${CMAKE_SOURCE_DIR}/Shaders/box.vert
+        ${CMAKE_SOURCE_DIR}/Shaders/box.frag)
 
 add_dependencies(SimRender SimShadersGrid)
