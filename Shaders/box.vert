@@ -20,6 +20,7 @@ layout(push_constant) uniform Push {
 
 layout(location = 0) out vec3 outNormal;
 layout(location = 1) out vec4 outColor;
+layout(location = 2) out vec3 outWorldPosition;
 
 void main() {
     mat4 model = mat4(inRow0, inRow1, inRow2, inRow3);
@@ -32,5 +33,6 @@ void main() {
     // normalnya sendiri.
     outNormal = normalize(mat3(model) * inNormal);
     outColor = inColor;
+    outWorldPosition = world.xyz;
     gl_Position = push.viewProj * world;
 }

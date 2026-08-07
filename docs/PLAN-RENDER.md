@@ -294,7 +294,7 @@ logam, mengganti bentuk bekerja, seret kiri memindahkan sorotan searah kursor,
 seret kanan mengorbit kamera, dan cache disk terisi dua berkas per material.
 **Nol pesan validation layer.**
 
-### E8.3 — Lighting & shadow · 🔨 matematika cascade, cluster, dan IBL selesai
+### E8.3 — Lighting & shadow · 🔨 cascade jalan di Vulkan
 IBL (prefilter env + DFG LUT), directional light dengan cascaded shadow map,
 point/spot dengan shadow atlas, clustered light culling untuk banyak lampu.
 
@@ -416,9 +416,56 @@ DFG **sudah jadi** — ia tidak tahu apakah sumbernya probe statis, SH, atau nan
 global illumination. Itulah titik sambungnya: mengganti sumbernya tidak
 menyentuh satu baris pun model shading.
 
-**Belum ada:** pembakaran peta prefilter dan LUT ke tekstur GPU, pass bayangan
-Vulkan beserta atlas untuk point/spot, dan penyambungan ketiganya ke pipeline
-material.
+#### Pass bayangan Vulkan
+
+Peta bayangannya **larik berlapis, bukan atlas di satu tekstur besar**. Atlas
+menuntut shader menggeser dan menskalakan koordinat per cascade, dan
+penyaringan PCF-nya lalu bisa mengambil texel milik cascade tetangga di tepi
+ubin. Lapisan memberi tiap cascade ruang koordinatnya sendiri, dan penjepitan
+sampler bekerja apa adanya.
+
+**Peta diimpor graph sebagai `ShaderRead`, bukan `None`.** `None` berarti "tidak
+ada yang perlu ditunggu", dan itu tidak benar: frame berikutnya menulis ulang
+peta yang masih dibaca fragment shader frame sebelumnya. Menyatakannya
+`ShaderRead` membuat graph memancarkan barrier yang menunggu pembacaan itu
+selesai — dan konsekuensinya keadaan awalnya harus benar sejak frame pertama,
+sama seperti target warna.
+
+**Bias normal, bukan bias depth konstan.** Bias depth konstan adalah angka ajaib
+yang harus disetel ulang tiap cascade: yang cukup di cascade dekat menghasilkan
+peter-panning di cascade jauh, dan sebaliknya menghasilkan acne. Menggeser titik
+sampel sepanjang normal sebanyak beberapa texel dunia menyesuaikan diri sendiri
+terhadap resolusi tiap cascade, karena `texelWorldSize` memang sudah dihitung
+per cascade.
+
+Perbandingan sampler `LESS_OR_EQUAL`, bukan `GREATER`: cascade memakai
+ortografik biasa sementara target viewport reversed-Z. Keduanya hidup
+berdampingan di renderer ini, dan memakai perbandingan yang salah membalik
+bayangan menjadi sorotan. Filter `LINEAR` bersama `compareEnable` adalah PCF
+perangkat keras — satu pengambilan mengembalikan rata-rata empat *perbandingan*,
+bukan rata-rata empat kedalaman; merata-ratakan kedalaman lalu membandingkannya
+sekali menghasilkan tepi yang salah di setiap permukaan miring.
+
+**Kamera bayangan sempat ditempatkan di sisi berlawanan dari cahaya**, dan tidak
+satu pun test yang sudah ada menangkapnya — bola pembatas, pengancingan texel,
+dan pembagian cascade semuanya tidak menyentuh letak matanya. Yang terlihat
+bukan bayangan yang bergeser melainkan adegan yang seluruhnya gelap. Sekarang
+ada test yang menyatakan konvensinya secara langsung: bergerak ke arah cahaya
+harus mengecilkan depth, dan seluruh isi bola cascade harus muat di kubus
+satuan.
+
+Satu galat validasi lain: descriptor menyebut `DEPTH_READ_ONLY_OPTIMAL`
+sementara graph menyimpulkan `SHADER_READ_ONLY_OPTIMAL` dari `Access::ShaderRead`.
+Keduanya sah untuk menyampel image depth, tapi yang berlaku adalah yang
+disimpulkan graph.
+
+Diverifikasi di GUI: kotak menjatuhkan bayangan ke bidang tanah, tidak ada acne
+pada bidang seluas 40 m, tidak ada garis perpindahan cascade yang terlihat, dan
+**nol pesan validation layer**.
+
+**Belum ada:** pembakaran peta prefilter dan LUT ke tekstur GPU, atlas bayangan
+untuk point/spot, penyambungan clustered culling ke pass forward, dan
+penyambungan IBL ke pipeline material.
 
 `openpbr.slang` sendiri sudah ada sejak E8.2, tapi baru cahaya langsung: satu
 arah cahaya, tanpa IBL, bayangan, maupun transmisi. Yang ditambahkan di sini

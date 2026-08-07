@@ -1134,3 +1134,51 @@ TEST_CASE("Pemetaan mip ke kekasaran linear dan menutupi kedua ujungnya") {
     // Satu mip berarti tidak ada rentang untuk dipetakan.
     CHECK(RoughnessForMip(0, 1) == doctest::Approx(0.0f));
 }
+
+TEST_CASE("Konvensi kedalaman cascade: mendekati cahaya berarti depth mengecil") {
+    // Test ini ada karena shader-nya bergantung pada konvensi ini dan tidak bisa
+    // menyatakannya sendiri. Ortografik glm, pembalikan Y untuk Vulkan, dan
+    // LookAt tangan-kanan bertemu di satu matriks — dan kalau salah satunya
+    // berlawanan arah, yang terlihat adalah adegan yang seluruhnya gelap tanpa
+    // satu pun pesan galat.
+    CascadeSettings settings;
+    settings.count = 1;
+    settings.maxDistance = 40.0f;
+    const Vec3 toLight = glm::normalize(Vec3(-0.4f, 0.8f, 0.45f));
+    const Camera camera = TestCamera(Vec3(0.0f, 2.0f, 0.0f));
+    const CascadeSet set = ComputeCascades(camera, 16.0f / 9.0f, toLight, settings);
+    REQUIRE(set.count == 1);
+
+    const BoundingSphere sphere = FrustumSliceSphere(camera, 16.0f / 9.0f, camera.nearZ, 40.0f);
+    const auto project = [&set](const Vec3& world) {
+        const Vec4 clip = set.cascades[0].viewProjection * Vec4(world, 1.0f);
+        return Vec3(clip) / clip.w;
+    };
+
+    const Vec3 centre = project(sphere.centre);
+    INFO("pusat -> (", centre.x, ",", centre.y, ",", centre.z, ")");
+    CHECK(centre.x >= -1.0f);
+    CHECK(centre.x <= 1.0f);
+    CHECK(centre.y >= -1.0f);
+    CHECK(centre.y <= 1.0f);
+    CHECK(centre.z > 0.0f);
+    CHECK(centre.z < 1.0f);
+
+    // Bergerak ke arah cahaya harus mengurangi depth — itulah yang membuat
+    // perbandingan LESS_OR_EQUAL berarti "tidak ada yang menghalangi".
+    const Vec3 nearer = project(sphere.centre + toLight * 2.0f);
+    CHECK(nearer.z < centre.z);
+    const Vec3 farther = project(sphere.centre - toLight * 2.0f);
+    CHECK(farther.z > centre.z);
+
+    // Seluruh isi bola harus muat di dalam kubus satuan.
+    for (const Vec3 offset : {Vec3(1, 0, 0), Vec3(-1, 0, 0), Vec3(0, 1, 0), Vec3(0, -1, 0),
+                              Vec3(0, 0, 1), Vec3(0, 0, -1)}) {
+        const Vec3 point = project(sphere.centre + offset * sphere.radius);
+        INFO("tepi bola -> (", point.x, ",", point.y, ",", point.z, ")");
+        CHECK(std::abs(point.x) <= 1.001f);
+        CHECK(std::abs(point.y) <= 1.001f);
+        CHECK(point.z >= 0.0f);
+        CHECK(point.z <= 1.0f);
+    }
+}

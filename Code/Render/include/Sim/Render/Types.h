@@ -60,6 +60,14 @@ struct ViewportDesc {
     bool showGrid = true;
     float gridCellSize = 1.0f;   ///< meter per petak kecil
     float gridFadeDistance = 120.0f;
+
+    /// Arah **dari permukaan ke matahari**, tidak harus ternormalisasi.
+    ///
+    /// Di sini, bukan di `ViewportScene`: ia pengaturan tampilan viewport
+    /// selama scene belum benar-benar punya lampu directional. Begitu komponen
+    /// lampu dibaca renderer, medan ini yang menjadi nilai mundurnya.
+    Vec3 sunDirection{-0.4f, 0.8f, 0.45f};
+    bool castShadows = true;
 };
 
 /// Satu objek yang bisa digambar, sudah dalam ruang dunia.

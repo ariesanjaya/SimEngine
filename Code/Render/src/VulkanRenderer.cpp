@@ -8,9 +8,11 @@
 #include "Sim/RHI/TextureRegistry.h"
 #include "Sim/Render/FrameGraph.h"
 #include "Sim/Render/Frustum.h"
+#include "Sim/Render/ShadowCascades.h"
 
 #include <algorithm>
 #include <array>
+#include <limits>
 #include <cstddef>
 #include <fstream>
 #include <vector>
@@ -21,6 +23,47 @@ namespace {
 /// Harus sama persis dengan blok push_constant di Shaders/box.vert.
 struct BoxPush {
     Mat4 viewProj;
+};
+
+/// Harus sama persis dengan blok `ShadowParams` di Shaders/shadow_common.glsl.
+///
+/// **ABI, dan std140.** Selisih satu sisipan tidak menghasilkan galat apa pun —
+/// hanya bayangan yang jatuh di tempat yang salah, yang paling mudah dikira
+/// masalah matriks cascade dan dicari berjam-jam di tempat yang keliru.
+struct ShadowUniforms {
+    std::array<Mat4, kMaxCascades> cascadeViewProj{};
+    Vec4 cascadeSplitFar{0.0f};
+    Vec4 cascadeBlendBegin{0.0f};
+    Vec4 cascadeTexelSize{0.0f};
+    /// xyz arah ke cahaya, w jumlah cascade.
+    Vec4 lightDirection{0.0f};
+    /// xyz posisi kamera, w 1 kalau bayangan menyala.
+    Vec4 cameraPosition{0.0f};
+    /// xyz arah pandang, w kekuatan bias normal dalam satuan texel.
+    Vec4 cameraForward{0.0f};
+};
+// 4 mat4 + 6 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
+// memperbarui shader-nya menjadi galat kompilasi, bukan bayangan yang bergeser.
+static_assert(sizeof(ShadowUniforms) == 4 * 64 + 6 * 16,
+              "ShadowUniforms harus cocok dengan blok ShadowParams di shadow_common.glsl");
+
+/// Peta bayangan cascade: satu image D32 berlapis, satu lapis per cascade.
+///
+/// **Larik berlapis, bukan atlas di satu tekstur besar.** Atlas menuntut shader
+/// menggeser dan menskalakan koordinat per cascade, dan penyaringan PCF-nya lalu
+/// bisa mengambil texel milik cascade tetangga di tepi ubin. Lapisan memberi
+/// tiap cascade ruang koordinatnya sendiri, dan penjepitan sampler bekerja apa
+/// adanya.
+struct ShadowMap {
+    VkImage image = VK_NULL_HANDLE;
+    VmaAllocation allocation = VK_NULL_HANDLE;
+    VkImageView arrayView = VK_NULL_HANDLE;
+    std::array<VkImageView, kMaxCascades> layerViews{};
+    VkSampler sampler = VK_NULL_HANDLE;
+    uint32_t resolution = 0;
+    uint32_t layers = 0;
+
+    bool IsValid() const { return image != VK_NULL_HANDLE; }
 };
 
 /// Harus sama persis dengan blok push_constant di Shaders/grid.{vert,frag}.
@@ -56,6 +99,13 @@ struct BoxInstance {
 };
 
 constexpr Vec4 kSelectedColor{1.0f, 0.62f, 0.20f, 1.0f};
+
+constexpr VkFormat kShadowFormat = VK_FORMAT_D32_SFLOAT;
+constexpr uint32_t kShadowResolution = 2048;
+/// Kekuatan bias normal, dalam satuan texel dunia cascade yang bersangkutan.
+/// Bukan angka ajaib per-cascade: ia dikalikan `texelWorldSize`, jadi cascade
+/// yang lebih kasar otomatis mendapat pergeseran yang lebih besar.
+constexpr float kNormalBiasTexels = 1.5f;
 
 std::vector<uint32_t> ReadSpirv(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
@@ -162,7 +212,7 @@ public:
         if (!target_.Create(device_, desc.initialWidth, desc.initialHeight)) {
             return false;
         }
-        if (!CreateCube() || !CreatePipelines(desc.shaderDirectory) ||
+        if (!CreateCube() || !CreateShadowMap() || !CreatePipelines(desc.shaderDirectory) ||
             !CreateOverlayPipelines(desc.shaderDirectory)) {
             return false;
         }
@@ -170,11 +220,17 @@ public:
             if (!slot.buffer.Create(device_, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                                     sizeof(BoxInstance) * 256) ||
                 !slot.lineBuffer.Create(device_, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                                        sizeof(LineVertex) * 1024)) {
+                                        sizeof(LineVertex) * 1024) ||
+                !slot.shadowUniform.Create(device_, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                           sizeof(ShadowUniforms))) {
                 return false;
             }
         }
+        if (!WriteShadowDescriptors()) {
+            return false;
+        }
         AdoptTargetLayout();
+        AdoptShadowLayout();
         RefreshTextureHandle();
         SIM_INFO("Render", "VulkanRenderer ready ({}x{}, frame graph, reversed-Z)", target_.Width(),
                  target_.Height());
@@ -242,6 +298,14 @@ public:
 
         Gather(desc, scene, viewProj);
 
+        // Cascade dihitung dari kamera yang sama dengan yang dipakai menggambar.
+        // Menghitungnya dari kamera frame sebelumnya menghemat satu ketergantungan
+        // dan menukarnya dengan bayangan yang tertinggal satu frame — terlihat
+        // sebagai bayangan yang "berenang" saat kamera bergerak cepat.
+        CascadeSettings cascadeSettings;
+        cascadeSettings.resolution = kShadowResolution;
+        cascades_ = ComputeCascades(desc.camera, aspect, desc.sunDirection, cascadeSettings);
+
         InstanceSlot& slot = slots_[slotIndex_];
         device_.WaitTransient(slot.submitId);
         slot.submitId = 0;
@@ -268,6 +332,7 @@ public:
                                       sizeof(LineVertex) * lineVertices_.size());
         }
 
+        UpdateShadowUniforms(desc, slot);
         BuildGraph();
 
         VkCommandBuffer cmd = device_.BeginTransient();
@@ -276,13 +341,18 @@ public:
                                             VK_IMAGE_ASPECT_COLOR_BIT});
         executor_.Bind(depthId_, BoundImage{target_.DepthImage(), target_.DepthView(),
                                             VK_IMAGE_ASPECT_DEPTH_BIT});
+        executor_.Bind(shadowId_, BoundImage{shadow_.image, shadow_.arrayView,
+                                             VK_IMAGE_ASPECT_DEPTH_BIT});
 
         const auto opaqueCount = static_cast<uint32_t>(opaque_.size());
         const auto transparentCount = static_cast<uint32_t>(transparent_.size());
         const BoxPush push{viewProj};
 
         const Mat4 invViewProj = glm::inverse(viewProj);
-        std::array<FrameGraphExecutor::Recorder, 5> recorders{};
+        std::array<FrameGraphExecutor::Recorder, 6> recorders{};
+        recorders[shadowPassId_] = [&](VkCommandBuffer command) {
+            RecordShadowPass(command, slot, opaqueCount);
+        };
         recorders[gridId_] = [&](VkCommandBuffer command) {
             // Grid membersihkan warna dan menjadi latar. Ia tidak menyentuh depth
             // sama sekali, jadi apa pun yang digambar sesudahnya menutupinya tanpa
@@ -363,6 +433,13 @@ private:
     struct InstanceSlot {
         rhi::DynamicBuffer buffer;
         rhi::DynamicBuffer lineBuffer;
+        // Satu uniform buffer dan satu descriptor set per slot. Berbagi satu
+        // set untuk seluruh frame in-flight berarti menulis ulang isinya
+        // sementara frame sebelumnya masih membacanya — kerusakan yang muncul
+        // sebagai bayangan yang sesekali melompat satu frame, bukan sebagai
+        // pesan galat.
+        rhi::DynamicBuffer shadowUniform;
+        VkDescriptorSet shadowSet = VK_NULL_HANDLE;
         uint64_t submitId = 0;
     };
 
@@ -376,6 +453,13 @@ private:
         graph_.Clear();
         colorId_ = graph_.Import("viewport-color", Access::Present);
         depthId_ = graph_.Import("viewport-depth", Access::None);
+        // ShaderRead, bukan None: frame ini menulis ulang peta yang masih
+        // dibaca fragment shader frame sebelumnya, dan `None` berarti "tidak
+        // ada yang perlu ditunggu".
+        shadowId_ = graph_.Import("shadow-cascades", Access::ShaderRead);
+
+        shadowPassId_ = graph_.AddPass("shadow-cascades");
+        graph_.Write(shadowPassId_, shadowId_, Access::DepthWrite);
 
         gridId_ = graph_.AddPass("grid");
         graph_.Write(gridId_, colorId_, Access::ColorWrite);
@@ -385,10 +469,12 @@ private:
 
         opaqueId_ = graph_.AddPass("forward-opaque");
         graph_.Read(opaqueId_, depthId_, Access::DepthWrite);
+        graph_.Read(opaqueId_, shadowId_, Access::ShaderRead);
         graph_.Write(opaqueId_, colorId_, Access::ColorWrite);
 
         transparentId_ = graph_.AddPass("forward-transparent");
         graph_.Read(transparentId_, depthId_, Access::DepthWrite);
+        graph_.Read(transparentId_, shadowId_, Access::ShaderRead);
         graph_.Write(transparentId_, colorId_, Access::ColorWrite);
 
         linesId_ = graph_.AddPass("lines");
@@ -396,6 +482,9 @@ private:
         graph_.Write(linesId_, colorId_, Access::ColorWrite);
 
         graph_.SetOutput(colorId_, Access::Present);
+        // Peta bayangan harus kembali ke keadaan awalnya, karena itulah keadaan
+        // yang diandaikan impor frame berikutnya.
+        graph_.SetOutput(shadowId_, Access::ShaderRead);
         compiled_ = graph_.Compile();
     }
 
@@ -497,10 +586,16 @@ private:
 
     void DrawInstances(VkCommandBuffer cmd, VkPipeline pipeline, const BoxPush& push,
                        InstanceSlot& slot, uint32_t first, uint32_t count) {
+        // Descriptor set diikat untuk setiap pipeline forward, termasuk prepass.
+        // Prepass tidak membacanya, tapi layout-nya mendeklarasikannya — dan
+        // set yang dideklarasikan tapi tidak terikat adalah pelanggaran meski
+        // tidak ada yang membacanya.
         if (pipeline == VK_NULL_HANDLE || count == 0) {
             return;
         }
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1,
+                                &slot.shadowSet, 0, nullptr);
         vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(BoxPush),
                            &push);
         const std::array<VkBuffer, 2> buffers{cubeBuffer_.Handle(), slot.buffer.Handle()};
@@ -696,8 +791,37 @@ private:
         layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         layoutInfo.pushConstantRangeCount = 1;
         layoutInfo.pPushConstantRanges = &range;
+        layoutInfo.setLayoutCount = 1;
+        layoutInfo.pSetLayouts = &shadowSetLayout_;
         SIM_VK_CHECK(
             vkCreatePipelineLayout(device_.Handle(), &layoutInfo, nullptr, &pipelineLayout_));
+
+        // Pass bayangan memakai layout sendiri: ia tidak membaca peta bayangan,
+        // dan mendeklarasikan descriptor set yang tidak pernah diikat berarti
+        // setiap draw-nya melanggar aturan validasi.
+        VkPipelineLayoutCreateInfo shadowLayoutInfo{};
+        shadowLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        shadowLayoutInfo.pushConstantRangeCount = 1;
+        shadowLayoutInfo.pPushConstantRanges = &range;
+        SIM_VK_CHECK(
+            vkCreatePipelineLayout(device_.Handle(), &shadowLayoutInfo, nullptr, &shadowLayout_));
+
+        VkShaderModule shadowVertex =
+            CreateShaderModule(device_.Handle(), shaderDirectory / "shadow.vert.spv");
+        if (shadowVertex == VK_NULL_HANDLE) {
+            vkDestroyShaderModule(device_.Handle(), vertex, nullptr);
+            vkDestroyShaderModule(device_.Handle(), fragment, nullptr);
+            return false;
+        }
+        // Tanpa tahap fragment sama sekali — jalur depth-only. Sama alasannya
+        // dengan prepass: shader fragment yang menulis ke lampiran warna yang
+        // tidak dipasang adalah peringatan validasi berulang, dan menghapusnya
+        // juga jalur yang lebih cepat.
+        shadowPipeline_ =
+            BuildPipeline(shadowVertex, VK_NULL_HANDLE, /*depthWrite=*/true,
+                          VK_COMPARE_OP_LESS_OR_EQUAL, /*blend=*/false, /*colorWrite=*/false,
+                          shadowLayout_, kShadowFormat);
+        vkDestroyShaderModule(device_.Handle(), shadowVertex, nullptr);
 
         // Tiga pipeline dari satu pasang shader. Yang berbeda hanya keadaan
         // depth dan blending — dan itu memang perbedaan antara prepass, opaque,
@@ -721,11 +845,18 @@ private:
         vkDestroyShaderModule(device_.Handle(), vertex, nullptr);
         vkDestroyShaderModule(device_.Handle(), fragment, nullptr);
         return prepassPipeline_ != VK_NULL_HANDLE && opaquePipeline_ != VK_NULL_HANDLE &&
-               transparentPipeline_ != VK_NULL_HANDLE;
+               transparentPipeline_ != VK_NULL_HANDLE && shadowPipeline_ != VK_NULL_HANDLE;
     }
 
+    /// `layout` dan `depthFormat` kosong berarti memakai milik pass forward.
+    /// Pass bayangan menggambar ke image lain dengan format lain, jadi ia harus
+    /// menyebutkan keduanya — pipeline yang formatnya tidak cocok dengan
+    /// lampiran yang dipasang adalah ketidakcocokan yang hanya dilaporkan
+    /// validation layer.
     VkPipeline BuildPipeline(VkShaderModule vertex, VkShaderModule fragment, bool depthWrite,
-                             VkCompareOp depthCompare, bool blend, bool colorWrite) {
+                             VkCompareOp depthCompare, bool blend, bool colorWrite,
+                             VkPipelineLayout layout = VK_NULL_HANDLE,
+                             VkFormat depthFormat = VK_FORMAT_UNDEFINED) {
         std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
         stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
@@ -844,7 +975,8 @@ private:
         rendering.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO;
         rendering.colorAttachmentCount = colorWrite ? 1u : 0u;
         rendering.pColorAttachmentFormats = colorWrite ? &colorFormat : nullptr;
-        rendering.depthAttachmentFormat = target_.DepthFormat();
+        rendering.depthAttachmentFormat =
+            depthFormat != VK_FORMAT_UNDEFINED ? depthFormat : target_.DepthFormat();
 
         VkGraphicsPipelineCreateInfo info{};
         info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
@@ -859,12 +991,304 @@ private:
         info.pDepthStencilState = &depthStencil;
         info.pColorBlendState = &colorBlend;
         info.pDynamicState = &dynamic;
-        info.layout = pipelineLayout_;
+        info.layout = layout != VK_NULL_HANDLE ? layout : pipelineLayout_;
 
         VkPipeline pipeline = VK_NULL_HANDLE;
         SIM_VK_CHECK(vkCreateGraphicsPipelines(device_.Handle(), VK_NULL_HANDLE, 1, &info, nullptr,
                                                &pipeline));
         return pipeline;
+    }
+
+    // --- bayangan -----------------------------------------------------------
+
+    bool CreateShadowMap() {
+        shadow_.resolution = kShadowResolution;
+        shadow_.layers = static_cast<uint32_t>(kMaxCascades);
+
+        VmaAllocationCreateInfo allocation{};
+        allocation.usage = VMA_MEMORY_USAGE_AUTO;
+
+        VkImageCreateInfo imageInfo{};
+        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageInfo.imageType = VK_IMAGE_TYPE_2D;
+        imageInfo.format = kShadowFormat;
+        imageInfo.extent = {shadow_.resolution, shadow_.resolution, 1};
+        imageInfo.mipLevels = 1;
+        imageInfo.arrayLayers = shadow_.layers;
+        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imageInfo.usage =
+            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vmaCreateImage(device_.Allocator(), &imageInfo, &allocation, &shadow_.image,
+                           &shadow_.allocation, nullptr) != VK_SUCCESS) {
+            SIM_ERROR("Render", "cannot allocate the cascade shadow map");
+            return false;
+        }
+
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = shadow_.image;
+        viewInfo.format = kShadowFormat;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        viewInfo.subresourceRange.levelCount = 1;
+
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D_ARRAY;
+        viewInfo.subresourceRange.layerCount = shadow_.layers;
+        SIM_VK_CHECK(
+            vkCreateImageView(device_.Handle(), &viewInfo, nullptr, &shadow_.arrayView));
+
+        // Satu view per lapis untuk menggambar ke dalamnya. Dynamic rendering
+        // memasang sebuah view, bukan sebuah lapis, jadi menggambar ke cascade
+        // tertentu menuntut view yang memang hanya berisi cascade itu.
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.subresourceRange.layerCount = 1;
+        for (uint32_t layer = 0; layer < shadow_.layers; ++layer) {
+            viewInfo.subresourceRange.baseArrayLayer = layer;
+            SIM_VK_CHECK(vkCreateImageView(device_.Handle(), &viewInfo, nullptr,
+                                           &shadow_.layerViews[layer]));
+        }
+
+        VkSamplerCreateInfo samplerInfo{};
+        samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        // LINEAR bersama compareEnable adalah PCF perangkat keras: satu
+        // pengambilan mengembalikan rata-rata empat perbandingan, bukan rata-rata
+        // empat kedalaman. Merata-ratakan kedalaman lalu membandingkannya sekali
+        // menghasilkan tepi bayangan yang salah di setiap permukaan miring.
+        samplerInfo.magFilter = VK_FILTER_LINEAR;
+        samplerInfo.minFilter = VK_FILTER_LINEAR;
+        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.compareEnable = VK_TRUE;
+        // LESS_OR_EQUAL, bukan GREATER: proyeksi cascade-nya ortografik biasa,
+        // bukan reversed-Z. Keduanya hidup berdampingan di renderer ini, dan
+        // memakai perbandingan yang salah membalik bayangan menjadi sorotan.
+        samplerInfo.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+        samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+        SIM_VK_CHECK(vkCreateSampler(device_.Handle(), &samplerInfo, nullptr, &shadow_.sampler));
+
+        const std::array<VkDescriptorSetLayoutBinding, 2> bindings{
+            VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+        };
+        VkDescriptorSetLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+        layoutInfo.pBindings = bindings.data();
+        SIM_VK_CHECK(vkCreateDescriptorSetLayout(device_.Handle(), &layoutInfo, nullptr,
+                                                 &shadowSetLayout_));
+
+        const std::array<VkDescriptorPoolSize, 2> sizes{
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                                 static_cast<uint32_t>(slots_.size())},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
+                                 static_cast<uint32_t>(slots_.size())},
+        };
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.maxSets = static_cast<uint32_t>(slots_.size());
+        poolInfo.poolSizeCount = static_cast<uint32_t>(sizes.size());
+        poolInfo.pPoolSizes = sizes.data();
+        SIM_VK_CHECK(
+            vkCreateDescriptorPool(device_.Handle(), &poolInfo, nullptr, &shadowPool_));
+        return true;
+    }
+
+    bool WriteShadowDescriptors() {
+        std::vector<VkDescriptorSetLayout> layouts(slots_.size(), shadowSetLayout_);
+        VkDescriptorSetAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocateInfo.descriptorPool = shadowPool_;
+        allocateInfo.descriptorSetCount = static_cast<uint32_t>(layouts.size());
+        allocateInfo.pSetLayouts = layouts.data();
+
+        std::vector<VkDescriptorSet> sets(slots_.size());
+        if (vkAllocateDescriptorSets(device_.Handle(), &allocateInfo, sets.data()) != VK_SUCCESS) {
+            SIM_ERROR("Render", "cannot allocate shadow descriptor sets");
+            return false;
+        }
+
+        std::vector<VkDescriptorBufferInfo> buffers(slots_.size());
+        std::vector<VkWriteDescriptorSet> writes;
+        writes.reserve(slots_.size() * 2);
+        // SHADER_READ_ONLY, bukan DEPTH_READ_ONLY. Keduanya sah untuk mengambil
+        // sampel dari image depth, tapi yang berlaku adalah yang disimpulkan
+        // frame graph dari `Access::ShaderRead` — dan descriptor yang menyebut
+        // layout lain adalah pelanggaran di setiap draw. DEPTH_READ_ONLY
+        // gunanya untuk depth yang dipasang sebagai lampiran sekaligus
+        // disampel, dan di sini tidak begitu.
+        const VkDescriptorImageInfo image{shadow_.sampler, shadow_.arrayView,
+                                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+
+        for (std::size_t i = 0; i < slots_.size(); ++i) {
+            slots_[i].shadowSet = sets[i];
+            buffers[i] = {slots_[i].shadowUniform.Handle(), 0, sizeof(ShadowUniforms)};
+
+            VkWriteDescriptorSet uniform{};
+            uniform.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            uniform.dstSet = sets[i];
+            uniform.dstBinding = 0;
+            uniform.descriptorCount = 1;
+            uniform.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            uniform.pBufferInfo = &buffers[i];
+            writes.push_back(uniform);
+
+            VkWriteDescriptorSet sampled = uniform;
+            sampled.dstBinding = 1;
+            sampled.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            sampled.pBufferInfo = nullptr;
+            sampled.pImageInfo = &image;
+            writes.push_back(sampled);
+        }
+        vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
+                               writes.data(), 0, nullptr);
+        return true;
+    }
+
+    /// Peta bayangan diimpor graph sebagai `ShaderRead`, sama seperti target
+    /// warna diimpor sebagai `Present`.
+    ///
+    /// **Bukan `None`.** `None` berarti "tidak ada yang perlu ditunggu", dan itu
+    /// tidak benar di sini: frame berikutnya menulis ulang peta yang masih
+    /// dibaca fragment shader frame sebelumnya. Menyatakannya `ShaderRead`
+    /// membuat graph memancarkan barrier yang menunggu pembacaan itu selesai —
+    /// dan konsekuensinya keadaan awalnya harus benar sejak frame pertama, sama
+    /// seperti target warna.
+    void AdoptShadowLayout() {
+        VkCommandBuffer cmd = device_.BeginOneShot();
+        VkImageMemoryBarrier2 barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        barrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = shadow_.image;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        barrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
+        barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
+
+        VkDependencyInfo dependency{};
+        dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dependency.imageMemoryBarrierCount = 1;
+        dependency.pImageMemoryBarriers = &barrier;
+        vkCmdPipelineBarrier2(cmd, &dependency);
+        device_.EndOneShot(cmd);
+    }
+
+    void DestroyShadowMap() {
+        if (shadowPool_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(device_.Handle(), shadowPool_, nullptr);
+            shadowPool_ = VK_NULL_HANDLE;
+        }
+        if (shadowSetLayout_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(device_.Handle(), shadowSetLayout_, nullptr);
+            shadowSetLayout_ = VK_NULL_HANDLE;
+        }
+        if (shadow_.sampler != VK_NULL_HANDLE) {
+            vkDestroySampler(device_.Handle(), shadow_.sampler, nullptr);
+            shadow_.sampler = VK_NULL_HANDLE;
+        }
+        for (VkImageView& view : shadow_.layerViews) {
+            if (view != VK_NULL_HANDLE) {
+                vkDestroyImageView(device_.Handle(), view, nullptr);
+                view = VK_NULL_HANDLE;
+            }
+        }
+        if (shadow_.arrayView != VK_NULL_HANDLE) {
+            vkDestroyImageView(device_.Handle(), shadow_.arrayView, nullptr);
+            shadow_.arrayView = VK_NULL_HANDLE;
+        }
+        if (shadow_.image != VK_NULL_HANDLE) {
+            vmaDestroyImage(device_.Allocator(), shadow_.image, shadow_.allocation);
+            shadow_.image = VK_NULL_HANDLE;
+            shadow_.allocation = VK_NULL_HANDLE;
+        }
+    }
+
+    void UpdateShadowUniforms(const ViewportDesc& desc, InstanceSlot& slot) {
+        ShadowUniforms uniforms;
+        for (int i = 0; i < cascades_.count; ++i) {
+            const Cascade& cascade = cascades_.cascades[static_cast<size_t>(i)];
+            uniforms.cascadeViewProj[static_cast<size_t>(i)] = cascade.viewProjection;
+            uniforms.cascadeSplitFar[i] = cascade.splitFar;
+            uniforms.cascadeBlendBegin[i] = cascade.blendBegin;
+            uniforms.cascadeTexelSize[i] = cascade.texelWorldSize;
+        }
+        // Cascade yang tidak terpakai diberi batas tak terhingga, bukan nol.
+        // Nol membuat `chooseCascade` menganggap setiap kedalaman melewatinya
+        // dan jatuh ke cascade yang matriksnya identitas.
+        for (int i = cascades_.count; i < kMaxCascades; ++i) {
+            uniforms.cascadeSplitFar[i] = std::numeric_limits<float>::max();
+            uniforms.cascadeBlendBegin[i] = std::numeric_limits<float>::max();
+            uniforms.cascadeTexelSize[i] = 1.0f;
+        }
+
+        const Vec3 sun = glm::length(desc.sunDirection) > 1e-6f
+                             ? glm::normalize(desc.sunDirection)
+                             : Vec3(0.0f, 1.0f, 0.0f);
+        uniforms.lightDirection = Vec4(sun, static_cast<float>(cascades_.count));
+        uniforms.cameraPosition =
+            Vec4(desc.camera.position, desc.castShadows && cascades_.count > 0 ? 1.0f : 0.0f);
+        uniforms.cameraForward = Vec4(desc.camera.Forward(), kNormalBiasTexels);
+        slot.shadowUniform.Write(&uniforms, sizeof(uniforms));
+    }
+
+    void RecordShadowPass(VkCommandBuffer cmd, InstanceSlot& slot, uint32_t opaqueCount) {
+        if (shadowPipeline_ == VK_NULL_HANDLE) {
+            return;
+        }
+        for (int i = 0; i < cascades_.count; ++i) {
+            VkRenderingAttachmentInfo depth{};
+            depth.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+            depth.imageView = shadow_.layerViews[static_cast<size_t>(i)];
+            depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+            depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+            // Satu, bukan nol. Cascade memakai ortografik biasa — yang terjauh
+            // adalah satu di sana, kebalikan dari target viewport yang
+            // reversed-Z. Keduanya hidup berdampingan di renderer ini.
+            depth.clearValue.depthStencil = {1.0f, 0};
+
+            VkRenderingInfo info{};
+            info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+            info.renderArea.extent = {shadow_.resolution, shadow_.resolution};
+            info.layerCount = 1;
+            info.pDepthAttachment = &depth;
+            vkCmdBeginRendering(cmd, &info);
+
+            const VkViewport viewport{0.0f,
+                                      0.0f,
+                                      static_cast<float>(shadow_.resolution),
+                                      static_cast<float>(shadow_.resolution),
+                                      0.0f,
+                                      1.0f};
+            const VkRect2D scissor{{0, 0}, {shadow_.resolution, shadow_.resolution}};
+            vkCmdSetViewport(cmd, 0, 1, &viewport);
+            vkCmdSetScissor(cmd, 0, 1, &scissor);
+
+            // Hanya yang buram yang menjatuhkan bayangan. Kaca yang menghitamkan
+            // lantai di bawahnya adalah kesalahan yang lebih mencolok daripada
+            // kaca yang tidak menjatuhkan bayangan sama sekali.
+            if (opaqueCount > 0 && slot.buffer.IsValid()) {
+                const Cascade& cascade = cascades_.cascades[static_cast<size_t>(i)];
+                const BoxPush push{cascade.viewProjection};
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
+                vkCmdPushConstants(cmd, shadowLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                                   sizeof(BoxPush), &push);
+                const std::array<VkBuffer, 2> buffers{cubeBuffer_.Handle(), slot.buffer.Handle()};
+                const std::array<VkDeviceSize, 2> offsets{0, 0};
+                vkCmdBindVertexBuffers(cmd, 0, 2, buffers.data(), offsets.data());
+                vkCmdDraw(cmd, cubeVertexCount_, opaqueCount, 0, 0);
+            }
+            vkCmdEndRendering(cmd);
+        }
     }
 
     void RefreshTextureHandle() {
@@ -883,17 +1307,20 @@ private:
         for (InstanceSlot& slot : slots_) {
             slot.buffer.Destroy();
             slot.lineBuffer.Destroy();
+            slot.shadowUniform.Destroy();
         }
         cubeBuffer_.Destroy();
         for (VkPipeline* pipeline :
              {&prepassPipeline_, &opaquePipeline_, &transparentPipeline_, &gridPipeline_,
-              &linePipeline_}) {
+              &linePipeline_, &shadowPipeline_}) {
             if (*pipeline != VK_NULL_HANDLE) {
                 vkDestroyPipeline(device_.Handle(), *pipeline, nullptr);
                 *pipeline = VK_NULL_HANDLE;
             }
         }
-        for (VkPipelineLayout* layout : {&pipelineLayout_, &gridLayout_, &lineLayout_}) {
+        DestroyShadowMap();
+        for (VkPipelineLayout* layout :
+             {&pipelineLayout_, &gridLayout_, &lineLayout_, &shadowLayout_}) {
             if (*layout != VK_NULL_HANDLE) {
                 vkDestroyPipelineLayout(device_.Handle(), *layout, nullptr);
                 *layout = VK_NULL_HANDLE;
@@ -923,6 +1350,15 @@ private:
     VkPipelineLayout lineLayout_ = VK_NULL_HANDLE;
     VkPipeline linePipeline_ = VK_NULL_HANDLE;
     std::vector<LineVertex> lineVertices_;
+
+    ShadowMap shadow_;
+    VkDescriptorSetLayout shadowSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool shadowPool_ = VK_NULL_HANDLE;
+    VkPipelineLayout shadowLayout_ = VK_NULL_HANDLE;
+    VkPipeline shadowPipeline_ = VK_NULL_HANDLE;
+    ResourceId shadowId_ = kInvalidResource;
+    PassId shadowPassId_ = kInvalidPass;
+    CascadeSet cascades_;
 
     rhi::DynamicBuffer cubeBuffer_;
     uint32_t cubeVertexCount_ = 0;

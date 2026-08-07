@@ -136,7 +136,15 @@ CascadeSet ComputeCascades(const Camera& camera, float aspect, const Vec3& light
                           cascade.texelWorldSize;
         const Vec3 snappedCentre = Vec3(glm::inverse(lightGrid) * Vec4(centreInLight, 1.0f));
 
-        const Vec3 eye = snappedCentre - toLight * (sphere.radius + settings.casterPullback);
+        // **Plus, bukan minus.** `toLight` menunjuk dari permukaan ke cahaya,
+        // jadi kamera bayangan duduk di arah itu — di langit, memandang turun.
+        // Menguranginya menaruh kamera di sisi yang berlawanan, dan peta yang
+        // dihasilkan mengukur kedalaman dari arah yang salah. Yang terlihat
+        // bukan bayangan yang bergeser melainkan adegan yang seluruhnya gelap,
+        // dan tidak satu pun test yang sudah ada menangkapnya: bola pembatas,
+        // pengancingan texel, dan pembagian cascade semuanya tidak menyentuh
+        // letak matanya.
+        const Vec3 eye = snappedCentre + toLight * (sphere.radius + settings.casterPullback);
         const Mat4 view = LookAt(eye, snappedCentre, up);
         // Ortografik biasa, bukan reversed-Z. Reversed-Z menolong karena float
         // rapat di dekat nol sedangkan perspektif menumpuk objek jauh di sana;
