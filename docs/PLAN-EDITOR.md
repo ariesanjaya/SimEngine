@@ -1666,6 +1666,14 @@ tetap muat.
 di antara dua frame terlihat benar di kurva dan meleset saat diputar pada laju
 frame klipnya.
 
+Keduanya diperiksa di editor yang benar-benar dijalankan, bukan hanya lewat test:
+rangka empat bone dibuat, klip dibuat, track ditambah, kuncinya diseret ke frame
+14 (0,467 s pada 30 fps — penguncian frame terbukti), lalu Undo mengembalikannya
+tepat ke 0,000 s. Untuk event, sebuah penangan Lua ditulis ke
+`Assets/Editor/anim_events.lua`, terbaca lewat hot reload, dan pratinjau yang
+diputar menyalakannya empat kali berjarak persis 1,000 detik — sekali per
+lintasan klip satu detik.
+
 **Belum ada:** tab state machine graph, dan IK. Preview pada mesh skinned
 menunggu E8; `Pose::ComputeSkinning` sudah menghasilkan matriks yang tinggal
 diunggah.

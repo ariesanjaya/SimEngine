@@ -594,9 +594,12 @@ private:
                             ImVec2(sheetOrigin_.x + sheetSize_.x, sheetOrigin_.y + sheetSize_.y),
                             ImGui::GetColorU32(ImVec4(0.11f, 0.12f, 0.14f, 1.0f)));
 
+        // Legenda lebih dulu: ia menentukan sampai mana label penggaris boleh
+        // ditulis. Digambar sesudahnya, keduanya bertumpuk di sudut kanan dan
+        // dua-duanya tidak terbaca.
+        DrawLegend(draw);
         DrawTimeRuler(draw, rowHeight);
         DrawEventRow(draw, rowHeight);
-        DrawLegend(draw);
 
         float y = sheetOrigin_.y + rowHeight * 2.0f;
         HandleKeyDrag(hovered);
@@ -641,7 +644,12 @@ private:
             draw->AddLine(ImVec2(x, sheetOrigin_.y), ImVec2(x, sheetOrigin_.y + sheetSize_.y), tick);
             char label[32];
             std::snprintf(label, sizeof(label), "%.2fs", static_cast<double>(t));
-            draw->AddText(ImVec2(x + 3.0f, sheetOrigin_.y + 2.0f), text, label);
+            // Label yang akan menabrak legenda tidak ditulis. Garis tanda-nya
+            // tetap digambar — yang hilang hanya angkanya, dan angka yang
+            // bertumpuk dengan teks lain lebih buruk daripada tidak ada angka.
+            if (x + 3.0f + ImGui::CalcTextSize(label).x < legendLeft_) {
+                draw->AddText(ImVec2(x + 3.0f, sheetOrigin_.y + 2.0f), text, label);
+            }
         }
         draw->AddLine(ImVec2(sheetOrigin_.x, sheetOrigin_.y + rowHeight),
                       ImVec2(sheetOrigin_.x + sheetSize_.x, sheetOrigin_.y + rowHeight), tick);
@@ -663,6 +671,7 @@ private:
                           ImGui::GetColorU32(kGroupColors[static_cast<std::size_t>(group)]), name);
             x -= ImGui::GetFontSize() * 0.8f;
         }
+        legendLeft_ = x;
     }
 
     void DrawEventRow(ImDrawList* draw, float rowHeight) {
@@ -1166,6 +1175,7 @@ private:
     ImVec2 sheetOrigin_{0.0f, 0.0f};
     ImVec2 sheetSize_{0.0f, 0.0f};
     float sheetLabelWidth_ = 0.0f;
+    float legendLeft_ = FLT_MAX;
 };
 
 }  // namespace
