@@ -268,11 +268,31 @@ Tiga hal ditemukan dengan menjalankannya, bukan dengan membaca kode:
   Sekarang `InvisibleButton` yang menerima seretnya, dan gambarnya digambar
   lewat draw list di rect yang sama.
 
-Diverifikasi lewat XTEST pada Debug build: material dibuat, tab **Preview**
-menampilkan bola ber-shading, mengubah **Base Metalness** 0 → 1 lewat node
-Constant mengubah bola menjadi logam, mengganti bentuk dan menggeser sudut
-cahaya bekerja, seret mengorbit kamera, dan cache disk terisi empat berkas
-(dua material × dua tahap). **Nol pesan validation layer.**
+**Preview bukan tab, melainkan area tetap di bawah tab.** Sebagai tab ia hilang
+tepat ketika ia paling berguna — saat orang menyunting parameter di Details atau
+menelusuri galat di Compiled Slang — dan menyunting material tanpa melihat
+akibatnya adalah bolak-balik yang tidak perlu dilakukan siapa pun.
+
+**Kiri menggerakkan cahaya, kanan mengorbit kamera; objeknya tidak pernah
+diputar.** Keduanya menjawab pertanyaan yang berbeda: memindahkan cahaya
+memperlihatkan bentuk sorotan sebuah material, sedangkan mengorbit
+memperlihatkan bagaimana rupanya berubah terhadap sudut pandang — dan untuk
+material anisotropik atau ber-coat, yang kedua tidak bisa disimpulkan dari yang
+pertama. Memutar objek terlihat sama dengan mengorbit kamera tapi ia menggeser
+bingkai tangent bersamanya, jadi arah anisotropi ikut berputar dan justru
+menyembunyikan hal yang sedang diperiksa.
+
+Kedua sumbu cahaya sempat terbalik — seret ke kiri memindahkan sorotan ke kanan.
+Itu bukan kesalahan yang terlihat dari kode: yang menentukan arahnya adalah letak
+kamera, bukan rumus di baris yang bersangkutan. Orbit memang berlawanan dengan
+kursor (yang diseret adalah objeknya), cahaya harus mengikutinya.
+
+Diverifikasi lewat XTEST pada Debug build: material dibuat, preview menampilkan
+bola ber-shading dan tetap terlihat saat tab berpindah ke Compiled Slang,
+mengubah **Base Metalness** 0 → 1 lewat node Constant mengubah bola menjadi
+logam, mengganti bentuk bekerja, seret kiri memindahkan sorotan searah kursor,
+seret kanan mengorbit kamera, dan cache disk terisi dua berkas per material.
+**Nol pesan validation layer.**
 
 ### E8.3 — Lighting & shadow
 IBL (prefilter env + DFG LUT), directional light dengan cascaded shadow map,

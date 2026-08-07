@@ -47,6 +47,16 @@ constexpr ImVec4 kGroupColor(0.45f, 0.55f, 0.70f, 1.0f);
 /// dipecah.
 const std::vector<ParameterOverride> kNoOverrides;
 
+/// Melipat sudut ke (-pi, pi].
+///
+/// Yaw cahaya diseret, dan seretan tidak punya ujung. Menjepitnya alih-alih
+/// melipat membuat cahaya berhenti di belakang objek — tepat pada sudut yang
+/// paling dicari orang saat memeriksa rim light.
+float WrapAngle(float radians) {
+    const float wrapped = std::fmod(radians + kPi, kTwoPi);
+    return wrapped < 0.0f ? wrapped + kPi : wrapped - kPi;
+}
+
 constexpr float kDefaultGroupSize = 260.0f;
 constexpr float kMinGroupSize = 40.0f;
 /// Jarak antara tepi grup dan node terluar yang dibungkusnya.
@@ -863,16 +873,43 @@ private:
 
     // --- panel samping ------------------------------------------------------
 
+    /// Sisi kanan: tab di atas, preview **tetap** di bawah.
+    ///
+    /// Preview sengaja bukan tab. Sebagai tab ia hilang tepat ketika ia paling
+    /// berguna — saat orang menyunting parameter di Details atau menelusuri
+    /// galat di Compiled Slang — dan menyunting material tanpa melihat akibatnya
+    /// adalah bolak-balik yang tidak perlu dilakukan siapa pun.
     void DrawSidePanel(EditorContext& context, bool withDetails) {
+        const float available = ImGui::GetContentRegionAvail().y;
+        const float previewHeight = PreviewHeight(available);
+        // Tab mendapat sisa ruangnya, preview mendapat bagian bawah yang tetap.
+        // Urutannya penting: child pertama harus tahu tingginya, dan itu hanya
+        // bisa dihitung dari tinggi preview yang sudah ditentukan lebih dulu.
+        if (ImGui::BeginChild("##sidetabs", ImVec2(0.0f, available - previewHeight))) {
+            DrawSideTabs(withDetails);
+        }
+        ImGui::EndChild();
+
+        ImGui::Separator();
+        DrawPreview(context);
+    }
+
+    /// Tinggi area preview: persegi mengikuti lebar panel, tapi tidak boleh
+    /// memakan lebih dari separuh tingginya — panel yang diseret pendek harus
+    /// tetap menyisakan ruang untuk tab di atasnya.
+    float PreviewHeight(float available) const {
+        const float width = ImGui::GetContentRegionAvail().x;
+        const float controls = ImGui::GetFrameHeightWithSpacing() * 2.0f;
+        return std::clamp(width + controls, ImGui::GetFontSize() * 8.0f,
+                          std::max(available * 0.5f, ImGui::GetFontSize() * 8.0f));
+    }
+
+    void DrawSideTabs(bool withDetails) {
         if (!ImGui::BeginTabBar("##side")) {
             return;
         }
         if (withDetails && ImGui::BeginTabItem("Details")) {
             DrawDetails();
-            ImGui::EndTabItem();
-        }
-        if (ImGui::BeginTabItem("Preview")) {
-            DrawPreview(context);
             ImGui::EndTabItem();
         }
         if (ImGui::BeginTabItem("Compiled Slang")) {
@@ -1096,11 +1133,13 @@ private:
         desc.width = static_cast<uint32_t>(width);
         desc.height = static_cast<uint32_t>(height);
         desc.shape = previewShape_;
-        desc.yaw = previewYaw_;
-        desc.pitch = previewPitch_;
+        desc.cameraYaw = previewYaw_;
+        desc.cameraPitch = previewPitch_;
         desc.distance = previewDistance_;
-        const float lightYaw = previewLightYaw_;
-        desc.lightDirection = Vec3(std::sin(lightYaw) * 0.75f, 0.6f, std::cos(lightYaw) * 0.75f);
+        const float cosPitch = std::cos(previewLightPitch_);
+        desc.lightDirection = Vec3(std::sin(previewLightYaw_) * cosPitch,
+                                   std::sin(previewLightPitch_),
+                                   std::cos(previewLightYaw_) * cosPitch);
         desc.lightRadiance = Vec3(previewExposure_);
         desc.time = previewTime_;
         previewTime_ += context.deltaSeconds;
@@ -1119,7 +1158,9 @@ private:
         // dan yang gagal diam-diam justru satu-satunya interaksi di sini.
         const ImVec2 origin = ImGui::GetCursorScreenPos();
         const ImVec2 size(width, height);
-        ImGui::InvisibleButton("##orbit", size, ImGuiButtonFlags_MouseButtonLeft);
+        ImGui::InvisibleButton("##view", size,
+                               ImGuiButtonFlags_MouseButtonLeft |
+                                   ImGuiButtonFlags_MouseButtonRight);
         const bool active = ImGui::IsItemActive();
         const bool hovered = ImGui::IsItemHovered();
         ImGui::GetWindowDrawList()->AddImage(
@@ -1133,26 +1174,49 @@ private:
                 previewDistance_ = std::clamp(previewDistance_ - wheel * 0.25f, 1.6f, 12.0f);
             }
         }
-        // Orbit dengan menyeret di atas gambarnya. Kamera yang mengorbit, bukan
-        // objek yang berputar: arah cahaya tetap terhadap dunia, jadi memutar
-        // preview memperlihatkan bagaimana material menangkap cahaya dari sudut
-        // lain — yang justru yang ingin dilihat.
+
+        // **Kiri menggerakkan cahaya, kanan menggerakkan kamera.** Keduanya
+        // dipisah karena keduanya menjawab pertanyaan yang berbeda: memindahkan
+        // cahaya memperlihatkan bentuk sorotan sebuah material, sedangkan
+        // mengorbit memperlihatkan bagaimana rupanya berubah terhadap sudut
+        // pandang — dan untuk material anisotropik atau ber-coat, yang kedua
+        // itulah yang tidak bisa disimpulkan dari yang pertama.
+        //
+        // Objeknya sendiri tidak pernah diputar. Memutar objek terlihat sama
+        // dengan mengorbit kamera, tapi ia menggeser bingkai tangent bersamanya
+        // — jadi arah anisotropi ikut berputar dan justru menyembunyikan hal
+        // yang sedang diperiksa.
         if (active) {
             const ImVec2 drag = ImGui::GetIO().MouseDelta;
-            previewYaw_ -= drag.x * 0.01f;
-            // Dibatasi sedikit di bawah kutub: tepat di kutub arah "atas" dan
-            // arah pandang sejajar, dan LookAt menghasilkan matriks yang tidak
-            // terdefinisi — preview berkedip hitam alih-alih memberi pesan.
-            previewPitch_ = std::clamp(previewPitch_ + drag.y * 0.01f, -1.5f, 1.5f);
+            if (ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
+                previewYaw_ -= drag.x * 0.01f;
+                // Dibatasi sedikit di bawah kutub: tepat di kutub arah "atas"
+                // dan arah pandang sejajar, dan LookAt menghasilkan matriks yang
+                // tidak terdefinisi — preview berkedip hitam alih-alih memberi
+                // pesan.
+                previewPitch_ = std::clamp(previewPitch_ + drag.y * 0.01f, -1.5f, 1.5f);
+            } else {
+                // Cahaya mengikuti kursor, bukan berlawanan dengannya. Kedua
+                // tandanya sempat terbalik — seret ke kiri memindahkan sorotan
+                // ke kanan — dan itu bukan kesalahan yang bisa dilihat dari
+                // kode: yang menentukan arahnya adalah letak kamera, bukan
+                // rumus di baris ini.
+                //
+                // Berbeda dengan orbit di atas, yang memang berlawanan: di sana
+                // yang diseret adalah objeknya, jadi kamera bergerak ke arah
+                // sebaliknya.
+                previewLightYaw_ = WrapAngle(previewLightYaw_ + drag.x * 0.01f);
+                previewLightPitch_ =
+                    std::clamp(previewLightPitch_ - drag.y * 0.01f, -1.45f, 1.45f);
+            }
         }
     }
 
     /// Dua baris, bukan satu.
     ///
-    /// Panel samping ini bisa diseret sempit, dan empat kontrol berlabel dalam
-    /// satu baris membuat label terakhir terpotong tepat pada lebar yang
-    /// dipakai orang. Dua baris tetap terbaca sampai panel jauh lebih sempit
-    /// daripada gambar preview-nya sendiri.
+    /// Panel samping ini bisa diseret sempit, dan beberapa kontrol berlabel
+    /// dalam satu baris membuat label terakhir terpotong tepat pada lebar yang
+    /// dipakai orang.
     void DrawPreviewControls() {
         const float spacing = ImGui::GetStyle().ItemSpacing.x;
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.0f);
@@ -1162,18 +1226,27 @@ private:
             previewShape_ = static_cast<render::PreviewShape>(shape);
         }
         ImGui::SameLine();
-        if (ImGui::Button("Reset View")) {
-            previewYaw_ = 0.0f;
-            previewPitch_ = 0.2f;
-            previewDistance_ = 3.2f;
+        if (ImGui::Button("Reset")) {
+            ResetPreviewView();
         }
-
-        const float half = std::max((ImGui::GetContentRegionAvail().x - spacing) * 0.5f, 40.0f);
-        ImGui::SetNextItemWidth(half - ImGui::CalcTextSize("Light").x - spacing);
-        ImGui::SliderAngle("Light", &previewLightYaw_, -180.0f, 180.0f, "%.0f°");
         ImGui::SameLine();
-        ImGui::SetNextItemWidth(half - ImGui::CalcTextSize("Exposure").x - spacing);
+        // Pembagian tombol mouse ditulis di tempat, bukan disembunyikan di
+        // tooltip: kontrol yang harus ditemukan lebih dulu dengan menebak
+        // adalah kontrol yang sebagian orang tidak akan pernah temukan.
+        ImGui::TextColored(kHintColor, "drag: light · right-drag: orbit");
+
+        ImGui::SetNextItemWidth(std::max(
+            ImGui::GetContentRegionAvail().x - ImGui::CalcTextSize("Exposure").x - spacing * 2.0f,
+            ImGui::GetFontSize() * 4.0f));
         ImGui::SliderFloat("Exposure", &previewExposure_, 0.5f, 8.0f, "%.1f");
+    }
+
+    void ResetPreviewView() {
+        previewYaw_ = 0.0f;
+        previewPitch_ = 0.2f;
+        previewDistance_ = 3.2f;
+        previewLightYaw_ = 0.7f;
+        previewLightPitch_ = 0.6f;
     }
 
     /// Mengompilasi ulang shader preview hanya ketika sumbernya benar-benar
@@ -1557,6 +1630,7 @@ private:
     float previewPitch_ = 0.2f;
     float previewDistance_ = 3.2f;
     float previewLightYaw_ = 0.7f;
+    float previewLightPitch_ = 0.6f;
     float previewExposure_ = 3.0f;
     float previewTime_ = 0.0f;
 

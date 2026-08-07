@@ -42,9 +42,16 @@ struct MaterialPreviewDesc {
     uint32_t width = 0;
     uint32_t height = 0;
     PreviewShape shape = PreviewShape::Sphere;
-    /// Rotasi objek, radian.
-    float yaw = 0.0f;
-    float pitch = 0.0f;
+
+    /// Orbit kamera mengelilingi objek yang diam, radian.
+    ///
+    /// Objeknya tidak pernah diputar. Arah cahaya diberikan terpisah dan tidak
+    /// ikut kamera, jadi mengorbit memperlihatkan permukaan yang sama dari sudut
+    /// pandang lain sementara cahayanya tetap di tempatnya — itulah cara melihat
+    /// bagaimana sebuah material berubah rupa terhadap sudut pandang, yang untuk
+    /// material anisotropik dan ber-coat justru bagian yang paling penting.
+    float cameraYaw = 0.0f;
+    float cameraPitch = 0.0f;
     /// Jarak kamera dari pusat objek.
     float distance = 3.0f;
     /// Arah **dari permukaan ke cahaya**, tidak harus ternormalisasi.

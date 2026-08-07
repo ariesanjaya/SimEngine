@@ -910,8 +910,11 @@ Diverifikasi tidak terjadi di sini: `[257, 145]` sebelum dan sesudah putaran
 penuh simpan → tutup → buka → simpan. Grup dibuat dari seleksi lewat tombol
 toolbar maupun **Ctrl+G**, dan judulnya diganti dengan klik ganda di tempat.
 
-**Preview sudah ada sejak E8.2**, di tab **Preview** panel ini: bentuk
-sphere/cube/plane, sudut cahaya, eksposur, dan orbit kamera dengan menyeret.
+**Preview sudah ada sejak E8.2**, sebagai area tetap di bawah tab panel ini —
+bukan sebagai tab, supaya ia tidak hilang tepat ketika ia paling berguna:
+saat parameter sedang disunting di Details atau galat sedang ditelusuri di
+Compiled Slang. Isinya bentuk sphere/cube/plane, eksposur, seret kiri untuk
+memindahkan cahaya, seret kanan untuk mengorbit kamera, dan roda untuk zoom.
 
 Ia sempat terhalang, dan catatan lamanya menyebut jalan keluarnya "membuat
 instance KEDUA `IViewportRenderer` lewat pabrik yang sudah ada". Itu benar untuk

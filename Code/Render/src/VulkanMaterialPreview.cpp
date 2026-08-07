@@ -541,14 +541,13 @@ private:
     void UpdateUniforms(const MaterialPreviewDesc& desc) {
         const float aspect =
             static_cast<float>(target_.Width()) / static_cast<float>(target_.Height());
-        // Kamera mengorbit objek, bukan objek yang berputar: itu membuat arah
-        // cahaya tetap terhadap dunia, jadi memutar preview memperlihatkan
-        // bagaimana material menangkap cahaya dari sudut lain — yang justru
-        // yang ingin dilihat orang.
-        const float cosPitch = std::cos(desc.pitch);
-        const Vec3 eye{desc.distance * cosPitch * std::sin(desc.yaw),
-                       desc.distance * std::sin(desc.pitch),
-                       desc.distance * cosPitch * std::cos(desc.yaw)};
+        // Kamera mengorbit, objeknya diam. Arah cahaya diberikan terpisah dan
+        // tidak ikut kamera, jadi mengorbit memperlihatkan permukaan yang sama
+        // dari sudut pandang lain sementara cahayanya tetap di tempatnya.
+        const float cosPitch = std::cos(desc.cameraPitch);
+        const Vec3 eye{desc.distance * cosPitch * std::sin(desc.cameraYaw),
+                       desc.distance * std::sin(desc.cameraPitch),
+                       desc.distance * cosPitch * std::cos(desc.cameraYaw)};
         const Mat4 view = LookAt(eye, Vec3(0.0f), Vec3(0.0f, 1.0f, 0.0f));
         const Mat4 projection = PerspectiveReversedZ(40.0f * kDegToRad, aspect, 0.05f, 100.0f);
 
@@ -561,7 +560,10 @@ private:
         frame.lightRadiance = desc.lightRadiance;
         frameUniform_.Write(&frame, sizeof(frame));
 
-        ObjectParams object;
+        // Identitas, dan sengaja tetap diunggah. Objeknya tidak pernah diputar —
+        // kameranya yang mengorbit — tapi descriptor `ObjectParams` tetap ada di
+        // modul, dan buffer yang tidak pernah ditulis berisi sampah.
+        const ObjectParams object;
         objectUniform_.Write(&object, sizeof(object));
 
         if (parametersDirty_ && !parameters_.empty() && materialUniform_.IsValid()) {
