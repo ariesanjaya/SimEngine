@@ -11,8 +11,22 @@ struct GpuLight {
     vec4 positionInvRangeSq;  // xyz posisi, w 1/range^2
     vec4 directionCosOuter;   // xyz arah pancar, w kosinus sudut luar
     vec4 colorCosInner;       // rgb warna * intensitas, w kosinus sudut dalam
-    vec4 kind;                // x: 0 point / 1 spot, y: jarak minimum kuadrat
+    // x: 0 point / 1 spot, y: jarak minimum kuadrat,
+    // z: indeks entri atlas pertama (-1 tanpa bayangan), w: bias normal (dunia)
+    vec4 kind;
 };
+
+/// Satu muka bayangan di dalam atlas.
+struct GpuShadowFace {
+    mat4 viewProjection;
+    vec4 tile;  // xy sudut kiri-atas dalam UV atlas, zw ukurannya
+};
+
+layout(set = 0, binding = 5) readonly buffer ShadowFaces {
+    GpuShadowFace faces[];
+} shadowFaces;
+
+layout(set = 0, binding = 6) uniform sampler2DShadow shadowAtlas;
 
 layout(set = 0, binding = 2) readonly buffer Lights {
     GpuLight lights[];
@@ -53,6 +67,69 @@ float distanceAttenuation(float distanceSq, float invRangeSq, float minDistanceS
     // daripada permukaan lampunya sendiri. Tanpa batas ini lampu yang tertanam
     // di dalam geometri — hal yang lazim — menghasilkan bercak putih hangus.
     return (smoothFactor * smoothFactor) / max(distanceSq, minDistanceSq);
+}
+
+/// Muka atlas untuk sebuah arah dari lampu ke permukaan.
+///
+/// Spot hanya punya satu muka. Point punya enam, dan yang dipilih adalah muka
+/// yang sumbunya paling searah — sama dengan cara perangkat keras memilih muka
+/// cubemap, hanya dilakukan tangan karena atlas bukan cubemap.
+int shadowFaceOf(vec3 fromLight, bool spot) {
+    if (spot) {
+        return 0;
+    }
+    vec3 a = abs(fromLight);
+    if (a.x >= a.y && a.x >= a.z) {
+        return fromLight.x > 0.0 ? 0 : 1;
+    }
+    if (a.y >= a.z) {
+        return fromLight.y > 0.0 ? 2 : 3;
+    }
+    return fromLight.z > 0.0 ? 4 : 5;
+}
+
+/// Faktor bayangan sebuah lampu punctual. 1 berarti tersinari penuh.
+float sampleAtlasShadow(GpuLight light, vec3 worldPosition, vec3 normal, vec3 fromLight) {
+    int first = int(light.kind.z);
+    if (first < 0) {
+        return 1.0;
+    }
+    // **Bias normal, sama dengan cascade.** Di sini ia dalam satuan dunia dan
+    // dihitung CPU dari ukuran ubin dan jangkauan lampu, karena ubin yang lebih
+    // kecil menuntut pergeseran yang lebih besar — dan ukuran ubin berubah
+    // setiap kali lampunya mendekat.
+    vec3 offset = normal * light.kind.w;
+    int face = first + shadowFaceOf(fromLight, light.kind.x > 0.5);
+    GpuShadowFace entry = shadowFaces.faces[face];
+
+    vec4 clip = entry.viewProjection * vec4(worldPosition + offset, 1.0);
+    if (clip.w <= 0.0) {
+        return 1.0;
+    }
+    vec3 projected = clip.xyz / clip.w;
+    vec2 local = projected.xy * 0.5 + 0.5;
+    if (any(lessThan(local, vec2(0.0))) || any(greaterThan(local, vec2(1.0))) ||
+        projected.z <= 0.0 || projected.z >= 1.0) {
+        // Di luar frustum muka ini berarti tidak ada yang menghalangi. Untuk
+        // spot itu daerah di luar berkasnya, yang toh sudah nol karena kerucut.
+        return 1.0;
+    }
+
+    // Dijepit ke dalam ubin dengan sisa setengah texel: PCF mengambil tetangga,
+    // dan tetangga di tepi ubin adalah milik lampu lain — bayangan lampu
+    // sebelah lalu bocor masuk sebagai garis di tepi berkas.
+    vec2 texel = 1.0 / vec2(textureSize(shadowAtlas, 0));
+    vec2 inset = texel * 0.5 / max(entry.tile.zw, vec2(1e-6));
+    local = clamp(local, inset, vec2(1.0) - inset);
+    vec2 uv = entry.tile.xy + local * entry.tile.zw;
+
+    float sum = 0.0;
+    for (int y = -1; y <= 1; ++y) {
+        for (int x = -1; x <= 1; ++x) {
+            sum += texture(shadowAtlas, vec3(uv + vec2(x, y) * texel, projected.z));
+        }
+    }
+    return sum / 9.0;
 }
 
 /// Cluster untuk sebuah fragmen. `viewDepth` jarak sepanjang sumbu pandang.
@@ -113,6 +190,9 @@ vec3 accumulateClusteredLights(vec2 fragCoord, vec3 worldPosition, vec3 normal, 
                                0.0, 1.0);
             attenuation *= cone * cone;
         }
+        // Bayangan diambil terakhir: ia yang paling mahal, dan setiap
+        // penolakan di atas menghematnya utuh.
+        attenuation *= sampleAtlasShadow(light, worldPosition, normal, -toLight);
         sum += light.colorCosInner.rgb * (ndotl * attenuation);
     }
     return sum;

@@ -9,6 +9,7 @@
 #include "Sim/Render/FrameGraph.h"
 #include "Sim/Render/Frustum.h"
 #include "Sim/Render/LightCluster.h"
+#include "Sim/Render/ShadowAtlas.h"
 #include "Sim/Render/ShadowCascades.h"
 
 #include <algorithm>
@@ -82,6 +83,14 @@ struct GpuLight {
 };
 static_assert(sizeof(GpuLight) == 64, "GpuLight harus cocok dengan std430-nya");
 
+/// Cermin dari `GpuShadowFace` di Shaders/cluster_common.glsl. std430.
+struct GpuShadowFace {
+    Mat4 viewProjection{1.0f};
+    /// xy sudut kiri-atas ubin dalam UV atlas, zw ukurannya.
+    Vec4 tile{0.0f};
+};
+static_assert(sizeof(GpuShadowFace) == 80, "GpuShadowFace harus cocok dengan std430-nya");
+
 /// Peta bayangan cascade: satu image D32 berlapis, satu lapis per cascade.
 ///
 /// **Larik berlapis, bukan atlas di satu tekstur besar.** Atlas menuntut shader
@@ -145,10 +154,19 @@ constexpr Vec4 kSelectedColor{1.0f, 0.62f, 0.20f, 1.0f};
 
 constexpr VkFormat kShadowFormat = VK_FORMAT_D32_SFLOAT;
 constexpr uint32_t kShadowResolution = 2048;
+/// Atlas point/spot. Terpisah dari cascade karena keduanya punya bentuk yang
+/// berbeda — cascade larik berlapis dengan resolusi seragam, atlas satu bidang
+/// dengan ubin beragam ukuran — dan menyatukannya berarti salah satunya harus
+/// mengalah pada bentuk yang bukan miliknya.
+constexpr uint32_t kAtlasResolution = 2048;
 /// Kekuatan bias normal, dalam satuan texel dunia cascade yang bersangkutan.
 /// Bukan angka ajaib per-cascade: ia dikalikan `texelWorldSize`, jadi cascade
 /// yang lebih kasar otomatis mendapat pergeseran yang lebih besar.
 constexpr float kNormalBiasTexels = 1.5f;
+/// Bias normal atlas, dalam satuan texel ubin. Lebih besar daripada milik
+/// cascade karena ubin atlas jauh lebih kecil dan frustumnya perspektif — texel
+/// di ujung jauh sebuah spot mewakili wilayah yang jauh lebih lebar.
+constexpr float kAtlasNormalBiasTexels = 3.0f;
 
 std::vector<uint32_t> ReadSpirv(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
@@ -256,7 +274,8 @@ public:
         if (!target_.Create(device_, desc.initialWidth, desc.initialHeight)) {
             return false;
         }
-        if (!CreateCube() || !CreateShadowMap() || !CreatePipelines(desc.shaderDirectory) ||
+        if (!CreateCube() || !CreateShadowMap() || !CreateShadowAtlas() ||
+            !CreatePipelines(desc.shaderDirectory) ||
             !CreateOverlayPipelines(desc.shaderDirectory)) {
             return false;
         }
@@ -272,7 +291,9 @@ public:
                 !slot.clusterRangeBuffer.Create(device_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                                 sizeof(uint32_t) * 2 * 4096) ||
                 !slot.clusterIndexBuffer.Create(device_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                                sizeof(uint32_t) * 8192)) {
+                                                sizeof(uint32_t) * 8192) ||
+                !slot.shadowFaceBuffer.Create(device_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                              sizeof(GpuShadowFace) * 64)) {
                 return false;
             }
         }
@@ -281,6 +302,7 @@ public:
         }
         AdoptTargetLayout();
         AdoptShadowLayout();
+        AdoptAtlasLayout();
         RefreshTextureHandle();
         SIM_INFO("Render", "VulkanRenderer ready ({}x{}, frame graph, reversed-Z)", target_.Width(),
                  target_.Height());
@@ -414,15 +436,20 @@ public:
                                             VK_IMAGE_ASPECT_DEPTH_BIT});
         executor_.Bind(shadowId_, BoundImage{shadow_.image, shadow_.arrayView,
                                              VK_IMAGE_ASPECT_DEPTH_BIT});
+        executor_.Bind(atlasId_, BoundImage{atlas_.image, atlas_.view,
+                                            VK_IMAGE_ASPECT_DEPTH_BIT});
 
         const auto opaqueCount = static_cast<uint32_t>(opaque_.size());
         const auto transparentCount = static_cast<uint32_t>(transparent_.size());
         const BoxPush push{viewProj};
 
         const Mat4 invViewProj = glm::inverse(viewProj);
-        std::array<FrameGraphExecutor::Recorder, 6> recorders{};
+        std::array<FrameGraphExecutor::Recorder, 7> recorders{};
         recorders[shadowPassId_] = [&](VkCommandBuffer command) {
             RecordShadowPass(command, slot, casterCount_);
+        };
+        recorders[atlasPassId_] = [&](VkCommandBuffer command) {
+            RecordAtlasPass(command, slot, casterCount_);
         };
         recorders[gridId_] = [&](VkCommandBuffer command) {
             // Grid membersihkan warna dan menjadi latar. Ia tidak menyentuh depth
@@ -513,6 +540,7 @@ private:
         rhi::DynamicBuffer lightBuffer;
         rhi::DynamicBuffer clusterRangeBuffer;
         rhi::DynamicBuffer clusterIndexBuffer;
+        rhi::DynamicBuffer shadowFaceBuffer;
         VkDescriptorSet shadowSet = VK_NULL_HANDLE;
         uint64_t submitId = 0;
     };
@@ -531,9 +559,13 @@ private:
         // dibaca fragment shader frame sebelumnya, dan `None` berarti "tidak
         // ada yang perlu ditunggu".
         shadowId_ = graph_.Import("shadow-cascades", Access::ShaderRead);
+        atlasId_ = graph_.Import("shadow-atlas", Access::ShaderRead);
 
         shadowPassId_ = graph_.AddPass("shadow-cascades");
         graph_.Write(shadowPassId_, shadowId_, Access::DepthWrite);
+
+        atlasPassId_ = graph_.AddPass("shadow-atlas");
+        graph_.Write(atlasPassId_, atlasId_, Access::DepthWrite);
 
         gridId_ = graph_.AddPass("grid");
         graph_.Write(gridId_, colorId_, Access::ColorWrite);
@@ -544,11 +576,13 @@ private:
         opaqueId_ = graph_.AddPass("forward-opaque");
         graph_.Read(opaqueId_, depthId_, Access::DepthWrite);
         graph_.Read(opaqueId_, shadowId_, Access::ShaderRead);
+        graph_.Read(opaqueId_, atlasId_, Access::ShaderRead);
         graph_.Write(opaqueId_, colorId_, Access::ColorWrite);
 
         transparentId_ = graph_.AddPass("forward-transparent");
         graph_.Read(transparentId_, depthId_, Access::DepthWrite);
         graph_.Read(transparentId_, shadowId_, Access::ShaderRead);
+        graph_.Read(transparentId_, atlasId_, Access::ShaderRead);
         graph_.Write(transparentId_, colorId_, Access::ColorWrite);
 
         linesId_ = graph_.AddPass("lines");
@@ -559,6 +593,7 @@ private:
         // Peta bayangan harus kembali ke keadaan awalnya, karena itulah keadaan
         // yang diandaikan impor frame berikutnya.
         graph_.SetOutput(shadowId_, Access::ShaderRead);
+        graph_.SetOutput(atlasId_, Access::ShaderRead);
         compiled_ = graph_.Compile();
     }
 
@@ -1162,7 +1197,7 @@ private:
         samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
         SIM_VK_CHECK(vkCreateSampler(device_.Handle(), &samplerInfo, nullptr, &shadow_.sampler));
 
-        const std::array<VkDescriptorSetLayoutBinding, 5> bindings{
+        const std::array<VkDescriptorSetLayoutBinding, 7> bindings{
             VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
@@ -1172,6 +1207,10 @@ private:
             VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{6, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
         };
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
@@ -1185,9 +1224,9 @@ private:
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                  static_cast<uint32_t>(slots_.size())},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                 static_cast<uint32_t>(slots_.size())},
+                                 static_cast<uint32_t>(slots_.size()) * 2},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                 static_cast<uint32_t>(slots_.size()) * 3},
+                                 static_cast<uint32_t>(slots_.size()) * 4},
         };
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1197,6 +1236,123 @@ private:
         SIM_VK_CHECK(
             vkCreateDescriptorPool(device_.Handle(), &poolInfo, nullptr, &shadowPool_));
         return true;
+    }
+
+    bool CreateShadowAtlas() {
+        atlasSettings_.resolution = kAtlasResolution;
+        atlasSettings_.maxTile = 512;
+        atlasSettings_.minTile = 128;
+
+        VmaAllocationCreateInfo allocation{};
+        allocation.usage = VMA_MEMORY_USAGE_AUTO;
+
+        VkImageCreateInfo imageInfo{};
+        imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        imageInfo.imageType = VK_IMAGE_TYPE_2D;
+        imageInfo.format = kShadowFormat;
+        imageInfo.extent = {kAtlasResolution, kAtlasResolution, 1};
+        imageInfo.mipLevels = 1;
+        imageInfo.arrayLayers = 1;
+        imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+        imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+        imageInfo.usage =
+            VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vmaCreateImage(device_.Allocator(), &imageInfo, &allocation, &atlas_.image,
+                           &atlas_.allocation, nullptr) != VK_SUCCESS) {
+            SIM_ERROR("Render", "cannot allocate the shadow atlas");
+            return false;
+        }
+
+        VkImageViewCreateInfo viewInfo{};
+        viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        viewInfo.image = atlas_.image;
+        viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        viewInfo.format = kShadowFormat;
+        viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        viewInfo.subresourceRange.levelCount = 1;
+        viewInfo.subresourceRange.layerCount = 1;
+        SIM_VK_CHECK(vkCreateImageView(device_.Handle(), &viewInfo, nullptr, &atlas_.view));
+
+        VkSamplerCreateInfo samplerInfo{};
+        samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+        samplerInfo.magFilter = VK_FILTER_LINEAR;
+        samplerInfo.minFilter = VK_FILTER_LINEAR;
+        samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+        // CLAMP_TO_EDGE, dan penjepitan di dalam ubin dilakukan shader. Sampler
+        // hanya tahu batas atlas, bukan batas ubin — dan tepi ubin adalah milik
+        // lampu lain, yang bocor masuk sebagai garis kalau tidak dijepit.
+        samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+        samplerInfo.compareEnable = VK_TRUE;
+        samplerInfo.compareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+        samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
+        SIM_VK_CHECK(vkCreateSampler(device_.Handle(), &samplerInfo, nullptr, &atlas_.sampler));
+        return true;
+    }
+
+    void DestroyShadowAtlas() {
+        if (atlas_.sampler != VK_NULL_HANDLE) {
+            vkDestroySampler(device_.Handle(), atlas_.sampler, nullptr);
+            atlas_.sampler = VK_NULL_HANDLE;
+        }
+        if (atlas_.view != VK_NULL_HANDLE) {
+            vkDestroyImageView(device_.Handle(), atlas_.view, nullptr);
+            atlas_.view = VK_NULL_HANDLE;
+        }
+        if (atlas_.image != VK_NULL_HANDLE) {
+            vmaDestroyImage(device_.Allocator(), atlas_.image, atlas_.allocation);
+            atlas_.image = VK_NULL_HANDLE;
+            atlas_.allocation = VK_NULL_HANDLE;
+        }
+    }
+
+    void RecordAtlasPass(VkCommandBuffer cmd, InstanceSlot& slot, uint32_t casterCount) {
+        VkRenderingAttachmentInfo depth{};
+        depth.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO;
+        depth.imageView = atlas_.view;
+        depth.imageLayout = VK_IMAGE_LAYOUT_DEPTH_ATTACHMENT_OPTIMAL;
+        depth.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        depth.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        depth.clearValue.depthStencil = {1.0f, 0};
+
+        VkRenderingInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_RENDERING_INFO;
+        info.renderArea.extent = {kAtlasResolution, kAtlasResolution};
+        info.layerCount = 1;
+        info.pDepthAttachment = &depth;
+        // Satu BeginRendering untuk seluruh atlas, lalu viewport dan scissor
+        // dipindah per ubin. Memulai rendering per ubin berarti satu clear per
+        // ubin pada image yang sama — dan clear yang kedua menghapus yang
+        // pertama kalau areanya kebetulan bertemu.
+        vkCmdBeginRendering(cmd, &info);
+
+        if (shadowPipeline_ != VK_NULL_HANDLE && casterCount > 0 && slot.buffer.IsValid()) {
+            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
+            const std::array<VkBuffer, 2> buffers{cubeBuffer_.Handle(), slot.buffer.Handle()};
+            const std::array<VkDeviceSize, 2> offsets{0, 0};
+            vkCmdBindVertexBuffers(cmd, 0, 2, buffers.data(), offsets.data());
+
+            for (const ShadowAtlasEntry& entry : atlasAllocation_.entries) {
+                const VkViewport viewport{static_cast<float>(entry.x),
+                                          static_cast<float>(entry.y),
+                                          static_cast<float>(entry.size),
+                                          static_cast<float>(entry.size),
+                                          0.0f,
+                                          1.0f};
+                const VkRect2D scissor{{static_cast<int32_t>(entry.x),
+                                        static_cast<int32_t>(entry.y)},
+                                       {entry.size, entry.size}};
+                vkCmdSetViewport(cmd, 0, 1, &viewport);
+                vkCmdSetScissor(cmd, 0, 1, &scissor);
+                const BoxPush push{entry.viewProjection};
+                vkCmdPushConstants(cmd, shadowLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                                   sizeof(BoxPush), &push);
+                vkCmdDraw(cmd, cubeVertexCount_, casterCount, 0, 0);
+            }
+        }
+        vkCmdEndRendering(cmd);
     }
 
     bool WriteShadowDescriptors() {
@@ -1217,9 +1373,9 @@ private:
         // `pBufferInfo` menyimpan pointer, jadi vektor yang tumbuh sambil diisi
         // akan membuat entri yang sudah dicatat menunjuk memori yang sudah
         // dibebaskan — kerusakan yang tidak muncul sebagai galat validasi.
-        std::vector<VkDescriptorBufferInfo> buffers(slots_.size() * 4);
+        std::vector<VkDescriptorBufferInfo> buffers(slots_.size() * 5);
         std::vector<VkWriteDescriptorSet> writes;
-        writes.reserve(slots_.size() * 5);
+        writes.reserve(slots_.size() * 7);
         // SHADER_READ_ONLY, bukan DEPTH_READ_ONLY. Keduanya sah untuk mengambil
         // sampel dari image depth, tapi yang berlaku adalah yang disimpulkan
         // frame graph dari `Access::ShaderRead` — dan descriptor yang menyebut
@@ -1228,14 +1384,17 @@ private:
         // disampel, dan di sini tidak begitu.
         const VkDescriptorImageInfo image{shadow_.sampler, shadow_.arrayView,
                                           VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        const VkDescriptorImageInfo atlasImage{atlas_.sampler, atlas_.view,
+                                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
 
         for (std::size_t i = 0; i < slots_.size(); ++i) {
             slots_[i].shadowSet = sets[i];
-            const std::size_t base = i * 4;
+            const std::size_t base = i * 5;
             buffers[base] = {slots_[i].shadowUniform.Handle(), 0, sizeof(ShadowUniforms)};
             buffers[base + 1] = {slots_[i].lightBuffer.Handle(), 0, VK_WHOLE_SIZE};
             buffers[base + 2] = {slots_[i].clusterRangeBuffer.Handle(), 0, VK_WHOLE_SIZE};
             buffers[base + 3] = {slots_[i].clusterIndexBuffer.Handle(), 0, VK_WHOLE_SIZE};
+            buffers[base + 4] = {slots_[i].shadowFaceBuffer.Handle(), 0, VK_WHOLE_SIZE};
 
             VkWriteDescriptorSet uniform{};
             uniform.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -1253,13 +1412,18 @@ private:
             sampled.pImageInfo = &image;
             writes.push_back(sampled);
 
-            for (uint32_t binding = 2; binding <= 4; ++binding) {
+            for (uint32_t binding = 2; binding <= 5; ++binding) {
                 VkWriteDescriptorSet storage = uniform;
                 storage.dstBinding = binding;
                 storage.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
                 storage.pBufferInfo = &buffers[base + binding - 1];
                 writes.push_back(storage);
             }
+
+            VkWriteDescriptorSet atlas = sampled;
+            atlas.dstBinding = 6;
+            atlas.pImageInfo = &atlasImage;
+            writes.push_back(atlas);
         }
         vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
@@ -1287,6 +1451,30 @@ private:
         barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         barrier.image = shadow_.image;
+        barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+        barrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
+        barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
+
+        VkDependencyInfo dependency{};
+        dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dependency.imageMemoryBarrierCount = 1;
+        dependency.pImageMemoryBarriers = &barrier;
+        vkCmdPipelineBarrier2(cmd, &dependency);
+        device_.EndOneShot(cmd);
+    }
+
+    void AdoptAtlasLayout() {
+        VkCommandBuffer cmd = device_.BeginOneShot();
+        VkImageMemoryBarrier2 barrier{};
+        barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        barrier.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
+        barrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        barrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+        barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        barrier.image = atlas_.image;
         barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
         barrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
         barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
@@ -1339,7 +1527,8 @@ private:
         const float exposure = std::max(desc.exposure, 0.0f);
         gpuLights_.clear();
         clusterLights_.clear();
-        for (const LightInstance& light : scene.lights) {
+        for (uint32_t sceneIndex = 0; sceneIndex < scene.lights.size(); ++sceneIndex) {
+            const LightInstance& light = scene.lights[sceneIndex];
             if (light.kind == LightKind::Directional) {
                 continue;
             }
@@ -1361,8 +1550,22 @@ private:
             // lampu terlihat masuk akal sendiri-sendiri.
             gpu.colorCosInner =
                 Vec4(light.color * light.intensity * exposure, light.cosInner);
-            gpu.kind = Vec4(light.kind == LightKind::Spot ? 1.0f : 0.0f, radius * radius, 0.0f,
-                            0.0f);
+            // Indeks entri atlas dan bias normalnya. Biasnya dalam satuan
+            // dunia dan dihitung di sini karena ia bergantung pada ukuran ubin
+            // yang baru diputuskan pengalokasi — ubin yang lebih kecil menuntut
+            // pergeseran yang lebih besar, dan ukuran ubin berubah setiap kali
+            // lampunya mendekat.
+            const int32_t first = sceneIndex < atlasAllocation_.firstEntry.size()
+                                      ? atlasAllocation_.firstEntry[sceneIndex]
+                                      : -1;
+            float normalBias = 0.0f;
+            if (first >= 0) {
+                const uint32_t tile =
+                    std::max(atlasAllocation_.entries[static_cast<size_t>(first)].size, 1u);
+                normalBias = light.range / static_cast<float>(tile) * kAtlasNormalBiasTexels;
+            }
+            gpu.kind = Vec4(light.kind == LightKind::Spot ? 1.0f : 0.0f, radius * radius,
+                            static_cast<float>(first), normalBias);
             gpuLights_.push_back(gpu);
 
             ClusterLight entry;
@@ -1373,6 +1576,36 @@ private:
             entry.range = light.range;
             entry.cosOuterAngle = light.cosOuter;
             clusterLights_.push_back(entry);
+        }
+
+        // Atlas dialokasikan dari daftar lampu yang sama, sebelum entri GPU
+        // ditulis: `kind.z` tiap lampu menunjuk entri pertamanya, dan nomor itu
+        // baru ada setelah pembagian atlasnya selesai.
+        atlasAllocation_ = AllocateShadowAtlas(scene.lights, desc.camera.position,
+                                               atlasSettings_);
+        if (atlasAllocation_.dropped > 0) {
+            SIM_WARN("Render", "{} shadow-casting lights did not fit the atlas",
+                     atlasAllocation_.dropped);
+        }
+
+        gpuFaces_.clear();
+        gpuFaces_.reserve(atlasAllocation_.entries.size());
+        const auto atlasExtent = static_cast<float>(atlasSettings_.resolution);
+        for (const ShadowAtlasEntry& entry : atlasAllocation_.entries) {
+            GpuShadowFace face;
+            face.viewProjection = entry.viewProjection;
+            face.tile = Vec4(static_cast<float>(entry.x) / atlasExtent,
+                             static_cast<float>(entry.y) / atlasExtent,
+                             static_cast<float>(entry.size) / atlasExtent,
+                             static_cast<float>(entry.size) / atlasExtent);
+            gpuFaces_.push_back(face);
+        }
+        if (gpuFaces_.empty()) {
+            gpuFaces_.push_back(GpuShadowFace{});
+        }
+        const VkDeviceSize faceBytes = sizeof(GpuShadowFace) * gpuFaces_.size();
+        if (slot.shadowFaceBuffer.Reserve(faceBytes)) {
+            slot.shadowFaceBuffer.Write(gpuFaces_.data(), faceBytes);
         }
 
         clusterGrid_.Build(clusterSettings_, desc.camera.fovYRadians, aspect, desc.camera.nearZ,
@@ -1519,6 +1752,7 @@ private:
             slot.lightBuffer.Destroy();
             slot.clusterRangeBuffer.Destroy();
             slot.clusterIndexBuffer.Destroy();
+            slot.shadowFaceBuffer.Destroy();
         }
         cubeBuffer_.Destroy();
         for (VkPipeline* pipeline :
@@ -1530,6 +1764,7 @@ private:
             }
         }
         DestroyShadowMap();
+        DestroyShadowAtlas();
         for (VkPipelineLayout* layout :
              {&pipelineLayout_, &gridLayout_, &lineLayout_, &shadowLayout_}) {
             if (*layout != VK_NULL_HANDLE) {
@@ -1580,6 +1815,20 @@ private:
     ClusterAssignment clusterAssignment_;
     std::vector<GpuLight> gpuLights_;
     std::vector<ClusterLight> clusterLights_;
+
+    /// Atlas point/spot: satu bidang depth, ubinnya beragam ukuran.
+    struct ShadowAtlasImage {
+        VkImage image = VK_NULL_HANDLE;
+        VmaAllocation allocation = VK_NULL_HANDLE;
+        VkImageView view = VK_NULL_HANDLE;
+        VkSampler sampler = VK_NULL_HANDLE;
+    };
+    ShadowAtlasImage atlas_;
+    ShadowAtlasSettings atlasSettings_;
+    ShadowAtlasResult atlasAllocation_;
+    std::vector<GpuShadowFace> gpuFaces_;
+    ResourceId atlasId_ = kInvalidResource;
+    PassId atlasPassId_ = kInvalidPass;
 
     ShadowMap shadow_;
     VkDescriptorSetLayout shadowSetLayout_ = VK_NULL_HANDLE;

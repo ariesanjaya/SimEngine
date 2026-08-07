@@ -294,7 +294,7 @@ logam, mengganti bentuk bekerja, seret kiri memindahkan sorotan searah kursor,
 seret kanan mengorbit kamera, dan cache disk terisi dua berkas per material.
 **Nol pesan validation layer.**
 
-### E8.3 — Lighting & shadow · 🔨 cascade dan clustered lighting jalan di Vulkan
+### E8.3 — Lighting & shadow · ✅ selesai
 IBL (prefilter env + DFG LUT), directional light dengan cascaded shadow map,
 point/spot dengan shadow atlas, clustered light culling untuk banyak lampu.
 
@@ -591,7 +591,7 @@ intensitasnya menggelapkannya. Nol pesan validation layer.
 | Cascaded shadow map (directional) | ✅ jalan di Vulkan |
 | Clustered light culling | ✅ jalan di Vulkan |
 | IBL (prefilter env + DFG LUT) | ✅ dibakar ke tekstur GPU dan dipakai preview material |
-| Point/spot dengan shadow atlas | ❌ belum ada |
+| Point/spot dengan shadow atlas | ✅ jalan di Vulkan |
 
 #### IBL tersambung
 
@@ -627,9 +627,53 @@ rata, dan bola logam berhenti hitam — ia memantulkan langit di belahan atas da
 tanah di belahan bawah, lengkap dengan pantulan cakram mataharinya. Nol pesan
 validation layer.
 
-**Belum ada:** atlas bayangan untuk point/spot — yang juga akan mengisi `V_i`
-yang kini diandaikan 1 — dan penyambungan IBL ke pass forward viewport, yang
-menunggu pipeline material menggantikan `box.frag`.
+#### Atlas bayangan point/spot
+
+Atlas terpisah dari cascade karena keduanya punya bentuk yang berbeda — cascade
+larik berlapis dengan resolusi seragam, atlas satu bidang dengan ubin beragam
+ukuran — dan menyatukannya berarti salah satunya harus mengalah pada bentuk yang
+bukan miliknya.
+
+Ubinnya pangkat dua, dialokasikan seperti quadtree tanpa pohonnya: sebuah ubin
+berukuran `size` hanya boleh mulai pada kelipatan `size`, jadi keselarasan itu
+sendiri yang mencegah tindihan. Ukurannya dipilih dari seberapa besar lampu itu
+di layar; ukuran tetap untuk semua akan memberi lampu meja di ujung ruangan
+resolusi yang sama dengan lampu sorot yang memenuhi layar.
+
+Point membayar enam muka, jadi ubinnya diturunkan satu tingkat — tanpa itu satu
+point light memakan atlas sebanyak enam spot yang sama pentingnya. Point yang
+tidak muat seluruh mukanya dibatalkan seluruhnya: empat dari enam muka
+menghasilkan bayangan yang berhenti di tengah udara.
+
+Satu `vkCmdBeginRendering` untuk seluruh atlas, lalu viewport dan scissor
+dipindah per ubin. Memulai rendering per ubin berarti satu clear per ubin pada
+image yang sama, dan clear kedua menghapus yang pertama begitu areanya bertemu.
+
+Koordinat dijepit di dalam ubin dengan sisa setengah texel sebelum PCF: PCF
+mengambil tetangga, dan tetangga di tepi ubin adalah milik lampu lain — bayangan
+lampu sebelah lalu bocor masuk sebagai garis di tepi berkas. Sampler hanya tahu
+batas atlas, bukan batas ubin.
+
+Muka +Y dan −Y memakai sumbu atas Z: keduanya memandang lurus sepanjang Y, dan
+`LookAt` dengan atas yang sejajar arah pandang menghasilkan matriks yang tidak
+terdefinisi — bayangannya lalu hilang hanya di atas dan di bawah lampu, gejala
+yang mudah dikira masalah bias.
+
+Bias normalnya dalam satuan dunia dan dihitung CPU dari ukuran ubin dan
+jangkauan lampu, karena ubin yang lebih kecil menuntut pergeseran yang lebih
+besar — dan ukuran ubin berubah setiap kali lampunya mendekat.
+
+Diverifikasi di GUI: dengan matahari dimatikan, kotak menjatuhkan bayangan point
+light yang jelas — baji gelap memanjang menjauhi lampu, tepinya lembut oleh PCF.
+**Nol pesan validation layer.**
+
+Dengan ini `V_i` pada Pers. 3 tidak lagi diandaikan 1 untuk punctual.
+
+#### Yang tersisa dari E8.3, dan ke mana
+
+Penyambungan IBL ke pass forward viewport menunggu pipeline material
+menggantikan `box.frag` — itu pekerjaan E8.4, bukan E8.3. Preview material sudah
+memakai IBL sepenuhnya.
 
 `openpbr.slang` sendiri sudah ada sejak E8.2, tapi baru cahaya langsung: satu
 arah cahaya, tanpa IBL, bayangan, maupun transmisi. Yang ditambahkan di sini
