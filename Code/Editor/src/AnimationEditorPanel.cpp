@@ -1,11 +1,14 @@
 #include "Sim/Animation/AnimationIo.h"
 #include "Sim/Animation/Clip.h"
+#include "Sim/Animation/AnimationGraph.h"
 #include "Sim/Animation/ClipHistory.h"
+#include "Sim/Animation/GraphInstance.h"
 #include "Sim/Animation/Pose.h"
 #include "Sim/Animation/Skeleton.h"
 #include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Editor/EditorContext.h"
 #include "Sim/Editor/Icons.h"
+#include "Sim/Editor/NodeGraph.h"
 #include "Sim/Editor/Notifications.h"
 #include "Sim/Editor/Panel.h"
 #include "Sim/Editor/PanelIds.h"
@@ -22,6 +25,9 @@
 #include <cfloat>
 #include <cmath>
 #include <filesystem>
+#include <map>
+#include <memory>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -70,6 +76,61 @@ bool IsDispatchableEventName(const std::string& name) {
     return true;
 }
 
+/// Pustaka klip yang mengambil dari basis data aset, dengan singgahan.
+///
+/// **Ada di panel, bukan di modul animasi.** `ClipLibrary` sengaja sebuah
+/// antarmuka: runtime yang memuat dari paket dan editor yang memuat dari folder
+/// proyek harus bisa memutar graph yang sama, dan menjahitkan `AssetDatabase` ke
+/// dalam modul akan memaksa runtime memalsukan dirinya sebagai editor.
+///
+/// Singgahannya menahan klip yang sudah dimuat sepanjang graph terbuka. Tanpa
+/// itu, setiap frame pratinjau membaca ulang berkas untuk setiap klip yang
+/// dirujuk state yang sedang aktif.
+class AssetClipLibrary final : public ClipLibrary {
+public:
+    void Bind(assets::AssetDatabase* assets) {
+        if (assets_ != assets) {
+            assets_ = assets;
+            cache_.clear();
+        }
+    }
+    void Invalidate() { cache_.clear(); }
+
+    const Clip* Find(const Uuid& guid) const override {
+        if (!guid.IsValid() || assets_ == nullptr) {
+            return nullptr;
+        }
+        const auto cached = cache_.find(guid);
+        if (cached != cache_.end()) {
+            // Entri kosong disimpan juga: klip yang gagal dimuat tidak boleh
+            // dicoba ulang enam puluh kali per detik.
+            return cached->second ? &cached->second->clip : nullptr;
+        }
+        const assets::AssetRecord* record = assets_->Find(guid);
+        if (record == nullptr) {
+            cache_.emplace(guid, nullptr);
+            return nullptr;
+        }
+        auto entry = std::make_unique<Entry>();
+        if (!LoadClip(entry->clip, entry->document, assets_->AbsolutePath(*record)).ok) {
+            cache_.emplace(guid, nullptr);
+            return nullptr;
+        }
+        const Clip* result = &entry->clip;
+        cache_.emplace(guid, std::move(entry));
+        return result;
+    }
+
+private:
+    struct Entry {
+        Clip clip;
+        ClipDocument document;
+    };
+
+    assets::AssetDatabase* assets_ = nullptr;
+    mutable std::map<Uuid, std::unique_ptr<Entry>> cache_;
+};
+
 /// Penyunting animasi.
 ///
 /// **Pratinjaunya rangka yang digambar dua dimensi, bukan mesh yang di-skin.**
@@ -90,10 +151,19 @@ public:
                 std::string(icons::kAnimationEditor) + "  Animation Editor",
                 PanelCategory::Authoring) {}
 
+    ~AnimationEditorPanel() override { canvas_.Shutdown(); }
+
     void OnDraw(EditorContext& context) override {
         if (context.assets == nullptr) {
             ImGui::TextDisabled("No asset database.");
             return;
+        }
+        if (!canvasReady_) {
+            // Diinisialisasi saat pertama digambar, bukan di konstruktor: panel
+            // dibuat sebelum konteks ImGui ada, dan kanvasnya menuntut konteks
+            // itu hidup.
+            canvas_.Initialize();
+            canvasReady_ = true;
         }
 
         DrawToolbar(context);
@@ -116,6 +186,10 @@ public:
                     DrawClipTab(context);
                     ImGui::EndTabItem();
                 }
+                if (ImGui::BeginTabItem((std::string(icons::kNodeGraph) + "  Graph").c_str())) {
+                    DrawGraphTab(context);
+                    ImGui::EndTabItem();
+                }
                 ImGui::EndTabBar();
             }
         }
@@ -126,7 +200,7 @@ private:
     // --- toolbar & daftar aset -----------------------------------------------
 
     void DrawToolbar(EditorContext& context) {
-        ImGui::BeginDisabled(!skeletonDirty_ && !clipDirty_);
+        ImGui::BeginDisabled(!skeletonDirty_ && !clipDirty_ && !graphDirty_);
         if (ImGui::Button((std::string(icons::kSave) + "  Save").c_str())) {
             SaveAll(context);
         }
@@ -225,6 +299,11 @@ private:
             }
         }
 
+        ImGui::BeginDisabled(!skeletonGuid_.IsValid());
+        if (ImGui::Button("New Graph", ImVec2(-FLT_MIN, 0.0f))) {
+            CreateGraph(context);
+        }
+        ImGui::EndDisabled();
         ImGui::Spacing();
         ImGui::TextColored(kHintColor, "Clips");
         for (const assets::AssetRecord& record : context.assets->All()) {
@@ -234,6 +313,18 @@ private:
             const std::string label = std::string(icons::kAssetAnimation) + "  " + record.name;
             if (ImGui::Selectable(label.c_str(), record.guid == clipGuid_)) {
                 OpenClip(context, record.guid);
+            }
+        }
+
+        ImGui::Spacing();
+        ImGui::TextColored(kHintColor, "Graphs");
+        for (const assets::AssetRecord& record : context.assets->All()) {
+            if (record.type != assets::AssetType::AnimationGraph) {
+                continue;
+            }
+            const std::string label = std::string(icons::kNodeGraph) + "  " + record.name;
+            if (ImGui::Selectable(label.c_str(), record.guid == graphGuid_)) {
+                OpenGraph(context, record.guid);
             }
         }
     }
@@ -486,7 +577,39 @@ private:
         }
 
         SampleClip(clip_, binding_, skeleton_, time_, pose_);
-        pose_.ComputeGlobal(skeleton_, globalScratch_);
+        DrawSkeleton(draw, origin, size, pose_);
+        draw->AddRect(origin, ImVec2(origin.x + size.x, origin.y + size.y),
+                      ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.10f)));
+
+        // Sudut kiri atas: sumbu tampilan dan event yang baru menyala. Event yang
+        // menyala tanpa jejak apa pun di layar tidak bisa diuji tanpa menulis
+        // skrip lebih dulu.
+        ImGui::SetCursorScreenPos(ImVec2(origin.x + 6.0f, origin.y + 6.0f));
+        int axis = static_cast<int>(axis_);
+        static constexpr std::array<const char*, 3> kAxisNames{"Front", "Side", "Top"};
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5.0f);
+        if (ImGui::Combo("##axis", &axis, kAxisNames.data(), static_cast<int>(kAxisNames.size()))) {
+            axis_ = static_cast<ViewAxis>(axis);
+        }
+        if (!firedLog_.empty()) {
+            ImGui::SetCursorScreenPos(
+                ImVec2(origin.x + 6.0f, origin.y + 6.0f + ImGui::GetFrameHeightWithSpacing()));
+            ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.35f, 1.0f), "%s  %s", icons::kEvent,
+                               firedLog_.back().c_str());
+        }
+    }
+
+    /// Menggambar sebuah pose sebagai rangka bergaris.
+    ///
+    /// Dipakai dua tab — pratinjau klip dan pratinjau graph — jadi ia tidak boleh
+    /// tahu apa pun tentang klip maupun graph. Yang masuk hanya pose dan kotak
+    /// tempat menggambarnya.
+    void DrawSkeleton(ImDrawList* draw, const ImVec2& origin, const ImVec2& size,
+                      const Pose& pose) {
+        pose.ComputeGlobal(skeleton_, globalScratch_);
+        if (globalScratch_.empty()) {
+            return;
+        }
 
         // Skala dihitung dari pose yang sedang terlihat, bukan dari bind pose:
         // klip yang mengangkat tangan tinggi-tinggi harus tetap muat, dan rangka
@@ -532,24 +655,6 @@ private:
             }
             draw->AddCircleFilled(here, i == selectedBone_ ? 5.0f : 3.0f,
                                   i == selectedBone_ ? selectedColor : jointColor);
-        }
-        draw->AddRect(origin, ImVec2(origin.x + size.x, origin.y + size.y),
-                      ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.10f)));
-
-        // Sudut kiri atas: sumbu tampilan dan event yang baru menyala. Event yang
-        // menyala tanpa jejak apa pun di layar tidak bisa diuji tanpa menulis
-        // skrip lebih dulu.
-        ImGui::SetCursorScreenPos(ImVec2(origin.x + 6.0f, origin.y + 6.0f));
-        int axis = static_cast<int>(axis_);
-        static constexpr std::array<const char*, 3> kAxisNames{"Front", "Side", "Top"};
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5.0f);
-        if (ImGui::Combo("##axis", &axis, kAxisNames.data(), static_cast<int>(kAxisNames.size()))) {
-            axis_ = static_cast<ViewAxis>(axis);
-        }
-        if (!firedLog_.empty()) {
-            ImGui::SetCursorScreenPos(ImVec2(origin.x + 6.0f, origin.y + 6.0f + ImGui::GetFrameHeightWithSpacing()));
-            ImGui::TextColored(ImVec4(0.95f, 0.75f, 0.35f, 1.0f), "%s  %s", icons::kEvent,
-                               firedLog_.back().c_str());
         }
     }
 
@@ -938,6 +1043,642 @@ private:
                            "Lua: define AnimationEvents[\"name\"] = function(n, t) ... end");
     }
 
+    // --- tab graph ------------------------------------------------------------
+
+    /// Id kanvas.
+    ///
+    /// Dipisah per jenis lewat rentang yang tidak bertumpang tindih, dan tidak
+    /// satu pun boleh nol — pustaka di balik kanvas memakai nol sebagai "tidak
+    /// ada". State ditunjuk lewat indeksnya: graph dibaca ulang dari model tiap
+    /// frame, jadi id yang bergeser saat sebuah state dihapus tidak menyimpan
+    /// keadaan basi di mana pun.
+    static uint64_t StateNodeId(int state) { return static_cast<uint64_t>(state) + 1u; }
+    static uint64_t AnyStateNodeId() { return 0x300000u; }
+    static uint64_t InputPinId(uint64_t node) { return 0x100000u + node * 2u; }
+    static uint64_t OutputPinId(uint64_t node) { return 0x100000u + node * 2u + 1u; }
+    static uint64_t TransitionLinkId(int index) { return 0x200000u + static_cast<uint64_t>(index); }
+
+    void DrawGraphTab(EditorContext& context) {
+        if (!graphGuid_.IsValid()) {
+            ImGui::TextColored(kHintColor, "Pick a graph on the left, or create one.");
+            return;
+        }
+        library_.Bind(context.assets);
+        DrawGraphToolbar(context);
+
+        Layer& layer = graph_.LayerAt(activeLayer_);
+        const float sideWidth = ImGui::GetFontSize() * 16.0f;
+        if (ImGui::BeginChild("##graphcanvas",
+                              ImVec2(std::max(ImGui::GetContentRegionAvail().x - sideWidth -
+                                                  ImGui::GetStyle().ItemSpacing.x,
+                                              1.0f),
+                                     0.0f))) {
+            DrawGraphCanvas(layer);
+        }
+        ImGui::EndChild();
+        ImGui::SameLine();
+        if (ImGui::BeginChild("##graphside", ImVec2(0.0f, 0.0f))) {
+            DrawGraphSide(context, layer);
+        }
+        ImGui::EndChild();
+    }
+
+    void DrawGraphToolbar(EditorContext& context) {
+        (void)context;
+        if (ImGui::Button((std::string(icons::kAdd) + "  State").c_str())) {
+            AddState();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button((std::string(icons::kAdd) + "  Layer").c_str())) {
+            Layer layer;
+            layer.name = "Layer " + std::to_string(graph_.LayerCount());
+            activeLayer_ = graph_.AddLayer(layer);
+            graphDirty_ = true;
+            RebindGraph();
+        }
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
+        const std::string preview = graph_.LayerAt(activeLayer_).name;
+        if (ImGui::BeginCombo("##layer", preview.c_str())) {
+            for (int i = 0; i < graph_.LayerCount(); ++i) {
+                if (ImGui::Selectable(graph_.LayerAt(i).name.c_str(), i == activeLayer_)) {
+                    activeLayer_ = i;
+                    placedStates_.clear();
+                }
+            }
+            ImGui::EndCombo();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Fit")) {
+            canvas_.FitToContent();
+        }
+        ImGui::SameLine();
+        if (ImGui::Button(graphPlaying_ ? icons::kPause : icons::kPlay)) {
+            graphPlaying_ = !graphPlaying_;
+            if (graphPlaying_) {
+                RebindGraph();
+            }
+        }
+        widgets::Tooltip("Run the graph on the open skeleton");
+    }
+
+    void DrawGraphCanvas(Layer& layer) {
+        canvas_.Begin("##animgraph", Vec2(0.0f, 0.0f));
+
+        // Simpul "Any State" digambar walaupun ia bukan state: transisi
+        // ber-`from` -1 berlaku dari mana pun, dan menggambarnya tanpa pangkal
+        // membuat kabelnya seolah muncul dari ketiadaan.
+        canvas_.BeginNode(AnyStateNodeId());
+        ImGui::TextColored(kHintColor, "Any State");
+        canvas_.BeginOutputPin(OutputPinId(AnyStateNodeId()));
+        ImGui::TextUnformatted(" >");
+        canvas_.EndPin();
+        canvas_.EndNode();
+
+        for (int i = 0; i < static_cast<int>(layer.states.size()); ++i) {
+            DrawStateNode(layer, i);
+        }
+        for (int i = 0; i < static_cast<int>(layer.transitions.size()); ++i) {
+            const Transition& transition = layer.transitions[static_cast<std::size_t>(i)];
+            const uint64_t fromNode =
+                transition.from < 0 ? AnyStateNodeId() : StateNodeId(transition.from);
+            if (transition.to < 0 || transition.to >= static_cast<int>(layer.states.size())) {
+                continue;
+            }
+            const bool selected = i == selectedTransition_;
+            canvas_.Link(TransitionLinkId(i), OutputPinId(fromNode),
+                         InputPinId(StateNodeId(transition.to)),
+                         selected ? Vec4(1.0f, 0.85f, 0.35f, 1.0f) : Vec4(0.55f, 0.60f, 0.68f, 1.0f),
+                         selected ? 3.0f : 2.0f);
+        }
+
+        HandleGraphCreate(layer);
+        HandleGraphDelete(layer);
+        canvas_.End();
+
+        // Seleksi dibaca sesudah End(): sebelum itu pustaka belum memutakhirkan
+        // apa yang diklik pada frame ini.
+        const std::vector<uint64_t> links = canvas_.SelectedLinks();
+        if (!links.empty()) {
+            const auto index = static_cast<int>(links.front() - 0x200000u);
+            if (index >= 0 && index < static_cast<int>(layer.transitions.size())) {
+                selectedTransition_ = index;
+            }
+        }
+        // **Pemasangan otomatis hanya berlaku kalau ada yang perlu dibingkai.**
+        // Ditemukan saat menjalankan panelnya: graph baru hanya berisi simpul
+        // semu "Any State", dan memasangnya ke layar memperbesar sampai satu
+        // simpul memenuhi seluruh kanvas — huruf setinggi seratus piksel dan
+        // tidak ada yang bisa dibaca. Membingkai satu simpul pun tidak ada
+        // gunanya; yang butuh dibingkai adalah graph yang isinya sudah tersebar.
+        // Tombol Fit tetap berlaku kapan pun, karena itu permintaan pengguna
+        // sendiri.
+        if (pendingFit_) {
+            if (layer.states.size() >= 2) {
+                canvas_.FitToContent();
+            }
+            pendingFit_ = false;
+        }
+    }
+
+    void DrawStateNode(Layer& layer, int index) {
+        State& state = layer.states[static_cast<std::size_t>(index)];
+        const uint64_t id = StateNodeId(index);
+
+        // Posisi berpindah dua arah — dari berkas ke kanvas saat dibuka, dan
+        // kembali begitu node diseret. `placedStates_` yang menentukan arahnya;
+        // tanpa itu, menyeret node langsung ditimpa balik posisi tersimpan.
+        if (!placedStates_.contains(index)) {
+            canvas_.SetNodePosition(id, state.canvas);
+            placedStates_.insert(index);
+        } else {
+            const Vec2 current = canvas_.GetNodePosition(id);
+            if (std::abs(current.x - state.canvas.x) > 0.5f ||
+                std::abs(current.y - state.canvas.y) > 0.5f) {
+                state.canvas = current;
+                graphDirty_ = true;
+            }
+        }
+
+        canvas_.BeginNode(id);
+        const bool isDefault = index == layer.defaultState;
+        const bool isActive = graphPlaying_ && instance_.Bound() &&
+                              instance_.CurrentState(activeLayer_) == index;
+        if (isActive) {
+            ImGui::TextColored(ImVec4(0.45f, 0.95f, 0.55f, 1.0f), "%s", state.name.c_str());
+        } else if (isDefault) {
+            ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.45f, 1.0f), "%s", state.name.c_str());
+        } else {
+            ImGui::TextUnformatted(state.name.c_str());
+        }
+        ImGui::TextColored(kHintColor, "%s", ToString(state.motion.kind));
+
+        canvas_.BeginInputPin(InputPinId(id));
+        ImGui::TextUnformatted("> ");
+        canvas_.EndPin();
+        ImGui::SameLine();
+        canvas_.BeginOutputPin(OutputPinId(id));
+        ImGui::TextUnformatted(" >");
+        canvas_.EndPin();
+        canvas_.EndNode();
+    }
+
+    void HandleGraphCreate(Layer& layer) {
+        if (!canvas_.BeginCreate()) {
+            canvas_.EndCreate();
+            return;
+        }
+        uint64_t fromPin = 0;
+        uint64_t toPin = 0;
+        // Sekali, bukan di dalam while — lihat catatan di NodeGraph.h.
+        if (canvas_.QueryNewLink(fromPin, toPin)) {
+            const int from = StateOfPin(layer, fromPin, true);
+            const int to = StateOfPin(layer, toPin, false);
+            if (from == -2 || to < 0 || from == to) {
+                canvas_.RejectLink();
+            } else if (canvas_.AcceptLink()) {
+                Transition transition;
+                transition.from = from;
+                transition.to = to;
+                layer.transitions.push_back(transition);
+                selectedTransition_ = static_cast<int>(layer.transitions.size()) - 1;
+                graphDirty_ = true;
+            }
+        }
+        canvas_.EndCreate();
+    }
+
+    /// Indeks state pemilik sebuah pin. -1 berarti "Any State", -2 berarti pin
+    /// itu bukan pin yang diminta (arahnya salah, atau tidak dikenal).
+    int StateOfPin(const Layer& layer, uint64_t pin, bool wantOutput) const {
+        if (pin < 0x100000u) {
+            return -2;
+        }
+        const uint64_t offset = pin - 0x100000u;
+        const bool isOutput = (offset & 1u) != 0u;
+        if (isOutput != wantOutput) {
+            return -2;
+        }
+        const uint64_t node = offset / 2u;
+        if (node == AnyStateNodeId()) {
+            // "Any State" hanya punya keluaran: tidak ada arti untuk transisi
+            // yang menuju ke mana pun sekaligus.
+            return wantOutput ? -1 : -2;
+        }
+        const auto index = static_cast<int>(node) - 1;
+        return index >= 0 && index < static_cast<int>(layer.states.size()) ? index : -2;
+    }
+
+    void HandleGraphDelete(Layer& layer) {
+        if (!canvas_.BeginDelete()) {
+            canvas_.EndDelete();
+            return;
+        }
+        uint64_t id = 0;
+        while (canvas_.QueryDeletedLink(id)) {
+            if (!canvas_.AcceptDeletion()) {
+                continue;
+            }
+            const auto index = static_cast<int>(id - 0x200000u);
+            if (index >= 0 && index < static_cast<int>(layer.transitions.size())) {
+                layer.transitions.erase(layer.transitions.begin() + index);
+                selectedTransition_ = -1;
+                graphDirty_ = true;
+            }
+        }
+        while (canvas_.QueryDeletedNode(id)) {
+            if (id == AnyStateNodeId()) {
+                // "Any State" bukan state; ia tidak bisa dihapus.
+                canvas_.RejectDeletion();
+                continue;
+            }
+            if (!canvas_.AcceptDeletion()) {
+                continue;
+            }
+            RemoveState(layer, static_cast<int>(id) - 1);
+        }
+        canvas_.EndDelete();
+    }
+
+    void RemoveState(Layer& layer, int index) {
+        if (index < 0 || index >= static_cast<int>(layer.states.size())) {
+            return;
+        }
+        layer.states.erase(layer.states.begin() + index);
+        // Transisi yang menunjuk state yang hilang ikut dibuang, dan indeks yang
+        // di atasnya digeser. Membiarkannya berarti transisi yang menunjuk state
+        // lain — bukan transisi yang mati, melainkan transisi yang salah.
+        auto tail = std::remove_if(layer.transitions.begin(), layer.transitions.end(),
+                                   [index](const Transition& transition) {
+                                       return transition.from == index || transition.to == index;
+                                   });
+        layer.transitions.erase(tail, layer.transitions.end());
+        for (Transition& transition : layer.transitions) {
+            if (transition.from > index) {
+                --transition.from;
+            }
+            if (transition.to > index) {
+                --transition.to;
+            }
+        }
+        if (layer.defaultState >= static_cast<int>(layer.states.size())) {
+            layer.defaultState = std::max(0, static_cast<int>(layer.states.size()) - 1);
+        }
+        placedStates_.clear();
+        selectedTransition_ = -1;
+        graphDirty_ = true;
+        RebindGraph();
+    }
+
+    void AddState() {
+        Layer& layer = graph_.LayerAt(activeLayer_);
+        State state;
+        state.name = "State " + std::to_string(layer.states.size());
+        state.canvas = Vec2(40.0f + static_cast<float>(layer.states.size() % 4) * 190.0f,
+                            40.0f + static_cast<float>(layer.states.size() / 4) * 120.0f);
+        layer.states.push_back(state);
+        graphDirty_ = true;
+        RebindGraph();
+    }
+
+    void DrawGraphSide(EditorContext& context, Layer& layer) {
+        DrawGraphPreview(context);
+        ImGui::Separator();
+
+        const float width = ImGui::GetFontSize() * 7.0f;
+        if (ImGui::CollapsingHeader("Layer", ImGuiTreeNodeFlags_DefaultOpen)) {
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (ImGui::InputText("##layername", &layer.name)) {
+                graphDirty_ = true;
+            }
+            ImGui::SetNextItemWidth(width);
+            if (ImGui::SliderFloat("Weight", &layer.weight, 0.0f, 1.0f)) {
+                graphDirty_ = true;
+            }
+            if (ImGui::Checkbox("Additive", &layer.additive)) {
+                graphDirty_ = true;
+            }
+            ImGui::SetNextItemWidth(width);
+            if (ImGui::InputText("Mask root", &layer.maskRootBone)) {
+                graphDirty_ = true;
+            }
+            widgets::Tooltip("Bone this layer starts from. Empty means the whole skeleton.");
+            if (!layer.states.empty()) {
+                ImGui::SetNextItemWidth(width);
+                if (ImGui::BeginCombo("Default",
+                                      layer.states[static_cast<std::size_t>(std::clamp(
+                                                       layer.defaultState, 0,
+                                                       static_cast<int>(layer.states.size()) - 1))]
+                                          .name.c_str())) {
+                    for (int i = 0; i < static_cast<int>(layer.states.size()); ++i) {
+                        if (ImGui::Selectable(layer.states[static_cast<std::size_t>(i)].name.c_str(),
+                                              i == layer.defaultState)) {
+                            layer.defaultState = i;
+                            graphDirty_ = true;
+                        }
+                    }
+                    ImGui::EndCombo();
+                }
+            }
+        }
+
+        DrawParameterList();
+        DrawStateProperties(context, layer);
+        DrawTransitionProperties(layer);
+    }
+
+    void DrawGraphPreview(EditorContext& context) {
+        if (graphPlaying_ && instance_.Bound()) {
+            const float dt = context.deltaSeconds > 0.0f ? context.deltaSeconds : 1.0f / 60.0f;
+            instance_.Update(dt);
+            for (const FiredEvent& event : instance_.Events()) {
+                firedLog_.push_back(event.name);
+                if (firedLog_.size() > 32) {
+                    firedLog_.erase(firedLog_.begin());
+                }
+            }
+        }
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        const ImVec2 size(ImGui::GetContentRegionAvail().x - widgets::kPanelRightMargin,
+                          ImGui::GetFontSize() * 8.0f);
+        ImGui::Dummy(size);
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        draw->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y),
+                            ImGui::GetColorU32(ImVec4(0.10f, 0.11f, 0.13f, 1.0f)));
+        if (instance_.Bound() && skeleton_.BoneCount() > 0) {
+            DrawSkeleton(draw, origin, size, instance_.Result());
+        }
+        draw->AddRect(origin, ImVec2(origin.x + size.x, origin.y + size.y),
+                      ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.10f)));
+
+        if (instance_.Bound()) {
+            const int state = instance_.CurrentState(activeLayer_);
+            const Layer& layer = graph_.LayerAt(activeLayer_);
+            const char* name = state >= 0 && state < static_cast<int>(layer.states.size())
+                                   ? layer.states[static_cast<std::size_t>(state)].name.c_str()
+                                   : "(none)";
+            ImGui::TextColored(kHintColor, "%s   %.0f%%", name,
+                               static_cast<double>(instance_.TransitionProgress(activeLayer_)) *
+                                   100.0);
+        }
+    }
+
+    void DrawParameterList() {
+        if (!ImGui::CollapsingHeader("Parameters", ImGuiTreeNodeFlags_DefaultOpen)) {
+            return;
+        }
+        static constexpr std::array<const char*, 3> kTypes{"Bool", "Float", "Trigger"};
+        for (int i = 0; i < graph_.parameters.Count(); ++i) {
+            Parameter& parameter = graph_.parameters.At(i);
+            ImGui::PushID(i);
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5.0f);
+            if (ImGui::InputText("##name", &parameter.name)) {
+                graphDirty_ = true;
+            }
+            ImGui::SameLine();
+            // Nilainya disunting pada instance saat pratinjau berjalan, dan pada
+            // graph saat tidak: yang pertama menggerakkan pemutaran, yang kedua
+            // menetapkan nilai awal yang tersimpan ke berkas. Menyunting satu
+            // tempat untuk keduanya berarti menggeser slider saat mencoba
+            // sesuatu diam-diam mengubah dokumennya.
+            const bool live = graphPlaying_ && instance_.Bound();
+            ParameterSet& target = live ? instance_.parameters : graph_.parameters;
+            const int index = live ? target.Find(parameter.name) : i;
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5.0f);
+            switch (parameter.type) {
+                case ParameterType::Float: {
+                    float value = target.Float(index);
+                    if (ImGui::DragFloat("##v", &value, 0.01f)) {
+                        target.SetFloat(index, value);
+                        graphDirty_ = graphDirty_ || !live;
+                    }
+                    break;
+                }
+                case ParameterType::Bool: {
+                    bool value = target.Bool(index);
+                    if (ImGui::Checkbox("##v", &value)) {
+                        target.SetBool(index, value);
+                        graphDirty_ = graphDirty_ || !live;
+                    }
+                    break;
+                }
+                case ParameterType::Trigger:
+                    if (ImGui::Button("Fire")) {
+                        target.Fire(index);
+                    }
+                    break;
+            }
+            ImGui::SameLine();
+            int type = static_cast<int>(parameter.type);
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 4.5f);
+            if (ImGui::Combo("##type", &type, kTypes.data(), static_cast<int>(kTypes.size()))) {
+                parameter.type = static_cast<ParameterType>(type);
+                graphDirty_ = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(icons::kDelete)) {
+                graph_.parameters.Remove(i);
+                graphDirty_ = true;
+                ImGui::PopID();
+                break;
+            }
+            ImGui::PopID();
+        }
+        if (ImGui::Button((std::string(icons::kAdd) + "  Parameter").c_str())) {
+            Parameter parameter;
+            parameter.name = "Param" + std::to_string(graph_.parameters.Count());
+            graph_.parameters.Add(parameter);
+            graphDirty_ = true;
+        }
+    }
+
+    void DrawStateProperties(EditorContext& context, Layer& layer) {
+        const std::vector<uint64_t> selected = canvas_.SelectedNodes();
+        if (selected.empty() || selected.front() == AnyStateNodeId()) {
+            return;
+        }
+        const auto index = static_cast<int>(selected.front()) - 1;
+        if (index < 0 || index >= static_cast<int>(layer.states.size())) {
+            return;
+        }
+        if (!ImGui::CollapsingHeader("State", ImGuiTreeNodeFlags_DefaultOpen)) {
+            return;
+        }
+        State& state = layer.states[static_cast<std::size_t>(index)];
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (ImGui::InputText("##statename", &state.name)) {
+            graphDirty_ = true;
+        }
+
+        static constexpr std::array<const char*, 3> kKinds{"Clip", "Blend1D", "Blend2D"};
+        int kind = static_cast<int>(state.motion.kind);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.0f);
+        if (ImGui::Combo("Motion", &kind, kKinds.data(), static_cast<int>(kKinds.size()))) {
+            state.motion.kind = static_cast<MotionKind>(kind);
+            graphDirty_ = true;
+            RebindGraph();
+        }
+
+        if (state.motion.kind == MotionKind::Clip) {
+            DrawClipPicker(context, "##clip", state.motion.clip);
+        } else {
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
+            if (ImGui::InputText("Param X", &state.motion.parameterX)) {
+                graphDirty_ = true;
+            }
+            if (state.motion.kind == MotionKind::Blend2D) {
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
+                if (ImGui::InputText("Param Y", &state.motion.parameterY)) {
+                    graphDirty_ = true;
+                }
+            }
+            for (std::size_t i = 0; i < state.motion.children.size(); ++i) {
+                MotionChild& child = state.motion.children[i];
+                ImGui::PushID(static_cast<int>(i));
+                DrawClipPicker(context, "##childclip", child.clip);
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
+                if (state.motion.kind == MotionKind::Blend2D) {
+                    if (ImGui::DragFloat2("Pos", &child.position.x, 0.05f)) {
+                        graphDirty_ = true;
+                    }
+                } else if (ImGui::DragFloat("Pos", &child.position.x, 0.05f)) {
+                    graphDirty_ = true;
+                }
+                ImGui::SameLine();
+                if (ImGui::SmallButton(icons::kDelete)) {
+                    state.motion.children.erase(state.motion.children.begin() +
+                                                static_cast<std::ptrdiff_t>(i));
+                    graphDirty_ = true;
+                    ImGui::PopID();
+                    break;
+                }
+                ImGui::PopID();
+            }
+            if (ImGui::Button("Add motion")) {
+                state.motion.children.push_back(MotionChild{});
+                graphDirty_ = true;
+            }
+            if (ImGui::Checkbox("Sync phase", &state.motion.syncPhase)) {
+                graphDirty_ = true;
+            }
+            widgets::Tooltip("Pair the clips up by their phase markers, so a walk/run blend keeps "
+                             "its footfalls together");
+        }
+    }
+
+    void DrawClipPicker(EditorContext& context, const char* id, AssetRef& ref) {
+        const assets::AssetRecord* current =
+            ref.IsValid() ? context.assets->Find(ref.guid) : nullptr;
+        ImGui::SetNextItemWidth(-FLT_MIN);
+        if (!ImGui::BeginCombo(id, current != nullptr ? current->name.c_str() : "(no clip)")) {
+            return;
+        }
+        if (ImGui::Selectable("(no clip)", !ref.IsValid())) {
+            ref.Clear();
+            graphDirty_ = true;
+            RebindGraph();
+        }
+        for (const assets::AssetRecord& record : context.assets->All()) {
+            if (record.type != assets::AssetType::AnimationClip) {
+                continue;
+            }
+            if (ImGui::Selectable(record.name.c_str(), record.guid == ref.guid)) {
+                ref = AssetRef{record.guid};
+                graphDirty_ = true;
+                RebindGraph();
+            }
+        }
+        ImGui::EndCombo();
+    }
+
+    void DrawTransitionProperties(Layer& layer) {
+        if (selectedTransition_ < 0 ||
+            selectedTransition_ >= static_cast<int>(layer.transitions.size())) {
+            return;
+        }
+        if (!ImGui::CollapsingHeader("Transition", ImGuiTreeNodeFlags_DefaultOpen)) {
+            return;
+        }
+        Transition& transition = layer.transitions[static_cast<std::size_t>(selectedTransition_)];
+        const char* from = transition.from < 0
+                               ? "Any State"
+                               : layer.states[static_cast<std::size_t>(transition.from)].name.c_str();
+        ImGui::TextColored(kHintColor, "%s  \xe2\x86\x92  %s", from,
+                           layer.states[static_cast<std::size_t>(transition.to)].name.c_str());
+
+        const float width = ImGui::GetFontSize() * 6.0f;
+        ImGui::SetNextItemWidth(width);
+        if (ImGui::DragFloat("Duration", &transition.duration, 0.01f, 0.0f, 10.0f, "%.2f s")) {
+            graphDirty_ = true;
+        }
+        if (ImGui::Checkbox("Exit time", &transition.hasExitTime)) {
+            graphDirty_ = true;
+        }
+        if (transition.hasExitTime) {
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(width);
+            if (ImGui::SliderFloat("##exit", &transition.exitTime, 0.0f, 1.0f)) {
+                graphDirty_ = true;
+            }
+        }
+
+        static constexpr std::array<const char*, 6> kComparisons{
+            "Greater", "Less", "GreaterEqual", "LessEqual", "Equal", "NotEqual"};
+        ImGui::TextColored(kHintColor, "Conditions (all must hold)");
+        for (std::size_t i = 0; i < transition.conditions.size(); ++i) {
+            Condition& condition = transition.conditions[i];
+            ImGui::PushID(static_cast<int>(i));
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5.0f);
+            if (ImGui::BeginCombo("##param", condition.parameter.empty()
+                                                 ? "(parameter)"
+                                                 : condition.parameter.c_str())) {
+                for (int p = 0; p < graph_.parameters.Count(); ++p) {
+                    const Parameter& parameter = graph_.parameters.At(p);
+                    if (ImGui::Selectable(parameter.name.c_str(),
+                                          parameter.name == condition.parameter)) {
+                        condition.parameter = parameter.name;
+                        graphDirty_ = true;
+                    }
+                }
+                ImGui::EndCombo();
+            }
+            ImGui::SameLine();
+            int comparison = static_cast<int>(condition.comparison);
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 5.0f);
+            if (ImGui::Combo("##cmp", &comparison, kComparisons.data(),
+                             static_cast<int>(kComparisons.size()))) {
+                condition.comparison = static_cast<Comparison>(comparison);
+                graphDirty_ = true;
+            }
+            ImGui::SameLine();
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 3.5f);
+            if (ImGui::DragFloat("##value", &condition.value, 0.01f)) {
+                graphDirty_ = true;
+            }
+            ImGui::SameLine();
+            if (ImGui::SmallButton(icons::kDelete)) {
+                transition.conditions.erase(transition.conditions.begin() +
+                                            static_cast<std::ptrdiff_t>(i));
+                graphDirty_ = true;
+                ImGui::PopID();
+                break;
+            }
+            ImGui::PopID();
+        }
+        if (ImGui::Button((std::string(icons::kAdd) + "  Condition").c_str())) {
+            transition.conditions.push_back(Condition{});
+            graphDirty_ = true;
+        }
+    }
+
+    void RebindGraph() {
+        library_.Invalidate();
+        if (skeleton_.BoneCount() > 0) {
+            instance_.Bind(graph_, skeleton_, library_);
+        }
+        activeLayer_ = std::clamp(activeLayer_, 0, std::max(graph_.LayerCount() - 1, 0));
+    }
+
     void AddTrackForSelectedBone() {
         if (selectedBone_ < 0 || selectedBone_ >= skeleton_.BoneCount()) {
             return;
@@ -1043,6 +1784,75 @@ private:
         }
     }
 
+    void CreateGraph(EditorContext& context) {
+        const std::filesystem::path folder =
+            std::filesystem::path(context.assets->Root()) / "Animation";
+        std::filesystem::path path = folder / "NewGraph.simanimgraph";
+        int suffix = 0;
+        while (std::filesystem::exists(path)) {
+            path = folder / ("NewGraph" + std::to_string(++suffix) + ".simanimgraph");
+        }
+
+        AnimationGraph fresh;
+        fresh.name = path.stem().string();
+        fresh.skeleton = AssetRef{skeletonGuid_};
+        Layer layer;
+        layer.name = "Base";
+        fresh.AddLayer(layer);
+
+        const AnimationIoResult result = SaveGraph(fresh, path);
+        if (!result.ok) {
+            if (context.notifications != nullptr) {
+                context.notifications->Error("Cannot create " + path.filename().string() + ": " +
+                                             result.error);
+            }
+            return;
+        }
+        context.assets->ScanNow();
+        if (const assets::AssetRecord* record =
+                context.assets->FindByRelativePath("Animation/" + path.filename().string())) {
+            OpenGraph(context, record->guid);
+        }
+    }
+
+    void OpenGraph(EditorContext& context, const Uuid& guid) {
+        const assets::AssetRecord* record = context.assets->Find(guid);
+        if (record == nullptr) {
+            return;
+        }
+        AnimationGraph loaded;
+        const AnimationIoResult result =
+            LoadGraph(loaded, context.assets->AbsolutePath(*record));
+        if (!result.ok) {
+            if (context.notifications != nullptr) {
+                context.notifications->Error("Cannot open " + record->name + ": " + result.error);
+            }
+            return;
+        }
+        graph_ = std::move(loaded);
+        graphGuid_ = guid;
+        graphName_ = record->name;
+        graphPath_ = context.assets->AbsolutePath(*record);
+        graphDirty_ = false;
+        graphPlaying_ = false;
+        activeLayer_ = 0;
+        selectedTransition_ = -1;
+        placedStates_.clear();
+        pendingFit_ = true;
+        if (graph_.LayerCount() == 0) {
+            // Graph tanpa lapis tidak punya tempat menaruh state; satu lapis
+            // dasar selalu ada, sama seperti layer dasar terrain.
+            Layer layer;
+            layer.name = "Base";
+            graph_.AddLayer(layer);
+        }
+        if (!skeletonGuid_.IsValid() && graph_.skeleton.IsValid()) {
+            OpenSkeleton(context, graph_.skeleton.guid);
+        }
+        library_.Bind(context.assets);
+        RebindGraph();
+    }
+
     void OpenSkeleton(EditorContext& context, const Uuid& guid) {
         const assets::AssetRecord* record = context.assets->Find(guid);
         if (record == nullptr) {
@@ -1133,6 +1943,16 @@ private:
             }
             clipDirty_ = false;
         }
+        if (graphDirty_ && graphGuid_.IsValid()) {
+            const AnimationIoResult result = SaveGraph(graph_, graphPath_);
+            if (!result.ok) {
+                if (context.notifications != nullptr) {
+                    context.notifications->Error("Save failed: " + result.error);
+                }
+                return;
+            }
+            graphDirty_ = false;
+        }
         if (context.notifications != nullptr) {
             context.notifications->Success("Saved");
         }
@@ -1171,6 +1991,21 @@ private:
     int selectedTrack_ = -1;
     int selectedKey_ = -1;
     bool dragging_ = false;
+
+    AnimationGraph graph_;
+    AssetClipLibrary library_;
+    GraphInstance instance_;
+    NodeCanvas canvas_;
+    bool canvasReady_ = false;
+    Uuid graphGuid_;
+    std::string graphName_;
+    std::filesystem::path graphPath_;
+    bool graphDirty_ = false;
+    bool graphPlaying_ = false;
+    int activeLayer_ = 0;
+    int selectedTransition_ = -1;
+    bool pendingFit_ = false;
+    std::set<int> placedStates_;
 
     ImVec2 sheetOrigin_{0.0f, 0.0f};
     ImVec2 sheetSize_{0.0f, 0.0f};

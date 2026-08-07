@@ -1518,7 +1518,7 @@ benar-benar berlaku, dan menanam/menghapus langsung di viewport 3D. Ketiganya
 menunggu E8; jarak LOD, billboard, dan cull sudah tersimpan di `.simveg` dan
 tinggal dibaca perendernya.
 
-### E7.5 — Animation Editor · 🔨 runtime lengkap; panel klip ada, graph belum
+### E7.5 — Animation Editor · 🔨 semuanya kecuali IK dan mesh skinned
 
 - **Skeleton view**: pohon bone, bind pose, retarget mapping ke rig standar.
 - **Timeline / Dope Sheet**: track per-bone/per-properti, keyframe (pindah, salin,
@@ -1674,9 +1674,36 @@ tepat ke 0,000 s. Untuk event, sebuah penangan Lua ditulis ke
 diputar menyalakannya empat kali berjarak persis 1,000 detik — sekali per
 lintasan klip satu detik.
 
-**Belum ada:** tab state machine graph, dan IK. Preview pada mesh skinned
-menunggu E8; `Pose::ComputeSkinning` sudah menghasilkan matriks yang tinggal
-diunggah.
+**Tab Graph** memakai `NodeCanvas` yang sama dengan Material Editor — kanvasnya
+memang sudah dicatat di `docs/DEPENDENCIES.md` sebagai milik bersama visual
+scripting, material, dan state machine animasi, jadi ini pemakai ketiganya dan
+bukan pembungkus baru.
+
+**"Any State" digambar sebagai simpul semu.** Transisi ber-`from` −1 berlaku dari
+state mana pun; tanpa pangkal yang terlihat, kabelnya seolah muncul dari
+ketiadaan. Ia satu-satunya simpul yang menolak dihapus, karena ia bukan state.
+
+**Pratinjau graph memakai `GraphInstance` yang sungguhan**, bukan gambar diam:
+parameter di panel samping menyunting instance saat pratinjau berjalan dan
+menyunting graph saat tidak. Pemisahan itu perlu — menyunting satu tempat untuk
+keduanya berarti menggeser slider saat mencoba sesuatu diam-diam mengubah
+dokumennya. Klipnya diambil lewat `AssetClipLibrary`, implementasi
+`ClipLibrary` yang menjembatani `AssetDatabase` dan tinggal di panel: modul
+animasi tidak boleh tahu apa pun tentang basis data aset, karena runtime yang
+memuat dari paket harus bisa memutar graph yang sama.
+
+**Menghapus state ikut membuang transisi yang menunjuknya dan menggeser indeks di
+atasnya.** Membiarkannya bukan menghasilkan transisi yang mati melainkan transisi
+yang menunjuk state lain — dan itu jauh lebih sulit dilihat.
+
+**Pemasangan otomatis ke layar hanya berlaku kalau ada yang perlu dibingkai.**
+Ditemukan saat menjalankan panelnya: graph baru hanya berisi simpul semu "Any
+State", dan memasangnya ke layar memperbesar sampai satu simpul memenuhi seluruh
+kanvas — huruf setinggi seratus piksel dan tidak ada yang terbaca. Tombol Fit
+tetap berlaku kapan pun, karena itu permintaan pengguna sendiri.
+
+**Belum ada:** IK, dan preview pada mesh skinned. Keduanya menunggu E8;
+`Pose::ComputeSkinning` sudah menghasilkan matriks yang tinggal diunggah.
 
 ---
 
