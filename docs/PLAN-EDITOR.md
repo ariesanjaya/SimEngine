@@ -1518,7 +1518,7 @@ benar-benar berlaku, dan menanam/menghapus langsung di viewport 3D. Ketiganya
 menunggu E8; jarak LOD, billboard, dan cull sudah tersimpan di `.simveg` dan
 tinggal dibaca perendernya.
 
-### E7.5 — Animation Editor · ~6 sesi · 🔨 seluruh runtime; panelnya belum
+### E7.5 — Animation Editor · 🔨 runtime lengkap; panel klip ada, graph belum
 
 - **Skeleton view**: pohon bone, bind pose, retarget mapping ke rig standar.
 - **Timeline / Dope Sheet**: track per-bone/per-properti, keyframe (pindah, salin,
@@ -1629,13 +1629,46 @@ dominan.
 pohon bersarang menuntut evaluasi rekursif beserta bobot berjenjang, dan hampir
 seluruh gunanya sudah tercakup blend tree 2D — yang memang alasan 2D ada.
 
-**Belum ada:** IK, panel penyuntingnya (pohon skeleton, dope sheet, penyunting
-kurva, kanvas state machine), dan penyaluran event ke Lua. Dua kriteria terima
-menempel di sana: memindahkan keyframe bisa di-undo, dan event memanggil fungsi
-Lua saat preview mencapai frame tersebut — `GraphInstance::Events()` sudah
-melaporkan nama event beserta bobot lapisnya, tinggal disalurkan. Preview pada
-mesh skinned menunggu E8; `Pose::ComputeSkinning` sudah menghasilkan matriks yang
-tinggal diunggah.
+**Panel Animation Editor** ada dengan tab Skeleton dan Clip. Kedua kriteria
+terima yang menempel padanya sudah terpenuhi:
+
+- *"memindahkan keyframe bisa di-undo"* — `ClipHistory`. Ia menyalin **track**,
+  bukan klip: klip 60 detik pada rig 100 bone berukuran puluhan megabyte, dan
+  snapshot tiap kali sebuah kunci digeser menghabiskan RAM dalam beberapa menit
+  menyunting. Tapi ia menyalin track **utuh**, bukan delta per-kunci — dan itu
+  arah yang berlawanan dengan sengaja: `Curve::MoveKey` menjaga urutan waktu,
+  jadi kunci yang diseret melewati tetangganya berpindah indeks, dan riwayat
+  yang mencatat indeks memulihkan kunci yang salah. Ada test khusus untuk kasus
+  itu. Satu langkah undo dibuka saat seretan dimulai dan ditutup saat dilepas,
+  bukan satu langkah per frame.
+- *"event memanggil fungsi Lua saat preview mencapai frame tersebut"* —
+  kontraknya tabel global `AnimationEvents`, bukan fungsi global bernama sama
+  dengan event-nya: nama event ditulis animator, dan menjadikan tiap nama itu
+  global akan menabrak apa pun yang kebetulan sudah bernama begitu. Satu tabel
+  juga membuat "event apa saja yang ditangani" bisa dijawab dengan membaca satu
+  tempat.
+
+**Nama event disaring sebelum disalurkan.** Penyaluran menyusun sepotong kode Lua
+yang memuat namanya, jadi nama bertanda kutip bisa menutup literal string dan
+menyambung kode lain — sebuah klip yang dibagikan orang lain menjadi jalan masuk
+untuk menjalankan apa pun di dalam editor. Yang lolos hanya huruf, angka, garis
+bawah, dan titik; yang tidak lolos tidak disalurkan dan disebutkan, bukan
+didiamkan.
+
+**Pratinjaunya rangka bergaris dua dimensi**, dengan alasan yang sama seperti
+peta 2D terrain dan vegetasi. Untuk menyunting kurva ia bahkan lebih terbaca
+daripada mesh: yang perlu dinilai adalah sudut sendi dan jangkauan gerak, dan
+keduanya justru tertutup kulit. Skalanya dihitung dari pose yang sedang
+terlihat, bukan dari bind pose — klip yang mengangkat tangan tinggi-tinggi harus
+tetap muat.
+
+**Kunci dikunci ke frame saat diseret, kecuali Alt ditahan.** Kunci yang mendarat
+di antara dua frame terlihat benar di kurva dan meleset saat diputar pada laju
+frame klipnya.
+
+**Belum ada:** tab state machine graph, dan IK. Preview pada mesh skinned
+menunggu E8; `Pose::ComputeSkinning` sudah menghasilkan matriks yang tinggal
+diunggah.
 
 ---
 

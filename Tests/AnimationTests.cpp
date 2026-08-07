@@ -4,6 +4,7 @@
 #include "Sim/Animation/AnimationIo.h"
 #include "Sim/Animation/GraphInstance.h"
 #include "Sim/Animation/Clip.h"
+#include "Sim/Animation/ClipHistory.h"
 #include "Sim/Animation/Pose.h"
 #include "Sim/Animation/Skeleton.h"
 
@@ -1258,4 +1259,137 @@ TEST_CASE("Kondisi menunjuk parameter lewat nama, jadi menyisipkan parameter tid
     }
     loaded.parameters.SetAll(shifted);
     CHECK(Evaluate(loaded.LayerAt(0).transitions[0].conditions[0], loaded.parameters));
+}
+
+// --- riwayat suntingan klip ---------------------------------------------------
+
+TEST_CASE("Memindahkan keyframe bisa dibatalkan") {
+    Clip clip;
+    clip.duration = 2.0f;
+    const int track = clip.EnsureTrack("Bone1", Channel::TranslationX);
+    clip.TrackAt(track).curve = RampCurve(0.0f, 10.0f, 2.0f);
+    REQUIRE(clip.TrackAt(track).curve.Keys().size() == 2);
+
+    ClipHistory history;
+    history.Begin("Move key");
+    history.Capture(clip, track);
+    clip.TrackAt(track).curve.MoveKey(1, 1.0f, 7.0f);
+    history.End();
+
+    REQUIRE(history.UndoDepth() == 1);
+    CHECK(history.UndoLabel() == "Move key");
+    CHECK(clip.TrackAt(track).curve.Keys()[1].time == doctest::Approx(1.0f));
+    CHECK(clip.TrackAt(track).curve.Keys()[1].value == doctest::Approx(7.0f));
+
+    REQUIRE(history.Undo(clip));
+    CHECK(clip.TrackAt(track).curve.Keys()[1].time == doctest::Approx(2.0f));
+    CHECK(clip.TrackAt(track).curve.Keys()[1].value == doctest::Approx(10.0f));
+
+    REQUIRE(history.Redo(clip));
+    CHECK(clip.TrackAt(track).curve.Keys()[1].time == doctest::Approx(1.0f));
+    CHECK(clip.TrackAt(track).curve.Keys()[1].value == doctest::Approx(7.0f));
+}
+
+TEST_CASE("Kunci yang diseret melewati tetangganya tetap bisa dibatalkan") {
+    // Justru kasus inilah alasan riwayatnya menyalin track utuh dan bukan delta
+    // per-kunci: `MoveKey` menjaga urutan waktu, jadi kunci yang menyeberang
+    // berpindah indeks — dan riwayat yang mencatat indeks akan memulihkan yang
+    // salah.
+    Clip clip;
+    clip.duration = 3.0f;
+    const int track = clip.EnsureTrack("Bone1", Channel::TranslationX);
+    Curve& curve = clip.TrackAt(track).curve;
+    for (int i = 0; i < 3; ++i) {
+        CurveKey key;
+        key.time = static_cast<float>(i);
+        key.value = static_cast<float>(i) * 10.0f;
+        key.interpolation = Interpolation::Linear;
+        curve.AddKey(key);
+    }
+
+    ClipHistory history;
+    history.Begin("Drag key");
+    history.Capture(clip, track);
+    // Kunci pertama diseret melewati dua kunci lain.
+    clip.TrackAt(track).curve.MoveKey(0, 2.5f, 0.0f);
+    history.End();
+    REQUIRE(clip.TrackAt(track).curve.Keys()[2].time == doctest::Approx(2.5f));
+
+    REQUIRE(history.Undo(clip));
+    const std::vector<CurveKey>& back = clip.TrackAt(track).curve.Keys();
+    REQUIRE(back.size() == 3);
+    for (int i = 0; i < 3; ++i) {
+        CHECK(back[static_cast<std::size_t>(i)].time == doctest::Approx(static_cast<float>(i)));
+        CHECK(back[static_cast<std::size_t>(i)].value ==
+              doctest::Approx(static_cast<float>(i) * 10.0f));
+    }
+}
+
+TEST_CASE("Menambah dan menghapus track bisa dibatalkan") {
+    Clip clip;
+    const int first = clip.EnsureTrack("Bone1", Channel::TranslationX);
+    clip.TrackAt(first).curve = ConstantCurve(1.0f);
+
+    ClipHistory history;
+    history.Begin("Add track");
+    history.CaptureAllTracks(clip);
+    const int added = clip.EnsureTrack("Bone1", Channel::RotationY);
+    clip.TrackAt(added).curve = ConstantCurve(2.0f);
+    history.End();
+    REQUIRE(clip.TrackCount() == 2);
+
+    REQUIRE(history.Undo(clip));
+    CHECK(clip.TrackCount() == 1);
+    CHECK(clip.TrackAt(0).channel == Channel::TranslationX);
+    REQUIRE(history.Redo(clip));
+    CHECK(clip.TrackCount() == 2);
+}
+
+TEST_CASE("Menyunting event dan penanda fase bisa dibatalkan") {
+    Clip clip;
+    clip.duration = 1.0f;
+    clip.AddEvent(Event{0.5f, "lama"});
+
+    ClipHistory history;
+    history.Begin("Add event");
+    history.CaptureEvents(clip);
+    clip.AddEvent(Event{0.25f, "baru"});
+    history.End();
+    REQUIRE(clip.Events().size() == 2);
+
+    REQUIRE(history.Undo(clip));
+    REQUIRE(clip.Events().size() == 1);
+    CHECK(clip.Events()[0].name == "lama");
+    REQUIRE(history.Redo(clip));
+    CHECK(clip.Events().size() == 2);
+}
+
+TEST_CASE("Langkah yang tidak menyalin apa pun tidak masuk riwayat") {
+    Clip clip;
+    ClipHistory history;
+    history.Begin("Tidak jadi");
+    history.End();
+    CHECK(history.UndoDepth() == 0);
+}
+
+TEST_CASE("Menyunting sesudah undo membuang cabang redo") {
+    Clip clip;
+    const int track = clip.EnsureTrack("Bone1", Channel::TranslationX);
+    clip.TrackAt(track).curve = ConstantCurve(1.0f);
+
+    ClipHistory history;
+    history.Begin("A");
+    history.Capture(clip, track);
+    clip.TrackAt(track).curve = ConstantCurve(2.0f);
+    history.End();
+
+    REQUIRE(history.Undo(clip));
+    REQUIRE(history.RedoDepth() == 1);
+
+    history.Begin("B");
+    history.Capture(clip, track);
+    clip.TrackAt(track).curve = ConstantCurve(3.0f);
+    history.End();
+    CHECK(history.RedoDepth() == 0);
+    CHECK(history.UndoDepth() == 1);
 }

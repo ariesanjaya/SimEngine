@@ -94,6 +94,10 @@ inline constexpr const char* kScatter = ICON_LC_SPRAY_CAN;
 inline constexpr const char* kPlant = ICON_LC_SPROUT;
 inline constexpr const char* kErase = ICON_LC_ERASER;
 inline constexpr const char* kSeed = ICON_LC_DICES;
+inline constexpr const char* kBone = ICON_LC_BONE;
+inline constexpr const char* kKeyframe = ICON_LC_DIAMOND;
+inline constexpr const char* kEvent = ICON_LC_FLAG;
+inline constexpr const char* kLoop = ICON_LC_REPEAT;
 inline constexpr const char* kImport = ICON_LC_IMPORT;
 inline constexpr const char* kExport = ICON_LC_UPLOAD;
 

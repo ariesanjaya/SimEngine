@@ -37,6 +37,9 @@ const char* IconFor(AssetType type) {
         case AssetType::Graph: return icons::kNodeGraph;
         case AssetType::Terrain: return icons::kTerrain;
         case AssetType::Vegetation: return icons::kVegetation;
+        case AssetType::Skeleton: return icons::kBone;
+        case AssetType::AnimationClip: return icons::kAssetAnimation;
+        case AssetType::AnimationGraph: return icons::kNodeGraph;
         case AssetType::Level: return icons::kAssetLevel;
         case AssetType::Prefab: return icons::kPrefab;
         case AssetType::Json:

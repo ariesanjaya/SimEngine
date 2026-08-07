@@ -32,7 +32,9 @@ sim_add_library(EditorPanels
         Sim::Particle
         Sim::Terrain
         # Panel Vegetation Editor membuka `.simveg` beserta terrain-nya.
-        Sim::Vegetation)
+        Sim::Vegetation
+        # Panel Animation Editor menyunting `.simskel` dan `.simanim`.
+        Sim::Animation)
 
 list(LENGTH _sim_panel_sources _sim_panel_count)
 message(STATUS "  editor panels: ${_sim_panel_count} berkas")

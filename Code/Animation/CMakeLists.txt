@@ -3,6 +3,7 @@ sim_add_library(Animation
         src/AnimationGraph.cpp
         src/AnimationIo.cpp
         src/Clip.cpp
+        src/ClipHistory.cpp
         src/GraphInstance.cpp
         src/Pose.cpp
         src/Skeleton.cpp

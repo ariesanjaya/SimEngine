@@ -28,6 +28,12 @@ enum class AssetType : uint8_t {
     Terrain,
     /// Vegetasi (`.simveg`) — aturan sebaran; instance-nya dihitung ulang.
     Vegetation,
+    /// Rangka animasi (`.simskel`).
+    Skeleton,
+    /// Klip animasi (`.simanim`).
+    AnimationClip,
+    /// Graph state machine animasi (`.simanimgraph`).
+    AnimationGraph,
     Level,
     Prefab,
     Text,

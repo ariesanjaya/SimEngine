@@ -881,10 +881,10 @@ private:
 }  // namespace
 
 // 31, bukan 30: urutan ini menentukan urutan panel di menu Window, dan
-// Vegetation Editor menempati 30 supaya ia berdiri di sebelah Terrain Editor
-// (29) bersama penyunting E7 yang lain. Nomor kembar tidak boleh: pengurutnya
+// Vegetation Editor menempati 30 dan Animation Editor 31, supaya keduanya
+// berdiri di sebelah Terrain Editor (29) bersama penyunting E7 yang lain. Nomor kembar tidak boleh: pengurutnya
 // stabil, jadi seri akan diputuskan urutan link — persis ketidakpastian yang
 // nomor ini ada untuk menghilangkannya.
-SIM_REGISTER_PANEL(ViewportPanel, 31)
+SIM_REGISTER_PANEL(ViewportPanel, 32)
 
 }  // namespace sim::editor
