@@ -40,6 +40,8 @@ struct ShadowUniforms {
     Vec4 lightDirection{0.0f};
     /// xyz posisi kamera, w 1 kalau bayangan menyala.
     Vec4 cameraPosition{0.0f};
+    /// rgb radiance matahari — warna dikali intensitas dikali eksposur.
+    Vec4 sunRadiance{0.0f};
     /// xyz arah pandang, w kekuatan bias normal dalam satuan texel.
     Vec4 cameraForward{0.0f};
     /// xyz ubin dan irisan cluster, w jumlah lampu.
@@ -51,7 +53,7 @@ struct ShadowUniforms {
 };
 // 4 mat4 + 6 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
 // memperbarui shader-nya menjadi galat kompilasi, bukan bayangan yang bergeser.
-static_assert(sizeof(ShadowUniforms) == 4 * 64 + 9 * 16,
+static_assert(sizeof(ShadowUniforms) == 4 * 64 + 10 * 16,
               "ShadowUniforms harus cocok dengan blok ShadowParams di shadow_common.glsl");
 
 /// Cermin dari `GpuLight` di Shaders/cluster_common.glsl. std430.
@@ -129,7 +131,15 @@ struct BoxInstance {
     Vec4 row2;
     Vec4 row3;
     Vec4 color;
+    /// Bit 0: menerima bayangan. Sebuah bitmask, bukan float bernilai 0/1 —
+    /// bendera per-instance berikutnya tinggal mengambil bit berikutnya alih-alih
+    /// menuntut atribut vertex baru.
+    uint32_t flags;
 };
+
+/// Bit 0 dari `BoxInstance::flags`. Harus sama dengan `kReceiveShadows` di
+/// Shaders/box.frag.
+constexpr uint32_t kInstanceReceiveShadows = 1u;
 
 constexpr Vec4 kSelectedColor{1.0f, 0.62f, 0.20f, 1.0f};
 
@@ -202,7 +212,7 @@ std::vector<BoxVertex> BuildUnitCube() {
     return vertices;
 }
 
-BoxInstance MakeInstance(const Mat4& model, const Vec4& color) {
+BoxInstance MakeInstance(const Mat4& model, const Vec4& color, bool receiveShadows) {
     BoxInstance instance;
     // Kolom glm ditulis apa adanya sebagai empat atribut. Shader menyusunnya
     // kembali dengan `mat4(...)`, yang juga kolom-mayor — jadi keduanya cocok
@@ -212,6 +222,7 @@ BoxInstance MakeInstance(const Mat4& model, const Vec4& color) {
     instance.row2 = model[2];
     instance.row3 = model[3];
     instance.color = color;
+    instance.flags = receiveShadows ? kInstanceReceiveShadows : 0u;
     return instance;
 }
 
@@ -347,9 +358,17 @@ public:
         // diam-diam lebih baik daripada menjumlahkan arah, yang menghasilkan
         // bayangan yang tidak cocok dengan lampu mana pun.
         sunDirection_ = desc.sunDirection;
+        sunRadiance_ = desc.sunRadiance;
+        sunCastsShadows_ = desc.castShadows;
         for (const LightInstance& light : scene.lights) {
             if (light.kind == LightKind::Directional) {
                 sunDirection_ = light.direction;
+                // Warna dikali intensitas — keduanya sampai ke shader sekarang.
+                // Sebelumnya hanya arahnya yang dipakai, jadi menyunting warna
+                // matahari di Inspector tidak mengubah apa pun: antarmuka yang
+                // berbohong, dan itu lebih buruk daripada tombol yang belum ada.
+                sunRadiance_ = light.color * light.intensity;
+                sunCastsShadows_ = desc.castShadows && light.castShadows;
                 break;
             }
         }
@@ -403,7 +422,7 @@ public:
         const Mat4 invViewProj = glm::inverse(viewProj);
         std::array<FrameGraphExecutor::Recorder, 6> recorders{};
         recorders[shadowPassId_] = [&](VkCommandBuffer command) {
-            RecordShadowPass(command, slot, opaqueCount);
+            RecordShadowPass(command, slot, casterCount_);
         };
         recorders[gridId_] = [&](VkCommandBuffer command) {
             // Grid membersihkan warna dan menjadi latar. Ia tidak menyentuh depth
@@ -548,6 +567,7 @@ private:
     void Gather(const ViewportDesc& desc, const ViewportScene& scene, const Mat4& viewProj) {
         opaque_.clear();
         transparent_.clear();
+        casterCount_ = 0;
         const Frustum frustum(viewProj);
         const Vec3 eye = desc.camera.position;
 
@@ -570,11 +590,27 @@ private:
 
             const Vec4 color = mesh.selected ? kSelectedColor : mesh.color;
             if (color.a >= 0.999f) {
-                opaque_.push_back(MakeInstance(model, color));
+                // **Yang menjatuhkan bayangan diletakkan lebih dulu.** Pass
+                // bayangan lalu tinggal menggambar awalan daftarnya, tanpa
+                // atribut tambahan dan tanpa cabang di shader. Trik yang sama
+                // dengan pemisahan buram/tembus pandang di bawah, dan urutan di
+                // antara sesama buram memang tidak berarti apa-apa — semuanya
+                // diuji depth.
+                if (mesh.castShadows) {
+                    opaque_.insert(opaque_.begin() + static_cast<std::ptrdiff_t>(casterCount_),
+                                   MakeInstance(model, color, mesh.receiveShadows));
+                    ++casterCount_;
+                } else {
+                    opaque_.push_back(MakeInstance(model, color, mesh.receiveShadows));
+                }
                 continue;
             }
             const float distance = glm::length(world.Centre() - eye);
-            sorted_.push_back(SortedEntry{distance, MakeInstance(model, color)});
+            // Tembus pandang tidak pernah menjatuhkan bayangan — kaca yang
+            // menghitamkan lantai di bawahnya adalah kesalahan yang lebih
+            // mencolok daripada kaca yang tidak berbayang sama sekali.
+            sorted_.push_back(
+                SortedEntry{distance, MakeInstance(model, color, mesh.receiveShadows)});
         }
 
         // Belakang ke depan. Alpha blending tidak komutatif: dua kaca yang
@@ -935,7 +971,7 @@ private:
             VkVertexInputBindingDescription{1, sizeof(BoxInstance),
                                             VK_VERTEX_INPUT_RATE_INSTANCE},
         };
-        const std::array<VkVertexInputAttributeDescription, 7> attributes{
+        const std::array<VkVertexInputAttributeDescription, 8> attributes{
             VkVertexInputAttributeDescription{0, 0, VK_FORMAT_R32G32B32_SFLOAT,
                                               offsetof(BoxVertex, position)},
             VkVertexInputAttributeDescription{1, 0, VK_FORMAT_R32G32B32_SFLOAT,
@@ -950,6 +986,8 @@ private:
                                               offsetof(BoxInstance, row3)},
             VkVertexInputAttributeDescription{6, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
                                               offsetof(BoxInstance, color)},
+            VkVertexInputAttributeDescription{7, 1, VK_FORMAT_R32_UINT,
+                                              offsetof(BoxInstance, flags)},
         };
         VkPipelineVertexInputStateCreateInfo vertexInput{};
         vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
@@ -1298,6 +1336,7 @@ private:
     /// ditangani terpisah bersama cascade bayangannya.
     void UpdateClusters(const ViewportDesc& desc, const ViewportScene& scene, float aspect,
                         InstanceSlot& slot) {
+        const float exposure = std::max(desc.exposure, 0.0f);
         gpuLights_.clear();
         clusterLights_.clear();
         for (const LightInstance& light : scene.lights) {
@@ -1317,7 +1356,11 @@ private:
             GpuLight gpu;
             gpu.positionInvRangeSq = Vec4(light.position, 1.0f / (range * range));
             gpu.directionCosOuter = Vec4(glm::normalize(light.direction), light.cosOuter);
-            gpu.colorCosInner = Vec4(light.color * light.intensity, light.cosInner);
+            // Eksposur yang sama dengan matahari. Dua jalur cahaya pada skala
+            // berbeda adalah ketidakcocokan yang paling sulit dilacak: setiap
+            // lampu terlihat masuk akal sendiri-sendiri.
+            gpu.colorCosInner =
+                Vec4(light.color * light.intensity * exposure, light.cosInner);
             gpu.kind = Vec4(light.kind == LightKind::Spot ? 1.0f : 0.0f, radius * radius, 0.0f,
                             0.0f);
             gpuLights_.push_back(gpu);
@@ -1387,7 +1430,8 @@ private:
                                                             : Vec3(0.0f, 1.0f, 0.0f);
         uniforms.lightDirection = Vec4(sun, static_cast<float>(cascades_.count));
         uniforms.cameraPosition =
-            Vec4(desc.camera.position, desc.castShadows && cascades_.count > 0 ? 1.0f : 0.0f);
+            Vec4(desc.camera.position, sunCastsShadows_ && cascades_.count > 0 ? 1.0f : 0.0f);
+        uniforms.sunRadiance = Vec4(sunRadiance_ * std::max(desc.exposure, 0.0f), 0.0f);
         uniforms.cameraForward = Vec4(desc.camera.Forward(), kNormalBiasTexels);
         uniforms.clusterCounts = Vec4(static_cast<float>(clusterGrid_.TilesX()),
                                       static_cast<float>(clusterGrid_.TilesY()),
@@ -1406,7 +1450,7 @@ private:
         slot.shadowUniform.Write(&uniforms, sizeof(uniforms));
     }
 
-    void RecordShadowPass(VkCommandBuffer cmd, InstanceSlot& slot, uint32_t opaqueCount) {
+    void RecordShadowPass(VkCommandBuffer cmd, InstanceSlot& slot, uint32_t casterCount) {
         if (shadowPipeline_ == VK_NULL_HANDLE) {
             return;
         }
@@ -1439,10 +1483,8 @@ private:
             vkCmdSetViewport(cmd, 0, 1, &viewport);
             vkCmdSetScissor(cmd, 0, 1, &scissor);
 
-            // Hanya yang buram yang menjatuhkan bayangan. Kaca yang menghitamkan
-            // lantai di bawahnya adalah kesalahan yang lebih mencolok daripada
-            // kaca yang tidak menjatuhkan bayangan sama sekali.
-            if (opaqueCount > 0 && slot.buffer.IsValid()) {
+            // Awalan daftar buram, yaitu yang benar-benar menjatuhkan bayangan.
+            if (casterCount > 0 && slot.buffer.IsValid()) {
                 const Cascade& cascade = cascades_.cascades[static_cast<size_t>(i)];
                 const BoxPush push{cascade.viewProjection};
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
@@ -1451,7 +1493,7 @@ private:
                 const std::array<VkBuffer, 2> buffers{cubeBuffer_.Handle(), slot.buffer.Handle()};
                 const std::array<VkDeviceSize, 2> offsets{0, 0};
                 vkCmdBindVertexBuffers(cmd, 0, 2, buffers.data(), offsets.data());
-                vkCmdDraw(cmd, cubeVertexCount_, opaqueCount, 0, 0);
+                vkCmdDraw(cmd, cubeVertexCount_, casterCount, 0, 0);
             }
             vkCmdEndRendering(cmd);
         }
@@ -1531,6 +1573,8 @@ private:
     static constexpr float kClusterFar = 300.0f;
 
     Vec3 sunDirection_{0.0f, 1.0f, 0.0f};
+    Vec3 sunRadiance_{0.75f};
+    bool sunCastsShadows_ = true;
     ClusterGridSettings clusterSettings_;
     ClusterGrid clusterGrid_;
     ClusterAssignment clusterAssignment_;
@@ -1563,6 +1607,8 @@ private:
         BoxInstance instance;
     };
     std::vector<SortedEntry> sorted_;
+    /// Banyaknya entri di awal `opaque_` yang menjatuhkan bayangan.
+    uint32_t casterCount_ = 0;
     uint32_t drawnOpaque_ = 0;
     uint32_t drawnTransparent_ = 0;
 };

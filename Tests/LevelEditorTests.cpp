@@ -498,3 +498,53 @@ TEST_CASE("Jari-jari sumber sampai ke renderer") {
     REQUIRE(scene.lights.size() == 1);
     CHECK(scene.lights[0].sourceRadius == doctest::Approx(0.5f));
 }
+
+TEST_CASE("Bendera bayangan mesh sampai ke renderer") {
+    scene::World world;
+    Selection selection;
+
+    const scene::Entity caster = MakeBox(world, "Caster", Vec3(0.0f));
+    const scene::Entity ghost = MakeBox(world, "Ghost", Vec3(4.0f, 0.0f, 0.0f));
+    world.TryGet<scene::MeshRendererComponent>(ghost)->castShadows = false;
+    world.TryGet<scene::MeshRendererComponent>(ghost)->receiveShadows = false;
+
+    SceneView view;
+    view.Build(world, selection);
+    const render::ViewportScene scene = view.Scene();
+    REQUIRE(scene.meshes.size() == 2);
+
+    // **Bendera yang muncul di Inspector tapi tidak sampai ke renderer adalah
+    // antarmuka yang berbohong**, dan itu lebih buruk daripada tombol yang belum
+    // ada: pemakainya mengira sudah mematikan sesuatu. Keduanya sempat begitu.
+    int casters = 0;
+    int receivers = 0;
+    for (const render::MeshInstance& mesh : scene.meshes) {
+        casters += mesh.castShadows ? 1 : 0;
+        receivers += mesh.receiveShadows ? 1 : 0;
+    }
+    CHECK(casters == 1);
+    CHECK(receivers == 1);
+    (void)caster;
+}
+
+TEST_CASE("Warna, intensitas, dan bendera bayangan lampu sampai ke renderer") {
+    scene::World world;
+    Selection selection;
+    const scene::Entity entity = MakeLight(world, "Sun", scene::LightType::Directional);
+    auto* light = world.TryGet<scene::LightComponent>(entity);
+    light->color = Vec3(1.0f, 0.5f, 0.25f);
+    light->intensity = 3.0f;
+    light->castShadows = false;
+
+    SceneView view;
+    view.Build(world, selection);
+    const render::ViewportScene scene = view.Scene();
+    REQUIRE(scene.lights.size() == 1);
+
+    // Warna dan intensitas dibawa terpisah, tidak dikalikan di sini: yang
+    // mengalikannya renderer, bersama eksposur — dan mengalikan dua kali adalah
+    // kesalahan yang tampak seperti "lampunya memang terlalu terang".
+    CHECK(scene.lights[0].color.g == doctest::Approx(0.5f));
+    CHECK(scene.lights[0].intensity == doctest::Approx(3.0f));
+    CHECK(scene.lights[0].castShadows == false);
+}

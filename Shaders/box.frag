@@ -6,6 +6,10 @@
 layout(location = 0) in vec3 inNormal;
 layout(location = 1) in vec4 inColor;
 layout(location = 2) in vec3 inWorldPosition;
+layout(location = 3) flat in uint inFlags;
+
+/// Harus sama dengan `kInstanceReceiveShadows` di VulkanRenderer.cpp.
+const uint kReceiveShadows = 1u;
 
 layout(location = 0) out vec4 outColor;
 
@@ -21,7 +25,10 @@ void main() {
     vec3 normal = normalize(inNormal);
     vec3 lightDir = normalize(shadowParams.lightDirection.xyz);
     float ndotl = max(dot(normal, lightDir), 0.0);
-    float shadow = sampleShadow(inWorldPosition, normal);
+    // Yang tidak menerima bayangan tetap dihitung n·l-nya — ia tersinari
+    // seperti biasa, hanya tidak pernah tergelapkan oleh yang lain.
+    float shadow = (inFlags & kReceiveShadows) != 0u ? sampleShadow(inWorldPosition, normal)
+                                                     : 1.0;
     float viewDepth = dot(inWorldPosition - shadowParams.cameraPosition.xyz,
                           shadowParams.cameraForward.xyz);
     // `punctual` adalah iradiansi E(x). Ia dijumlahkan ke suku ad-hoc di
@@ -30,6 +37,8 @@ void main() {
     // openpbr.slang, dan ke sanalah lampu punctual pindah begitu pipeline
     // material menggantikan shader ini.
     vec3 punctual = accumulateClusteredLights(gl_FragCoord.xy, inWorldPosition, normal, viewDepth);
-    vec3 lit = inColor.rgb * (0.25 + 0.75 * ndotl * shadow + punctual);
+    // Radiance matahari datang dari scene sekarang — warna dikali intensitas
+    // dikali eksposur — bukan lagi angka 0,75 yang ditulis di sini.
+    vec3 lit = inColor.rgb * (0.25 + shadowParams.sunRadiance.rgb * (ndotl * shadow) + punctual);
     outColor = vec4(lit, inColor.a);
 }

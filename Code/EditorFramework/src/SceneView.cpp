@@ -77,6 +77,10 @@ void SceneView::Build(scene::World& world, const Selection& selection) {
             instance.boundsMax = Vec3(0.5f);
             instance.color = kMeshColor;
             instance.selected = selected;
+            if (const auto* renderer = world.TryGet<scene::MeshRendererComponent>(entity)) {
+                instance.castShadows = renderer->castShadows;
+                instance.receiveShadows = renderer->receiveShadows;
+            }
             meshes_.push_back(instance);
 
             if (pickable) {
@@ -128,6 +132,7 @@ void SceneView::AppendLight(const scene::LightComponent& light, const Mat4& matr
     instance.intensity = light.intensity;
     instance.range = light.range;
     instance.sourceRadius = light.sourceRadius;
+    instance.castShadows = light.castShadows;
 
     switch (light.type) {
         case scene::LightType::Directional:

@@ -545,8 +545,61 @@ akan tetap hijau setelah shader-nya berubah. Yang diuji adalah bagian yang
 memang hidup di C++ — penerjemahan `LightComponent` menjadi `LightInstance`,
 tempat konvensi arah dan sudut kerucut diputuskan.
 
-**Belum ada:** pembakaran peta prefilter dan LUT ke tekstur GPU, atlas bayangan
-untuk point/spot, dan penyambungan IBL ke pipeline material.
+#### Bendera bayangan dan radiance matahari
+
+Ketiganya ditemukan saat memeriksa ulang E8.3, dan ketiganya punya pola yang
+sama: **data mengalir dari komponen ke Inspector dan ke berkas, lalu berhenti
+sebelum renderer.** `MeshRendererComponent::castShadows`, `receiveShadows`, dan
+`LightComponent::castShadows` semuanya tersimpan dan bisa disunting tapi tidak
+mengubah apa pun — antarmuka yang berbohong, yang lebih buruk daripada tombol
+yang belum ada karena pemakainya mengira sudah mematikan sesuatu.
+
+Yang menjatuhkan bayangan diletakkan di **awal daftar buram**, sehingga pass
+bayangan tinggal menggambar awalannya — tanpa atribut tambahan dan tanpa cabang
+di shader. Trik yang sama dengan pemisahan buram/tembus pandang, dan urutan di
+antara sesama buram memang tidak berarti apa-apa karena semuanya diuji depth.
+`receiveShadows` menuntut keputusan per-fragmen, jadi ia satu-satunya yang
+benar-benar butuh atribut instance — sebuah bitmask, bukan float 0/1, supaya
+bendera berikutnya tinggal mengambil bit berikutnya.
+
+**Warna dan intensitas matahari sekarang sampai ke shader.** Sebelumnya hanya
+arahnya yang dipakai dan `box.frag` mengalikan angka 0,75 yang ditulis langsung
+di sana.
+
+Menyalakannya memunculkan pertanyaan yang tidak bisa dihindari: matahari yang
+disemai editor berintensitas 3,0, dan target warna viewport 8-bit tanpa satu pun
+operator nada di antaranya — jadi radiance sungguhan terpotong putih. Yang salah
+bukan angkanya melainkan tidak adanya yang memetakannya. Jawabannya
+`ViewportDesc::exposure`, sebuah **parameter bernama** yang berdiri sebagai
+pengganti tone mapping sampai E8.8 — alasan yang sama dengan `sourceRadius`:
+angka yang tersembunyi tidak bisa disetel siapa pun dan akan dikira bagian dari
+model. Bawaannya dipilih supaya matahari bawaan menghasilkan tepat 0,75, yaitu
+nilai yang dulu ditulis di shader, sehingga adegan yang ada tidak berubah rupa.
+
+Eksposurnya **berlaku untuk kedua jalur cahaya**. Matahari dan lampu punctual
+pada skala yang berbeda adalah persis jenis ketidakcocokan yang paling sulit
+dilacak: setiap lampu terlihat masuk akal sendiri-sendiri.
+
+Diverifikasi di GUI: mematikan **Cast Shadows** membuat bayangan kotak benar-
+benar hilang, warna matahari mewarnai seluruh adegan, dan menurunkan
+intensitasnya menggelapkannya. Nol pesan validation layer.
+
+#### Status E8.3
+
+| Butir | Keadaan |
+|---|---|
+| Cascaded shadow map (directional) | ✅ jalan di Vulkan |
+| Clustered light culling | ✅ jalan di Vulkan |
+| IBL (prefilter env + DFG LUT) | ⚠️ matematikanya teruji, **belum ada pemakai runtime** |
+| Point/spot dengan shadow atlas | ❌ belum ada |
+
+`Ibl.cpp` dan `evaluateOpenPBR_IBL` hanya dipanggil dari test. Modulnya ada dan
+benar, tapi tidak ada satu baris kode produksi pun yang memakainya — itu keadaan
+yang berbeda dari "pembakarannya belum ada", dan lebih jujur disebutkan begitu.
+
+**Belum ada:** pembakaran peta prefilter dan LUT ke tekstur GPU (menuntut cubemap
+bermip di RHI, yang belum ada), penyambungan IBL ke pipeline material, dan atlas
+bayangan untuk point/spot — yang juga akan mengisi `V_i` yang kini diandaikan 1.
 
 `openpbr.slang` sendiri sudah ada sejak E8.2, tapi baru cahaya langsung: satu
 arah cahaya, tanpa IBL, bayangan, maupun transmisi. Yang ditambahkan di sini

@@ -67,7 +67,29 @@ struct ViewportDesc {
     /// selama scene belum benar-benar punya lampu directional. Begitu komponen
     /// lampu dibaca renderer, medan ini yang menjadi nilai mundurnya.
     Vec3 sunDirection{-0.4f, 0.8f, 0.45f};
+    /// Radiance matahari — warna dikali intensitas — saat scene tidak punya
+    /// lampu directional. Angkanya sama dengan matahari yang disemai editor,
+    /// jadi scene tanpa matahari tampak seperti scene dengan matahari bawaan.
+    Vec3 sunRadiance{3.0f};
     bool castShadows = true;
+
+    /// Pengali eksposur, dipakai seragam oleh matahari dan lampu punctual.
+    ///
+    /// **Berdiri sebagai pengganti tone mapping sampai E8.8.** Target warna
+    /// viewport 8-bit dan tidak ada satu pun operator nada di antaranya, jadi
+    /// radiance sungguhan — matahari bawaan bernilai 3,0 — akan terpotong putih.
+    /// Yang salah bukan angkanya melainkan tidak adanya yang memetakannya.
+    ///
+    /// Sebuah parameter, bukan konstanta di dalam shader, karena alasan yang
+    /// sama dengan `sourceRadius`: angka yang tersembunyi tidak bisa disetel
+    /// siapa pun dan akan dikira bagian dari model. Bawaannya dipilih supaya
+    /// matahari bawaan menghasilkan tepat 0,75 — nilai yang dulu ditulis
+    /// langsung di `box.frag` — sehingga adegan yang ada tidak berubah rupa.
+    ///
+    /// **Berlaku untuk kedua jalur cahaya.** Matahari dan lampu punctual pada
+    /// skala yang berbeda adalah persis jenis ketidakcocokan yang paling sulit
+    /// dilacak: setiap lampu terlihat masuk akal sendiri-sendiri.
+    float exposure = 0.25f;
 };
 
 /// Satu objek yang bisa digambar, sudah dalam ruang dunia.
@@ -82,6 +104,13 @@ struct MeshInstance {
     Vec3 boundsMax{0.5f, 0.5f, 0.5f};
     Vec4 color{0.72f, 0.74f, 0.78f, 1.0f};
     bool selected = false;
+    /// Ikut pass bayangan. Yang tidak menjatuhkan bayangan tetap digambar
+    /// seperti biasa — ia hanya tidak muncul di peta bayangan.
+    bool castShadows = true;
+    /// Menerima bayangan dari yang lain. Dimatikan biasanya untuk permukaan
+    /// yang bayangannya sudah dipanggang, atau untuk latar yang tidak boleh
+    /// tergelapkan apa pun.
+    bool receiveShadows = true;
 };
 
 enum class LightKind : uint8_t {
@@ -113,6 +142,8 @@ struct LightInstance {
     float sourceRadius = 0.01f;
     float cosInner = 0.9f;
     float cosOuter = 0.8f;
+    /// Hanya berarti untuk directional sampai atlas bayangan point/spot ada.
+    bool castShadows = true;
 };
 
 /// Garis dalam ruang dunia. Dipakai grid bantu, sumbu, dan penanda hubungan

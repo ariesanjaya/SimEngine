@@ -13,6 +13,7 @@ layout(set = 0, binding = 0) uniform ShadowParams {
     vec4 cascadeTexelSize;   // ukuran dunia satu texel tiap cascade
     vec4 lightDirection;     // xyz: dari permukaan ke cahaya, w: jumlah cascade
     vec4 cameraPosition;     // xyz: posisi, w: 1 kalau bayangan menyala
+    vec4 sunRadiance;        // rgb: warna * intensitas * eksposur
     vec4 cameraForward;      // xyz: arah pandang, w: kekuatan bias normal
     vec4 clusterCounts;      // xyz: tilesX, tilesY, slices; w: jumlah lampu
     vec4 clusterDepth;       // x: skala irisan, y: bias irisan, z: near, w: far

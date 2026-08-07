@@ -13,6 +13,7 @@ layout(location = 3) in vec4 inRow1;
 layout(location = 4) in vec4 inRow2;
 layout(location = 5) in vec4 inRow3;
 layout(location = 6) in vec4 inColor;
+layout(location = 7) in uint inFlags;
 
 // Tidak ada tahap fragment. Pass ini hanya menulis depth, jadi pipeline-nya
 // dibuat tanpa fragment shader sama sekali — jalur depth-only yang lebih cepat,
