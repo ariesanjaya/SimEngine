@@ -7,38 +7,31 @@
 // skala dan bias-nya dihitung CPU dan dikirim apa adanya, bukan diturunkan ulang
 // di sini dari near dan far.
 
+#ifndef CLUSTER_COMMON_SLANG
+#define CLUSTER_COMMON_SLANG
+
+#include "shadow_common.slang"
+
 struct GpuLight {
-    vec4 positionInvRangeSq;  // xyz posisi, w 1/range^2
-    vec4 directionCosOuter;   // xyz arah pancar, w kosinus sudut luar
-    vec4 colorCosInner;       // rgb warna * intensitas, w kosinus sudut dalam
+    float4 positionInvRangeSq;  // xyz posisi, w 1/range^2
+    float4 directionCosOuter;   // xyz arah pancar, w kosinus sudut luar
+    float4 colorCosInner;       // rgb warna * intensitas, w kosinus sudut dalam
     // x: 0 point / 1 spot, y: jarak minimum kuadrat,
     // z: indeks entri atlas pertama (-1 tanpa bayangan), w: bias normal (dunia)
-    vec4 kind;
+    float4 kind;
 };
 
 /// Satu muka bayangan di dalam atlas.
 struct GpuShadowFace {
-    mat4 viewProjection;
-    vec4 tile;  // xy sudut kiri-atas dalam UV atlas, zw ukurannya
+    float4x4 viewProjection;
+    float4 tile;  // xy sudut kiri-atas dalam UV atlas, zw ukurannya
 };
 
-layout(set = 0, binding = 5) readonly buffer ShadowFaces {
-    GpuShadowFace faces[];
-} shadowFaces;
-
-layout(set = 0, binding = 6) uniform sampler2DShadow shadowAtlas;
-
-layout(set = 0, binding = 2) readonly buffer Lights {
-    GpuLight lights[];
-} lightBuffer;
-
-layout(set = 0, binding = 3) readonly buffer ClusterRanges {
-    uvec2 ranges[];
-} clusterRanges;
-
-layout(set = 0, binding = 4) readonly buffer ClusterIndices {
-    uint indices[];
-} clusterIndices;
+[[vk::binding(2, 0)]] StructuredBuffer<GpuLight> lightBuffer;
+[[vk::binding(3, 0)]] StructuredBuffer<uint2> clusterRanges;
+[[vk::binding(4, 0)]] StructuredBuffer<uint> clusterIndices;
+[[vk::binding(5, 0)]] StructuredBuffer<GpuShadowFace> shadowFaces;
+[[vk::binding(6, 0)]] Sampler2DShadow shadowAtlas;
 
 /// Peredupan jarak dengan jendela.
 ///
@@ -74,11 +67,11 @@ float distanceAttenuation(float distanceSq, float invRangeSq, float minDistanceS
 /// Spot hanya punya satu muka. Point punya enam, dan yang dipilih adalah muka
 /// yang sumbunya paling searah — sama dengan cara perangkat keras memilih muka
 /// cubemap, hanya dilakukan tangan karena atlas bukan cubemap.
-int shadowFaceOf(vec3 fromLight, bool spot) {
+int shadowFaceOf(float3 fromLight, bool spot) {
     if (spot) {
         return 0;
     }
-    vec3 a = abs(fromLight);
+    float3 a = abs(fromLight);
     if (a.x >= a.y && a.x >= a.z) {
         return fromLight.x > 0.0 ? 0 : 1;
     }
@@ -89,7 +82,7 @@ int shadowFaceOf(vec3 fromLight, bool spot) {
 }
 
 /// Faktor bayangan sebuah lampu punctual. 1 berarti tersinari penuh.
-float sampleAtlasShadow(GpuLight light, vec3 worldPosition, vec3 normal, vec3 fromLight) {
+float sampleAtlasShadow(GpuLight light, float3 worldPosition, float3 normal, float3 fromLight) {
     int first = int(light.kind.z);
     if (first < 0) {
         return 1.0;
@@ -98,18 +91,18 @@ float sampleAtlasShadow(GpuLight light, vec3 worldPosition, vec3 normal, vec3 fr
     // dihitung CPU dari ukuran ubin dan jangkauan lampu, karena ubin yang lebih
     // kecil menuntut pergeseran yang lebih besar — dan ukuran ubin berubah
     // setiap kali lampunya mendekat.
-    vec3 offset = normal * light.kind.w;
+    float3 offset = normal * light.kind.w;
     int face = first + shadowFaceOf(fromLight, light.kind.x > 0.5);
-    GpuShadowFace entry = shadowFaces.faces[face];
+    GpuShadowFace entry = shadowFaces[face];
 
-    vec4 clip = entry.viewProjection * vec4(worldPosition + offset, 1.0);
+    float4 clip = mul(entry.viewProjection, float4(worldPosition + offset, 1.0));
     if (clip.w <= 0.0) {
         return 1.0;
     }
-    vec3 projected = clip.xyz / clip.w;
-    vec2 local = projected.xy * 0.5 + 0.5;
-    if (any(lessThan(local, vec2(0.0))) || any(greaterThan(local, vec2(1.0))) ||
-        projected.z <= 0.0 || projected.z >= 1.0) {
+    float3 projected = clip.xyz / clip.w;
+    float2 local = projected.xy * 0.5 + 0.5;
+    if (any(local < float2(0.0)) || any(local > float2(1.0)) || projected.z <= 0.0 ||
+        projected.z >= 1.0) {
         // Di luar frustum muka ini berarti tidak ada yang menghalangi. Untuk
         // spot itu daerah di luar berkasnya, yang toh sudah nol karena kerucut.
         return 1.0;
@@ -118,25 +111,27 @@ float sampleAtlasShadow(GpuLight light, vec3 worldPosition, vec3 normal, vec3 fr
     // Dijepit ke dalam ubin dengan sisa setengah texel: PCF mengambil tetangga,
     // dan tetangga di tepi ubin adalah milik lampu lain — bayangan lampu
     // sebelah lalu bocor masuk sebagai garis di tepi berkas.
-    vec2 texel = 1.0 / vec2(textureSize(shadowAtlas, 0));
-    vec2 inset = texel * 0.5 / max(entry.tile.zw, vec2(1e-6));
-    local = clamp(local, inset, vec2(1.0) - inset);
-    vec2 uv = entry.tile.xy + local * entry.tile.zw;
+    uint width, height, levels;
+    shadowAtlas.GetDimensions(0, width, height, levels);
+    float2 texel = 1.0 / float2(width, height);
+    float2 inset = texel * 0.5 / max(entry.tile.zw, float2(1e-6));
+    local = clamp(local, inset, float2(1.0) - inset);
+    float2 uv = entry.tile.xy + local * entry.tile.zw;
 
     float sum = 0.0;
     for (int y = -1; y <= 1; ++y) {
         for (int x = -1; x <= 1; ++x) {
-            sum += texture(shadowAtlas, vec3(uv + vec2(x, y) * texel, projected.z));
+            sum += shadowAtlas.SampleCmp(uv + float2(x, y) * texel, projected.z);
         }
     }
     return sum / 9.0;
 }
 
 /// Cluster untuk sebuah fragmen. `viewDepth` jarak sepanjang sumbu pandang.
-uint clusterOf(vec2 fragCoord, float viewDepth) {
-    uvec3 counts = uvec3(shadowParams.clusterCounts.xyz);
-    vec2 tile = fragCoord / max(shadowParams.viewportSize.xy, vec2(1.0));
-    uvec2 xy = uvec2(clamp(tile, vec2(0.0), vec2(0.999)) * vec2(counts.xy));
+uint clusterOf(float2 fragCoord, float viewDepth) {
+    uint3 counts = uint3(shadowParams.clusterCounts.xyz);
+    float2 tile = fragCoord / max(shadowParams.viewportSize.xy, float2(1.0));
+    uint2 xy = uint2(clamp(tile, float2(0.0), float2(0.999)) * float2(counts.xy));
 
     float slice = log(max(viewDepth, shadowParams.clusterDepth.z)) *
                       shadowParams.clusterDepth.x + shadowParams.clusterDepth.y;
@@ -153,8 +148,8 @@ uint clusterOf(vec2 fragCoord, float viewDepth) {
 /// sebesar faktor pi.
 ///
 /// Itu bukan kemungkinan yang jauh: `evaluateOpenPBR_IBL` di openpbr.slang
-/// **membagi pi**, sedangkan `box.frag` di bawah tidak — karena seluruh
-/// ekspresi `box.frag` memang ad-hoc dan bukan model shading. Begitu jalur
+/// **membagi pi**, sedangkan `box.frag.slang` di bawah tidak — karena seluruh
+/// ekspresi `box.frag.slang` memang ad-hoc dan bukan model shading. Begitu jalur
 /// punctual ini pindah ke openpbr.slang, skala intensitasnya bergeser sebesar
 /// pi dan setiap lampu yang sudah disetel harus disetel ulang. Yang membuat
 /// kesalahan pi mahal adalah ia tidak pernah terlihat salah; yang
@@ -163,21 +158,22 @@ uint clusterOf(vec2 fragCoord, float viewDepth) {
 /// Difus saja. Ini shader sementara untuk geometri kotak — model shading
 /// sungguhnya OpenPBR lewat pipeline material, dan menulis pendekatan kedua di
 /// sini melanggar aturan yang dipegang seluruh E7.1.
-vec3 accumulateClusteredLights(vec2 fragCoord, vec3 worldPosition, vec3 normal, float viewDepth) {
+float3 accumulateClusteredLights(float2 fragCoord, float3 worldPosition, float3 normal,
+                                 float viewDepth) {
     uint cluster = clusterOf(fragCoord, viewDepth);
-    uvec2 range = clusterRanges.ranges[cluster];
+    uint2 range = clusterRanges[cluster];
 
-    vec3 sum = vec3(0.0);
+    float3 sum = float3(0.0);
     for (uint i = 0u; i < range.y; ++i) {
-        GpuLight light = lightBuffer.lights[clusterIndices.indices[range.x + i]];
-        vec3 toLight = light.positionInvRangeSq.xyz - worldPosition;
+        GpuLight light = lightBuffer[clusterIndices[range.x + i]];
+        float3 toLight = light.positionInvRangeSq.xyz - worldPosition;
         float distanceSq = dot(toLight, toLight);
         float attenuation =
             distanceAttenuation(distanceSq, light.positionInvRangeSq.w, light.kind.y);
         if (attenuation <= 0.0) {
             continue;
         }
-        vec3 direction = toLight * inversesqrt(max(distanceSq, 1e-8));
+        float3 direction = toLight * rsqrt(max(distanceSq, 1e-8));
         float ndotl = max(dot(normal, direction), 0.0);
         if (ndotl <= 0.0) {
             continue;
@@ -197,3 +193,5 @@ vec3 accumulateClusteredLights(vec2 fragCoord, vec3 worldPosition, vec3 normal, 
     }
     return sum;
 }
+
+#endif

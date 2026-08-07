@@ -26,19 +26,37 @@ function(sim_compile_shaders target)
     foreach(_src ${ARG_SOURCES})
         get_filename_component(_abs "${_src}" ABSOLUTE)
         get_filename_component(_name "${_src}" NAME)
+        get_filename_component(_dir "${_abs}" DIRECTORY)
+
+        get_filename_component(_ext "${_src}" LAST_EXT)
+        if(_ext STREQUAL ".slang")
+            # Ekstensi `.slang` dibuang dari nama keluaran: `grid.vert.slang`
+            # menjadi `grid.vert.spv`. Sisi C++ memuat shader lewat namanya, dan
+            # nama itu tidak boleh ikut berubah hanya karena bahasa sumbernya
+            # berganti.
+            get_filename_component(_name "${_src}" NAME_WLE)
+        endif()
         set(_out "${ARG_OUTPUT_DIR}/${_name}.spv")
         set(_dep "${_out}.d")  # nama bawaan yang ditulis glslc -MD
 
-        get_filename_component(_ext "${_src}" LAST_EXT)
         if(_ext STREQUAL ".slang")
             if(NOT SIM_SLANGC)
                 message(FATAL_ERROR "Shader Slang '${_src}' butuh slangc, tapi tidak ditemukan")
             endif()
             add_custom_command(
                 OUTPUT  "${_out}"
+                # -matrix-layout-column-major **wajib**, dan harus sama dengan
+                # argumen yang dipakai pipeline material di `ShaderCache`.
+                # Tanpanya Slang memakai tata letak baris, dan `mul(M, v)`
+                # menghasilkan transpose dari yang dimaksud — setiap matriks di
+                # seluruh engine lalu salah, tanpa satu pun galat kompilasi.
                 COMMAND "${SIM_SLANGC}" "${_abs}" -target spirv -o "${_out}"
                         -profile spirv_1_5 -emit-spirv-directly
+                        -matrix-layout-column-major
+                        -I "${_dir}" -depfile "${_dep}"
+                        $<IF:$<CONFIG:Debug>,-g,-O2>
                 DEPENDS "${_abs}"
+                DEPFILE "${_dep}"
                 COMMENT "slangc ${_name}"
                 VERBATIM)
         else()

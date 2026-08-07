@@ -8,55 +8,56 @@
 // Rumusnya harus sama dengan `SdfTraceBackend` dan `TraceScreenSpace` di sisi
 // C++, yang keduanya diuji terhadap medan analitik dan depth buffer sintetis.
 
-#ifndef GI_TRACE_GLSL
-#define GI_TRACE_GLSL
+#ifndef GI_TRACE_SLANG
+#define GI_TRACE_SLANG
 
-#include "gi_common.glsl"
+#include "gi_common.slang"
+#include "shadow_common.slang"
 
-layout(set = 0, binding = 7) uniform sampler3D sdfCascade0;
-layout(set = 0, binding = 8) uniform sampler3D sdfCascade1;
-layout(set = 0, binding = 9) uniform sampler3D sdfCascade2;
-layout(set = 0, binding = 10) uniform sampler2D hiZ;
+[[vk::binding(7, 0)]] Sampler3D sdfCascade0;
+[[vk::binding(8, 0)]] Sampler3D sdfCascade1;
+[[vk::binding(9, 0)]] Sampler3D sdfCascade2;
+[[vk::binding(10, 0)]] Sampler2D hiZ;
 
 float cascadeVoxelSize(int cascade) { return shadowParams.sdfOrigin[cascade].w; }
 
 /// Kaskade terhalus yang memuat sebuah titik, atau -1.
-int cascadeFor(vec3 world) {
+int cascadeFor(float3 world) {
     int count = int(shadowParams.sdfParams.y);
     float resolution = shadowParams.sdfParams.x;
     for (int i = 0; i < count; ++i) {
-        vec3 origin = shadowParams.sdfOrigin[i].xyz;
+        float3 origin = shadowParams.sdfOrigin[i].xyz;
         float voxel = shadowParams.sdfOrigin[i].w;
-        vec3 local = world - origin;
+        float3 local = world - origin;
         float span = voxel * resolution;
         // Sedikit di dalam tepinya: sampel trilinear membaca voxel tetangga,
         // dan tetangga di tepi kaskade adalah milik sisi seberangnya.
-        if (all(greaterThanEqual(local, vec3(voxel))) &&
-            all(lessThanEqual(local, vec3(span - voxel)))) {
+        if (all(local >= float3(voxel)) &&
+            all(local <= float3(span - voxel))) {
             return i;
         }
     }
     return -1;
 }
 
-float sampleCascade(int cascade, vec3 world) {
+float sampleCascadeSdf(int cascade, float3 world) {
     float voxel = shadowParams.sdfOrigin[cascade].w;
     float resolution = shadowParams.sdfParams.x;
     // Koordinat tekstur toroidal: dibagi resolusi lalu dibiarkan membungkus oleh
     // sampler REPEAT. Titik asalnya tidak dikurangkan — justru itu inti clipmap,
     // sebuah voxel dunia selalu memetakan ke texel yang sama.
-    vec3 uvw = (world / voxel - vec3(0.5)) / resolution;
+    float3 uvw = (world / voxel - float3(0.5)) / resolution;
     // Cabang, bukan pemilihan lewat ternary: GLSL tidak mengizinkan sampler
     // sebagai nilai ekspresi. Larik sampler akan lebih rapi, tapi ia menuntut
     // indeks yang seragam di seluruh subgroup — dan indeks kaskade di sini
     // memang berbeda antar-piksel.
     float encoded;
     if (cascade == 0) {
-        encoded = texture(sdfCascade0, uvw).r;
+        encoded = sdfCascade0.SampleLevel(uvw, 0).r;
     } else if (cascade == 1) {
-        encoded = texture(sdfCascade1, uvw).r;
+        encoded = sdfCascade1.SampleLevel(uvw, 0).r;
     } else {
-        encoded = texture(sdfCascade2, uvw).r;
+        encoded = sdfCascade2.SampleLevel(uvw, 0).r;
     }
     float band = voxel * shadowParams.sdfParams.z;
     return (encoded - 0.5) * band * 2.0;
@@ -65,11 +66,11 @@ float sampleCascade(int cascade, vec3 world) {
 struct SdfHit {
     bool hit;
     float distance;
-    vec3 position;
+    float3 position;
     int steps;
 };
 
-SdfHit traceSdf(vec3 origin, vec3 direction, float tMax) {
+SdfHit traceSdf(float3 origin, float3 direction, float tMax) {
     SdfHit result;
     result.hit = false;
     result.distance = 0.0;
@@ -79,13 +80,13 @@ SdfHit traceSdf(vec3 origin, vec3 direction, float tMax) {
     int maxSteps = int(shadowParams.sdfParams.w);
     float travelled = 0.0;
     for (int step = 0; step < maxSteps; ++step) {
-        vec3 position = origin + direction * travelled;
+        float3 position = origin + direction * travelled;
         int cascade = cascadeFor(position);
         if (cascade < 0) {
             result.steps = step;
             return result;
         }
-        float distance = sampleCascade(cascade, position);
+        float distance = sampleCascadeSdf(cascade, position);
         float voxel = cascadeVoxelSize(cascade);
         if (distance < voxel * 0.5) {
             result.hit = true;
@@ -117,47 +118,47 @@ struct ScreenHit {
     bool hit;
     bool leftScreen;
     float distance;
-    vec3 position;
+    float3 position;
     /// Tempat perpotongannya di layar. Dipakai membaca radiansi permukaan yang
     /// dikenai dari buffer warna yang sudah tersinari.
-    vec2 uv;
+    float2 uv;
     int steps;
 };
 
 /// Ukuran sepetak yang sah pada sebuah tingkat, dengan pembagian dibulatkan ke
 /// bawah — aturan mip Vulkan, sama dengan `HiZPyramid` di sisi C++.
-ivec2 hizLevelSize(int level) {
-    ivec2 size = ivec2(shadowParams.viewportSize.xy);
+int2 hizLevelSize(int level) {
+    int2 size = int2(shadowParams.viewportSize.xy);
     for (int i = 0; i < level; ++i) {
-        size = max(ivec2(1), size / 2);
+        size = max(int2(1), size / 2);
     }
     return size;
 }
 
-float hizSample(int level, vec2 uv, ivec2 size) {
-    ivec2 texel = clamp(ivec2(floor(uv * vec2(size))), ivec2(0), size - ivec2(1));
-    return texelFetch(hiZ, texel, level).r;
+float hizSample(int level, float2 uv, int2 size) {
+    int2 texel = clamp(int2(floor(uv * float2(size))), int2(0), size - int2(1));
+    return hiZ.Load(int3(texel, level)).r;
 }
 
-vec3 unproject(vec2 uv, float depth) {
-    vec4 point = shadowParams.invViewProj * vec4(uv * 2.0 - 1.0, depth, 1.0);
+float3 unproject(float2 uv, float depth) {
+    float4 point = mul(shadowParams.invViewProj, float4(uv * 2.0 - 1.0, depth, 1.0));
     return point.xyz / point.w;
 }
 
 /// Parameter saat sinar meninggalkan sel yang memuatnya pada tingkat ini.
-float nextCellBoundary(vec2 uv0, vec2 duv, ivec2 size, float s) {
-    vec2 scale = vec2(size);
-    vec2 point = (uv0 + duv * s) * scale;
-    vec2 cell = floor(point);
+float nextCellBoundary(float2 uv0, float2 duv, int2 size, float s) {
+    float2 scale = float2(size);
+    float2 point = (uv0 + duv * s) * scale;
+    float2 cell = floor(point);
 
     float next = 1e30;
     for (int axis = 0; axis < 2; ++axis) {
-        float step = duv[axis] * scale[axis];
-        if (abs(step) < 1e-9) {
+        float advance = duv[axis] * scale[axis];
+        if (abs(advance) < 1e-9) {
             continue;
         }
-        float edge = step > 0.0 ? cell[axis] + 1.0 : cell[axis];
-        next = min(next, (edge - uv0[axis] * scale[axis]) / step);
+        float edge = advance > 0.0 ? cell[axis] + 1.0 : cell[axis];
+        next = min(next, (edge - uv0[axis] * scale[axis]) / advance);
     }
     if (next > 1e29) {
         return 1e30;
@@ -167,13 +168,13 @@ float nextCellBoundary(vec2 uv0, vec2 duv, ivec2 size, float s) {
     return next + (1.0 / max(length(duv * scale), 1e-9)) / 128.0;
 }
 
-ScreenHit traceScreen(vec3 origin, vec3 direction, float tMax) {
+ScreenHit traceScreen(float3 origin, float3 direction, float tMax) {
     ScreenHit result;
     result.hit = false;
     result.leftScreen = true;
     result.distance = 0.0;
     result.position = origin;
-    result.uv = vec2(0.0);
+    result.uv = float2(0.0);
     result.steps = 0;
 
     int levelCount = int(shadowParams.screenTrace.w);
@@ -184,8 +185,8 @@ ScreenHit traceScreen(vec3 origin, vec3 direction, float tMax) {
     float bias = min(shadowParams.screenTrace.y, tMax * 0.5);
     int maxSteps = int(shadowParams.screenTrace.z);
 
-    vec4 clipStart = shadowParams.viewProj * vec4(origin + direction * bias, 1.0);
-    vec4 clipEnd = shadowParams.viewProj * vec4(origin + direction * tMax, 1.0);
+    float4 clipStart = mul(shadowParams.viewProj, float4(origin + direction * bias, 1.0));
+    float4 clipEnd = mul(shadowParams.viewProj, float4(origin + direction * tMax, 1.0));
     // Titik dengan w tidak positif tidak punya proyeksi yang berarti: koordinat
     // layarnya adalah pantulan di seberang layar, dan penelusur yang memakainya
     // menelusuri tempat yang salah dengan penuh keyakinan.
@@ -195,7 +196,7 @@ ScreenHit traceScreen(vec3 origin, vec3 direction, float tMax) {
     }
     if (clipStart.w < minW || clipEnd.w < minW) {
         float t = (minW - clipStart.w) / (clipEnd.w - clipStart.w);
-        vec4 crossing = clipStart + (clipEnd - clipStart) * t;
+        float4 crossing = clipStart + (clipEnd - clipStart) * t;
         if (clipStart.w >= minW) {
             clipEnd = crossing;
         } else {
@@ -203,10 +204,10 @@ ScreenHit traceScreen(vec3 origin, vec3 direction, float tMax) {
         }
     }
 
-    vec3 ndcStart = clipStart.xyz / clipStart.w;
-    vec3 ndcEnd = clipEnd.xyz / clipEnd.w;
-    vec2 uv0 = ndcStart.xy * 0.5 + 0.5;
-    vec2 duv = (ndcEnd.xy * 0.5 + 0.5) - uv0;
+    float3 ndcStart = clipStart.xyz / clipStart.w;
+    float3 ndcEnd = clipEnd.xyz / clipEnd.w;
+    float2 uv0 = ndcStart.xy * 0.5 + 0.5;
+    float2 duv = (ndcEnd.xy * 0.5 + 0.5) - uv0;
     float z0 = ndcStart.z;
     float dz = ndcEnd.z - ndcStart.z;
 
@@ -232,7 +233,7 @@ ScreenHit traceScreen(vec3 origin, vec3 direction, float tMax) {
     float s = sMin;
     for (int step = 0; step < maxSteps; ++step) {
         result.steps = step + 1;
-        ivec2 size = hizLevelSize(level);
+        int2 size = hizLevelSize(level);
         float sNext = min(nextCellBoundary(uv0, duv, size, s), sMax);
         float sceneZ = hizSample(level, uv0 + duv * ((s + sNext) * 0.5), size);
 
@@ -250,7 +251,7 @@ ScreenHit traceScreen(vec3 origin, vec3 direction, float tMax) {
             // Sinar yang masuk dalam keadaan sudah di belakang permukaan tidak
             // memotongnya — ia lewat di belakangnya.
             if (zEnter < sceneZ) {
-                vec2 entryUv = uv0 + duv * s;
+                float2 entryUv = uv0 + duv * s;
                 if (distance(unproject(entryUv, zEnter), unproject(entryUv, sceneZ)) >
                     thickness) {
                     s = sNext;
@@ -280,22 +281,22 @@ ScreenHit traceScreen(vec3 origin, vec3 direction, float tMax) {
 }
 
 
-const int kLayerNone = 0;
-const int kLayerScreen = 1;
-const int kLayerSdf = 2;
-const int kLayerSky = 3;
+static const int kLayerNone = 0;
+static const int kLayerScreen = 1;
+static const int kLayerSdf = 2;
+static const int kLayerSky = 3;
 
 /// Hasil satu penelusuran berjenjang.
 struct TieredHit {
     bool hit;
     int layer;
     float distance;
-    vec3 position;
-    vec2 uv;      // hanya berarti untuk lapis layar
+    float3 position;
+    float2 uv;      // hanya berarti untuk lapis layar
     int steps;
 };
 
-TieredHit traceTiered(vec3 origin, vec3 direction, float tMax) {
+TieredHit traceTiered(float3 origin, float3 direction, float tMax) {
     TieredHit result;
     ScreenHit screen = traceScreen(origin, direction, tMax);
     if (screen.hit) {
@@ -315,7 +316,7 @@ TieredHit traceTiered(vec3 origin, vec3 direction, float tMax) {
     result.layer = sdf.hit ? kLayerSdf : kLayerSky;
     result.distance = sdf.distance;
     result.position = sdf.position;
-    result.uv = vec2(0.0);
+    result.uv = float2(0.0);
     // Langkah kedua lapis dijumlahkan: yang diawasi anggaran adalah biaya satu
     // sinar, dan sinar yang gagal di layar lalu berjalan penuh di SDF adalah
     // sinar yang paling mahal.
@@ -329,12 +330,12 @@ TieredHit traceTiered(vec3 origin, vec3 direction, float tMax) {
 /// duplikasi yang disengaja untuk sementara: langit sungguhan datang di E8.8
 /// bersama atmosfer, dan sampai saat itu satu-satunya alternatif adalah
 /// mengangkut tiga warna lewat UBO untuk sesuatu yang akan dibuang.
-vec3 giSky(vec3 direction) {
-    const vec3 zenith = vec3(0.18, 0.32, 0.62);
-    const vec3 horizon = vec3(0.62, 0.66, 0.72);
-    const vec3 ground = vec3(0.14, 0.13, 0.12);
+float3 giSky(float3 direction) {
+    const float3 zenith = float3(0.18, 0.32, 0.62);
+    const float3 horizon = float3(0.62, 0.66, 0.72);
+    const float3 ground = float3(0.14, 0.13, 0.12);
     float t = direction.y;
-    return t >= 0.0 ? mix(horizon, zenith, sqrt(t)) : mix(horizon, ground, sqrt(-t));
+    return t >= 0.0 ? lerp(horizon, zenith, sqrt(t)) : lerp(horizon, ground, sqrt(-t));
 }
 
 #endif

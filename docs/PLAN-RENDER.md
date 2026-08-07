@@ -1196,6 +1196,51 @@ apa yang dipakai menggambar adalah selisih yang paling mahal, karena alatnya lal
 berbohong justru saat paling dibutuhkan. `invViewProj` ikut pindah ke UBO supaya
 penelusurnya tidak bergantung pada push constant pemakainya.
 
+#### Porting shader ke Slang
+
+Dua belas entry point dan enam berkas bersama pindah dari GLSL ke Slang dalam
+satu sapuan, sebelum sisi GPU M3 menambah shader baru — memporting dua belas
+berkas lebih murah daripada lima belas, dan yang lebih penting: shader probe
+lahir dalam bahasa yang benar alih-alih ditulis dua kali.
+
+**Tidak ada satu pun penghalang teknis.** Semua yang dipakai punya padanan:
+`gl_VertexIndex`→`SV_VertexID`, `texelFetch`→`.Load()`, `sampler2DArrayShadow`→
+`Sampler2DArrayShadow` dengan `SampleCmp`, `sampler3D`→`Sampler3D`, push
+constant→`[[vk::push_constant]]`, storage buffer→`StructuredBuffer`. Yang
+menahannya selama ini hanyalah jalur GLSL yang sudah ada dan terus diperpanjang.
+
+**Perkalian matriks adalah jebakan yang paling berbahaya, dan Slang justru
+menangkapnya.** GLSL `M * v` dengan matriks kolom-mayor menjadi `mul(M, v)` di
+Slang; menuliskannya sebagai `M * v` **tidak dikompilasi** — Slang tidak punya
+overload `matrix * vector`. Itu keberuntungan yang layak dicatat: kesalahan yang
+seharusnya muncul sebagai seluruh dunia tertranspose diam-diam malah muncul
+sebagai galat kompilasi di tiga baris yang tepat.
+
+**`row0..row3` sebenarnya kolom, dan namanya berbohong.** Sisi C++ menuliskan
+`model[0..3]`, dan indeks glm memilih kolom. GLSL `mat4(a,b,c,d)` juga
+kolom-mayor, jadi keduanya cocok tanpa transpose. Slang mengikuti HLSL:
+`float4x4(a,b,c,d)` menyusunnya sebagai **baris**. Transpose-nya sekarang
+disebut sekali di `instance_common.slang`; melewatkannya tidak menghasilkan galat
+apa pun — hanya setiap kotak tergambar di tempat dan orientasi yang salah.
+
+**ABI `ShadowParams` selamat karena bentuknya, bukan karena keberuntungan.**
+Seluruh anggotanya `float4`, `float4x4`, atau larik keduanya — semuanya
+berukuran dan berjajar kelipatan 16 byte. Pada tipe-tipe itu std140, std430, dan
+tata letak skalar sepakat persis, jadi tidak ada aturan tata letak yang bisa
+menggeser satu medan pun. Menambahkan `float3` atau skalar tunggal ke sana akan
+mematahkan sifat itu, dan `static_assert` di sisi C++ tidak bisa melihatnya.
+
+**Slang membuang atribut vertex yang tidak dipakai; glslang tidak.** Pass
+bayangan hanya membaca posisi dan keempat kolom matriks, jadi normal, warna, dan
+bendera hilang dari antarmuka entry point-nya — dan pipeline yang mendeklarasikan
+atribut yang tidak dikonsumsi shader-nya adalah peringatan validasi di setiap
+pembuatan pipeline. Yang dilakukan bukan meredam peringatannya melainkan
+menyaring daftar atributnya: yang tidak diambil memang tidak perlu diambil.
+
+Pelacakan dependensi lewat `-depfile`: menyentuh `shadow_common.slang` membangun
+ulang tepat dua shader yang menyertakannya, bukan seluruhnya dan bukan tidak
+sama sekali.
+
 **Belum ada:** seluruh sisi GPU-nya — G-buffer normal dari depth prepass, pass
 penelusur probe yang menembakkan 16 ray dan memproyeksikannya ke SH, ping-pong
 akumulasi temporal, pass resolve yang menginterpolasi probe ke piksel, dan
@@ -1255,8 +1300,24 @@ Dicatat supaya tidak diperdebatkan ulang saat E8:
    Tiga kelompok parameter spesifikasi sengaja belum ada: `subsurface_*`,
    `transmission_*`, `thin_film_*`. Tekniknya sudah dipilih di
    [RENDER-OPENPBR.md](RENDER-OPENPBR.md).
-4. **Shader**: sumbernya Slang, dikompilasi lewat `slangc` dari Vulkan SDK. GLSL
-   masih diterima untuk shader utilitas.
+4. **Shader**: sumbernya Slang, dikompilasi lewat `slangc` dari Vulkan SDK.
+   **Seluruhnya, tanpa kecuali.**
+
+   Aturan ini sempat berbunyi "GLSL masih diterima untuk shader utilitas", dan
+   pengecualian itu menelan dirinya sendiri: dua belas shader pipeline ditulis
+   GLSL karena masing-masing terasa "utilitas" saat ditulis — termasuk penelusur
+   GI, pembangun piramida HiZ, dan pass forward. Sebuah pengecualian yang
+   batasnya ditentukan perasaan penulisnya bukan pengecualian melainkan aturan
+   kedua. Sekarang tidak ada lagi berkas `.glsl` di `Shaders/`.
+
+   Berkas diberi nama `<nama>.<tahap>.slang`; `sim_compile_shaders` membuang
+   akhiran `.slang` dari nama keluarannya, sehingga sisi C++ tetap memuat
+   `box.vert.spv` dan tidak ikut berubah hanya karena bahasa sumbernya berganti.
+
+   **`-matrix-layout-column-major` wajib**, dan harus sama dengan argumen yang
+   dipakai pipeline material di `ShaderCache`. Tanpanya Slang memakai tata letak
+   baris, dan setiap matriks di seluruh engine tertranspose tanpa satu pun galat
+   kompilasi.
 5. **Vulkan 1.3** sebagai baseline (dynamic rendering, synchronization2,
    timeline semaphore), dengan fallback render pass tradisional bila perangkat
    hanya 1.2.

@@ -31,17 +31,17 @@ sim_add_library(Render
 
 sim_compile_shaders(SimShadersGrid
     SOURCES
-        ${CMAKE_SOURCE_DIR}/Shaders/grid.vert
-        ${CMAKE_SOURCE_DIR}/Shaders/grid.frag
-        ${CMAKE_SOURCE_DIR}/Shaders/line.vert
-        ${CMAKE_SOURCE_DIR}/Shaders/line.frag
-        ${CMAKE_SOURCE_DIR}/Shaders/box.vert
-        ${CMAKE_SOURCE_DIR}/Shaders/box.frag
-        ${CMAKE_SOURCE_DIR}/Shaders/shadow.vert
-        ${CMAKE_SOURCE_DIR}/Shaders/hiz_reduce.vert
-        ${CMAKE_SOURCE_DIR}/Shaders/hiz_reduce.frag
-        ${CMAKE_SOURCE_DIR}/Shaders/sdf_debug.vert
-        ${CMAKE_SOURCE_DIR}/Shaders/sdf_debug.frag)
+        ${CMAKE_SOURCE_DIR}/Shaders/grid.vert.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/grid.frag.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/line.vert.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/line.frag.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/box.vert.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/box.frag.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/shadow.vert.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/hiz_reduce.vert.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/hiz_reduce.frag.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/sdf_debug.vert.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/sdf_debug.frag.slang)
 # openpbr.slang sengaja tidak ada di daftar ini. Ia modul pustaka tanpa entry
 # point — yang mengompilasinya adalah `AssembleMaterialModule`, yang menanamnya
 # ke dalam modul material lalu menyerahkannya ke ShaderCache. Menambahkannya di

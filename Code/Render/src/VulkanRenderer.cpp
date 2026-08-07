@@ -1235,12 +1235,35 @@ private:
             VkVertexInputAttributeDescription{7, 1, VK_FORMAT_R32_UINT,
                                               offsetof(BoxInstance, flags)},
         };
+        // Pass bayangan hanya membaca posisi dan keempat kolom matriks model —
+        // normal, warna, dan bendera tidak disentuhnya. Buffer-nya sama dan
+        // stride-nya sama; yang berbeda hanya atribut mana yang diambil.
+        //
+        // **Menyebutkannya jadi wajib setelah shader-nya pindah ke Slang.**
+        // glslang mempertahankan input yang dideklarasikan walaupun tidak
+        // dipakai, jadi selama shader-nya GLSL semua delapan atribut "terpakai".
+        // Slang membuang yang tidak terpakai dari antarmuka entry point, dan
+        // pipeline yang mendeklarasikan atribut yang tidak dikonsumsi shader-nya
+        // adalah peringatan validasi di setiap pembuatan pipeline. Menyaringnya
+        // di sini bukan sekadar meredam peringatan: atribut yang tidak diambil
+        // memang tidak perlu diambil.
+        std::array<VkVertexInputAttributeDescription, 8> used{};
+        uint32_t usedCount = 0;
+        for (const VkVertexInputAttributeDescription& attribute : attributes) {
+            const bool shadowOnly = fragment == VK_NULL_HANDLE && !colorWrite;
+            if (shadowOnly && (attribute.location == 1 || attribute.location == 6 ||
+                               attribute.location == 7)) {
+                continue;
+            }
+            used[usedCount++] = attribute;
+        }
+
         VkPipelineVertexInputStateCreateInfo vertexInput{};
         vertexInput.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
         vertexInput.vertexBindingDescriptionCount = static_cast<uint32_t>(bindings.size());
         vertexInput.pVertexBindingDescriptions = bindings.data();
-        vertexInput.vertexAttributeDescriptionCount = static_cast<uint32_t>(attributes.size());
-        vertexInput.pVertexAttributeDescriptions = attributes.data();
+        vertexInput.vertexAttributeDescriptionCount = usedCount;
+        vertexInput.pVertexAttributeDescriptions = used.data();
 
         VkPipelineInputAssemblyStateCreateInfo assembly{};
         assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
