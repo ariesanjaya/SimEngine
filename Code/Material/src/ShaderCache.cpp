@@ -292,6 +292,15 @@ void ShaderCache::Purge() {
     }
 }
 
+std::string_view SlangArguments() {
+    // `-matrix-layout-column-major` menyamakan tata letak matriks di memori
+    // dengan glm, yang column-major. Tanpanya `mul(m, v)` membaca matriks yang
+    // diunggah C++ dalam urutan terbalik — yang bukan galat melainkan transpose,
+    // dan transpose sebuah matriks rotasi adalah rotasi ke arah sebaliknya.
+    return "-target spirv -profile spirv_1_5 -emit-spirv-directly "
+           "-matrix-layout-column-major";
+}
+
 std::string SlangCompilerIdentity(const std::filesystem::path& slangcPath) {
     const std::filesystem::path exe = ResolveSlangc(slangcPath);
     if (exe.empty()) {
@@ -310,7 +319,11 @@ std::string SlangCompilerIdentity(const std::filesystem::path& slangcPath) {
     if (const size_t newline = text.find('\n'); newline != std::string::npos) {
         text.resize(newline);
     }
-    return Trim(std::move(text));
+    text = Trim(std::move(text));
+    if (text.empty()) {
+        return {};
+    }
+    return text + " " + std::string(SlangArguments());
 }
 
 ShaderCache::Compiler MakeSlangCompiler(std::filesystem::path slangcPath) {
@@ -357,10 +370,10 @@ ShaderCache::Compiler MakeSlangCompiler(std::filesystem::path slangcPath) {
 
         const std::string entry = request.entryPoint.empty() ? std::string("main")
                                                              : request.entryPoint;
-        const std::string command = Quote(exe) + " " + Quote(in) + " -target spirv" +
-                                    " -profile spirv_1_5 -emit-spirv-directly" + " -entry " +
-                                    entry + " -stage " + ToString(request.stage) + " -o " +
-                                    Quote(spv) + " > " + Quote(log) + " 2>&1";
+        const std::string command = Quote(exe) + " " + Quote(in) + " " +
+                                    std::string(SlangArguments()) + " -entry " + entry +
+                                    " -stage " + ToString(request.stage) + " -o " + Quote(spv) +
+                                    " > " + Quote(log) + " 2>&1";
         const int status = std::system(command.c_str());
         out.error = Trim(ReadTextFile(log));
 

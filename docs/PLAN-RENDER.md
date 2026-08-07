@@ -108,17 +108,17 @@ berarti begitu ada tekstur untuk diindeks — yaitu E8.2. Alias memori transien
 sudah ada di graph dan teruji, tapi belum ada pemakainya: pass pertama yang
 benar-benar menuntut target antara adalah post-process di E8.8.
 
-### E8.2 — Material runtime · 🔨 graph → SPIR-V selesai
+### E8.2 — Material runtime · 🔨 kedua tahap shader selesai
 Kompilasi graph `.simmat` → kode shader → SPIR-V, cache di disk berbasis hash graph.
 Material instance jadi uniform buffer + indeks tekstur. Varian shader (skinned,
 instanced, alpha-test) lewat spesialisasi konstanta. **Titik sambung:** Material
 Editor mulai menampilkan preview PBR sungguhan.
 
-**Sudah ada:** jalur lengkap dari graph sampai SPIR-V — `MaterialParameterBlock`
-(tata letak blok uniform dan tabel slot tekstur), `openpbr.slang` (model
-shading-nya), `AssembleMaterialModule` (perakit modul), dan `ShaderCache`
-(kompilasi `slangc` beserta cache disk). Graph → Slang sendiri sudah selesai di
-E7.1.
+**Sudah ada:** jalur lengkap dari graph sampai SPIR-V untuk kedua tahap —
+`MaterialParameterBlock` (tata letak blok uniform dan tabel slot tekstur),
+`openpbr.slang` (model shading-nya), `AssembleMaterialModule` (perakit modul,
+tahap vertex dan fragment), dan `ShaderCache` (kompilasi `slangc` beserta cache
+disk). Graph → Slang sendiri sudah selesai di E7.1.
 
 **Ini ABI antara kode Slang yang dihasilkan dan sisi C++.** Kedua sisi
 menghitung offset dari daftar parameter yang sama, dan selisih satu sisipan
@@ -180,11 +180,55 @@ setengah tertulis yang ingin dihindari muncul.
 bertabrakan muncul sebagai material yang memakai shader milik material lain —
 bug yang tidak akan pernah dicurigai orang berasal dari cache.
 
-**Belum ada:** tahap vertex (`kSkinned`/`kInstanced` sudah dideklarasikan tapi
-belum ada yang membacanya, jadi slangc membuangnya dari SPIR-V), dan preview PBR
-di Material Editor. Preview-nya menuntut instance `IViewportRenderer` kedua —
-jalannya sudah jelas dan dicatat di E7.1, tinggal dikerjakan bersama pipeline
-materialnya.
+#### Tahap vertex
+
+**Satu modul, dua entry point, dua entri cache.** Sumbernya sama persis untuk
+kedua tahap; yang membedakan kuncinya adalah tahap dan nama entry point-nya.
+Merakit dua modul terpisah akan membuat struct varying tertulis dua kali — dan
+struct varying yang berbeda antara vertex dan fragment adalah kegagalan link
+pipeline, bukan sesuatu yang bisa ditemukan dengan membaca salah satunya.
+
+**Lokasi atribut dan nomor binding ditulis eksplisit, tidak dinomori otomatis.**
+Penomoran otomatis mengikuti urutan yang *bertahan*: dengan `kSkinned` mati
+kedua atribut tulang bisa dibuang, dan seluruh atribut sesudahnya bergeser
+sementara `VkVertexInputAttributeDescription` di sisi C++ tidak ikut. Hal yang
+sama berlaku untuk tekstur di set material, yang bergeser saat sebuah parameter
+tidak terpakai dibuang. Keduanya tidak menghasilkan galat validasi — hanya mesh
+yang membaca UV sebagai warna, dan albedo yang ternyata peta normal.
+
+Pembagian set mengikuti seberapa sering isinya berubah: set 0 per-frame
+(FrameParams, matriks tulang, transform instance), set 1 per-objek, set 2 milik
+material. Nomornya tertulis sekali di `MaterialBindings` dan
+`MaterialVertexLocation`, dan diuji terhadap teks yang benar-benar dihasilkan.
+
+**Atribut vertex selalu tujuh, apa pun nilai konstanta spesialisasinya.**
+Spesialisasi terjadi saat pipeline dibuat, sedangkan daftar antarmuka
+`OpEntryPoint` sudah terkunci di modul — terbukti lewat `spirv-dis`:
+`boneIndices` dan `boneWeights` tetap ada meski `kSkinned` mati. Mesh tanpa data
+skin karena itu tetap harus menyediakan keduanya, biasanya lewat binding
+ber-stride nol.
+
+**Argumen `slangc` ikut identitas kompilator.** Ini sempat terlewat.
+`-matrix-layout-column-major` menyamakan tata letak matriks dengan glm; kalau ia
+tidak ikut kunci cache, mengubahnya meninggalkan seluruh entri lama yang tampak
+sah dan ternyata mentranspose setiap matriks — mesh yang terpelintir, bukan
+pesan galat.
+
+**Bobot skinning dinormalisasi, bukan dipercaya.** Bobot yang jumlahnya 0.98
+karena dikuantisasi ke 8 bit di importer menyusutkan mesh 2% secara merata —
+cacat yang terbaca sebagai "model ini agak kecil", bukan sebagai bug skinning.
+Arah (normal, tangent) memakai bagian 3x3 matriks saja; ini benar untuk tulang
+rotasi + translasi + skala seragam, dan skala tak seragam akan menuntut invers
+transpose. Hal yang sama berlaku untuk transform instance, dan penabur vegetasi
+E7.4 memang hanya menghasilkan yaw + skala seragam.
+
+`SV_InstanceID` dihitung relatif terhadap `firstInstance`, jadi draw yang
+memakai firstInstance bukan nol tetap mengindeks buffer transform dari nol —
+firstInstance tidak bisa dipakai sebagai offset ke dalamnya.
+
+**Belum ada:** preview PBR di Material Editor. Menuntut instance
+`IViewportRenderer` kedua — jalannya sudah jelas dan dicatat di E7.1, tinggal
+dikerjakan bersama pipeline materialnya.
 
 ### E8.3 — Lighting & shadow
 IBL (prefilter env + DFG LUT), directional light dengan cascaded shadow map,

@@ -1233,8 +1233,8 @@ TEST_CASE("Prelude yang berubah membatalkan cache material") {
 
     MaterialModuleOptions before;
     before.prelude = "// model shading versi lama\n";
-    REQUIRE(cache.Get(MakeMaterialRequest(compiled.slang, before)).ok);
-    REQUIRE(cache.Get(MakeMaterialRequest(compiled.slang, before)).ok);
+    REQUIRE(cache.Get(MakeMaterialRequest(compiled.slang, ShaderStage::Fragment, before)).ok);
+    REQUIRE(cache.Get(MakeMaterialRequest(compiled.slang, ShaderStage::Fragment, before)).ok);
     CHECK(*compiler.calls == 1);
 
     // Inilah alasan prelude ditanam: kalau ia hanya di-import, sumber yang
@@ -1242,7 +1242,7 @@ TEST_CASE("Prelude yang berubah membatalkan cache material") {
     // dibangun terhadap model shading yang sudah tidak ada.
     MaterialModuleOptions after;
     after.prelude = "// model shading versi baru\n";
-    REQUIRE(cache.Get(MakeMaterialRequest(compiled.slang, after)).ok);
+    REQUIRE(cache.Get(MakeMaterialRequest(compiled.slang, ShaderStage::Fragment, after)).ok);
     CHECK(*compiler.calls == 2);
 }
 
@@ -1278,7 +1278,7 @@ TEST_CASE("Graph sungguhan berjalan sampai SPIR-V") {
     cache.Configure(dir.path, identity);
     cache.SetCompiler(MakeSlangCompiler());
 
-    const CompileOutput out = cache.Get(MakeMaterialRequest(compiled.slang, options));
+    const CompileOutput out = cache.Get(MakeMaterialRequest(compiled.slang, ShaderStage::Fragment, options));
     INFO("slangc: ", out.error);
     REQUIRE(out.ok);
     CHECK(LooksLikeSpirv(out.spirv));
@@ -1286,7 +1286,7 @@ TEST_CASE("Graph sungguhan berjalan sampai SPIR-V") {
 
     // Dan sekali lagi lewat cache — jalur yang benar-benar dipakai editor saat
     // material yang sama diminta ulang.
-    const CompileOutput again = cache.Get(MakeMaterialRequest(compiled.slang, options));
+    const CompileOutput again = cache.Get(MakeMaterialRequest(compiled.slang, ShaderStage::Fragment, options));
     REQUIRE(again.ok);
     CHECK(again.spirv == out.spirv);
     CHECK(cache.Statistics().hits == 1);
@@ -1326,7 +1326,7 @@ TEST_CASE("Material bertekstur dan berparameter juga sampai SPIR-V") {
     ShaderCache cache;
     cache.Configure({}, identity);
     cache.SetCompiler(MakeSlangCompiler());
-    const CompileOutput out = cache.Get(MakeMaterialRequest(compiled.slang, options));
+    const CompileOutput out = cache.Get(MakeMaterialRequest(compiled.slang, ShaderStage::Fragment, options));
     INFO("slangc: ", out.error);
     REQUIRE(out.ok);
 
@@ -1401,4 +1401,211 @@ TEST_CASE("Nilai bawaan OpenPBRSurface sama dengan nilai bawaan pin") {
         INFO("pin ", pin.name);
         CHECK(prelude.find(assignment) != std::string::npos);
     }
+}
+
+// --- Tahap vertex ------------------------------------------------------------
+
+TEST_CASE("Modul memuat kedua entry point dari satu sumber") {
+    const MaterialCompileResult compiled = CompileMaterial(MinimalGraph());
+    REQUIRE(compiled.ok);
+    MaterialModuleOptions options;
+    options.prelude = "// prelude\n";
+
+    const CompileRequest vertex =
+        MakeMaterialRequest(compiled.slang, ShaderStage::Vertex, options);
+    const CompileRequest fragment =
+        MakeMaterialRequest(compiled.slang, ShaderStage::Fragment, options);
+
+    // Sumbernya sama persis — struct varying-nya tertulis sekali, jadi tidak ada
+    // cara kedua tahap memakai bentuk yang berbeda.
+    CHECK(vertex.source == fragment.source);
+    CHECK(vertex.entryPoint == "vertexMain");
+    CHECK(fragment.entryPoint == "fragmentMain");
+    CHECK(vertex.source.find("[shader(\"vertex\")]") != std::string::npos);
+    CHECK(vertex.source.find("[shader(\"fragment\")]") != std::string::npos);
+
+    // Tapi kuncinya berbeda: SPIR-V yang dihasilkan memang tidak sama.
+    ShaderCache cache;
+    cache.Configure({}, "x");
+    CHECK(cache.KeyOf(vertex) != cache.KeyOf(fragment));
+}
+
+TEST_CASE("Binding material ditulis eksplisit, bukan dinomori otomatis") {
+    MaterialGraph graph;
+    graph.nodes.push_back(Node(1, std::string(kSurfaceOutputType)));
+    graph.nodes.push_back(Node(2, "input.texture"));
+    graph.nodes.back().settings["texture"] = Id(900).ToString();
+    graph.nodes.push_back(Node(3, "input.sample"));
+    Link(graph, 2, "texture", 3, "texture");
+    Link(graph, 3, "rgb", 1, "baseColor");
+
+    graph.nodes.push_back(Node(4, "input.texture"));
+    graph.nodes.back().settings["texture"] = Id(901).ToString();
+    graph.nodes.push_back(Node(5, "input.sample"));
+    Link(graph, 4, "texture", 5, "texture");
+    Link(graph, 5, "rgb", 1, "normal");
+
+    MaterialParameter tint;
+    tint.name = "tint";
+    tint.kind = ValueKind::Float3;
+    tint.defaultValue = "float3(1.0)";
+    graph.parameters.push_back(tint);
+
+    const MaterialCompileResult compiled = CompileMaterial(graph);
+    REQUIRE(compiled.ok);
+    REQUIRE(compiled.textures.size() == 2);
+
+    CHECK(compiled.slang.find("[[vk::binding(0, 2)]]\ncbuffer MaterialParams") !=
+          std::string::npos);
+    // Tekstur dan sampler berselang-seling: tekstur ke-i selalu di 1 + 2i,
+    // berapa pun banyaknya seluruhnya.
+    for (int i = 0; i < 2; ++i) {
+        const std::string texture = "[[vk::binding(" +
+                                    std::to_string(MaterialBindings::TextureBinding(
+                                        static_cast<uint32_t>(i))) +
+                                    ", 2)]]\nTexture2D<float4> " + compiled.textures[i].name;
+        const std::string sampler = "[[vk::binding(" +
+                                    std::to_string(MaterialBindings::SamplerBinding(
+                                        static_cast<uint32_t>(i))) +
+                                    ", 2)]]\nSamplerState s" +
+                                    compiled.textures[i].name.substr(1);
+        INFO("tekstur ke-", i);
+        CHECK(compiled.slang.find(texture) != std::string::npos);
+        CHECK(compiled.slang.find(sampler) != std::string::npos);
+    }
+
+    // Parameter yang tidak dibaca graph tetap ditulis ke cbuffer. Menyaringnya
+    // akan membuat offset sisi C++ dan sisi Slang berbeda tepat pada material
+    // yang sedang disunting.
+    CHECK(compiled.slang.find("float3 tint;") != std::string::npos);
+}
+
+TEST_CASE("Argumen slangc ikut identitas kompilator") {
+    const std::string identity = SlangCompilerIdentity();
+    if (identity.empty()) {
+        MESSAGE("slangc tidak ditemukan — bagian integrasi dilewati");
+        return;
+    }
+    // Mengubah satu flag mengubah SPIR-V dari sumber yang sama persis. Kalau
+    // flag tidak ikut kunci, seluruh entri lama tetap tampak sah — dan
+    // `-matrix-layout-column-major` yang hilang berarti setiap matriks
+    // tertranspose, yaitu mesh yang terpelintir tanpa satu pun pesan galat.
+    CHECK(identity.find(std::string(SlangArguments())) != std::string::npos);
+    CHECK(SlangArguments().find("-matrix-layout-column-major") != std::string_view::npos);
+}
+
+TEST_CASE("Tahap vertex material sungguhan berjalan sampai SPIR-V") {
+    const std::string identity = SlangCompilerIdentity();
+    if (identity.empty()) {
+        MESSAGE("slangc tidak ditemukan — bagian integrasi dilewati");
+        return;
+    }
+    MaterialModuleOptions options;
+    options.prelude = LoadOpenPbrPrelude(SIM_SHADER_DIR);
+    REQUIRE(!options.prelude.empty());
+
+    const MaterialCompileResult compiled = CompileMaterial(MinimalGraph());
+    REQUIRE(compiled.ok);
+
+    TempCacheDir dir("vertex");
+    ShaderCache cache;
+    cache.Configure(dir.path, identity);
+    cache.SetCompiler(MakeSlangCompiler());
+
+    const CompileOutput vertex =
+        cache.Get(MakeMaterialRequest(compiled.slang, ShaderStage::Vertex, options));
+    INFO("slangc vertex: ", vertex.error);
+    REQUIRE(vertex.ok);
+    CHECK(LooksLikeSpirv(vertex.spirv));
+
+    const CompileOutput fragment =
+        cache.Get(MakeMaterialRequest(compiled.slang, ShaderStage::Fragment, options));
+    INFO("slangc fragment: ", fragment.error);
+    REQUIRE(fragment.ok);
+
+    // Sumber yang sama, dua modul yang berbeda — dan dua entri cache.
+    CHECK(vertex.spirv != fragment.spirv);
+    CHECK(cache.Statistics().compiles == 2);
+    CHECK(cache.Statistics().hits == 0);
+}
+
+TEST_CASE("Material bertekstur dan berparameter berjalan di kedua tahap") {
+    const std::string identity = SlangCompilerIdentity();
+    if (identity.empty()) {
+        MESSAGE("slangc tidak ditemukan — bagian integrasi dilewati");
+        return;
+    }
+    MaterialModuleOptions options;
+    options.prelude = LoadOpenPbrPrelude(SIM_SHADER_DIR);
+    REQUIRE(!options.prelude.empty());
+
+    MaterialGraph graph;
+    graph.nodes.push_back(Node(1, std::string(kSurfaceOutputType)));
+    graph.nodes.push_back(Node(2, "input.texture"));
+    graph.nodes.back().settings["texture"] = Id(900).ToString();
+    graph.nodes.push_back(Node(3, "input.sample"));
+    Link(graph, 2, "texture", 3, "texture");
+    Link(graph, 3, "rgb", 1, "baseColor");
+    graph.nodes.push_back(Node(4, "param.get"));
+    graph.nodes.back().settings["parameter"] = "roughness";
+    MaterialParameter roughness;
+    roughness.name = "roughness";
+    roughness.kind = ValueKind::Float;
+    roughness.defaultValue = "0.4";
+    graph.parameters.push_back(roughness);
+    Link(graph, 4, "value", 1, "specularRoughness");
+
+    const MaterialCompileResult compiled = CompileMaterial(graph);
+    REQUIRE(compiled.ok);
+
+    ShaderCache cache;
+    cache.Configure({}, identity);
+    cache.SetCompiler(MakeSlangCompiler());
+    for (const ShaderStage stage : {ShaderStage::Vertex, ShaderStage::Fragment}) {
+        const CompileOutput out =
+            cache.Get(MakeMaterialRequest(compiled.slang, stage, options));
+        INFO("tahap ", ToString(stage), ": ", out.error);
+        CHECK(out.ok);
+    }
+}
+
+TEST_CASE("Semua atribut vertex punya lokasi eksplisit") {
+    const MaterialCompileResult compiled = CompileMaterial(MinimalGraph());
+    REQUIRE(compiled.ok);
+    const std::string module = AssembleMaterialModule(compiled.slang, {});
+
+    // Tanpa lokasi eksplisit, atribut dinomori menurut urutan yang *bertahan* —
+    // dan dengan kSkinned mati kedua atribut tulang bisa hilang, menggeser
+    // seluruh atribut sesudahnya sementara sisi C++ tidak ikut bergeser.
+    const std::pair<uint32_t, const char*> expected[] = {
+        {MaterialVertexLocation::kPosition, "position"},
+        {MaterialVertexLocation::kNormal, "normal"},
+        {MaterialVertexLocation::kTangent, "tangent"},
+        {MaterialVertexLocation::kUv0, "uv0"},
+        {MaterialVertexLocation::kColor, "color"},
+        {MaterialVertexLocation::kBoneIndices, "boneIndices"},
+        {MaterialVertexLocation::kBoneWeights, "boneWeights"},
+    };
+    for (const auto& [location, name] : expected) {
+        const std::string marker = "[[vk::location(" + std::to_string(location) + ")]]";
+        const size_t at = module.find(marker);
+        INFO("atribut ", name);
+        REQUIRE(at != std::string::npos);
+        CHECK(module.find(name, at) < module.find('\n', at));
+    }
+}
+
+TEST_CASE("Skinning menormalisasi bobot dan mengabaikan translasi pada arah") {
+    const MaterialCompileResult compiled = CompileMaterial(MinimalGraph());
+    REQUIRE(compiled.ok);
+    const std::string module = AssembleMaterialModule(compiled.slang, {});
+
+    // Bobot yang jumlahnya 0.98 karena dikuantisasi menyusutkan mesh 2% secara
+    // merata — cacat yang terbaca sebagai "model ini agak kecil", bukan sebagai
+    // bug skinning.
+    CHECK(module.find("v.boneWeights / total") != std::string::npos);
+    // Posisi memakai matriks penuh, arah hanya bagian 3x3-nya.
+    CHECK(module.find("mul(bone, float4(position, 1.0))") != std::string::npos);
+    CHECK(module.find("mul((float3x3)bone, normal)") != std::string::npos);
+    CHECK(module.find("mul((float3x3)bone, tangent)") != std::string::npos);
 }

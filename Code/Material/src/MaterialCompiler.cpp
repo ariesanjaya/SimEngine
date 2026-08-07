@@ -403,7 +403,18 @@ MaterialCompileResult Emitter::Run() {
     head << "// Nilai permukaan mengikuti OpenPBR Surface v1.1 (openpbr.slang).\n";
     head << "import openpbr;\n\n";
 
+    // Binding ditulis eksplisit, tidak diserahkan ke penomoran otomatis Slang.
+    //
+    // Otomatis menomori menurut urutan deklarasi *yang bertahan*: parameter yang
+    // tidak pernah dibaca graph bisa dibuang, dan seluruh tekstur sesudahnya
+    // bergeser satu. Sisi C++ tetap menghitung dari daftar deklarasi yang utuh,
+    // jadi tekstur akan terikat ke slot tetangganya — dan itu tidak menghasilkan
+    // satu pun galat, hanya material yang albedo-nya ternyata peta normal.
+    //
+    // Set 2 adalah wilayah material. Set 0 milik per-frame dan set 1 per-objek,
+    // keduanya ditulis `AssembleMaterialModule`.
     if (!graph_.parameters.empty()) {
+        head << "[[vk::binding(0, 2)]]\n";
         head << "cbuffer MaterialParams\n{\n";
         for (const MaterialParameter& parameter : graph_.parameters) {
             head << "    " << SlangType(parameter.kind) << " "
@@ -411,9 +422,18 @@ MaterialCompileResult Emitter::Run() {
         }
         head << "}\n\n";
     }
-    for (const TextureBinding& binding : result_.textures) {
-        head << "Texture2D<float4> " << binding.name << ";\n";
-        head << "SamplerState s" << binding.name.substr(1) << ";\n";
+    {
+        // Tekstur dan sampler-nya berselang-seling mulai binding 1, jadi tekstur
+        // ke-i selalu di 1 + 2i berapa pun banyaknya. Menaruh semua tekstur dulu
+        // lalu semua sampler akan membuat nomor sampler bergantung pada jumlah
+        // tekstur — dan jumlah itu berubah setiap kali graph disunting.
+        uint32_t binding = 1;
+        for (const TextureBinding& texture : result_.textures) {
+            head << "[[vk::binding(" << binding++ << ", 2)]]\n";
+            head << "Texture2D<float4> " << texture.name << ";\n";
+            head << "[[vk::binding(" << binding++ << ", 2)]]\n";
+            head << "SamplerState s" << texture.name.substr(1) << ";\n";
+        }
     }
     if (!result_.textures.empty()) {
         head << '\n';

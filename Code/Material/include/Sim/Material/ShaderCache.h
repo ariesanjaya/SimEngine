@@ -134,8 +134,17 @@ bool LooksLikeSpirv(const std::vector<uint32_t>& words);
 /// ditemukan — bukan yang diam-diam menghasilkan modul kosong.
 ShaderCache::Compiler MakeSlangCompiler(std::filesystem::path slangcPath = {});
 
-/// Versi `slangc` yang terpasang, untuk dipakai sebagai identitas kompilator.
-/// Kosong bila tidak bisa dijalankan.
+/// Argumen tetap yang diberikan ke `slangc`, di luar berkas dan entry point.
+///
+/// **Ini bagian dari identitas kompilator, bukan detail pemanggilan.**
+/// `-matrix-layout-column-major` mengubah SPIR-V yang dihasilkan dari sumber
+/// yang sama persis; kalau ia tidak ikut kunci cache, mengubah satu flag akan
+/// meninggalkan seluruh entri lama yang tampak sah dan ternyata mentranspose
+/// setiap matriks. Kegagalannya berupa mesh yang terpelintir, bukan pesan galat.
+std::string_view SlangArguments();
+
+/// Identitas kompilator: versi `slangc` yang terpasang beserta argumennya.
+/// Kosong bila `slangc` tidak bisa dijalankan.
 std::string SlangCompilerIdentity(const std::filesystem::path& slangcPath = {});
 
 }  // namespace sim::material
