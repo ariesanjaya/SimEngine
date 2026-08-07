@@ -8,6 +8,7 @@ sim_add_library(Render
         src/IblBaker.cpp
         src/LightCluster.cpp
         src/DepthPyramid.cpp
+        src/ScreenProbe.cpp
         src/ScreenTrace.cpp
         src/SdfClipmap.cpp
         src/SdfClipmapResource.cpp

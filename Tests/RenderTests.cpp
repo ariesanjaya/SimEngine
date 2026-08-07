@@ -4,6 +4,7 @@
 #include "Sim/Render/Frustum.h"
 #include "Sim/Render/Ibl.h"
 #include "Sim/Render/LightCluster.h"
+#include "Sim/Render/ScreenProbe.h"
 #include "Sim/Render/ScreenTrace.h"
 #include "Sim/Render/SdfClipmap.h"
 #include "Sim/Render/SdfVolume.h"
@@ -2547,4 +2548,192 @@ TEST_CASE("Mematikan lapis layar membuat jawabannya turun ke SDF") {
     // menjawab jarak yang berbeda untuk permukaan yang sama adalah dua lapis
     // yang akan berkedip bergantian saat kamera bergerak.
     CHECK(direct.distance == doctest::Approx(layered.distance).epsilon(0.2));
+}
+
+// --- M3: screen probe -------------------------------------------------------
+
+TEST_CASE("Pemetaan oktahedral bolak-balik tanpa kehilangan arah") {
+    // Yang diuji bukan rumusnya melainkan sifat yang dipakai: setiap arah punya
+    // satu titik di kotak, dan titik itu mengembalikan arah yang sama. Pemetaan
+    // yang benar di setengah bola atas tapi salah di bawah adalah kesalahan
+    // paling umum di sini, dan gejalanya cahaya yang datang dari arah yang
+    // terbalik — bukan cahaya yang hilang.
+    const std::array<Vec3, 10> directions{Vec3(0, 1, 0),   Vec3(0, -1, 0), Vec3(1, 0, 0),
+                                          Vec3(-1, 0, 0),  Vec3(0, 0, 1),  Vec3(0, 0, -1),
+                                          glm::normalize(Vec3(1, 1, 1)),
+                                          glm::normalize(Vec3(-1, 2, -3)),
+                                          glm::normalize(Vec3(0.2f, -0.9f, 0.4f)),
+                                          glm::normalize(Vec3(-0.7f, -0.1f, -0.7f))};
+    for (const Vec3& direction : directions) {
+        const Vec2 uv = OctEncode(direction);
+        CHECK(uv.x >= -1e-5f);
+        CHECK(uv.x <= 1.0f + 1e-5f);
+        CHECK(uv.y >= -1e-5f);
+        CHECK(uv.y <= 1.0f + 1e-5f);
+        const Vec3 back = OctDecode(uv);
+        CHECK(glm::dot(back, direction) == doctest::Approx(1.0f).epsilon(0.001));
+    }
+}
+
+TEST_CASE("Kisi probe menutupi ubin tepi yang hanya terisi sebagian") {
+    // Dibulatkan ke bawah, sepotong tepi kanan dan bawah layar tidak punya probe
+    // sama sekali — dan tepi layar justru tempat penelusuran screen-space paling
+    // sering menyerah ke SDF, yaitu tempat probe paling dibutuhkan.
+    ProbeGridSettings settings;
+    settings.tileSize = 16;
+    ProbeGrid grid;
+    grid.Configure(100, 40, settings);
+
+    CHECK(grid.Counts() == glm::uvec2(7, 3));
+    CHECK(grid.ProbeCount() == 21);
+    CHECK(grid.RaysPerProbe() == 16);
+
+    // Probe ubin terakhir tetap mengambil depth dari piksel yang benar-benar
+    // ada: pusat ubin itu di x = 104, jauh di luar layar selebar 100.
+    const Vec2 last = grid.ProbePixel(6, 2);
+    CHECK(last.x <= 99.5f);
+    CHECK(last.y <= 39.5f);
+    CHECK(last.x > 96.0f);
+}
+
+TEST_CASE("Enam belas ray probe menutupi seluruh sel oktahedral") {
+    // Satu ray per sel, jadi tidak ada bagian bola yang tidak tersampel pada
+    // sebuah frame. Arah yang diacak bebas tanpa stratifikasi bisa meninggalkan
+    // separuh bola kosong, dan yang kosong itu muncul sebagai iradiansi yang
+    // berdenyut walaupun adegannya diam.
+    ProbeGridSettings settings;
+    settings.raysPerAxis = 4;
+
+    std::array<int, 16> hits{};
+    for (uint32_t ray = 0; ray < 16; ++ray) {
+        const Vec3 direction = ProbeRayDirection(ray, 3, 17, settings);
+        CHECK(glm::length(direction) == doctest::Approx(1.0f).epsilon(0.001));
+        const Vec2 uv = OctEncode(direction);
+        const auto cx = static_cast<uint32_t>(std::min(uv.x * 4.0f, 3.999f));
+        const auto cy = static_cast<uint32_t>(std::min(uv.y * 4.0f, 3.999f));
+        ++hits[cy * 4 + cx];
+    }
+    for (const int count : hits) {
+        CHECK(count == 1);
+    }
+}
+
+TEST_CASE("Arah probe bergeser antar-frame dan antar-probe") {
+    // Enam belas arah tetap adalah pola, bukan derau — dan pola tidak hilang
+    // oleh akumulasi berapa pun lamanya. Jitter yang sama di seluruh probe sama
+    // buruknya: polanya lalu terlihat sebagai kisi ubin.
+    ProbeGridSettings settings;
+
+    const Vec3 frame0 = ProbeRayDirection(5, 0, 9, settings);
+    const Vec3 frame1 = ProbeRayDirection(5, 1, 9, settings);
+    CHECK(glm::dot(frame0, frame1) < 0.9999f);
+
+    const Vec3 probeA = ProbeRayDirection(5, 0, 9, settings);
+    const Vec3 probeB = ProbeRayDirection(5, 0, 10, settings);
+    CHECK(glm::dot(probeA, probeB) < 0.9999f);
+
+    // Tapi tetap deterministik: dipanggil dua kali dengan angka yang sama, hasil
+    // yang sama. Test yang hasilnya berubah tiap dijalankan bukan test.
+    CHECK(glm::dot(probeA, ProbeRayDirection(5, 0, 9, settings)) ==
+          doctest::Approx(1.0f).epsilon(1e-6));
+}
+
+TEST_CASE("Radiance seragam menghasilkan iradiansi pi kali radiance-nya") {
+    // Uji tungku: ∫cos θ dω atas setengah bola persis π, jadi radiance seragam L
+    // harus menghasilkan iradiansi πL untuk normal mana pun. Ini yang menangkap
+    // faktor normalisasi yang salah — 2π alih-alih 4π, atau pembagi yang lupa —
+    // dan kesalahan seperti itu muncul sebagai adegan yang seluruhnya terlalu
+    // terang atau terlalu gelap, yang paling mudah dikira masalah eksposur.
+    ProbeGridSettings settings;
+    std::vector<ProbeRay> rays(16);
+    const Vec3 radiance(0.4f, 0.6f, 0.8f);
+
+    for (const Vec3 normal :
+         {Vec3(0, 1, 0), Vec3(1, 0, 0), glm::normalize(Vec3(1, 2, 3))}) {
+        // Dirata-rata atas banyak frame: enam belas arah saja terlalu sedikit
+        // untuk sebuah penaksir Monte Carlo, dan yang diuji di sini nilai yang
+        // dituju penaksirnya, bukan derau satu frame.
+        Vec3 total(0.0f);
+        constexpr uint32_t kFrames = 256;
+        for (uint32_t frame = 0; frame < kFrames; ++frame) {
+            for (uint32_t i = 0; i < rays.size(); ++i) {
+                rays[i].direction = ProbeRayDirection(i, frame, 0, settings);
+                rays[i].radiance = radiance;
+            }
+            total += IntegrateIrradiance(rays.data(), static_cast<uint32_t>(rays.size()), normal);
+        }
+        const Vec3 average = total / static_cast<float>(kFrames);
+        const Vec3 expected = radiance * 3.14159265358979323846f;
+        CHECK(average.x == doctest::Approx(expected.x).epsilon(0.05));
+        CHECK(average.y == doctest::Approx(expected.y).epsilon(0.05));
+        CHECK(average.z == doctest::Approx(expected.z).epsilon(0.05));
+    }
+}
+
+TEST_CASE("Akumulasi menyatu dan tetap merespons perubahan") {
+    // Rata-rata sejati atas seluruh riwayat berhenti merespons setelah beberapa
+    // detik. Membatasi jumlah sampelnya membuat bobot frame terbaru tidak pernah
+    // turun di bawah 1/maxFrames — jadi responsnya punya batas atas yang bisa
+    // disebut, dan itulah yang diuji di sini.
+    constexpr uint32_t kMax = 12;
+    Vec3 value(0.0f);
+    for (uint32_t frame = 0; frame < 64; ++frame) {
+        value = AccumulateProbe(value, Vec3(1.0f), frame, kMax);
+    }
+    CHECK(value.x == doctest::Approx(1.0f).epsilon(0.01));
+
+    // Lampu dimatikan: harus turun mendekati nol dalam beberapa puluh frame,
+    // bukan bertahan selamanya.
+    for (uint32_t frame = 0; frame < 64; ++frame) {
+        value = AccumulateProbe(value, Vec3(0.0f), frame + 64, kMax);
+    }
+    CHECK(value.x < 0.01f);
+}
+
+TEST_CASE("Probe di seberang dinding tidak menyumbang ke piksel") {
+    // Yang membedakan "lantai yang sama" dari "terpisah dinding" adalah jarak ke
+    // bidang piksel, bukan jarak antar-titik. Memakai jarak lurus membuat cahaya
+    // merembes menembus sudut ruangan — cacat yang paling sering dikira
+    // kebocoran denoiser.
+    ProbeFilterSettings filter;
+    const Vec3 pixelPosition(0.0f);
+    const Vec3 pixelNormal(0.0f, 1.0f, 0.0f);
+
+    ProbeSurface sameFloor;
+    sameFloor.valid = true;
+    sameFloor.normal = pixelNormal;
+    sameFloor.position = Vec3(3.0f, 0.0f, -2.0f);  // jauh, tapi sebidang
+    CHECK(ProbeWeight(sameFloor, pixelPosition, pixelNormal, filter) > 0.9f);
+
+    ProbeSurface aboveFloor = sameFloor;
+    aboveFloor.position = Vec3(0.05f, 0.5f, 0.0f);  // dekat, tapi di atas bidang
+    CHECK(ProbeWeight(aboveFloor, pixelPosition, pixelNormal, filter) == 0.0f);
+
+    ProbeSurface wall = sameFloor;
+    wall.normal = Vec3(1.0f, 0.0f, 0.0f);
+    wall.position = pixelPosition;
+    CHECK(ProbeWeight(wall, pixelPosition, pixelNormal, filter) == 0.0f);
+
+    ProbeSurface sky;
+    sky.valid = false;
+    CHECK(ProbeWeight(sky, pixelPosition, pixelNormal, filter) == 0.0f);
+}
+
+TEST_CASE("Koordinat ubin berpusat di probe, bukan di pojok ubin") {
+    // Tanpa pergeseran setengah ubin, seluruh interpolasi bergeser — dan
+    // pergeseran itu terlihat sebagai cahaya yang selalu meleset ke satu arah,
+    // gejala yang mudah dikira masalah penempatan probe.
+    ProbeGridSettings settings;
+    settings.tileSize = 16;
+    ProbeGrid grid;
+    grid.Configure(64, 64, settings);
+
+    // Piksel tepat di probe (1,1), yaitu pusat ubin kedua: 16 + 8 = 24.
+    const Vec2 atProbe = grid.TileCoordinate(Vec2(24.0f, 24.0f));
+    CHECK(atProbe.x == doctest::Approx(1.0f));
+    CHECK(atProbe.y == doctest::Approx(1.0f));
+
+    // Dan tepat di tengah antara dua probe.
+    const Vec2 between = grid.TileCoordinate(Vec2(32.0f, 24.0f));
+    CHECK(between.x == doctest::Approx(1.5f));
 }

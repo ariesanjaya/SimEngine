@@ -1,0 +1,140 @@
+#pragma once
+
+#include "Sim/Core/Math.h"
+
+#include <cstdint>
+
+namespace sim::render {
+
+// --- Pemetaan oktahedral -----------------------------------------------------
+
+/// Arah satuan → kotak [0,1]².
+///
+/// **Oktahedral, bukan kubus atau bola.** Pemetaan kubus menuntut enam sisi dan
+/// karena itu enam kali pemilihan sisi di setiap pembacaan; pemetaan bola
+/// (latitude/longitude) memusatkan hampir seluruh texel-nya di kutub. Oktahedral
+/// memetakan seluruh bola ke satu kotak dengan luasan yang hampir seragam — dan
+/// keseragaman itulah yang membuat 16 texel per probe cukup untuk mewakili
+/// seluruh arah.
+Vec2 OctEncode(const Vec3& direction);
+
+/// Kotak [0,1]² → arah satuan. Kebalikan `OctEncode`.
+Vec3 OctDecode(const Vec2& uv);
+
+// --- Kisi probe --------------------------------------------------------------
+
+struct ProbeGridSettings {
+    /// Piksel per sisi ubin. Satu probe per ubin.
+    uint32_t tileSize = 16;
+    /// Akar jumlah ray per probe per frame. 4 berarti 4×4 = 16 arah.
+    uint32_t raysPerAxis = 4;
+    /// Banyaknya frame yang diakumulasi. Rencana GI menyebut 8–16.
+    uint32_t accumulationFrames = 12;
+};
+
+/// Kisi probe di atas layar: satu probe per ubin `tileSize`×`tileSize` piksel.
+class ProbeGrid {
+public:
+    void Configure(uint32_t viewportWidth, uint32_t viewportHeight,
+                   const ProbeGridSettings& settings);
+
+    const ProbeGridSettings& Settings() const { return settings_; }
+    glm::uvec2 Counts() const { return counts_; }
+    uint32_t ProbeCount() const { return counts_.x * counts_.y; }
+    uint32_t RaysPerProbe() const { return settings_.raysPerAxis * settings_.raysPerAxis; }
+
+    /// Piksel tempat probe (`x`, `y`) mengambil posisinya dari depth buffer.
+    ///
+    /// **Dijepit ke dalam viewport.** Ubin terakhir sebuah layar yang lebarnya
+    /// bukan kelipatan ubin hanya terisi sebagian, dan pusat ubin itu jatuh di
+    /// luar layar — probe yang mengambil depth dari sana mengambilnya dari
+    /// piksel yang tidak pernah digambar.
+    Vec2 ProbePixel(uint32_t x, uint32_t y) const;
+
+    /// Koordinat ubin pecahan sebuah piksel. Bagian bulatnya adalah probe kiri
+    /// atas dari empat yang menjadi tetangganya, pecahannya bobot bilinearnya.
+    Vec2 TileCoordinate(const Vec2& pixel) const;
+
+private:
+    ProbeGridSettings settings_;
+    glm::uvec2 viewport_{0};
+    glm::uvec2 counts_{0};
+};
+
+/// Arah ray ke-`ray` sebuah probe pada frame ke-`frame`.
+///
+/// **Seluruh bola, bukan setengahnya.** Sebuah probe melayani seluruh ubin
+/// 16×16 piksel, dan piksel di dalam satu ubin bisa punya normal yang sangat
+/// berbeda — di tepi geometri, bahkan berlawanan. Probe yang hanya menelusuri
+/// setengah bola di sekitar satu normal tidak punya apa pun untuk diberikan
+/// kepada piksel yang normalnya menghadap ke arah lain.
+///
+/// **Arahnya berjitter tiap frame, dan jitternya berbeda tiap probe.** Enam
+/// belas arah tetap menghasilkan enam belas berkas cahaya yang sama di setiap
+/// frame: bukan derau melainkan pola, dan pola tidak hilang oleh akumulasi
+/// berapa pun lamanya. Jitter yang sama di seluruh probe sama buruknya — polanya
+/// lalu terlihat sebagai kisi ubin.
+///
+/// Urutannya **deterministik**: sama dengan alasan sampel IBL deterministik —
+/// gambar yang berbeda tiap kali dijalankan tidak bisa dibandingkan dengan
+/// gambar acuan, dan test yang hasilnya berubah tiap kali dijalankan bukan test.
+Vec3 ProbeRayDirection(uint32_t ray, uint32_t frame, uint32_t probeIndex,
+                       const ProbeGridSettings& settings);
+
+// --- Integrasi ---------------------------------------------------------------
+
+/// Satu sampel radiance sebuah probe.
+struct ProbeRay {
+    Vec3 direction{0.0f, 1.0f, 0.0f};
+    Vec3 radiance{0.0f};
+};
+
+/// Iradiansi pada sebuah normal dari sekumpulan sampel arah seragam.
+///
+/// Penaksir Monte Carlo untuk ∫ L(ω)·cos θ dω atas setengah bola, dengan sampel
+/// yang tersebar seragam di **seluruh** bola: 4π/N × Σ L·maks(0, n·ω). Faktor
+/// 4π-nya luas bola, bukan 2π: yang disampel seluruh bola, dan separuhnya yang
+/// di belakang permukaan menyumbang nol lewat `maks`.
+Vec3 IntegrateIrradiance(const ProbeRay* rays, uint32_t count, const Vec3& normal);
+
+/// Rata-rata berjalan atas `maxFrames` frame terakhir.
+///
+/// **Jumlah sampel dibatasi, bukan dibiarkan tumbuh.** Rata-rata sejati atas
+/// seluruh riwayat berhenti merespons perubahan setelah beberapa detik — dan
+/// yang berubah bukan hanya lampu melainkan juga geometri yang bergerak.
+/// Membatasinya membuat bobot frame terbaru tidak pernah turun di bawah
+/// 1/maxFrames, jadi responsnya punya batas atas yang bisa disebut.
+Vec3 AccumulateProbe(const Vec3& history, const Vec3& current, uint32_t frames,
+                     uint32_t maxFrames);
+
+// --- Interpolasi ke piksel ---------------------------------------------------
+
+/// Keadaan permukaan tempat sebuah probe duduk.
+struct ProbeSurface {
+    Vec3 position{0.0f};
+    Vec3 normal{0.0f, 1.0f, 0.0f};
+    /// False bila probe-nya jatuh di langit: tidak ada permukaan untuk dipijak,
+    /// dan iradiansinya tidak berarti apa-apa.
+    bool valid = false;
+};
+
+struct ProbeFilterSettings {
+    /// Selisih jarak sepanjang normal yang masih dianggap permukaan yang sama,
+    /// meter. Di atasnya bobotnya nol.
+    float planeDistance = 0.1f;
+    /// Kesamaan normal minimum. Di bawahnya bobotnya nol.
+    float normalCosine = 0.5f;
+};
+
+/// Bobot sebuah probe untuk sebuah piksel.
+///
+/// **Jaraknya diukur tegak lurus bidang piksel, bukan sebagai jarak lurus.**
+/// Dua titik di sebuah lantai yang sama bisa berjarak beberapa meter dan tetap
+/// merupakan permukaan yang sama; dua titik yang berjarak sepuluh sentimeter
+/// tapi terpisah oleh sebuah dinding bukan. Yang membedakan keduanya jarak ke
+/// bidangnya, bukan jarak antar-titiknya — dan memakai jarak lurus membuat
+/// cahaya merembes menembus sudut ruangan.
+float ProbeWeight(const ProbeSurface& probe, const Vec3& pixelPosition,
+                  const Vec3& pixelNormal, const ProbeFilterSettings& settings);
+
+}  // namespace sim::render
