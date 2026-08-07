@@ -79,6 +79,47 @@ public:
             }
         }
 
+
+        // --- Global illumination (M0) ---
+        //
+        // Pemilih backend terlihat sejak sekarang, bukan nanti bersama backend
+        // kedua. Mesin ini punya RT core, jadi pemilihan otomatis tidak akan
+        // pernah menjalankan jalur SDF — jalur yang justru harus bekerja di
+        // setiap GPU. Tanpa sakelar ini, ia berhenti diuji tanpa ada yang
+        // menyadarinya.
+        ImGui::Separator();
+        ImGui::Checkbox("GI enabled", &context.gi.enabled);
+
+        const char* backends[] = {"Auto", "Force SDF", "Force ray query"};
+        int backend = static_cast<int>(context.gi.backend);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+        if (ImGui::Combo("Backend", &backend, backends, IM_ARRAYSIZE(backends))) {
+            context.gi.backend = static_cast<render::TraceBackendPreference>(backend);
+        }
+
+        const char* views[] = {"Off",        "Albedo",    "Normal",
+                               "Irradiance", "Ray count", "March steps"};
+        int view = static_cast<int>(context.gi.debugView);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+        if (ImGui::Combo("Debug view", &view, views, IM_ARRAYSIZE(views))) {
+            context.gi.debugView = static_cast<render::GiDebugView>(view);
+        }
+
+        if (context.viewportRenderer != nullptr) {
+            const render::TraceBackendSelection selection =
+                context.viewportRenderer->GiBackend();
+            // Yang dipakai, bukan yang diminta — keduanya bisa berbeda, dan
+            // perbedaan yang tidak ditampilkan adalah perbedaan yang tidak
+            // diketahui siapa pun.
+            ImGui::Text("Active  : %s", render::ToString(selection.kind));
+            if (selection.fellBack) {
+                ImGui::TextColored(ImVec4(0.94f, 0.72f, 0.35f, 1.0f), "%s",
+                                   selection.reason.c_str());
+            } else {
+                ImGui::TextDisabled("%s", selection.reason.c_str());
+            }
+        }
+
         ImGui::Separator();
         ImGui::Text("Selected: %zu",
                     context.selection != nullptr ? context.selection->Count() : 0u);

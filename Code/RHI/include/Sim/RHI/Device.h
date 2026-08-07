@@ -87,6 +87,10 @@ public:
     uint32_t GraphicsQueueFamily() const { return graphicsQueueFamily_; }
     VmaAllocator Allocator() const { return allocator_; }
     uint32_t ApiVersion() const { return apiVersion_; }
+
+    /// Apakah perangkat ini **bisa** memakai ray query. Belum diaktifkan —
+    /// aktivasinya bersama acceleration structure di M7 rencana GI.
+    bool SupportsRayQuery() const { return supportsRayQuery_; }
     const std::string& DeviceName() const { return deviceName_; }
     VkPipelineCache PipelineCache() const { return pipelineCache_; }
     /// True bila dynamic rendering, synchronization2, dan kawan-kawannya
@@ -125,6 +129,7 @@ private:
     VkCommandPool oneShotPool_ = VK_NULL_HANDLE;
     VkPipelineCache pipelineCache_ = VK_NULL_HANDLE;
     uint32_t apiVersion_ = VK_API_VERSION_1_0;
+    bool supportsRayQuery_ = false;
     std::string deviceName_;
     bool validationEnabled_ = false;
     bool supportsVulkan13_ = false;

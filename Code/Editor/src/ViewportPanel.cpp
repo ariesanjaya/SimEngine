@@ -148,6 +148,7 @@ public:
         desc.height = height;
         desc.mode = drawMode_;
         desc.showGrid = showGrid_;
+        desc.gi = context.gi;
         camera_.ApplyTo(desc.camera);
         desc.camera.orthographic = orthographic_;
         desc.camera.orthoHeight = camera_.distance;

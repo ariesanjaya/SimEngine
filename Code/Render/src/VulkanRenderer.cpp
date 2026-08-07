@@ -11,6 +11,7 @@
 #include "Sim/Render/Frustum.h"
 #include "Sim/Render/LightCluster.h"
 #include "Sim/Render/ShadowAtlas.h"
+#include "Sim/Render/TraceBackend.h"
 #include "Sim/Render/ShadowCascades.h"
 
 #include <algorithm>
@@ -382,6 +383,13 @@ public:
         // directional kedua dan seterusnya diabaikan — dan mengabaikannya
         // diam-diam lebih baik daripada menjumlahkan arah, yang menghasilkan
         // bayangan yang tidak cocok dengan lampu mana pun.
+        // Backend GI diselesaikan tiap frame dari kemampuan perangkat dan
+        // permintaan pengguna. Murah, dan menyimpannya berarti pertanyaan
+        // "yang mana yang berlaku sekarang" setiap kali preferensinya berubah.
+        TraceBackendCaps caps;
+        caps.rayQuery = device_.SupportsRayQuery();
+        giBackend_ = SelectTraceBackend(caps, desc.gi.backend);
+
         sunDirection_ = desc.sunDirection;
         sunRadiance_ = desc.sunRadiance;
         sunCastsShadows_ = desc.castShadows;
@@ -531,6 +539,8 @@ public:
     uint32_t Width() const override { return target_.Width(); }
     uint32_t Height() const override { return target_.Height(); }
     const char* Name() const override { return "VulkanRenderer"; }
+
+    TraceBackendSelection GiBackend() const override { return giBackend_; }
 
     std::span<const PassTiming> PassTimings() const override {
         timings_.clear();
@@ -1796,6 +1806,7 @@ private:
     /// biasanya tertutup, dan menyusun daftar yang tidak ada yang membacanya
     /// adalah pekerjaan yang dibuang setiap frame.
     mutable std::vector<PassTiming> timings_;
+    TraceBackendSelection giBackend_;
     TextureHandle textureHandle_ = kInvalidTexture;
 
     FrameGraph graph_;

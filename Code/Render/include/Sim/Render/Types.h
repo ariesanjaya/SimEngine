@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Sim/Core/Math.h"
+#include "Sim/Render/TraceBackend.h"
 
 #include <cstdint>
 #include <span>
@@ -90,6 +91,12 @@ struct ViewportDesc {
     /// skala yang berbeda adalah persis jenis ketidakcocokan yang paling sulit
     /// dilacak: setiap lampu terlihat masuk akal sendiri-sendiri.
     float exposure = 0.25f;
+
+    /// Pengaturan global illumination. Mengalir dari editor ke renderer;
+    /// backend yang **akhirnya** dipakai mengalir balik lewat
+    /// `IViewportRenderer::GiBackend()` — permintaan dan hasil sengaja dua hal
+    /// yang berbeda, karena permintaan bisa tidak terpenuhi.
+    GiSettings gi;
 };
 
 /// Satu objek yang bisa digambar, sudah dalam ruang dunia.

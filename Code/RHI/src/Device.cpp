@@ -250,6 +250,30 @@ bool Device::CreateLogicalDevice() {
     queueInfo.queueCount = 1;
     queueInfo.pQueuePriorities = &priority;
 
+    // Ray query hanya **dideteksi** di sini, tidak diaktifkan. Mengaktifkannya
+    // menuntut acceleration structure beserta seluruh rantai pembangunannya, dan
+    // itu pekerjaan M7 rencana GI. Yang dibutuhkan sekarang hanya jawaban atas
+    // "backend mana yang akan dipilih di mesin ini" — dan jawaban itu harus ada
+    // sejak M0, supaya jalur SDF tidak diam-diam berhenti diuji.
+    {
+        uint32_t extensionCount = 0;
+        vkEnumerateDeviceExtensionProperties(physicalDevice_, nullptr, &extensionCount, nullptr);
+        std::vector<VkExtensionProperties> available(extensionCount);
+        vkEnumerateDeviceExtensionProperties(physicalDevice_, nullptr, &extensionCount,
+                                             available.data());
+        bool rayQuery = false;
+        bool accelerationStructure = false;
+        for (const VkExtensionProperties& extension : available) {
+            const std::string_view name(extension.extensionName);
+            rayQuery = rayQuery || name == VK_KHR_RAY_QUERY_EXTENSION_NAME;
+            accelerationStructure = accelerationStructure ||
+                                    name == VK_KHR_ACCELERATION_STRUCTURE_EXTENSION_NAME;
+        }
+        // Keduanya, bukan salah satu: ray query tanpa acceleration structure
+        // tidak punya apa pun untuk ditelusuri.
+        supportsRayQuery_ = rayQuery && accelerationStructure;
+    }
+
     std::vector<const char*> deviceExtensions{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
 
     VkPhysicalDeviceFeatures features{};

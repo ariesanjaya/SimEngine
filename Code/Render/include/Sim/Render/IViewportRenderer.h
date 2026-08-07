@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Sim/Render/TraceBackend.h"
 #include "Sim/Render/Types.h"
 
 #include <cstdint>
@@ -62,6 +63,11 @@ public:
     /// Waktu GPU per pass frame yang terakhir selesai. Kosong bila perangkatnya
     /// tidak mendukung timestamp, atau selama beberapa frame pertama.
     virtual std::span<const PassTiming> PassTimings() const { return {}; }
+
+    /// Backend trace yang **benar-benar dipakai**, beserta alasannya. Berbeda
+    /// dari yang diminta lewat `ViewportDesc::gi` bila permintaannya tidak bisa
+    /// dipenuhi perangkat ini.
+    virtual TraceBackendSelection GiBackend() const { return {}; }
 };
 
 }  // namespace sim::render

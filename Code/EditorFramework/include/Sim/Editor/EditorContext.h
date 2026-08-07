@@ -77,6 +77,13 @@ struct EditorContext {
     render::IThumbnailCache* thumbnails = nullptr;
     const FrameLimiter* frameLimiter = nullptr;
 
+    /// Pengaturan global illumination.
+    ///
+    /// Di sini, bukan di panel Viewport, karena dua panel menyentuhnya: Viewport
+    /// meneruskannya ke renderer, Statistics menyuntingnya. Pengaturan yang
+    /// dimiliki salah satu panel akan hilang begitu panel itu ditutup.
+    render::GiSettings gi;
+
     /// Laju frame yang sedang dikunci, dan alasannya (monitor terlambat).
     float lockedFps = 60.0f;
     std::string frameLockReason;

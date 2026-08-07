@@ -5,6 +5,7 @@
 #include "Sim/Render/Ibl.h"
 #include "Sim/Render/LightCluster.h"
 #include "Sim/Render/ShadowAtlas.h"
+#include "Sim/Render/TraceBackend.h"
 #include "Sim/Render/ShadowCascades.h"
 
 #include <doctest/doctest.h>
@@ -1533,4 +1534,89 @@ TEST_CASE("Kepentingan bayangan naik saat lampu mendekat") {
     LightInstance sun;
     sun.kind = LightKind::Directional;
     CHECK(ShadowImportance(sun, Vec3(0.0f)) == doctest::Approx(0.0f));
+}
+
+// --- Pemilih backend trace (GI M0) --------------------------------------------
+
+TEST_CASE("Pemilihan otomatis mengambil ray query bila ada") {
+    TraceBackendCaps caps;
+    caps.rayQuery = true;
+    const TraceBackendSelection selection =
+        SelectTraceBackend(caps, TraceBackendPreference::Auto);
+    CHECK(selection.kind == TraceBackendKind::RayQuery);
+    CHECK(!selection.fellBack);
+    CHECK(!selection.reason.empty());
+
+    caps.rayQuery = false;
+    const TraceBackendSelection fallback =
+        SelectTraceBackend(caps, TraceBackendPreference::Auto);
+    CHECK(fallback.kind == TraceBackendKind::Sdf);
+    // Bukan penurunan: SDF memang pilihan yang benar di perangkat itu.
+    CHECK(!fallback.fellBack);
+}
+
+TEST_CASE("Memaksa SDF berlaku justru di perangkat yang punya ray query") {
+    // **Ini alasan pemilihnya ada sejak M0, bukan M7.** Mesin pengembangan punya
+    // RT core, jadi pemilihan otomatis tidak akan pernah menjalankan jalur SDF —
+    // jalur yang justru harus bekerja di setiap GPU. Tanpa paksaan ini, ia
+    // berhenti dijalankan siapa pun tanpa ada yang menyadarinya.
+    TraceBackendCaps caps;
+    caps.rayQuery = true;
+    const TraceBackendSelection selection =
+        SelectTraceBackend(caps, TraceBackendPreference::ForceSdf);
+    CHECK(selection.kind == TraceBackendKind::Sdf);
+    CHECK(!selection.fellBack);
+}
+
+TEST_CASE("Memaksa ray query di perangkat tanpa dukungan diturunkan, dan disebutkan") {
+    TraceBackendCaps caps;
+    caps.rayQuery = false;
+    const TraceBackendSelection selection =
+        SelectTraceBackend(caps, TraceBackendPreference::ForceRayQuery);
+
+    // Diturunkan, bukan ditolak — editor yang menolak jalan tidak bisa dipakai
+    // menyunting data. Tapi penurunannya disebutkan, tidak didiamkan: backend
+    // yang dipilih diam-diam adalah backend yang tidak ada yang tahu sedang
+    // berjalan.
+    CHECK(selection.kind == TraceBackendKind::Sdf);
+    CHECK(selection.fellBack);
+    CHECK(selection.reason.find("Ray query") != std::string::npos);
+}
+
+TEST_CASE("Tanpa compute tidak ada backend, dan sebabnya yang disebut") {
+    TraceBackendCaps caps;
+    caps.compute = false;
+    caps.rayQuery = true;
+    const TraceBackendSelection selection =
+        SelectTraceBackend(caps, TraceBackendPreference::Auto);
+    CHECK(selection.kind == TraceBackendKind::Null);
+    // Sebab yang sebenarnya, bukan "ray query tidak tersedia" pada perangkat
+    // yang masalahnya jauh lebih mendasar.
+    CHECK(selection.reason.find("compute") != std::string::npos);
+}
+
+TEST_CASE("Backend null selalu meleset dan tidak melangkah") {
+    const std::unique_ptr<ITraceBackend> backend = CreateNullTraceBackend();
+    REQUIRE(backend != nullptr);
+    CHECK(backend->Kind() == TraceBackendKind::Null);
+
+    const TraceResult result =
+        backend->Trace(Vec3(0.0f), Vec3(0.0f, 0.0f, 1.0f), 1000.0f);
+    CHECK(!result.hit);
+    // Nol langkah adalah jawaban yang benar untuk backend yang memang tidak
+    // melangkah — heatmap-nya kosong, bukan berisi angka yang mengarang.
+    CHECK(result.steps == 0u);
+}
+
+TEST_CASE("Setiap nilai enum punya namanya") {
+    // Nama dipakai UI dan log. Enum yang bertambah tanpa namanya ikut
+    // menghasilkan "None" yang menyesatkan, bukan galat kompilasi.
+    for (const TraceBackendKind kind : {TraceBackendKind::Null, TraceBackendKind::Sdf,
+                                        TraceBackendKind::RayQuery}) {
+        CHECK(std::string(ToString(kind)).size() > 1);
+    }
+    CHECK(std::string(ToString(TraceBackendKind::Sdf)) != ToString(TraceBackendKind::Null));
+    CHECK(std::string(ToString(GiDebugView::MarchSteps)) != ToString(GiDebugView::Off));
+    CHECK(std::string(ToString(TraceBackendPreference::ForceSdf)) !=
+          ToString(TraceBackendPreference::Auto));
 }

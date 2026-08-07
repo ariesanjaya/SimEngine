@@ -782,6 +782,35 @@ menyadarinya. Urutan milestone-nya sendiri sudah benar (SDF dulu di M1–M2, ray
 query terakhir di M7); yang ditambahkan hanyalah bahwa pemilihnya wajib eksplisit
 dan tampak, sejak awal.
 
+Kekhawatirannya terkonfirmasi begitu deteksinya jalan: `VK_KHR_ray_query` dan
+`VK_KHR_acceleration_structure` keduanya tersedia di mesin ini, jadi **Auto
+memilih ray query** — dan tanpa sakelar paksa, jalur SDF tidak akan pernah
+dijalankan sekali pun selama pengembangannya.
+
+#### M0 — apa yang sudah ada
+
+- **`rhi::GpuProfiler`** dan tabel waktu per pass. Lihat catatan anggaran di atas.
+- **`ITraceBackend`** beserta `NullTraceBackend` yang selalu meleset. Null bukan
+  penambal sementara: ia yang membuat seluruh sistem di atasnya bisa dibangun dan
+  diuji sebelum ada satu pun ray yang ditembakkan, dan ia jawaban yang benar saat
+  GI dimatikan.
+- **Pemilih backend** dengan Auto / Force SDF / Force ray query, yang melaporkan
+  backend yang **akhirnya** dipakai beserta alasannya. Permintaan dan hasil
+  sengaja dua hal yang berbeda: memaksa ray query di perangkat tanpa dukungan
+  diturunkan ke SDF — editor yang menolak jalan tidak bisa dipakai menyunting
+  data — tapi penurunannya disebutkan, tidak didiamkan.
+- **Daftar debug view** (albedo, normal, iradiansi mentah, ray count, heatmap
+  langkah march), terdaftar sekarang walau isinya menyusul. Alat diagnostik yang
+  ditambahkan belakangan adalah alat yang tidak dipakai saat ia paling
+  dibutuhkan, yaitu ketika sistemnya masih salah dan belum jelas salahnya di mana.
+
+`TraceResult::steps` sudah ada sejak sekarang dan bernilai nol pada backend null
+— heatmap yang kosong adalah jawaban benar untuk backend yang memang tidak
+melangkah, bukan angka yang mengarang.
+
+**Berikutnya M1:** SDF clipmap global — bake per-mesh, tiga kaskade 128³,
+toroidal scroll, komposit statis + dinamis.
+
 - **Anggarannya belum didamaikan dengan kriteria terima E8.** 3,0 ms adalah 18%
   dari frame 60 fps, sementara adegan uji E8 — terrain 2×2 km, 200 ribu instance
   vegetasi, 20 lampu berbayang — sudah menuntut sisanya. Keduanya ditulis
