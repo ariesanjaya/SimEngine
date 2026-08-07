@@ -4,6 +4,8 @@ sim_add_library(Render
         src/FrameGraphExecutor.cpp
         src/VulkanRenderer.cpp
         src/Frustum.cpp
+        src/LightCluster.cpp
+        src/ShadowCascades.cpp
         src/MaterialPreviewMesh.cpp
         src/StubRenderer.cpp
         src/VulkanMaterialPreview.cpp

@@ -294,9 +294,83 @@ logam, mengganti bentuk bekerja, seret kiri memindahkan sorotan searah kursor,
 seret kanan mengorbit kamera, dan cache disk terisi dua berkas per material.
 **Nol pesan validation layer.**
 
-### E8.3 — Lighting & shadow
+### E8.3 — Lighting & shadow · 🔨 matematika cascade & cluster selesai
 IBL (prefilter env + DFG LUT), directional light dengan cascaded shadow map,
 point/spot dengan shadow atlas, clustered light culling untuk banyak lampu.
+
+**Sudah ada:** `ShadowCascades` dan `LightCluster` — seluruh matematikanya,
+teruji tanpa GPU. Sama seperti E8.1, yang diputuskan lebih dulu adalah bagian
+yang bisa dibuktikan salah di test; pass Vulkan-nya menyusul.
+
+#### Cascade
+
+**Tiap cascade dipas pada bola, bukan pada kotak yang ketat.** Kotak ketat
+berubah ukuran saat kamera berputar, dan ukuran yang berubah berarti
+dunia-per-texel yang berubah — tepi bayangan lalu berkilat setiap kali kamera
+bergerak sedikit. Bola pembatas irisan frustum tidak bergantung orientasi, jadi
+ukurannya tetap untuk sebuah belahan. Yang dibayar peta bayangan yang sedikit
+lebih longgar daripada perlunya. Diuji dua arah: bola benar-benar memuat
+kedelapan sudut irisan, dan jari-jarinya tidak berubah untuk dua belas orientasi
+kamera.
+
+**Titik asalnya lalu dikancing ke kelipatan texel.** Bola menghilangkan kilatan
+akibat rotasi, pengancingan yang akibat pergeseran — salah satunya saja masih
+menyisakan kilatan, dan keduanya sering dikira satu perbaikan yang sama.
+Kisinya diambil dari rotasi cahaya dengan titik asal di origin dunia; memakai
+matriks pandang yang titik asalnya ikut bergerak bersama bola membuat pusatnya
+selalu jatuh tepat di (0,0), pengancingannya tidak melakukan apa pun, dan
+kilatannya tetap ada sementara kodenya tampak sudah menanganinya. Itu bentuk
+pertama yang saya tulis.
+
+Test-nya pun mula-mula salah: ia mengukur pergeseran di ruang **dunia**,
+padahal yang dikancing hanya X dan Y di ruang cahaya. Z di sana menunjuk
+sepanjang arah cahaya — menggesernya memindahkan rentang kedalaman, bukan kisi
+texel — jadi pengukuran yang mencampur ketiganya membuat pengancingan yang benar
+terlihat gagal.
+
+**Belahannya campuran logaritmik dan seragam.** Keduanya sendirian salah ke arah
+berlawanan: logaritmik murni menaruh hampir seluruh resolusi di beberapa meter
+pertama sehingga cascade terakhir jadi kotak-kotak, seragam murni memberi jarak
+dekat porsi yang sama dengan jarak jauh padahal di dekatlah tepi bayangan
+diperhatikan.
+
+**Bidang dekat cahaya ditarik mundur** supaya benda di belakang kamera tetap
+menjatuhkan bayangan ke dalam pandangan — tanpa itu yang hilang justru bayangan
+benda tinggi, yang paling diperhatikan.
+
+Ortografiknya biasa, bukan reversed-Z: depth ortografik linier, jadi menukarnya
+tidak memindahkan presisi ke mana pun — hanya menambah satu aturan yang harus
+diingat.
+
+#### Clustered culling
+
+**Eksponensial di kedalaman, seragam di layar.** Irisan seragam memberi beberapa
+meter pertama satu irisan dan ratusan meter terakhir sisanya, padahal lampu
+berkerumun justru di dekat kamera.
+
+**Cluster diuji sebagai kotak, bukan sebagai enam bidang.** Uji bola-terhadap-
+bidang menganggap bola di dalam selama ia di sisi dalam setiap bidang — benar
+untuk volume cembung tak terbatas, bukan untuk cluster yang terbatas: bola yang
+lewat di dekat sudut memenuhi keenam bidang tanpa pernah menyentuh cluster-nya.
+Ada test khusus untuk kasus sudut itu.
+
+**Spot diuji terhadap kerucut sungguhan**, bukan bola pembatasnya: spot sempit
+yang panjang punya bola pembatas jauh lebih besar daripada kerucutnya. Puncak
+kerucut digeser mundur `r/sin θ` supaya bola yang menyerempet sisi ikut
+terhitung — tanpa itu lampu sorot memotong benda tepat di tepi berkasnya.
+
+**Daftar per cluster dipotong dan pemotongannya dilaporkan.** Daftar tanpa batas
+membuat satu cluster buruk — sudut ruangan dengan dua puluh lampu — menentukan
+biaya seluruh frame, dan yang terlihat adalah frame rate yang jatuh di satu
+tempat tanpa sebab yang jelas.
+
+Rumus irisan disimpan sebagai skala dan bias supaya CPU dan GPU memakai bentuk
+yang sama persis; dua rumus yang setara secara matematis tapi ditulis berbeda
+akan berselisih satu irisan di tepinya, dan yang terlihat adalah lampu yang
+hilang tepat pada jarak tertentu.
+
+**Belum ada:** IBL (prefilter env + DFG LUT), pass bayangan Vulkan beserta atlas
+untuk point/spot, dan penyambungan ke `openpbr.slang`.
 
 `openpbr.slang` sendiri sudah ada sejak E8.2, tapi baru cahaya langsung: satu
 arah cahaya, tanpa IBL, bayangan, maupun transmisi. Yang ditambahkan di sini

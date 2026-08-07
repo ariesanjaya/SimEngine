@@ -2,10 +2,13 @@
 
 #include "Sim/Render/FrameGraph.h"
 #include "Sim/Render/Frustum.h"
+#include "Sim/Render/LightCluster.h"
+#include "Sim/Render/ShadowCascades.h"
 
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <string>
 #include <vector>
@@ -478,4 +481,431 @@ TEST_CASE("Menyaring kotak mengembalikan indeks yang lolos saja") {
     std::vector<uint32_t> visible;
     CHECK(CullAabbs(frustum, boxes, visible) == 2u);
     CHECK(visible == std::vector<uint32_t>{0u, 2u});
+}
+
+// --- Cascade bayangan --------------------------------------------------------
+
+namespace {
+
+Camera TestCamera(const Vec3& position = Vec3(0.0f, 2.0f, 0.0f),
+                  const Quat& rotation = Quat(1.0f, 0.0f, 0.0f, 0.0f)) {
+    Camera camera;
+    camera.position = position;
+    camera.rotation = rotation;
+    camera.fovYRadians = 60.0f * kDegToRad;
+    camera.nearZ = 0.1f;
+    camera.farZ = 1000.0f;
+    return camera;
+}
+
+/// Kedelapan sudut irisan frustum, dalam ruang dunia.
+std::array<Vec3, 8> SliceCorners(const Camera& camera, float aspect, float nearDistance,
+                                 float farDistance) {
+    const float tanY = std::tan(camera.fovYRadians * 0.5f);
+    const float tanX = tanY * aspect;
+    const Vec3 forward = camera.Forward();
+    const Vec3 right = camera.Right();
+    const Vec3 up = camera.Up();
+
+    std::array<Vec3, 8> corners{};
+    int at = 0;
+    for (const float depth : {nearDistance, farDistance}) {
+        for (const float sy : {-1.0f, 1.0f}) {
+            for (const float sx : {-1.0f, 1.0f}) {
+                corners[static_cast<size_t>(at++)] = camera.position + forward * depth +
+                                                     right * (sx * tanX * depth) +
+                                                     up * (sy * tanY * depth);
+            }
+        }
+    }
+    return corners;
+}
+
+}  // namespace
+
+TEST_CASE("Belahan cascade menaik dan berakhir tepat di jarak maksimum") {
+    CascadeSettings settings;
+    settings.count = 4;
+    settings.maxDistance = 150.0f;
+    std::array<float, kMaxCascades> splits{};
+    ComputeCascadeSplits(settings, 0.1f, splits);
+
+    CHECK(splits[0] < splits[1]);
+    CHECK(splits[1] < splits[2]);
+    CHECK(splits[2] < splits[3]);
+    // Yang terakhir dipaksa tepat: selisih sepersekian meter di sini berarti
+    // pita sempit yang tidak ditutupi cascade mana pun, dan yang terlihat di
+    // sana adalah bayangan yang hilang mendadak.
+    CHECK(splits[3] == doctest::Approx(150.0f));
+}
+
+TEST_CASE("splitLambda memilih antara pembagian seragam dan logaritmik") {
+    CascadeSettings uniform;
+    uniform.count = 4;
+    uniform.maxDistance = 100.0f;
+    uniform.splitLambda = 0.0f;
+    std::array<float, kMaxCascades> uniformSplits{};
+    ComputeCascadeSplits(uniform, 0.1f, uniformSplits);
+    // Seragam: tiap cascade menutupi seperempat jaraknya.
+    CHECK(uniformSplits[0] == doctest::Approx(25.075f).epsilon(0.01));
+
+    CascadeSettings logarithmic = uniform;
+    logarithmic.splitLambda = 1.0f;
+    std::array<float, kMaxCascades> logSplits{};
+    ComputeCascadeSplits(logarithmic, 0.1f, logSplits);
+    // Logaritmik menaruh belahan pertama jauh lebih dekat — itulah gunanya, dan
+    // juga alasan ia tidak dipakai murni.
+    CHECK(logSplits[0] < 1.0f);
+    CHECK(logSplits[0] < uniformSplits[0] * 0.1f);
+}
+
+TEST_CASE("Bola pembatas benar-benar memuat seluruh sudut irisan") {
+    const Camera camera = TestCamera();
+    const float aspect = 16.0f / 9.0f;
+    for (const auto [from, to] : {std::pair{0.1f, 10.0f}, std::pair{10.0f, 40.0f},
+                                  std::pair{40.0f, 150.0f}, std::pair{0.1f, 0.11f}}) {
+        const BoundingSphere sphere = FrustumSliceSphere(camera, aspect, from, to);
+        INFO("irisan ", from, "..", to);
+        for (const Vec3& corner : SliceCorners(camera, aspect, from, to)) {
+            CHECK(glm::length(corner - sphere.centre) <= sphere.radius + 1e-3f);
+        }
+    }
+}
+
+TEST_CASE("Jari-jari bola tidak berubah saat kamera berputar") {
+    // **Inilah yang membuat tepi bayangan tidak berkilat.** Kotak yang dipas
+    // ketat berubah ukuran mengikuti orientasi kamera, dan ukuran yang berubah
+    // berarti dunia-per-texel yang berubah — tepi bayangan lalu bergetar setiap
+    // kali kamera bergerak sedikit.
+    const float aspect = 16.0f / 9.0f;
+    const float reference =
+        FrustumSliceSphere(TestCamera(), aspect, 10.0f, 40.0f).radius;
+
+    for (const float yaw : {0.3f, 1.1f, 2.7f, -0.8f}) {
+        for (const float pitch : {0.0f, 0.4f, -1.2f}) {
+            const Quat rotation = glm::angleAxis(yaw, Vec3(0.0f, 1.0f, 0.0f)) *
+                                  glm::angleAxis(pitch, Vec3(1.0f, 0.0f, 0.0f));
+            const Camera rotated = TestCamera(Vec3(0.0f, 2.0f, 0.0f), rotation);
+            INFO("yaw ", yaw, " pitch ", pitch);
+            CHECK(FrustumSliceSphere(rotated, aspect, 10.0f, 40.0f).radius ==
+                  doctest::Approx(reference));
+        }
+    }
+}
+
+TEST_CASE("Kisi texel cascade terkunci ke kisi dunia yang tetap") {
+    // Pengancingan texel adalah separuh kedua dari anti-kilat; bola menangani
+    // rotasi, ini menangani pergeseran. Keduanya sering dikira satu perbaikan
+    // yang sama, dan yang memakai salah satunya saja tetap melihat kilatan.
+    CascadeSettings settings;
+    settings.count = 1;
+    settings.resolution = 512;
+    settings.maxDistance = 50.0f;
+    const Vec3 toLight = glm::normalize(Vec3(0.3f, 0.8f, 0.5f));
+    const float aspect = 16.0f / 9.0f;
+
+    // Kisi yang sama dengan yang dipakai implementasinya: rotasi cahaya saja,
+    // titik asal di origin dunia.
+    const Mat4 lightGrid = LookAt(Vec3(0.0f), -toLight, Vec3(0.0f, 1.0f, 0.0f));
+
+    // **Hanya X dan Y yang dikancing, dan itu memang cukup.** Z di ruang cahaya
+    // menunjuk sepanjang arah cahaya; menggesernya memindahkan rentang
+    // kedalaman, bukan kisi texel. Mengukur pergeseran di ruang dunia — yang
+    // mencampur ketiganya — akan membuat pengancingan yang benar terlihat
+    // gagal. Itu yang mula-mula saya ukur.
+    const auto originXy = [&lightGrid](const Cascade& cascade) {
+        const Mat4 inverse = glm::inverse(cascade.viewProjection);
+        const Vec3 world = Vec3(inverse * Vec4(0.0f, 0.0f, 0.5f, 1.0f));
+        const Vec3 inLight = Vec3(lightGrid * Vec4(world, 1.0f));
+        return Vec2(inLight.x, inLight.y);
+    };
+
+    const CascadeSet base = ComputeCascades(TestCamera(), aspect, toLight, settings);
+    const float texel = base.cascades[0].texelWorldSize;
+    REQUIRE(texel > 0.0f);
+    const Vec2 reference = originXy(base.cascades[0]);
+
+    int identical = 0;
+    Vec2 previous = reference;
+    for (int step = 0; step <= 40; ++step) {
+        const float offset = static_cast<float>(step) * texel * 0.1f;
+        const CascadeSet moved = ComputeCascades(
+            TestCamera(Vec3(offset, 2.0f, 0.0f)), aspect, toLight, settings);
+        const Vec2 xy = originXy(moved.cascades[0]);
+
+        // Invarian yang sebenarnya: titik asal cascade selalu jatuh tepat pada
+        // kelipatan texel dari kisi dunia yang tetap. Itulah yang membuat
+        // sebuah texel bayangan menutupi bagian dunia yang sama dari frame ke
+        // frame, dan tepinya berhenti bergetar.
+        INFO("langkah ", step);
+        CHECK(std::abs(xy.x / texel - std::round(xy.x / texel)) < 0.02f);
+        CHECK(std::abs(xy.y / texel - std::round(xy.y / texel)) < 0.02f);
+
+        if (glm::length(xy - previous) < texel * 0.02f) {
+            ++identical;
+        }
+        previous = xy;
+    }
+    // 41 sampel yang seluruhnya hanya membentang beberapa texel harus banyak
+    // yang kembar. Kalau setiap langkah menghasilkan nilai baru, pengancingannya
+    // tidak mengancing apa pun.
+    //
+    // Dihitung terhadap sampel SEBELUMNYA, bukan terhadap sampel pertama:
+    // kalau yang pertama kebetulan jatuh dekat batas texel, kelompok pertamanya
+    // pendek dan hitungannya bilang "gagal" pada pengancingan yang bekerja.
+    CHECK(identical > 30);
+}
+
+TEST_CASE("Arah cahaya nol tidak menghasilkan NaN") {
+    CascadeSettings settings;
+    const CascadeSet set = ComputeCascades(TestCamera(), 1.6f, Vec3(0.0f), settings);
+    for (int i = 0; i < set.count; ++i) {
+        for (int column = 0; column < 4; ++column) {
+            for (int row = 0; row < 4; ++row) {
+                CHECK(std::isfinite(set.cascades[static_cast<size_t>(i)]
+                                        .viewProjection[column][row]));
+            }
+        }
+    }
+}
+
+TEST_CASE("Matahari tepat di puncak tetap menghasilkan matriks yang sah") {
+    // Y dunia dan arah pandang cahaya sejajar di sini, dan LookAt biasa
+    // menghasilkan matriks yang tidak terdefinisi. Tengah hari bukan kasus aneh.
+    CascadeSettings settings;
+    const CascadeSet set = ComputeCascades(TestCamera(), 1.6f, Vec3(0.0f, 1.0f, 0.0f), settings);
+    REQUIRE(set.count > 0);
+    for (int column = 0; column < 4; ++column) {
+        for (int row = 0; row < 4; ++row) {
+            CHECK(std::isfinite(set.cascades[0].viewProjection[column][row]));
+        }
+    }
+}
+
+TEST_CASE("Pemilihan cascade dan pita campurnya") {
+    CascadeSettings settings;
+    settings.count = 3;
+    settings.maxDistance = 120.0f;
+    settings.blendFraction = 0.2f;
+    const CascadeSet set =
+        ComputeCascades(TestCamera(), 1.6f, glm::normalize(Vec3(0.0f, 1.0f, 0.3f)), settings);
+    REQUIRE(set.count == 3);
+
+    // Di tengah cascade pertama: tanpa campuran.
+    const CascadeChoice inside = ChooseCascade(set, set.cascades[0].blendBegin * 0.5f);
+    CHECK(inside.index == 0);
+    CHECK(inside.blendWeight == doctest::Approx(0.0f));
+
+    // Tepat di batas: sepenuhnya sudah cascade berikutnya.
+    const CascadeChoice edge = ChooseCascade(set, set.cascades[0].splitFar);
+    CHECK(edge.index == 0);
+    CHECK(edge.blendWeight == doctest::Approx(1.0f));
+
+    // Di dalam pita: di antara keduanya.
+    const float middle = (set.cascades[0].blendBegin + set.cascades[0].splitFar) * 0.5f;
+    const CascadeChoice band = ChooseCascade(set, middle);
+    CHECK(band.index == 0);
+    CHECK(band.blendWeight > 0.4f);
+    CHECK(band.blendWeight < 0.6f);
+
+    // Cascade terakhir tidak punya penerus, jadi tidak ada yang bisa dicampur.
+    CHECK(set.cascades[2].blendBegin == doctest::Approx(set.cascades[2].splitFar));
+    const CascadeChoice beyond = ChooseCascade(set, 500.0f);
+    CHECK(beyond.index == 2);
+    CHECK(beyond.blendWeight == doctest::Approx(0.0f));
+}
+
+// --- Clustered light culling -------------------------------------------------
+
+namespace {
+
+ClusterGrid MakeGrid(const ClusterGridSettings& settings, float nearZ = 0.1f,
+                     float farZ = 200.0f) {
+    ClusterGrid grid;
+    grid.Build(settings, 60.0f * kDegToRad, 16.0f / 9.0f, nearZ, farZ);
+    return grid;
+}
+
+ClusterLight PointAt(const Vec3& position, float range) {
+    ClusterLight light;
+    light.type = ClusterLightType::Point;
+    light.position = position;
+    light.range = range;
+    return light;
+}
+
+}  // namespace
+
+TEST_CASE("Irisan kedalaman eksponensial dan konsisten dengan batasnya") {
+    const ClusterGridSettings settings;
+    const ClusterGrid grid = MakeGrid(settings, 0.1f, 200.0f);
+
+    CHECK(grid.SliceOf(0.1f) == 0u);
+    CHECK(grid.SliceOf(0.05f) == 0u);  // di depan bidang dekat, dijepit
+    CHECK(grid.SliceOf(200.0f) == settings.slices - 1);
+    CHECK(grid.SliceOf(5000.0f) == settings.slices - 1);
+
+    // Setiap kedalaman harus jatuh ke irisan yang batasnya memuatnya. Rumus
+    // irisan dan rumus batas ditulis terpisah, dan justru selisih satu di
+    // antaranya yang membuat lampu hilang tepat pada jarak tertentu.
+    for (const float depth : {0.2f, 1.0f, 7.5f, 33.0f, 120.0f, 199.0f}) {
+        const uint32_t slice = grid.SliceOf(depth);
+        const Vec2 bounds = grid.SliceBounds(slice);
+        INFO("kedalaman ", depth, " irisan ", slice);
+        CHECK(depth >= bounds.x - 1e-3f);
+        CHECK(depth <= bounds.y + 1e-3f);
+    }
+
+    // Eksponensial: irisan pertama jauh lebih tipis daripada yang terakhir.
+    const Vec2 first = grid.SliceBounds(0);
+    const Vec2 last = grid.SliceBounds(settings.slices - 1);
+    CHECK((first.y - first.x) < (last.y - last.x) * 0.01f);
+}
+
+TEST_CASE("Kotak cluster memuat titik yang dipetakan ke cluster itu") {
+    ClusterGridSettings settings;
+    settings.tilesX = 8;
+    settings.tilesY = 6;
+    settings.slices = 12;
+    const ClusterGrid grid = MakeGrid(settings);
+
+    const float tanY = std::tan(30.0f * kDegToRad);
+    const float tanX = tanY * 16.0f / 9.0f;
+
+    for (const float depth : {0.5f, 3.0f, 25.0f, 150.0f}) {
+        for (const float ndcX : {-0.9f, -0.2f, 0.35f, 0.85f}) {
+            for (const float ndcY : {-0.75f, 0.1f, 0.6f}) {
+                const Vec3 point(ndcX * tanX * depth, ndcY * tanY * depth, depth);
+                const auto x = static_cast<uint32_t>((ndcX * 0.5f + 0.5f) *
+                                                     static_cast<float>(settings.tilesX));
+                const auto y = static_cast<uint32_t>((ndcY * 0.5f + 0.5f) *
+                                                     static_cast<float>(settings.tilesY));
+                const uint32_t slice = grid.SliceOf(depth);
+                const Aabb box = grid.ClusterBounds(std::min(x, settings.tilesX - 1),
+                                                   std::min(y, settings.tilesY - 1), slice);
+                INFO("titik (", point.x, ",", point.y, ",", point.z, ")");
+                CHECK(SphereIntersectsAabb(point, 1e-4f, box));
+            }
+        }
+    }
+}
+
+TEST_CASE("Uji bola-kotak menolak bola yang lewat di dekat sudut") {
+    // Inilah alasan cluster diuji sebagai kotak, bukan sebagai enam bidang:
+    // bola ini berada di sisi dalam bidang X dan bidang Y sekaligus, jadi uji
+    // bidang menyatakannya di dalam — padahal ia tidak menyentuh kotaknya.
+    Aabb box;
+    box.min = Vec3(0.0f);
+    box.max = Vec3(1.0f);
+    CHECK(!SphereIntersectsAabb(Vec3(-1.0f, -1.0f, 0.5f), 1.2f, box));
+    CHECK(SphereIntersectsAabb(Vec3(-1.0f, -1.0f, 0.5f), 1.5f, box));
+    CHECK(SphereIntersectsAabb(Vec3(0.5f, 0.5f, 0.5f), 0.01f, box));
+}
+
+TEST_CASE("Kerucut spot menghitung bola yang menyerempet tepinya") {
+    const Vec3 apex(0.0f);
+    const Vec3 direction(0.0f, 0.0f, 1.0f);
+    const float range = 20.0f;
+    const float cosOuter = std::cos(15.0f * kDegToRad);
+
+    // Di dalam berkas.
+    CHECK(ConeIntersectsSphere(apex, direction, range, cosOuter, Vec3(0.0f, 0.0f, 10.0f), 0.1f));
+    // Di belakang lampu.
+    CHECK(!ConeIntersectsSphere(apex, direction, range, cosOuter, Vec3(0.0f, 0.0f, -10.0f), 0.1f));
+    // Lebih jauh daripada jangkauannya.
+    CHECK(!ConeIntersectsSphere(apex, direction, range, cosOuter, Vec3(0.0f, 0.0f, 40.0f), 0.5f));
+    // Melenceng jauh dari berkasnya.
+    CHECK(!ConeIntersectsSphere(apex, direction, range, cosOuter, Vec3(15.0f, 0.0f, 10.0f), 0.5f));
+
+    // Pusatnya tepat di luar berkas, tapi bolanya menyerempet masuk. Tanpa
+    // penggeseran puncak, hanya pusat bola yang diuji — dan lampu sorot akan
+    // memotong benda tepat di tepi berkasnya.
+    const float justOutside = std::tan(16.0f * kDegToRad) * 10.0f;
+    CHECK(!ConeIntersectsSphere(apex, direction, range, cosOuter,
+                                Vec3(justOutside, 0.0f, 10.0f), 0.01f));
+    CHECK(ConeIntersectsSphere(apex, direction, range, cosOuter, Vec3(justOutside, 0.0f, 10.0f),
+                               1.0f));
+    // Bola yang menelan puncaknya selalu memotong.
+    CHECK(ConeIntersectsSphere(apex, direction, range, cosOuter, Vec3(0.5f, 0.0f, -0.2f), 2.0f));
+}
+
+TEST_CASE("Lampu hanya masuk ke cluster yang benar-benar dikenainya") {
+    ClusterGridSettings settings;
+    settings.tilesX = 8;
+    settings.tilesY = 6;
+    settings.slices = 12;
+    const ClusterGrid grid = MakeGrid(settings);
+
+    // Lampu kecil di sumbu pandang pada kedalaman 10.
+    const std::array<ClusterLight, 1> lights{PointAt(Vec3(0.0f, 0.0f, 10.0f), 1.0f)};
+    const ClusterAssignment assignment =
+        AssignLights(grid, Mat4(1.0f), lights, settings);
+
+    uint32_t touched = 0;
+    for (uint32_t i = 0; i < grid.ClusterCount(); ++i) {
+        touched += assignment.ranges[i].count;
+    }
+    CHECK(touched > 0);
+    // Kalau ia masuk ke sebagian besar cluster, penyaringannya tidak menyaring.
+    CHECK(touched < grid.ClusterCount() / 4);
+
+    // Cluster tempat lampunya berada pasti termuat.
+    const uint32_t slice = grid.SliceOf(10.0f);
+    const uint32_t centre = grid.IndexOf(settings.tilesX / 2, settings.tilesY / 2, slice);
+    CHECK(assignment.LightsOf(centre).size() == 1);
+}
+
+TEST_CASE("Lampu di belakang kamera tidak masuk cluster mana pun") {
+    const ClusterGridSettings settings;
+    const ClusterGrid grid = MakeGrid(settings);
+    const std::array<ClusterLight, 1> lights{PointAt(Vec3(0.0f, 0.0f, -50.0f), 5.0f)};
+    const ClusterAssignment assignment = AssignLights(grid, Mat4(1.0f), lights, settings);
+
+    for (uint32_t i = 0; i < grid.ClusterCount(); ++i) {
+        CHECK(assignment.ranges[i].count == 0);
+    }
+}
+
+TEST_CASE("Daftar cluster dipotong dan pemotongannya dilaporkan") {
+    ClusterGridSettings settings;
+    settings.tilesX = 4;
+    settings.tilesY = 4;
+    settings.slices = 4;
+    settings.maxLightsPerCluster = 3;
+    const ClusterGrid grid = MakeGrid(settings);
+
+    // Sepuluh lampu raksasa yang semuanya mengenai semua cluster.
+    std::vector<ClusterLight> lights;
+    for (int i = 0; i < 10; ++i) {
+        lights.push_back(PointAt(Vec3(0.0f, 0.0f, 20.0f), 10000.0f));
+    }
+    const ClusterAssignment assignment = AssignLights(grid, Mat4(1.0f), lights, settings);
+
+    // Dipotong, bukan dibiarkan tumbuh: satu cluster buruk tidak boleh
+    // menentukan biaya seluruh frame.
+    for (uint32_t i = 0; i < grid.ClusterCount(); ++i) {
+        CHECK(assignment.ranges[i].count <= 3u);
+    }
+    // Dan pemotongannya dilaporkan, bukan diam-diam.
+    CHECK(assignment.overflowed == grid.ClusterCount());
+}
+
+TEST_CASE("Matriks pandang memindahkan lampu, arahnya tanpa translasi") {
+    ClusterGridSettings settings;
+    settings.tilesX = 8;
+    settings.tilesY = 6;
+    settings.slices = 12;
+    const ClusterGrid grid = MakeGrid(settings);
+
+    // Kamera digeser 100 m di sumbu X; lampu ikut digeser sama banyak, jadi
+    // hasilnya harus sama persis dengan kamera di origin.
+    const std::array<ClusterLight, 1> atOrigin{PointAt(Vec3(0.0f, 0.0f, 10.0f), 2.0f)};
+    const std::array<ClusterLight, 1> shifted{PointAt(Vec3(100.0f, 0.0f, 10.0f), 2.0f)};
+    const Mat4 view = glm::translate(Mat4(1.0f), Vec3(-100.0f, 0.0f, 0.0f));
+
+    const ClusterAssignment a = AssignLights(grid, Mat4(1.0f), atOrigin, settings);
+    const ClusterAssignment b = AssignLights(grid, view, shifted, settings);
+    for (uint32_t i = 0; i < grid.ClusterCount(); ++i) {
+        CHECK(a.ranges[i].count == b.ranges[i].count);
+    }
 }
