@@ -5,6 +5,7 @@ sim_add_library(Render
         src/VulkanRenderer.cpp
         src/Frustum.cpp
         src/Ibl.cpp
+        src/IblBaker.cpp
         src/LightCluster.cpp
         src/ShadowCascades.cpp
         src/MaterialPreviewMesh.cpp

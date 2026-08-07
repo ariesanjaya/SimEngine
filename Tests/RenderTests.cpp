@@ -1182,3 +1182,69 @@ TEST_CASE("Konvensi kedalaman cascade: mendekati cahaya berarti depth mengecil")
         CHECK(point.z <= 1.0f);
     }
 }
+
+TEST_CASE("Langit prosedural: gradien, tanah, dan cakram matahari") {
+    GradientSky sky;
+    sky.zenith = Vec3(0.0f, 0.0f, 1.0f);
+    sky.horizon = Vec3(0.5f);
+    sky.ground = Vec3(0.0f);
+    sky.sunDirection = Vec3(0.0f, 1.0f, 0.0f);
+    sky.sunRadiance = Vec3(10.0f);
+
+    // Zenit memuat matahari, jadi ia langit biru ditambah cakramnya.
+    const Vec3 up = sky.Sample(Vec3(0.0f, 1.0f, 0.0f));
+    CHECK(up.z > 10.0f);
+    // Sedikit di luar cakram: langit saja.
+    const Vec3 nearSun = sky.Sample(glm::normalize(Vec3(0.2f, 1.0f, 0.0f)));
+    CHECK(nearSun.z < 2.0f);
+    CHECK(nearSun.z > 0.5f);
+    // Ke bawah: tanah, dan tidak ada matahari di sana.
+    const Vec3 down = sky.Sample(Vec3(0.0f, -1.0f, 0.0f));
+    CHECK(down.x < 0.05f);
+    CHECK(down.z < 0.05f);
+    // Cakrawala berada di antara keduanya.
+    const Vec3 side = sky.Sample(Vec3(1.0f, 0.0f, 0.0f));
+    CHECK(side.x == doctest::Approx(0.5f));
+}
+
+TEST_CASE("Arah muka cubemap menutupi keenam sumbu dan ternormalisasi") {
+    // Tengah tiap muka harus menunjuk tepat ke sumbunya. Konvensi V yang
+    // terbalik hanya salah pada dua muka, dan itu jauh lebih membingungkan
+    // daripada terbalik seluruhnya — jadi diuji per muka, bukan sekali.
+    const Vec3 expected[6]{{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}};
+    for (int face = 0; face < kCubeFaceCount; ++face) {
+        const Vec3 centre = CubeFaceDirection(face, 0.5f, 0.5f);
+        INFO("muka ", face);
+        CHECK(glm::length(centre - expected[static_cast<size_t>(face)]) < 1e-4f);
+    }
+
+    // Setiap texel di setiap muka harus ternormalisasi, dan keenam muka bersama
+    // harus menutupi seluruh bola — diuji dengan memeriksa bahwa setiap arah
+    // sumbu ditemukan oleh salah satu muka.
+    for (int face = 0; face < kCubeFaceCount; ++face) {
+        for (const float u : {0.02f, 0.5f, 0.98f}) {
+            for (const float v : {0.02f, 0.5f, 0.98f}) {
+                const Vec3 d = CubeFaceDirection(face, u, v);
+                CHECK(std::abs(glm::length(d) - 1.0f) < 1e-4f);
+            }
+        }
+    }
+}
+
+TEST_CASE("Prefilter mip 0 lingkungan konstan sama dengan konstantanya") {
+    // Rantai mip peta prefilter bukan penyaringan biasa: tiap mip dibakar
+    // dengan kekasaran yang berbeda, bukan dikecilkan dari mip sebelumnya.
+    // Yang dijamin di sini: pada lingkungan konstan seluruh mip harus sama,
+    // karena tidak ada yang bisa dirata-ratakan.
+    const ConstantEnvironment environment(Vec3(0.25f, 0.5f, 0.75f));
+    for (uint32_t mip = 0; mip < 5; ++mip) {
+        const float roughness = RoughnessForMip(mip, 5);
+        for (int face = 0; face < kCubeFaceCount; ++face) {
+            const Vec3 direction = CubeFaceDirection(face, 0.5f, 0.5f);
+            const Vec3 filtered = PrefilterSpecular(environment, direction, roughness, 64);
+            INFO("mip ", mip, " muka ", face);
+            CHECK(filtered.x == doctest::Approx(0.25f).epsilon(0.002));
+            CHECK(filtered.z == doctest::Approx(0.75f).epsilon(0.002));
+        }
+    }
+}

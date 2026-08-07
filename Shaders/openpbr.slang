@@ -234,6 +234,33 @@ float3 evaluateOpenPBR(OpenPBRSurface surface, ShadingFrame frame, float3 lightD
 // pun model shading. Fungsi yang mengambil sendiri dari sampler tertentu akan
 // mengunci sumbernya ke dalam model.
 
+/// Iradiansi dari sembilan koefisien harmonik bola.
+///
+/// **Cermin dari `EvaluateIrradiance` di sisi C++, termasuk ketiga konstanta
+/// konvolusinya.** Keduanya harus bergerak bersama: yang di sini mengembalikan E
+/// yang sudah dikonvolusi lobe kosinus, dan melewatkan konvolusinya menghasilkan
+/// angka yang tetap masuk akal — halus dan berwarna benar — tapi salah sebesar
+/// faktor yang berbeda per pita.
+float3 evaluateIrradianceSh(float3 sh[9], float3 normal) {
+    const float3 n = normalize(normal);
+    const float a0 = 3.141593;  // pi
+    const float a1 = 2.094395;  // 2pi/3
+    const float a2 = 0.785398;  // pi/4
+
+    float3 result = sh[0] * (0.282095 * a0);
+    result += sh[1] * (0.488603 * n.y * a1);
+    result += sh[2] * (0.488603 * n.z * a1);
+    result += sh[3] * (0.488603 * n.x * a1);
+    result += sh[4] * (1.092548 * n.x * n.y * a2);
+    result += sh[5] * (1.092548 * n.y * n.z * a2);
+    result += sh[6] * (0.315392 * (3.0 * n.z * n.z - 1.0) * a2);
+    result += sh[7] * (1.092548 * n.x * n.z * a2);
+    result += sh[8] * (0.546274 * (n.x * n.x - n.y * n.y) * a2);
+    // Orde dua tidak bisa mewakili tepi tajam tanpa melewati batas, dan
+    // iradiansi negatif merambat ke seluruh perhitungan sesudahnya.
+    return max(result, float3(0.0));
+}
+
 /// Kekasaran → level mip pada peta prefilter.
 ///
 /// Linear terhadap kekasaran, sama dengan `RoughnessForMip` di sisi C++.

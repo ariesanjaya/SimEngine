@@ -30,6 +30,15 @@ public:
     /// membatasi jumlahnya per frame.
     bool CreateFromRgba(Device& device, uint32_t width, uint32_t height, const void* pixels);
 
+    /// Bentuk umumnya: format apa pun, satu mip, tanpa konversi.
+    ///
+    /// `bytesPerTexel` diberikan pemanggil, tidak disimpulkan dari `format`.
+    /// Menyimpulkannya menuntut tabel format yang harus tumbuh setiap kali ada
+    /// format baru, dan tabel yang ketinggalan satu baris menghasilkan unggahan
+    /// yang meleset — bukan galat, melainkan gambar yang isinya bergeser.
+    bool Create(Device& device, uint32_t width, uint32_t height, VkFormat format,
+                uint32_t bytesPerTexel, const void* texels);
+
     void Destroy();
 
     VkImageView View() const { return view_; }

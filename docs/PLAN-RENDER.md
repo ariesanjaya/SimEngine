@@ -590,16 +590,46 @@ intensitasnya menggelapkannya. Nol pesan validation layer.
 |---|---|
 | Cascaded shadow map (directional) | ✅ jalan di Vulkan |
 | Clustered light culling | ✅ jalan di Vulkan |
-| IBL (prefilter env + DFG LUT) | ⚠️ matematikanya teruji, **belum ada pemakai runtime** |
+| IBL (prefilter env + DFG LUT) | ✅ dibakar ke tekstur GPU dan dipakai preview material |
 | Point/spot dengan shadow atlas | ❌ belum ada |
 
-`Ibl.cpp` dan `evaluateOpenPBR_IBL` hanya dipanggil dari test. Modulnya ada dan
-benar, tapi tidak ada satu baris kode produksi pun yang memakainya — itu keadaan
-yang berbeda dari "pembakarannya belum ada", dan lebih jujur disebutkan begitu.
+#### IBL tersambung
 
-**Belum ada:** pembakaran peta prefilter dan LUT ke tekstur GPU (menuntut cubemap
-bermip di RHI, yang belum ada), penyambungan IBL ke pipeline material, dan atlas
-bayangan untuk point/spot — yang juga akan mengisi `V_i` yang kini diandaikan 1.
+`rhi::TextureCube` baru: cubemap dengan rantai mip. **Rantai mip di sini bukan
+penyaringan biasa** — mip ke-*n* dibakar dengan kekasaran ke-*n*, bukan
+dikecilkan dari mip sebelumnya. Membangkitkannya lewat `vkCmdBlitImage` akan
+menghasilkan gambar yang mirip tapi salah: buram yang rata, bukan buram yang
+mengikuti lobe GGX.
+
+Pembakarannya di **CPU**, memakai `IEnvironmentSampler` dan fungsi-fungsi yang
+sudah teruji. Membakarnya di GPU menuntut pass compute beserta rantai barrier-nya
+sendiri, dan yang dibakar adalah lingkungan yang berubah paling banyak sekali per
+sesi. Yang dibayar 175 ms di Release (1,8 detik di Debug — matematika ini memang
+sepuluh kali lebih lambat tanpa optimasi); yang didapat adalah tidak adanya
+implementasi kedua.
+
+Lingkungannya `GradientSky` prosedural sampai importir tekstur HDR ada. Ia ada
+supaya IBL punya sumber tanpa satu berkas pun — dan sekaligus lingkungan yang
+jawabannya bisa diperiksa tangan di test.
+
+Sembilan koefisien SH diunggah sebagai `float4`, bukan `float3`: std140
+menjajarkan anggota larik ke 16 byte apa pun tipenya, jadi mengunggahnya rapat
+membuat setiap koefisien sesudah yang pertama meleset.
+
+Modul material yang dirakit kini mendeklarasikan cubemap prefilter, LUT DFG, dan
+koefisien SH di set 0, lalu memanggil `evaluateOpenPBR_IBL`. Dua pengambilan dari
+peta yang sama pada mip berbeda — base dan coat punya kekasarannya sendiri, dan
+satu mip untuk keduanya membuat coat yang licin tampak sekasar lapisan di
+bawahnya.
+
+Diverifikasi di GUI: bola dielektrik menangkap gradien langit alih-alih abu-abu
+rata, dan bola logam berhenti hitam — ia memantulkan langit di belahan atas dan
+tanah di belahan bawah, lengkap dengan pantulan cakram mataharinya. Nol pesan
+validation layer.
+
+**Belum ada:** atlas bayangan untuk point/spot — yang juga akan mengisi `V_i`
+yang kini diandaikan 1 — dan penyambungan IBL ke pass forward viewport, yang
+menunggu pipeline material menggantikan `box.frag`.
 
 `openpbr.slang` sendiri sudah ada sejak E8.2, tapi baru cahaya langsung: satu
 arah cahaya, tanpa IBL, bayangan, maupun transmisi. Yang ditambahkan di sini

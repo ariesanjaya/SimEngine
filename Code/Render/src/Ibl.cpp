@@ -59,6 +59,44 @@ void ShBasis(const Vec3& d, std::array<float, 9>& out) {
 
 }  // namespace
 
+Vec3 GradientSky::Sample(const Vec3& direction) const {
+    const Vec3 d = glm::normalize(direction);
+    // Gradien dinaikkan pangkat supaya cakrawalanya tidak selebar setengah
+    // langit — linear terhadap ketinggian membuat zenit hanya tercapai tepat di
+    // puncak, dan lingkungannya terasa rata.
+    const float height = std::clamp(d.y, -1.0f, 1.0f);
+    Vec3 radiance;
+    if (height >= 0.0f) {
+        radiance = glm::mix(horizon, zenith, std::pow(height, 0.45f));
+    } else {
+        radiance = glm::mix(horizon, ground, std::pow(-height, 0.35f));
+    }
+    if (glm::dot(d, glm::normalize(sunDirection)) >= sunCos) {
+        radiance += sunRadiance;
+    }
+    return radiance;
+}
+
+Vec3 CubeFaceDirection(int face, float u, float v) {
+    // Dipetakan ke -1..1, dengan V menghadap ke bawah.
+    const float s = u * 2.0f - 1.0f;
+    const float t = 1.0f - v * 2.0f;
+    switch (face) {
+        case 0:
+            return glm::normalize(Vec3(1.0f, t, -s));
+        case 1:
+            return glm::normalize(Vec3(-1.0f, t, s));
+        case 2:
+            return glm::normalize(Vec3(s, 1.0f, -t));
+        case 3:
+            return glm::normalize(Vec3(s, -1.0f, t));
+        case 4:
+            return glm::normalize(Vec3(s, t, 1.0f));
+        default:
+            return glm::normalize(Vec3(-s, t, -1.0f));
+    }
+}
+
 Vec2 Hammersley(uint32_t index, uint32_t count) {
     const float denominator = static_cast<float>(std::max(count, 1u));
     return {static_cast<float>(index) / denominator, RadicalInverse(index)};

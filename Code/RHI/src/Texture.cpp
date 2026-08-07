@@ -64,7 +64,15 @@ Texture2D& Texture2D::operator=(Texture2D&& other) noexcept {
 
 bool Texture2D::CreateFromRgba(Device& device, uint32_t width, uint32_t height,
                                const void* pixels) {
-    if (width == 0 || height == 0 || pixels == nullptr) {
+    // UNORM, bukan SRGB: thumbnail digambar oleh ImGui yang menulis langsung ke
+    // swapchain tanpa koreksi gamma. Memakai SRGB di sini membuat gambarnya
+    // tampak lebih terang daripada aslinya di berkas.
+    return Create(device, width, height, VK_FORMAT_R8G8B8A8_UNORM, 4, pixels);
+}
+
+bool Texture2D::Create(Device& device, uint32_t width, uint32_t height, VkFormat format,
+                       uint32_t bytesPerTexel, const void* texels) {
+    if (width == 0 || height == 0 || bytesPerTexel == 0 || texels == nullptr) {
         return false;
     }
     Destroy();
@@ -72,14 +80,14 @@ bool Texture2D::CreateFromRgba(Device& device, uint32_t width, uint32_t height,
     width_ = width;
     height_ = height;
 
-    const VkDeviceSize bytes = static_cast<VkDeviceSize>(width) * height * 4;
+    const VkDeviceSize bytes = static_cast<VkDeviceSize>(width) * height * bytesPerTexel;
 
     // Staging buffer hidup hanya selama fungsi ini. Menyimpannya untuk dipakai
     // ulang akan menahan memori host sebesar thumbnail terbesar yang pernah
     // dibuat, sepanjang sesi.
     DynamicBuffer staging;
     if (!staging.Create(device, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, bytes) ||
-        !staging.Write(pixels, bytes)) {
+        !staging.Write(texels, bytes)) {
         SIM_ERROR("RHI", "Cannot stage {}x{} texture upload", width, height);
         Destroy();
         return false;
@@ -88,10 +96,7 @@ bool Texture2D::CreateFromRgba(Device& device, uint32_t width, uint32_t height,
     VkImageCreateInfo imageInfo{};
     imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
-    // UNORM, bukan SRGB: thumbnail digambar oleh ImGui yang menulis langsung ke
-    // swapchain tanpa koreksi gamma. Memakai SRGB di sini membuat gambarnya
-    // tampak lebih terang daripada aslinya di berkas.
-    imageInfo.format = VK_FORMAT_R8G8B8A8_UNORM;
+    imageInfo.format = format;
     imageInfo.extent = {width, height, 1};
     imageInfo.mipLevels = 1;
     imageInfo.arrayLayers = 1;

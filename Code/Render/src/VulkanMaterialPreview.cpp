@@ -6,6 +6,7 @@
 #include "Sim/RHI/RenderTarget.h"
 #include "Sim/RHI/Texture.h"
 #include "Sim/RHI/TextureRegistry.h"
+#include "IblBaker.h"
 #include "Sim/Render/Frustum.h"
 #include "Sim/Render/IMaterialPreview.h"
 #include "Sim/Render/RendererFactory.h"
@@ -29,6 +30,10 @@ constexpr uint32_t kMaterialSet = 2;
 constexpr uint32_t kFrameParamsBinding = 0;
 constexpr uint32_t kBoneMatricesBinding = 1;
 constexpr uint32_t kInstanceTransformsBinding = 2;
+constexpr uint32_t kPrefilteredEnvBinding = 3;
+constexpr uint32_t kPrefilteredSamplerBinding = 4;
+constexpr uint32_t kDfgLutBinding = 5;
+constexpr uint32_t kDfgSamplerBinding = 6;
 constexpr uint32_t kObjectParamsBinding = 0;
 constexpr uint32_t kMaterialParamsBinding = 0;
 
@@ -40,9 +45,14 @@ struct FrameParams {
     Vec3 lightDirection{0.0f, 1.0f, 0.0f};
     float alphaCutoff = 0.5f;
     Vec3 lightRadiance{1.0f};
-    float pad0 = 0.0f;
+    float prefilteredMips = 1.0f;
+    /// Sembilan koefisien SH sebagai float4, bukan float3: std140 menjajarkan
+    /// anggota larik ke 16 byte apa pun tipenya, jadi mengunggahnya rapat
+    /// membuat setiap koefisien sesudah yang pertama meleset.
+    std::array<Vec4, 9> irradianceSh{};
 };
-static_assert(sizeof(FrameParams) == 112, "FrameParams harus sama dengan tata letak std140-nya");
+static_assert(sizeof(FrameParams) == 112 + 9 * 16,
+              "FrameParams harus sama dengan tata letak std140-nya");
 
 struct ObjectParams {
     Mat4 world{1.0f};
@@ -81,6 +91,14 @@ public:
         if (!CreateMeshes() || !CreateUniforms() || !CreateFallbackTexture() ||
             !CreateDescriptorPool()) {
             return false;
+        }
+        // Lingkungannya prosedural sampai peta HDR bisa dimuat. Dibakar sekali
+        // di sini, bukan malas saat material pertama dipasang: yang malas
+        // membuat material pertama terasa membeku setengah detik, dan orang
+        // menyalahkan kompilasi shader-nya.
+        const GradientSky sky;
+        if (!BakeIbl(device_, sky, IblBakeSettings{}, ibl_)) {
+            SIM_WARN("Render", "IBL bake failed; the preview will have no environment");
         }
         AdoptTargetLayout();
         RefreshTextureHandle();
@@ -135,6 +153,8 @@ public:
     }
 
     bool HasMaterial() const override { return pipeline_ != VK_NULL_HANDLE; }
+
+    const BakedIbl& Environment() const { return ibl_; }
 
     void SetParameters(std::span<const uint8_t> block) override {
         if (block.empty()) {
@@ -255,10 +275,12 @@ private:
         // Cukup besar untuk satu material dengan sejumlah tekstur yang wajar.
         // Pool dibuat sekali dan set-nya dibebaskan per material, jadi batas ini
         // membatasi satu material, bukan seluruh sesi.
-        const std::array<VkDescriptorPoolSize, 3> sizes{
+        const std::array<VkDescriptorPoolSize, 5> sizes{
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 8},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 8},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kMaxTextures * 2},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxTextures + 4},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLER, kMaxTextures + 4},
         };
         VkDescriptorPoolCreateInfo info{};
         info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -290,13 +312,21 @@ private:
             return VkDescriptorSetLayoutBinding{binding, type, 1, stages, nullptr};
         };
 
-        const std::array<VkDescriptorSetLayoutBinding, 3> frame{
+        const std::array<VkDescriptorSetLayoutBinding, 7> frame{
             bind(kFrameParamsBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                  VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT),
             bind(kBoneMatricesBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                  VK_SHADER_STAGE_VERTEX_BIT),
             bind(kInstanceTransformsBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                  VK_SHADER_STAGE_VERTEX_BIT),
+            bind(kPrefilteredEnvBinding, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                 VK_SHADER_STAGE_FRAGMENT_BIT),
+            bind(kPrefilteredSamplerBinding, VK_DESCRIPTOR_TYPE_SAMPLER,
+                 VK_SHADER_STAGE_FRAGMENT_BIT),
+            bind(kDfgLutBinding, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                 VK_SHADER_STAGE_FRAGMENT_BIT),
+            bind(kDfgSamplerBinding, VK_DESCRIPTOR_TYPE_SAMPLER,
+                 VK_SHADER_STAGE_FRAGMENT_BIT),
         };
         const std::array<VkDescriptorSetLayoutBinding, 1> object{
             bind(kObjectParamsBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
@@ -522,6 +552,30 @@ private:
               nullptr);
         write(frameSet_, kInstanceTransformsBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
               &buffers[2], nullptr);
+
+        // Lingkungan. Kalau pembakarannya gagal, tekstur putih 1x1 yang sama
+        // dipakai sebagai penggantinya — bukan descriptor yang dibiarkan
+        // kosong, yang merupakan pelanggaran di setiap draw.
+        const bool hasEnvironment = ibl_.IsValid();
+        const VkDescriptorImageInfo prefiltered{
+            VK_NULL_HANDLE, hasEnvironment ? ibl_.prefiltered.View() : fallbackTexture_.View(),
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        const VkDescriptorImageInfo prefilteredSampler{
+            hasEnvironment ? ibl_.prefiltered.Sampler() : fallbackTexture_.Sampler(),
+            VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED};
+        const VkDescriptorImageInfo dfgImage{
+            VK_NULL_HANDLE, hasEnvironment ? ibl_.dfg.View() : fallbackTexture_.View(),
+            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        const VkDescriptorImageInfo dfgSampler{
+            hasEnvironment ? ibl_.dfg.Sampler() : fallbackTexture_.Sampler(), VK_NULL_HANDLE,
+            VK_IMAGE_LAYOUT_UNDEFINED};
+
+        write(frameSet_, kPrefilteredEnvBinding, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr,
+              &prefiltered);
+        write(frameSet_, kPrefilteredSamplerBinding, VK_DESCRIPTOR_TYPE_SAMPLER, nullptr,
+              &prefilteredSampler);
+        write(frameSet_, kDfgLutBinding, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &dfgImage);
+        write(frameSet_, kDfgSamplerBinding, VK_DESCRIPTOR_TYPE_SAMPLER, nullptr, &dfgSampler);
         write(objectSet_, kObjectParamsBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &buffers[3],
               nullptr);
         write(materialSet_, kMaterialParamsBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &buffers[4],
@@ -558,6 +612,11 @@ private:
         frame.lightDirection = glm::normalize(desc.lightDirection);
         frame.alphaCutoff = desc.alphaCutoff;
         frame.lightRadiance = desc.lightRadiance;
+        frame.prefilteredMips =
+            ibl_.IsValid() ? static_cast<float>(ibl_.prefiltered.MipCount()) : 1.0f;
+        for (std::size_t i = 0; i < frame.irradianceSh.size(); ++i) {
+            frame.irradianceSh[i] = Vec4(ibl_.irradiance.coefficients[i], 0.0f);
+        }
         frameUniform_.Write(&frame, sizeof(frame));
 
         // Identitas, dan sengaja tetap diunggah. Objeknya tidak pernah diputar —
@@ -737,6 +796,7 @@ private:
             vkDestroyDescriptorPool(device_.Handle(), pool_, nullptr);
             pool_ = VK_NULL_HANDLE;
         }
+        ibl_.Destroy();
         fallbackTexture_.Destroy();
         vertices_.Destroy();
         indices_.Destroy();
@@ -747,6 +807,8 @@ private:
     }
 
     static constexpr uint32_t kMaxTextures = 8;
+
+    BakedIbl ibl_;
 
     rhi::Device& device_;
     rhi::ITextureRegistry& textures_;

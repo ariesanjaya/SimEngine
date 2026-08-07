@@ -22,6 +22,41 @@ public:
     virtual Vec3 Sample(const Vec3& direction) const = 0;
 };
 
+/// Langit prosedural: gradien cakrawala→zenit dengan cakram matahari.
+///
+/// **Ada supaya IBL punya sumber tanpa satu berkas pun.** Peta lingkungan
+/// sungguhan datang bersama importir tekstur HDR; sampai itu ada, lingkungan
+/// yang dijawab secara analitis lebih baik daripada tidak ada lingkungan sama
+/// sekali — dan ia sekaligus lingkungan yang jawabannya bisa diperiksa tangan
+/// di test.
+class GradientSky final : public IEnvironmentSampler {
+public:
+    Vec3 zenith{0.18f, 0.32f, 0.62f};
+    Vec3 horizon{0.62f, 0.66f, 0.72f};
+    Vec3 ground{0.14f, 0.13f, 0.12f};
+    /// Arah **ke** matahari.
+    Vec3 sunDirection{-0.4f, 0.8f, 0.45f};
+    Vec3 sunRadiance{14.0f, 12.6f, 10.5f};
+    /// Kosinus jari-jari sudut cakram matahari. Bawaannya kira-kira 3°, jauh
+    /// lebih lebar daripada matahari sungguhan — cakram setengah derajat hanya
+    /// akan tertangkap beberapa sampel saja, dan hasilnya prefilter yang
+    /// berbintik alih-alih sorotan yang mulus.
+    float sunCos = 0.9986f;
+
+    Vec3 Sample(const Vec3& direction) const override;
+};
+
+/// Enam muka cubemap, urutan Vulkan: +X, −X, +Y, −Y, +Z, −Z.
+inline constexpr int kCubeFaceCount = 6;
+
+/// Arah dunia untuk sebuah texel muka cubemap.
+///
+/// `u` dan `v` dalam 0..1 dan sudah di tengah texel. Konvensinya konvensi
+/// cubemap Vulkan/D3D, yang sumbu V-nya menghadap ke bawah — memakai konvensi
+/// OpenGL di sini menghasilkan lingkungan yang terbalik atas-bawah pada dua
+/// mukanya saja, yang jauh lebih membingungkan daripada terbalik seluruhnya.
+Vec3 CubeFaceDirection(int face, float u, float v);
+
 // --- LUT DFG -----------------------------------------------------------------
 
 /// Dua suku integral BRDF split-sum: `F0 * scale + bias`.

@@ -74,7 +74,13 @@ std::string AssembleMaterialModule(const std::string& generatedSlang,
     out << "    float3   gLightDirection;  // dari permukaan ke cahaya\n";
     out << "    float    gAlphaCutoff;\n";
     out << "    float3   gLightRadiance;\n";
-    out << "    float    gPad0;\n";
+    out << "    float    gPrefilteredMips;\n";
+    // Sembilan koefisien sebagai float4, bukan float3. std140 menjajarkan
+    // anggota larik ke 16 byte apa pun tipenya, jadi float3[9] memakan tempat
+    // yang sama dengan float4[9] — sementara menulisnya float3 mengundang sisi
+    // C++ mengunggah 108 byte yang rapat, dan seluruh koefisien sesudah yang
+    // pertama lalu meleset.
+    out << "    float4   gIrradianceSh[9];\n";
     out << "}\n\n";
 
     // Matriks skinning, bukan matriks tulang: `bone world * inverse bind`,
@@ -84,6 +90,19 @@ std::string AssembleMaterialModule(const std::string& generatedSlang,
     out << "StructuredBuffer<float4x4> gBoneMatrices;\n";
     out << "[[vk::binding(2, 0)]]\n";
     out << "StructuredBuffer<float4x4> gInstanceTransforms;\n\n";
+
+    // Lingkungan. Tekstur dan sampler terpisah, sama dengan tekstur material —
+    // dan cubemap prefilter memakai sampler yang sama dengan LUT DFG tidak bisa,
+    // karena yang satu menuntut interpolasi antar-mip dan yang lain tidak punya
+    // mip sama sekali.
+    out << "[[vk::binding(3, 0)]]\n";
+    out << "TextureCube<float4> gPrefilteredEnv;\n";
+    out << "[[vk::binding(4, 0)]]\n";
+    out << "SamplerState sPrefilteredEnv;\n";
+    out << "[[vk::binding(5, 0)]]\n";
+    out << "Texture2D<float2> gDfgLut;\n";
+    out << "[[vk::binding(6, 0)]]\n";
+    out << "SamplerState sDfgLut;\n\n";
 
     out << "// --- keadaan per-objek (set 1) -------------------------------------\n";
     out << "[[vk::binding(0, 1)]]\n";
@@ -231,7 +250,31 @@ std::string AssembleMaterialModule(const std::string& generatedSlang,
     out << "    }\n\n";
 
     out << "    float3 lit = evaluateOpenPBR(m.surface, frame, normalize(gLightDirection),\n";
-    out << "                                 gLightRadiance);\n";
+    out << "                                 gLightRadiance);\n\n";
+
+    // Lingkungan. Tanpa ini logam hitam di luar sorotannya — benar secara
+    // fisika untuk satu cahaya langsung, dan salah sebagai gambar.
+    out << "    float3 shCoefficients[9];\n";
+    out << "    [unroll]\n";
+    out << "    for (int i = 0; i < 9; ++i) {\n";
+    out << "        shCoefficients[i] = gIrradianceSh[i].rgb;\n";
+    out << "    }\n";
+    out << "    const float3 irradiance = evaluateIrradianceSh(shCoefficients, frame.normal);\n";
+    out << "    const float3 reflection = prefilterDirection(frame);\n";
+    // Dua pengambilan dari peta yang sama pada mip yang berbeda: base dan coat
+    // punya kekasarannya sendiri, dan memakai satu mip untuk keduanya membuat
+    // coat yang licin tampak sekasar lapisan di bawahnya.
+    out << "    const float3 prefilteredBase = gPrefilteredEnv.SampleLevel(\n";
+    out << "        sPrefilteredEnv, reflection,\n";
+    out << "        prefilterMipForRoughness(m.surface.specularRoughness, gPrefilteredMips)).rgb;\n";
+    out << "    const float3 prefilteredCoat = gPrefilteredEnv.SampleLevel(\n";
+    out << "        sPrefilteredEnv, reflection,\n";
+    out << "        prefilterMipForRoughness(m.surface.coatRoughness, gPrefilteredMips)).rgb;\n";
+    out << "    const float nv = saturate(dot(frame.normal, frame.view));\n";
+    out << "    const float2 dfg = gDfgLut.SampleLevel(\n";
+    out << "        sDfgLut, float2(nv, saturate(m.surface.specularRoughness)), 0.0);\n";
+    out << "    lit += evaluateOpenPBR_IBL(m.surface, frame, irradiance, prefilteredBase,\n";
+    out << "                               prefilteredCoat, dfg);\n";
     out << "    lit += m.emissive;\n";
     out << "    return float4(lit, m.opacity);\n";
     out << "}\n";
