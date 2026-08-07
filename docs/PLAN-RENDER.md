@@ -108,15 +108,17 @@ berarti begitu ada tekstur untuk diindeks — yaitu E8.2. Alias memori transien
 sudah ada di graph dan teruji, tapi belum ada pemakainya: pass pertama yang
 benar-benar menuntut target antara adalah post-process di E8.8.
 
-### E8.2 — Material runtime · 🔨 tata letak uniform selesai
+### E8.2 — Material runtime · 🔨 graph → SPIR-V selesai
 Kompilasi graph `.simmat` → kode shader → SPIR-V, cache di disk berbasis hash graph.
 Material instance jadi uniform buffer + indeks tekstur. Varian shader (skinned,
 instanced, alpha-test) lewat spesialisasi konstanta. **Titik sambung:** Material
 Editor mulai menampilkan preview PBR sungguhan.
 
-**Sudah ada:** `MaterialParameterBlock` — tata letak blok uniform sebuah
-material beserta tabel slot teksturnya. Graph → Slang sendiri sudah selesai di
-E7.1; yang ditambahkan di sini adalah sisi datanya.
+**Sudah ada:** jalur lengkap dari graph sampai SPIR-V — `MaterialParameterBlock`
+(tata letak blok uniform dan tabel slot tekstur), `openpbr.slang` (model
+shading-nya), `AssembleMaterialModule` (perakit modul), dan `ShaderCache`
+(kompilasi `slangc` beserta cache disk). Graph → Slang sendiri sudah selesai di
+E7.1.
 
 **Ini ABI antara kode Slang yang dihasilkan dan sisi C++.** Kedua sisi
 menghitung offset dari daftar parameter yang sama, dan selisih satu sisipan
@@ -141,15 +143,57 @@ yang sudah tersimpan menunjuk offset yang lama.
 demi byte: itulah yang dipakai renderer untuk memutuskan apakah sebuah blok
 perlu diunggah ulang.
 
-**Belum ada:** Slang → SPIR-V lewat `slangc` beserta cache disk berbasis hash,
-varian lewat spesialisasi konstanta, dan preview PBR di Material Editor.
-Preview-nya menuntut instance `IViewportRenderer` kedua — jalannya sudah jelas
-dan dicatat di E7.1, tinggal dikerjakan bersama pipeline materialnya.
+#### Kompilasi dan cache
+
+**Keluaran kompiler graph belum bisa diberikan ke `slangc`.** Ia berisi
+`evalMaterial()` dan tidak punya entry point, varying, maupun yang memanggil
+model shading-nya. `AssembleMaterialModule` yang melengkapinya: konstanta
+spesialisasi, prelude, cbuffer per-frame, struct varying, kode material, lalu
+entry point fragment.
+
+**Prelude ditanam, bukan di-`import`, dan itu keputusan demi cache-nya.** Kunci
+cache adalah hash teks sumber yang diberikan ke kompilator; sumber yang cuma
+menulis `import openpbr;` menghasilkan kunci yang **tidak berubah ketika
+`openpbr.slang` berubah** — dan cache akan dengan patuh menyerahkan SPIR-V yang
+dibangun terhadap model shading yang sudah tidak ada. Menanamnya membuat setiap
+perubahan model shading otomatis membatalkan seluruh material, tanpa satu pun
+daftar dependensi yang harus dipelihara tangan. Harganya modul yang panjang dan
+prelude yang diparse ulang per material — ongkos sekali per material per
+perubahan, dibayar oleh cache yang justru jadi benar.
+
+**Identitas kompilator ikut kunci.** Tanpanya cache menyerahkan SPIR-V yang
+dihasilkan `slangc` yang sudah tidak terpasang, dan bug itu muncul sebagai
+shader yang jalan di satu mesin dan tidak di mesin lain.
+
+**Varian TIDAK ikut kunci.** Skinned, instanced, dan alpha-test dipasang sebagai
+konstanta spesialisasi saat pipeline dibuat, jadi satu modul melayani kedelapan
+kombinasinya. Menjadikannya bagian kunci akan melipatgandakan modul secara
+kombinatorial — tiga sakelar menjadi delapan modul yang masing-masing harus
+dikompilasi, disimpan, dan dibatalkan sendiri-sendiri.
+
+**Entri diperiksa, bukan dipercaya.** Berkas yang terpotong dibaca sebagai cache
+miss. Penulisannya lewat berkas sementara lalu `rename` di direktori yang sama —
+rename lintas sistem berkas bukan operasi tunggal, dan justru di situlah keadaan
+setengah tertulis yang ingin dihindari muncul.
+
+**Kuncinya 128 bit.** Bukan demi kekuatan kriptografis: kunci cache yang
+bertabrakan muncul sebagai material yang memakai shader milik material lain —
+bug yang tidak akan pernah dicurigai orang berasal dari cache.
+
+**Belum ada:** tahap vertex (`kSkinned`/`kInstanced` sudah dideklarasikan tapi
+belum ada yang membacanya, jadi slangc membuangnya dari SPIR-V), dan preview PBR
+di Material Editor. Preview-nya menuntut instance `IViewportRenderer` kedua —
+jalannya sudah jelas dan dicatat di E7.1, tinggal dikerjakan bersama pipeline
+materialnya.
 
 ### E8.3 — Lighting & shadow
-Model shading **OpenPBR Surface v1.1** (`openpbr.slang`), IBL (prefilter env +
-DFG LUT), directional light dengan cascaded shadow map, point/spot dengan shadow
-atlas, clustered light culling untuk banyak lampu.
+IBL (prefilter env + DFG LUT), directional light dengan cascaded shadow map,
+point/spot dengan shadow atlas, clustered light culling untuk banyak lampu.
+
+`openpbr.slang` sendiri sudah ada sejak E8.2, tapi baru cahaya langsung: satu
+arah cahaya, tanpa IBL, bayangan, maupun transmisi. Yang ditambahkan di sini
+tidak mengubah antarmuka `OpenPBRSurface`, jadi material yang sudah ditulis
+tidak ikut berubah.
 
 `evalOpenPBR_IBL` menerima `prefilteredBase`, `prefilteredCoat`, dan
 `irradiance` terpisah. Ketiganya di sini datang dari probe statis — dan itu juga

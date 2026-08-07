@@ -23,12 +23,19 @@ sim_add_test(SimAssetTests
         Sim::Assets)
 
 # Material: model graph `.simmat`, katalog node (keluarannya mengikuti OpenPBR
-# Surface v1.1), dan validasi. Tidak butuh Lua maupun editor.
+# Surface v1.1), validasi, tata letak blok uniform, dan cache SPIR-V. Tidak
+# butuh Lua maupun editor.
 sim_add_test(SimMaterialTests
     SOURCES
         MaterialTests.cpp
     DEPS
         Sim::Material)
+
+# Direktori shader sumber, bukan salinannya di build. Test yang membaca
+# openpbr.slang harus membaca berkas yang sedang disunting orang — salinan yang
+# tertinggal satu build akan membuat test lulus atas kode yang sudah berubah.
+target_compile_definitions(SimMaterialTests
+    PRIVATE SIM_SHADER_DIR="${CMAKE_SOURCE_DIR}/Shaders")
 
 # Terrain: penyimpanan heightmap berubin, brush, undo per goresan, dan
 # round-trip heightmap PNG 16-bit/RAW.

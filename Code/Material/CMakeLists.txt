@@ -6,6 +6,8 @@ sim_add_library(Material
         src/MaterialParameterBlock.cpp
         src/MaterialNodeCatalog.cpp
         src/MaterialValidation.cpp
+        src/MaterialShaderModule.cpp
+        src/ShaderCache.cpp
     PUBLIC_DEPS
         Sim::Core
     # PRIVATE: header publik Material tidak membocorkan nlohmann, sehingga

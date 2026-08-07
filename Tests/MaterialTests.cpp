@@ -1,12 +1,20 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 
 #include "Sim/Material/MaterialGraph.h"
+#include "Sim/Material/MaterialCompiler.h"
 #include "Sim/Material/MaterialNodeCatalog.h"
+#include "Sim/Material/MaterialParameterBlock.h"
+#include "Sim/Material/MaterialShaderModule.h"
 #include "Sim/Material/MaterialValidation.h"
+#include "Sim/Material/ShaderCache.h"
 
 #include <doctest/doctest.h>
 
 #include <cstring>
+
+#include <filesystem>
+#include <fstream>
+#include <memory>
 
 #include <algorithm>
 #include <string>
@@ -861,4 +869,536 @@ TEST_CASE("Menulis parameter yang tidak ada mengembalikan false") {
     block.Build({Param("a", ValueKind::Float)});
     std::vector<uint8_t> bytes(block.Bytes(), 0u);
     CHECK(!block.Write(bytes, "b", MaterialValue{}));
+}
+
+// --- Cache SPIR-V ------------------------------------------------------------
+
+namespace {
+
+/// Direktori cache yang bersih untuk satu test, dan terhapus sesudahnya.
+///
+/// Nama diambil dari nama test-nya, bukan dari waktu atau angka acak: test yang
+/// gagal harus bisa dijalankan ulang dan menemui keadaan awal yang sama, dan
+/// direktori bernama acak yang tertinggal karena test-nya crash tidak bisa
+/// dikenali lagi sebagai milik siapa.
+struct TempCacheDir {
+    std::filesystem::path path;
+
+    explicit TempCacheDir(std::string_view name) {
+        std::error_code ec;
+        path = std::filesystem::temp_directory_path(ec) / ("sim-shader-cache-" + std::string(name));
+        std::filesystem::remove_all(path, ec);
+        std::filesystem::create_directories(path, ec);
+    }
+    ~TempCacheDir() {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+    }
+    TempCacheDir(const TempCacheDir&) = delete;
+    TempCacheDir& operator=(const TempCacheDir&) = delete;
+};
+
+/// SPIR-V palsu yang lolos pemeriksaan bentuk: magic + header + satu kata
+/// penanda supaya isinya bisa dibedakan antar-kompilasi.
+std::vector<uint32_t> FakeSpirv(uint32_t marker) {
+    return {0x07230203u, 0x00010500u, 0u, 1u, 0u, marker};
+}
+
+/// Kompilator yang menghitung berapa kali ia benar-benar dipanggil.
+struct CountingCompiler {
+    std::shared_ptr<int> calls = std::make_shared<int>(0);
+    uint32_t marker = 1u;
+
+    ShaderCache::Compiler Bind() {
+        auto counter = calls;
+        const uint32_t value = marker;
+        return [counter, value](const CompileRequest&) {
+            ++*counter;
+            CompileOutput out;
+            out.ok = true;
+            out.spirv = FakeSpirv(value);
+            return out;
+        };
+    }
+};
+
+CompileRequest Request(std::string source, ShaderStage stage = ShaderStage::Fragment,
+                       std::string entry = "fragmentMain") {
+    CompileRequest request;
+    request.source = std::move(source);
+    request.stage = stage;
+    request.entryPoint = std::move(entry);
+    return request;
+}
+
+}  // namespace
+
+TEST_CASE("Kompilasi kedua dilayani cache, bukan kompilator") {
+    TempCacheDir dir("hit");
+    CountingCompiler compiler;
+    ShaderCache cache;
+    cache.Configure(dir.path, "slangc-2026.8");
+    cache.SetCompiler(compiler.Bind());
+
+    const CompileOutput first = cache.Get(Request("float4 f() { return 0; }"));
+    REQUIRE(first.ok);
+    const CompileOutput second = cache.Get(Request("float4 f() { return 0; }"));
+    REQUIRE(second.ok);
+
+    CHECK(*compiler.calls == 1);
+    CHECK(cache.Statistics().hits == 1);
+    CHECK(cache.Statistics().misses == 1);
+    CHECK(second.spirv == first.spirv);
+}
+
+TEST_CASE("Cache bertahan melewati instance ShaderCache") {
+    TempCacheDir dir("persist");
+    CountingCompiler compiler;
+    {
+        ShaderCache cache;
+        cache.Configure(dir.path, "slangc-2026.8");
+        cache.SetCompiler(compiler.Bind());
+        REQUIRE(cache.Get(Request("a")).ok);
+    }
+    ShaderCache fresh;
+    fresh.Configure(dir.path, "slangc-2026.8");
+    fresh.SetCompiler(compiler.Bind());
+    REQUIRE(fresh.Get(Request("a")).ok);
+
+    // Inti cache disk: proses berikutnya tidak mengompilasi ulang.
+    CHECK(*compiler.calls == 1);
+    CHECK(fresh.Statistics().hits == 1);
+}
+
+TEST_CASE("Sumber, tahap, dan entry point masing-masing memisahkan kunci") {
+    ShaderCache cache;
+    cache.Configure({}, "slangc-2026.8");
+
+    const std::string base = cache.KeyOf(Request("a", ShaderStage::Fragment, "main"));
+    CHECK(cache.KeyOf(Request("b", ShaderStage::Fragment, "main")) != base);
+    CHECK(cache.KeyOf(Request("a", ShaderStage::Vertex, "main")) != base);
+    CHECK(cache.KeyOf(Request("a", ShaderStage::Fragment, "other")) != base);
+
+    // Medan yang bersebelahan tidak boleh bisa saling meminjam karakter: kalau
+    // kuncinya sekadar penggabungan, "ab"+"c" dan "a"+"bc" akan bertemu.
+    CHECK(cache.KeyOf(Request("ab", ShaderStage::Fragment, "c")) !=
+          cache.KeyOf(Request("a", ShaderStage::Fragment, "bc")));
+}
+
+TEST_CASE("Kompilator yang berganti versi membatalkan cache") {
+    TempCacheDir dir("compiler");
+    CountingCompiler compiler;
+    ShaderCache cache;
+    cache.Configure(dir.path, "slangc-2026.8");
+    cache.SetCompiler(compiler.Bind());
+    REQUIRE(cache.Get(Request("a")).ok);
+
+    // Ini yang mencegah SPIR-V dari kompilator yang sudah tidak ada dipakai
+    // ulang — bug yang muncul sebagai shader yang jalan di satu mesin saja.
+    cache.Configure(dir.path, "slangc-2027.1");
+    REQUIRE(cache.Get(Request("a")).ok);
+    CHECK(*compiler.calls == 2);
+    CHECK(cache.Statistics().hits == 0);
+}
+
+TEST_CASE("Varian tidak memisahkan kunci — ia konstanta spesialisasi") {
+    ShaderVariant plain;
+    ShaderVariant skinned;
+    skinned.skinned = true;
+
+    CHECK(plain.Mask() == 0u);
+    CHECK(skinned.Mask() == 1u);
+    CHECK(skinned.Constants() == std::array<uint32_t, 3>{1u, 0u, 0u});
+
+    ShaderVariant all;
+    all.skinned = true;
+    all.instanced = true;
+    all.alphaTest = true;
+    CHECK(all.Mask() == 7u);
+    CHECK(all.Constants() == std::array<uint32_t, 3>{1u, 1u, 1u});
+
+    // Satu modul untuk kedelapan kombinasinya: ShaderVariant tidak punya jalan
+    // masuk ke CompileRequest sama sekali, jadi tidak ada cara ia ikut kunci.
+    ShaderCache cache;
+    cache.Configure({}, "slangc-2026.8");
+    CHECK(cache.KeyOf(Request("a")) == cache.KeyOf(Request("a")));
+}
+
+TEST_CASE("Entri yang terpotong dibaca sebagai miss, bukan sebagai SPIR-V") {
+    TempCacheDir dir("truncated");
+    CountingCompiler compiler;
+    ShaderCache cache;
+    cache.Configure(dir.path, "slangc-2026.8");
+    cache.SetCompiler(compiler.Bind());
+
+    const CompileRequest request = Request("a");
+    REQUIRE(cache.Get(request).ok);
+
+    // Simulasi proses yang mati di tengah tulis pada versi lama, atau salinan
+    // proyek yang rusak: berkasnya ada, namanya benar, isinya tidak utuh.
+    const std::filesystem::path entry =
+        dir.path / (cache.KeyOf(request) + ".spv");
+    {
+        std::ofstream file(entry, std::ios::binary | std::ios::trunc);
+        const uint32_t magicOnly = 0x07230203u;
+        file.write(reinterpret_cast<const char*>(&magicOnly), sizeof(magicOnly));
+    }
+
+    const CompileOutput out = cache.Get(request);
+    CHECK(out.ok);
+    CHECK(LooksLikeSpirv(out.spirv));
+    CHECK(*compiler.calls == 2);
+    CHECK(cache.Statistics().rejected == 1);
+}
+
+TEST_CASE("Berkas yang bukan kelipatan empat byte ditolak") {
+    TempCacheDir dir("ragged");
+    CountingCompiler compiler;
+    ShaderCache cache;
+    cache.Configure(dir.path, "slangc-2026.8");
+    cache.SetCompiler(compiler.Bind());
+
+    const CompileRequest request = Request("a");
+    REQUIRE(cache.Get(request).ok);
+    {
+        std::ofstream file(dir.path / (cache.KeyOf(request) + ".spv"),
+                           std::ios::binary | std::ios::trunc);
+        file << "not spirv";
+    }
+    CHECK(cache.Get(request).ok);
+    CHECK(cache.Statistics().rejected == 1);
+}
+
+TEST_CASE("Kompilator yang gagal tidak meninggalkan entri") {
+    TempCacheDir dir("failure");
+    ShaderCache cache;
+    cache.Configure(dir.path, "slangc-2026.8");
+    cache.SetCompiler([](const CompileRequest&) {
+        CompileOutput out;
+        out.error = "expected ';'";
+        return out;
+    });
+
+    const CompileRequest request = Request("bad");
+    const CompileOutput out = cache.Get(request);
+    CHECK(!out.ok);
+    CHECK(out.error == "expected ';'");
+
+    // Kegagalan yang tersimpan akan membuat shader yang sudah diperbaiki tetap
+    // gagal sampai cache-nya dibersihkan tangan.
+    CHECK(!std::filesystem::exists(dir.path / (cache.KeyOf(request) + ".spv")));
+}
+
+TEST_CASE("Sukses tanpa SPIR-V yang sah dilaporkan gagal") {
+    TempCacheDir dir("empty");
+    ShaderCache cache;
+    cache.Configure(dir.path, "slangc-2026.8");
+    cache.SetCompiler([](const CompileRequest&) {
+        CompileOutput out;
+        out.ok = true;  // mengaku berhasil
+        return out;     // tapi tidak menyerahkan apa pun
+    });
+
+    const CompileOutput out = cache.Get(Request("a"));
+    CHECK(!out.ok);
+    CHECK(!out.error.empty());
+    CHECK(out.spirv.empty());
+}
+
+TEST_CASE("Cache tanpa direktori tetap mengompilasi") {
+    CountingCompiler compiler;
+    ShaderCache cache;
+    cache.Configure({}, "slangc-2026.8");
+    cache.SetCompiler(compiler.Bind());
+
+    CHECK(cache.Get(Request("a")).ok);
+    CHECK(cache.Get(Request("a")).ok);
+    // Tanpa lapisan disk setiap permintaan meleset — yang benar, dan tidak
+    // sama dengan gagal.
+    CHECK(*compiler.calls == 2);
+    CHECK(cache.Statistics().hits == 0);
+}
+
+TEST_CASE("Tanpa kompilator, cache melaporkan alasannya") {
+    ShaderCache cache;
+    cache.Configure({}, "slangc-2026.8");
+    const CompileOutput out = cache.Get(Request("a"));
+    CHECK(!out.ok);
+    CHECK(!out.error.empty());
+}
+
+TEST_CASE("Purge hanya menyentuh berkas milik cache") {
+    TempCacheDir dir("purge");
+    CountingCompiler compiler;
+    ShaderCache cache;
+    cache.Configure(dir.path, "slangc-2026.8");
+    cache.SetCompiler(compiler.Bind());
+    REQUIRE(cache.Get(Request("a")).ok);
+
+    const std::filesystem::path bystander = dir.path / "catatan.txt";
+    { std::ofstream(bystander) << "bukan milik cache"; }
+
+    cache.Purge();
+    CHECK(!std::filesystem::exists(dir.path / (cache.KeyOf(Request("a")) + ".spv")));
+    // Direktori cache yang ternyata ditunjuk ke tempat lain tidak boleh menjadi
+    // penghapusan menyeluruh.
+    CHECK(std::filesystem::exists(bystander));
+}
+
+TEST_CASE("slangc sungguhan menghasilkan SPIR-V yang bisa di-cache") {
+    const std::string identity = SlangCompilerIdentity();
+    if (identity.empty()) {
+        MESSAGE("slangc tidak ditemukan — bagian integrasi dilewati");
+        return;
+    }
+
+    TempCacheDir dir("slangc");
+    ShaderCache cache;
+    cache.Configure(dir.path, identity);
+    cache.SetCompiler(MakeSlangCompiler());
+
+    const std::string source = R"(
+[shader("fragment")]
+float4 fragmentMain(float2 uv : TEXCOORD0) : SV_Target {
+    return float4(uv, 0.0, 1.0);
+}
+)";
+    const CompileOutput out = cache.Get(Request(source));
+    INFO("slangc: ", out.error);
+    REQUIRE(out.ok);
+    CHECK(LooksLikeSpirv(out.spirv));
+    CHECK(out.spirv.size() > 16);
+
+    const CompileOutput again = cache.Get(Request(source));
+    REQUIRE(again.ok);
+    CHECK(again.spirv == out.spirv);
+    CHECK(cache.Statistics().hits == 1);
+}
+
+TEST_CASE("Sumber Slang yang salah dilaporkan dengan pesan slangc") {
+    if (SlangCompilerIdentity().empty()) {
+        MESSAGE("slangc tidak ditemukan — bagian integrasi dilewati");
+        return;
+    }
+    ShaderCache cache;
+    cache.Configure({}, "x");
+    cache.SetCompiler(MakeSlangCompiler());
+
+    const CompileOutput out = cache.Get(Request("this is not slang at all"));
+    CHECK(!out.ok);
+    // Pesannya diteruskan apa adanya; panel material yang menaruhnya di samping
+    // node yang salah, dan itu hanya bisa kalau teksnya tidak dibuang di sini.
+    CHECK(!out.error.empty());
+}
+
+TEST_CASE("slangc yang ditunjuk ke berkas yang tidak ada gagal dengan jelas") {
+    ShaderCache cache;
+    cache.Configure({}, "x");
+    cache.SetCompiler(MakeSlangCompiler("/tidak/ada/slangc"));
+
+    const CompileOutput out = cache.Get(Request("a"));
+    CHECK(!out.ok);
+    CHECK(out.error.find("/tidak/ada/slangc") != std::string::npos);
+}
+
+// --- Graph → Slang → SPIR-V --------------------------------------------------
+
+TEST_CASE("Modul yang dirakit menanam prelude, bukan meng-import-nya") {
+    const MaterialCompileResult compiled = CompileMaterial(MinimalGraph());
+    REQUIRE(compiled.ok);
+    // Kode yang dihasilkan sengaja tetap memakai import — ia ditulis untuk
+    // dibaca manusia.
+    CHECK(compiled.slang.find("import openpbr;") != std::string::npos);
+
+    MaterialModuleOptions options;
+    options.prelude = "struct OpenPBRSurface { int marker; };\n";
+    const std::string module = AssembleMaterialModule(compiled.slang, options);
+
+    CHECK(module.find("import openpbr;") == std::string::npos);
+    CHECK(module.find("int marker;") != std::string::npos);
+    CHECK(module.find("evalMaterial") != std::string::npos);
+    CHECK(module.find("[shader(\"fragment\")]") != std::string::npos);
+    CHECK(module.find("vk::constant_id(2)") != std::string::npos);
+}
+
+TEST_CASE("Prelude yang berubah membatalkan cache material") {
+    TempCacheDir dir("prelude");
+    CountingCompiler compiler;
+    ShaderCache cache;
+    cache.Configure(dir.path, "slangc-2026.8");
+    cache.SetCompiler(compiler.Bind());
+
+    const MaterialCompileResult compiled = CompileMaterial(MinimalGraph());
+    REQUIRE(compiled.ok);
+
+    MaterialModuleOptions before;
+    before.prelude = "// model shading versi lama\n";
+    REQUIRE(cache.Get(MakeMaterialRequest(compiled.slang, before)).ok);
+    REQUIRE(cache.Get(MakeMaterialRequest(compiled.slang, before)).ok);
+    CHECK(*compiler.calls == 1);
+
+    // Inilah alasan prelude ditanam: kalau ia hanya di-import, sumber yang
+    // di-hash tidak berubah sedikit pun dan cache akan menyerahkan SPIR-V yang
+    // dibangun terhadap model shading yang sudah tidak ada.
+    MaterialModuleOptions after;
+    after.prelude = "// model shading versi baru\n";
+    REQUIRE(cache.Get(MakeMaterialRequest(compiled.slang, after)).ok);
+    CHECK(*compiler.calls == 2);
+}
+
+TEST_CASE("Graph sungguhan berjalan sampai SPIR-V") {
+    const std::string identity = SlangCompilerIdentity();
+    if (identity.empty()) {
+        MESSAGE("slangc tidak ditemukan — bagian integrasi dilewati");
+        return;
+    }
+
+    MaterialModuleOptions options;
+    options.prelude = LoadOpenPbrPrelude(SIM_SHADER_DIR);
+    REQUIRE_MESSAGE(!options.prelude.empty(), "openpbr.slang tidak terbaca dari " SIM_SHADER_DIR);
+
+    // Material yang menyentuh lebih dari satu kanal, supaya yang diuji bukan
+    // hanya jalur baseColor.
+    MaterialGraph graph = MinimalGraph();
+    graph.nodes.push_back(Node(3, "input.constant"));
+    graph.nodes.back().settings["kind"] = "float";
+    graph.nodes.back().settings["value"] = "0.65";
+    Link(graph, 3, "value", 1, "specularRoughness");
+
+    graph.nodes.push_back(Node(4, "input.constant"));
+    graph.nodes.back().settings["kind"] = "float";
+    graph.nodes.back().settings["value"] = "1.0";
+    Link(graph, 4, "value", 1, "baseMetalness");
+
+    const MaterialCompileResult compiled = CompileMaterial(graph);
+    REQUIRE(compiled.ok);
+
+    TempCacheDir dir("endtoend");
+    ShaderCache cache;
+    cache.Configure(dir.path, identity);
+    cache.SetCompiler(MakeSlangCompiler());
+
+    const CompileOutput out = cache.Get(MakeMaterialRequest(compiled.slang, options));
+    INFO("slangc: ", out.error);
+    REQUIRE(out.ok);
+    CHECK(LooksLikeSpirv(out.spirv));
+    CHECK(cache.Statistics().compiles == 1);
+
+    // Dan sekali lagi lewat cache — jalur yang benar-benar dipakai editor saat
+    // material yang sama diminta ulang.
+    const CompileOutput again = cache.Get(MakeMaterialRequest(compiled.slang, options));
+    REQUIRE(again.ok);
+    CHECK(again.spirv == out.spirv);
+    CHECK(cache.Statistics().hits == 1);
+}
+
+TEST_CASE("Material bertekstur dan berparameter juga sampai SPIR-V") {
+    const std::string identity = SlangCompilerIdentity();
+    if (identity.empty()) {
+        MESSAGE("slangc tidak ditemukan — bagian integrasi dilewati");
+        return;
+    }
+    MaterialModuleOptions options;
+    options.prelude = LoadOpenPbrPrelude(SIM_SHADER_DIR);
+    REQUIRE(!options.prelude.empty());
+
+    MaterialGraph graph;
+    graph.nodes.push_back(Node(1, std::string(kSurfaceOutputType)));
+    graph.nodes.push_back(Node(2, "input.texture"));
+    graph.nodes.back().settings["texture"] = Id(900).ToString();
+    graph.nodes.push_back(Node(3, "input.sample"));
+    Link(graph, 2, "texture", 3, "texture");
+    Link(graph, 3, "rgb", 1, "baseColor");
+
+    graph.nodes.push_back(Node(4, "param.get"));
+    graph.nodes.back().settings["parameter"] = "roughness";
+    MaterialParameter roughness;
+    roughness.name = "roughness";
+    roughness.kind = ValueKind::Float;
+    roughness.defaultValue = "0.4";
+    graph.parameters.push_back(roughness);
+    Link(graph, 4, "value", 1, "specularRoughness");
+
+    const MaterialCompileResult compiled = CompileMaterial(graph);
+    REQUIRE_MESSAGE(compiled.ok, FirstError({false, compiled.errors}));
+    REQUIRE(compiled.textures.size() == 1);
+
+    ShaderCache cache;
+    cache.Configure({}, identity);
+    cache.SetCompiler(MakeSlangCompiler());
+    const CompileOutput out = cache.Get(MakeMaterialRequest(compiled.slang, options));
+    INFO("slangc: ", out.error);
+    REQUIRE(out.ok);
+
+    // Tata letak cbuffer yang dihitung C++ harus cocok dengan yang ditulis ke
+    // Slang. Keduanya berangkat dari daftar parameter yang sama, dan test ini
+    // yang menjaga keduanya tidak berpisah diam-diam.
+    MaterialParameterBlock block;
+    block.Build(graph.parameters);
+    CHECK(block.SlotCount() == 1);
+    CHECK(block.Slot(0).offset == 0u);
+    CHECK(block.Bytes() == 16u);
+}
+
+TEST_CASE("openpbr.slang sendiri bisa dikompilasi") {
+    if (SlangCompilerIdentity().empty()) {
+        MESSAGE("slangc tidak ditemukan — bagian integrasi dilewati");
+        return;
+    }
+    const std::string prelude = LoadOpenPbrPrelude(SIM_SHADER_DIR);
+    REQUIRE(!prelude.empty());
+
+    // Model shading diuji lepas dari material mana pun. Kalau ia hanya pernah
+    // dikompilasi sebagai bagian modul yang dirakit, kesalahan di dalamnya akan
+    // muncul sebagai "material anu gagal" — menunjuk ke tempat yang salah.
+    ShaderCache cache;
+    cache.Configure({}, "x");
+    cache.SetCompiler(MakeSlangCompiler());
+
+    CompileRequest request;
+    request.stage = ShaderStage::Fragment;
+    request.entryPoint = "probeMain";
+    request.source = prelude + R"(
+[shader("fragment")]
+float4 probeMain(float3 normal : NORMAL, float3 view : TEXCOORD0) : SV_Target {
+    OpenPBRSurface surface = OpenPBRSurface::defaults();
+    surface.baseMetalness = 0.5;
+    surface.coatWeight = 1.0;
+    surface.fuzzWeight = 0.25;
+    surface.specularRoughnessAnisotropy = -0.5;
+    ShadingFrame frame;
+    frame.normal = normalize(normal);
+    frame.view = normalize(view);
+    frame.tangent = float3(1, 0, 0);
+    frame.bitangent = float3(0, 1, 0);
+    return float4(evaluateOpenPBR(surface, frame, float3(0, 1, 0), float3(1)), 1);
+}
+)";
+    const CompileOutput out = cache.Get(request);
+    INFO("slangc: ", out.error);
+    CHECK(out.ok);
+}
+
+TEST_CASE("Nilai bawaan OpenPBRSurface sama dengan nilai bawaan pin") {
+    // Satu keputusan yang tertulis di dua tempat: katalog node dan
+    // openpbr.slang. Yang membuatnya bertahan bukan kedisiplinan melainkan test
+    // ini — pin yang bawaannya bergeser tanpa shader-nya ikut menghasilkan
+    // material yang berubah rupa hanya ketika pin-nya dilepas.
+    const std::string prelude = LoadOpenPbrPrelude(SIM_SHADER_DIR);
+    REQUIRE(!prelude.empty());
+    const MaterialNodeType* output = MaterialNodeCatalog::Get().Find(kSurfaceOutputType);
+    REQUIRE(output != nullptr);
+
+    for (const MaterialPin& pin : output->pins) {
+        if (pin.direction != PinDirection::Input || pin.defaultValue.empty()) {
+            continue;
+        }
+        // Ketiga pin di luar OpenPBRSurface tidak punya padanan di struct-nya.
+        if (pin.name == "normal" || pin.name == "emissive" || pin.name == "opacity") {
+            continue;
+        }
+        const std::string assignment = "s." + pin.name + " = " + pin.defaultValue + ";";
+        INFO("pin ", pin.name);
+        CHECK(prelude.find(assignment) != std::string::npos);
+    }
 }
