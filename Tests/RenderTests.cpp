@@ -4,6 +4,7 @@
 #include "Sim/Render/Frustum.h"
 #include "Sim/Render/Ibl.h"
 #include "Sim/Render/LightCluster.h"
+#include "Sim/Render/SdfClipmap.h"
 #include "Sim/Render/ShadowAtlas.h"
 #include "Sim/Render/TraceBackend.h"
 #include "Sim/Render/ShadowCascades.h"
@@ -1619,4 +1620,210 @@ TEST_CASE("Setiap nilai enum punya namanya") {
     CHECK(std::string(ToString(GiDebugView::MarchSteps)) != ToString(GiDebugView::Off));
     CHECK(std::string(ToString(TraceBackendPreference::ForceSdf)) !=
           ToString(TraceBackendPreference::Auto));
+}
+
+// --- SDF clipmap (GI M1) ------------------------------------------------------
+
+namespace {
+
+SdfClipmap MakeClipmap(uint32_t resolution = 128, uint32_t cascades = 3) {
+    SdfClipmapSettings settings;
+    settings.resolution = resolution;
+    settings.cascadeCount = cascades;
+    settings.finestVoxelSize = 0.1f;
+    settings.voxelScale = 4;
+    SdfClipmap clipmap;
+    clipmap.Configure(settings);
+    return clipmap;
+}
+
+/// Apakah dua wilayah bertindihan.
+bool RegionsOverlap(const SdfScrollRegion& a, const SdfScrollRegion& b) {
+    if (a.cascade != b.cascade) {
+        return false;
+    }
+    for (int axis = 0; axis < 3; ++axis) {
+        if (a.max[axis] <= b.min[axis] || b.max[axis] <= a.min[axis]) {
+            return false;
+        }
+    }
+    return true;
+}
+
+}  // namespace
+
+TEST_CASE("Ukuran kaskade menaik pangkat dua dan menutupi jangkauan yang dijanjikan") {
+    const SdfClipmap clipmap = MakeClipmap();
+    CHECK(clipmap.VoxelSize(0) == doctest::Approx(0.1f));
+    CHECK(clipmap.VoxelSize(1) == doctest::Approx(0.4f));
+    CHECK(clipmap.VoxelSize(2) == doctest::Approx(1.6f));
+    // 128 voxel × 1,6 m ÷ 2 = ±102,4 m, angka yang disebut rencana.
+    CHECK(clipmap.MaxRange() == doctest::Approx(102.4f));
+}
+
+TEST_CASE("Pengali voxel dibulatkan ke pangkat dua") {
+    // Bukan kerapian: kaskade kasar harus punya kisi yang selaras dengan yang
+    // halus, kalau tidak jahitannya bergerak saat kamera maju.
+    SdfClipmapSettings settings;
+    settings.voxelScale = 3;
+    SdfClipmap clipmap;
+    clipmap.Configure(settings);
+    CHECK(clipmap.Settings().voxelScale == 2u);
+
+    settings.voxelScale = 7;
+    clipmap.Configure(settings);
+    CHECK(clipmap.Settings().voxelScale == 4u);
+}
+
+TEST_CASE("Pembungkusan toroidal benar untuk koordinat negatif") {
+    // `%` C++ memberi sisa bertanda: -1 % 128 adalah -1, bukan 127. Indeks
+    // negatif membaca di luar tekstur, dan itu tidak muncul sampai kamera
+    // melewati titik nol dunia.
+    const SdfClipmap clipmap = MakeClipmap(128);
+    CHECK(clipmap.WrapAxis(0) == 0u);
+    CHECK(clipmap.WrapAxis(127) == 127u);
+    CHECK(clipmap.WrapAxis(128) == 0u);
+    CHECK(clipmap.WrapAxis(-1) == 127u);
+    CHECK(clipmap.WrapAxis(-128) == 0u);
+    CHECK(clipmap.WrapAxis(-129) == 127u);
+    for (int32_t i = -300; i <= 300; ++i) {
+        CHECK(clipmap.WrapAxis(i) < 128u);
+    }
+}
+
+TEST_CASE("Voxel di sebelah kiri origin tidak tertukar dengan yang di kanan") {
+    // Pembagian C++ memotong ke arah nol, jadi -1/128 adalah 0 dan bukan -1.
+    // Tanpa pembagian yang membulat ke bawah, voxel di kedua sisi titik nol
+    // dunia jatuh ke koordinat yang sama.
+    const SdfClipmap clipmap = MakeClipmap();
+    CHECK(clipmap.VoxelOf(0, Vec3(0.05f, 0.0f, 0.0f)).x == 0);
+    CHECK(clipmap.VoxelOf(0, Vec3(-0.05f, 0.0f, 0.0f)).x == -1);
+    CHECK(clipmap.VoxelOf(0, Vec3(-0.15f, 0.0f, 0.0f)).x == -2);
+}
+
+TEST_CASE("Penempatan pertama menulis seluruh volume, diam tidak menulis apa pun") {
+    SdfClipmap clipmap = MakeClipmap(32, 2);
+    const SdfScrollResult first = clipmap.Scroll(Vec3(0.0f));
+    CHECK(first.fullRewrite);
+    CHECK(first.regions.size() == 2);
+    for (const SdfScrollRegion& region : first.regions) {
+        CHECK(region.VoxelCount() == 32 * 32 * 32);
+    }
+
+    // Kamera diam: tidak ada satu voxel pun yang basi.
+    const SdfScrollResult again = clipmap.Scroll(Vec3(0.0f));
+    CHECK(!again.fullRewrite);
+    CHECK(again.regions.empty());
+}
+
+TEST_CASE("Bergerak satu voxel hanya menuliskan satu lempeng tepi") {
+    // **Inilah alasan pengalamatan toroidal ada.** Tanpa ini, satu voxel
+    // pergerakan berarti 32.768 voxel ditulis ulang di kaskade ini saja.
+    SdfClipmap clipmap = MakeClipmap(32, 1);
+    clipmap.Scroll(Vec3(0.0f));
+
+    const SdfScrollResult moved = clipmap.Scroll(Vec3(0.1f, 0.0f, 0.0f));
+    CHECK(!moved.fullRewrite);
+    REQUIRE(moved.regions.size() == 1);
+    // Satu lempeng: 1 × 32 × 32.
+    CHECK(moved.regions[0].VoxelCount() == 32 * 32);
+}
+
+TEST_CASE("Gerak diagonal menghasilkan lempeng yang tidak bertindihan") {
+    SdfClipmap clipmap = MakeClipmap(32, 1);
+    clipmap.Scroll(Vec3(0.0f));
+    const SdfScrollResult moved = clipmap.Scroll(Vec3(0.3f, 0.2f, -0.5f));
+
+    CHECK(!moved.fullRewrite);
+    CHECK(moved.regions.size() == 3);
+    // Sudutnya tidak boleh ditulis dua kali — bukan demi kebenaran melainkan
+    // supaya jumlah voxel yang dilaporkan benar-benar jumlah pekerjaan.
+    for (std::size_t i = 0; i < moved.regions.size(); ++i) {
+        for (std::size_t j = i + 1; j < moved.regions.size(); ++j) {
+            INFO("wilayah ", i, " dan ", j);
+            CHECK(!RegionsOverlap(moved.regions[i], moved.regions[j]));
+        }
+    }
+
+    int64_t total = 0;
+    for (const SdfScrollRegion& region : moved.regions) {
+        total += region.VoxelCount();
+    }
+    // 3 + 2 + 5 lempeng dari volume 32³, dipotong supaya tidak tumpang tindih.
+    CHECK(total < 32 * 32 * 32);
+    CHECK(total > 0);
+}
+
+TEST_CASE("Lompatan lebih jauh daripada lebar kaskade menulis ulang seluruhnya") {
+    SdfClipmap clipmap = MakeClipmap(32, 1);
+    clipmap.Scroll(Vec3(0.0f));
+    // 32 voxel × 0,1 m = 3,2 m lebarnya; lompat 100 m.
+    const SdfScrollResult jumped = clipmap.Scroll(Vec3(100.0f, 0.0f, 0.0f));
+    CHECK(jumped.fullRewrite);
+    REQUIRE(jumped.regions.size() == 1);
+    // Menuliskan tiga lempeng yang saling tumpang tindih penuh justru lebih
+    // mahal daripada menulis volumenya sekali.
+    CHECK(jumped.regions[0].VoxelCount() == 32 * 32 * 32);
+}
+
+TEST_CASE("Kaskade kasar tidak ikut bergeser untuk gerak yang halus") {
+    // Kaskade 1 punya voxel 0,4 m. Bergerak 0,1 m menggeser kaskade 0 satu
+    // voxel dan tidak menyentuh kaskade 1 sama sekali — itulah gunanya
+    // mengancing tiap kaskade ke ukuran voxelnya sendiri, bukan ke yang
+    // terhalus.
+    SdfClipmap clipmap = MakeClipmap(32, 2);
+    clipmap.Scroll(Vec3(0.0f));
+    const SdfScrollResult moved = clipmap.Scroll(Vec3(0.1f, 0.0f, 0.0f));
+
+    REQUIRE(moved.regions.size() == 1);
+    CHECK(moved.regions[0].cascade == 0u);
+}
+
+TEST_CASE("Pemilihan kaskade mengambil yang terhalus yang memuat titiknya") {
+    SdfClipmap clipmap = MakeClipmap(128, 3);
+    clipmap.Scroll(Vec3(0.0f));
+
+    // Dekat kamera: kaskade terhalus (±6,4 m).
+    CHECK(clipmap.CascadeFor(Vec3(1.0f, 0.0f, 0.0f)) == 0);
+    // Di luar kaskade 0 tapi di dalam kaskade 1 (±25,6 m).
+    CHECK(clipmap.CascadeFor(Vec3(15.0f, 0.0f, 0.0f)) == 1);
+    // Di luar kaskade 1 tapi di dalam kaskade 2 (±102,4 m).
+    CHECK(clipmap.CascadeFor(Vec3(60.0f, 0.0f, 0.0f)) == 2);
+    // Di luar semuanya.
+    CHECK(clipmap.CascadeFor(Vec3(500.0f, 0.0f, 0.0f)) == -1);
+}
+
+TEST_CASE("Jarak bertanda bolak-balik lewat penyandian delapan bit") {
+    const SdfClipmap clipmap = MakeClipmap();
+    for (uint32_t cascade = 0; cascade < 3; ++cascade) {
+        const float band = clipmap.BandRadius(cascade);
+        for (const float fraction : {-0.9f, -0.5f, 0.0f, 0.25f, 0.9f}) {
+            const float distance = band * fraction;
+            const float roundTrip =
+                clipmap.DecodeDistance(cascade, clipmap.EncodeDistance(cascade, distance));
+            INFO("kaskade ", cascade, " jarak ", distance);
+            CHECK(roundTrip == doctest::Approx(distance).epsilon(0.01));
+        }
+        // Nol jarak ada tepat di tengah rentang — itulah yang membuat jarak
+        // bertanda terwakili. Menyimpan jarak tak bertanda membuat sphere
+        // tracing tidak bisa tahu ia sudah di dalam benda.
+        CHECK(clipmap.EncodeDistance(cascade, 0.0f) == doctest::Approx(0.5f));
+        // Di luar pita, nilainya jenuh, bukan membungkus.
+        CHECK(clipmap.EncodeDistance(cascade, band * 100.0f) == doctest::Approx(1.0f));
+        CHECK(clipmap.EncodeDistance(cascade, -band * 100.0f) == doctest::Approx(0.0f));
+    }
+}
+
+TEST_CASE("Texel yang dipakai ulang setelah bergeser memang texel yang sama") {
+    // Inti pengalamatan toroidal: sebuah voxel dunia yang masih berada di dalam
+    // kaskade sesudah pergeseran harus memetakan ke texel yang sama persis —
+    // kalau tidak, isinya tetap harus ditulis ulang dan penghematannya nol.
+    SdfClipmap clipmap = MakeClipmap(32, 1);
+    clipmap.Scroll(Vec3(0.0f));
+
+    const glm::ivec3 sample(3, 4, 5);
+    const glm::uvec3 before = clipmap.TexelOf(0, sample);
+    clipmap.Scroll(Vec3(0.5f, 0.0f, 0.0f));
+    const glm::uvec3 after = clipmap.TexelOf(0, sample);
+    CHECK(before == after);
 }

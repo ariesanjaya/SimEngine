@@ -7,6 +7,7 @@ sim_add_library(Render
         src/Ibl.cpp
         src/IblBaker.cpp
         src/LightCluster.cpp
+        src/SdfClipmap.cpp
         src/ShadowAtlas.cpp
         src/TraceBackend.cpp
         src/ShadowCascades.cpp

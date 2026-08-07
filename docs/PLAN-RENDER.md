@@ -808,8 +808,51 @@ dijalankan sekali pun selama pengembangannya.
 — heatmap yang kosong adalah jawaban benar untuk backend yang memang tidak
 melangkah, bukan angka yang mengarang.
 
-**Berikutnya M1:** SDF clipmap global — bake per-mesh, tiga kaskade 128³,
-toroidal scroll, komposit statis + dinamis.
+#### M1 — SDF clipmap global (berjalan)
+
+**Sudah ada:** `SdfClipmap` — pengalamatan, pemilihan kaskade, toroidal scroll,
+dan penyandian jarak. Seluruhnya teruji tanpa GPU, mengikuti pola yang sama
+dengan cascade bayangan, cluster, dan IBL.
+
+**Teksturnya tidak bergerak; titik asalnyalah yang bergerak.** Kamera yang maju
+satu voxel hanya menuntut satu lempeng tepi ditulis ulang. Tanpa itu, sebuah
+kaskade 128³ berarti 2 juta voxel ditulis ulang setiap frame kamera bergerak,
+dikali tiga kaskade — dan anggaran 0,4 ms untuk pembaruan clipmap habis sebelum
+satu ray pun ditembakkan. Diuji langsung: gerak satu voxel menghasilkan 32×32
+voxel basi, bukan 32³.
+
+**Tiap kaskade dikancing ke ukuran voxelnya sendiri**, bukan ke yang terhalus.
+Mengancing semuanya ke voxel terhalus membuat kaskade kasar bergeser pecahan
+voxelnya sendiri, dan seluruh isinya jadi basi setiap frame. Diuji: gerak 0,1 m
+menggeser kaskade 0 dan tidak menyentuh kaskade 1 sama sekali.
+
+**Pengali antar-kaskade dipaksa pangkat dua.** Bukan kerapian: kisi kaskade
+kasar harus selaras dengan yang halus, kalau tidak sebuah titik yang berpindah
+kaskade jatuh di tempat yang berbeda, dan jahitannya bergerak saat kamera maju.
+
+Dua jebakan bilangan bulat yang masing-masing baru muncul setelah kamera
+melewati titik nol dunia, dan keduanya punya test sendiri:
+
+- `%` C++ memberi sisa **bertanda** — `−1 % 128` adalah `−1`, bukan `127` — dan
+  indeks negatif membaca di luar tekstur.
+- Konversi float→int memotong **ke arah nol**, jadi −0,05 m dan +0,05 m jatuh ke
+  voxel yang sama. Kedua sisi origin lalu berbagi satu voxel.
+
+**Yang disimpan hanya pita tipis di sekitar permukaan**, bukan seluruh
+jangkauan. Delapan bit yang dipaksa mewakili seluruh kaskade menghasilkan
+langkah kuantisasi hampir satu meter di kaskade terkasar — sphere tracing dengan
+langkah sebesar itu menembus dinding. Jaraknya **bertanda**, dengan nol di
+tengah rentang: jarak tak bertanda membuat sphere tracing tidak bisa tahu ia
+sudah di dalam benda, dan ray yang mulai di dalam dinding tidak pernah keluar.
+
+Lompatan yang lebih jauh daripada lebar kaskade menulis ulang seluruh volume
+sekali, bukan tiga lempeng yang saling tumpang tindih penuh — yang justru lebih
+mahal.
+
+**Belum ada:** bake SDF per-mesh menjadi brick sparse, tekstur volume 3D di RHI,
+komposit statis + dinamis ke kaskade, dan sphere tracing yang benar-benar
+membacanya. Kriteria selesai M1 — depth sphere tracing cocok dengan depth buffer
+raster, dan biaya update < 0,5 ms — baru bisa diuji setelah keempatnya ada.
 
 - **Anggarannya belum didamaikan dengan kriteria terima E8.** 3,0 ms adalah 18%
   dari frame 60 fps, sementara adegan uji E8 — terrain 2×2 km, 200 ribu instance
