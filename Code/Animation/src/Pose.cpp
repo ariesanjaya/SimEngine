@@ -43,7 +43,9 @@ void Pose::Reset(const Skeleton& skeleton) {
 }
 
 void Pose::Resize(int boneCount) {
-    local_.assign(static_cast<std::size_t>(std::max(boneCount, 0)), BoneTransform{});
+    // `resize`, bukan `assign`: yang sudah ada harus bertahan. Lihat catatan di
+    // header — `Blend` menulis ke pose yang kerap salah satu masukannya sendiri.
+    local_.resize(static_cast<std::size_t>(std::max(boneCount, 0)));
 }
 
 const BoneTransform& Pose::Local(int index) const {

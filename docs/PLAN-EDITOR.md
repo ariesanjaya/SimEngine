@@ -1518,7 +1518,7 @@ benar-benar berlaku, dan menanam/menghapus langsung di viewport 3D. Ketiganya
 menunggu E8; jarak LOD, billboard, dan cull sudah tersimpan di `.simveg` dan
 tinggal dibaca perendernya.
 
-### E7.5 — Animation Editor · ~6 sesi · 🔨 fondasi runtime (rangka, klip, pose)
+### E7.5 — Animation Editor · ~6 sesi · 🔨 seluruh runtime; panelnya belum
 
 - **Skeleton view**: pohon bone, bind pose, retarget mapping ke rig standar.
 - **Timeline / Dope Sheet**: track per-bone/per-properti, keyframe (pindah, salin,
@@ -1537,10 +1537,21 @@ tinggal dibaca perendernya.
 **Sudah ada:** modul `Sim::Animation` (`Code/Animation`) — rangka berurutan
 topologis dengan bind pose dan kamus retarget, klip berbasis `Curve` yang sama
 dengan Particle dan Terrain, pencampuran pose beserta bone mask dan layer aditif,
-event, penanda fase, root motion, dan format `.simskel`/`.simanim`. 30 test.
-Kriteria "scrub mulus" **terukur**: rig 100 bone, 900 track, 162 ribu kunci,
-posisi acak — **0,095 ms per frame** (Release; 0,57 ms pada Debug), berbanding
-anggaran 16,7 ms satu frame 60 Hz.
+event, penanda fase, root motion, blend tree 1D/2D, state machine berlapis
+dengan transisi berkondisi, dan format `.simskel`/`.simanim`/`.simanimgraph`.
+49 test.
+
+Dua kriteria terima sudah terpenuhi dan terukur:
+
+- *"klip 60 detik pada rig 100 bone bisa di-scrub mulus"* — rig 100 bone, 900
+  track, 162 ribu kunci, posisi acak: **0,090 ms per frame** (Release; 0,57 ms
+  pada Debug), berbanding anggaran 16,7 ms satu frame 60 Hz.
+- *"kondisi transisi tersimpan/dimuat identik"* — bolak-balik lewat berkas,
+  lengkap dengan tiga tipe parameter dan pembanding yang berbeda-beda, lalu
+  serialisasi ulangnya dibandingkan byte demi byte.
+- *"blend tree 2D menghasilkan bobot yang benar pada titik uji"* — tepat di
+  simpul bobotnya persis 1, setengah jalan antar-simpul berbagi rata, jumlahnya
+  selalu 1, dan di luar sebaran ia jatuh ke simpul terluar ke arah itu.
 
 **Rotasi ditulis sebagai tiga kurva Euler dan dipakai sebagai kuaternion.** Ini
 pemisahan yang disengaja antara bentuk penulisan dan bentuk pemakaian. Menulis
@@ -1580,9 +1591,50 @@ kali di batas frame, dan dengan selang terbuka event pada waktu 0 tidak pernah
 menyala. Frame yang tersendat dan melompati lima event menyalakan kelimanya —
 event yang hilang di mesin lambat adalah bug yang hanya muncul di mesin lambat.
 
-**Belum ada:** state machine beserta transisi berkondisi, blend tree 1D/2D,
-layer, IK, panel penyuntingnya, dan penyaluran event ke Lua. Preview pada mesh
-skinned menunggu E8; `Pose::ComputeSkinning` sudah menghasilkan matriks yang
+**Blend tree 2D memakai interpolasi gradient band**, bukan "simpul terdekat"
+maupun jarak terbalik. Yang terdekat melompat di batas antar-simpul; jarak
+terbalik membuat setiap simpul menyumbang di mana-mana, jadi berdiri tepat di
+atas simpul "lari" tetap mencampurkan sedikit "mundur". Gradient band memberi
+keduanya sekaligus: tepat di sebuah simpul bobotnya persis 1, di sepanjang ruas
+antar-simpul ia linear, dan peralihannya mulus di mana pun. Blend 1D justru
+tidak memakainya — di satu dimensi yang diharapkan orang hanya dua simpul
+mengapit yang aktif, karena pada kecepatan 3 m/s tidak ada alasan klip "diam"
+ikut menyumbang.
+
+**Trigger padam sesudah seluruh lapis mengevaluasi transisinya, bukan per lapis.**
+Dipadamkan per lapis, satu trigger hanya terlihat lapis pertama dan lapis atas
+yang seharusnya ikut bereaksi diam saja. Bool tidak padam sendiri: ia keadaan
+yang dimiliki gameplay, sedangkan trigger kejadian yang dinyalakan sekali —
+tanpa pemadaman itu, satu tombol lompat membuat karakter melompat selamanya.
+
+**Kondisi menunjuk parameter lewat nama, dan pembandingnya ditulis sebagai nama
+juga.** Indeks tidak bisa memenuhi kriteria "tersimpan/dimuat identik":
+menyisipkan parameter menggeser seluruh indeks sesudahnya, jadi berkas yang sama
+berarti kondisi yang berbeda setelah daftar parameternya disunting. Angka enum
+menghadapi hal yang sama pada perubahan kode.
+
+**`Blend` boleh menulis ke pose yang sama dengan salah satu masukannya**, dan
+runtime graph mengandalkannya — ia mencampur lapis demi lapis ke dalam satu pose
+hasil, dan pose antara per lapis berarti satu alokasi per lapis per frame. Test
+menangkap versi pertamanya yang tidak aman: `Pose::Resize` memakai `assign`,
+jadi masukannya terhapus sebelum sempat dibaca dan hasilnya pose kosong.
+
+**Durasi state adalah rata-rata durasi klipnya yang ditimbang bobot**, bukan
+durasi klip pertama. Blend tree yang mencampur jalan (1,2 s) dengan lari (0,7 s)
+harus mempercepat langkahnya secara mulus saat bobotnya bergeser; memakai salah
+satu durasi saja membuat langkahnya melompat tepat ketika bobotnya berpindah
+dominan.
+
+**Blend tree tidak bisa disarangkan di dalam blend tree.** Batas yang disengaja:
+pohon bersarang menuntut evaluasi rekursif beserta bobot berjenjang, dan hampir
+seluruh gunanya sudah tercakup blend tree 2D — yang memang alasan 2D ada.
+
+**Belum ada:** IK, panel penyuntingnya (pohon skeleton, dope sheet, penyunting
+kurva, kanvas state machine), dan penyaluran event ke Lua. Dua kriteria terima
+menempel di sana: memindahkan keyframe bisa di-undo, dan event memanggil fungsi
+Lua saat preview mencapai frame tersebut — `GraphInstance::Events()` sudah
+melaporkan nama event beserta bobot lapisnya, tinggal disalurkan. Preview pada
+mesh skinned menunggu E8; `Pose::ComputeSkinning` sudah menghasilkan matriks yang
 tinggal diunggah.
 
 ---

@@ -22,6 +22,14 @@ public:
     explicit Pose(const Skeleton& skeleton);
 
     void Reset(const Skeleton& skeleton);
+    /// Mengubah jumlah bone **tanpa membuang isi yang masih muat**.
+    ///
+    /// Bedanya penting: `Blend` memanggil ini pada keluarannya, dan keluarannya
+    /// kerap pose yang sama dengan salah satu masukannya — runtime graph
+    /// mencampur lapis demi lapis ke dalam satu pose hasil. Kalau ini
+    /// mengosongkan isinya lebih dulu, masukan itu sudah terhapus sebelum
+    /// sempat dibaca, dan hasilnya pose kosong yang terlihat sebagai karakter
+    /// yang runtuh.
     void Resize(int boneCount);
 
     int BoneCount() const { return static_cast<int>(local_.size()); }
@@ -79,6 +87,12 @@ private:
 };
 
 /// Mencampur dua pose: `weight` 0 menghasilkan `a`, 1 menghasilkan `b`.
+///
+/// **`out` boleh pose yang sama dengan `a` atau `b`.** Runtime graph
+/// mengandalkannya: ia mencampur lapis demi lapis ke dalam satu pose hasil, dan
+/// menyediakan pose antara untuk tiap lapis berarti satu alokasi per lapis per
+/// frame. Aman karena tiap bone dibaca sebelum ditulis, dan karena `Resize`
+/// tidak membuang isi yang masih muat.
 ///
 /// Rotasi dicampur dengan nlerp yang dipendekkan, bukan lerp komponen: dua
 /// kuaternion yang mewakili rotasi berdekatan bisa berlawanan tanda, dan

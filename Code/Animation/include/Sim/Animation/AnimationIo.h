@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Sim/Animation/AnimationGraph.h"
 #include "Sim/Animation/Clip.h"
 #include "Sim/Core/AssetRef.h"
 
@@ -10,6 +11,7 @@ namespace sim::animation {
 
 inline constexpr int kSkeletonSchemaVersion = 1;
 inline constexpr int kClipSchemaVersion = 1;
+inline constexpr int kGraphSchemaVersion = 1;
 
 /// Isi berkas `.simskel`.
 ///
@@ -57,5 +59,20 @@ AnimationIoResult LoadClipFromString(ClipDocument& document, Clip& clip, const s
 AnimationIoResult SaveClip(const Clip& clip, const ClipDocument& document,
                            const std::filesystem::path& path);
 AnimationIoResult LoadClip(Clip& clip, ClipDocument& document, const std::filesystem::path& path);
+
+// --- graph --------------------------------------------------------------------
+
+/// Kondisi transisi ditulis dengan nama parameter, nama pembanding, dan nilainya
+/// — bukan dengan indeks parameter dan angka enum.
+///
+/// Kriteria terima E7.5 menuntut kondisi transisi tersimpan dan dimuat identik,
+/// dan indeks tidak bisa memenuhinya: menambah parameter di tengah daftar
+/// menggeser seluruh indeks sesudahnya, jadi berkas yang sama akan berarti
+/// kondisi yang berbeda setelah daftar parameternya disunting. Angka enum
+/// menghadapi hal yang sama pada perubahan kode. Nama bertahan pada keduanya.
+std::string SaveGraphToString(const AnimationGraph& graph);
+AnimationIoResult LoadGraphFromString(AnimationGraph& graph, const std::string& text);
+AnimationIoResult SaveGraph(const AnimationGraph& graph, const std::filesystem::path& path);
+AnimationIoResult LoadGraph(AnimationGraph& graph, const std::filesystem::path& path);
 
 }  // namespace sim::animation

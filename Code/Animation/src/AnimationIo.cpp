@@ -311,4 +311,236 @@ AnimationIoResult LoadClip(Clip& clip, ClipDocument& document,
     return LoadClipFromString(document, clip, text);
 }
 
+// --- graph --------------------------------------------------------------------
+
+namespace {
+
+Json WriteMotion(const Motion& motion) {
+    Json entry;
+    entry["kind"] = ToString(motion.kind);
+    entry["clip"] = motion.clip.guid.ToString();
+    entry["parameterX"] = motion.parameterX;
+    entry["parameterY"] = motion.parameterY;
+    entry["speed"] = motion.speed;
+    entry["syncPhase"] = motion.syncPhase;
+    Json children = Json::array();
+    for (const MotionChild& child : motion.children) {
+        Json node;
+        node["clip"] = child.clip.guid.ToString();
+        node["position"] = Json::array({child.position.x, child.position.y});
+        node["speed"] = child.speed;
+        children.push_back(std::move(node));
+    }
+    entry["children"] = std::move(children);
+    return entry;
+}
+
+Motion ReadMotion(const Json& entry) {
+    Motion motion;
+    if (!entry.is_object()) {
+        return motion;
+    }
+    motion.kind = MotionKindFromString(entry.value("kind", std::string{}));
+    motion.clip = AssetRef{Uuid::Parse(entry.value("clip", std::string{}))};
+    motion.parameterX = entry.value("parameterX", std::string{});
+    motion.parameterY = entry.value("parameterY", std::string{});
+    motion.speed = entry.value("speed", 1.0f);
+    motion.syncPhase = entry.value("syncPhase", true);
+    if (const auto children = entry.find("children");
+        children != entry.end() && children->is_array()) {
+        for (const Json& node : *children) {
+            if (!node.is_object()) {
+                continue;
+            }
+            MotionChild child;
+            child.clip = AssetRef{Uuid::Parse(node.value("clip", std::string{}))};
+            const Vec3 position = ReadVec3(node.value("position", Json{}), Vec3(0.0f));
+            child.position = Vec2(position.x, position.y);
+            if (const auto at = node.find("position");
+                at != node.end() && at->is_array() && at->size() == 2) {
+                child.position = Vec2((*at)[0].get<float>(), (*at)[1].get<float>());
+            }
+            child.speed = node.value("speed", 1.0f);
+            motion.children.push_back(std::move(child));
+        }
+    }
+    return motion;
+}
+
+}  // namespace
+
+std::string SaveGraphToString(const AnimationGraph& graph) {
+    Json root;
+    root["version"] = kGraphSchemaVersion;
+    root["name"] = graph.name;
+    root["skeleton"] = graph.skeleton.guid.ToString();
+
+    Json parameters = Json::array();
+    for (const Parameter& parameter : graph.parameters.All()) {
+        parameters.push_back(Json{{"name", parameter.name},
+                                  {"type", ToString(parameter.type)},
+                                  {"value", parameter.value}});
+    }
+    root["parameters"] = std::move(parameters);
+
+    Json layers = Json::array();
+    for (const Layer& layer : graph.Layers()) {
+        Json entry;
+        entry["name"] = layer.name;
+        entry["weight"] = layer.weight;
+        entry["additive"] = layer.additive;
+        entry["maskRootBone"] = layer.maskRootBone;
+        entry["defaultState"] = layer.defaultState;
+
+        Json states = Json::array();
+        for (const State& state : layer.states) {
+            Json node;
+            node["name"] = state.name;
+            node["canvas"] = Json::array({state.canvas.x, state.canvas.y});
+            node["motion"] = WriteMotion(state.motion);
+            states.push_back(std::move(node));
+        }
+        entry["states"] = std::move(states);
+
+        Json transitions = Json::array();
+        for (const Transition& transition : layer.transitions) {
+            Json node;
+            node["from"] = transition.from;
+            node["to"] = transition.to;
+            node["duration"] = transition.duration;
+            node["hasExitTime"] = transition.hasExitTime;
+            node["exitTime"] = transition.exitTime;
+            Json conditions = Json::array();
+            for (const Condition& condition : transition.conditions) {
+                conditions.push_back(Json{{"parameter", condition.parameter},
+                                          {"comparison", ToString(condition.comparison)},
+                                          {"value", condition.value}});
+            }
+            node["conditions"] = std::move(conditions);
+            transitions.push_back(std::move(node));
+        }
+        entry["transitions"] = std::move(transitions);
+        layers.push_back(std::move(entry));
+    }
+    root["layers"] = std::move(layers);
+    return root.dump(2) + "\n";
+}
+
+AnimationIoResult LoadGraphFromString(AnimationGraph& graph, const std::string& text) {
+    AnimationIoResult result;
+    Json root;
+    try {
+        root = Json::parse(text);
+    } catch (const nlohmann::json::exception& error) {
+        result.error = error.what();
+        return result;
+    }
+    if (!root.is_object()) {
+        result.error = "root is not an object";
+        return result;
+    }
+
+    graph = AnimationGraph{};
+    result.sourceVersion = root.value("version", kGraphSchemaVersion);
+    graph.name = root.value("name", std::string{});
+    graph.skeleton = AssetRef{Uuid::Parse(root.value("skeleton", std::string{}))};
+
+    std::vector<Parameter> parameters;
+    if (const auto it = root.find("parameters"); it != root.end() && it->is_array()) {
+        for (const Json& entry : *it) {
+            if (!entry.is_object()) {
+                continue;
+            }
+            Parameter parameter;
+            parameter.name = entry.value("name", std::string{});
+            parameter.type = ParameterTypeFromString(entry.value("type", std::string{}));
+            parameter.value = entry.value("value", 0.0f);
+            if (!parameter.name.empty()) {
+                parameters.push_back(std::move(parameter));
+            }
+        }
+    }
+    graph.parameters.SetAll(parameters);
+
+    std::vector<Layer> layers;
+    if (const auto it = root.find("layers"); it != root.end() && it->is_array()) {
+        for (const Json& entry : *it) {
+            if (!entry.is_object()) {
+                continue;
+            }
+            Layer layer;
+            layer.name = entry.value("name", std::string{"Base"});
+            layer.weight = entry.value("weight", 1.0f);
+            layer.additive = entry.value("additive", false);
+            layer.maskRootBone = entry.value("maskRootBone", std::string{});
+            layer.defaultState = entry.value("defaultState", 0);
+
+            if (const auto states = entry.find("states");
+                states != entry.end() && states->is_array()) {
+                for (const Json& node : *states) {
+                    if (!node.is_object()) {
+                        continue;
+                    }
+                    State state;
+                    state.name = node.value("name", std::string{});
+                    if (const auto canvas = node.find("canvas");
+                        canvas != node.end() && canvas->is_array() && canvas->size() == 2) {
+                        state.canvas = Vec2((*canvas)[0].get<float>(), (*canvas)[1].get<float>());
+                    }
+                    state.motion = ReadMotion(node.value("motion", Json{}));
+                    layer.states.push_back(std::move(state));
+                }
+            }
+            if (const auto transitions = entry.find("transitions");
+                transitions != entry.end() && transitions->is_array()) {
+                for (const Json& node : *transitions) {
+                    if (!node.is_object()) {
+                        continue;
+                    }
+                    Transition transition;
+                    transition.from = node.value("from", -1);
+                    transition.to = node.value("to", 0);
+                    transition.duration = node.value("duration", 0.2f);
+                    transition.hasExitTime = node.value("hasExitTime", false);
+                    transition.exitTime = node.value("exitTime", 1.0f);
+                    if (const auto conditions = node.find("conditions");
+                        conditions != node.end() && conditions->is_array()) {
+                        for (const Json& item : *conditions) {
+                            if (!item.is_object()) {
+                                continue;
+                            }
+                            Condition condition;
+                            condition.parameter = item.value("parameter", std::string{});
+                            condition.comparison =
+                                ComparisonFromString(item.value("comparison", std::string{}));
+                            condition.value = item.value("value", 0.0f);
+                            transition.conditions.push_back(std::move(condition));
+                        }
+                    }
+                    layer.transitions.push_back(std::move(transition));
+                }
+            }
+            layers.push_back(std::move(layer));
+        }
+    }
+    graph.SetLayers(layers);
+    result.ok = true;
+    return result;
+}
+
+AnimationIoResult SaveGraph(const AnimationGraph& graph, const std::filesystem::path& path) {
+    AnimationIoResult result;
+    result.ok = WriteFile(path, SaveGraphToString(graph), result.error);
+    return result;
+}
+
+AnimationIoResult LoadGraph(AnimationGraph& graph, const std::filesystem::path& path) {
+    std::string text;
+    AnimationIoResult result = ReadFile(path, text);
+    if (!result.ok) {
+        return result;
+    }
+    return LoadGraphFromString(graph, text);
+}
+
 }  // namespace sim::animation

@@ -1,7 +1,9 @@
 sim_add_library(Animation
     SOURCES
+        src/AnimationGraph.cpp
         src/AnimationIo.cpp
         src/Clip.cpp
+        src/GraphInstance.cpp
         src/Pose.cpp
         src/Skeleton.cpp
     PUBLIC_DEPS

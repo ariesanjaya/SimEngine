@@ -1,6 +1,8 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 
+#include "Sim/Animation/AnimationGraph.h"
 #include "Sim/Animation/AnimationIo.h"
+#include "Sim/Animation/GraphInstance.h"
 #include "Sim/Animation/Clip.h"
 #include "Sim/Animation/Pose.h"
 #include "Sim/Animation/Skeleton.h"
@@ -10,6 +12,7 @@
 #include <chrono>
 #include <cmath>
 #include <filesystem>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -691,4 +694,568 @@ TEST_CASE("Mencuplik klip tidak mengalokasi setelah frame pertama") {
     // Alamat buffer yang tidak bergerak berarti tidak ada realokasi.
     CHECK(pose.Locals().data() == localsBefore);
     CHECK(pose.EulerScratch(50).data() == eulerBefore);
+}
+
+// =============================================================================
+// State machine dan blend tree
+// =============================================================================
+
+namespace {
+
+/// Pustaka klip sederhana untuk test — peran yang di editor dipegang
+/// AssetDatabase.
+class TestClipLibrary final : public ClipLibrary {
+public:
+    Uuid Add(const Clip& clip) {
+        const Uuid guid = Uuid::Generate();
+        clips_[guid] = clip;
+        return guid;
+    }
+    const Clip* Find(const Uuid& guid) const override {
+        const auto at = clips_.find(guid);
+        return at == clips_.end() ? nullptr : &at->second;
+    }
+
+private:
+    std::map<Uuid, Clip> clips_;
+};
+
+/// Motion yang memutar satu klip. Ditulis lewat fungsi, bukan inisialisasi
+/// agregat: `Motion` punya field yang bawaannya berarti, dan agregat yang
+/// menyebut dua field pertama saja membiarkan sisanya tidak terinisialisasi.
+Motion ClipMotion(const Uuid& guid) {
+    Motion motion;
+    motion.kind = MotionKind::Clip;
+    motion.clip = AssetRef{guid};
+    return motion;
+}
+
+/// Klip satu bone yang menggeser X dari `from` ke `to`.
+Clip MakeSlideClip(const std::string& name, float from, float to, float duration) {
+    Clip clip;
+    clip.name = name;
+    clip.duration = duration;
+    const int track = clip.EnsureTrack("Bone1", Channel::TranslationX);
+    clip.TrackAt(track).curve = RampCurve(from, to, duration);
+    return clip;
+}
+
+}  // namespace
+
+// --- blend tree 1D ------------------------------------------------------------
+
+TEST_CASE("Blend 1D hanya menyalakan dua simpul yang mengapit") {
+    const std::vector<float> positions{0.0f, 2.0f, 5.0f};
+    std::vector<float> weights;
+
+    Blend1DWeights(positions, 3.0f, weights);
+    REQUIRE(weights.size() == 3);
+    // Simpul "diam" di 0 tidak ikut menyumbang sama sekali pada kecepatan 3.
+    CHECK(weights[0] == doctest::Approx(0.0f));
+    CHECK(weights[1] == doctest::Approx(2.0f / 3.0f));
+    CHECK(weights[2] == doctest::Approx(1.0f / 3.0f));
+}
+
+TEST_CASE("Blend 1D menahan nilainya di luar simpul terluar") {
+    const std::vector<float> positions{0.0f, 2.0f, 5.0f};
+    std::vector<float> weights;
+
+    Blend1DWeights(positions, -4.0f, weights);
+    CHECK(weights[0] == doctest::Approx(1.0f));
+    CHECK(weights[2] == doctest::Approx(0.0f));
+
+    Blend1DWeights(positions, 100.0f, weights);
+    CHECK(weights[0] == doctest::Approx(0.0f));
+    CHECK(weights[2] == doctest::Approx(1.0f));
+}
+
+TEST_CASE("Blend 1D tidak menuntut posisi terurut") {
+    const std::vector<float> positions{5.0f, 0.0f, 2.0f};
+    std::vector<float> weights;
+    Blend1DWeights(positions, 3.0f, weights);
+    // Urutan keluaran mengikuti urutan masukan, bukan urutan terurut.
+    CHECK(weights[0] == doctest::Approx(1.0f / 3.0f));
+    CHECK(weights[1] == doctest::Approx(0.0f));
+    CHECK(weights[2] == doctest::Approx(2.0f / 3.0f));
+}
+
+// --- blend tree 2D ------------------------------------------------------------
+
+TEST_CASE("Blend 2D menghasilkan bobot yang benar pada titik uji") {
+    // Empat arah gerak: diam di tengah, maju, mundur, samping.
+    const std::vector<Vec2> positions{
+        Vec2(0.0f, 0.0f), Vec2(0.0f, 1.0f), Vec2(0.0f, -1.0f), Vec2(1.0f, 0.0f),
+    };
+    std::vector<float> weights;
+
+    SUBCASE("tepat di sebuah simpul, bobotnya persis satu") {
+        for (std::size_t i = 0; i < positions.size(); ++i) {
+            Blend2DWeights(positions, positions[i], weights);
+            for (std::size_t j = 0; j < weights.size(); ++j) {
+                REQUIRE(weights[j] == doctest::Approx(i == j ? 1.0f : 0.0f).epsilon(0.001));
+            }
+        }
+    }
+
+    SUBCASE("setengah jalan antara dua simpul, keduanya berbagi rata") {
+        Blend2DWeights(positions, Vec2(0.0f, 0.5f), weights);
+        CHECK(weights[0] == doctest::Approx(0.5f).epsilon(0.001));
+        CHECK(weights[1] == doctest::Approx(0.5f).epsilon(0.001));
+        // Yang berlawanan arah tidak boleh ikut menyumbang.
+        CHECK(weights[2] == doctest::Approx(0.0f).epsilon(0.001));
+        CHECK(weights[3] == doctest::Approx(0.0f).epsilon(0.001));
+    }
+
+    SUBCASE("bobotnya selalu berjumlah satu") {
+        const std::vector<Vec2> samples{
+            Vec2(0.3f, 0.4f), Vec2(-2.0f, 0.1f), Vec2(0.7f, 0.7f), Vec2(5.0f, -5.0f),
+        };
+        for (const Vec2& sample : samples) {
+            Blend2DWeights(positions, sample, weights);
+            float total = 0.0f;
+            for (const float weight : weights) {
+                REQUIRE(weight >= 0.0f);
+                total += weight;
+            }
+            REQUIRE(total == doctest::Approx(1.0f).epsilon(0.001));
+        }
+    }
+
+    SUBCASE("di luar sebaran simpul, jatuh ke simpul terluar ke arah itu") {
+        Blend2DWeights(positions, Vec2(0.0f, 10.0f), weights);
+        CHECK(weights[1] == doctest::Approx(1.0f).epsilon(0.001));
+    }
+}
+
+TEST_CASE("Blend 2D tidak runtuh saat dua simpul berimpit") {
+    const std::vector<Vec2> positions{Vec2(0.0f, 0.0f), Vec2(0.0f, 0.0f), Vec2(1.0f, 0.0f)};
+    std::vector<float> weights;
+    Blend2DWeights(positions, Vec2(0.5f, 0.0f), weights);
+    float total = 0.0f;
+    for (const float weight : weights) {
+        REQUIRE(std::isfinite(weight));
+        total += weight;
+    }
+    CHECK(total == doctest::Approx(1.0f).epsilon(0.001));
+}
+
+// --- parameter dan kondisi ----------------------------------------------------
+
+TEST_CASE("Trigger padam sendiri, bool tidak") {
+    ParameterSet parameters;
+    parameters.Add(Parameter{"Jump", ParameterType::Trigger, 0.0f});
+    parameters.Add(Parameter{"Crouching", ParameterType::Bool, 0.0f});
+
+    parameters.Fire("Jump");
+    parameters.SetBool("Crouching", true);
+    CHECK(parameters.Bool(parameters.Find("Jump")));
+    CHECK(parameters.Bool(parameters.Find("Crouching")));
+
+    parameters.ConsumeTriggers();
+    // Kejadian padam; keadaan bertahan sampai gameplay yang mematikannya.
+    CHECK(!parameters.Bool(parameters.Find("Jump")));
+    CHECK(parameters.Bool(parameters.Find("Crouching")));
+}
+
+TEST_CASE("Kondisi diuji menurut tipe parameternya") {
+    ParameterSet parameters;
+    parameters.Add(Parameter{"Speed", ParameterType::Float, 3.0f});
+    parameters.Add(Parameter{"Grounded", ParameterType::Bool, 1.0f});
+    parameters.Add(Parameter{"Jump", ParameterType::Trigger, 0.0f});
+
+    CHECK(Evaluate(Condition{"Speed", Comparison::Greater, 2.0f}, parameters));
+    CHECK(!Evaluate(Condition{"Speed", Comparison::Greater, 5.0f}, parameters));
+    CHECK(Evaluate(Condition{"Speed", Comparison::LessEqual, 3.0f}, parameters));
+
+    CHECK(Evaluate(Condition{"Grounded", Comparison::Equal, 1.0f}, parameters));
+    CHECK(!Evaluate(Condition{"Grounded", Comparison::Equal, 0.0f}, parameters));
+
+    // Trigger benar semata kalau sedang menyala; pembandingnya diabaikan.
+    CHECK(!Evaluate(Condition{"Jump", Comparison::Greater, 0.5f}, parameters));
+    parameters.Fire("Jump");
+    CHECK(Evaluate(Condition{"Jump", Comparison::Less, -100.0f}, parameters));
+}
+
+TEST_CASE("Kondisi yang menunjuk parameter yang tidak ada tidak pernah benar") {
+    ParameterSet parameters;
+    parameters.Add(Parameter{"Speed", ParameterType::Float, 3.0f});
+    // Bukan "selalu benar": transisi yang menyala karena parameternya terhapus
+    // adalah kejutan yang paling sulit dilacak.
+    CHECK(!Evaluate(Condition{"Hilang", Comparison::Greater, -999.0f}, parameters));
+    CHECK(!Evaluate(Condition{"Hilang", Comparison::NotEqual, 12.0f}, parameters));
+}
+
+// --- runtime graph ------------------------------------------------------------
+
+namespace {
+
+struct GraphFixture {
+    Skeleton skeleton = MakeChain(2);
+    TestClipLibrary library;
+    AnimationGraph graph;
+    GraphInstance instance;
+
+    void Build() { instance.Bind(graph, skeleton, library); }
+};
+
+}  // namespace
+
+TEST_CASE("Graph memulai pada state bawaannya") {
+    GraphFixture fixture;
+    const Uuid idle = fixture.library.Add(MakeSlideClip("Idle", 0.0f, 0.0f, 1.0f));
+    const Uuid walk = fixture.library.Add(MakeSlideClip("Walk", 0.0f, 10.0f, 1.0f));
+
+    Layer layer;
+    layer.states.push_back(State{"Idle", ClipMotion(idle), Vec2(0.0f)});
+    layer.states.push_back(State{"Walk", ClipMotion(walk), Vec2(0.0f)});
+    layer.defaultState = 1;
+    fixture.graph.AddLayer(layer);
+    fixture.Build();
+
+    CHECK(fixture.instance.CurrentState(0) == 1);
+    fixture.instance.Update(0.5f);
+    // Setengah jalan pada klip Walk: X sudah bergeser separuh.
+    CHECK(fixture.instance.Result().Local(1).translation.x == doctest::Approx(5.0f).epsilon(0.01));
+}
+
+TEST_CASE("Transisi berkondisi berpindah state dan crossfade-nya mulus") {
+    GraphFixture fixture;
+    const Uuid idle = fixture.library.Add(MakeSlideClip("Idle", 0.0f, 0.0f, 1.0f));
+    const Uuid walk = fixture.library.Add(MakeSlideClip("Walk", 20.0f, 20.0f, 1.0f));
+
+    fixture.graph.parameters.Add(Parameter{"Speed", ParameterType::Float, 0.0f});
+    Layer layer;
+    layer.states.push_back(State{"Idle", ClipMotion(idle), Vec2(0.0f)});
+    layer.states.push_back(State{"Walk", ClipMotion(walk), Vec2(0.0f)});
+    Transition go;
+    go.from = 0;
+    go.to = 1;
+    go.duration = 0.4f;
+    go.conditions.push_back(Condition{"Speed", Comparison::Greater, 0.5f});
+    layer.transitions.push_back(go);
+    fixture.graph.AddLayer(layer);
+    fixture.Build();
+
+    fixture.instance.Update(0.1f);
+    REQUIRE(fixture.instance.CurrentState(0) == 0);
+
+    fixture.instance.parameters.SetFloat("Speed", 3.0f);
+    fixture.instance.Update(0.01f);
+    REQUIRE(fixture.instance.CurrentState(0) == 1);
+
+    // Di tengah crossfade, hasilnya harus di antara kedua klip — bukan melompat.
+    fixture.instance.Update(0.2f);
+    const float x = fixture.instance.Result().Local(1).translation.x;
+    CHECK(x > 0.5f);
+    CHECK(x < 19.5f);
+    CHECK(fixture.instance.TransitionProgress(0) > 0.0f);
+
+    // Setelah durasinya lewat, ia sepenuhnya di klip tujuan.
+    fixture.instance.Update(0.5f);
+    CHECK(fixture.instance.TransitionProgress(0) == doctest::Approx(0.0f));
+    CHECK(fixture.instance.Result().Local(1).translation.x == doctest::Approx(20.0f).epsilon(0.01));
+}
+
+TEST_CASE("Trigger terlihat seluruh lapis sebelum dipadamkan") {
+    GraphFixture fixture;
+    const Uuid a = fixture.library.Add(MakeSlideClip("A", 0.0f, 0.0f, 1.0f));
+    const Uuid b = fixture.library.Add(MakeSlideClip("B", 1.0f, 1.0f, 1.0f));
+    fixture.graph.parameters.Add(Parameter{"Fire", ParameterType::Trigger, 0.0f});
+
+    for (int i = 0; i < 2; ++i) {
+        Layer layer;
+        layer.name = "L" + std::to_string(i);
+        layer.states.push_back(State{"A", ClipMotion(a), Vec2(0.0f)});
+        layer.states.push_back(State{"B", ClipMotion(b), Vec2(0.0f)});
+        Transition go;
+        go.from = 0;
+        go.to = 1;
+        go.duration = 0.0f;
+        go.conditions.push_back(Condition{"Fire", Comparison::Greater, 0.0f});
+        layer.transitions.push_back(go);
+        fixture.graph.AddLayer(layer);
+    }
+    fixture.Build();
+
+    fixture.instance.parameters.Fire("Fire");
+    fixture.instance.Update(1.0f / 60.0f);
+    // Kalau trigger dipadamkan per lapis, lapis kedua tidak akan pernah
+    // melihatnya.
+    CHECK(fixture.instance.CurrentState(0) == 1);
+    CHECK(fixture.instance.CurrentState(1) == 1);
+}
+
+TEST_CASE("Transisi dari state mana pun berlaku di semua state") {
+    GraphFixture fixture;
+    const Uuid a = fixture.library.Add(MakeSlideClip("A", 0.0f, 0.0f, 1.0f));
+    const Uuid b = fixture.library.Add(MakeSlideClip("B", 1.0f, 1.0f, 1.0f));
+    const Uuid hit = fixture.library.Add(MakeSlideClip("Hit", 9.0f, 9.0f, 1.0f));
+    fixture.graph.parameters.Add(Parameter{"Hit", ParameterType::Trigger, 0.0f});
+
+    Layer layer;
+    layer.states.push_back(State{"A", ClipMotion(a), Vec2(0.0f)});
+    layer.states.push_back(State{"B", ClipMotion(b), Vec2(0.0f)});
+    layer.states.push_back(State{"Hit", ClipMotion(hit), Vec2(0.0f)});
+    Transition any;
+    any.from = -1;  // dari mana pun
+    any.to = 2;
+    any.duration = 0.0f;
+    any.conditions.push_back(Condition{"Hit", Comparison::Greater, 0.0f});
+    layer.transitions.push_back(any);
+    fixture.graph.AddLayer(layer);
+    fixture.Build();
+
+    fixture.instance.Play(0, 1);
+    fixture.instance.parameters.Fire("Hit");
+    fixture.instance.Update(0.016f);
+    CHECK(fixture.instance.CurrentState(0) == 2);
+}
+
+TEST_CASE("Exit time menahan transisi sampai klipnya cukup jauh berjalan") {
+    GraphFixture fixture;
+    const Uuid a = fixture.library.Add(MakeSlideClip("A", 0.0f, 0.0f, 1.0f));
+    const Uuid b = fixture.library.Add(MakeSlideClip("B", 1.0f, 1.0f, 1.0f));
+
+    Layer layer;
+    layer.states.push_back(State{"A", ClipMotion(a), Vec2(0.0f)});
+    layer.states.push_back(State{"B", ClipMotion(b), Vec2(0.0f)});
+    Transition go;
+    go.from = 0;
+    go.to = 1;
+    go.duration = 0.0f;
+    go.hasExitTime = true;
+    go.exitTime = 0.8f;
+    layer.transitions.push_back(go);
+    fixture.graph.AddLayer(layer);
+    fixture.Build();
+
+    fixture.instance.Update(0.5f);
+    CHECK(fixture.instance.CurrentState(0) == 0);
+    fixture.instance.Update(0.35f);
+    CHECK(fixture.instance.CurrentState(0) == 1);
+}
+
+TEST_CASE("Blend tree 1D di dalam state mengikuti parameternya") {
+    GraphFixture fixture;
+    const Uuid idle = fixture.library.Add(MakeSlideClip("Idle", 0.0f, 0.0f, 1.0f));
+    const Uuid run = fixture.library.Add(MakeSlideClip("Run", 10.0f, 10.0f, 1.0f));
+    fixture.graph.parameters.Add(Parameter{"Speed", ParameterType::Float, 0.0f});
+
+    Motion motion;
+    motion.kind = MotionKind::Blend1D;
+    motion.parameterX = "Speed";
+    motion.syncPhase = false;
+    motion.children.push_back(MotionChild{AssetRef{idle}, Vec2(0.0f, 0.0f), 1.0f});
+    motion.children.push_back(MotionChild{AssetRef{run}, Vec2(10.0f, 0.0f), 1.0f});
+
+    Layer layer;
+    layer.states.push_back(State{"Locomotion", motion, Vec2(0.0f)});
+    fixture.graph.AddLayer(layer);
+    fixture.Build();
+
+    fixture.instance.parameters.SetFloat("Speed", 5.0f);
+    fixture.instance.Update(0.016f);
+    CHECK(fixture.instance.Result().Local(1).translation.x == doctest::Approx(5.0f).epsilon(0.05));
+
+    fixture.instance.parameters.SetFloat("Speed", 10.0f);
+    fixture.instance.Update(0.016f);
+    CHECK(fixture.instance.Result().Local(1).translation.x == doctest::Approx(10.0f).epsilon(0.05));
+}
+
+TEST_CASE("Lapis bermask hanya menyentuh rantai bone-nya") {
+    Skeleton skeleton;
+    skeleton.AddBone(MakeBone("Root", -1, Vec3(0.0f)));
+    skeleton.AddBone(MakeBone("Spine", 0, Vec3(0.0f, 1.0f, 0.0f)));
+    skeleton.AddBone(MakeBone("Leg", 0, Vec3(0.0f, -1.0f, 0.0f)));
+
+    TestClipLibrary library;
+    Clip base;
+    base.duration = 1.0f;
+    base.TrackAt(base.EnsureTrack("Spine", Channel::TranslationX)).curve = ConstantCurve(1.0f);
+    base.TrackAt(base.EnsureTrack("Leg", Channel::TranslationX)).curve = ConstantCurve(1.0f);
+    Clip upper;
+    upper.duration = 1.0f;
+    upper.TrackAt(upper.EnsureTrack("Spine", Channel::TranslationX)).curve = ConstantCurve(9.0f);
+    upper.TrackAt(upper.EnsureTrack("Leg", Channel::TranslationX)).curve = ConstantCurve(9.0f);
+    const Uuid baseGuid = library.Add(base);
+    const Uuid upperGuid = library.Add(upper);
+
+    AnimationGraph graph;
+    Layer baseLayer;
+    baseLayer.name = "Base";
+    baseLayer.states.push_back(
+        State{"Base", ClipMotion(baseGuid), Vec2(0.0f)});
+    graph.AddLayer(baseLayer);
+
+    Layer upperLayer;
+    upperLayer.name = "Upper";
+    upperLayer.maskRootBone = "Spine";
+    upperLayer.states.push_back(
+        State{"Upper", ClipMotion(upperGuid), Vec2(0.0f)});
+    graph.AddLayer(upperLayer);
+
+    GraphInstance instance;
+    instance.Bind(graph, skeleton, library);
+    instance.Update(0.016f);
+
+    CHECK(instance.Result().Local(skeleton.Find("Spine")).translation.x ==
+          doctest::Approx(9.0f).epsilon(0.01));
+    // Kaki di luar mask lapis atas — ia tetap milik lapis dasar.
+    CHECK(instance.Result().Local(skeleton.Find("Leg")).translation.x ==
+          doctest::Approx(1.0f).epsilon(0.01));
+}
+
+TEST_CASE("Event klip yang sedang diputar dilaporkan runtime") {
+    GraphFixture fixture;
+    Clip walk = MakeSlideClip("Walk", 0.0f, 1.0f, 1.0f);
+    walk.AddEvent(Event{0.5f, "footstep_left"});
+    const Uuid guid = fixture.library.Add(walk);
+
+    Layer layer;
+    layer.states.push_back(State{"Walk", ClipMotion(guid), Vec2(0.0f)});
+    fixture.graph.AddLayer(layer);
+    fixture.Build();
+
+    fixture.instance.Update(0.4f);
+    CHECK(fixture.instance.Events().empty());
+    fixture.instance.Update(0.2f);
+    REQUIRE(fixture.instance.Events().size() == 1);
+    CHECK(fixture.instance.Events()[0].name == "footstep_left");
+    CHECK(fixture.instance.Events()[0].layer == 0);
+    // Frame berikutnya tidak menyalakannya lagi.
+    fixture.instance.Update(0.2f);
+    CHECK(fixture.instance.Events().empty());
+}
+
+TEST_CASE("Root motion graph datang dari lapis dasar") {
+    GraphFixture fixture;
+    Clip walk;
+    walk.duration = 1.0f;
+    walk.extractRootMotion = true;
+    walk.rootBone = "Root";
+    walk.TrackAt(walk.EnsureTrack("Root", Channel::TranslationZ)).curve =
+        RampCurve(0.0f, 4.0f, 1.0f);
+    const Uuid guid = fixture.library.Add(walk);
+
+    Layer layer;
+    layer.states.push_back(State{"Walk", ClipMotion(guid), Vec2(0.0f)});
+    fixture.graph.AddLayer(layer);
+    fixture.Build();
+
+    fixture.instance.Update(0.25f);
+    CHECK(fixture.instance.RootMotion().translation.z == doctest::Approx(1.0f).epsilon(0.02));
+    // Root tetap di tempat di dalam pose — gerakannya sudah diserahkan.
+    CHECK(fixture.instance.Result().Local(0).translation.z == doctest::Approx(0.0f));
+}
+
+// --- berkas graph -------------------------------------------------------------
+
+TEST_CASE("Kondisi transisi tersimpan dan dimuat identik") {
+    TempDir dir("graph");
+    AnimationGraph graph;
+    graph.name = "Locomotion";
+    graph.parameters.Add(Parameter{"Speed", ParameterType::Float, 1.5f});
+    graph.parameters.Add(Parameter{"Grounded", ParameterType::Bool, 1.0f});
+    graph.parameters.Add(Parameter{"Jump", ParameterType::Trigger, 0.0f});
+
+    Motion blend;
+    blend.kind = MotionKind::Blend2D;
+    blend.parameterX = "Speed";
+    blend.parameterY = "Grounded";
+    blend.speed = 1.25f;
+    blend.syncPhase = false;
+    blend.children.push_back(MotionChild{AssetRef{Uuid::Generate()}, Vec2(0.0f, 0.0f), 1.0f});
+    blend.children.push_back(MotionChild{AssetRef{Uuid::Generate()}, Vec2(3.0f, -1.0f), 0.75f});
+
+    Layer layer;
+    layer.name = "Base";
+    layer.weight = 0.85f;
+    layer.additive = true;
+    layer.maskRootBone = "Spine";
+    layer.defaultState = 1;
+    layer.states.push_back(State{"Idle", Motion{}, Vec2(10.0f, 20.0f)});
+    layer.states.push_back(State{"Locomotion", blend, Vec2(-30.0f, 40.0f)});
+
+    Transition transition;
+    transition.from = 0;
+    transition.to = 1;
+    transition.duration = 0.35f;
+    transition.hasExitTime = true;
+    transition.exitTime = 0.8f;
+    // Satu kondisi per tipe parameter, dan pembanding yang berbeda-beda —
+    // kriteria terimanya menuntut seluruhnya kembali identik.
+    transition.conditions.push_back(Condition{"Speed", Comparison::GreaterEqual, 2.5f});
+    transition.conditions.push_back(Condition{"Grounded", Comparison::Equal, 1.0f});
+    transition.conditions.push_back(Condition{"Jump", Comparison::NotEqual, -3.25f});
+    layer.transitions.push_back(transition);
+    graph.AddLayer(layer);
+
+    const std::filesystem::path path = dir / "Locomotion.simanimgraph";
+    REQUIRE(SaveGraph(graph, path).ok);
+
+    AnimationGraph loaded;
+    REQUIRE(LoadGraph(loaded, path).ok);
+
+    REQUIRE(loaded.LayerCount() == 1);
+    const Layer& back = loaded.LayerAt(0);
+    CHECK(back.name == "Base");
+    CHECK(back.weight == doctest::Approx(0.85f));
+    CHECK(back.additive);
+    CHECK(back.maskRootBone == "Spine");
+    CHECK(back.defaultState == 1);
+    REQUIRE(back.transitions.size() == 1);
+
+    const Transition& loadedTransition = back.transitions[0];
+    CHECK(loadedTransition.from == 0);
+    CHECK(loadedTransition.to == 1);
+    CHECK(loadedTransition.duration == doctest::Approx(0.35f));
+    CHECK(loadedTransition.hasExitTime);
+    CHECK(loadedTransition.exitTime == doctest::Approx(0.8f));
+    REQUIRE(loadedTransition.conditions.size() == 3);
+    for (std::size_t i = 0; i < 3; ++i) {
+        const Condition& want = transition.conditions[i];
+        const Condition& got = loadedTransition.conditions[i];
+        CHECK(got.parameter == want.parameter);
+        CHECK(got.comparison == want.comparison);
+        CHECK(got.value == doctest::Approx(want.value));
+    }
+
+    REQUIRE(back.states.size() == 2);
+    CHECK(back.states[1].motion.kind == MotionKind::Blend2D);
+    CHECK(back.states[1].motion.parameterY == "Grounded");
+    CHECK(back.states[1].motion.speed == doctest::Approx(1.25f));
+    CHECK(!back.states[1].motion.syncPhase);
+    REQUIRE(back.states[1].motion.children.size() == 2);
+    CHECK(back.states[1].motion.children[1].position.x == doctest::Approx(3.0f));
+    CHECK(back.states[1].motion.children[1].position.y == doctest::Approx(-1.0f));
+    CHECK(back.states[1].motion.children[1].speed == doctest::Approx(0.75f));
+    CHECK(back.states[1].canvas.x == doctest::Approx(-30.0f));
+
+    // Dan byte-nya sama: menyimpan dokumen yang tidak disunting tidak boleh
+    // menghasilkan diff.
+    CHECK(SaveGraphToString(loaded) == SaveGraphToString(graph));
+}
+
+TEST_CASE("Kondisi menunjuk parameter lewat nama, jadi menyisipkan parameter tidak menggesernya") {
+    AnimationGraph graph;
+    graph.parameters.Add(Parameter{"Speed", ParameterType::Float, 4.0f});
+    Layer layer;
+    layer.states.push_back(State{"A", Motion{}, Vec2(0.0f)});
+    Transition transition;
+    transition.conditions.push_back(Condition{"Speed", Comparison::Greater, 1.0f});
+    layer.transitions.push_back(transition);
+    graph.AddLayer(layer);
+
+    const std::string text = SaveGraphToString(graph);
+    AnimationGraph loaded;
+    REQUIRE(LoadGraphFromString(loaded, text).ok);
+
+    // Parameter baru disisipkan di depan; kalau kondisinya memakai indeks, ia
+    // sekarang menunjuk parameter yang salah.
+    std::vector<Parameter> shifted{Parameter{"Baru", ParameterType::Float, 0.0f}};
+    for (const Parameter& parameter : loaded.parameters.All()) {
+        shifted.push_back(parameter);
+    }
+    loaded.parameters.SetAll(shifted);
+    CHECK(Evaluate(loaded.LayerAt(0).transitions[0].conditions[0], loaded.parameters));
 }
