@@ -294,12 +294,13 @@ logam, mengganti bentuk bekerja, seret kiri memindahkan sorotan searah kursor,
 seret kanan mengorbit kamera, dan cache disk terisi dua berkas per material.
 **Nol pesan validation layer.**
 
-### E8.3 — Lighting & shadow · 🔨 matematika cascade & cluster selesai
+### E8.3 — Lighting & shadow · 🔨 matematika cascade, cluster, dan IBL selesai
 IBL (prefilter env + DFG LUT), directional light dengan cascaded shadow map,
 point/spot dengan shadow atlas, clustered light culling untuk banyak lampu.
 
-**Sudah ada:** `ShadowCascades` dan `LightCluster` — seluruh matematikanya,
-teruji tanpa GPU. Sama seperti E8.1, yang diputuskan lebih dulu adalah bagian
+**Sudah ada:** `ShadowCascades`, `LightCluster`, dan `Ibl` — seluruh
+matematikanya, teruji tanpa GPU — ditambah `evaluateOpenPBR_IBL` di
+`openpbr.slang`. Sama seperti E8.1, yang diputuskan lebih dulu adalah bagian
 yang bisa dibuktikan salah di test; pass Vulkan-nya menyusul.
 
 #### Cascade
@@ -369,8 +370,55 @@ yang sama persis; dua rumus yang setara secara matematis tapi ditulis berbeda
 akan berselisih satu irisan di tepinya, dan yang terlihat adalah lampu yang
 hilang tepat pada jarak tertentu.
 
-**Belum ada:** IBL (prefilter env + DFG LUT), pass bayangan Vulkan beserta atlas
-untuk point/spot, dan penyambungan ke `openpbr.slang`.
+#### IBL
+
+Sumber lingkungan diambil lewat antarmuka `IEnvironmentSampler`, bukan lewat
+cubemap konkret. Pembakaran IBL adalah pekerjaan sekali per environment, jadi
+biaya panggilan virtual tidak berarti apa-apa — sementara yang didapat besar:
+seluruh matematikanya bisa diuji terhadap lingkungan yang jawabannya diketahui
+secara analitis, tanpa satu berkas gambar pun.
+
+**LUT DFG menyimpan skala dan bias, bukan hasil jadi untuk sebuah F0.** F0
+keluar dari integralnya sebagai faktor linear, jadi satu LUT melayani setiap
+material; menyimpan hasil jadi berarti satu LUT per material, dan LUT-nya
+berukuran sama dengan tekstur.
+
+**Sampelnya deterministik.** Urutan Hammersley, bukan RNG — alasan yang sama
+dengan penabur vegetasi E7.4: LUT yang berbeda antar-jalan membuat perbandingan
+gambar tidak bisa dipakai sebagai test, dan cache apa pun yang menyimpannya
+tidak pernah sah.
+
+**Irradiance sebagai sembilan koefisien SH, bukan cubemap.** Kernel lobe kosinus
+meredam pita di atas orde dua sampai di bawah satu persen, jadi cubemap
+irradiance membayar memori dan satu pengambilan tekstur untuk ketelitian yang
+tidak terlihat. Konvolusinya (π, 2π/3, π/4) adalah yang membedakan irradiance
+dari radiance rata-rata; melewatkannya menghasilkan angka yang tetap masuk akal
+— halus dan berwarna benar — tapi salah sebesar faktor yang berbeda per pita,
+dan biasanya "diperbaiki" dengan menaikkan intensitas lampu sampai tidak ada
+lagi yang cocok. Diuji sebagai tungku putih: radiance konstan L menghasilkan
+irradiance π·L pada normal mana pun.
+
+**Prefilter mengandaikan N = V = R**, pendekatan baku sejak Karis 2013.
+Harganya jelas: pantulan yang seharusnya memanjang pada sudut serong menjadi
+bundar. Menyimpan variasi terhadap sudut pandang menuntut dimensi ketiga pada
+petanya — memori yang belum ada yang menuntutnya.
+
+Beberapa hal kecil yang masing-masing punya kegagalannya sendiri: bingkai sampel
+memilih sumbu bantu dari komponen normal terkecil (sumbu tetap menghasilkan
+cross product nol tepat pada arah "atas", yang muncul di setiap permukaan
+datar); konstanta k Smith untuk IBL berbeda dari yang untuk cahaya langsung
+(`alpha/2` lawan `(r+1)²/8`, dan yang salah membuat logam kasar terlalu gelap);
+LUT dibakar di tengah texel, bukan di tepinya; kekasaran nol memakai
+pengambilan tunggal alih-alih integral yang sampelnya menyebar karena penjepitan.
+
+`evaluateOpenPBR_IBL` menerima irradiance, kedua radiance prefilter, dan suku
+DFG **sudah jadi** — ia tidak tahu apakah sumbernya probe statis, SH, atau nanti
+global illumination. Itulah titik sambungnya: mengganti sumbernya tidak
+menyentuh satu baris pun model shading.
+
+**Belum ada:** pembakaran peta prefilter dan LUT ke tekstur GPU, pass bayangan
+Vulkan beserta atlas untuk point/spot, dan penyambungan ketiganya ke pipeline
+material.
 
 `openpbr.slang` sendiri sudah ada sejak E8.2, tapi baru cahaya langsung: satu
 arah cahaya, tanpa IBL, bayangan, maupun transmisi. Yang ditambahkan di sini

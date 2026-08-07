@@ -224,3 +224,78 @@ float3 evaluateOpenPBR(OpenPBRSurface surface, ShadingFrame frame, float3 lightD
 
     return result * lightRadiance * nl;
 }
+
+// --- Pencahayaan berbasis gambar ---------------------------------------------
+//
+// **Ketiga masukannya diserahkan sudah jadi, bukan diambil sendiri dari
+// tekstur.** `evaluateOpenPBR_IBL` tidak tahu apakah irradiance-nya datang dari
+// probe statis, dari harmonik bola, atau nanti dari global illumination — dan
+// justru itu titik sambungnya: mengganti sumbernya tidak menyentuh satu baris
+// pun model shading. Fungsi yang mengambil sendiri dari sampler tertentu akan
+// mengunci sumbernya ke dalam model.
+
+/// Kekasaran → level mip pada peta prefilter.
+///
+/// Linear terhadap kekasaran, sama dengan `RoughnessForMip` di sisi C++.
+/// Keduanya harus bergerak bersama: pemetaan yang berbeda berarti mip yang
+/// dibaca bukan mip yang dibakar untuk kekasaran itu, dan yang terlihat adalah
+/// pantulan yang buramnya tidak sesuai dengan slider.
+float prefilterMipForRoughness(float roughness, float mipCount) {
+    return saturate(roughness) * max(mipCount - 1.0, 0.0);
+}
+
+/// Arah baca peta prefilter untuk sebuah permukaan.
+float3 prefilterDirection(ShadingFrame frame) {
+    return reflect(-frame.view, frame.normal);
+}
+
+/// Suku DFG yang sudah dibaca dari LUT: x = skala F0, y = bias.
+float3 environmentSpecular(float3 f0, float2 dfg, float3 prefiltered) {
+    return prefiltered * (f0 * dfg.x + dfg.y);
+}
+
+/// Pantulan lingkungan sebuah permukaan.
+///
+/// `irradiance` adalah E — sudah dikonvolusi lobe kosinus — bukan radiance
+/// rata-rata. Pembagian dengan pi ada di dalam sini; melakukannya dua kali
+/// menghasilkan difus yang terlalu gelap sebesar faktor pi, dan sekali pun tidak
+/// menghasilkan yang terlalu terang sebesar faktor yang sama.
+float3 evaluateOpenPBR_IBL(OpenPBRSurface surface, ShadingFrame frame, float3 irradiance,
+                           float3 prefilteredBase, float3 prefilteredCoat, float2 dfg) {
+    const float nv = max(dot(frame.normal, frame.view), 1e-5);
+
+    const float3 dielectricF0 = float3(iorToF0(surface.specularIor)) * surface.specularColor;
+    const float3 f0 = lerp(dielectricF0, surface.baseColor, surface.baseMetalness);
+
+    const float3 specular =
+        environmentSpecular(f0, dfg, prefilteredBase) * surface.specularWeight;
+
+    // Energi yang tidak dipantulkan spekular saja yang sampai ke difus. Dipakai
+    // suku DFG yang sama, bukan Fresnel pada satu arah: yang mengenai permukaan
+    // di sini datang dari segala arah, dan Fresnel satu arah akan meloloskan
+    // terlalu banyak energi ke difus pada permukaan kasar.
+    const float3 specularEnergy = f0 * dfg.x + dfg.y;
+    const float3 diffuseEnergy =
+        (float3(1.0) - specularEnergy) * (1.0 - surface.baseMetalness);
+    float3 result =
+        surface.baseColor * (irradiance / kPi) * diffuseEnergy * surface.baseWeight + specular;
+
+    if (surface.fuzzWeight > 0.0) {
+        // Sheen lingkungan tanpa LUT-nya sendiri: sheen menyerempet permukaan,
+        // jadi ia didekati sebagai irradiance yang dibobot Fresnel sisi.
+        const float grazing = pow(1.0 - nv, 3.0);
+        result += surface.fuzzColor * (irradiance / kPi) * (grazing * surface.fuzzWeight);
+    }
+
+    if (surface.coatWeight > 0.0) {
+        const float3 coatF0 = float3(iorToF0(surface.coatIor));
+        const float3 coatSpecular = environmentSpecular(coatF0, dfg, prefilteredCoat);
+        const float3 coatFresnel = fresnelSchlick(coatF0, nv);
+        const float3 absorb = lerp(float3(1.0), coatColorAttenuation(surface, coatFresnel),
+                                   surface.coatDarkening);
+        result = result * lerp(float3(1.0), absorb, surface.coatWeight) +
+                 coatSpecular * surface.coatWeight;
+    }
+
+    return result;
+}

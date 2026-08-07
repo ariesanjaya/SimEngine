@@ -2,6 +2,7 @@
 
 #include "Sim/Render/FrameGraph.h"
 #include "Sim/Render/Frustum.h"
+#include "Sim/Render/Ibl.h"
 #include "Sim/Render/LightCluster.h"
 #include "Sim/Render/ShadowCascades.h"
 
@@ -908,4 +909,228 @@ TEST_CASE("Matriks pandang memindahkan lampu, arahnya tanpa translasi") {
     for (uint32_t i = 0; i < grid.ClusterCount(); ++i) {
         CHECK(a.ranges[i].count == b.ranges[i].count);
     }
+}
+
+// --- IBL ---------------------------------------------------------------------
+
+namespace {
+
+/// Lingkungan yang jawabannya diketahui secara analitis.
+class ConstantEnvironment final : public IEnvironmentSampler {
+public:
+    explicit ConstantEnvironment(const Vec3& radiance) : radiance_(radiance) {}
+    Vec3 Sample(const Vec3&) const override { return radiance_; }
+
+private:
+    Vec3 radiance_;
+};
+
+/// Setengah bola terang di arah tertentu, setengah lagi gelap.
+class HemisphereEnvironment final : public IEnvironmentSampler {
+public:
+    explicit HemisphereEnvironment(const Vec3& up) : up_(glm::normalize(up)) {}
+    Vec3 Sample(const Vec3& direction) const override {
+        return glm::dot(direction, up_) > 0.0f ? Vec3(1.0f) : Vec3(0.0f);
+    }
+
+private:
+    Vec3 up_;
+};
+
+}  // namespace
+
+TEST_CASE("Urutan Hammersley deterministik dan mengisi kotak satuan") {
+    // Deterministik: LUT yang berbeda antar-jalan membuat perbandingan gambar
+    // tidak bisa dipakai sebagai test, dan cache apa pun yang menyimpannya tidak
+    // pernah sah. Alasan yang sama dengan penabur vegetasi E7.4.
+    CHECK(Hammersley(0, 16).x == doctest::Approx(0.0f));
+    CHECK(Hammersley(0, 16).y == doctest::Approx(0.0f));
+    CHECK(Hammersley(8, 16).y == doctest::Approx(0.0625f));
+    CHECK(Hammersley(1, 16).y == doctest::Approx(0.5f));
+
+    float minX = 1.0f;
+    float maxX = 0.0f;
+    float minY = 1.0f;
+    float maxY = 0.0f;
+    for (uint32_t i = 0; i < 256; ++i) {
+        const Vec2 point = Hammersley(i, 256);
+        CHECK(point.x >= 0.0f);
+        CHECK(point.x < 1.0f);
+        CHECK(point.y >= 0.0f);
+        CHECK(point.y < 1.0f);
+        minX = std::min(minX, point.x);
+        maxX = std::max(maxX, point.x);
+        minY = std::min(minY, point.y);
+        maxY = std::max(maxY, point.y);
+    }
+    CHECK(minX < 0.01f);
+    CHECK(maxX > 0.99f);
+    CHECK(minY < 0.01f);
+    CHECK(maxY > 0.99f);
+}
+
+TEST_CASE("Sampel GGX berkumpul di sekitar normal dan melebar dengan kekasaran") {
+    const Vec3 normal(0.0f, 0.0f, 1.0f);
+    const auto spread = [&normal](float roughness) {
+        float total = 0.0f;
+        for (uint32_t i = 0; i < 512; ++i) {
+            const Vec3 half = ImportanceSampleGgx(Hammersley(i, 512), normal, roughness);
+            CHECK(glm::dot(half, normal) >= -1e-4f);
+            CHECK(std::abs(glm::length(half) - 1.0f) < 1e-3f);
+            total += std::acos(std::clamp(glm::dot(half, normal), -1.0f, 1.0f));
+        }
+        return total / 512.0f;
+    };
+    const float tight = spread(0.05f);
+    const float loose = spread(0.8f);
+    CHECK(tight < 0.05f);
+    CHECK(loose > tight * 5.0f);
+}
+
+TEST_CASE("Sampel GGX tetap sah pada normal yang sejajar sumbu bantu") {
+    // Bingkai yang selalu memakai satu sumbu tetap menghasilkan cross product
+    // nol tepat ketika normal sejajar dengannya — dan arah itu bukan kasus
+    // langka melainkan arah "atas", yang muncul pada setiap permukaan datar.
+    for (const Vec3 normal : {Vec3(0.0f, 0.0f, 1.0f), Vec3(0.0f, 0.0f, -1.0f),
+                              Vec3(0.0f, 1.0f, 0.0f), Vec3(1.0f, 0.0f, 0.0f)}) {
+        const Vec3 half = ImportanceSampleGgx(Vec2(0.3f, 0.4f), normal, 0.4f);
+        INFO("normal (", normal.x, ",", normal.y, ",", normal.z, ")");
+        CHECK(std::isfinite(half.x));
+        CHECK(std::isfinite(half.y));
+        CHECK(std::isfinite(half.z));
+        CHECK(std::abs(glm::length(half) - 1.0f) < 1e-3f);
+    }
+}
+
+TEST_CASE("Suku DFG: cermin sempurna memberi F0 apa adanya") {
+    // Pada kekasaran nol, F0 * scale + bias harus mengembalikan F0 — permukaan
+    // cermin memantulkan tepat Fresnel-nya.
+    const DfgTerms terms = IntegrateDfg(1.0f, 0.0f, 2048);
+    CHECK(terms.scale == doctest::Approx(1.0f).epsilon(0.02));
+    CHECK(terms.bias == doctest::Approx(0.0f).epsilon(0.02));
+}
+
+TEST_CASE("Suku DFG kehilangan energi seiring kekasaran, tidak pernah menambah") {
+    // GGX hamburan tunggal memang kehilangan energi pada permukaan kasar —
+    // itulah yang nanti dikembalikan oleh kompensasi multi-scatter. Yang tidak
+    // boleh terjadi adalah sebaliknya: BRDF yang memantulkan lebih dari yang
+    // diterimanya membuat pantulan bertingkat menyala makin terang.
+    float previous = 2.0f;
+    for (const float roughness : {0.05f, 0.2f, 0.4f, 0.6f, 0.8f, 1.0f}) {
+        const DfgTerms terms = IntegrateDfg(0.8f, roughness, 2048);
+        const float total = terms.scale + terms.bias;
+        INFO("kekasaran ", roughness, " total ", total);
+        CHECK(total > 0.0f);
+        CHECK(total <= 1.0f + 1e-3f);
+        CHECK(total < previous + 1e-3f);
+        previous = total;
+    }
+}
+
+TEST_CASE("Suku DFG tidak pernah negatif untuk seluruh isi LUT") {
+    const DfgLut lut = BakeDfgLut(32, 256);
+    REQUIRE(lut.size == 32);
+    for (uint32_t y = 0; y < lut.size; ++y) {
+        for (uint32_t x = 0; x < lut.size; ++x) {
+            const DfgTerms terms = lut.At(x, y);
+            INFO("texel ", x, ",", y);
+            CHECK(terms.scale >= 0.0f);
+            CHECK(terms.bias >= 0.0f);
+            CHECK(terms.scale <= 1.0f + 1e-3f);
+            CHECK(terms.bias <= 1.0f + 1e-3f);
+            CHECK(std::isfinite(terms.scale));
+            CHECK(std::isfinite(terms.bias));
+        }
+    }
+}
+
+TEST_CASE("Pembacaan LUT bilinear cocok dengan texel di tengahnya") {
+    const DfgLut lut = BakeDfgLut(16, 128);
+    // Tengah texel — di sanalah nilai bakarnya berada, dan di situlah
+    // interpolasi harus mengembalikannya persis. Membakar di tepi texel akan
+    // membuat separuh texel pertama dan terakhir mewakili nilai di luar rentang.
+    for (uint32_t i = 0; i < lut.size; ++i) {
+        const float coordinate = (static_cast<float>(i) + 0.5f) / static_cast<float>(lut.size);
+        const DfgTerms sampled = lut.Sample(coordinate, coordinate);
+        const DfgTerms exact = lut.At(i, i);
+        INFO("texel ", i);
+        CHECK(sampled.scale == doctest::Approx(exact.scale).epsilon(0.001));
+        CHECK(sampled.bias == doctest::Approx(exact.bias).epsilon(0.001));
+    }
+    // Di luar rentang dijepit, bukan dibungkus.
+    CHECK(lut.Sample(-1.0f, -1.0f).scale == doctest::Approx(lut.At(0, 0).scale));
+    CHECK(lut.Sample(2.0f, 2.0f).scale ==
+          doctest::Approx(lut.At(lut.size - 1, lut.size - 1).scale));
+}
+
+TEST_CASE("Irradiance lingkungan konstan sama dengan pi kali radiance-nya") {
+    // Uji tungku putih. Radiance L merata dari segala arah menghasilkan
+    // irradiance pi*L pada normal mana pun — dan angka pi itulah yang hilang
+    // kalau konvolusi lobe kosinus dilewatkan.
+    const ConstantEnvironment environment(Vec3(0.5f, 0.25f, 1.0f));
+    const Sh9 sh = ProjectIrradiance(environment, 8192);
+
+    for (const Vec3 normal : {Vec3(0.0f, 1.0f, 0.0f), Vec3(1.0f, 0.0f, 0.0f),
+                              Vec3(0.0f, 0.0f, -1.0f), glm::normalize(Vec3(1.0f, 1.0f, 1.0f))}) {
+        const Vec3 irradiance = EvaluateIrradiance(sh, normal);
+        INFO("normal (", normal.x, ",", normal.y, ",", normal.z, ")");
+        CHECK(irradiance.x == doctest::Approx(kPi * 0.5f).epsilon(0.02));
+        CHECK(irradiance.y == doctest::Approx(kPi * 0.25f).epsilon(0.02));
+        CHECK(irradiance.z == doctest::Approx(kPi * 1.0f).epsilon(0.02));
+    }
+}
+
+TEST_CASE("Irradiance mengikuti arah setengah bola yang terang") {
+    const HemisphereEnvironment environment(Vec3(0.0f, 1.0f, 0.0f));
+    const Sh9 sh = ProjectIrradiance(environment, 16384);
+
+    const Vec3 up = EvaluateIrradiance(sh, Vec3(0.0f, 1.0f, 0.0f));
+    const Vec3 side = EvaluateIrradiance(sh, Vec3(1.0f, 0.0f, 0.0f));
+    const Vec3 down = EvaluateIrradiance(sh, Vec3(0.0f, -1.0f, 0.0f));
+
+    CHECK(up.x > side.x);
+    CHECK(side.x > down.x);
+    // Menghadap lurus ke langit terang menerima hampir seluruh pi.
+    CHECK(up.x == doctest::Approx(kPi).epsilon(0.06));
+    // Menyamping menerima kira-kira separuhnya.
+    CHECK(side.x == doctest::Approx(kPi * 0.5f).epsilon(0.08));
+    // Dan tidak ada yang negatif, meski orde dua tidak bisa mewakili tepi tajam.
+    CHECK(down.x >= 0.0f);
+}
+
+TEST_CASE("Prefilter lingkungan konstan mengembalikan konstanta itu") {
+    // Kalau pembobotannya salah, hasil ini bergeser — dan pada lingkungan
+    // sungguhan pergeserannya tidak bisa dibedakan dari "memang begitu
+    // rupanya".
+    const ConstantEnvironment environment(Vec3(0.3f, 0.6f, 0.9f));
+    for (const float roughness : {0.0f, 0.1f, 0.35f, 0.7f, 1.0f}) {
+        const Vec3 filtered =
+            PrefilterSpecular(environment, glm::normalize(Vec3(0.2f, 0.9f, -0.3f)), roughness);
+        INFO("kekasaran ", roughness);
+        CHECK(filtered.x == doctest::Approx(0.3f).epsilon(0.001));
+        CHECK(filtered.y == doctest::Approx(0.6f).epsilon(0.001));
+        CHECK(filtered.z == doctest::Approx(0.9f).epsilon(0.001));
+    }
+}
+
+TEST_CASE("Prefilter kekasaran nol adalah pengambilan tunggal yang tajam") {
+    // Tanpa cabang khusus, integralnya menyebar sampel di sekitar arah pantul
+    // karena kekasarannya dijepit ke batas bawah — dan pantulan tajam jadi
+    // selalu sedikit buram.
+    const HemisphereEnvironment environment(Vec3(0.0f, 1.0f, 0.0f));
+    const Vec3 justAbove = glm::normalize(Vec3(1.0f, 0.02f, 0.0f));
+    CHECK(PrefilterSpecular(environment, justAbove, 0.0f).x == doctest::Approx(1.0f));
+
+    // Sedikit kasar sudah mulai mencampur sisi gelapnya.
+    const float blurred = PrefilterSpecular(environment, justAbove, 0.5f, 1024).x;
+    CHECK(blurred < 0.95f);
+    CHECK(blurred > 0.3f);
+}
+
+TEST_CASE("Pemetaan mip ke kekasaran linear dan menutupi kedua ujungnya") {
+    CHECK(RoughnessForMip(0, 6) == doctest::Approx(0.0f));
+    CHECK(RoughnessForMip(5, 6) == doctest::Approx(1.0f));
+    CHECK(RoughnessForMip(3, 6) == doctest::Approx(0.6f));
+    // Satu mip berarti tidak ada rentang untuk dipetakan.
+    CHECK(RoughnessForMip(0, 1) == doctest::Approx(0.0f));
 }

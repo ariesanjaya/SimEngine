@@ -1371,7 +1371,14 @@ float4 probeMain(float3 normal : NORMAL, float3 view : TEXCOORD0) : SV_Target {
     frame.view = normalize(view);
     frame.tangent = float3(1, 0, 0);
     frame.bitangent = float3(0, 1, 0);
-    return float4(evaluateOpenPBR(surface, frame, float3(0, 1, 0), float3(1)), 1);
+    float3 direct = evaluateOpenPBR(surface, frame, float3(0, 1, 0), float3(1));
+    // Jalur IBL diuji di sini juga: kesalahan di dalamnya harus muncul sebagai
+    // "openpbr.slang gagal", bukan sebagai "material anu gagal".
+    float3 reflectDir = prefilterDirection(frame);
+    float mip = prefilterMipForRoughness(surface.specularRoughness, 6.0);
+    float3 ambient = evaluateOpenPBR_IBL(surface, frame, float3(0.4), float3(0.6),
+                                         float3(0.7), float2(0.9, 0.02));
+    return float4(direct + ambient + reflectDir * mip * 0.0, 1);
 }
 )";
     const CompileOutput out = cache.Get(request);
