@@ -764,6 +764,42 @@ TEST_CASE("Irisan kedalaman eksponensial dan konsisten dengan batasnya") {
     CHECK((first.y - first.x) < (last.y - last.x) * 0.01f);
 }
 
+/// Ubin layar sebuah titik ruang pandang, dihitung **seperti shader
+/// menghitungnya**: lewat koordinat framebuffer, yang sumbu Y-nya ke bawah.
+///
+/// Ditulis begini dengan sengaja. Menghitungnya dari NDC ruang pandang akan
+/// menghasilkan test yang konsisten dengan dirinya sendiri dan buta terhadap
+/// pembalikan Y — dan itu persis test yang tetap hijau selama cahaya terpotong
+/// di batas ubin pada layar sungguhan.
+void ScreenTileOf(const Vec3& viewPoint, float tanHalfX, float tanHalfY,
+                  const ClusterGridSettings& settings, uint32_t& outX, uint32_t& outY) {
+    const float ndcX = viewPoint.x / (tanHalfX * viewPoint.z);
+    // Proyeksi membalik Y (`result[1][1] = -f` di PerspectiveReversedZ), jadi
+    // gl_FragCoord.y naik ke bawah layar.
+    const float ndcY = -viewPoint.y / (tanHalfY * viewPoint.z);
+    const float fx = std::clamp(ndcX * 0.5f + 0.5f, 0.0f, 0.999f);
+    const float fy = std::clamp(ndcY * 0.5f + 0.5f, 0.0f, 0.999f);
+    outX = static_cast<uint32_t>(fx * static_cast<float>(settings.tilesX));
+    outY = static_cast<uint32_t>(fy * static_cast<float>(settings.tilesY));
+}
+
+TEST_CASE("Baris ubin nol adalah baris atas layar") {
+    // Inti kesalahannya: indeks ubin adalah indeks ubin LAYAR, sedangkan kotak
+    // cluster hidup di ruang pandang yang +Y-nya ke atas. Tanpa pembalikan,
+    // fragmen mencari lampu di baris yang tercermin — dan yang terlihat adalah
+    // cahaya yang terpotong tepat di batas ubin, persegi bertepi tegak lurus
+    // yang tidak mungkin dihasilkan geometri mana pun.
+    ClusterGridSettings settings;
+    settings.tilesY = 8;
+    const ClusterGrid grid = MakeGrid(settings);
+
+    const Aabb top = grid.ClusterBounds(0, 0, 5);
+    const Aabb bottom = grid.ClusterBounds(0, settings.tilesY - 1, 5);
+    CHECK(top.min.y > 0.0f);     // baris atas layar = +Y ruang pandang
+    CHECK(bottom.max.y < 0.0f);  // baris bawah layar = -Y ruang pandang
+    CHECK(top.min.y > bottom.max.y);
+}
+
 TEST_CASE("Kotak cluster memuat titik yang dipetakan ke cluster itu") {
     ClusterGridSettings settings;
     settings.tilesX = 8;
@@ -778,14 +814,12 @@ TEST_CASE("Kotak cluster memuat titik yang dipetakan ke cluster itu") {
         for (const float ndcX : {-0.9f, -0.2f, 0.35f, 0.85f}) {
             for (const float ndcY : {-0.75f, 0.1f, 0.6f}) {
                 const Vec3 point(ndcX * tanX * depth, ndcY * tanY * depth, depth);
-                const auto x = static_cast<uint32_t>((ndcX * 0.5f + 0.5f) *
-                                                     static_cast<float>(settings.tilesX));
-                const auto y = static_cast<uint32_t>((ndcY * 0.5f + 0.5f) *
-                                                     static_cast<float>(settings.tilesY));
+                uint32_t x = 0;
+                uint32_t y = 0;
+                ScreenTileOf(point, tanX, tanY, settings, x, y);
                 const uint32_t slice = grid.SliceOf(depth);
-                const Aabb box = grid.ClusterBounds(std::min(x, settings.tilesX - 1),
-                                                   std::min(y, settings.tilesY - 1), slice);
-                INFO("titik (", point.x, ",", point.y, ",", point.z, ")");
+                const Aabb box = grid.ClusterBounds(x, y, slice);
+                INFO("titik (", point.x, ",", point.y, ",", point.z, ") -> ubin ", x, ",", y);
                 CHECK(SphereIntersectsAabb(point, 1e-4f, box));
             }
         }

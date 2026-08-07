@@ -60,6 +60,10 @@ public:
     uint32_t Slices() const { return settings_.slices; }
     uint32_t ClusterCount() const { return settings_.tilesX * settings_.tilesY * settings_.slices; }
 
+    /// **Indeks ubin adalah indeks ubin LAYAR: baris 0 di atas.** Sama dengan
+    /// yang dihitung shader dari `gl_FragCoord`, yang sumbu Y-nya menunjuk ke
+    /// bawah. Pembalikan terhadap +Y ruang pandang terjadi sekali, di
+    /// `ClusterBounds` — di tempat yang memang tahu soal konvensi proyeksi.
     uint32_t IndexOf(uint32_t x, uint32_t y, uint32_t slice) const {
         return (slice * settings_.tilesY + y) * settings_.tilesX + x;
     }

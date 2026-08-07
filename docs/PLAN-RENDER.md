@@ -479,6 +479,23 @@ dan sisanya diabaikan — mengabaikannya diam-diam lebih baik daripada
 menjumlahkan arah, yang menghasilkan bayangan yang tidak cocok dengan lampu mana
 pun.
 
+**Baris ubin nol adalah baris ATAS layar.** Indeks ubin adalah indeks ubin
+layar — shader menghitungnya dari `gl_FragCoord`, yang sumbu Y-nya menunjuk ke
+bawah — sedangkan +Y ruang pandang menunjuk ke atas. Pembalikannya terjadi
+sekali, di `ClusterBounds`, di tempat yang memang tahu soal konvensi proyeksi.
+
+Bentuk pertamanya tidak membalik, dan **test yang menyertainya ikut tidak
+membalik**: ia menghitung ubin dari NDC ruang pandang, jadi ia konsisten dengan
+dirinya sendiri dan buta terhadap kesalahannya. Yang menemukannya sebuah
+tangkapan layar — cahaya terpotong tepat di batas ubin, persegi bertepi tegak
+lurus di ruang layar, bentuk yang tidak mungkin dihasilkan geometri mana pun.
+Tepinya diukur jatuh di x = 240 dan 719, dan batas ubin untuk viewport 1277
+lebar dengan 16 kolom ada di 239 dan 718.
+
+Test-nya kini menghitung ubin lewat koordinat framebuffer, seperti shader —
+ditambah satu test yang menyatakan konvensinya langsung: baris atas layar harus
+punya batas +Y ruang pandang, baris bawah harus −Y.
+
 **Skala dan bias irisan dikirim dari CPU apa adanya**, bukan diturunkan ulang di
 shader dari near dan far. Dua rumus yang setara secara matematis tapi ditulis
 berbeda berselisih satu irisan di tepinya, dan yang terlihat adalah lampu yang

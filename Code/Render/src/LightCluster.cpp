@@ -51,10 +51,22 @@ Aabb ClusterGrid::ClusterBounds(uint32_t x, uint32_t y, uint32_t slice) const {
     const auto tilesY = static_cast<float>(settings_.tilesY);
 
     // Sudut ubin dalam koordinat ternormalisasi [-1, 1].
+    //
+    // **Baris 0 adalah baris ATAS layar, jadi Y-nya dibalik.** Indeks ubin di
+    // sini adalah indeks ubin layar — shader menghitungnya dari `gl_FragCoord`,
+    // yang sumbu Y-nya menunjuk ke bawah — sedangkan +Y ruang pandang menunjuk
+    // ke atas. Tanpa pembalikan ini, sebuah fragmen mencari lampu di baris ubin
+    // yang tercermin: lampu yang ada di bawah layar dicari di daftar milik
+    // bagian atas.
+    //
+    // Kegagalannya tidak terlihat sebagai cahaya yang salah tempat melainkan
+    // sebagai **cahaya yang terpotong tepat di batas ubin** — persegi bertepi
+    // tegak lurus di ruang layar, yang bentuknya tidak mungkin dihasilkan
+    // geometri mana pun. Itu yang menemukannya.
     const float x0 = static_cast<float>(x) / tilesX * 2.0f - 1.0f;
     const float x1 = static_cast<float>(x + 1) / tilesX * 2.0f - 1.0f;
-    const float y0 = static_cast<float>(y) / tilesY * 2.0f - 1.0f;
-    const float y1 = static_cast<float>(y + 1) / tilesY * 2.0f - 1.0f;
+    const float y0 = 1.0f - static_cast<float>(y + 1) / tilesY * 2.0f;
+    const float y1 = 1.0f - static_cast<float>(y) / tilesY * 2.0f;
 
     // Ubin melebar bersama kedalaman, jadi batas melintangnya diambil dari
     // bidang **jauh** irisan — di sanalah ubinnya paling lebar. Memakai bidang
