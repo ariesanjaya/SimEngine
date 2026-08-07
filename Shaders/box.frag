@@ -1,6 +1,7 @@
 #version 450
 
 #include "shadow_common.glsl"
+#include "cluster_common.glsl"
 
 layout(location = 0) in vec3 inNormal;
 layout(location = 1) in vec4 inColor;
@@ -21,6 +22,9 @@ void main() {
     vec3 lightDir = normalize(shadowParams.lightDirection.xyz);
     float ndotl = max(dot(normal, lightDir), 0.0);
     float shadow = sampleShadow(inWorldPosition, normal);
-    vec3 lit = inColor.rgb * (0.25 + 0.75 * ndotl * shadow);
+    float viewDepth = dot(inWorldPosition - shadowParams.cameraPosition.xyz,
+                          shadowParams.cameraForward.xyz);
+    vec3 punctual = accumulateClusteredLights(gl_FragCoord.xy, inWorldPosition, normal, viewDepth);
+    vec3 lit = inColor.rgb * (0.25 + 0.75 * ndotl * shadow + punctual);
     outColor = vec4(lit, inColor.a);
 }

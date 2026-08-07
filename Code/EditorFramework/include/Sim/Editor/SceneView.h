@@ -65,6 +65,11 @@ public:
     /// Menyusun ulang seluruh daftar dari isi world.
     void Build(scene::World& world, const Selection& selection);
 
+private:
+    void AppendLight(const scene::LightComponent& light, const Mat4& matrix);
+
+public:
+
     /// Tampilan yang siap diserahkan ke IViewportRenderer::Render().
     /// Span-nya menunjuk ke penyimpanan milik SceneView, jadi objek ini harus
     /// hidup lebih lama daripada panggilan Render().
@@ -99,6 +104,7 @@ public:
 private:
     std::vector<render::MeshInstance> meshes_;
     std::vector<render::LineSegment> lines_;
+    std::vector<render::LightInstance> lights_;
     std::vector<Pickable> pickables_;
     std::vector<EntityIcon> icons_;
 };

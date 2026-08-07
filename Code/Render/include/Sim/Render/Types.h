@@ -84,6 +84,34 @@ struct MeshInstance {
     bool selected = false;
 };
 
+enum class LightKind : uint8_t {
+    Directional,
+    Point,
+    Spot,
+};
+
+/// Sebuah lampu dalam ruang dunia.
+///
+/// Bentuknya sengaja berbeda dari `scene::LightComponent`: yang di sini sudah
+/// dalam ruang dunia dan sudut kerucutnya sudah menjadi kosinus. Renderer tidak
+/// boleh mengenal tipe komponen — itu seam #1 di docs/ARCHITECTURE.md — dan
+/// menyalinnya apa adanya berarti renderer ikut memutuskan bagaimana rotasi
+/// entity menjadi arah pancar.
+struct LightInstance {
+    LightKind kind = LightKind::Point;
+    Vec3 position{0.0f};
+    /// Untuk directional dan spot: arah **dari permukaan ke cahaya** pada
+    /// directional, dan arah pancar (dari lampu ke luar) pada spot. Keduanya
+    /// dibedakan karena keduanya memang menjawab pertanyaan yang berbeda, dan
+    /// menyatukannya berarti satu tanda yang harus diingat di setiap pemakaian.
+    Vec3 direction{0.0f, -1.0f, 0.0f};
+    Vec3 color{1.0f};
+    float intensity = 1.0f;
+    float range = 10.0f;
+    float cosInner = 0.9f;
+    float cosOuter = 0.8f;
+};
+
 /// Garis dalam ruang dunia. Dipakai grid bantu, sumbu, dan penanda hubungan
 /// parent-child di outliner.
 struct LineSegment {
@@ -104,6 +132,10 @@ struct LineSegment {
 struct ViewportScene {
     std::span<const MeshInstance> meshes;
     std::span<const LineSegment> lines;
+    /// Lampu punctual. Directional boleh ada di sini juga — renderer memakai
+    /// yang pertama sebagai matahari dan mengabaikan sisanya, karena cascade
+    /// bayangan hanya ada satu himpunan.
+    std::span<const LightInstance> lights;
 };
 
 }  // namespace sim::render

@@ -46,6 +46,7 @@ bool RayIntersectsAabb(const Vec3& origin, const Vec3& direction, const Vec3& bo
 
 void SceneView::Build(scene::World& world, const Selection& selection) {
     meshes_.clear();
+    lights_.clear();
     lines_.clear();
     icons_.clear();
     pickables_.clear();
@@ -92,6 +93,7 @@ void SceneView::Build(scene::World& world, const Selection& selection) {
         icon.pickable = pickable;
 
         if (const auto* light = world.TryGet<scene::LightComponent>(entity)) {
+            AppendLight(*light, matrix);
             // Lampu directional dibedakan dari yang lain: ia menerangi seluruh
             // scene tanpa punya posisi bermakna, dan membedakannya sekilas
             // menghemat satu klik ke Inspector.
@@ -109,10 +111,53 @@ void SceneView::Build(scene::World& world, const Selection& selection) {
     }
 }
 
+/// Menerjemahkan sebuah `LightComponent` menjadi lampu ruang dunia.
+///
+/// **Di sini, bukan di renderer.** Renderer tidak boleh mengenal tipe komponen
+/// — itu seam #1 di docs/ARCHITECTURE.md — dan yang paling mudah bocor lewat
+/// batas itu justru penerjemahan seperti ini: bagaimana rotasi entity menjadi
+/// arah pancar, dan bagaimana sudut kerucut menjadi kosinus.
+void SceneView::AppendLight(const scene::LightComponent& light, const Mat4& matrix) {
+    render::LightInstance instance;
+    instance.position = Vec3(matrix[3]);
+    // -Z lokal, sama dengan arah hadap kamera. Sumbu yang berbeda antara lampu
+    // dan kamera berarti gizmo yang sama menunjuk ke arah yang berbeda
+    // bergantung apa yang terpilih.
+    const Vec3 forward = glm::normalize(Vec3(matrix * Vec4(0.0f, 0.0f, -1.0f, 0.0f)));
+    instance.color = light.color;
+    instance.intensity = light.intensity;
+    instance.range = light.range;
+
+    switch (light.type) {
+        case scene::LightType::Directional:
+            instance.kind = render::LightKind::Directional;
+            // Dibalik: yang disimpan arah **ke** cahaya, sedangkan yang dihadapi
+            // entity adalah arah pancarnya.
+            instance.direction = -forward;
+            break;
+        case scene::LightType::Point:
+            instance.kind = render::LightKind::Point;
+            break;
+        case scene::LightType::Spot:
+            instance.kind = render::LightKind::Spot;
+            instance.direction = forward;
+            break;
+    }
+    // Kerucut dalam harus selalu di dalam kerucut luar. Sudut yang tertukar
+    // menghasilkan pembagi negatif di shader, dan tepi berkasnya menyala alih-alih
+    // memudar.
+    const float outer = std::max(light.outerAngleRadians, light.innerAngleRadians);
+    const float inner = std::min(light.innerAngleRadians, outer);
+    instance.cosOuter = std::cos(outer);
+    instance.cosInner = std::cos(inner);
+    lights_.push_back(instance);
+}
+
 render::ViewportScene SceneView::Scene() const {
     render::ViewportScene scene;
     scene.meshes = meshes_;
     scene.lines = lines_;
+    scene.lights = lights_;
     return scene;
 }
 

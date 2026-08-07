@@ -8,6 +8,7 @@
 #include "Sim/RHI/TextureRegistry.h"
 #include "Sim/Render/FrameGraph.h"
 #include "Sim/Render/Frustum.h"
+#include "Sim/Render/LightCluster.h"
 #include "Sim/Render/ShadowCascades.h"
 
 #include <algorithm>
@@ -41,11 +42,28 @@ struct ShadowUniforms {
     Vec4 cameraPosition{0.0f};
     /// xyz arah pandang, w kekuatan bias normal dalam satuan texel.
     Vec4 cameraForward{0.0f};
+    /// xyz ubin dan irisan cluster, w jumlah lampu.
+    Vec4 clusterCounts{0.0f};
+    /// x skala irisan, y bias irisan, z near, w far.
+    Vec4 clusterDepth{0.0f};
+    /// xy ukuran viewport dalam piksel.
+    Vec4 viewportSize{0.0f};
 };
 // 4 mat4 + 6 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
 // memperbarui shader-nya menjadi galat kompilasi, bukan bayangan yang bergeser.
-static_assert(sizeof(ShadowUniforms) == 4 * 64 + 6 * 16,
+static_assert(sizeof(ShadowUniforms) == 4 * 64 + 9 * 16,
               "ShadowUniforms harus cocok dengan blok ShadowParams di shadow_common.glsl");
+
+/// Cermin dari `GpuLight` di Shaders/cluster_common.glsl. std430.
+struct GpuLight {
+    Vec4 positionRange{0.0f};
+    Vec4 directionCosOuter{0.0f};
+    Vec4 colorCosInner{0.0f};
+    /// x: 0 point, 1 spot. Sisanya cadangan — std430 tetap menyisipkan sampai
+    /// kelipatan 16, jadi medan cadangan ini tidak memakan apa pun.
+    Vec4 kind{0.0f};
+};
+static_assert(sizeof(GpuLight) == 64, "GpuLight harus cocok dengan std430-nya");
 
 /// Peta bayangan cascade: satu image D32 berlapis, satu lapis per cascade.
 ///
@@ -222,7 +240,13 @@ public:
                 !slot.lineBuffer.Create(device_, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
                                         sizeof(LineVertex) * 1024) ||
                 !slot.shadowUniform.Create(device_, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
-                                           sizeof(ShadowUniforms))) {
+                                           sizeof(ShadowUniforms)) ||
+                !slot.lightBuffer.Create(device_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                         sizeof(GpuLight) * 64) ||
+                !slot.clusterRangeBuffer.Create(device_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                                sizeof(uint32_t) * 2 * 4096) ||
+                !slot.clusterIndexBuffer.Create(device_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                                sizeof(uint32_t) * 8192)) {
                 return false;
             }
         }
@@ -302,9 +326,21 @@ public:
         // Menghitungnya dari kamera frame sebelumnya menghemat satu ketergantungan
         // dan menukarnya dengan bayangan yang tertinggal satu frame — terlihat
         // sebagai bayangan yang "berenang" saat kamera bergerak cepat.
+        // Directional pertama dari scene menjadi matahari; `desc.sunDirection`
+        // adalah nilai mundurnya. Cascade hanya ada satu himpunan, jadi
+        // directional kedua dan seterusnya diabaikan — dan mengabaikannya
+        // diam-diam lebih baik daripada menjumlahkan arah, yang menghasilkan
+        // bayangan yang tidak cocok dengan lampu mana pun.
+        sunDirection_ = desc.sunDirection;
+        for (const LightInstance& light : scene.lights) {
+            if (light.kind == LightKind::Directional) {
+                sunDirection_ = light.direction;
+                break;
+            }
+        }
         CascadeSettings cascadeSettings;
         cascadeSettings.resolution = kShadowResolution;
-        cascades_ = ComputeCascades(desc.camera, aspect, desc.sunDirection, cascadeSettings);
+        cascades_ = ComputeCascades(desc.camera, aspect, sunDirection_, cascadeSettings);
 
         InstanceSlot& slot = slots_[slotIndex_];
         device_.WaitTransient(slot.submitId);
@@ -332,6 +368,7 @@ public:
                                       sizeof(LineVertex) * lineVertices_.size());
         }
 
+        UpdateClusters(desc, scene, aspect, slot);
         UpdateShadowUniforms(desc, slot);
         BuildGraph();
 
@@ -439,6 +476,9 @@ private:
         // sebagai bayangan yang sesekali melompat satu frame, bukan sebagai
         // pesan galat.
         rhi::DynamicBuffer shadowUniform;
+        rhi::DynamicBuffer lightBuffer;
+        rhi::DynamicBuffer clusterRangeBuffer;
+        rhi::DynamicBuffer clusterIndexBuffer;
         VkDescriptorSet shadowSet = VK_NULL_HANDLE;
         uint64_t submitId = 0;
     };
@@ -1069,10 +1109,16 @@ private:
         samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
         SIM_VK_CHECK(vkCreateSampler(device_.Handle(), &samplerInfo, nullptr, &shadow_.sampler));
 
-        const std::array<VkDescriptorSetLayoutBinding, 2> bindings{
+        const std::array<VkDescriptorSetLayoutBinding, 5> bindings{
             VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{3, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
         };
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
@@ -1082,11 +1128,13 @@ private:
         SIM_VK_CHECK(vkCreateDescriptorSetLayout(device_.Handle(), &layoutInfo, nullptr,
                                                  &shadowSetLayout_));
 
-        const std::array<VkDescriptorPoolSize, 2> sizes{
+        const std::array<VkDescriptorPoolSize, 3> sizes{
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                  static_cast<uint32_t>(slots_.size())},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                                  static_cast<uint32_t>(slots_.size())},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                 static_cast<uint32_t>(slots_.size()) * 3},
         };
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -1112,9 +1160,13 @@ private:
             return false;
         }
 
-        std::vector<VkDescriptorBufferInfo> buffers(slots_.size());
+        // Empat entri buffer per slot, dan vektornya dipesan penuh lebih dulu.
+        // `pBufferInfo` menyimpan pointer, jadi vektor yang tumbuh sambil diisi
+        // akan membuat entri yang sudah dicatat menunjuk memori yang sudah
+        // dibebaskan — kerusakan yang tidak muncul sebagai galat validasi.
+        std::vector<VkDescriptorBufferInfo> buffers(slots_.size() * 4);
         std::vector<VkWriteDescriptorSet> writes;
-        writes.reserve(slots_.size() * 2);
+        writes.reserve(slots_.size() * 5);
         // SHADER_READ_ONLY, bukan DEPTH_READ_ONLY. Keduanya sah untuk mengambil
         // sampel dari image depth, tapi yang berlaku adalah yang disimpulkan
         // frame graph dari `Access::ShaderRead` — dan descriptor yang menyebut
@@ -1126,7 +1178,11 @@ private:
 
         for (std::size_t i = 0; i < slots_.size(); ++i) {
             slots_[i].shadowSet = sets[i];
-            buffers[i] = {slots_[i].shadowUniform.Handle(), 0, sizeof(ShadowUniforms)};
+            const std::size_t base = i * 4;
+            buffers[base] = {slots_[i].shadowUniform.Handle(), 0, sizeof(ShadowUniforms)};
+            buffers[base + 1] = {slots_[i].lightBuffer.Handle(), 0, VK_WHOLE_SIZE};
+            buffers[base + 2] = {slots_[i].clusterRangeBuffer.Handle(), 0, VK_WHOLE_SIZE};
+            buffers[base + 3] = {slots_[i].clusterIndexBuffer.Handle(), 0, VK_WHOLE_SIZE};
 
             VkWriteDescriptorSet uniform{};
             uniform.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -1134,7 +1190,7 @@ private:
             uniform.dstBinding = 0;
             uniform.descriptorCount = 1;
             uniform.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            uniform.pBufferInfo = &buffers[i];
+            uniform.pBufferInfo = &buffers[base];
             writes.push_back(uniform);
 
             VkWriteDescriptorSet sampled = uniform;
@@ -1143,6 +1199,14 @@ private:
             sampled.pBufferInfo = nullptr;
             sampled.pImageInfo = &image;
             writes.push_back(sampled);
+
+            for (uint32_t binding = 2; binding <= 4; ++binding) {
+                VkWriteDescriptorSet storage = uniform;
+                storage.dstBinding = binding;
+                storage.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                storage.pBufferInfo = &buffers[base + binding - 1];
+                writes.push_back(storage);
+            }
         }
         vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
@@ -1212,6 +1276,72 @@ private:
         }
     }
 
+    /// Menyaring lampu punctual ke cluster lalu mengunggahnya.
+    ///
+    /// **Directional tidak ikut.** Ia mengenai setiap cluster, jadi
+    /// memasukkannya hanya menambah satu entri ke setiap daftar — dan ia sudah
+    /// ditangani terpisah bersama cascade bayangannya.
+    void UpdateClusters(const ViewportDesc& desc, const ViewportScene& scene, float aspect,
+                        InstanceSlot& slot) {
+        gpuLights_.clear();
+        clusterLights_.clear();
+        for (const LightInstance& light : scene.lights) {
+            if (light.kind == LightKind::Directional) {
+                continue;
+            }
+            if (gpuLights_.size() >= kMaxClusterLights) {
+                break;
+            }
+            GpuLight gpu;
+            gpu.positionRange = Vec4(light.position, light.range);
+            gpu.directionCosOuter = Vec4(glm::normalize(light.direction), light.cosOuter);
+            gpu.colorCosInner = Vec4(light.color * light.intensity, light.cosInner);
+            gpu.kind = Vec4(light.kind == LightKind::Spot ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
+            gpuLights_.push_back(gpu);
+
+            ClusterLight entry;
+            entry.type = light.kind == LightKind::Spot ? ClusterLightType::Spot
+                                                       : ClusterLightType::Point;
+            entry.position = light.position;
+            entry.direction = glm::normalize(light.direction);
+            entry.range = light.range;
+            entry.cosOuterAngle = light.cosOuter;
+            clusterLights_.push_back(entry);
+        }
+
+        clusterGrid_.Build(clusterSettings_, desc.camera.fovYRadians, aspect, desc.camera.nearZ,
+                           std::min(desc.camera.farZ, kClusterFar));
+        clusterAssignment_ =
+            AssignLights(clusterGrid_, desc.camera.View(), clusterLights_, clusterSettings_);
+        if (clusterAssignment_.overflowed > 0) {
+            // Dilaporkan, tidak didiamkan. Pemotongan yang diam-diam terlihat
+            // sebagai lampu yang hilang di sudut tertentu saja, dan tidak ada
+            // yang akan menghubungkannya dengan batas per-cluster.
+            SIM_WARN("Render", "{} clusters exceeded {} lights and were truncated",
+                     clusterAssignment_.overflowed, clusterSettings_.maxLightsPerCluster);
+        }
+
+        // Buffer kosong tidak sah, jadi keduanya selalu berisi minimal satu
+        // entri boneka. Cluster yang jumlahnya nol tidak pernah membacanya.
+        if (gpuLights_.empty()) {
+            gpuLights_.push_back(GpuLight{});
+        }
+        if (clusterAssignment_.indices.empty()) {
+            clusterAssignment_.indices.push_back(0);
+        }
+
+        const VkDeviceSize lightBytes = sizeof(GpuLight) * gpuLights_.size();
+        const VkDeviceSize rangeBytes =
+            sizeof(ClusterAssignment::Range) * clusterAssignment_.ranges.size();
+        const VkDeviceSize indexBytes = sizeof(uint32_t) * clusterAssignment_.indices.size();
+        if (slot.lightBuffer.Reserve(lightBytes) && slot.clusterRangeBuffer.Reserve(rangeBytes) &&
+            slot.clusterIndexBuffer.Reserve(indexBytes)) {
+            slot.lightBuffer.Write(gpuLights_.data(), lightBytes);
+            slot.clusterRangeBuffer.Write(clusterAssignment_.ranges.data(), rangeBytes);
+            slot.clusterIndexBuffer.Write(clusterAssignment_.indices.data(), indexBytes);
+        }
+    }
+
     void UpdateShadowUniforms(const ViewportDesc& desc, InstanceSlot& slot) {
         ShadowUniforms uniforms;
         for (int i = 0; i < cascades_.count; ++i) {
@@ -1230,13 +1360,26 @@ private:
             uniforms.cascadeTexelSize[i] = 1.0f;
         }
 
-        const Vec3 sun = glm::length(desc.sunDirection) > 1e-6f
-                             ? glm::normalize(desc.sunDirection)
-                             : Vec3(0.0f, 1.0f, 0.0f);
+        const Vec3 sun = glm::length(sunDirection_) > 1e-6f ? glm::normalize(sunDirection_)
+                                                            : Vec3(0.0f, 1.0f, 0.0f);
         uniforms.lightDirection = Vec4(sun, static_cast<float>(cascades_.count));
         uniforms.cameraPosition =
             Vec4(desc.camera.position, desc.castShadows && cascades_.count > 0 ? 1.0f : 0.0f);
         uniforms.cameraForward = Vec4(desc.camera.Forward(), kNormalBiasTexels);
+        uniforms.clusterCounts = Vec4(static_cast<float>(clusterGrid_.TilesX()),
+                                      static_cast<float>(clusterGrid_.TilesY()),
+                                      static_cast<float>(clusterGrid_.Slices()),
+                                      static_cast<float>(gpuLights_.size()));
+        // Skala dan bias irisan datang dari CPU apa adanya, bukan diturunkan
+        // ulang di shader dari near dan far. Dua rumus yang setara secara
+        // matematis tapi ditulis berbeda berselisih satu irisan di tepinya.
+        const Vec2 first = clusterGrid_.SliceBounds(0);
+        const Vec2 last = clusterGrid_.SliceBounds(clusterGrid_.Slices() - 1);
+        const float logRatio = std::log(last.y / first.x);
+        const float scale = static_cast<float>(clusterGrid_.Slices()) / logRatio;
+        uniforms.clusterDepth = Vec4(scale, -scale * std::log(first.x), first.x, last.y);
+        uniforms.viewportSize = Vec4(static_cast<float>(target_.Width()),
+                                     static_cast<float>(target_.Height()), 0.0f, 0.0f);
         slot.shadowUniform.Write(&uniforms, sizeof(uniforms));
     }
 
@@ -1308,6 +1451,9 @@ private:
             slot.buffer.Destroy();
             slot.lineBuffer.Destroy();
             slot.shadowUniform.Destroy();
+            slot.lightBuffer.Destroy();
+            slot.clusterRangeBuffer.Destroy();
+            slot.clusterIndexBuffer.Destroy();
         }
         cubeBuffer_.Destroy();
         for (VkPipeline* pipeline :
@@ -1350,6 +1496,19 @@ private:
     VkPipelineLayout lineLayout_ = VK_NULL_HANDLE;
     VkPipeline linePipeline_ = VK_NULL_HANDLE;
     std::vector<LineVertex> lineVertices_;
+
+    static constexpr std::size_t kMaxClusterLights = 256;
+    /// Cluster berhenti di jarak ini, bukan di `farZ` kamera. Irisan
+    /// eksponensial sampai dua kilometer membuat irisan pertama setipis
+    /// sentimeter, dan lampu punctual memang tidak relevan di kejauhan.
+    static constexpr float kClusterFar = 300.0f;
+
+    Vec3 sunDirection_{0.0f, 1.0f, 0.0f};
+    ClusterGridSettings clusterSettings_;
+    ClusterGrid clusterGrid_;
+    ClusterAssignment clusterAssignment_;
+    std::vector<GpuLight> gpuLights_;
+    std::vector<ClusterLight> clusterLights_;
 
     ShadowMap shadow_;
     VkDescriptorSetLayout shadowSetLayout_ = VK_NULL_HANDLE;

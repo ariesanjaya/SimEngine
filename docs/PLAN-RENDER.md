@@ -294,7 +294,7 @@ logam, mengganti bentuk bekerja, seret kiri memindahkan sorotan searah kursor,
 seret kanan mengorbit kamera, dan cache disk terisi dua berkas per material.
 **Nol pesan validation layer.**
 
-### E8.3 — Lighting & shadow · 🔨 cascade jalan di Vulkan
+### E8.3 — Lighting & shadow · 🔨 cascade dan clustered lighting jalan di Vulkan
 IBL (prefilter env + DFG LUT), directional light dengan cascaded shadow map,
 point/spot dengan shadow atlas, clustered light culling untuk banyak lampu.
 
@@ -463,9 +463,45 @@ Diverifikasi di GUI: kotak menjatuhkan bayangan ke bidang tanah, tidak ada acne
 pada bidang seluas 40 m, tidak ada garis perpindahan cascade yang terlihat, dan
 **nol pesan validation layer**.
 
+#### Clustered lighting di pass forward
+
+`ViewportScene` sekarang membawa `LightInstance` — bentuk yang **sengaja berbeda
+dari `scene::LightComponent`**: sudah dalam ruang dunia, dan sudut kerucutnya
+sudah menjadi kosinus. Renderer tidak boleh mengenal tipe komponen (seam #1 di
+ARCHITECTURE.md), dan yang paling mudah bocor lewat batas itu justru
+penerjemahan seperti ini: bagaimana rotasi entity menjadi arah pancar. Karena
+itu penerjemahannya ada di `SceneView`, bukan di renderer.
+
+**Directional tidak ikut penyaringan cluster.** Ia mengenai setiap cluster, jadi
+memasukkannya hanya menambah satu entri ke setiap daftar; ia sudah ditangani
+terpisah bersama cascade-nya. Directional pertama dari scene menjadi matahari
+dan sisanya diabaikan — mengabaikannya diam-diam lebih baik daripada
+menjumlahkan arah, yang menghasilkan bayangan yang tidak cocok dengan lampu mana
+pun.
+
+**Skala dan bias irisan dikirim dari CPU apa adanya**, bukan diturunkan ulang di
+shader dari near dan far. Dua rumus yang setara secara matematis tapi ditulis
+berbeda berselisih satu irisan di tepinya, dan yang terlihat adalah lampu yang
+hilang tepat pada jarak tertentu.
+
+**Peredupan jaraknya berjendela.** Kuadrat terbalik saja tidak pernah mencapai
+nol, jadi setiap lampu akan menerangi seluruh dunia dengan nilai yang sangat
+kecil — dan `range` tidak akan berarti apa-apa selain kebohongan yang dipakai
+penyaringan cluster.
+
+Cluster berhenti di 300 m, bukan di `farZ` kamera: irisan eksponensial sampai
+dua kilometer membuat irisan pertama setipis sentimeter, dan lampu punctual
+memang tidak relevan di kejauhan. Pemotongan daftar per-cluster dilaporkan lewat
+log, bukan didiamkan — pemotongan yang diam-diam terlihat sebagai lampu yang
+hilang di sudut tertentu saja, dan tidak ada yang akan menghubungkannya dengan
+batas per-cluster.
+
+Diverifikasi di GUI: lampu point menghasilkan kolam cahaya dengan peredupan
+mulus sampai batas jangkauannya, tanpa jejak ubin cluster, berdampingan dengan
+bayangan directional. **Nol pesan validation layer.**
+
 **Belum ada:** pembakaran peta prefilter dan LUT ke tekstur GPU, atlas bayangan
-untuk point/spot, penyambungan clustered culling ke pass forward, dan
-penyambungan IBL ke pipeline material.
+untuk point/spot, dan penyambungan IBL ke pipeline material.
 
 `openpbr.slang` sendiri sudah ada sejak E8.2, tapi baru cahaya langsung: satu
 arah cahaya, tanpa IBL, bayangan, maupun transmisi. Yang ditambahkan di sini
