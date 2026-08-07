@@ -709,6 +709,22 @@ sorting untuk transparansi, soft particle, ribbon/trail.
 Sky atmospheric, tone mapping (ACES), bloom, SSAO, TAA atau FXAA, depth of field,
 motion blur, color grading LUT, exposure otomatis.
 
+**Langitnya mengikuti `/home/arie/SDK/atmosphere-bac`** — implementasi
+Bruneton-Hillaire (transmittance LUT, multiscattering LUT, sky-view LUT, aerial
+perspective) beserta awan volumetriknya. Referensi lokal, bukan dependensi; lihat
+`docs/DEPENDENCIES.md`.
+
+**Ditambah editor Time-of-Day ala CryEngine**: kurva per-parameter atmosfer
+terhadap jam, dan siklus siang-malam yang berjalan real-time sehingga mataharinya
+benar-benar berputar. Ini yang menyambungkan langit ke sistem yang sudah ada —
+arah dan radiance matahari sudah mengalir dari `LightComponent` ke cascade
+bayangan sejak E8.3, jadi memutar matahari otomatis memutar bayangannya.
+
+Satu hal yang menunggu di sini dan sudah tercatat sejak E8.3:
+`ViewportDesc::exposure` berdiri sebagai pengganti tone mapping. Begitu ACES dan
+eksposur otomatis ada, ia dihapus — dan setiap lampu kembali memakai radiance
+sungguhannya tanpa pengali.
+
 **Kriteria terima E8 (keseluruhan).** Scene uji berisi terrain 2×2 km, 200 ribu
 instance vegetasi, 20 lampu berbayang, karakter ber-animasi, dan tiga sistem partikel
 berjalan ≥ 60 fps pada GPU target, tanpa error validation layer, dan tampilan di
@@ -722,14 +738,20 @@ Rencana terpisah ada di `/home/arie/SDK/rencana-implementasi-gi.md`: screen prob
 implementasi — SDF clipmap untuk GPU tanpa RT core, ray query untuk yang punya.
 Anggarannya 3,0 ms per frame di 1080p, ±16 minggu untuk satu orang.
 
-Tiga hal yang perlu diputuskan sebelum ia masuk roadmap:
+**Urutan yang diminta: GI lebih dulu, lalu E8.8.** Dari ketiga hal di bawah,
+satu sudah lepas dengan selesainya E8.3 — dua sisanya masih perlu diputuskan
+sebelum baris kode pertama ditulis.
 
 - **Anggarannya belum didamaikan dengan kriteria terima E8.** 3,0 ms adalah 18%
   dari frame 60 fps, sementara adegan uji E8 — terrain 2×2 km, 200 ribu instance
   vegetasi, 20 lampu berbayang — sudah menuntut sisanya. Keduanya ditulis
   terpisah dan belum pernah dijumlahkan.
-- **Ia bergantung pada E8.3, bukan hanya E8.1.** Milestone M6-nya menyambung ke
-  `evalOpenPBR_IBL`, yang menuntut prefilter env dan DFG LUT sudah ada.
+- ~~**Ia bergantung pada E8.3, bukan hanya E8.1.**~~ **Sudah lepas.** E8.3
+  selesai: prefilter env, DFG LUT, dan `evaluateOpenPBR_IBL` semuanya ada dan
+  dipakai preview material. Titik sambung M6 tinggal mengganti sumber
+  `irradiance` dan `prefilteredBase` dari probe statis ke cache radiance — dan
+  antarmuka `evaluateOpenPBR_IBL` sengaja dibuat menerima ketiganya sudah jadi
+  supaya penggantian itu tidak menyentuh satu baris pun model shading.
 - **Baseline-nya tidak bisa diuji di mesin ini.** Mesin pengembangan punya RT
   core (RTX 2060), yaitu tier atas rencana itu. Jalur SDF — yang justru harus
   bekerja di semua GPU — hanya bisa diuji lewat override backend manual, jadi
