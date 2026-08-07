@@ -46,6 +46,15 @@ sim_add_test(SimVegetationTests
     DEPS
         Sim::Vegetation)
 
+# Render: frame graph (pembuangan pass, barrier, alias memori) dan frustum
+# culling. Keduanya bebas Vulkan dengan sengaja, jadi keduanya bisa diuji tanpa
+# GPU — dan justru di keduanyalah kesalahan renderer paling mahal dicari.
+sim_add_test(SimRenderTests
+    SOURCES
+        RenderTests.cpp
+    DEPS
+        Sim::Render)
+
 # Animation: rangka berurutan topologis, klip berbasis kurva, pencampuran pose,
 # penanda fase, root motion, dan format `.simskel`/`.simanim`.
 sim_add_test(SimAnimationTests

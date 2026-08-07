@@ -18,10 +18,52 @@ Artinya E8 adalah menulis implementasi kedua dari satu antarmuka yang sudah mapa
 
 ## E8 — Renderer
 
-### E8.1 — Render graph & pass dasar
+### E8.1 — Render graph & pass dasar · 🔨 graph & culling selesai, pass Vulkan belum
 Frame graph sederhana (deklarasi pass + resource, penyusunan barrier otomatis),
 depth prepass, forward opaque, transparan tersortir, resolve. Kamera & frustum
 culling. Bindless descriptor untuk tekstur (`VK_EXT_descriptor_indexing`).
+
+**Sudah ada:** `render::FrameGraph` dan `render::Frustum`, keduanya **bebas
+Vulkan dengan sengaja** dan karena itu diuji tanpa GPU — 22 test. Keduanya
+tinggal di header publik `Sim::Render`, yang memang sudah bebas Vulkan sejak E1
+supaya modul Editor yang me-link Render tidak ikut melihatnya.
+
+**Barrier tidak ditulis tangan.** Barrier yang ditulis tangan benar pada hari ia
+ditulis dan salah setelah pass ketiga disisipkan di antaranya — dan salahnya
+tidak muncul sebagai kesalahan melainkan sebagai kedipan di satu kartu grafis
+saja. Tiap pass hanya menyatakan apa yang dibaca dan ditulisnya; perpindahan
+keadaannya diturunkan dari deklarasi itu. Barrier hanya dipancarkan saat keadaan
+benar-benar berpindah: dua pembacaan berurutan dengan cara yang sama tidak
+dipisahkan apa pun, karena memancarkan barrier per pass memang benar tapi
+memaksa GPU menjalankannya berurutan tanpa ada yang menuntutnya.
+
+**Barrier `CompiledPass` selalu berarti "sebelum pass ini".** Satu arah saja, dan
+transisi yang memang harus terjadi sesudah seluruh pass punya tempatnya sendiri
+(`finalBarriers`). Versi pertamanya menempelkan transisi keluaran ke barrier pass
+terakhir — yang berarti target diserahkan ke ImGui sebelum pass itu sempat
+menggambarnya. Ditemukan saat memeriksa ulang kontraknya, bukan oleh test:
+test-nya sendiri ikut salah karena ditulis dari asumsi yang sama.
+
+**Pass yang hasilnya tidak dibaca siapa pun dibuang, dan pembuangannya menular ke
+belakang.** Tanpa itu, tiap fitur yang bisa dimatikan — bayangan, SSAO, garis
+bantu debug — menuntut `if` di dalam kode frame. Dengan pembuangan otomatis,
+mematikan sebuah fitur cukup berarti tidak ada yang membaca keluarannya.
+
+**Alias memori ditentukan lewat selang umur, bukan lewat kolam.** Kolam
+membagikan apa pun yang sedang bebas, jadi jumlah memori yang terpakai bergantung
+pada urutan permintaan dan berubah-ubah antar-frame tanpa ada yang mengubahnya —
+"kadang kehabisan memori" adalah bug yang paling mahal dicari. Selang umur memberi
+jawaban yang sama untuk graph yang sama, dan itu dikunci test.
+
+**Reversed-Z** (`PerspectiveReversedZ`, plus varian bidang-jauh-tak-hingga) — sudah
+keputusan terkunci sejak fase editor. Frustum-nya sendiri tidak perlu tahu:
+bidangnya diturunkan dari matriks view-proj apa adanya, jadi yang berubah hanya
+isi matriksnya sementara volume yang dibatasi tetap sama. Itu dikunci test yang
+membandingkan keputusan "di dalam/di luar" kedua proyeksi pada ribuan titik.
+
+**Belum ada:** eksekusi Vulkan-nya — depth prepass, forward opaque, transparan
+tersortir, resolve, dan bindless descriptor. Yang sudah ada adalah kerangka yang
+menentukan urutan, barrier, dan memorinya.
 
 ### E8.2 — Material runtime
 Kompilasi graph `.simmat` → kode shader → SPIR-V, cache di disk berbasis hash graph.

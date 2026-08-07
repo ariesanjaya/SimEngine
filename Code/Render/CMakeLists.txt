@@ -1,5 +1,7 @@
 sim_add_library(Render
     SOURCES
+        src/FrameGraph.cpp
+        src/Frustum.cpp
         src/StubRenderer.cpp
         src/ThumbnailCache.cpp
     PUBLIC_DEPS
