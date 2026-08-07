@@ -108,11 +108,43 @@ berarti begitu ada tekstur untuk diindeks — yaitu E8.2. Alias memori transien
 sudah ada di graph dan teruji, tapi belum ada pemakainya: pass pertama yang
 benar-benar menuntut target antara adalah post-process di E8.8.
 
-### E8.2 — Material runtime
+### E8.2 — Material runtime · 🔨 tata letak uniform selesai
 Kompilasi graph `.simmat` → kode shader → SPIR-V, cache di disk berbasis hash graph.
 Material instance jadi uniform buffer + indeks tekstur. Varian shader (skinned,
 instanced, alpha-test) lewat spesialisasi konstanta. **Titik sambung:** Material
 Editor mulai menampilkan preview PBR sungguhan.
+
+**Sudah ada:** `MaterialParameterBlock` — tata letak blok uniform sebuah
+material beserta tabel slot teksturnya. Graph → Slang sendiri sudah selesai di
+E7.1; yang ditambahkan di sini adalah sisi datanya.
+
+**Ini ABI antara kode Slang yang dihasilkan dan sisi C++.** Kedua sisi
+menghitung offset dari daftar parameter yang sama, dan selisih satu sisipan
+tidak menghasilkan galat apa pun — hanya material yang warnanya salah dengan
+cara yang sulit dilacak. Karena itu tata letaknya dihitung di satu tempat dan
+diuji terhadap contoh yang offset-nya dihitung tangan, bukan disalin dari
+keluaran kodenya sendiri.
+
+**`float3` pada std140 punya dua angka yang berbeda: penjajaran 16 tapi ukuran
+12.** Keduanya harus dipegang sekaligus, dan salah satunya saja meleset ke arah
+yang berlawanan — lupa penjajarannya menaruh `float3` di offset 4, sedangkan
+mengira ukurannya 16 mendorong `float` berikutnya melewati celah yang justru
+boleh diisinya. Yang kedua sempat ditulis terbalik, dan test yang menemaninya
+ikut salah karena ditulis dari keyakinan yang sama; keduanya sudah dikoreksi.
+
+**Urutan slot mengikuti urutan deklarasi, bukan urutan yang dioptimasi.**
+Menyusun ulang menurut ukuran menghemat sisipan, tapi membuat tata letak
+berubah saat sebuah parameter diganti tipenya — dan setiap material instance
+yang sudah tersimpan menunjuk offset yang lama.
+
+**Sisipan selalu nol**, supaya dua blok yang isinya sama berbanding sama byte
+demi byte: itulah yang dipakai renderer untuk memutuskan apakah sebuah blok
+perlu diunggah ulang.
+
+**Belum ada:** Slang → SPIR-V lewat `slangc` beserta cache disk berbasis hash,
+varian lewat spesialisasi konstanta, dan preview PBR di Material Editor.
+Preview-nya menuntut instance `IViewportRenderer` kedua — jalannya sudah jelas
+dan dicatat di E7.1, tinggal dikerjakan bersama pipeline materialnya.
 
 ### E8.3 — Lighting & shadow
 Model shading **OpenPBR Surface v1.1** (`openpbr.slang`), IBL (prefilter env +

@@ -6,6 +6,8 @@
 
 #include <doctest/doctest.h>
 
+#include <cstring>
+
 #include <algorithm>
 #include <string>
 
@@ -540,6 +542,7 @@ TEST_CASE("Kompilasi bersifat deterministik") {
 // =============================================================================
 
 #include "Sim/Material/MaterialInstance.h"
+#include "Sim/Material/MaterialParameterBlock.h"
 
 namespace {
 
@@ -698,4 +701,164 @@ TEST_CASE("Membersihkan timpaan mengembalikan parameter ke nilai induk") {
     CHECK_FALSE(resolved[1].overridden);
     CHECK(resolved[1].value.components[0] == doctest::Approx(0.3f));
     CHECK(instance.overrides.empty());
+}
+
+// =============================================================================
+// E8.2 — tata letak blok uniform
+// =============================================================================
+
+namespace {
+
+MaterialParameter Param(const std::string& name, ValueKind kind, const std::string& value = {}) {
+    MaterialParameter parameter;
+    parameter.name = name;
+    parameter.kind = kind;
+    parameter.defaultValue = value;
+    return parameter;
+}
+
+float ReadFloat(const std::vector<uint8_t>& block, uint32_t offset) {
+    float value = 0.0f;
+    std::memcpy(&value, block.data() + offset, sizeof(value));
+    return value;
+}
+
+}  // namespace
+
+TEST_CASE("Float3 berjajar 16 byte, dan float sesudahnya tidak mengisi celahnya") {
+    // Inilah aturan std140 yang paling sering dilupakan, dan satu-satunya yang
+    // salahnya tidak menghasilkan galat apa pun — hanya nilai yang bergeser.
+    // Offset di bawah dihitung tangan, bukan disalin dari keluaran kode.
+    MaterialParameterBlock block;
+    block.Build({
+        Param("roughness", ValueKind::Float),   // 0  .. 4
+        Param("tint", ValueKind::Float3),       // 16 .. 28   (didorong dari 4)
+        Param("metalness", ValueKind::Float),   // 28 .. 32   (celah 12..16 TIDAK dipakai)
+        Param("uvScale", ValueKind::Float2),    // 32 .. 40
+        Param("emissive", ValueKind::Float4),   // 48 .. 64   (didorong dari 40)
+    });
+
+    REQUIRE(block.SlotCount() == 5);
+    CHECK(block.Slot(0).offset == 0u);
+    CHECK(block.Slot(1).offset == 16u);
+    CHECK(block.Slot(2).offset == 28u);
+    CHECK(block.Slot(3).offset == 32u);
+    CHECK(block.Slot(4).offset == 48u);
+    CHECK(block.Bytes() == 64u);
+}
+
+TEST_CASE("Tekstur tidak menempati blok uniform dan tidak menggeser yang sesudahnya") {
+    MaterialParameterBlock block;
+    block.Build({
+        Param("roughness", ValueKind::Float),
+        Param("albedoMap", ValueKind::Texture),
+        Param("metalness", ValueKind::Float),
+    });
+    REQUIRE(block.SlotCount() == 2);
+    CHECK(block.Slot(0).offset == 0u);
+    // 4, bukan 8: tekstur punya tabel slotnya sendiri dan tidak memakan tempat
+    // di sini sama sekali.
+    CHECK(block.Slot(1).offset == 4u);
+    CHECK(block.Find("albedoMap") == -1);
+}
+
+TEST_CASE("Blok dibulatkan ke kelipatan 16") {
+    MaterialParameterBlock block;
+    block.Build({Param("a", ValueKind::Float)});
+    CHECK(block.Bytes() == 16u);
+    block.Build({Param("a", ValueKind::Float4), Param("b", ValueKind::Float)});
+    CHECK(block.Bytes() == 32u);
+}
+
+TEST_CASE("Nilai bawaan terisi, lalu ditimpa override instance") {
+    const std::vector<MaterialParameter> parameters{
+        Param("roughness", ValueKind::Float, "0.4"),
+        Param("tint", ValueKind::Float3, "float3(0.2, 0.4, 0.6)"),
+    };
+    MaterialParameterBlock block;
+    block.Build(parameters);
+
+    std::vector<uint8_t> bytes;
+    block.Fill(parameters, {}, bytes);
+    REQUIRE(bytes.size() == block.Bytes());
+    CHECK(ReadFloat(bytes, 0) == doctest::Approx(0.4f));
+    CHECK(ReadFloat(bytes, 16) == doctest::Approx(0.2f));
+    CHECK(ReadFloat(bytes, 24) == doctest::Approx(0.6f));
+
+    MaterialValue override;
+    override.kind = ValueKind::Float;
+    override.components = {0.9f, 0.0f, 0.0f, 0.0f};
+    block.Fill(parameters, {ParameterOverride{"roughness", override}}, bytes);
+    CHECK(ReadFloat(bytes, 0) == doctest::Approx(0.9f));
+    // Yang tidak ditimpa tetap dari induknya.
+    CHECK(ReadFloat(bytes, 16) == doctest::Approx(0.2f));
+}
+
+TEST_CASE("Override yang parameternya sudah tidak ada diabaikan, bukan menggagalkan") {
+    // Menghapus sebuah parameter dari induk tidak boleh membuat instance-nya
+    // gagal dimuat.
+    const std::vector<MaterialParameter> parameters{Param("roughness", ValueKind::Float, "0.5")};
+    MaterialParameterBlock block;
+    block.Build(parameters);
+
+    MaterialValue ghost;
+    ghost.kind = ValueKind::Float;
+    ghost.components = {1.0f, 0.0f, 0.0f, 0.0f};
+    std::vector<uint8_t> bytes;
+    block.Fill(parameters, {ParameterOverride{"sudahDihapus", ghost}}, bytes);
+    CHECK(bytes.size() == block.Bytes());
+    CHECK(ReadFloat(bytes, 0) == doctest::Approx(0.5f));
+}
+
+TEST_CASE("Sisipan selalu nol, jadi dua blok yang isinya sama berbanding sama") {
+    // Renderer memakai perbandingan byte untuk memutuskan apakah sebuah blok
+    // perlu diunggah ulang; sisipan yang tidak diinisialisasi membuat dua blok
+    // yang sebenarnya sama terlihat berbeda.
+    // `cutoff` lebih dulu, lalu `tint`: penjajaran 16 milik float3 mendorongnya
+    // ke offset 16 dan meninggalkan celah nyata di 4..16. Urutan sebaliknya
+    // tidak menyisakan celah sama sekali — float justru mengisi offset +12,
+    // karena ukuran float3 memang 12.
+    const std::vector<MaterialParameter> parameters{
+        Param("cutoff", ValueKind::Float, "0.5"),
+        Param("tint", ValueKind::Float3, "float3(1.0)"),
+    };
+    MaterialParameterBlock block;
+    block.Build(parameters);
+    REQUIRE(block.Slot(1).offset == 16u);
+    std::vector<uint8_t> a;
+    std::vector<uint8_t> b;
+    block.Fill(parameters, {}, a);
+    block.Fill(parameters, {}, b);
+    CHECK(a == b);
+    // Celah 4..16 benar-benar nol.
+    CHECK(ReadFloat(a, 4) == doctest::Approx(0.0f));
+    CHECK(ReadFloat(a, 8) == doctest::Approx(0.0f));
+    CHECK(ReadFloat(a, 12) == doctest::Approx(0.0f));
+}
+
+TEST_CASE("Menulis satu nilai tidak melewati batas slotnya") {
+    const std::vector<MaterialParameter> parameters{
+        Param("tint", ValueKind::Float3, "float3(0.0)"),
+        Param("cutoff", ValueKind::Float, "0.25"),
+    };
+    MaterialParameterBlock block;
+    block.Build(parameters);
+    std::vector<uint8_t> bytes;
+    block.Fill(parameters, {}, bytes);
+
+    // Instance lama menyimpan float4 untuk parameter yang kini float3. `cutoff`
+    // duduk tepat di offset 12 — mengisi celah ukuran float3 — jadi komponen
+    // keempat yang ditulis melewati slotnya akan menimpanya persis.
+    MaterialValue wide;
+    wide.kind = ValueKind::Float4;
+    wide.components = {1.0f, 1.0f, 1.0f, 99.0f};
+    CHECK(block.Write(bytes, "tint", wide));
+    CHECK(ReadFloat(bytes, 12) == doctest::Approx(0.25f));
+}
+
+TEST_CASE("Menulis parameter yang tidak ada mengembalikan false") {
+    MaterialParameterBlock block;
+    block.Build({Param("a", ValueKind::Float)});
+    std::vector<uint8_t> bytes(block.Bytes(), 0u);
+    CHECK(!block.Write(bytes, "b", MaterialValue{}));
 }
