@@ -9,6 +9,7 @@ sim_add_library(Render
         src/LightCluster.cpp
         src/Atmosphere.cpp
         src/Bloom.cpp
+        src/CloudNoise.cpp
         src/DepthPyramid.cpp
         src/Denoise.cpp
         src/PostProcess.cpp
@@ -68,7 +69,8 @@ sim_compile_shaders(SimShadersGrid
         ${CMAKE_SOURCE_DIR}/Shaders/sky_view.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/sky_draw.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/sky_aerial.frag.slang
-        ${CMAKE_SOURCE_DIR}/Shaders/sky_aerial_apply.frag.slang)
+        ${CMAKE_SOURCE_DIR}/Shaders/sky_aerial_apply.frag.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/sky_clouds.frag.slang)
 # openpbr.slang sengaja tidak ada di daftar ini. Ia modul pustaka tanpa entry
 # point — yang mengompilasinya adalah `AssembleMaterialModule`, yang menanamnya
 # ke dalam modul material lalu menyerahkannya ke ShaderCache. Menambahkannya di

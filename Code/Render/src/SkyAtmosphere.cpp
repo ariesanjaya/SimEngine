@@ -1,9 +1,12 @@
 #include "SkyAtmosphere.h"
 
 #include "Sim/Core/Log.h"
+#include "Sim/Render/CloudNoise.h"
 
 #include <algorithm>
+#include <chrono>
 #include <fstream>
+#include <span>
 #include <vector>
 
 namespace sim::render {
@@ -60,6 +63,17 @@ struct AerialApplyPush {
     Mat4 invViewProj{1.0f};
     Vec4 camera{0.0f};
     Vec4 params{0.0f};
+};
+
+struct CloudPush {
+    Mat4 invViewProj{1.0f};
+    Vec4 camera{0.0f};
+    Vec4 sun{0.0f};
+    Vec4 sunRadiance{0.0f};
+    Vec4 layer{0.0f};
+    Vec4 shaping{0.0f};
+    Vec4 lighting{0.0f};
+    Vec4 lutSizes{0.0f};
 };
 
 std::vector<uint32_t> ReadSpirv(const std::filesystem::path& path) {
@@ -426,6 +440,23 @@ void SkyAtmosphere::AdoptDepth(VkImageView depthView, VkSampler depthSampler) {
     if (aerialApplySet_ == VK_NULL_HANDLE || depthView == VK_NULL_HANDLE) {
         return;
     }
+    depthView_ = depthView;
+    depthSampler_ = depthSampler;
+    // Set awan menunjuk depth buffer yang sama. Ia mungkin belum ada — awan
+    // dibangun belakangan, dan `CreateClouds` menulis descriptor-nya sendiri
+    // dari kedua medan yang baru saja disimpan di atas.
+    if (cloudSet_ != VK_NULL_HANDLE) {
+        const VkDescriptorImageInfo cloudDepth{depthSampler, depthView,
+                                               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        VkWriteDescriptorSet cloudWrite{};
+        cloudWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        cloudWrite.dstSet = cloudSet_;
+        cloudWrite.dstBinding = 3;
+        cloudWrite.descriptorCount = 1;
+        cloudWrite.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        cloudWrite.pImageInfo = &cloudDepth;
+        vkUpdateDescriptorSets(device_->Handle(), 1, &cloudWrite, 0, nullptr);
+    }
     // SHADER_READ_ONLY, karena itulah layout yang dijanjikan `Access::ShaderRead`
     // graph — sama dengan yang dipakai piramida depth. Layout descriptor yang
     // tidak cocok dengan layout sesungguhnya adalah galat validation layer pada
@@ -632,6 +663,151 @@ void SkyAtmosphere::RecordDraw(VkCommandBuffer cmd, const Mat4& invViewProj,
     vkCmdDraw(cmd, 3, 1, 0, 0);
 }
 
+bool SkyAtmosphere::CreateClouds(const std::filesystem::path& shaderDirectory,
+                                 VkFormat sceneFormat) {
+    if (device_ == nullptr || !IsValid()) {
+        return false;
+    }
+
+    const auto started = std::chrono::steady_clock::now();
+    const CloudNoiseVolume shape = BuildCloudShapeVolume(kCloudShapeSize, 20250812u);
+    const CloudNoiseVolume detail = BuildCloudDetailVolume(kCloudDetailSize, 90210u);
+    const double buildMs =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - started)
+            .count();
+
+    if (!cloudShape_.Create(*device_, glm::uvec3(kCloudShapeSize), VK_FORMAT_R8G8B8A8_UNORM, 4) ||
+        !cloudDetail_.Create(*device_, glm::uvec3(kCloudDetailSize), VK_FORMAT_R8G8B8A8_UNORM,
+                             4)) {
+        SIM_ERROR("Render", "cannot allocate cloud noise volumes");
+        return false;
+    }
+    if (!cloudShape_.UploadRegion(glm::uvec3(0), glm::uvec3(kCloudShapeSize),
+                                  std::as_bytes(std::span(shape.texels))) ||
+        !cloudDetail_.UploadRegion(glm::uvec3(0), glm::uvec3(kCloudDetailSize),
+                                   std::as_bytes(std::span(detail.texels)))) {
+        return false;
+    }
+
+    // Sampler tersendiri: derau awan **harus** diulang, sementara sampler LUT
+    // menjepit. Memakai sampler yang menjepit di sini akan mengoles texel tepi
+    // sepanjang seluruh langit alih-alih mengulang ubinnya.
+    VkSamplerCreateInfo samplerInfo{};
+    samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    samplerInfo.magFilter = VK_FILTER_LINEAR;
+    samplerInfo.minFilter = VK_FILTER_LINEAR;
+    samplerInfo.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    samplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    samplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    if (vkCreateSampler(device_->Handle(), &samplerInfo, nullptr, &cloudSampler_) != VK_SUCCESS) {
+        return false;
+    }
+
+    std::array<VkDescriptorSetLayoutBinding, 4> bindings{};
+    for (uint32_t i = 0; i < bindings.size(); ++i) {
+        bindings[i].binding = i;
+        bindings[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        bindings[i].descriptorCount = 1;
+        bindings[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    }
+    VkDescriptorSetLayoutCreateInfo layoutInfo{};
+    layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+    layoutInfo.pBindings = bindings.data();
+    if (vkCreateDescriptorSetLayout(device_->Handle(), &layoutInfo, nullptr, &cloudSetLayout_) !=
+        VK_SUCCESS) {
+        return false;
+    }
+
+    const VkDescriptorPoolSize poolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4};
+    VkDescriptorPoolCreateInfo poolInfo{};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.maxSets = 1;
+    poolInfo.poolSizeCount = 1;
+    poolInfo.pPoolSizes = &poolSize;
+    if (vkCreateDescriptorPool(device_->Handle(), &poolInfo, nullptr, &cloudPool_) != VK_SUCCESS) {
+        return false;
+    }
+    VkDescriptorSetAllocateInfo allocateInfo{};
+    allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocateInfo.descriptorPool = cloudPool_;
+    allocateInfo.descriptorSetCount = 1;
+    allocateInfo.pSetLayouts = &cloudSetLayout_;
+    if (vkAllocateDescriptorSets(device_->Handle(), &allocateInfo, &cloudSet_) != VK_SUCCESS) {
+        return false;
+    }
+
+    const std::array<VkDescriptorImageInfo, 4> images{
+        VkDescriptorImageInfo{cloudSampler_, cloudShape_.View(),
+                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        VkDescriptorImageInfo{cloudSampler_, cloudDetail_.View(),
+                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        VkDescriptorImageInfo{sampler_, transmittance_.view,
+                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        VkDescriptorImageInfo{depthSampler_, depthView_,
+                              VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+    std::array<VkWriteDescriptorSet, 4> writes{};
+    for (uint32_t i = 0; i < writes.size(); ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = cloudSet_;
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        writes[i].pImageInfo = &images[i];
+    }
+    // Depth belum tentu sudah ditunjuk saat ini; `AdoptDepth` menuliskannya lagi.
+    const uint32_t writeCount = depthView_ == VK_NULL_HANDLE ? 3u : 4u;
+    vkUpdateDescriptorSets(device_->Handle(), writeCount, writes.data(), 0, nullptr);
+
+    if (!CreatePipeline(shaderDirectory, "sky_clouds.frag.spv", cloudSetLayout_, sizeof(CloudPush),
+                        sceneFormat, vertexUv_, cloudLayout_, cloudPipeline_, /*blend=*/true)) {
+        return false;
+    }
+    SIM_INFO("Render", "cloud noise volumes ready ({}^3 + {}^3, {:.0f} ms)", kCloudShapeSize,
+             kCloudDetailSize, buildMs);
+    return true;
+}
+
+void SkyAtmosphere::RecordClouds(VkCommandBuffer cmd, const Mat4& invViewProj,
+                                 const Vec3& cameraPosition, float cameraHeightKm,
+                                 const Vec3& sunDirection, const Vec3& sunRadiance,
+                                 float intensity, const CloudSettings& settings,
+                                 float timeSeconds) {
+    if (!CloudsAreValid()) {
+        return;
+    }
+    const Vec3 sun = glm::length(sunDirection) > 1e-6f ? glm::normalize(sunDirection)
+                                                       : Vec3(0.0f, 1.0f, 0.0f);
+    CloudPush push;
+    push.invViewProj = invViewProj;
+    push.camera = Vec4(cameraPosition, std::max(cameraHeightKm, 0.0f));
+    push.sun = Vec4(sun, intensity);
+    push.sunRadiance = Vec4(sunRadiance, timeSeconds * settings.windSpeed);
+    // Puncak dijaga di atas alasnya. Lapisan terbalik membuat gradien
+    // ketinggiannya nol di mana-mana, dan yang terlihat adalah langit tanpa awan
+    // — tidak bisa dibedakan dari sakelar yang mati.
+    const float bottomKm = std::max(settings.bottomKm, 0.0f);
+    const float topKm = std::max(settings.topKm, bottomKm + 0.01f);
+    push.layer = Vec4(bottomKm, topKm, std::clamp(settings.coverage, 0.0f, 1.0f),
+                      std::max(settings.density, 0.0f));
+    push.shaping = Vec4(std::max(settings.tileKm, 0.01f), std::max(settings.detailScale, 0.01f),
+                        std::max(settings.detailStrength, 0.0f),
+                        static_cast<float>(std::clamp(settings.viewSamples, 1, 256)));
+    push.lighting = Vec4(static_cast<float>(std::clamp(settings.lightSamples, 1, 32)),
+                         std::max(settings.sunAbsorption, 0.0f),
+                         std::max(settings.cloudAbsorption, 1e-3f),
+                         std::clamp(settings.darknessThreshold, 0.0f, 1.0f));
+    push.lutSizes = Vec4(static_cast<float>(kTransmittanceWidth),
+                         static_cast<float>(kTransmittanceHeight), 0.0f, 0.0f);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, cloudPipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, cloudLayout_, 0, 1, &cloudSet_,
+                            0, nullptr);
+    vkCmdPushConstants(cmd, cloudLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+}
+
 void SkyAtmosphere::RecordAerialLut(VkCommandBuffer cmd, const Mat4& invViewProj,
                                     float cameraHeightKm, const Vec3& sunDirection,
                                     float maxDistanceKm, float hazeDensity) {
@@ -710,6 +886,25 @@ void SkyAtmosphere::Destroy() {
     dropPipeline(drawPipeline_, drawLayout_);
     dropPipeline(aerialLutPipeline_, aerialLutLayout_);
     dropPipeline(aerialApplyPipeline_, aerialApplyLayout_);
+    dropPipeline(cloudPipeline_, cloudLayout_);
+
+    cloudShape_.Destroy();
+    cloudDetail_.Destroy();
+    if (cloudSampler_ != VK_NULL_HANDLE) {
+        vkDestroySampler(device_->Handle(), cloudSampler_, nullptr);
+        cloudSampler_ = VK_NULL_HANDLE;
+    }
+    if (cloudPool_ != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(device_->Handle(), cloudPool_, nullptr);
+        cloudPool_ = VK_NULL_HANDLE;
+        cloudSet_ = VK_NULL_HANDLE;
+    }
+    if (cloudSetLayout_ != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(device_->Handle(), cloudSetLayout_, nullptr);
+        cloudSetLayout_ = VK_NULL_HANDLE;
+    }
+    depthView_ = VK_NULL_HANDLE;
+    depthSampler_ = VK_NULL_HANDLE;
 
     if (pool_ != VK_NULL_HANDLE) {
         vkDestroyDescriptorPool(device_->Handle(), pool_, nullptr);

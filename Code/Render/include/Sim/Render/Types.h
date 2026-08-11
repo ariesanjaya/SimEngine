@@ -71,6 +71,50 @@ struct PostProcessSettings {
     BloomSettings bloom;
 };
 
+/// Awan volumetrik.
+///
+/// **Mati secara bawaan, dan alasannya biaya.** Langit dan kabut berharga
+/// sepersepuluh milidetik; raymarch awan berharga puluhan kali itu, dan ia
+/// dibayar pada setiap frame di setiap viewport. Sakelar yang menyala sendiri
+/// membuat seseorang membayar harga itu tanpa pernah memintanya.
+struct CloudSettings {
+    bool enabled = false;
+
+    /// Alas dan puncak lapisan, kilometer di atas permukaan laut.
+    float bottomKm = 1.5f;
+    float topKm = 4.0f;
+
+    /// Cakupan langit, 0..1. **Mengurangi kerapatan, bukan mengalikannya** —
+    /// pengurangan memakan tepi awan, yang memang cara langit menjadi cerah;
+    /// perkalian menipiskan semuanya merata sehingga langit cerah tampak seperti
+    /// langit mendung yang tembus pandang.
+    float coverage = 0.45f;
+    /// Pengali kerapatan sesudah pembentukan.
+    float density = 1.0f;
+
+    /// Sisi ubin derau, kilometer. Ini yang menentukan besar awannya.
+    float tileKm = 12.0f;
+    /// Pengali skala volume rincian terhadap volume bentuk.
+    float detailScale = 7.0f;
+    /// Kekuatan kikisan rincian di tepi.
+    float detailStrength = 0.35f;
+
+    /// Cuplikan sepanjang pandangan, dan cuplikan menuju matahari. Keduanya
+    /// mengalikan biaya pass ini secara langsung.
+    int viewSamples = 48;
+    int lightSamples = 6;
+
+    /// Serapan menuju matahari dan menembus awan.
+    float sunAbsorption = 0.85f;
+    float cloudAbsorption = 1.05f;
+    /// Lantai kegelapan bagian dalam awan, pengganti murah hamburan berganda.
+    /// Nol menghasilkan awan sehitam batu.
+    float darknessThreshold = 0.18f;
+
+    /// Kecepatan angin, km per detik. Menggeser ubin derau secara mendatar.
+    float windSpeed = 0.01f;
+};
+
 /// Kamera editor. Rotasi disimpan sebagai quaternion supaya tidak ada gimbal
 /// lock saat kamera fly diarahkan lurus ke atas/bawah.
 struct Camera {
@@ -153,6 +197,9 @@ struct ViewportDesc {
     /// udara tanpa mengaburkannya — kebalikan dari yang diminta orang saat
     /// meminta kabut lebih tebal.
     float aerialHaze = 1.0f;
+
+    /// Awan volumetrik.
+    CloudSettings clouds;
 
     /// Pengaturan post-process: eksposur, operator nada, dan yang menyusul di
     /// atasnya.

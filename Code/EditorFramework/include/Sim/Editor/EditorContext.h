@@ -100,6 +100,10 @@ struct EditorContext {
         float aerialHaze = 1.0f;
     } sky;
 
+    /// Awan volumetrik. Terpisah dari `sky` karena biayanya berbeda satu orde,
+    /// dan karena itu sakelarnya perlu berdiri sendiri.
+    render::CloudSettings clouds;
+
     /// Waktu-hari: preset kurva, jam siklus, dan tempat mataharinya.
     ///
     /// Di sini karena alasan yang sama dengan `gi`: dua hal menyentuhnya. Panel

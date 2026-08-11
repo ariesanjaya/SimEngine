@@ -389,6 +389,10 @@ public:
         if (sky_.Create(device_, shaderDirectory_, PostProcess::kSceneFormat)) {
             sky_.AdoptLayouts();
             sky_.AdoptDepth(target_.DepthView(), target_.Sampler());
+            // Sesudah AdoptDepth, karena set descriptor awan menunjuk depth
+            // buffer dan menulisnya sekali di sini lebih murah daripada
+            // menuliskannya lagi tiap frame.
+            sky_.CreateClouds(shaderDirectory_, PostProcess::kSceneFormat);
         }
         CreateRadianceCache();
         if (probes_.Create(device_, shaderDirectory_, shadowSetLayout_)) {
@@ -600,6 +604,7 @@ public:
                     : 0.0f;
             lastFrameTime_ = now;
             hasLastFrameTime_ = true;
+            cloudTimeSeconds_ += deltaSeconds_;
         }
         sdfVoxelsWritten_ = 0;
         sdfUpdateMs_ = 0.0f;
@@ -763,6 +768,17 @@ public:
             }
             vkCmdEndRendering(command);
         };
+
+        if (cloudId_ != kInvalidPass) {
+            recorders[cloudId_] = [&](VkCommandBuffer command) {
+                BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/false,
+                               /*writeColor=*/true, /*useDepth=*/false);
+                sky_.RecordClouds(command, invViewProj, desc.camera.position,
+                                  desc.cameraHeightKm, sunDirection_, sunRadiance_,
+                                  desc.skyIntensity, desc.clouds, cloudTimeSeconds_);
+                vkCmdEndRendering(command);
+            };
+        }
 
         if (aerialId_ != kInvalidPass) {
             // Jangkauan LUT mengikuti bidang jauh kamera. **Bukan 4 km per slice
@@ -955,6 +971,18 @@ private:
         if (sdfDebugEnabled_) {
             giDebugId_ = graph_.AddPass("gi-sdf-debug");
             graph_.Write(giDebugId_, sceneId_, Access::ColorWrite);
+        }
+
+        // Awan volumetrik, sesudah seluruh geometri: raymarch-nya berhenti di
+        // permukaan terdekat, dan permukaan itu baru diketahui setelah depth
+        // selesai ditulis. Sebelum kabut, karena awan berada di dalam atmosfer
+        // yang sama — udara di antara kamera dan awan adalah udara yang sama
+        // yang membiru di kejauhan.
+        cloudId_ = kInvalidPass;
+        if (desc.skyEnabled && desc.clouds.enabled && sky_.CloudsAreValid()) {
+            cloudId_ = graph_.AddPass("clouds");
+            graph_.Read(cloudId_, depthId_, Access::ShaderRead);
+            graph_.Write(cloudId_, sceneId_, Access::ColorWrite);
         }
 
         // Kabut atmosferik, sesudah seluruh geometri dan sebelum bloom.
@@ -2618,6 +2646,11 @@ private:
     SkyAtmosphere sky_;
     /// Langkah waktu frame ini, dipakai adaptasi eksposur.
     float deltaSeconds_ = 0.0f;
+    /// Jam angin awan. Berakumulasi dari langkah waktu, bukan dibaca dari jam
+    /// dinding: awan yang bergerak mengikuti jam dinding akan meloncat setiap
+    /// kali frame tersendat, dan yang meloncat pada lapisan sebesar itu terlihat
+    /// sebagai seluruh langit yang bergeser.
+    float cloudTimeSeconds_ = 0.0f;
     std::chrono::steady_clock::time_point lastFrameTime_{};
     bool hasLastFrameTime_ = false;
     /// Cache radiansi hash grid. Riwayat lintas frame, jadi ia bukan per slot —
@@ -2659,6 +2692,7 @@ private:
     ResourceId sceneId_ = kInvalidResource;
     ResourceId depthId_ = kInvalidResource;
     PassId skyId_ = kInvalidPass;
+    PassId cloudId_ = kInvalidPass;
     PassId aerialId_ = kInvalidPass;
     PassId bloomId_ = kInvalidPass;
     PassId meterId_ = kInvalidPass;

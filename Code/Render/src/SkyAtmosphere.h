@@ -1,7 +1,9 @@
 #pragma once
 
 #include "Sim/RHI/Device.h"
+#include "Sim/RHI/Texture3D.h"
 #include "Sim/Render/Atmosphere.h"
+#include "Sim/Render/Types.h"
 
 #include <array>
 #include <cstdint>
@@ -86,6 +88,29 @@ public:
     void RecordAerialApply(VkCommandBuffer cmd, const Mat4& invViewProj,
                            const Vec3& cameraPosition, float maxDistanceKm, float intensity);
 
+    /// Sisi ubin derau awan. Bentuk 64³ dan rincian 32³.
+    ///
+    /// **Bukan 128³ seperti acuannya.** Acuan membangkitkannya di compute
+    /// shader, tempat 128³ berharga beberapa milidetik; di CPU angka itu
+    /// berharga 1,3 detik yang dibayar setiap kali editor dibuka. 64³ berharga
+    /// 218 ms — dan yang hilang pada awan berskala kilometer adalah rincian yang
+    /// toh sudah dikikis volume rincian.
+    static constexpr uint32_t kCloudShapeSize = 64;
+    static constexpr uint32_t kCloudDetailSize = 32;
+
+    /// Membangkitkan volume derau dan mengunggahnya. Dipanggil sekali, dan
+    /// **terpisah dari `Create`**: ia memakan ratusan milidetik, dan pemanggil
+    /// berhak memutuskan kapan membayarnya.
+    bool CreateClouds(const std::filesystem::path& shaderDirectory, VkFormat sceneFormat);
+
+    bool CloudsAreValid() const { return cloudPipeline_ != VK_NULL_HANDLE && hasDepth_; }
+
+    /// Menggambar awan ke gambar adegan lewat blending yang sama dengan kabut.
+    /// Pemanggil yang membuka dan menutup rendering.
+    void RecordClouds(VkCommandBuffer cmd, const Mat4& invViewProj, const Vec3& cameraPosition,
+                      float cameraHeightKm, const Vec3& sunDirection, const Vec3& sunRadiance,
+                      float intensity, const CloudSettings& settings, float timeSeconds);
+
 private:
     struct Image {
         VkImage image = VK_NULL_HANDLE;
@@ -134,6 +159,14 @@ private:
     VkDescriptorSet drawSet_ = VK_NULL_HANDLE;
     VkDescriptorSet aerialLutSet_ = VK_NULL_HANDLE;
     VkDescriptorSet aerialApplySet_ = VK_NULL_HANDLE;
+    VkDescriptorSet cloudSet_ = VK_NULL_HANDLE;
+    VkDescriptorSetLayout cloudSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool cloudPool_ = VK_NULL_HANDLE;
+    rhi::Texture3D cloudShape_;
+    rhi::Texture3D cloudDetail_;
+    VkSampler cloudSampler_ = VK_NULL_HANDLE;
+    VkImageView depthView_ = VK_NULL_HANDLE;
+    VkSampler depthSampler_ = VK_NULL_HANDLE;
     bool hasDepth_ = false;
 
     VkPipelineLayout transmittanceLayout_ = VK_NULL_HANDLE;
@@ -148,6 +181,8 @@ private:
     VkPipeline aerialLutPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout aerialApplyLayout_ = VK_NULL_HANDLE;
     VkPipeline aerialApplyPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout cloudLayout_ = VK_NULL_HANDLE;
+    VkPipeline cloudPipeline_ = VK_NULL_HANDLE;
 
     /// Transmitansi dibangun sekali; sisanya saat mataharinya bergerak cukup
     /// jauh. Ambangnya bukan "berubah sama sekali": matahari yang digerakkan

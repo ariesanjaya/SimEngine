@@ -14,6 +14,7 @@
 #include "Sim/Render/TimeOfDay.h"
 #include "Sim/Render/ToneMap.h"
 #include "Sim/Render/Atmosphere.h"
+#include "Sim/Render/CloudNoise.h"
 #include "Sim/Render/Bloom.h"
 #include "Sim/Render/TieredTrace.h"
 #include "Sim/Render/TraceBackend.h"
@@ -3948,6 +3949,205 @@ TEST_CASE("udara memakan biru dan mengembalikannya sebagai kabut biru") {
     const Vec3 black = ApplyAerialPerspective(Vec3(0.0f), far);
     CHECK(black.z > black.x);
     CHECK(black.z > 0.0f);
+}
+
+// --- E8.8: derau awan volumetrik ---------------------------------------------
+
+TEST_CASE("derau awan menyambung di ketiga tepinya") {
+    using namespace sim::render;
+
+    // **Ini sifat yang menentukan seluruhnya.** Lapisan awan membentang puluhan
+    // kilometer dan volume deraunya beberapa puluh texel, jadi ia diulang
+    // berkali-kali di setiap arah. Derau yang tidak menyambung menaruh tepi
+    // tajam pada setiap batas pengulangan — dan yang terlihat bukan derau yang
+    // salah melainkan **kisi garis lurus di langit**, teratur sempurna, yang
+    // tidak mungkin dikira awan oleh siapa pun. Cacat ini juga tidak muncul
+    // sebagai galat apa pun: tiap texel di dalam volumenya benar.
+    for (int i = 0; i < 24; ++i) {
+        const float a = static_cast<float>(i) / 24.0f;
+        const float b = static_cast<float>((i * 7) % 24) / 24.0f;
+
+        // Worley dan Perlin, digeser satu periode penuh di tiap sumbu.
+        const Vec3 base(a, b, 0.37f);
+        for (const Vec3& shift : {Vec3(1.0f, 0.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f),
+                                  Vec3(0.0f, 0.0f, 1.0f)}) {
+            CHECK(CloudNoise::Worley(base, 4, 1234) ==
+                  doctest::Approx(CloudNoise::Worley(base + shift, 4, 1234)).epsilon(1e-4f));
+            CHECK(CloudNoise::Perlin(base, 4, 1234) ==
+                  doctest::Approx(CloudNoise::Perlin(base + shift, 4, 1234)).epsilon(1e-4f));
+            // Dan FBM-nya juga — tiap oktafnya melipatduakan frekuensi, dan
+            // frekuensi yang tetap bilangan bulat itulah syarat agar jumlahnya
+            // ikut menyambung. Faktor pecahan menghasilkan oktaf yang
+            // masing-masing rapi tapi jumlahnya tidak menyambung sama sekali.
+            CHECK(CloudNoise::WorleyFbm(base, 4, 3, 99) ==
+                  doctest::Approx(CloudNoise::WorleyFbm(base + shift, 4, 3, 99)).epsilon(1e-4f));
+            CHECK(CloudNoise::PerlinWorley(base, 4, 55) ==
+                  doctest::Approx(CloudNoise::PerlinWorley(base + shift, 4, 55)).epsilon(1e-4f));
+        }
+    }
+}
+
+TEST_CASE("derau awan berada di 0..1 dan benar-benar berderau") {
+    using namespace sim::render;
+
+    // Sebuah "derau" yang ternyata tetapan tidak menghasilkan galat apa pun,
+    // hanya langit yang tertutup rata atau kosong sama sekali — dan keduanya
+    // mudah dikira pilihan pengaturan.
+    float lowest = 2.0f;
+    float highest = -1.0f;
+    double sum = 0.0;
+    int count = 0;
+    for (int z = 0; z < 12; ++z) {
+        for (int y = 0; y < 12; ++y) {
+            for (int x = 0; x < 12; ++x) {
+                const Vec3 p((x + 0.5f) / 12.0f, (y + 0.5f) / 12.0f, (z + 0.5f) / 12.0f);
+                const float value = CloudNoise::PerlinWorley(p, 4, 2024);
+                CHECK(value >= 0.0f);
+                CHECK(value <= 1.0f);
+                lowest = std::min(lowest, value);
+                highest = std::max(highest, value);
+                sum += value;
+                ++count;
+            }
+        }
+    }
+    CHECK(highest - lowest > 0.4f);
+    const double mean = sum / count;
+    CHECK(mean > 0.05);
+    CHECK(mean < 0.95);
+}
+
+TEST_CASE("Worley bernilai nol tepat di titik fiturnya, dan naik menjauhinya") {
+    using namespace sim::render;
+
+    // Worley adalah jarak ke titik fitur terdekat. Kalau ia tidak pernah
+    // menyentuh nol, titik fiturnya tidak berada di tempat yang dikira
+    // pencariannya — cacat yang muncul sebagai awan yang seluruhnya sama
+    // rapatnya, bukan sebagai galat.
+    float smallest = 1.0f;
+    for (int i = 0; i < 4096; ++i) {
+        const Vec3 p(static_cast<float>(i % 16) / 16.0f,
+                     static_cast<float>((i / 16) % 16) / 16.0f,
+                     static_cast<float>(i / 256) / 16.0f);
+        smallest = std::min(smallest, CloudNoise::Worley(p, 4, 5150));
+    }
+    CHECK(smallest < 0.1f);
+
+    // Dan benih yang berbeda menghasilkan bidang yang berbeda — kalau tidak,
+    // volume bentuk dan volume rincian akan mengikis dirinya sendiri dengan
+    // pola yang sama persis, yang meniadakan seluruh guna keduanya terpisah.
+    int different = 0;
+    for (int i = 0; i < 64; ++i) {
+        const Vec3 p(static_cast<float>(i) / 64.0f, 0.3f, 0.7f);
+        if (std::abs(CloudNoise::Worley(p, 4, 1) - CloudNoise::Worley(p, 4, 2)) > 0.01f) {
+            ++different;
+        }
+    }
+    CHECK(different > 50);
+}
+
+TEST_CASE("gradien ketinggian awan nol di kedua ujung lapisannya") {
+    using namespace sim::render;
+
+    // **Nol di alas juga, bukan hanya di puncak.** Lapisan yang dipotong rata di
+    // bawah memperlihatkan alasnya sebagai bidang datar sempurna yang membentang
+    // sampai horizon, dan tidak ada yang lebih cepat memberi tahu mata bahwa
+    // langitnya palsu.
+    CHECK(CloudHeightGradient(1.5f, 1.5f, 4.0f) == doctest::Approx(0.0f));
+    CHECK(CloudHeightGradient(4.0f, 1.5f, 4.0f) == doctest::Approx(0.0f));
+    CHECK(CloudHeightGradient(1.0f, 1.5f, 4.0f) == doctest::Approx(0.0f));
+    CHECK(CloudHeightGradient(9.0f, 1.5f, 4.0f) == doctest::Approx(0.0f));
+
+    // Di dalamnya positif, dan puncaknya berada di bawah tengah — dasar kumulus
+    // hampir rata sementara puncaknya berjumbai panjang.
+    float peakAt = 0.0f;
+    float peak = 0.0f;
+    for (int i = 1; i < 100; ++i) {
+        const float fraction = static_cast<float>(i) / 100.0f;
+        const float value = CloudHeightGradient(1.5f + fraction * 2.5f, 1.5f, 4.0f);
+        CHECK(value > 0.0f);
+        CHECK(value <= 1.0f);
+        if (value > peak) {
+            peak = value;
+            peakAt = fraction;
+        }
+    }
+    CHECK(peakAt < 0.5f);
+
+    // Lapisan yang tebalnya nol atau terbalik tidak boleh membagi dengan nol.
+    CHECK(CloudHeightGradient(2.0f, 3.0f, 3.0f) == doctest::Approx(0.0f));
+    CHECK(CloudHeightGradient(2.0f, 4.0f, 1.0f) == doctest::Approx(0.0f));
+}
+
+TEST_CASE("volume derau awan terisi dan tiap kanalnya berbeda") {
+    using namespace sim::render;
+
+    // Kecil, karena yang diuji bentuknya bukan kualitasnya.
+    const CloudNoiseVolume shape = BuildCloudShapeVolume(8, 4242);
+    CHECK(shape.size == 8);
+    CHECK(shape.texels.size() == 8u * 8u * 8u * 4u);
+
+    // Empat kanal yang isinya sama adalah empat kanal yang tiga di antaranya
+    // terbuang — dan bobot yang disetel pemakai lalu tidak berpengaruh apa pun,
+    // yang tampak seperti slider yang rusak.
+    for (uint32_t channel = 1; channel < 4; ++channel) {
+        int different = 0;
+        for (uint32_t z = 0; z < 8; ++z) {
+            for (uint32_t y = 0; y < 8; ++y) {
+                for (uint32_t x = 0; x < 8; ++x) {
+                    if (std::abs(shape.At(x, y, z, 0) - shape.At(x, y, z, channel)) > 0.02f) {
+                        ++different;
+                    }
+                }
+            }
+        }
+        CHECK(different > 256);
+    }
+
+    const CloudNoiseVolume detail = BuildCloudDetailVolume(8, 4242);
+    CHECK(detail.size == 8);
+    CHECK(detail.texels.size() == 8u * 8u * 8u * 4u);
+
+    // Di luar batas mengembalikan nol alih-alih membaca memori tetangga.
+    // **Dijaga per sumbu, bukan pada indeks datarnya:** indeks datar dari x yang
+    // melewati tepi tetap jatuh di dalam larik, hanya di baris berikutnya.
+    CHECK(shape.At(8, 0, 0, 0) == doctest::Approx(0.0f));
+    CHECK(shape.At(0, 8, 0, 0) == doctest::Approx(0.0f));
+    CHECK(shape.At(0, 0, 8, 0) == doctest::Approx(0.0f));
+    CHECK(shape.At(0, 0, 0, 4) == doctest::Approx(0.0f));
+}
+
+TEST_CASE("tiap kanal volume derau meregang ke seluruh rentangnya") {
+    using namespace sim::render;
+
+    // **Bukan penghalusan, dan ini terukur.** Sebelum peregangan ada, kanal
+    // gabungan volume bentuk membentang 0,09..0,71 dengan median 0,24 — dan
+    // cakupan, yang berupa ambang, karena itu memotong di tempat yang hanya
+    // dilewati 0,2% volume. Yang terlihat bukan derau yang salah melainkan
+    // langit yang cerah, yang tidak bisa dibedakan dari sakelar yang mati.
+    const CloudNoiseVolume shape = BuildCloudShapeVolume(16, 777);
+    for (uint32_t channel = 0; channel < 4; ++channel) {
+        float lowest = 2.0f;
+        float highest = -1.0f;
+        double sum = 0.0;
+        for (uint32_t z = 0; z < 16; ++z) {
+            for (uint32_t y = 0; y < 16; ++y) {
+                for (uint32_t x = 0; x < 16; ++x) {
+                    const float value = shape.At(x, y, z, channel);
+                    lowest = std::min(lowest, value);
+                    highest = std::max(highest, value);
+                    sum += value;
+                }
+            }
+        }
+        CHECK(lowest <= 1.0f / 255.0f);
+        CHECK(highest >= 254.0f / 255.0f);
+        // Dan pusatnya berada di tengah rentangnya, bukan menempel di salah satu
+        // ujung — ambang yang berguna menuntut nilai di kedua sisinya.
+        const double mean = sum / (16 * 16 * 16);
+        CHECK(mean > 0.2);
+        CHECK(mean < 0.8);
+    }
 }
 
 TEST_CASE("fungsi fase berintegral satu atas bola") {

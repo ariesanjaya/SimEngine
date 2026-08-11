@@ -155,6 +155,7 @@ public:
         desc.cameraHeightKm = context.sky.cameraHeightKm;
         desc.aerialPerspective = context.sky.aerialPerspective;
         desc.aerialHaze = context.sky.aerialHaze;
+        desc.clouds = context.clouds;
         camera_.ApplyTo(desc.camera);
         desc.camera.orthographic = orthographic_;
         desc.camera.orthoHeight = camera_.distance;

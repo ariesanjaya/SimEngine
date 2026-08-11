@@ -910,7 +910,63 @@ berubah, seluruhnya pada geometri, seluruhnya ke arah yang benar (lebih terang
 dan lebih biru). Pass ini baru punya sesuatu untuk dikerjakan begitu E8.5 membawa
 terrain.
 
-**Yang belum ada dari acuan itu:** awan volumetrik.
+**Selesai: awan volumetrik**
+(`Code/Render/{include/Sim/Render/CloudNoise.h,src/CloudNoise.cpp,src/SkyAtmosphere.{h,cpp}}`,
+`Shaders/sky_clouds.frag.slang`). Raymarch melalui cangkang bola antara dua
+ketinggian, disinari matahari lewat light march pendek, dikomposit dengan
+blending yang sama dengan kabut.
+
+- **Derau 3D-nya dibangkitkan di CPU, bukan di compute shader.** Alasan
+  langsungnya sama dengan aerial perspective; yang didapat lebih dari sekadar
+  menghindari jalur baru. Derau menjadi kode biasa yang punya nilai balik, jadi
+  sifat yang menentukan benar-tidaknya bisa dinyatakan sebagai uji: **ia harus
+  menyambung di ketiga tepinya.** Lapisan awan membentang puluhan kilometer dan
+  volumenya 64 texel, jadi ia diulang berkali-kali; derau yang tidak menyambung
+  menaruh tepi tajam pada setiap batas pengulangan, dan yang terlihat adalah
+  kisi garis lurus di langit — teratur sempurna, dan tidak mungkin dikira awan.
+- **Dibagi ke 24 thread.** 64³ satu thread berharga 1,8 detik yang dibayar
+  setiap kali editor dibuka; dibagi per irisan z ia menjadi 218 ms, dan hasilnya
+  sama persis karena tiap texel berdiri sendiri.
+- **64³, bukan 128³ seperti acuannya.** Di compute shader 128³ berharga beberapa
+  milidetik; di CPU ia berharga 1,3 detik. Yang hilang pada awan berskala
+  kilometer adalah rincian yang toh sudah dikikis volume rincian.
+- **Cangkang bola, bukan kotak.** Kotak sejajar sumbu punya tepi, dan tepi itu
+  jatuh di dalam pandangan sebagai garis lurus tempat awan berhenti mendadak —
+  tepat di dekat horizon, yaitu tempat lapisan awan paling banyak terlihat.
+
+**Dua kesalahan yang keduanya muncul sebagai langit yang cerah**, bukan sebagai
+galat — dan keduanya baru ketahuan setelah sebaran nilainya diukur, bukan
+ditatap:
+
+- Bentuk pertama `PerlinWorley` membagi dengan Worley. Perlin dan Worley
+  sama-sama bermean sekitar 0,5, jadi pembilangnya sama seringnya negatif:
+  **median kanal itu nol**, separuh volume terjepit habis. Bentuk yang benar
+  memetakan Perlin ke rentang yang dasarnya digeser Worley.
+- Derau FBM memusat di sekitar mean-nya. Terukur sebelum peregangan ada, kanal
+  gabungannya membentang 0,09–0,71 bermedian 0,24 — sementara cakupan 0,45
+  berarti ambang 0,55, yang hanya dilewati **0,2%** volume. Sesudah tiap kanal
+  diregangkan ke seluruh rentangnya: median 0,53 dan 40% melewati ambang. Acuan
+  itu menormalkan deraunya lewat pass tersendiri, dan alasannya sama.
+
+Terukur di editor (RTX 2060, viewport 1277×541):
+
+| Yang diukur | Hasil |
+| --- | --- |
+| Biaya pass `clouds` | **1,534 ms** |
+| Biaya pass `sky` / `aerial` di frame yang sama | 0,131 / 0,133 ms |
+| Pembangkitan volume derau saat start (release) | **259 ms** |
+| Galat validation layer | **0** |
+
+**Mati secara bawaan, dan alasannya angka di atas.** Langit dan kabut berharga
+sepersepuluh milidetik; awan berharga sepuluh kali lipatnya, dan pada 1080p
+penuh ia mendekati 4–5 ms. Sakelar yang menyala sendiri membuat seseorang
+membayar harga itu tanpa pernah memintanya.
+
+**Yang belum benar dan sudah terlihat:** geseran acak per piksel menukar pita
+dengan bintik, dan bintiknya terlihat pada awan yang tipis. Yang menghilangkannya
+adalah blue noise beserta akumulasi temporal — dan akumulasi temporal adalah
+pekerjaan yang sama dengan TAA, yang masih ada di daftar E8.8. Menyelesaikannya
+dua kali adalah menyelesaikannya sekali dengan cara yang salah.
 
 **Selesai: bloom** (`Code/Render/{include/Sim/Render/Bloom.h,src/Bloom.cpp}`,
 `Shaders/{bloom_down,bloom_up}.frag.slang`). Penurunan 13 cuplikan (Jimenez)
