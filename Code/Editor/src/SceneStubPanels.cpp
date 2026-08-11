@@ -88,6 +88,15 @@ public:
             ImGui::SliderFloat("Sky gain", &context.sky.intensity, 0.0f, 100.0f, "%.0f");
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
             ImGui::SliderFloat("Altitude", &context.sky.cameraHeightKm, 0.0f, 20.0f, "%.2f km");
+
+            // Kabut atmosferik. Sakelarnya terpisah dari langit karena biayanya
+            // muncul sebagai pass tersendiri di tabel di atas — dan angka yang
+            // tidak bisa dimatikan adalah angka yang tidak bisa diukur.
+            ImGui::Checkbox("Aerial perspective", &context.sky.aerialPerspective);
+            if (context.sky.aerialPerspective) {
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+                ImGui::SliderFloat("Haze", &context.sky.aerialHaze, 0.0f, 40.0f, "%.1f×");
+            }
         }
 
         // --- Post-process (E8.8) ---

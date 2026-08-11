@@ -93,9 +93,11 @@ struct EditorContext {
     /// Pengaturan langit atmosferik. Di sini karena alasan yang sama dengan
     /// `gi` dan `post`.
     struct SkySettings {
-        bool enabled = false;
+        bool enabled = true;
         float intensity = 20.0f;
         float cameraHeightKm = 0.5f;
+        bool aerialPerspective = true;
+        float aerialHaze = 1.0f;
     } sky;
 
     /// Waktu-hari: preset kurva, jam siklus, dan tempat mataharinya.

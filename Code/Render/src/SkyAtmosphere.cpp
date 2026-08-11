@@ -48,6 +48,20 @@ struct DrawPush {
     Vec4 sunRadiance{0.0f};
 };
 
+struct AerialLutPush {
+    Mat4 invViewProj{1.0f};
+    Vec4 camera{0.0f};
+    Vec4 sun{0.0f};
+    Vec4 params{0.0f};
+    Vec4 lutSizes{0.0f};
+};
+
+struct AerialApplyPush {
+    Mat4 invViewProj{1.0f};
+    Vec4 camera{0.0f};
+    Vec4 params{0.0f};
+};
+
 std::vector<uint32_t> ReadSpirv(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary | std::ios::ate);
     if (!file) {
@@ -113,10 +127,63 @@ bool SkyAtmosphere::CreateImage(Image& target, uint32_t width, uint32_t height) 
     return vkCreateImageView(device_->Handle(), &viewInfo, nullptr, &target.view) == VK_SUCCESS;
 }
 
+bool SkyAtmosphere::CreateAerialImage() {
+    VkImageCreateInfo imageInfo{};
+    imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+    imageInfo.imageType = VK_IMAGE_TYPE_3D;
+    // Tanpa bendera ini, satu slice sebuah image 3D tidak bisa menjadi lampiran
+    // warna sama sekali — dan seluruh pendekatan "bangun LUT 3D tanpa compute"
+    // bergantung padanya.
+    imageInfo.flags = VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;
+    imageInfo.format = kLutFormat;
+    imageInfo.extent = {kAerialSize, kAerialSize, kAerialSlices};
+    imageInfo.mipLevels = 1;
+    imageInfo.arrayLayers = 1;
+    imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
+    imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
+    imageInfo.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    VmaAllocationCreateInfo allocation{};
+    allocation.usage = VMA_MEMORY_USAGE_AUTO;
+    if (vmaCreateImage(device_->Allocator(), &imageInfo, &allocation, &aerial_.image,
+                       &aerial_.allocation, nullptr) != VK_SUCCESS) {
+        aerial_.image = VK_NULL_HANDLE;
+        return false;
+    }
+
+    VkImageViewCreateInfo viewInfo{};
+    viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+    viewInfo.image = aerial_.image;
+    viewInfo.viewType = VK_IMAGE_VIEW_TYPE_3D;
+    viewInfo.format = kLutFormat;
+    viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    viewInfo.subresourceRange.levelCount = 1;
+    viewInfo.subresourceRange.layerCount = 1;
+    if (vkCreateImageView(device_->Handle(), &viewInfo, nullptr, &aerial_.view) != VK_SUCCESS) {
+        return false;
+    }
+
+    // Satu view 2D per slice. Untuk image 3D, `baseArrayLayer` dibaca sebagai
+    // indeks slice — itulah yang membuat tiap slice bisa menjadi lampiran.
+    for (uint32_t slice = 0; slice < kAerialSlices; ++slice) {
+        VkImageViewCreateInfo sliceInfo = viewInfo;
+        sliceInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        sliceInfo.subresourceRange.baseArrayLayer = slice;
+        sliceInfo.subresourceRange.layerCount = 1;
+        if (vkCreateImageView(device_->Handle(), &sliceInfo, nullptr, &aerialSlices_[slice]) !=
+            VK_SUCCESS) {
+            return false;
+        }
+    }
+    return true;
+}
+
 bool SkyAtmosphere::CreatePipeline(const std::filesystem::path& shaderDirectory,
                                    const char* fragmentName, VkDescriptorSetLayout setLayout,
                                    uint32_t pushSize, VkFormat format, VkShaderModule vertex,
-                                   VkPipelineLayout& outLayout, VkPipeline& outPipeline) {
+                                   VkPipelineLayout& outLayout, VkPipeline& outPipeline,
+                                   bool blendEnabled) {
     VkPushConstantRange range{};
     range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     range.size = pushSize;
@@ -165,6 +232,23 @@ bool SkyAtmosphere::CreatePipeline(const std::filesystem::path& shaderDirectory,
     VkPipelineColorBlendAttachmentState attachment{};
     attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                 VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    if (blendEnabled) {
+        // `dst = src + dst * src.a`. Inilah yang membuat kabut bisa diterapkan
+        // tanpa membaca gambar HDR yang sedang ditulisi: transmitansi masuk
+        // lewat alfa sebagai faktor blending, bukan lewat descriptor.
+        attachment.blendEnable = VK_TRUE;
+        attachment.srcColorBlendFactor = VK_BLEND_FACTOR_ONE;
+        attachment.dstColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        attachment.colorBlendOp = VK_BLEND_OP_ADD;
+        // Alfa gambar adegan tidak dibaca siapa pun di hilir, dan menulisinya
+        // dengan transmitansi hanya akan menyimpan angka yang menyesatkan
+        // pembaca berikutnya.
+        attachment.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                    VK_COLOR_COMPONENT_B_BIT;
+        attachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        attachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+        attachment.alphaBlendOp = VK_BLEND_OP_ADD;
+    }
     VkPipelineColorBlendStateCreateInfo blend{};
     blend.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
     blend.attachmentCount = 1;
@@ -232,7 +316,7 @@ bool SkyAtmosphere::Create(rhi::Device& device, const std::filesystem::path& sha
 
     if (!CreateImage(transmittance_, kTransmittanceWidth, kTransmittanceHeight) ||
         !CreateImage(multiscatter_, kMultiscatterSize, kMultiscatterSize) ||
-        !CreateImage(skyView_, kSkyViewWidth, kSkyViewHeight)) {
+        !CreateImage(skyView_, kSkyViewWidth, kSkyViewHeight) || !CreateAerialImage()) {
         SIM_ERROR("Render", "cannot allocate the sky LUTs");
         return false;
     }
@@ -258,23 +342,25 @@ bool SkyAtmosphere::Create(rhi::Device& device, const std::filesystem::path& sha
         }
     }
 
-    const VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 8};
+    const VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 12};
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets = 3;
+    poolInfo.maxSets = 5;
     poolInfo.poolSizeCount = 1;
     poolInfo.pPoolSizes = &size;
     if (vkCreateDescriptorPool(device_->Handle(), &poolInfo, nullptr, &pool_) != VK_SUCCESS) {
         return false;
     }
 
-    const std::array<VkDescriptorSetLayout, 3> layouts{setLayouts_[0], setLayouts_[1],
-                                                       setLayouts_[2]};
-    std::array<VkDescriptorSet, 3> sets{};
+    // Kedua set aerial memakai tata letak dua sumber yang sama dengan sky-view.
+    const std::array<VkDescriptorSetLayout, 5> layouts{setLayouts_[0], setLayouts_[1],
+                                                       setLayouts_[2], setLayouts_[1],
+                                                       setLayouts_[1]};
+    std::array<VkDescriptorSet, 5> sets{};
     VkDescriptorSetAllocateInfo allocateInfo{};
     allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     allocateInfo.descriptorPool = pool_;
-    allocateInfo.descriptorSetCount = 3;
+    allocateInfo.descriptorSetCount = static_cast<uint32_t>(layouts.size());
     allocateInfo.pSetLayouts = layouts.data();
     if (vkAllocateDescriptorSets(device_->Handle(), &allocateInfo, sets.data()) != VK_SUCCESS) {
         SIM_ERROR("Render", "cannot allocate sky descriptor sets");
@@ -283,6 +369,8 @@ bool SkyAtmosphere::Create(rhi::Device& device, const std::filesystem::path& sha
     multiscatterSet_ = sets[0];
     skyViewSet_ = sets[1];
     drawSet_ = sets[2];
+    aerialLutSet_ = sets[3];
+    aerialApplySet_ = sets[4];
 
     std::vector<VkDescriptorImageInfo> images;
     std::vector<VkWriteDescriptorSet> writes;
@@ -301,6 +389,11 @@ bool SkyAtmosphere::Create(rhi::Device& device, const std::filesystem::path& sha
     bind(skyViewSet_, 1, multiscatter_.view);
     bind(drawSet_, 0, skyView_.view);
     bind(drawSet_, 1, transmittance_.view);
+    bind(aerialLutSet_, 0, transmittance_.view);
+    bind(aerialLutSet_, 1, multiscatter_.view);
+    // Binding 1 set ini — depth buffer — ditulis `AdoptDepth`: image-nya milik
+    // target render, dan ia dialokasi ulang setiap kali viewport berubah ukuran.
+    bind(aerialApplySet_, 0, aerial_.view);
     for (std::size_t i = 0; i < writes.size(); ++i) {
         writes[i].pImageInfo = &images[i];
     }
@@ -317,10 +410,37 @@ bool SkyAtmosphere::Create(rhi::Device& device, const std::filesystem::path& sha
                         sizeof(SkyViewPush), kLutFormat, vertex_, skyViewLayout_,
                         skyViewPipeline_) ||
         !CreatePipeline(shaderDirectory, "sky_draw.frag.spv", setLayouts_[2], sizeof(DrawPush),
-                        sceneFormat, vertexUv_, drawLayout_, drawPipeline_)) {
+                        sceneFormat, vertexUv_, drawLayout_, drawPipeline_) ||
+        !CreatePipeline(shaderDirectory, "sky_aerial.frag.spv", setLayouts_[1],
+                        sizeof(AerialLutPush), kLutFormat, vertex_, aerialLutLayout_,
+                        aerialLutPipeline_) ||
+        !CreatePipeline(shaderDirectory, "sky_aerial_apply.frag.spv", setLayouts_[1],
+                        sizeof(AerialApplyPush), sceneFormat, vertexUv_, aerialApplyLayout_,
+                        aerialApplyPipeline_, /*blend=*/true)) {
         return false;
     }
     return true;
+}
+
+void SkyAtmosphere::AdoptDepth(VkImageView depthView, VkSampler depthSampler) {
+    if (aerialApplySet_ == VK_NULL_HANDLE || depthView == VK_NULL_HANDLE) {
+        return;
+    }
+    // SHADER_READ_ONLY, karena itulah layout yang dijanjikan `Access::ShaderRead`
+    // graph — sama dengan yang dipakai piramida depth. Layout descriptor yang
+    // tidak cocok dengan layout sesungguhnya adalah galat validation layer pada
+    // saat submit, bukan pada saat shader mencuplik.
+    const VkDescriptorImageInfo info{depthSampler, depthView,
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = aerialApplySet_;
+    write.dstBinding = 1;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &info;
+    vkUpdateDescriptorSets(device_->Handle(), 1, &write, 0, nullptr);
+    hasDepth_ = true;
 }
 
 void SkyAtmosphere::AdoptLayouts() {
@@ -328,7 +448,7 @@ void SkyAtmosphere::AdoptLayouts() {
         return;
     }
     VkCommandBuffer cmd = device_->BeginOneShot();
-    for (const Image* image : {&transmittance_, &multiscatter_, &skyView_}) {
+    for (const Image* image : {&transmittance_, &multiscatter_, &skyView_, &aerial_}) {
         VkImageMemoryBarrier2 barrier{};
         barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
         barrier.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
@@ -342,7 +462,11 @@ void SkyAtmosphere::AdoptLayouts() {
         barrier.image = image->image;
         barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
         barrier.subresourceRange.levelCount = 1;
-        barrier.subresourceRange.layerCount = 1;
+        // REMAINING, bukan 1. Pada image 3D ber-`2D_ARRAY_COMPATIBLE`, arti
+        // `layerCount = 1` berubah begitu `maintenance9` menyala: hari ini ia
+        // berarti seluruh slice, besok satu slice saja. REMAINING berarti hal
+        // yang sama di kedua keadaan.
+        barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
         VkDependencyInfo dependency{};
         dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
         dependency.imageMemoryBarrierCount = 1;
@@ -376,7 +500,10 @@ void SkyAtmosphere::Transition(VkCommandBuffer cmd, VkImage image, VkImageLayout
     barrier.image = image;
     barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     barrier.subresourceRange.levelCount = 1;
-    barrier.subresourceRange.layerCount = 1;
+    // REMAINING, alasan yang sama dengan `AdoptLayouts`: LUT aerial adalah image
+    // 3D, dan arti `layerCount = 1` di atasnya bergantung fitur yang belum
+    // menyala.
+    barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
     VkDependencyInfo dependency{};
     dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
     dependency.imageMemoryBarrierCount = 1;
@@ -505,6 +632,64 @@ void SkyAtmosphere::RecordDraw(VkCommandBuffer cmd, const Mat4& invViewProj,
     vkCmdDraw(cmd, 3, 1, 0, 0);
 }
 
+void SkyAtmosphere::RecordAerialLut(VkCommandBuffer cmd, const Mat4& invViewProj,
+                                    float cameraHeightKm, const Vec3& sunDirection,
+                                    float maxDistanceKm, float hazeDensity) {
+    if (!AerialIsValid()) {
+        return;
+    }
+    const Vec3 sun = glm::length(sunDirection) > 1e-6f ? glm::normalize(sunDirection)
+                                                       : Vec3(0.0f, 1.0f, 0.0f);
+
+    AerialLutPush push;
+    push.invViewProj = invViewProj;
+    push.camera = Vec4(0.0f, 0.0f, 0.0f, std::max(cameraHeightKm, 0.0f));
+    push.sun = Vec4(sun, std::max(hazeDensity, 0.0f));
+    push.lutSizes = Vec4(static_cast<float>(kTransmittanceWidth),
+                         static_cast<float>(kTransmittanceHeight),
+                         static_cast<float>(kMultiscatterSize),
+                         static_cast<float>(kMultiscatterSize));
+
+    // Satu barrier untuk seluruh gambar, lalu seluruh slice, lalu satu barrier
+    // kembali. Barrier per slice akan menyerialkan tiga puluh dua draw yang
+    // tidak saling membaca sama sekali.
+    Transition(cmd, aerial_.image, VK_IMAGE_LAYOUT_UNDEFINED,
+               VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, true);
+    for (uint32_t slice = 0; slice < kAerialSlices; ++slice) {
+        push.params = Vec4(static_cast<float>(slice), static_cast<float>(kAerialSlices),
+                           std::max(maxDistanceKm, 1e-3f), static_cast<float>(kAerialSize));
+        Image sliceTarget;
+        sliceTarget.view = aerialSlices_[slice];
+        DrawInto(cmd, sliceTarget, kAerialSize, kAerialSize, aerialLutPipeline_, aerialLutLayout_,
+                 aerialLutSet_, &push, sizeof(push));
+    }
+    Transition(cmd, aerial_.image, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
+               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false);
+}
+
+void SkyAtmosphere::RecordAerialApply(VkCommandBuffer cmd, const Mat4& invViewProj,
+                                      const Vec3& cameraPosition, float maxDistanceKm,
+                                      float intensity) {
+    if (!AerialIsValid()) {
+        return;
+    }
+    AerialApplyPush push;
+    push.invViewProj = invViewProj;
+    push.camera = Vec4(cameraPosition, std::max(maxDistanceKm, 1e-3f));
+    // Pengali yang sama dengan langit, dan itu keharusan: kabut adalah udara
+    // yang sama dengan yang membuat langit biru. Dua pengali yang berbeda
+    // membuat gunung jauh dan langit di belakangnya berwarna berlainan pada
+    // jarak tempat keduanya seharusnya bertemu.
+    push.params = Vec4(intensity, 0.0f, 0.0f, 0.0f);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, aerialApplyPipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, aerialApplyLayout_, 0, 1,
+                            &aerialApplySet_, 0, nullptr);
+    vkCmdPushConstants(cmd, aerialApplyLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push),
+                       &push);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+}
+
 void SkyAtmosphere::Destroy() {
     if (device_ == nullptr) {
         return;
@@ -523,6 +708,8 @@ void SkyAtmosphere::Destroy() {
     dropPipeline(multiscatterPipeline_, multiscatterLayout_);
     dropPipeline(skyViewPipeline_, skyViewLayout_);
     dropPipeline(drawPipeline_, drawLayout_);
+    dropPipeline(aerialLutPipeline_, aerialLutLayout_);
+    dropPipeline(aerialApplyPipeline_, aerialApplyLayout_);
 
     if (pool_ != VK_NULL_HANDLE) {
         vkDestroyDescriptorPool(device_->Handle(), pool_, nullptr);
@@ -534,7 +721,13 @@ void SkyAtmosphere::Destroy() {
             layout = VK_NULL_HANDLE;
         }
     }
-    for (Image* image : {&transmittance_, &multiscatter_, &skyView_}) {
+    for (VkImageView& view : aerialSlices_) {
+        if (view != VK_NULL_HANDLE) {
+            vkDestroyImageView(device_->Handle(), view, nullptr);
+            view = VK_NULL_HANDLE;
+        }
+    }
+    for (Image* image : {&transmittance_, &multiscatter_, &skyView_, &aerial_}) {
         if (image->view != VK_NULL_HANDLE) {
             vkDestroyImageView(device_->Handle(), image->view, nullptr);
             image->view = VK_NULL_HANDLE;
@@ -555,6 +748,7 @@ void SkyAtmosphere::Destroy() {
             *module = VK_NULL_HANDLE;
         }
     }
+    hasDepth_ = false;
     device_ = nullptr;
 }
 

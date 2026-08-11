@@ -839,13 +839,78 @@ Terukur di editor, dengan matahari disetir panel Time-of-Day:
 | 16:00 | 0,70 |
 | 17:30 | **1,30** (jingga) |
 
-Biaya pass `sky`: **0,29 ms**. Nol galat validation layer. Sakelarnya mati
-secara bawaan: langit menggantikan warna latar yang selama ini disetel pemakai,
-dan editor yang mengganti latar sendiri tanpa diminta sulit dibedakan dari editor
-yang rusak.
+Biaya pass `sky`: **0,29 ms**. Nol galat validation layer.
 
-**Yang belum ada dari acuan itu:** aerial perspective (LUT 3D kabut jarak jauh)
-dan awan volumetrik. Keduanya berdiri di atas LUT yang sekarang sudah ada.
+**Sakelarnya sekarang menyala secara bawaan.** Ia sempat mati, dan alasannya
+benar pada waktunya: langit menggantikan warna latar yang disetel pemakai, dan
+editor yang mengganti latar sendiri tanpa diminta sulit dibedakan dari editor
+yang rusak. Syarat yang dicatat waktu itu — "sampai matahari benar-benar disetir
+Time-of-Day" — sudah dipenuhi. Yang membalik timbangannya: langit yang mati
+secara bawaan adalah langit yang tidak pernah dilihat siapa pun, dan cacat pada
+sesuatu yang tidak pernah terlihat adalah cacat yang tidak pernah ditemukan.
+
+Terukur pada kamera bawaan yang diarahkan ke atas: zenit (11, 33, 68) dengan
+nisbah merah/biru **0,16**, melunak mulus ke kabut horizon (140, 154, 159)
+bernisbah **0,88**, lalu gelap di bawah horizon. Kamera bawaan sendiri menunduk
+26°, jadi yang terlihat tanpa memutar pandangan hanyalah pita 0–7° di atas
+horizon — dan pita itu memang berkabut putih, bukan biru. Langit birunya ada di
+atas, seperti seharusnya.
+
+**Selesai: aerial perspective** (`Code/Render/{include/Sim/Render/Atmosphere.h,
+src/Atmosphere.cpp,src/SkyAtmosphere.{h,cpp}}`,
+`Shaders/sky_aerial{,_apply}.frag.slang`). LUT 3D 32×32×32: dua sumbu layar, satu
+sumbu jarak.
+
+- **Satu draw per slice, bukan satu compute dispatch.** Acuannya memakai compute
+  shader; engine ini sengaja belum punya satu pun compute pipeline, dan yang
+  pertama akan membawa serta storage image, barrier compute, dan seluruh jalur
+  yang belum pernah dijalankan sekali pun. `VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT`
+  membuat tiap slice sebuah lampiran warna yang sah, sementara view 3D di atas
+  image yang sama tetap memberi penyaringan trilinear — termasuk antar-slice,
+  yang justru arah tempat kabut paling mudah menjadi pita.
+- **Kompositnya blending, bukan salinan ping-pong.** Yang harus terjadi tiap
+  piksel adalah `warna × transmitansi + hamburan`, dan itu persis
+  `dst = src + dst × src.a` asalkan transmitansinya satu skalar di kanal alfa.
+  Bentuk mana pun yang membaca gambar HDR lewat descriptor sambil menulisinya
+  adalah perilaku yang tidak terdefinisi, dan menghindarinya menuntut gambar HDR
+  kedua seukuran penuh beserta satu salinan tiap frame. Yang ditukar: pemerahan
+  pada jalur yang sangat panjang. Acuan Bruneton-Hillaire menukar yang sama.
+- **Jangkauan LUT mengikuti bidang jauh kamera, bukan 4 km per slice.** Angka
+  acuan itu masuk akal untuk adegan seluas planet; untuk adegan sepanjang dua
+  kilometer ia menaruh seluruh yang terlihat di dalam slice pertama — kabut lalu
+  menjadi satu nilai tetap yang tidak berubah terhadap jarak sama sekali, yang
+  tampak seperti kabut yang "tidak bekerja" alih-alih seperti LUT yang salah
+  skala.
+- **Sebaran slice kuadratik**, dan ia harus membalik dengan tepat di kedua arah.
+  Pemetaan yang meleset tidak menghasilkan galat apa pun, hanya kabut yang
+  pekatnya benar pada jarak yang salah.
+
+Uji yang menentukan ada di acuan CPU-nya: **integral 0→D harus sama dengan
+rantai 0→d lalu d→D**. LUT ini berhenti di jarak maksimumnya dan yang di baliknya
+diwarnai pass langit; kalau integral yang dipotong dua tidak sama dengan yang
+utuh, kedua bagian itu tidak akan bertemu — dan yang terlihat adalah garis
+jahitan tepat di tempat terrain menyentuh langit. Terukur: transmitansi cocok
+dalam 0,2%, hamburan dalam 1%.
+
+Terukur di editor:
+
+| Yang diukur | Hasil |
+| --- | --- |
+| Biaya pass `aerial` (LUT + komposit) | **0,117 ms** |
+| Galat validation layer | **0** |
+| Siluet geometri terhadap latar, pada uji gerbang depth | 9/26/53 lawan 47/68/103 |
+
+**Satu hal yang harus dikatakan apa adanya: di adegan bawaan editor, kabut ini
+nyaris tak terlihat, dan itu benar.** Yang tampak sebagai "tanah" di viewport
+adalah pass grid, dan grid sengaja tidak menulis depth sama sekali — jadi pass
+kabut, yang melewati piksel bidang jauh, tidak menyentuhnya. Yang tersisa untuk
+dikabuti hanyalah dua mesh berjarak beberapa meter, dan udara sepanjang beberapa
+meter memang tidak mengubah apa pun. Terukur pada haze 20×: hanya 3.703 piksel
+berubah, seluruhnya pada geometri, seluruhnya ke arah yang benar (lebih terang
+dan lebih biru). Pass ini baru punya sesuatu untuk dikerjakan begitu E8.5 membawa
+terrain.
+
+**Yang belum ada dari acuan itu:** awan volumetrik.
 
 **Selesai: bloom** (`Code/Render/{include/Sim/Render/Bloom.h,src/Bloom.cpp}`,
 `Shaders/{bloom_down,bloom_up}.frag.slang`). Penurunan 13 cuplikan (Jimenez)

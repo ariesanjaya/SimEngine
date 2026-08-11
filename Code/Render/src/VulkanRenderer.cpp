@@ -388,6 +388,7 @@ public:
         }
         if (sky_.Create(device_, shaderDirectory_, PostProcess::kSceneFormat)) {
             sky_.AdoptLayouts();
+            sky_.AdoptDepth(target_.DepthView(), target_.Sampler());
         }
         CreateRadianceCache();
         if (probes_.Create(device_, shaderDirectory_, shadowSetLayout_)) {
@@ -474,6 +475,8 @@ public:
         if (hizChanged || probesChanged || postChanged) {
             UpdateGiDescriptors();
         }
+        // Kabut membaca depth buffer yang sama, dan image-nya juga baru.
+        sky_.AdoptDepth(target_.DepthView(), target_.Sampler());
     }
 
     void Render(const ViewportDesc& desc, const ViewportScene& scene) override {
@@ -761,6 +764,26 @@ public:
             vkCmdEndRendering(command);
         };
 
+        if (aerialId_ != kInvalidPass) {
+            // Jangkauan LUT mengikuti bidang jauh kamera. **Bukan 4 km per slice
+            // seperti acuannya:** angka itu masuk akal untuk adegan seluas
+            // planet, dan untuk adegan sepanjang dua kilometer ia menaruh seluruh
+            // yang terlihat di dalam slice pertama — kabut lalu menjadi satu
+            // nilai tetap yang tidak berubah terhadap jarak sama sekali, yang
+            // tampak seperti kabut yang "tidak bekerja" alih-alih seperti LUT
+            // yang salah skala.
+            const float aerialRangeKm = std::max(desc.camera.farZ * 0.001f, 0.001f);
+            recorders[aerialId_] = [&, aerialRangeKm](VkCommandBuffer command) {
+                sky_.RecordAerialLut(command, invViewProj, desc.cameraHeightKm, sunDirection_,
+                                     aerialRangeKm, desc.aerialHaze);
+                BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/false,
+                               /*writeColor=*/true, /*useDepth=*/false);
+                sky_.RecordAerialApply(command, invViewProj, desc.camera.position, aerialRangeKm,
+                                       desc.skyIntensity);
+                vkCmdEndRendering(command);
+            };
+        }
+
         if (bloomId_ != kInvalidPass) {
             recorders[bloomId_] = [&](VkCommandBuffer command) {
                 if (desc.post.enabled && desc.post.bloom.enabled) {
@@ -932,6 +955,22 @@ private:
         if (sdfDebugEnabled_) {
             giDebugId_ = graph_.AddPass("gi-sdf-debug");
             graph_.Write(giDebugId_, sceneId_, Access::ColorWrite);
+        }
+
+        // Kabut atmosferik, sesudah seluruh geometri dan sebelum bloom.
+        //
+        // **Urutannya terhadap bloom bukan selera.** Kabut adalah bagian dari
+        // adegan: sorotan terang yang berada di balik lima kilometer udara sudah
+        // diredam sebelum ia berpendar. Bloom yang berjalan lebih dulu akan
+        // memendarkan kecerahan yang sesungguhnya tidak pernah sampai ke kamera,
+        // dan yang terlihat adalah pendaran yang menembus kabut.
+        aerialId_ = kInvalidPass;
+        if (desc.skyEnabled && desc.aerialPerspective && sky_.AerialIsValid()) {
+            aerialId_ = graph_.AddPass("aerial");
+            graph_.Read(aerialId_, depthId_, Access::ShaderRead);
+            graph_.Write(aerialId_, sceneId_, Access::ColorWrite);
+            // LUT 3D-nya diurus `SkyAtmosphere` sendiri, bukan dilacak graph.
+            graph_.SetSideEffect(aerialId_);
         }
 
         // Pengukuran luminansi dan eksposur. Sesudah seluruh pass adegan, karena
@@ -2620,6 +2659,7 @@ private:
     ResourceId sceneId_ = kInvalidResource;
     ResourceId depthId_ = kInvalidResource;
     PassId skyId_ = kInvalidPass;
+    PassId aerialId_ = kInvalidPass;
     PassId bloomId_ = kInvalidPass;
     PassId meterId_ = kInvalidPass;
     PassId tonemapId_ = kInvalidPass;

@@ -66,7 +66,9 @@ sim_compile_shaders(SimShadersGrid
         ${CMAKE_SOURCE_DIR}/Shaders/sky_transmittance.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/sky_multiscatter.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/sky_view.frag.slang
-        ${CMAKE_SOURCE_DIR}/Shaders/sky_draw.frag.slang)
+        ${CMAKE_SOURCE_DIR}/Shaders/sky_draw.frag.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/sky_aerial.frag.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/sky_aerial_apply.frag.slang)
 # openpbr.slang sengaja tidak ada di daftar ini. Ia modul pustaka tanpa entry
 # point — yang mengompilasinya adalah `AssembleMaterialModule`, yang menanamnya
 # ke dalam modul material lalu menyerahkannya ke ShaderCache. Menambahkannya di

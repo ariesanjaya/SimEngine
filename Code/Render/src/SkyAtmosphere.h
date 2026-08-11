@@ -27,12 +27,31 @@ public:
     static constexpr uint32_t kSkyViewWidth = 192;
     static constexpr uint32_t kSkyViewHeight = 108;
 
+    /// Sisi LUT aerial perspective dan banyaknya slice-nya.
+    ///
+    /// **32×32 di layar sudah cukup, dan itu bukan penghematan yang dipaksakan.**
+    /// Yang disimpan LUT ini berubah mulus terhadap arah pandang — tidak ada satu
+    /// pun tepi tajam di dalamnya — sementara yang membuat kabut tampak salah
+    /// adalah tepi pada arah **jarak**, tempat ia bertemu geometri. Resolusi
+    /// karena itu dihabiskan pada slice, bukan pada layar.
+    static constexpr uint32_t kAerialSize = 32;
+    static constexpr uint32_t kAerialSlices = 32;
+
     bool Create(rhi::Device& device, const std::filesystem::path& shaderDirectory,
                 VkFormat sceneFormat);
     void Destroy();
     void AdoptLayouts();
 
+    /// Menunjuk ulang descriptor kabut ke depth buffer yang sedang berlaku.
+    ///
+    /// **Wajib dipanggil ulang tiap kali target dialokasi ulang.** Descriptor
+    /// yang masih menunjuk image depth yang lama tidak menghasilkan galat apa
+    /// pun — ia membaca memori yang sudah dilepas, dan yang terlihat adalah
+    /// kabut yang bentuknya mengikuti adegan beberapa frame yang lalu.
+    void AdoptDepth(VkImageView depthView, VkSampler depthSampler);
+
     bool IsValid() const { return transmittance_.image != VK_NULL_HANDLE; }
+    bool AerialIsValid() const { return aerial_.image != VK_NULL_HANDLE && hasDepth_; }
 
     /// Membangun ulang LUT yang perlu dibangun ulang, lalu menggambar langit ke
     /// lampiran yang sedang terpasang.
@@ -48,6 +67,25 @@ public:
                     float cameraHeightKm, const Vec3& sunDirection, const Vec3& sunRadiance,
                     float intensity);
 
+    /// Membangun LUT aerial perspective untuk kamera frame ini.
+    ///
+    /// `maxDistanceKm` adalah jangkauan LUT-nya. **Diturunkan dari bidang jauh
+    /// kamera, bukan dipatok tetap.** Acuannya memakai 4 km per slice — masuk
+    /// akal untuk adegan seluas planet, dan salah untuk adegan sepanjang dua
+    /// kilometer: seluruh yang terlihat lalu jatuh ke dalam slice pertama, dan
+    /// kabutnya menjadi satu nilai tetap yang tidak berubah terhadap jarak sama
+    /// sekali.
+    ///
+    /// `hazeDensity` mengalikan aerosol Mie. Satu berarti udara seperti yang
+    /// dimodelkan Bruneton.
+    void RecordAerialLut(VkCommandBuffer cmd, const Mat4& invViewProj, float cameraHeightKm,
+                         const Vec3& sunDirection, float maxDistanceKm, float hazeDensity);
+
+    /// Mengomposit kabut ke gambar adegan lewat blending. Pemanggil yang membuka
+    /// dan menutup rendering atas gambar HDR itu.
+    void RecordAerialApply(VkCommandBuffer cmd, const Mat4& invViewProj,
+                           const Vec3& cameraPosition, float maxDistanceKm, float intensity);
+
 private:
     struct Image {
         VkImage image = VK_NULL_HANDLE;
@@ -56,10 +94,20 @@ private:
     };
 
     bool CreateImage(Image& target, uint32_t width, uint32_t height);
+    /// Gambar 3D beserta satu view 3D untuk mencuplik dan satu view 2D per slice
+    /// untuk menggambar.
+    ///
+    /// **Dua bentuk view atas satu image, dan itulah yang membuat pendekatan
+    /// grafis ini mungkin.** `VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT` membuat
+    /// tiap slice sebuah image 2D yang sah sebagai lampiran warna, sementara
+    /// view 3D di atas image yang sama memberi penyaringan trilinear gratis saat
+    /// dicuplik — termasuk **antar-slice**, yang justru arah tempat kabut paling
+    /// mudah menjadi pita.
+    bool CreateAerialImage();
     bool CreatePipeline(const std::filesystem::path& shaderDirectory, const char* fragment,
                         VkDescriptorSetLayout setLayout, uint32_t pushSize, VkFormat format,
                         VkShaderModule vertex, VkPipelineLayout& outLayout,
-                        VkPipeline& outPipeline);
+                        VkPipeline& outPipeline, bool blendEnabled = false);
     void DrawInto(VkCommandBuffer cmd, const Image& target, uint32_t width, uint32_t height,
                   VkPipeline pipeline, VkPipelineLayout layout, VkDescriptorSet set,
                   const void* push, uint32_t pushSize);
@@ -74,12 +122,19 @@ private:
     Image transmittance_;
     Image multiscatter_;
     Image skyView_;
+    /// LUT aerial perspective. `view` di sini adalah view 3D untuk mencuplik;
+    /// yang digambar adalah `aerialSlices_`.
+    Image aerial_;
+    std::array<VkImageView, kAerialSlices> aerialSlices_{};
 
     VkDescriptorPool pool_ = VK_NULL_HANDLE;
     std::array<VkDescriptorSetLayout, 3> setLayouts_{};
     VkDescriptorSet multiscatterSet_ = VK_NULL_HANDLE;
     VkDescriptorSet skyViewSet_ = VK_NULL_HANDLE;
     VkDescriptorSet drawSet_ = VK_NULL_HANDLE;
+    VkDescriptorSet aerialLutSet_ = VK_NULL_HANDLE;
+    VkDescriptorSet aerialApplySet_ = VK_NULL_HANDLE;
+    bool hasDepth_ = false;
 
     VkPipelineLayout transmittanceLayout_ = VK_NULL_HANDLE;
     VkPipeline transmittancePipeline_ = VK_NULL_HANDLE;
@@ -89,6 +144,10 @@ private:
     VkPipeline skyViewPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout drawLayout_ = VK_NULL_HANDLE;
     VkPipeline drawPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout aerialLutLayout_ = VK_NULL_HANDLE;
+    VkPipeline aerialLutPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout aerialApplyLayout_ = VK_NULL_HANDLE;
+    VkPipeline aerialApplyPipeline_ = VK_NULL_HANDLE;
 
     /// Transmitansi dibangun sekali; sisanya saat mataharinya bergerak cukup
     /// jauh. Ambangnya bukan "berubah sama sekali": matahari yang digerakkan

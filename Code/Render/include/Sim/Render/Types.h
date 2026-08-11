@@ -125,18 +125,34 @@ struct ViewportDesc {
 
     /// Langit atmosferik. Saat mati, latar viewport tetap `clearColor`.
     ///
-    /// **Menyala secara bawaan tidak otomatis benar**: langit menggantikan warna
-    /// latar yang selama ini disetel pemakai, dan editor yang mengganti latar
-    /// sendiri tanpa diminta sulit dibedakan dari editor yang rusak. Sakelarnya
-    /// karena itu ada, dan bawaannya mati sampai matahari benar-benar disetir
-    /// Time-of-Day.
-    bool skyEnabled = false;
+    /// **Bawaannya menyala sejak matahari disetir Time-of-Day**, dan itu syarat
+    /// yang memang sudah dipenuhi. Sebelumnya ia mati karena langit menggantikan
+    /// warna latar yang disetel pemakai — editor yang mengganti latar sendiri
+    /// tanpa diminta sulit dibedakan dari editor yang rusak. Yang membalik
+    /// timbangannya: langit yang mati secara bawaan adalah langit yang tidak
+    /// pernah dilihat siapa pun, dan cacat pada sesuatu yang tidak pernah
+    /// terlihat adalah cacat yang tidak pernah ditemukan. Sakelarnya tetap ada.
+    bool skyEnabled = true;
     /// Pengali radiansi langit. Atmosfer Bruneton menghasilkan angka dalam
     /// satuannya sendiri; sampai lampu memakai satuan fotometrik, angka ini yang
     /// menjembatani keduanya.
     float skyIntensity = 20.0f;
     /// Ketinggian kamera di atas permukaan laut, kilometer.
     float cameraHeightKm = 0.5f;
+
+    /// Aerial perspective: udara yang berada **di antara** kamera dan permukaan.
+    ///
+    /// Terpisah dari `skyEnabled` karena keduanya bisa dinilai sendiri-sendiri —
+    /// dan karena yang ini punya biaya yang bisa dibedakan di tabel pass.
+    bool aerialPerspective = true;
+    /// Pengali kerapatan aerosol Mie. Satu berarti udara seperti yang dimodelkan
+    /// Bruneton.
+    ///
+    /// **Yang dikalikan aerosol, bukan seluruh atmosfer.** Aerosol adalah apa
+    /// yang membuat udara berkabut; mengalikan Rayleigh ikut akan membirukan
+    /// udara tanpa mengaburkannya — kebalikan dari yang diminta orang saat
+    /// meminta kabut lebih tebal.
+    float aerialHaze = 1.0f;
 
     /// Pengaturan post-process: eksposur, operator nada, dan yang menyusul di
     /// atasnya.

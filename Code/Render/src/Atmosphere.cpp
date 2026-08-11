@@ -202,6 +202,92 @@ Vec2 SkyViewParamsToUv(const AtmosphereParameters& atmosphere, const SkyViewPara
     return Vec2(UnitToSubUv(uv.x, dimensions.x), UnitToSubUv(uv.y, dimensions.y));
 }
 
+float AerialSliceDistance(uint32_t slice, uint32_t sliceCount, float maxDistanceKm) {
+    if (sliceCount == 0) {
+        return 0.0f;
+    }
+    const float unit = (static_cast<float>(slice) + 0.5f) / static_cast<float>(sliceCount);
+    return maxDistanceKm * unit * unit;
+}
+
+float AerialDistanceToSliceCoord(float distanceKm, uint32_t sliceCount, float maxDistanceKm) {
+    if (sliceCount == 0 || maxDistanceKm <= 0.0f) {
+        return 0.0f;
+    }
+    // Akar, karena sebarannya kuadratik. Setengah texel digeser di kedua ujung
+    // supaya slice pertama dan terakhir jatuh tepat di tengah texel-nya — sama
+    // dengan `SubUvToUnit` pada LUT yang lain, dan salah pada sumbu yang sama
+    // bila dilewatkan.
+    const float unit = SafeSqrt(std::clamp(distanceKm / maxDistanceKm, 0.0f, 1.0f));
+    return std::clamp(unit, 0.0f, 1.0f);
+}
+
+AerialSample IntegrateAerialPerspective(const AtmosphereParameters& atmosphere,
+                                        const Vec3& origin, const Vec3& direction,
+                                        const Vec3& sunDirection, float distanceKm,
+                                        uint32_t sampleCount) {
+    AerialSample sample;
+    if (distanceKm <= 0.0f || sampleCount == 0) {
+        return sample;
+    }
+
+    // Berhenti di permukaan planet. Sinar yang menembusnya mengintegrasikan
+    // udara yang berada di dalam tanah — kerapatannya menjadi eksponensial yang
+    // meledak, dan yang terlihat adalah kabut putih menyilaukan di bawah
+    // horizon, bukan galat.
+    const float toPlanet = RaySphereNearest(origin, direction, atmosphere.bottomRadius);
+    const float rayLength = toPlanet > 0.0f ? std::min(distanceKm, toPlanet) : distanceKm;
+
+    const float cosTheta = glm::dot(direction, sunDirection);
+    const float rayleighPhaseValue = RayleighPhase(cosTheta);
+    const float miePhaseValue = MiePhase(cosTheta, atmosphere.miePhaseG);
+
+    Vec3 accumulated(0.0f);
+    Vec3 transmittance(1.0f);
+    const float step = rayLength / static_cast<float>(sampleCount);
+
+    for (uint32_t i = 0; i < sampleCount; ++i) {
+        const Vec3 position = origin + direction * ((static_cast<float>(i) + 0.5f) * step);
+        const float radius = glm::length(position);
+        const float height = radius - atmosphere.bottomRadius;
+        const Vec3 up = position / radius;
+
+        const MediumDensity density = SampleDensity(atmosphere, height);
+        const Vec3 rayleigh = atmosphere.rayleighScattering * density.rayleigh;
+        const Vec3 mie(atmosphere.mieScattering * density.mie);
+        const Vec3 extinction = SampleExtinction(atmosphere, height);
+
+        // Bayangan planet: titik yang matahari terbenamnya sudah lewat tidak
+        // menyumbang hamburan tunggal apa pun.
+        const float toGround = RaySphereNearest(position + up * 0.01f, sunDirection,
+                                                atmosphere.bottomRadius);
+        const float lit = toGround < 0.0f ? 1.0f : 0.0f;
+        const Vec3 toSun =
+            lit > 0.0f ? Transmittance(atmosphere, position, sunDirection, 64) : Vec3(0.0f);
+
+        const Vec3 inscatter =
+            toSun * (rayleigh * rayleighPhaseValue + mie * miePhaseValue) * lit;
+        const Vec3 stepTransmittance(std::exp(-extinction.x * step), std::exp(-extinction.y * step),
+                                     std::exp(-extinction.z * step));
+        // Integrasi analitik di dalam langkahnya, sama dengan pass langit:
+        // perkalian sederhana meninggalkan pita-pita yang terlihat pada jumlah
+        // langkah sekecil ini.
+        const Vec3 integrated =
+            (inscatter - inscatter * stepTransmittance) / glm::max(extinction, Vec3(1e-9f));
+
+        accumulated += transmittance * integrated;
+        transmittance *= stepTransmittance;
+    }
+
+    sample.inscatter = accumulated;
+    sample.transmittance = transmittance;
+    return sample;
+}
+
+Vec3 ApplyAerialPerspective(const Vec3& sceneColor, const AerialSample& sample) {
+    return sceneColor * sample.transmittance + sample.inscatter;
+}
+
 float RayleighPhase(float cosTheta) {
     return 3.0f / (16.0f * kPi) * (1.0f + cosTheta * cosTheta);
 }

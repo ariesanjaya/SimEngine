@@ -3827,6 +3827,129 @@ TEST_CASE("pemetaan uv LUT sky-view membalik dan memadat di dekat horizon") {
     CHECK(std::abs(span(0.45f, 0.55f)) < std::abs(span(0.05f, 0.15f)));
 }
 
+TEST_CASE("pemetaan slice aerial perspective membalik dan memadat di dekat kamera") {
+    using namespace sim::render;
+
+    constexpr uint32_t kSlices = 32;
+    constexpr float kMaxKm = 4.0f;
+
+    // **Pemetaan yang meleset tidak menghasilkan galat apa pun**, hanya kabut
+    // yang pekatnya benar pada jarak yang salah — dan itu tampak seperti pilihan
+    // seni yang buruk, bukan seperti bug.
+    for (uint32_t slice = 0; slice < kSlices; ++slice) {
+        const float distance = AerialSliceDistance(slice, kSlices, kMaxKm);
+        const float coord = AerialDistanceToSliceCoord(distance, kSlices, kMaxKm);
+        const float expected = (static_cast<float>(slice) + 0.5f) / static_cast<float>(kSlices);
+        CHECK(coord == doctest::Approx(expected).epsilon(0.001f));
+    }
+
+    // Dan pemadatannya nyata: delapan slice pertama menampung jauh lebih sedikit
+    // jarak daripada delapan slice terakhir. Kabut yang berarti ada di dekat
+    // kamera; sebaran seragam akan menghabiskan resolusinya di kejauhan yang
+    // isinya sudah nyaris tak berubah.
+    const float nearSpan = AerialSliceDistance(7, kSlices, kMaxKm) -
+                           AerialSliceDistance(0, kSlices, kMaxKm);
+    const float farSpan = AerialSliceDistance(31, kSlices, kMaxKm) -
+                          AerialSliceDistance(24, kSlices, kMaxKm);
+    CHECK(nearSpan < farSpan * 0.2f);
+}
+
+TEST_CASE("aerial perspective menyambung tanpa jahitan: 0→D sama dengan 0→d lalu d→D") {
+    using namespace sim::render;
+
+    // **Ini uji yang menentukan.** LUT aerial perspective berhenti di jarak
+    // maksimumnya, dan yang berada di baliknya diwarnai pass langit. Kalau
+    // integral yang dipotong dua tidak sama dengan integral utuh, kedua bagian
+    // itu tidak akan bertemu — dan yang terlihat adalah garis jahitan tepat di
+    // tempat terrain menyentuh langit, yaitu tempat yang paling diperhatikan
+    // orang. Sifat yang menjamin sambungannya: transmitansi mengalikan, dan
+    // hamburan yang di belakang harus lewat transmitansi yang di depan.
+    const AtmosphereParameters atmosphere;
+    const Vec3 origin(0.0f, 0.0f, atmosphere.bottomRadius + 0.5f);
+    const Vec3 direction = glm::normalize(Vec3(1.0f, 0.0f, 0.08f));
+    const Vec3 sun = glm::normalize(Vec3(0.4f, 0.0f, 0.9f));
+
+    constexpr float kTotal = 40.0f;
+    constexpr float kSplit = 12.0f;
+
+    const AerialSample whole =
+        IntegrateAerialPerspective(atmosphere, origin, direction, sun, kTotal, 512);
+    const AerialSample front =
+        IntegrateAerialPerspective(atmosphere, origin, direction, sun, kSplit, 154);
+    const AerialSample back = IntegrateAerialPerspective(
+        atmosphere, origin + direction * kSplit, direction, sun, kTotal - kSplit, 358);
+
+    const Vec3 chainedTransmittance = front.transmittance * back.transmittance;
+    const Vec3 chainedInscatter = front.inscatter + front.transmittance * back.inscatter;
+
+    CHECK(chainedTransmittance.x == doctest::Approx(whole.transmittance.x).epsilon(0.002f));
+    CHECK(chainedTransmittance.z == doctest::Approx(whole.transmittance.z).epsilon(0.002f));
+    CHECK(chainedInscatter.x == doctest::Approx(whole.inscatter.x).epsilon(0.01f));
+    CHECK(chainedInscatter.z == doctest::Approx(whole.inscatter.z).epsilon(0.01f));
+}
+
+TEST_CASE("aerial perspective tidak menyentuh apa pun pada jarak nol") {
+    using namespace sim::render;
+
+    // Kabut yang sudah pekat pada jarak nol adalah kabut yang menyelimuti benda
+    // yang dipegang kamera. Cacat ini muncul dari pemetaan slice yang bergeser
+    // setengah texel, dan ia terlihat pada setiap adegan sekaligus — sehingga
+    // tampak seperti "renderer-nya memang begitu".
+    const AtmosphereParameters atmosphere;
+    const Vec3 origin(0.0f, 0.0f, atmosphere.bottomRadius + 0.2f);
+    const Vec3 direction = glm::normalize(Vec3(1.0f, 0.0f, 0.1f));
+    const Vec3 sun = glm::normalize(Vec3(0.3f, 0.0f, 0.95f));
+    const Vec3 scene(0.4f, 0.5f, 0.6f);
+
+    const AerialSample zero =
+        IntegrateAerialPerspective(atmosphere, origin, direction, sun, 0.0f, 64);
+    const Vec3 composited = ApplyAerialPerspective(scene, zero);
+    CHECK(composited.x == doctest::Approx(scene.x));
+    CHECK(composited.y == doctest::Approx(scene.y));
+    CHECK(composited.z == doctest::Approx(scene.z));
+}
+
+TEST_CASE("udara memakan biru dan mengembalikannya sebagai kabut biru") {
+    using namespace sim::render;
+
+    // Dua efek yang berlawanan arah, dan keduanya harus ada. Transmitansi
+    // **memerahkan** apa yang lewat — biru dihamburkan keluar lebih dulu.
+    // Hamburan masuk **membirukan** apa yang ada di depannya — biru itu
+    // dihamburkan masuk dari arah lain. Yang membuat gunung jauh tampak biru
+    // adalah suku kedua yang menang atas suku pertama; sebuah implementasi yang
+    // hanya punya salah satunya akan tampak masuk akal sendirian.
+    const AtmosphereParameters atmosphere;
+    const Vec3 origin(0.0f, 0.0f, atmosphere.bottomRadius + 0.1f);
+    const Vec3 direction = glm::normalize(Vec3(1.0f, 0.0f, 0.02f));
+    const Vec3 sun = glm::normalize(Vec3(0.2f, 0.3f, 0.93f));
+
+    Vec3 previousTransmittance(2.0f);
+    Vec3 previousInscatter(-1.0f);
+    for (const float distance : {0.5f, 2.0f, 8.0f, 32.0f}) {
+        const AerialSample sample =
+            IntegrateAerialPerspective(atmosphere, origin, direction, sun, distance, 256);
+
+        // Makin jauh, makin sedikit yang lewat — dan biru berkurang lebih cepat.
+        CHECK(sample.transmittance.z < sample.transmittance.x);
+        CHECK(sample.transmittance.x < previousTransmittance.x);
+        CHECK(sample.inscatter.z > previousInscatter.z);
+        previousTransmittance = sample.transmittance;
+        previousInscatter = sample.inscatter;
+    }
+
+    // Dan kabut yang ditambahkannya biru: pada jarak jauh, biru jauh melebihi
+    // merah.
+    const AerialSample far =
+        IntegrateAerialPerspective(atmosphere, origin, direction, sun, 32.0f, 256);
+    CHECK(far.inscatter.z > far.inscatter.x * 2.0f);
+
+    // Permukaan hitam yang jauh karena itu tidak hitam melainkan biru — persis
+    // yang membuat gunung di kejauhan tampak biru.
+    const Vec3 black = ApplyAerialPerspective(Vec3(0.0f), far);
+    CHECK(black.z > black.x);
+    CHECK(black.z > 0.0f);
+}
+
 TEST_CASE("fungsi fase berintegral satu atas bola") {
     using namespace sim::render;
 

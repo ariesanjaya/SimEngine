@@ -111,6 +111,63 @@ Vec2 SkyViewParamsToUv(const AtmosphereParameters& atmosphere, const SkyViewPara
 SkyViewParams UvToSkyViewParams(const AtmosphereParameters& atmosphere, const Vec2& uv,
                                 float viewHeight, const Vec2& dimensions);
 
+// --- Aerial perspective ------------------------------------------------------
+
+/// Satu texel LUT aerial perspective: udara yang berada **di antara** kamera dan
+/// sebuah permukaan.
+///
+/// **Dua besaran, bukan satu.** Kabut yang hanya memadu warna adegan menuju satu
+/// warna kabut memaksa memilih satu warna untuk seluruh arah pandang — dan arah
+/// yang menghadap matahari serta arah yang membelakanginya berbeda jauh justru
+/// pada jarak yang membuat kabut terlihat. Di sini keduanya terpisah: apa yang
+/// dimakan udara, dan apa yang ditambahkannya.
+struct AerialSample {
+    /// Cahaya yang dihamburkan masuk sepanjang ruas kamera→permukaan.
+    Vec3 inscatter{0.0f};
+    /// Transmitansi sepanjang ruas yang sama.
+    ///
+    /// **Vektor, bukan skalar.** Udara memakan biru jauh lebih cepat daripada
+    /// merah; satu skalar akan memudarkan gunung yang jauh tanpa memerahkan
+    /// cahaya yang menembusnya, dan yang hilang persis kebalikan dari yang
+    /// membuat matahari terbenam terlihat seperti matahari terbenam.
+    Vec3 transmittance{1.0f};
+};
+
+/// Jarak ke tengah slice ke-`slice`, kilometer.
+///
+/// **Sebaran kuadratik, bukan seragam.** Kabut yang berarti berada di beberapa
+/// ratus meter pertama; sebaran seragam atas jangkauan penuh menghabiskan hampir
+/// seluruh slice-nya pada jarak yang isinya sudah nyaris tak berubah, dan
+/// menyisakan satu-dua slice untuk seluruh peralihan yang benar-benar terlihat.
+float AerialSliceDistance(uint32_t slice, uint32_t sliceCount, float maxDistanceKm);
+
+/// Kebalikannya: jarak → koordinat tekstur w, 0..1.
+///
+/// **Harus membalik `AerialSliceDistance` dengan tepat.** Pemetaan yang meleset
+/// tidak menghasilkan galat apa pun, hanya kabut yang pekatnya benar pada jarak
+/// yang salah — dan "pekat yang benar di tempat yang salah" adalah persis yang
+/// tidak terlihat sebagai kesalahan saat memandanginya.
+float AerialDistanceToSliceCoord(float distanceKm, uint32_t sliceCount, float maxDistanceKm);
+
+/// Integrasi hamburan masuk dan transmitansi sepanjang ruas sepanjang
+/// `distanceKm`, berhenti lebih awal bila sinarnya menembus planet.
+///
+/// **Hamburan tunggal saja.** Suku multiscattering-nya ada di GPU lewat LUT yang
+/// dibangun pass tersendiri, dan yang di sini adalah bagian yang punya lawan
+/// bicara analitik — geometri, energi, dan kesinambungannya dengan langit.
+AerialSample IntegrateAerialPerspective(const AtmosphereParameters& atmosphere,
+                                        const Vec3& origin, const Vec3& direction,
+                                        const Vec3& sunDirection, float distanceKm,
+                                        uint32_t sampleCount = 64);
+
+/// Komposit ke warna adegan: **diredam lalu ditambah**, bukan dipadu.
+///
+/// Paduan `lerp(scene, fogColor, k)` adalah bentuk yang sama dengan kesalahan
+/// komposit bloom, dan gagal dengan cara yang sama: ia menuntut satu warna kabut
+/// yang berdiri sendiri, sementara yang sebenarnya terjadi adalah dua hal
+/// berlainan yang kebetulan sama-sama bergantung jarak.
+Vec3 ApplyAerialPerspective(const Vec3& sceneColor, const AerialSample& sample);
+
 // --- Fungsi fase -------------------------------------------------------------
 
 /// Fase Rayleigh. Berintegral tepat satu atas bola — sebuah fase yang tidak
