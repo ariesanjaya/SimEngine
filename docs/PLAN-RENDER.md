@@ -998,7 +998,24 @@ Terukur di editor pada ambang 1,0: tepat di luar tepi kotak terang, bloom
 menambahkan **+22/255**, meluruh mulus ke +1 dalam 30 piksel, dan latar di bawah
 ambang tidak tersentuh sama sekali.
 
-**Satu hal yang belum benar dan sudah tercatat:** lampu belum memakai satuan
+**Satu hal yang terukur saat langit dinyalakan, dan belum dikerjakan: rantai
+eksposur dan ACES belum dikalibrasi terhadap satu sama lain.** `AutoExposure`
+menyasar luminansi rata-rata 0,104 — angka yang benar, dan memang angka
+pengukur cahaya sungguhan (K = 12,5, ISO 100, formulasi berbasis kejenuhan).
+Tapi kurva ACES memetakan 0,104 menjadi **0,045**, yaitu sRGB 59/255. Abu-abu
+tengah karena itu mendarat sekitar dua stop lebih gelap daripada tempat yang
+lazim (0,18 → 0,106, atau sRGB 93/255).
+
+Terukur pada adegan bawaan dengan langit menyala: rata-rata geometrik luminansi
+tampilan **0,0463**, terhadap ACES(0,104) = 0,0452 dari model CPU. Selisihnya 2%
+— artinya rantainya bekerja persis seperti yang dirancang, dan yang salah bukan
+implementasinya melainkan **sambungan antara sasaran eksposur dan kurva nada**.
+Perbaikan yang lazim adalah mengalikan masukan ACES dengan tetapan kalibrasi
+sebelum kurvanya. Dicatat di sini, bukan dikerjakan sekarang: ia menyentuh setiap
+piksel yang sudah diukur di tabel-tabel di atas, jadi ia layak menjadi
+perubahannya sendiri beserta pengukurannya sendiri.
+
+**Satu hal lagi yang belum benar dan sudah tercatat:** lampu belum memakai satuan
 fotometrik. Matahari bawaan beradiansi 3,0, bukan sepuluh ribu cd/m², jadi EV100
 yang berguna di sini berada di sekitar nol alih-alih 13–15. Nilai bawaan
 `manualEv100` pertama saya adalah 13, dan hasilnya viewport hitam pekat tanpa
