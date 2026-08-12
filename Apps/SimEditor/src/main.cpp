@@ -72,6 +72,19 @@ std::filesystem::path FindUiFont() {
     return {};
 }
 
+/// Tempat project baru dibuat secara bawaan.
+///
+/// **Di Documents, bukan di folder konfigurasi.** Yang di folder konfigurasi
+/// adalah milik editor; project adalah pekerjaan orang, dan pekerjaan orang
+/// tinggal di tempat yang ia sendiri bisa temukan, backup, dan taruh di kontrol
+/// versi tanpa harus tahu editor menyimpan apa pun di mana.
+std::filesystem::path ProjectsRoot() {
+    const char* home = SDL_getenv("HOME");
+    std::filesystem::path base =
+        home != nullptr ? std::filesystem::path(home) : std::filesystem::current_path();
+    return base / "Documents" / "SimEngine";
+}
+
 /// Folder konfigurasi per-pengguna: layout dock, preferensi, log.
 std::filesystem::path ConfigDirectory() {
     const char* home = SDL_getenv("HOME");
@@ -118,7 +131,7 @@ FrameLock ComputeFrameLock() {
 
 }  // namespace
 
-int main(int /*argc*/, char** /*argv*/) {
+int main(int argc, char** argv) {
     using namespace sim;
 
     MainThreadQueue::Get().BindMainThread();
@@ -237,6 +250,7 @@ int main(int /*argc*/, char** /*argv*/) {
     editor::EditorApp app;
     editor::EditorApp::Config appConfig;
     appConfig.configDir = configDir;
+    appConfig.projectsRoot = ProjectsRoot();
     appConfig.resourceDir = ExecutableDirectory() / "Resources";
     appConfig.shaderDir = rendererDesc.shaderDirectory;
     appConfig.viewportRenderer = renderer.get();
@@ -253,16 +267,21 @@ int main(int /*argc*/, char** /*argv*/) {
         return 1;
     }
 
-#if SIM_WITH_LUA
-    // Setelah app.Initialize(): runtime butuh World dan AssetDatabase yang baru
-    // dibuat di dalamnya.
-    //
-    // Cache graph berada di luar folder Assets, dan itu disengaja: `.lua` hasil
-    // kompilasi bukan aset yang dikarang pengguna, dan menaruhnya di Assets akan
-    // membuatnya muncul di Asset Browser, ikut mendapat GUID, dan ikut masuk
-    // kontrol versi sebagai berkas turunan.
-    scripts.Initialize(app.GetWorld(), app.Context().assets, configDir / "GraphCache");
-#endif
+    // Project dari baris perintah, seperti yang dijanjikan docs/PLAN-EDITOR.md.
+    // **Bukan pengganti project manager melainkan jalan pintas ke dalamnya:**
+    // yang gagal dibuka tetap mendarat di manager beserta pesannya, bukan pada
+    // editor kosong yang tidak menjelaskan apa-apa.
+    if (argc > 1 && argv[1] != nullptr && argv[1][0] != '\0') {
+        app.OpenProject(std::filesystem::path(argv[1]));
+    }
+
+    // Runtime Lua tidak lagi dipasang di sini. Ia memegang pointer ke indeks
+    // aset, dan indeks itu baru punya akar sesudah sebuah project dibuka — jadi
+    // yang memasangnya adalah `EditorApp::OpenProject`, setiap kali project
+    // berganti. Cache graph tetap di luar folder Assets: `.lua` hasil kompilasi
+    // bukan aset yang dikarang pengguna, dan menaruhnya di Assets akan membuatnya
+    // muncul di Asset Browser, ikut mendapat GUID, dan ikut masuk kontrol versi
+    // sebagai berkas turunan.
 
     bool running = true;
     std::string windowTitle;

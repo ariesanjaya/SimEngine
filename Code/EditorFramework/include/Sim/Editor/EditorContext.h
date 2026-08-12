@@ -78,6 +78,11 @@ struct EditorContext {
     render::IMaterialPreview* materialPreview = nullptr;
     /// Pratinjau aset untuk Asset Browser. Dimiliki pemanggil EditorApp.
     render::IThumbnailCache* thumbnails = nullptr;
+    /// Folder `Resources` di sebelah executable: isi bawaan editor, read-only.
+    /// **Bukan bagian project mana pun** — ia sama untuk setiap project yang
+    /// dibuka, dan menyalinnya ke dalam project adalah pilihan pengguna, bukan
+    /// syarat memakainya.
+    std::string builtinDir;
     /// Pemutar klip animasi untuk mesh ber-rig. Dimiliki EditorApp; panel
     /// Viewport meneruskannya ke `SceneView::Build`. Null berarti mesh ber-rig
     /// digambar pada bind pose-nya.

@@ -129,6 +129,15 @@ void AssetDatabase::Shutdown() {
     folders_.clear();
     byGuid_.clear();
     byPath_.clear();
+    // **Cuplikan pemindaian ikut dibuang, dan ini yang membuat indeks bisa
+    // dibuka ulang pada akar yang lain.** Ia adalah keadaan berkas dari
+    // pemindaian sebelumnya; membiarkannya berarti pemindaian pertama akar baru
+    // dibandingkan dengan isi akar lama — setiap berkas project sebelumnya
+    // terbaca sebagai "dihapus", dan setiap berkas project ini sebagai "baru",
+    // pada indeks yang toh akan benar sesudahnya. Yang tidak benar adalah
+    // efek sampingnya: berkas `.meta` diimpor ulang, dan pemakainya diberi tahu
+    // bahwa aset yang tidak ia sentuh baru saja berubah.
+    snapshot_ = {};
 }
 
 void AssetDatabase::ScanNow() {

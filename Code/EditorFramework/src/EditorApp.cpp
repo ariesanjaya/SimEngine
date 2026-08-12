@@ -54,6 +54,10 @@ extern "C" void OnFatalSignal(int signal) {
 
 bool EditorApp::Initialize(const Config& config) {
     configDir_ = config.configDir;
+    projectsRoot_ = config.projectsRoot;
+    resourceDir_ = config.resourceDir;
+    tasks_ = config.tasks;
+    graphCacheDir_ = configDir_ / "GraphCache";
 
     context_.history = &history_;
     context_.selection = &selection_;
@@ -68,17 +72,18 @@ bool EditorApp::Initialize(const Config& config) {
     context_.frameLimiter = config.frameLimiter;
     context_.lockedFps = config.lockedFps;
     context_.frameLockReason = config.frameLockReason;
-    context_.prefabDir = (configDir_ / "Prefabs").string();
+    // **Cache turunan milik editor, bukan milik project.** Ketiganya berkunci
+    // GUID aset atau hash sumber, dan keduanya unik lintas project — jadi satu
+    // cache bersama justru yang benar, dan berpindah project tidak berarti
+    // mendekode ulang seluruh thumbnail yang sudah pernah dibuat.
     context_.shaderCacheDir = (configDir_ / "ShaderCache").string();
     context_.shaderDir = config.shaderDir.string();
+    context_.builtinDir = config.resourceDir.string();
 
-    // Disemai sebelum pemindaian pertama, supaya asetnya sudah punya GUID saat
-    // CreateStarterLevel() mencarinya di bawah.
-    SeedStarterAssets(config.resourceDir);
-
-    // Folder aset untuk sementara berada di folder konfigurasi editor. Begitu
-    // konsep proyek matang, akarnya pindah mengikuti project.simproj.
-    assets_.Initialize({configDir_ / "Assets", config.tasks, 1.0f});
+    // **Indeks aset belum dibuka di sini.** Akarnya milik project, dan belum ada
+    // project sampai seseorang memilihnya — itulah yang membedakan susunan ini
+    // dari yang sebelumnya, tempat folder aset editor dan folder aset pekerjaan
+    // orang adalah folder yang sama.
     context_.assets = &assets_;
 
     // PropertyGrid menampilkan nama aset, bukan GUID mentah, lewat kait ini.
@@ -103,7 +108,7 @@ bool EditorApp::Initialize(const Config& config) {
                  (configDir_ / "shortcuts.json").string());
     }
 
-    CreateStarterLevel();
+    projects_.Load(configDir_ / "projects.json");
 
     PanelRegistry::Get().InstantiateAll(panels_);
     panels_.LoadState(configDir_ / "panels.json");
@@ -172,6 +177,20 @@ void EditorApp::RegisterCoreActions() {
                              },
                              {}});
 
+    actions_.Register(Action{"project.close",
+                             "Close Project...",
+                             "File",
+                             icons::kOpen,
+                             ImGuiKey_None,
+                             [this]() {
+                                 // Kembali ke project manager, bukan langsung
+                                 // membuka yang lain: memilih project berikutnya
+                                 // adalah keputusan yang sama besarnya dengan
+                                 // memilih yang pertama.
+                                 CloseProject();
+                             },
+                             [this]() { return HasProject(); }});
+
     actions_.Register(Action{"editor.exit",
                              "Exit",
                              "File",
@@ -187,7 +206,7 @@ void EditorApp::RegisterCoreActions() {
                              ImGuiMod_Ctrl | ImGuiKey_S,
                              [this]() {
                                  SaveLevel(levelPath_.empty()
-                                               ? configDir_ / "Levels" / "untitled.simlevel"
+                                               ? LevelsDirectory() / "untitled.simlevel"
                                                : levelPath_);
                              },
                              {}});
@@ -427,34 +446,194 @@ void EditorApp::PasteAction(bool asChild) {
     history_.Execute<PasteEntitiesCommand>(&world_, &selection_, clipboard_, parentGuid, "Paste");
 }
 
-void EditorApp::SeedStarterAssets(const std::filesystem::path& resourceDir) {
-    if (resourceDir.empty()) {
-        return;
-    }
-    const std::filesystem::path source = resourceDir / "Meshes";
-    const std::filesystem::path target = configDir_ / "Assets" / "Meshes";
+// --- project ------------------------------------------------------------------
 
-    std::error_code error;
-    // Syaratnya keberadaan FOLDER tujuan, bukan berkasnya satu per satu.
-    // Menyemai per-berkas berarti aset contoh yang sengaja dihapus pengguna
-    // muncul lagi setiap editor dijalankan — perilaku yang mustahil ditebak dan
-    // tidak bisa dilawan. Dengan syarat ini, penyemaian terjadi tepat sekali:
-    // pada proyek yang belum punya folder Meshes sama sekali.
-    if (!std::filesystem::exists(source, error) || std::filesystem::exists(target, error)) {
-        return;
+std::filesystem::path EditorApp::AssetsDirectory() const {
+    return HasProject() ? project_.AssetsDirectory() : std::filesystem::path{};
+}
+
+std::filesystem::path EditorApp::LevelsDirectory() const {
+    return HasProject() ? project_.LevelsDirectory() : std::filesystem::path{};
+}
+
+bool EditorApp::OpenProject(const std::filesystem::path& path) {
+    scene::Project project;
+    std::string error;
+    if (!projects_.Open(path, project, error)) {
+        projectError_ = error;
+        SIM_WARN("Editor", "Cannot open the project {}: {}", path.string(), error);
+        return false;
     }
 
-    // Berkas `.meta` ikut disalin, dan itu bukan kelengkapan belaka: GUID aset
-    // tinggal di sana. Tanpa menyalinnya, setiap mesin membangkitkan GUID
-    // sendiri, dan berkas level yang merujuk model ini hanya berlaku di mesin
-    // tempat ia dibuat.
-    std::filesystem::copy(source, target, std::filesystem::copy_options::recursive, error);
-    if (error) {
-        SIM_WARN("Editor", "Cannot seed starter assets into {}: {}", target.string(),
-                 error.message());
+    // Yang lama ditutup lebih dulu, dan urutannya bukan selera: indeks aset
+    // memasang pemantau berkas pada akarnya, dan dua pemantau pada dua akar yang
+    // berbeda berarti berkas project lama masih memicu impor ulang di project
+    // yang baru.
+    if (HasProject()) {
+        CloseProject();
+    }
+
+    project_ = std::move(project);
+    projectError_.clear();
+
+    context_.prefabDir = project_.PrefabsDirectory().string();
+    assets_.Initialize({project_.AssetsDirectory(), tasks_, 1.0f});
+
+    // Runtime skrip dipasang ulang: ia memegang pointer ke indeks aset, dan
+    // indeks itu baru saja menunjuk akar yang lain.
+    if (context_.scripts != nullptr) {
+        context_.scripts->Shutdown();
+        context_.scripts->Initialize(world_, &assets_, graphCacheDir_);
+        scriptingReady_ = false;
+    }
+
+    const std::filesystem::path startup = project_.StartupLevelPath();
+    if (!startup.empty() && std::filesystem::exists(startup) && LoadLevel(startup)) {
+        SIM_INFO("Editor", "Project '{}' open, startup level {}", project_.name,
+                 startup.string());
+    } else {
+        CreateStarterLevel();
+        SIM_INFO("Editor", "Project '{}' open at {}", project_.name, project_.root.string());
+    }
+
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+                         std::chrono::system_clock::now().time_since_epoch())
+                         .count();
+    projects_.Remember(project_, static_cast<int64_t>(now));
+    projects_.Save(configDir_ / "projects.json");
+    return true;
+}
+
+bool EditorApp::CreateProject(const std::filesystem::path& parent, const std::string& name) {
+    scene::Project project;
+    std::string error;
+    if (!projects_.Create(parent, name, project, error)) {
+        projectError_ = error;
+        SIM_WARN("Editor", "Cannot create the project '{}': {}", name, error);
+        return false;
+    }
+    SIM_INFO("Editor", "Project '{}' created at {}", project.name, project.root.string());
+    return OpenProject(project.root);
+}
+
+void EditorApp::CloseProject() {
+    if (!HasProject()) {
         return;
     }
-    SIM_INFO("Editor", "Starter assets seeded into {}", target.string());
+    if (playing_) {
+        Stop();
+    }
+    // Pemantau berkas dilepas dan indeksnya dikosongkan. Tanpa ini, project
+    // berikutnya membuka indeks kedua di atas yang pertama.
+    assets_.Shutdown();
+    world_.Clear();
+    history_.Clear();
+    selection_.Clear();
+    animation_.Clear();
+    levelPath_.clear();
+    context_.levelName.clear();
+    project_ = scene::Project{};
+}
+
+/// Layar pemilih project, digambar sebagai ganti seluruh shell editor.
+void EditorApp::DrawProjectManager() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->WorkPos);
+    ImGui::SetNextWindowSize(viewport->WorkSize);
+    ImGui::Begin("##ProjectManager", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
+
+    ImGui::Dummy(ImVec2(0.0f, viewport->WorkSize.y * 0.06f));
+    const float width = std::min(720.0f, viewport->WorkSize.x - 80.0f);
+    ImGui::SetCursorPosX((viewport->WorkSize.x - width) * 0.5f);
+    ImGui::BeginChild("##ProjectManagerBody", ImVec2(width, 0.0f));
+
+    ImGui::PushFont(nullptr, ImGui::GetFontSize() * 1.6f);
+    ImGui::TextUnformatted("SimEngine");
+    ImGui::PopFont();
+    ImGui::TextDisabled("Pilih project untuk mulai bekerja.");
+    ImGui::Spacing();
+    ImGui::Separator();
+    ImGui::Spacing();
+
+    if (!projectError_.empty()) {
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.40f, 1.0f));
+        ImGui::TextWrapped("%s", projectError_.c_str());
+        ImGui::PopStyleColor();
+        ImGui::Spacing();
+    }
+
+    ImGui::SeparatorText("Project baru");
+    ImGui::SetNextItemWidth(width * 0.55f);
+    ImGui::InputTextWithHint("##NewProjectName", "Nama project", &newProjectName_);
+    ImGui::SameLine();
+    const bool nameUsable = !ProjectLibrary::SanitizeFolderName(newProjectName_).empty();
+    ImGui::BeginDisabled(!nameUsable || projectsRoot_.empty());
+    if (ImGui::Button("Buat", ImVec2(120.0f, 0.0f))) {
+        CreateProject(projectsRoot_, newProjectName_);
+    }
+    ImGui::EndDisabled();
+    if (!projectsRoot_.empty()) {
+        // Lokasinya diperlihatkan, tidak hanya diandaikan: "di mana project saya
+        // tadi disimpan" adalah pertanyaan yang muncul justru saat editor sudah
+        // ditutup, dan jawabannya harus terlihat saat membuatnya.
+        ImGui::TextDisabled("%s", (projectsRoot_ / ProjectLibrary::SanitizeFolderName(
+                                                       newProjectName_.empty() ? "NamaProject"
+                                                                               : newProjectName_))
+                                      .string()
+                                      .c_str());
+    }
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Buka project yang sudah ada");
+    ImGui::SetNextItemWidth(width * 0.55f);
+    ImGui::InputTextWithHint("##OpenProjectPath", "Jalur folder project", &openProjectPath_);
+    ImGui::SameLine();
+    ImGui::BeginDisabled(openProjectPath_.empty());
+    if (ImGui::Button("Buka", ImVec2(120.0f, 0.0f))) {
+        OpenProject(std::filesystem::path(openProjectPath_));
+    }
+    ImGui::EndDisabled();
+
+    ImGui::Spacing();
+    ImGui::SeparatorText("Terakhir dibuka");
+    if (projects_.Recent().empty()) {
+        ImGui::TextDisabled("Belum ada. Buat satu di atas untuk mulai.");
+    }
+    // Disalin lebih dulu: membuka sebuah project menulis ulang daftar ini, dan
+    // menulis ulang wadah yang sedang diiterasi adalah iterator yang menggantung.
+    const std::vector<RecentProject> recent = projects_.Recent();
+    std::filesystem::path forget;
+    for (const RecentProject& project : recent) {
+        ImGui::PushID(project.path.string().c_str());
+        const bool exists = project.Exists();
+        ImGui::BeginDisabled(!exists);
+        if (ImGui::Button(project.name.empty() ? "(tanpa nama)" : project.name.c_str(),
+                          ImVec2(width * 0.55f, 0.0f))) {
+            OpenProject(project.path);
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::SmallButton("Lupakan")) {
+            forget = project.path;
+        }
+        ImGui::SameLine();
+        if (exists) {
+            ImGui::TextDisabled("%s", project.path.string().c_str());
+        } else {
+            // Ditandai, bukan disembunyikan: project yang lenyap dari daftar
+            // tanpa penjelasan terbaca sebagai editor yang lupa.
+            ImGui::TextDisabled("%s — tidak ditemukan", project.path.string().c_str());
+        }
+        ImGui::PopID();
+    }
+    if (!forget.empty() && projects_.Forget(forget)) {
+        projects_.Save(configDir_ / "projects.json");
+    }
+
+    ImGui::EndChild();
+    ImGui::End();
 }
 
 void EditorApp::CreateStarterLevel() {
@@ -550,6 +729,17 @@ bool EditorApp::LoadLevel(const std::filesystem::path& path) {
 void EditorApp::DrawFrame(float deltaSeconds) {
     context_.deltaSeconds = deltaSeconds;
 
+    // **Tanpa project, tidak ada yang lain digambar sama sekali.** Bukan sekadar
+    // urutan: panel membaca indeks aset, folder level, dan runtime skrip, dan
+    // ketiganya baru punya arti sesudah sebuah project dipilih. Menggambar shell
+    // lebih dulu dengan semuanya kosong berarti setiap panel harus punya jalur
+    // "belum ada project" sendiri-sendiri — dan yang lupa memilikinya akan
+    // menulis ke folder yang tidak ada.
+    if (!HasProject()) {
+        DrawProjectManager();
+        return;
+    }
+
     // Mendahului panel: hasil pemindaian latar diterapkan di sini, sehingga
     // seluruh panel dalam frame ini melihat daftar aset yang sama.
     assets_.Update(deltaSeconds);
@@ -575,7 +765,7 @@ void EditorApp::DrawFrame(float deltaSeconds) {
         // berarti sebuah skrip gameplay bisa menambah menu, dan sebuah skrip
         // editor ikut terbawa ke build permainan.
         scripting_.Initialize(context_.scripts, &context_, &panels_,
-                              configDir_ / "Assets" / kEditorScriptFolder);
+                              AssetsDirectory() / kEditorScriptFolder);
         // Breakpoint graph menahan Play, bukan menghentikannya: scene tetap
         // seperti apa adanya saat node itu tercapai, dan Stop tetap satu-satunya
         // yang mengembalikannya. Yang tertahan adalah frame BERIKUTNYA — frame
@@ -663,7 +853,7 @@ void EditorApp::DrawLevelDialogs() {
     // dependensi lagi untuk sesuatu yang akan digantikan Asset Browser di E5.
     // Sampai saat itu, level dipilih dari folder editor lewat daftar sederhana —
     // cukup untuk menyimpan dengan nama lain dan membuka lagi.
-    const std::filesystem::path levelsDir = configDir_ / "Levels";
+    const std::filesystem::path levelsDir = LevelsDirectory();
 
     if (pendingDialog_ == Dialog::SaveAs && !ImGui::IsPopupOpen("Save Level As")) {
         ImGui::OpenPopup("Save Level As");
@@ -772,7 +962,7 @@ void EditorApp::DrawExitPrompt() {
 
     if (ImGui::Button("Save and Exit", ImVec2(120.0f, 0.0f))) {
         const std::filesystem::path path =
-            levelPath_.empty() ? configDir_ / "Levels" / "untitled.simlevel" : levelPath_;
+            levelPath_.empty() ? LevelsDirectory() / "untitled.simlevel" : levelPath_;
         if (SaveLevel(path)) {
             wantsExit_ = true;
         }
@@ -819,7 +1009,7 @@ void EditorApp::UpdateAutosave(float deltaSeconds) {
     }
     autosaveTimer_ = 0.0f;
 
-    const std::filesystem::path path = configDir_ / "Levels" / "autosave.simlevel";
+    const std::filesystem::path path = LevelsDirectory() / "autosave.simlevel";
     std::error_code error;
     std::filesystem::create_directories(path.parent_path(), error);
     const scene::LevelIoResult result = scene::SaveLevelToFile(world_, path);
@@ -860,7 +1050,7 @@ std::vector<std::string> EditorApp::FindExternalAssetUsers(const Uuid& guid) con
     // Berkas level milik editor. Folder ini berada DI LUAR akar aset, jadi
     // AssetDatabase tidak mengindeksnya dan UsersOf() tidak akan pernah
     // menyebutnya — padahal justru di sinilah level pengguna disimpan.
-    const std::filesystem::path levels = configDir_ / "Levels";
+    const std::filesystem::path levels = LevelsDirectory();
     std::error_code error;
     if (!std::filesystem::is_directory(levels, error)) {
         return users;

@@ -10,6 +10,7 @@
 #include "Sim/Editor/EditorShell.h"
 #include "Sim/Editor/Notifications.h"
 #include "Sim/Editor/PanelManager.h"
+#include "Sim/Editor/ProjectLibrary.h"
 #include "Sim/Editor/Selection.h"
 #include "Sim/Editor/SkinnedPreview.h"
 #include "Sim/Scene/World.h"
@@ -28,8 +29,13 @@ namespace sim::editor {
 class EditorApp {
 public:
     struct Config {
-        /// Tempat pintasan, layout, dan log disimpan.
+        /// Tempat pintasan, layout, log, dan cache turunan disimpan. **Milik
+        /// editor, bukan milik project**: yang di sini berlaku untuk seluruh
+        /// project yang pernah dibuka orang ini.
         std::filesystem::path configDir;
+        /// Tempat project baru dibuat secara bawaan. Boleh kosong — dialog
+        /// project baru lalu meminta lokasinya sendiri.
+        std::filesystem::path projectsRoot;
         /// Folder `Resources` di sebelah executable. Kosong berarti aset contoh
         /// tidak disemai — editor tetap berjalan, level contohnya saja yang
         /// kehilangan modelnya.
@@ -72,6 +78,22 @@ public:
 
     scene::World& GetWorld() { return world_; }
 
+    // --- project --------------------------------------------------------------
+
+    /// Project yang sedang dibuka. `root` kosong berarti belum ada.
+    const scene::Project& CurrentProject() const { return project_; }
+    bool HasProject() const { return !project_.root.empty(); }
+
+    /// Membuka sebuah project dan menyiapkan seluruh yang bergantung padanya:
+    /// indeks aset, folder level dan prefab, runtime skrip, lalu level awalnya.
+    bool OpenProject(const std::filesystem::path& path);
+    /// Membuat project baru di `parent/<nama>` lalu membukanya.
+    bool CreateProject(const std::filesystem::path& parent, const std::string& name);
+    /// Menutup project yang sedang dibuka dan kembali ke project manager.
+    void CloseProject();
+
+    ProjectLibrary& Projects() { return projects_; }
+
     /// Membuat level contoh saat editor dibuka tanpa berkas apa pun.
     /// Menjalankan skrip. Keadaan scene dicuplik lebih dulu supaya Stop bisa
     /// mengembalikannya persis seperti sebelum Play — tanpa itu, mencoba sesuatu
@@ -81,7 +103,6 @@ public:
     bool IsPlaying() const { return playing_; }
 
     void CreateStarterLevel();
-    void SeedStarterAssets(const std::filesystem::path& resourceDir);
     bool SaveLevel(const std::filesystem::path& path);
     bool LoadLevel(const std::filesystem::path& path);
 
@@ -104,6 +125,10 @@ private:
     std::vector<std::string> FindExternalAssetUsers(const Uuid& guid) const;
 
     void InstallCrashHandler();
+    void DrawProjectManager();
+    /// Folder isi project yang sedang dibuka. Kosong bila belum ada project.
+    std::filesystem::path AssetsDirectory() const;
+    std::filesystem::path LevelsDirectory() const;
     void CreateEntityAction();
     void DeleteSelectionAction();
     void DuplicateSelectionAction();
@@ -146,7 +171,22 @@ private:
     bool focusSaveAsField_ = false;
 
     std::filesystem::path configDir_;
+    std::filesystem::path projectsRoot_;
+    std::filesystem::path resourceDir_;
     std::filesystem::path levelPath_;
+    scene::Project project_;
+    ProjectLibrary projects_;
+    /// Isian dialog project baru. Disimpan di sini, bukan `static` di dalam
+    /// fungsi gambarnya: yang `static` bertahan melewati penutupan dialog, dan
+    /// dialog yang terbuka dengan sisa ketikan sesi sebelumnya adalah dialog
+    /// yang membuat orang tidak sengaja membuat project bernama salah.
+    std::string newProjectName_;
+    std::string openProjectPath_;
+    std::string projectError_;
+    /// Kolam tugas dan folder cache graph, disimpan karena keduanya dibutuhkan
+    /// lagi setiap kali sebuah project dibuka — bukan hanya sekali saat start.
+    TaskPool* tasks_ = nullptr;
+    std::filesystem::path graphCacheDir_;
     /// Cuplikan level sesaat sebelum Play, dipakai Stop untuk mengembalikannya.
     std::string playSnapshot_;
     /// Seleksi sesaat sebelum Play, disimpan sebagai GUID.
