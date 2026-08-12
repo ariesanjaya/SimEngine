@@ -4,6 +4,7 @@ sim_add_library(Assets
         src/AssetTypes.cpp
         src/Importer.cpp
         src/MeshImport.cpp
+        src/MeshSettings.cpp
         src/Thumbnail.cpp
     PUBLIC_DEPS
         Sim::Core

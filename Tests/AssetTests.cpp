@@ -3,6 +3,7 @@
 #include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Assets/Importer.h"
 #include "Sim/Assets/MeshData.h"
+#include "Sim/Assets/MeshSettings.h"
 #include "Sim/Core/FileWatcher.h"
 #include "Sim/Core/TaskPool.h"
 
@@ -813,4 +814,56 @@ TEST_CASE("Jalur tekstur dinormalkan supaya bisa dibaca di mesin lain") {
         CHECK_FALSE(std::filesystem::path(material.baseColorTexture).is_absolute());
     }
     CHECK(withTexture > 0);
+}
+
+TEST_CASE("Penandaan kain disimpan di sebelah mesh dan dikunci nama material") {
+    using namespace sim::assets;
+
+    TempDir temp;
+    const std::filesystem::path mesh = temp.Path() / "rig.fbx";
+    WriteFile(mesh, "bukan fbx sungguhan");
+
+    // Berkas yang belum ada berarti pengaturan kosong, bukan galat — itu keadaan
+    // setiap mesh yang baru diimpor.
+    MeshSettings settings;
+    CHECK_FALSE(LoadMeshSettings(settings, mesh));
+    CHECK(settings.Empty());
+    CHECK_FALSE(settings.ClothFor("Alpha_Body_MAT"));
+
+    settings.SetCloth("Jubah", true);
+    settings.SetCloth("Alpha_Body_MAT", false);
+    REQUIRE(SaveMeshSettings(settings, mesh));
+    CHECK(std::filesystem::exists(MeshSettingsPath(mesh)));
+    // Namanya ditempel di belakang nama lengkapnya, bukan mengganti ekstensinya:
+    // rig.fbx dan rig.obj di satu folder adalah dua aset yang berbeda.
+    CHECK(MeshSettingsPath(mesh).filename() == "rig.fbx.simmeshcfg");
+
+    MeshSettings loaded;
+    REQUIRE(LoadMeshSettings(loaded, mesh));
+    CHECK(loaded.ClothFor("Jubah"));
+    // Yang tidak menandai apa pun dibuang, supaya berkasnya tidak tumbuh oleh
+    // baris yang seluruhnya bernilai bawaan.
+    CHECK(loaded.parts.size() == 1);
+    CHECK_FALSE(loaded.ClothFor("Alpha_Body_MAT"));
+    CHECK_FALSE(loaded.ClothFor("tidak pernah disebut"));
+
+    // Menyimpan dua kali menghasilkan byte yang sama.
+    std::string first;
+    std::string second;
+    {
+        std::ifstream in(MeshSettingsPath(mesh));
+        first.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    REQUIRE(SaveMeshSettings(loaded, mesh));
+    {
+        std::ifstream in(MeshSettingsPath(mesh));
+        second.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    }
+    CHECK(first == second);
+
+    // Melepas penanda terakhir menghapus berkasnya: berkas pengaturan yang tidak
+    // mengatur apa pun hanya menambah satu berkas yang harus ikut kontrol versi.
+    loaded.SetCloth("Jubah", false);
+    REQUIRE(SaveMeshSettings(loaded, mesh));
+    CHECK_FALSE(std::filesystem::exists(MeshSettingsPath(mesh)));
 }
