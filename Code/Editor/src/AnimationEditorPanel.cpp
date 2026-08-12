@@ -1815,6 +1815,31 @@ private:
         }
     }
 
+    bool OpenAsset(const Uuid& guid, EditorContext& context) override {
+        if (context.assets == nullptr) {
+            return false;
+        }
+        const assets::AssetRecord* record = context.assets->Find(guid);
+        if (record == nullptr) {
+            return false;
+        }
+        // Tiga jenis aset, tiga jalur buka — dan tipe asetnya yang membedakan,
+        // bukan tebakan dari namanya.
+        switch (record->type) {
+            case assets::AssetType::AnimationClip:
+                OpenClip(context, guid);
+                return true;
+            case assets::AssetType::Skeleton:
+                OpenSkeleton(context, guid);
+                return true;
+            case assets::AssetType::AnimationGraph:
+                OpenGraph(context, guid);
+                return true;
+            default:
+                return false;
+        }
+    }
+
     void OpenGraph(EditorContext& context, const Uuid& guid) {
         const assets::AssetRecord* record = context.assets->Find(guid);
         if (record == nullptr) {

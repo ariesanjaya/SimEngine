@@ -707,6 +707,18 @@ private:
         }
     }
 
+    bool OpenAsset(const Uuid& guid, EditorContext& context) override {
+        if (context.assets == nullptr) {
+            return false;
+        }
+        const assets::AssetRecord* record = context.assets->Find(guid);
+        if (record == nullptr || record->type != assets::AssetType::Particle) {
+            return false;
+        }
+        Open(context, guid);
+        return true;
+    }
+
     void Open(EditorContext& context, const Uuid& guid) {
         const assets::AssetRecord* record = context.assets->Find(guid);
         if (record == nullptr) {

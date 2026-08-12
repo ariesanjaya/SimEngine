@@ -1357,6 +1357,26 @@ private:
         }
     }
 
+    bool OpenAsset(const Uuid& guid, EditorContext& context) override {
+        if (context.assets == nullptr) {
+            return false;
+        }
+        const assets::AssetRecord* record = context.assets->Find(guid);
+        if (record == nullptr || record->type != assets::AssetType::Material) {
+            return false;
+        }
+        // `.simmat` dan `.simmatinst` sama-sama bertipe Material tapi dibuka
+        // lewat jalur yang berbeda: yang kedua tidak punya graph sendiri, ia
+        // hanya menimpa parameter induknya.
+        if (record->relativePath.size() > 12 &&
+            record->relativePath.rfind(".simmatinst") == record->relativePath.size() - 11) {
+            OpenInstance(context, guid, *record, context.assets->AbsolutePath(*record));
+        } else {
+            Open(context, guid);
+        }
+        return true;
+    }
+
     void Open(EditorContext& context, const Uuid& guid) {
         const assets::AssetRecord* record = context.assets->Find(guid);
         if (record == nullptr) {
