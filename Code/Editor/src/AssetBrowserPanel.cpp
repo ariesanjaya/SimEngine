@@ -2,6 +2,8 @@
 #include "Sim/Core/Log.h"
 #include "Sim/Editor/Command.h"
 #include "Sim/Editor/Icons.h"
+#include "Sim/Material/MaterialGraph.h"
+#include "Sim/Material/MaterialNodeCatalog.h"
 #include "Sim/Platform/FileDialog.h"
 #include "Sim/Editor/Notifications.h"
 #include "Sim/Editor/Panel.h"
@@ -294,6 +296,9 @@ private:
         if (ImGui::MenuItem("Folder baru")) {
             CreateFolder(context, db, folder);
         }
+        if (ImGui::MenuItem("Material baru")) {
+            CreateMaterial(context, db, folder);
+        }
         if (ImGui::MenuItem("Import aset...")) {
             ImportAssets(context, db, folder);
         }
@@ -341,6 +346,49 @@ private:
                              ? target.filename().string()
                              : parent + "/" + target.filename().string();
         context.notifications->Success("Folder " + target.filename().string() + " dibuat");
+    }
+
+    /// Membuat material kosong di dalam `folder`.
+    ///
+    /// **Di folder tempat orang mengklik kanan, bukan selalu di `Materials/`.**
+    /// Material Editor membuat miliknya di folder tetap karena ia tidak punya
+    /// gagasan "folder yang sedang dibuka"; panel ini punya, dan menaruh berkas
+    /// di tempat lain daripada yang ditunjuk orang adalah cara tercepat membuat
+    /// orang kehilangan berkasnya sendiri.
+    void CreateMaterial(EditorContext& context, assets::AssetDatabase& db,
+                        const std::string& folder) {
+        const std::filesystem::path base =
+            folder.empty() ? db.Root() : db.Root() / std::filesystem::path(folder);
+        std::error_code error;
+        std::filesystem::create_directories(base, error);
+
+        std::filesystem::path path = base / "NewMaterial.simmat";
+        int suffix = 0;
+        while (std::filesystem::exists(path, error)) {
+            path = base / ("NewMaterial" + std::to_string(++suffix) + ".simmat");
+        }
+
+        // Satu simpul keluaran permukaan, sama dengan yang dibuat Material
+        // Editor: material kosong yang sudah sah, bukan berkas kosong yang baru
+        // menjadi material setelah disunting.
+        material::MaterialGraph graph;
+        material::MaterialNode output;
+        output.guid = Uuid::Generate();
+        output.type = std::string(material::kSurfaceOutputType);
+        output.position = Vec2(240.0f, 80.0f);
+        graph.nodes.push_back(std::move(output));
+
+        if (!material::SaveMaterialToFile(graph, path).ok) {
+            context.notifications->Error("Tidak bisa membuat " + path.filename().string());
+            return;
+        }
+        db.ScanNow();
+        if (const assets::AssetRecord* record = db.FindByRelativePath(
+                folder.empty() ? path.filename().string()
+                               : folder + "/" + path.filename().string())) {
+            selected_ = record->guid;
+        }
+        context.notifications->Success(path.filename().string() + " dibuat");
     }
 
     /// Menyalin berkas yang dipilih pengguna ke dalam sebuah folder aset.
@@ -460,6 +508,9 @@ private:
         ImGui::BeginDisabled(browsingBuiltin_ || dialogOpen_);
         if (ImGui::MenuItem("Folder baru")) {
             CreateFolder(context, db, currentFolder_);
+        }
+        if (ImGui::MenuItem("Material baru")) {
+            CreateMaterial(context, db, currentFolder_);
         }
         if (ImGui::MenuItem("Import aset...")) {
             ImportAssets(context, db, currentFolder_);
