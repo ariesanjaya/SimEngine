@@ -119,7 +119,7 @@ public:
         DrawToolbar(*db, showDetails);
         if (browsingBuiltin_) {
             ImGui::TextDisabled(
-                "Isi bawaan editor — bisa dipakai langsung, tapi tidak bisa disunting di sini.");
+                "Editor built-ins — usable as they are, but not editable here.");
         }
         ImGui::Separator();
 
@@ -146,16 +146,17 @@ public:
             ImGui::EndChild();
         }
 
-        DrawCreatePrompt(context, *db);
+        DrawPrompt(context, *db);
         DrawDeletePrompt(context, *db);
         // Dijalankan setelah seluruh pohon digambar: memindahkan berkas memicu
         // pemindaian ulang yang mengganti daftar folder yang sedang ditelusuri.
         ResolvePendingMove(context, *db);
+        ResolveFolderMove(context, *db);
     }
 
 private:
-    /// Jenis aset yang sedang dinamai. `None` berarti tidak ada prompt terbuka.
-    enum class CreateKind { None, Folder, Material };
+    /// Apa yang sedang dinamai. `None` berarti tidak ada prompt yang terbuka.
+    enum class PromptKind { None, NewFolder, NewMaterial, RenameFolder };
 
     /// Sakelar Project / Built-in. Digambar lebih dulu supaya ia tidak ikut
     /// menyusut bersama bilah alat di panel sempit: mengetahui pustaka mana yang
@@ -262,6 +263,14 @@ private:
             if (ImGui::Selectable(label.c_str(), selected)) {
                 currentFolder_ = folder;
             }
+            if (ImGui::BeginDragDropSource()) {
+                // Muatannya jalur relatif, bukan penunjuk ke dalam daftar folder:
+                // daftar itu dibangun ulang setiap kali indeks berubah, dan
+                // penunjuknya sudah menggantung sebelum jatuhannya sempat diproses.
+                ImGui::SetDragDropPayload("SIM_FOLDER", folder.c_str(), folder.size() + 1);
+                ImGui::TextUnformatted(LeafName(folder).c_str());
+                ImGui::EndDragDropSource();
+            }
             DrawFolderDropTarget(folder);
             DrawFolderContextMenu(context, db, folder);
             ImGui::PopID();
@@ -277,6 +286,12 @@ private:
     void DrawFolderDropTarget(const std::string& folder) {
         if (!ImGui::BeginDragDropTarget()) {
             return;
+        }
+        if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("SIM_FOLDER")) {
+            if (payload->Data != nullptr) {
+                pendingFolderMove_ = {std::string(static_cast<const char*>(payload->Data)), folder,
+                                      true};
+            }
         }
         if (const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("SIM_ASSET")) {
             if (payload->DataSize == sizeof(Uuid)) {
@@ -297,14 +312,21 @@ private:
         // Pustaka bawaan ikut pemasangan editor: apa pun yang ditulis ke sana
         // hilang pada pemasangan berikutnya.
         ImGui::BeginDisabled(browsingBuiltin_ || dialogOpen_);
-        if (ImGui::MenuItem("Folder baru")) {
-            BeginCreate(CreateKind::Folder, folder);
+        if (ImGui::MenuItem("New folder")) {
+            BeginPrompt(PromptKind::NewFolder, folder);
         }
-        if (ImGui::MenuItem("Material baru")) {
-            BeginCreate(CreateKind::Material, folder);
+        if (ImGui::MenuItem("New material")) {
+            BeginPrompt(PromptKind::NewMaterial, folder);
         }
-        if (ImGui::MenuItem("Import aset...")) {
+        if (ImGui::MenuItem("Import assets...")) {
             ImportAssets(context, db, folder);
+        }
+        ImGui::EndDisabled();
+        // Akar tidak ikut: "Assets" adalah folder aset project itu sendiri, dan
+        // namanya bukan milik panel ini.
+        ImGui::BeginDisabled(browsingBuiltin_ || dialogOpen_ || folder.empty());
+        if (ImGui::MenuItem("Rename")) {
+            BeginPrompt(PromptKind::RenameFolder, folder);
         }
         ImGui::EndDisabled();
         ImGui::Separator();
@@ -328,12 +350,112 @@ private:
     /// seseorang berubah pikiran di tengah jalan — dan berkas yang terlanjur ada
     /// adalah sampah yang harus dibersihkan sendiri, bukan sesuatu yang batal
     /// dengan menekan Escape.
-    void BeginCreate(CreateKind kind, const std::string& folder) {
-        createKind_ = kind;
-        createFolder_ = folder;
-        createName_ = kind == CreateKind::Folder ? "New Folder" : "NewMaterial";
-        createError_.clear();
-        createFocus_ = true;
+    /// `folder` adalah folder tujuan untuk yang dibuat, dan folder yang
+    /// bersangkutan sendiri untuk yang diganti nama.
+    void BeginPrompt(PromptKind kind, const std::string& folder) {
+        promptKind_ = kind;
+        promptFolder_ = folder;
+        promptName_ = kind == PromptKind::NewFolder      ? "New Folder"
+                      : kind == PromptKind::NewMaterial  ? "NewMaterial"
+                                                         : LeafName(folder);
+        promptError_.clear();
+        promptFocus_ = true;
+    }
+
+    /// Induk sebuah folder relatif; "" untuk yang tepat di akar aset.
+    static std::string ParentFolder(const std::string& folder) {
+        const std::size_t slash = folder.rfind('/');
+        return slash == std::string::npos ? std::string{} : folder.substr(0, slash);
+    }
+
+    /// Menyesuaikan keadaan panel yang masih menyebut jalur folder lama.
+    ///
+    /// **Termasuk seluruh keturunannya, bukan hanya yang persis sama namanya.**
+    /// Folder yang berpindah membawa serta isinya; folder yang sedang dibuka dan
+    /// yang ditandai favorit sama-sama disimpan sebagai jalur, dan jalur yang
+    /// menunjuk tempat yang sudah tidak ada membuat panel menampilkan folder
+    /// kosong tanpa sebab yang terlihat.
+    void RepathFolders(const std::string& from, const std::string& to) {
+        const auto repath = [&](std::string& path) {
+            if (path == from) {
+                path = to;
+            } else if (path.size() > from.size() && path.compare(0, from.size(), from) == 0 &&
+                       path[from.size()] == '/') {
+                path = to + path.substr(from.size());
+            }
+        };
+        repath(currentFolder_);
+        for (std::string& favourite : favourites_) {
+            repath(favourite);
+        }
+    }
+
+    /// Mengganti nama sebuah folder di tempatnya.
+    ///
+    /// GUID aset di dalamnya tidak berubah: `.meta` ikut berpindah bersama
+    /// berkasnya, jadi tidak ada level yang perlu disunting — sama seperti
+    /// memindahkan satu aset.
+    bool RenameFolder(EditorContext& context, assets::AssetDatabase& db,
+                      const std::string& folder, const std::string& name) {
+        if (!ValidateName(name)) {
+            return false;
+        }
+        const std::string parent = ParentFolder(folder);
+        const std::string target = parent.empty() ? name : parent + "/" + name;
+        if (target == folder) {
+            return true;
+        }
+        std::error_code error;
+        const std::filesystem::path to = db.Root() / std::filesystem::path(target);
+        if (std::filesystem::exists(to, error)) {
+            promptError_ = "\"" + name + "\" already exists here.";
+            return false;
+        }
+        std::filesystem::rename(db.Root() / std::filesystem::path(folder), to, error);
+        if (error) {
+            promptError_ = "Cannot rename the folder: " + error.message();
+            return false;
+        }
+        db.ScanNow();
+        RepathFolders(folder, target);
+        context.notifications->Success("Renamed to " + name);
+        return true;
+    }
+
+    /// Memindahkan sebuah folder ke dalam folder lain.
+    void MoveFolder(EditorContext& context, assets::AssetDatabase& db, const std::string& folder,
+                    const std::string& destination) {
+        // **Tujuan yang berada di dalam folder itu sendiri ditolak.** Yang
+        // dilakukan `rename` pada folder yang dipindahkan ke dalam keturunannya
+        // bergantung pada sistem berkas, dan yang paling ringan pun meninggalkan
+        // folder yang tidak lagi bisa dijangkau dari akar.
+        if (destination == folder ||
+            (destination.size() > folder.size() &&
+             destination.compare(0, folder.size(), folder) == 0 &&
+             destination[folder.size()] == '/')) {
+            context.notifications->Error("A folder cannot be moved into itself.");
+            return;
+        }
+        if (ParentFolder(folder) == destination) {
+            return;
+        }
+        const std::string leaf = LeafName(folder);
+        const std::string target = destination.empty() ? leaf : destination + "/" + leaf;
+        std::error_code error;
+        const std::filesystem::path to = db.Root() / std::filesystem::path(target);
+        if (std::filesystem::exists(to, error)) {
+            context.notifications->Error("\"" + leaf + "\" already exists in the destination.");
+            return;
+        }
+        std::filesystem::rename(db.Root() / std::filesystem::path(folder), to, error);
+        if (error) {
+            context.notifications->Error("Cannot move the folder: " + error.message());
+            return;
+        }
+        db.ScanNow();
+        RepathFolders(folder, target);
+        context.notifications->Success("Moved " + leaf + " to " +
+                                       (destination.empty() ? "Assets" : destination));
     }
 
     static std::string TrimName(const std::string& text) {
@@ -353,18 +475,18 @@ private:
     /// sekali.
     bool ValidateName(const std::string& name) {
         if (name.find('/') != std::string::npos || name.find('\\') != std::string::npos) {
-            createError_ = "The name cannot contain a path.";
+            promptError_ = "The name cannot contain a path.";
             return false;
         }
         if (name == "." || name == "..") {
-            createError_ = "That name is reserved.";
+            promptError_ = "That name is reserved.";
             return false;
         }
         return true;
     }
 
     /// Membuat folder bernama `name` di dalam `parent` (relatif terhadap akar
-    /// aset). False berarti promptnya tetap terbuka dengan `createError_` terisi.
+    /// aset). False berarti promptnya tetap terbuka dengan `promptError_` terisi.
     bool CreateFolder(EditorContext& context, assets::AssetDatabase& db,
                       const std::string& parent, const std::string& name) {
         if (!ValidateName(name)) {
@@ -375,12 +497,12 @@ private:
         const std::filesystem::path target = base / name;
         std::error_code error;
         if (std::filesystem::exists(target, error)) {
-            createError_ = "\"" + name + "\" already exists here.";
+            promptError_ = "\"" + name + "\" already exists here.";
             return false;
         }
         std::filesystem::create_directories(target, error);
         if (error) {
-            createError_ = "Cannot create the folder: " + error.message();
+            promptError_ = "Cannot create the folder: " + error.message();
             return false;
         }
         // Pemindaian dipaksa selesai supaya foldernya langsung terlihat.
@@ -421,7 +543,7 @@ private:
 
         const std::filesystem::path path = base / fileName;
         if (std::filesystem::exists(path, error)) {
-            createError_ = "\"" + fileName + "\" already exists here.";
+            promptError_ = "\"" + fileName + "\" already exists here.";
             return false;
         }
 
@@ -436,7 +558,7 @@ private:
         graph.nodes.push_back(std::move(output));
 
         if (!material::SaveMaterialToFile(graph, path).ok) {
-            createError_ = "Cannot write " + fileName;
+            promptError_ = "Cannot write " + fileName;
             return false;
         }
         db.ScanNow();
@@ -451,12 +573,15 @@ private:
     /// Prompt nama untuk aset baru. Menyusul `DrawDeletePrompt`: keduanya modal
     /// di lingkup panel, bukan di dalam child mana pun, supaya ID popup-nya tidak
     /// ikut berpindah bersama isi yang sedang digambar.
-    void DrawCreatePrompt(EditorContext& context, assets::AssetDatabase& db) {
-        if (createKind_ == CreateKind::None) {
+    void DrawPrompt(EditorContext& context, assets::AssetDatabase& db) {
+        if (promptKind_ == PromptKind::None) {
             return;
         }
-        const bool folderMode = createKind_ == CreateKind::Folder;
-        const char* title = folderMode ? "New folder" : "New material";
+        const bool renaming = promptKind_ == PromptKind::RenameFolder;
+        const bool materialMode = promptKind_ == PromptKind::NewMaterial;
+        const char* title = renaming      ? "Rename folder"
+                            : materialMode ? "New material"
+                                           : "New folder";
         if (!ImGui::IsPopupOpen(title)) {
             ImGui::OpenPopup(title);
         }
@@ -467,33 +592,34 @@ private:
             return;
         }
 
-        ImGui::TextDisabled("in %s", createFolder_.empty() ? "Assets" : createFolder_.c_str());
+        const std::string context_folder = renaming ? ParentFolder(promptFolder_) : promptFolder_;
+        ImGui::TextDisabled("in %s", context_folder.empty() ? "Assets" : context_folder.c_str());
         ImGui::Spacing();
 
         // Fokus diarahkan ke kotaknya sekali saat prompt muncul. Prompt yang
         // meminta nama tapi menunggu satu klik lagi sebelum bisa diketik adalah
         // langkah tambahan yang tidak menghasilkan apa pun.
-        if (createFocus_) {
+        if (promptFocus_) {
             ImGui::SetKeyboardFocusHere();
-            createFocus_ = false;
+            promptFocus_ = false;
         }
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18.0f);
         const bool submitted =
-            ImGui::InputText("##createname", &createName_,
+            ImGui::InputText("##createname", &promptName_,
                              ImGuiInputTextFlags_EnterReturnsTrue |
                                  ImGuiInputTextFlags_AutoSelectAll);
-        if (!folderMode) {
+        if (materialMode) {
             ImGui::SameLine();
             ImGui::TextDisabled(".simmat");
         }
-        if (!createError_.empty()) {
+        if (!promptError_.empty()) {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.40f, 1.0f));
-            ImGui::TextUnformatted(createError_.c_str());
+            ImGui::TextUnformatted(promptError_.c_str());
             ImGui::PopStyleColor();
         }
 
         ImGui::Spacing();
-        const std::string name = TrimName(createName_);
+        const std::string name = TrimName(promptName_);
         ImGui::BeginDisabled(name.empty());
         const bool confirm =
             ImGui::Button("Create", ImVec2(120.0f, 0.0f)) || (submitted && !name.empty());
@@ -503,19 +629,31 @@ private:
             ImGui::Button("Cancel", ImVec2(120.0f, 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape);
 
         if (confirm) {
-            createError_.clear();
-            const bool created = folderMode ? CreateFolder(context, db, createFolder_, name)
-                                            : CreateMaterial(context, db, createFolder_, name);
+            promptError_.clear();
+            bool created = false;
+            switch (promptKind_) {
+                case PromptKind::NewFolder:
+                    created = CreateFolder(context, db, promptFolder_, name);
+                    break;
+                case PromptKind::NewMaterial:
+                    created = CreateMaterial(context, db, promptFolder_, name);
+                    break;
+                case PromptKind::RenameFolder:
+                    created = RenameFolder(context, db, promptFolder_, name);
+                    break;
+                case PromptKind::None:
+                    break;
+            }
             // Yang gagal membiarkan promptnya terbuka bersama pesannya. Menutupnya
             // berarti seluruh langkahnya harus diulang untuk memperbaiki satu huruf.
             if (created) {
-                createKind_ = CreateKind::None;
+                promptKind_ = PromptKind::None;
                 ImGui::CloseCurrentPopup();
             } else {
-                createFocus_ = true;
+                promptFocus_ = true;
             }
         } else if (cancel) {
-            createKind_ = CreateKind::None;
+            promptKind_ = PromptKind::None;
             ImGui::CloseCurrentPopup();
         }
         ImGui::EndPopup();
@@ -536,7 +674,7 @@ private:
         // ujungnya: daftar yang hanya memuat yang dikenal membuat berkas yang
         // sebenarnya bisa dipakai tampak tidak didukung.
         static const std::array<platform::FileDialogFilter, 5> kFilters{
-            platform::FileDialogFilter{"Semua aset",
+            platform::FileDialogFilter{"All assets",
                                        "fbx;obj;png;jpg;jpeg;tga;hdr;lua;simmat;simanim;simskel"},
             platform::FileDialogFilter{"Mesh", "fbx;obj"},
             platform::FileDialogFilter{"Tekstur", "png;jpg;jpeg;tga;hdr"},
@@ -579,7 +717,7 @@ private:
                 }
                 if (copied > 0) {
                     db.ScanNow();
-                    context.notifications->Success(std::to_string(copied) + " aset diimpor");
+                    context.notifications->Success(std::to_string(copied) + " assets imported");
                 }
             },
             /*allowMany=*/true);
@@ -636,19 +774,19 @@ private:
         ImGui::TextDisabled("%s", currentFolder_.empty() ? "Assets" : currentFolder_.c_str());
         ImGui::Separator();
         ImGui::BeginDisabled(browsingBuiltin_ || dialogOpen_);
-        if (ImGui::MenuItem("Folder baru")) {
-            BeginCreate(CreateKind::Folder, currentFolder_);
+        if (ImGui::MenuItem("New folder")) {
+            BeginPrompt(PromptKind::NewFolder, currentFolder_);
         }
-        if (ImGui::MenuItem("Material baru")) {
-            BeginCreate(CreateKind::Material, currentFolder_);
+        if (ImGui::MenuItem("New material")) {
+            BeginPrompt(PromptKind::NewMaterial, currentFolder_);
         }
-        if (ImGui::MenuItem("Import aset...")) {
+        if (ImGui::MenuItem("Import assets...")) {
             ImportAssets(context, db, currentFolder_);
         }
         ImGui::EndDisabled();
         if (browsingBuiltin_) {
             ImGui::Separator();
-            ImGui::TextDisabled("Pustaka bawaan tidak bisa disunting");
+            ImGui::TextDisabled("The built-in library cannot be edited");
         }
         ImGui::EndPopup();
     }
@@ -873,7 +1011,7 @@ private:
         if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) &&
             context.openAsset) {
             if (!context.openAsset(record.guid)) {
-                context.notifications->Info("Belum ada editor untuk " + record.name);
+                context.notifications->Info("No editor for " + record.name);
             }
         }
 
@@ -889,7 +1027,7 @@ private:
                 // membingungkan daripada aksi yang memang tidak ditawarkan.
                 const bool hasProject = context.assets != nullptr;
                 ImGui::BeginDisabled(!hasProject);
-                if (ImGui::MenuItem("Salin ke project")) {
+                if (ImGui::MenuItem("Copy to project")) {
                     CopyBuiltinToProject(context, db, record);
                 }
                 ImGui::EndDisabled();
@@ -1133,6 +1271,19 @@ private:
         ImGui::EndPopup();
     }
 
+    void ResolveFolderMove(EditorContext& context, assets::AssetDatabase& db) {
+        if (!pendingFolderMove_.valid) {
+            return;
+        }
+        const PendingFolderMove move = pendingFolderMove_;
+        pendingFolderMove_ = {};
+        if (browsingBuiltin_) {
+            context.notifications->Error("The built-in library cannot be edited.");
+            return;
+        }
+        MoveFolder(context, db, move.source, move.destination);
+    }
+
     void ResolvePendingMove(EditorContext& context, assets::AssetDatabase& db) {
         if (!pendingMove_.valid) {
             return;
@@ -1192,17 +1343,27 @@ private:
     ViewKey viewKey_{0, {}, {}, -1};
     std::vector<const AssetRecord*> visible_;
     PendingMove pendingMove_;
+
+    /// Perpindahan folder yang menunggu. Dikerjakan setelah seluruh pohon
+    /// digambar, sama alasannya dengan `pendingMove_`: memindahkan folder
+    /// mengganti daftar yang sedang diiterasi.
+    struct PendingFolderMove {
+        std::string source;
+        std::string destination;
+        bool valid = false;
+    };
+    PendingFolderMove pendingFolderMove_;
     std::string search_;
     std::string currentFolder_;
     std::string renameBuffer_;
 
-    CreateKind createKind_ = CreateKind::None;
+    PromptKind promptKind_ = PromptKind::None;
     /// Folder tujuan, dibekukan saat prompt dibuka: orang bisa berpindah folder
     /// di balik prompt, dan berkasnya harus tetap lahir di tempat yang ditunjuk.
-    std::string createFolder_;
-    std::string createName_;
-    std::string createError_;
-    bool createFocus_ = false;
+    std::string promptFolder_;
+    std::string promptName_;
+    std::string promptError_;
+    bool promptFocus_ = false;
     std::vector<std::string> favourites_;
     std::vector<Uuid> deleteUsers_;
     /// Pemakai di luar indeks aset, sudah berbentuk teks siap tampil.
