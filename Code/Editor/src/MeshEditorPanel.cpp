@@ -133,6 +133,39 @@ private:
         if (ImGui::Button("Muat ulang") && !meshPath_.empty()) {
             Reload(context);
         }
+
+        // Hanya glTF yang menanam teksturnya; FBX menunjuk berkas di sebelahnya,
+        // jadi tombolnya tidak punya arti di sana.
+        const bool gltf = meshPath_.size() > 4 &&
+                          (meshPath_.rfind(".glb") == meshPath_.size() - 4 ||
+                           meshPath_.rfind(".gltf") == meshPath_.size() - 5);
+        if (gltf) {
+            ImGui::SameLine();
+            if (ImGui::Button("Keluarkan tekstur")) {
+                ExtractTextures(context);
+            }
+        }
+    }
+
+    /// Menulis tekstur yang tertanam menjadi berkas, di folder yang sama dengan
+    /// mesh-nya. **Dipanggil dengan sengaja, bukan saat mesh dimuat** — yang
+    /// memuat mesh adalah perender, di jalur daftar gambar.
+    void ExtractTextures(EditorContext& context) {
+        std::vector<std::string> written;
+        std::string error;
+        const std::filesystem::path folder = std::filesystem::path(meshPath_).parent_path();
+        if (!assets::ExtractGltfTextures(meshPath_, folder, written, error)) {
+            if (context.notifications != nullptr) {
+                context.notifications->Error("Tidak bisa mengeluarkan tekstur: " + error);
+            }
+            return;
+        }
+        context.assets->ScanNow();
+        if (context.notifications != nullptr) {
+            context.notifications->Success(
+                written.empty() ? "Semua teksturnya sudah ada"
+                                : std::to_string(written.size()) + " tekstur dikeluarkan");
+        }
     }
 
     void Open(EditorContext& context, const assets::AssetRecord& record) {

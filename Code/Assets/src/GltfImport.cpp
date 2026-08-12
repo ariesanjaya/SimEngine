@@ -24,6 +24,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <fstream>
 #include <unordered_map>
 #include <vector>
 
@@ -44,26 +45,44 @@ Mat4 ToMat4(const cgltf_float m[16]) {
 /// dari nomor urutnya kalau ia pun tidak bernama. Yang penting nama itu **tetap
 /// sama setiap kali berkasnya dibaca**, karena ia yang akan menjadi nama berkas
 /// saat gambarnya dikeluarkan.
-std::string TextureName(const cgltf_texture_view& view, std::size_t slot) {
+/// Ekstensi yang sesuai isi gambarnya.
+std::string ExtensionFor(const cgltf_image& image) {
+    if (image.mime_type != nullptr) {
+        if (std::strstr(image.mime_type, "jpeg") != nullptr ||
+            std::strstr(image.mime_type, "jpg") != nullptr) {
+            return ".jpg";
+        }
+    }
+    return ".png";
+}
+
+std::string TextureName(const cgltf_data& data, const cgltf_texture_view& view) {
     if (view.texture == nullptr || view.texture->image == nullptr) {
         return {};
     }
     const cgltf_image& image = *view.texture->image;
-    if (image.uri != nullptr && image.uri[0] != '\0') {
-        // URI data: bukan jalur berkas melainkan isi gambarnya sendiri.
-        if (std::strncmp(image.uri, "data:", 5) != 0) {
-            std::string uri = image.uri;
-            std::replace(uri.begin(), uri.end(), '\\', '/');
-            return uri;
-        }
+    if (image.uri != nullptr && image.uri[0] != '\0' &&
+        std::strncmp(image.uri, "data:", 5) != 0) {
+        // Berkas di sebelah `.gltf`-nya. URI data: bukan jalur melainkan isi
+        // gambarnya sendiri, jadi ia ditangani sebagai gambar tertanam.
+        std::string uri = image.uri;
+        std::replace(uri.begin(), uri.end(), '\\', '/');
+        return uri;
     }
+    // **Dinamai menurut nomor gambarnya di dalam berkas, bukan menurut slot
+    // materialnya.** Nomor slot sama untuk setiap material — dua material yang
+    // sama-sama punya peta warna dasar akan menghasilkan nama yang sama, dan
+    // yang kedua menimpa yang pertama saat dikeluarkan. Nomor gambar unik di
+    // dalam berkasnya dan tetap sama setiap kali dibaca, dan itulah dua sifat
+    // yang dibutuhkan nama yang akan menjadi nama berkas.
+    const auto index = static_cast<std::size_t>(&image - data.images);
     if (image.name != nullptr && image.name[0] != '\0') {
-        return std::string(image.name) + ".png";
+        return std::string(image.name) + ExtensionFor(image);
     }
-    return "embedded_" + std::to_string(slot) + ".png";
+    return "embedded_" + std::to_string(index) + ExtensionFor(image);
 }
 
-MeshMaterial ReadMaterial(const cgltf_material& source) {
+MeshMaterial ReadMaterial(const cgltf_data& data, const cgltf_material& source) {
     MeshMaterial material;
     material.name = source.name != nullptr ? source.name : "";
 
@@ -74,17 +93,17 @@ MeshMaterial ReadMaterial(const cgltf_material& source) {
         material.opacity = pbr.base_color_factor[3];
         material.metalness = pbr.metallic_factor;
         material.roughness = pbr.roughness_factor;
-        material.baseColorTexture = TextureName(pbr.base_color_texture, 0);
+        material.baseColorTexture = TextureName(data, pbr.base_color_texture);
         // Satu tekstur membawa metalness dan roughness sekaligus — biru dan
         // hijau. Dicatat di kedua medan supaya pemakainya tidak perlu tahu
         // bahwa keduanya kebetulan berbagi berkas.
-        material.roughnessTexture = TextureName(pbr.metallic_roughness_texture, 1);
+        material.roughnessTexture = TextureName(data, pbr.metallic_roughness_texture);
         material.metalnessTexture = material.roughnessTexture;
     }
-    material.normalTexture = TextureName(source.normal_texture, 2);
+    material.normalTexture = TextureName(data, source.normal_texture);
     material.emissive = Vec3(source.emissive_factor[0], source.emissive_factor[1],
                              source.emissive_factor[2]);
-    material.emissiveTexture = TextureName(source.emissive_texture, 3);
+    material.emissiveTexture = TextureName(data, source.emissive_texture);
     if (material.name.empty()) {
         material.name = "Material";
     }
@@ -274,7 +293,7 @@ MeshData LoadGltfMesh(const std::filesystem::path& path, std::string& error) {
                     material = found->second;
                 } else {
                     material = static_cast<int>(mesh.materials.size());
-                    mesh.materials.push_back(ReadMaterial(*primitive.material));
+                    mesh.materials.push_back(ReadMaterial(*data, *primitive.material));
                     materialIndex.emplace(primitive.material, material);
                 }
             }
@@ -351,6 +370,81 @@ MeshData LoadGltfMesh(const std::filesystem::path& path, std::string& error) {
     }
     GroupByMaterial(mesh, triangleMaterial);
     return mesh;
+}
+
+bool ExtractGltfTextures(const std::filesystem::path& path, const std::filesystem::path& folder,
+                        std::vector<std::string>& outWritten, std::string& error) {
+    outWritten.clear();
+    error.clear();
+
+    cgltf_options options{};
+    cgltf_data* data = nullptr;
+    if (cgltf_parse_file(&options, path.string().c_str(), &data) != cgltf_result_success) {
+        error = "not a readable glTF file";
+        return false;
+    }
+    if (cgltf_load_buffers(&options, data, path.string().c_str()) != cgltf_result_success) {
+        cgltf_free(data);
+        error = "cannot read the buffers this file points at";
+        return false;
+    }
+
+    std::error_code code;
+    std::filesystem::create_directories(folder, code);
+
+    for (cgltf_size i = 0; i < data->images_count; ++i) {
+        const cgltf_image& image = data->images[i];
+
+        // Gambar yang menunjuk berkas di sebelah `.gltf`-nya disalin, bukan
+        // ditulis ulang: isinya sudah ada di disk, dan menyalinnya membuat
+        // seluruh tekstur mesh ini berada di dalam project — yang di luar akan
+        // hilang begitu project dipindahkan.
+        if (image.uri != nullptr && image.uri[0] != '\0' &&
+            std::strncmp(image.uri, "data:", 5) != 0) {
+            std::string uri = image.uri;
+            std::replace(uri.begin(), uri.end(), '\\', '/');
+            const std::filesystem::path source = path.parent_path() / uri;
+            const std::filesystem::path destination = folder / std::filesystem::path(uri).filename();
+            if (std::filesystem::exists(destination, code) ||
+                !std::filesystem::exists(source, code)) {
+                continue;
+            }
+            std::filesystem::copy_file(source, destination, code);
+            if (!code) {
+                outWritten.push_back(destination.filename().string());
+            }
+            continue;
+        }
+
+        if (image.buffer_view == nullptr) {
+            continue;
+        }
+        const void* bytes = cgltf_buffer_view_data(image.buffer_view);
+        if (bytes == nullptr || image.buffer_view->size == 0) {
+            continue;
+        }
+
+        std::string name = image.name != nullptr && image.name[0] != '\0'
+                               ? std::string(image.name) + ExtensionFor(image)
+                               : "embedded_" + std::to_string(i) + ExtensionFor(image);
+        const std::filesystem::path destination = folder / name;
+        if (std::filesystem::exists(destination, code)) {
+            continue;
+        }
+        std::ofstream out(destination, std::ios::binary);
+        if (!out) {
+            SIM_WARN("Assets", "Cannot write {}", destination.string());
+            continue;
+        }
+        out.write(static_cast<const char*>(bytes),
+                  static_cast<std::streamsize>(image.buffer_view->size));
+        if (out.good()) {
+            outWritten.push_back(std::move(name));
+        }
+    }
+
+    cgltf_free(data);
+    return true;
 }
 
 }  // namespace sim::assets

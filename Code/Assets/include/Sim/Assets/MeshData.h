@@ -243,6 +243,25 @@ void GroupByMaterial(MeshData& mesh, const std::vector<int>& triangleMaterial);
 /// dengan sengaja.
 MeshData LoadGltfMesh(const std::filesystem::path& path, std::string& error);
 
+/// Mengeluarkan tekstur sebuah berkas glTF/GLB menjadi berkas di `folder`.
+///
+/// **Langkah tersendiri, bukan bagian `LoadMesh`.** `LoadMesh` dipanggil
+/// perender di jalur daftar gambar; fungsi yang menulis berkas sebagai efek
+/// samping menggambar adalah fungsi yang menulis berkas pada waktu yang tidak
+/// bisa ditebak siapa pun — dan ke folder mana pun yang kebetulan sedang aktif.
+/// Yang di sini dipanggil dengan sengaja, oleh editor.
+///
+/// Nama berkasnya sama persis dengan yang tercatat di `MeshMaterial`, karena
+/// keduanya berasal dari satu fungsi penamaan. Gambar yang tertanam ditulis apa
+/// adanya — isinya sudah PNG atau JPEG, jadi tidak ada yang perlu dikodekan
+/// ulang. Berkas yang sudah ada **tidak** ditimpa: tekstur yang sudah disunting
+/// orang tidak boleh hilang karena mesh-nya diimpor ulang.
+///
+/// `outWritten` diisi nama berkas yang benar-benar ditulis. Mengembalikan false
+/// hanya bila berkasnya sendiri tidak terbaca — nol gambar bukan kegagalan.
+bool ExtractGltfTextures(const std::filesystem::path& path, const std::filesystem::path& folder,
+                         std::vector<std::string>& outWritten, std::string& error);
+
 SkeletonData LoadSkeleton(const std::filesystem::path& path, std::string& error);
 
 /// Memuat mesh dari berkas FBX atau OBJ.

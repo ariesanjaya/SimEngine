@@ -927,3 +927,53 @@ TEST_CASE("glTF terbaca beserta material dan ruasnya") {
     CHECK(named);
     CHECK(textured);
 }
+
+TEST_CASE("Tekstur glTF yang tertanam dikeluarkan dengan nama yang dirujuk materialnya") {
+    using namespace sim::assets;
+
+    const char* gltfPath = std::getenv("SIM_GLTF");
+    if (gltfPath == nullptr || !std::filesystem::exists(gltfPath)) {
+        return;
+    }
+
+    TempDir temp;
+    std::vector<std::string> written;
+    std::string error;
+    REQUIRE(ExtractGltfTextures(gltfPath, temp.Path(), written, error));
+    INFO("error: " << error);
+    REQUIRE_FALSE(written.empty());
+
+    // **Namanya harus sama persis dengan yang dicatat materialnya**, karena
+    // keduanya berasal dari satu fungsi penamaan. Kalau berselisih, material
+    // menunjuk berkas yang tidak pernah ada — dan itu tidak menghasilkan galat,
+    // hanya tekstur yang diam-diam tidak muncul.
+    std::string loadError;
+    const MeshData mesh = LoadMesh(gltfPath, loadError);
+    REQUIRE(mesh.IsValid());
+    int matched = 0;
+    for (const MeshMaterial& material : mesh.materials) {
+        for (const std::string* texture :
+             {&material.baseColorTexture, &material.normalTexture, &material.roughnessTexture,
+              &material.emissiveTexture}) {
+            if (texture->empty()) {
+                continue;
+            }
+            INFO("tekstur " << *texture);
+            CHECK(std::filesystem::exists(temp.Path() / *texture));
+            ++matched;
+        }
+    }
+    CHECK(matched > 0);
+
+    // Berkas yang sudah ada tidak ditimpa: tekstur yang sudah disunting orang
+    // tidak boleh hilang karena mesh-nya diimpor ulang.
+    const std::filesystem::path first = temp.Path() / written.front();
+    WriteFile(first, "sudah disunting");
+    std::vector<std::string> again;
+    REQUIRE(ExtractGltfTextures(gltfPath, temp.Path(), again, error));
+    CHECK(again.empty());
+    std::ifstream check(first);
+    std::string contents;
+    check >> contents;
+    CHECK(contents == "sudah");
+}
