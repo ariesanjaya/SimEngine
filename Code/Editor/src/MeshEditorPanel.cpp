@@ -109,6 +109,7 @@ public:
                           ImGuiChildFlags_AlwaysUseWindowPadding);
         DrawInfo();
         DrawParts(context);
+        DrawComponentDefaults(context);
         DrawBones();
         ImGui::EndChild();
     }
@@ -333,16 +334,74 @@ private:
             bool cloth = IsClothPart(part);
             if (ImGui::Checkbox("##cloth", &cloth) && !name.empty()) {
                 settings_.SetCloth(name, cloth);
-                if (!assets::SaveMeshSettings(settings_, meshPath_) &&
-                    context.notifications != nullptr) {
-                    context.notifications->Error("Tidak bisa menyimpan penandaan kain");
-                }
+                Save(context);
             }
             ImGui::SameLine();
             ImGui::Text("%s", name.c_str());
             ImGui::SameLine();
             ImGui::TextDisabled("%u tri", mesh_.parts[part].indexCount / 3u);
+            DrawMaterialSlot(context, name);
             ImGui::PopID();
+        }
+    }
+
+    /// Pemilih material bawaan untuk sebuah ruas.
+    ///
+    /// **Yang disetel di sini bukan yang berlaku saat menggambar** melainkan
+    /// titik awal sebuah entity: ia disalin ke `MeshRendererComponent` saat aset
+    /// mesh ini ditetapkan, dan sesudah itu entity yang memilikinya.
+    void DrawMaterialSlot(EditorContext& context, const std::string& materialName) {
+        if (materialName.empty() || context.assets == nullptr) {
+            return;
+        }
+        const Uuid current = settings_.MaterialFor(materialName);
+        std::string label = "(bawaan editor)";
+        if (const assets::AssetRecord* record = context.assets->Find(current)) {
+            label = record->name;
+        }
+
+        ImGui::SetNextItemWidth(-1.0f);
+        if (!ImGui::BeginCombo("##material", label.c_str())) {
+            return;
+        }
+        if (ImGui::Selectable("(bawaan editor)", !current.IsValid())) {
+            settings_.SetMaterial(materialName, Uuid{});
+            Save(context);
+        }
+        for (const assets::AssetRecord& record : context.assets->All()) {
+            if (record.type != assets::AssetType::Material) {
+                continue;
+            }
+            const bool selected = record.guid == current;
+            ImGui::PushID(record.guid.ToString().c_str());
+            if (ImGui::Selectable(record.relativePath.c_str(), selected)) {
+                settings_.SetMaterial(materialName, record.guid);
+                Save(context);
+            }
+            ImGui::PopID();
+        }
+        ImGui::EndCombo();
+    }
+
+    /// Nilai bawaan yang ikut terisi ke komponen saat mesh ini dipasang.
+    void DrawComponentDefaults(EditorContext& context) {
+        ImGui::SeparatorText("Bawaan MeshRenderer");
+        ImGui::TextDisabled("Mengisi slot yang masih kosong saat mesh ini dipasang.");
+
+        bool changed = false;
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
+        changed |= ImGui::SliderFloat("LOD Bias", &settings_.lodBias, -4.0f, 4.0f);
+        changed |= ImGui::Checkbox("Cast Shadows", &settings_.castShadows);
+        ImGui::SameLine();
+        changed |= ImGui::Checkbox("Receive Shadows", &settings_.receiveShadows);
+        if (changed) {
+            Save(context);
+        }
+    }
+
+    void Save(EditorContext& context) {
+        if (!assets::SaveMeshSettings(settings_, meshPath_) && context.notifications != nullptr) {
+            context.notifications->Error("Tidak bisa menyimpan pengaturan mesh");
         }
     }
 
