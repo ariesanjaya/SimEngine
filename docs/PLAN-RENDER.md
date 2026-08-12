@@ -766,10 +766,37 @@ Terukur di editor (RTX 2060, viewport 1277x696):
 | `forward-opaque` | 0,014 ms |
 | Galat validation layer | **0** |
 
-**Yang belum ada dari E8.4:** LOD dan meshoptimizer, blend shape, material dan
-tekstur dari berkasnya, serta glTF — ufbx membaca FBX dan OBJ, dan `cgltf` masih
-menunggu. Indeks aset juga belum mencatat jumlah segitiga: itu menuntut medan
-baru di `ImportResult` beserta panel yang menampilkannya.
+**Yang belum ada dari E8.4:** LOD dan meshoptimizer, blend shape, serta glTF —
+ufbx membaca FBX dan OBJ, dan `cgltf` masih menunggu. Indeks aset juga belum
+mencatat jumlah segitiga: itu menuntut medan baru di `ImportResult` beserta panel
+yang menampilkannya.
+
+**Sedang berjalan: material dan tekstur dari berkasnya.** Sisi impornya sudah
+mendarat (lihat di bawah); yang tersisa dua, dan yang kedua besar.
+
+1. **Aset material yang dibangkitkan saat impor.** `MeshMaterial` yang datar
+   menjadi `.simmat`, teksturnya disalin ke dalam project, dan
+   `MeshRendererComponent::material` menunjuk hasilnya. Jalur teksturnya relatif
+   terhadap berkas mesh dan kerap naik satu tingkat, jadi yang menyalinnya harus
+   menyelesaikannya lebih dulu — `..\checkerA.tga` di sebelah `shaderBall.fbx`.
+2. **Pipeline material menggantikan `box.frag` di pass forward.** Inilah yang
+   ditunggu sejak E8.3 untuk menyambungkan IBL, dan yang membuat tekstur berarti
+   sama sekali. `box.frag` sekarang hanya `input.color.rgb` dikali cahaya — tidak
+   ada roughness, tidak ada metalness, tidak ada tekstur — jadi material yang
+   diimpor tidak punya tempat untuk diperlihatkan selain warna dasarnya.
+   Mesinnya sudah ada dan berjalan di `VulkanMaterialPreview`: modul dirakit
+   `AssembleMaterialModule`, dikompilasi lewat `ShaderCache`, parameternya di
+   satu blok uniform dan teksturnya di set 2. Yang belum ada adalah mengangkatnya
+   ke pass forward — pipeline per material, pengelompokan draw per material, dan
+   unggahan tekstur yang dimiliki renderer.
+
+**Satu keputusan yang menunggu, dan sebaiknya diambil sebelum nomor 1:** apa yang
+terjadi pada `MeshRendererComponent::baseColor` begitu berkasnya membawa material
+sendiri. Ia ada sebagai penambal sampai material sungguhan datang — "satu-satunya
+cara sebuah adegan bisa punya permukaan yang berbeda warna" — dan begitu material
+mendarat, membiarkannya tetap mengalikan warna material berarti Inspector punya
+dua tempat yang mengatur hal yang sama. Membiarkannya diam-diam tidak berpengaruh
+lebih buruk lagi: itu antarmuka yang berbohong.
 
 **Selesai: impor rangka dan bobot skin dari FBX**
 (`Code/Assets/{include/Sim/Assets/MeshData.h,src/MeshImport.cpp}`). Diuji
