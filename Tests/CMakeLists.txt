@@ -99,6 +99,10 @@ sim_add_test(SimLevelEditorTests
     DEPS
         Sim::EditorFramework)
 
+# Material bawaan dibaca dari folder sumber, alasan yang sama dengan yang lain.
+target_compile_definitions(SimLevelEditorTests
+    PRIVATE SIM_BUILTIN_DIR="${CMAKE_SOURCE_DIR}/Resources")
+
 if(SIM_WITH_LUA)
     sim_add_test(SimScriptTests
         SOURCES

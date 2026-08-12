@@ -70,20 +70,21 @@ struct StaticFlagComponent {
     bool isStatic = false;
 };
 
+/// Menggambar sebuah aset mesh.
+///
+/// **Tidak ada lagi warna dasar di sini.** Ia dulu penambal — satu-satunya cara
+/// sebuah adegan bisa punya permukaan berbeda warna sebelum material sungguhan
+/// ada — dan begitu berkas mesh membawa materialnya sendiri, membiarkannya
+/// mengalikan warna material berarti Inspector punya dua tempat yang mengatur
+/// hal yang sama, sementara membiarkannya diam-diam tidak berpengaruh adalah
+/// antarmuka yang berbohong. Warna sekarang datang dari material: yang tertulis
+/// di berkas mesh untuk tiap ruasnya, `material` di bawah untuk yang menimpanya
+/// seluruhnya, dan material bawaan editor untuk ruas yang tidak punya keduanya.
 struct MeshRendererComponent {
     /// Rujukan berisi GUID, bukan nama berkas. Itulah yang membuat mengganti
     /// nama atau memindahkan mesh tidak menyentuh satu pun berkas level.
     AssetRef mesh;
     AssetRef material;
-    /// Warna dasar sementara, dipakai renderer sampai pipeline material
-    /// menggantikan shader kotak.
-    ///
-    /// **Di komponen mesh, bukan di material.** Material sungguhan datang lewat
-    /// `material` di atas dan akan menggantikannya; sampai saat itu satu-satunya
-    /// cara sebuah adegan bisa punya permukaan yang berbeda warna adalah lewat
-    /// sini — dan tanpa itu tidak ada adegan uji GI yang bisa memperlihatkan
-    /// color bleeding, karena seluruh dunia berwarna sama.
-    Vec3 baseColor{0.62f, 0.65f, 0.70f};
     bool castShadows = true;
     bool receiveShadows = true;
     /// Menggeser pemilihan tingkat detail: negatif memilih mesh yang lebih

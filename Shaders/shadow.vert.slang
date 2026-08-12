@@ -20,6 +20,8 @@
 
 struct ShadowPush {
     float4x4 lightViewProj;
+    // Tidak dibaca di sini; lihat catatan di prepass.vert.
+    float4 partColor;
 };
 
 [[vk::push_constant]] ConstantBuffer<ShadowPush> push;

@@ -1,12 +1,16 @@
 #include "Sim/Editor/SceneView.h"
 
 #include "Sim/Assets/AssetDatabase.h"
+#include "Sim/Material/MaterialGraph.h"
+#include "Sim/Material/MaterialNodeCatalog.h"
 #include "Sim/Editor/EditorContext.h"
 #include "Sim/Editor/Icons.h"
 #include "Sim/Editor/Selection.h"
 #include "Sim/Scene/Components.h"
 
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <limits>
 
 namespace sim::editor {
@@ -43,12 +47,50 @@ bool RayIntersectsAabb(const Vec3& origin, const Vec3& direction, const Vec3& bo
     return true;
 }
 
+/// `"float3(0.62, 0.65, 0.70)"` menjadi sebuah warna.
+///
+/// **Nilai pin material adalah teks kode shader, bukan angka.** Itu yang
+/// membuatnya bisa berupa ekspresi apa pun; yang bisa dibaca di sini hanyalah
+/// bentuk harfiahnya, dan yang bukan literal jatuh ke `fallback` alih-alih
+/// menjadi tebakan. Satu angka berarti ketiganya sama — `float3(0.5)`.
+Vec3 ParseFloat3(std::string_view text, const Vec3& fallback) {
+    const std::size_t open = text.find('(');
+    const std::size_t close = text.rfind(')');
+    if (open == std::string_view::npos || close == std::string_view::npos || close <= open) {
+        return fallback;
+    }
+    std::array<float, 3> parsed{};
+    int count = 0;
+    std::size_t cursor = open + 1;
+    while (cursor < close && count < 3) {
+        const std::size_t comma = text.find(',', cursor);
+        const std::size_t end = comma == std::string_view::npos || comma > close ? close : comma;
+        const std::string_view piece = text.substr(cursor, end - cursor);
+        float value = 0.0f;
+        const char* begin = piece.data();
+        const char* stop = piece.data() + piece.size();
+        while (begin < stop && (*begin == ' ' || *begin == '\t')) {
+            ++begin;
+        }
+        if (std::from_chars(begin, stop, value).ec != std::errc{}) {
+            return fallback;
+        }
+        parsed[static_cast<std::size_t>(count++)] = value;
+        cursor = end + 1;
+    }
+    if (count == 1) {
+        return Vec3(parsed[0]);
+    }
+    return count == 3 ? Vec3(parsed[0], parsed[1], parsed[2]) : fallback;
+}
+
 }  // namespace
 
 void SceneView::Build(scene::World& world, const Selection& selection,
                       const assets::AssetDatabase* assets,
                       render::IViewportRenderer* renderer,
-                      const SkinnedPreview* animation) {
+                      const SkinnedPreview* animation,
+                      const assets::AssetDatabase* builtinAssets) {
     meshes_.clear();
     skinMatrices_.clear();
     lights_.clear();
@@ -84,7 +126,13 @@ void SceneView::Build(scene::World& world, const Selection& selection,
             instance.color = kMeshColor;
             instance.selected = selected;
             if (const auto* meshRenderer = world.TryGet<scene::MeshRendererComponent>(entity)) {
-                instance.color = Vec4(meshRenderer->baseColor, 1.0f);
+                // **Warna datang dari material, bukan dari komponen.** Yang
+                // ditetapkan entity menang untuk seluruh mesh; ruas yang punya
+                // material di berkasnya ditimpa renderer sendiri; sisanya
+                // memakai material bawaan editor.
+                instance.color = meshRenderer->material.IsValid()
+                                     ? MaterialColor(assets, meshRenderer->material.guid)
+                                     : BuiltinColor(builtinAssets);
                 instance.castShadows = meshRenderer->castShadows;
                 instance.receiveShadows = meshRenderer->receiveShadows;
 
@@ -142,6 +190,50 @@ void SceneView::Build(scene::World& world, const Selection& selection,
         }
         icons_.push_back(icon);
     }
+}
+
+/// Warna dasar sebuah material, dibaca dari `.simmat`-nya sekali lalu diingat.
+///
+/// **Yang dibaca hanya warna dasarnya, dan itu memang seluruh yang bisa
+/// diperlihatkan sekarang.** Pass forward masih memakai `box.frag`, yang tidak
+/// punya roughness, metalness, maupun tekstur; begitu pipeline material
+/// menggantikannya, yang di sini berganti menjadi material seutuhnya.
+Vec4 SceneView::MaterialColor(const assets::AssetDatabase* assets, const Uuid& guid) {
+    if (const auto found = materialColor_.find(guid); found != materialColor_.end()) {
+        return found->second;
+    }
+    Vec4 color = kMeshColor;
+    if (assets != nullptr) {
+        if (const assets::AssetRecord* record = assets->Find(guid)) {
+            material::MaterialGraph graph;
+            if (material::LoadMaterialFromFile(graph, assets->AbsolutePath(*record)).ok) {
+                for (const material::MaterialNode& node : graph.nodes) {
+                    if (node.type != material::kSurfaceOutputType) {
+                        continue;
+                    }
+                    const auto pin = node.pinValues.find("baseColor");
+                    if (pin != node.pinValues.end()) {
+                        color = Vec4(ParseFloat3(pin->second, Vec3(kMeshColor)), 1.0f);
+                    }
+                    break;
+                }
+            }
+        }
+    }
+    // Yang gagal dibaca ikut diingat: mengurai berkas rusak tiap frame adalah
+    // editor yang melambat tanpa sebab yang terlihat.
+    materialColor_.emplace(guid, color);
+    return color;
+}
+
+/// Warna material bawaan editor — yang mengisi mesh tanpa material sendiri.
+Vec4 SceneView::BuiltinColor(const assets::AssetDatabase* builtinAssets) {
+    if (builtinAssets == nullptr) {
+        return kMeshColor;
+    }
+    const assets::AssetRecord* record =
+        builtinAssets->FindByRelativePath("Materials/Default.simmat");
+    return record != nullptr ? MaterialColor(builtinAssets, record->guid) : kMeshColor;
 }
 
 /// Menyediakan palet kulit sebuah instance dan menunjuknya dari instance itu.

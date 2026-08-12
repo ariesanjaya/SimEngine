@@ -141,7 +141,7 @@ public:
         renderer->Resize(width, height);
 
         sceneView_.Build(*context.world, *context.selection, context.assets, renderer,
-                         context.animation);
+                         context.animation, context.builtinAssets);
         HandleCameraInput();
 
         render::ViewportDesc desc;

@@ -957,3 +957,42 @@ TEST_CASE("EditorApp::CreateProject benar-benar membuat foldernya di lokasi bawa
 
     app.Shutdown();
 }
+
+TEST_CASE("Warna instance datang dari material, bukan lagi dari komponen") {
+    // `MeshRendererComponent::baseColor` sudah tidak ada. Yang menggantikannya:
+    // material yang ditetapkan entity, dan material bawaan editor untuk yang
+    // tidak menetapkannya.
+    ScratchDir scratch;
+    const std::filesystem::path builtinRoot = scratch.path / "Resources";
+    std::filesystem::create_directories(builtinRoot / "Materials");
+    std::filesystem::copy_file(
+        std::filesystem::path(SIM_BUILTIN_DIR) / "Materials" / "Default.simmat",
+        builtinRoot / "Materials" / "Default.simmat");
+
+    assets::AssetDatabase builtin;
+    REQUIRE(builtin.Initialize({builtinRoot, nullptr, 1.0f}));
+    REQUIRE(builtin.FindByRelativePath("Materials/Default.simmat") != nullptr);
+
+    scene::World world;
+    Selection selection;
+    const scene::Entity entity = world.Create("Kotak");
+    world.Add<scene::MeshRendererComponent>(entity, scene::MeshRendererComponent{});
+
+    SceneView view;
+    view.Build(world, selection, nullptr, nullptr, nullptr, &builtin);
+    const render::ViewportScene scene = view.Scene();
+    REQUIRE(scene.meshes.size() == 1);
+
+    // Warna material bawaan, bukan warna apa pun yang kebetulan menjadi nilai
+    // awal `MeshInstance`.
+    CHECK(scene.meshes[0].color.r == doctest::Approx(0.62f));
+    CHECK(scene.meshes[0].color.g == doctest::Approx(0.65f));
+    CHECK(scene.meshes[0].color.b == doctest::Approx(0.70f));
+
+    // Tanpa pustaka bawaan sama sekali editor tetap menggambar sesuatu, bukan
+    // hitam: entity yang tidak terlihat adalah entity yang tidak bisa dipilih.
+    SceneView bare;
+    bare.Build(world, selection);
+    REQUIRE(bare.Scene().meshes.size() == 1);
+    CHECK(bare.Scene().meshes[0].color.a > 0.0f);
+}

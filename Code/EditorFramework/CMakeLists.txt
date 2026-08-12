@@ -22,6 +22,9 @@ sim_add_library(EditorFramework
         Sim::Animation
         Sim::Assets
         Sim::Core
+        # Warna dasar material dibaca di sini: `SceneView` menyelesaikan material
+        # mana yang berlaku untuk tiap entity, dan itu keputusan editor.
+        Sim::Material
         # Dialog berkas sistem. Diagram dependensi di docs/ARCHITECTURE.md memang
         # menggambar panah Platform → EditorFramework; ini pemakai pertamanya.
         # Yang dipakai hanya `Sim/Platform/FileDialog.h`, dan header itu sengaja

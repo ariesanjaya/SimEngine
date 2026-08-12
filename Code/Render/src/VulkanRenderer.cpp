@@ -35,6 +35,14 @@ namespace {
 /// Harus sama persis dengan blok push_constant di Shaders/box.vert.
 struct BoxPush {
     Mat4 viewProj;
+    /// Warna dasar ruas yang sedang digambar. `w` nol berarti ruas ini tidak
+    /// punya material di berkasnya, dan yang berlaku adalah warna instance.
+    ///
+    /// **Push constant, bukan atribut instance.** Warnanya milik ruas — bagian
+    /// dari mesh — sedangkan atribut instance milik entity; menaruhnya di sana
+    /// berarti satu entry instance per ruas per entity, yaitu menyalin seluruh
+    /// matriks model sebanyak jumlah materialnya.
+    Vec4 partColor{0.0f};
 };
 
 /// Harus sama persis dengan blok push_constant di Shaders/sdf_debug.{vert,frag}.
@@ -247,6 +255,10 @@ struct DrawRun {
 /// Bit 0 dari `BoxInstance::flags`. Harus sama dengan `kReceiveShadows` di
 /// Shaders/box.frag.
 constexpr uint32_t kInstanceReceiveShadows = 1u;
+/// Bit 1: warna instance mengalahkan warna material ruas. Dipakai sorotan
+/// seleksi — objek terpilih harus berubah warna seluruhnya, dan material
+/// berkasnya justru yang paling tidak boleh menutupinya.
+constexpr uint32_t kInstanceForceColor = 2u;
 
 /// Dua varian dari satu pasang shader: tanpa kulit dan dengan kulit.
 ///
@@ -339,7 +351,7 @@ std::vector<BoxVertex> BuildUnitCube() {
 }
 
 BoxInstance MakeInstance(const Mat4& model, const Vec4& color, bool receiveShadows,
-                         uint32_t skinBase) {
+                         bool forceColor, uint32_t skinBase) {
     BoxInstance instance;
     // Kolom glm ditulis apa adanya sebagai empat atribut. Shader menyusunnya
     // kembali dengan `mat4(...)`, yang juga kolom-mayor — jadi keduanya cocok
@@ -349,7 +361,8 @@ BoxInstance MakeInstance(const Mat4& model, const Vec4& color, bool receiveShado
     instance.row2 = model[2];
     instance.row3 = model[3];
     instance.color = color;
-    instance.flags = receiveShadows ? kInstanceReceiveShadows : 0u;
+    instance.flags = (receiveShadows ? kInstanceReceiveShadows : 0u) |
+                     (forceColor ? kInstanceForceColor : 0u);
     instance.skinBase = skinBase;
     return instance;
 }
@@ -1242,8 +1255,8 @@ private:
 
             const bool skinned = IsSkinnable(mesh, scene.skinMatrices.size());
             const Vec4 color = mesh.selected ? kSelectedColor : mesh.color;
-            const BoxInstance instance =
-                MakeInstance(model, color, mesh.receiveShadows, skinned ? mesh.skinFirst : 0u);
+            const BoxInstance instance = MakeInstance(model, color, mesh.receiveShadows,
+                                                      mesh.selected, skinned ? mesh.skinFirst : 0u);
             if (color.a >= 0.999f) {
                 gathered_.push_back(GatherEntry{mesh.mesh, skinned, instance, mesh.castShadows});
                 continue;
@@ -1498,7 +1511,7 @@ private:
                                 static_cast<uint32_t>(sets.size()), sets.data(), 0, nullptr);
         vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(BoxPush),
                            &push);
-        DrawRuns(cmd, slot, runs, instanceBase, pipelines);
+        DrawRuns(cmd, slot, runs, instanceBase, pipelines, pipelineLayout_, push);
     }
 
     /// Mengikat geometri tiap ruas lalu menggambarnya. Dipakai bersama pass
@@ -1511,7 +1524,8 @@ private:
     /// pemanggil yang mengikatnya sekali di awal akan menggambar sebagian ruas
     /// lewat pipeline yang bukan miliknya, tanpa satu pun galat.
     void DrawRuns(VkCommandBuffer cmd, InstanceSlot& slot, std::span<const DrawRun> runs,
-                  uint32_t instanceBase, const PipelineVariants& pipelines) {
+                  uint32_t instanceBase, const PipelineVariants& pipelines,
+                  VkPipelineLayout layout, const BoxPush& push) {
         VkPipeline bound = VK_NULL_HANDLE;
         for (const DrawRun& run : runs) {
             if (run.count == 0 || run.mesh >= meshes_.size()) {
@@ -1540,7 +1554,21 @@ private:
             const std::array<VkDeviceSize, 3> offsets{0, 0, 0};
             vkCmdBindVertexBuffers(cmd, 0, 3, buffers.data(), offsets.data());
             vkCmdBindIndexBuffer(cmd, mesh.indices.Handle(), 0, VK_INDEX_TYPE_UINT32);
-            vkCmdDrawIndexed(cmd, mesh.indexCount, run.count, 0, 0, instanceBase + run.first);
+            // Satu panggilan per ruas. Mesh yang berkasnya tidak menyebut
+            // material punya tepat satu ruas, jadi ini tetap satu panggilan
+            // untuk seluruh adegan statis yang sudah ada.
+            for (const GpuMesh::Part& part : mesh.parts) {
+                if (part.indexCount == 0) {
+                    continue;
+                }
+                BoxPush partPush = push;
+                partPush.partColor = part.baseColor;
+                vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(BoxPush),
+                                   &partPush);
+                vkCmdDrawIndexed(cmd, part.indexCount, run.count, static_cast<int32_t>(0),
+                                 static_cast<int32_t>(part.firstIndex),
+                                 instanceBase + run.first);
+            }
         }
     }
 
@@ -1573,6 +1601,21 @@ private:
                      data.skeleton.bones.size());
         }
         mesh->indexCount = static_cast<uint32_t>(data.indices.size());
+        for (const assets::SubMesh& part : data.parts) {
+            GpuMesh::Part gpuPart;
+            gpuPart.firstIndex = part.firstIndex;
+            gpuPart.indexCount = part.indexCount;
+            if (part.material >= 0 &&
+                static_cast<std::size_t>(part.material) < data.materials.size()) {
+                const assets::MeshMaterial& material =
+                    data.materials[static_cast<std::size_t>(part.material)];
+                gpuPart.baseColor = Vec4(material.baseColor, 1.0f);
+            }
+            mesh->parts.push_back(gpuPart);
+        }
+        if (mesh->parts.empty()) {
+            mesh->parts.push_back(GpuMesh::Part{0, mesh->indexCount, Vec4(0.0f)});
+        }
         mesh->boundsMin = data.boundsMin;
         mesh->boundsMax = data.boundsMax;
         meshes_.push_back(std::move(mesh));
@@ -2440,7 +2483,7 @@ private:
                 const BoxPush push{entry.viewProjection};
                 vkCmdPushConstants(cmd, shadowLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
                                    sizeof(BoxPush), &push);
-                DrawRuns(cmd, slot, casterRuns_, 0, shadowPipelines_);
+                DrawRuns(cmd, slot, casterRuns_, 0, shadowPipelines_, shadowLayout_, push);
             }
         }
         vkCmdEndRendering(cmd);
@@ -3050,7 +3093,7 @@ private:
                                         &slot.skinSet, 0, nullptr);
                 vkCmdPushConstants(cmd, shadowLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
                                    sizeof(BoxPush), &push);
-                DrawRuns(cmd, slot, casterRuns_, 0, shadowPipelines_);
+                DrawRuns(cmd, slot, casterRuns_, 0, shadowPipelines_, shadowLayout_, push);
             }
             vkCmdEndRendering(cmd);
         }
@@ -3314,6 +3357,18 @@ private:
         /// seluruh isi adegan.
         rhi::DynamicBuffer skin;
         uint32_t indexCount = 0;
+        /// Ruas per material, sesuai `assets::MeshData::parts`. Selalu berisi
+        /// sedikitnya satu — jalur gambar karena itu tidak perlu membedakan
+        /// "punya ruas" dan "tidak".
+        struct Part {
+            uint32_t firstIndex = 0;
+            uint32_t indexCount = 0;
+            /// Warna dasar material berkasnya. `w` nol berarti berkasnya tidak
+            /// menyebut material untuk ruas ini, dan yang berlaku adalah warna
+            /// instance — yaitu material yang ditetapkan editor.
+            Vec4 baseColor{0.0f};
+        };
+        std::vector<Part> parts;
         /// Nol berarti mesh ini tidak punya rangka, jadi tidak pernah digambar
         /// lewat pipeline ber-kulit.
         uint32_t boneCount = 0;

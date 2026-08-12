@@ -7,6 +7,7 @@
 #include "Sim/Scene/World.h"
 
 #include <span>
+#include <unordered_map>
 #include <vector>
 
 namespace sim::assets {
@@ -81,12 +82,17 @@ public:
     void Build(scene::World& world, const Selection& selection,
                const assets::AssetDatabase* assets = nullptr,
                render::IViewportRenderer* renderer = nullptr,
-               const SkinnedPreview* animation = nullptr);
+               const SkinnedPreview* animation = nullptr,
+               const assets::AssetDatabase* builtinAssets = nullptr);
 
 private:
     void AppendLight(const scene::LightComponent& light, const Mat4& matrix);
     void AppendSkinPalette(uint32_t boneCount, std::span<const Mat4> palette,
                            render::MeshInstance& instance);
+    /// Warna dasar sebuah material, dari cache atau dibaca dari berkasnya.
+    Vec4 MaterialColor(const assets::AssetDatabase* assets, const Uuid& guid);
+    /// Warna material bawaan editor — yang mengisi mesh tanpa material sendiri.
+    Vec4 BuiltinColor(const assets::AssetDatabase* builtinAssets);
 
 public:
 
@@ -130,6 +136,10 @@ private:
     std::vector<render::LightInstance> lights_;
     std::vector<Pickable> pickables_;
     std::vector<EntityIcon> icons_;
+    /// Warna dasar per material, supaya `.simmat` tidak diurai tiap frame untuk
+    /// jawaban yang tidak berubah. Kunci GUID; jalur yang gagal dibaca dicatat
+    /// dengan warna bawaan supaya ia juga tidak dicoba lagi.
+    std::unordered_map<Uuid, Vec4> materialColor_;
 };
 
 /// Sinar dunia yang melewati sebuah titik di layar.

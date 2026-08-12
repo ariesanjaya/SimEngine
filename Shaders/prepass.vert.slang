@@ -14,6 +14,9 @@
 
 struct PrepassPush {
     float4x4 viewProj;
+    // Tidak dibaca di sini, tapi tata letaknya harus sama dengan `BoxPush` di
+    // sisi C++: ketiga pass memakai struct push constant yang sama.
+    float4 partColor;
 };
 
 [[vk::push_constant]] ConstantBuffer<PrepassPush> push;

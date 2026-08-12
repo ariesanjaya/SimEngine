@@ -7,6 +7,16 @@
 #ifndef BOX_VARYINGS_SLANG
 #define BOX_VARYINGS_SLANG
 
+/// Bit `BoxVertex::flags` / `BoxVarying::flags`. Harus sama dengan `kInstance*`
+/// di VulkanRenderer.cpp.
+///
+/// **Di sini karena inilah berkas yang dipakai bersama tahap vertex dan
+/// fragment.** `box.frag` sempat menuliskan bit pertama sendiri; bit kedua
+/// ditambahkan bersamanya supaya yang ketiga tidak menjadi tiga salinan yang
+/// harus sepakat.
+static const uint kFlagReceiveShadows = 1u;
+static const uint kFlagForceInstanceColor = 2u;
+
 struct BoxVarying {
     float4 position : SV_Position;
     [[vk::location(0)]] float3 normal;

@@ -10,6 +10,9 @@
 
 struct BoxPush {
     float4x4 viewProj;
+    // Warna dasar ruas yang sedang digambar; `w` nol berarti ruas ini tidak
+    // punya material di berkasnya.
+    float4 partColor;
 };
 
 [[vk::push_constant]] ConstantBuffer<BoxPush> push;
@@ -34,7 +37,13 @@ BoxVarying main(BoxVertex vertex) {
     // baru diperbaiki di E8.4 ketika mesh sungguhan masuk beserta matriks
     // normalnya sendiri.
     output.normal = normalize(mul((float3x3)model, localNormal));
-    output.color = vertex.color;
+    // **Warna material ruas menang atas warna instance, kecuali saat instance
+    // memaksanya.** Yang memaksa hanyalah sorotan seleksi: objek terpilih harus
+    // berubah warna seluruhnya, dan material berkasnya justru yang paling tidak
+    // boleh menutupinya.
+    bool forceInstanceColor = (vertex.flags & kFlagForceInstanceColor) != 0u;
+    output.color = (push.partColor.w > 0.0 && !forceInstanceColor) ? push.partColor
+                                                                   : vertex.color;
     output.worldPosition = world.xyz;
     output.flags = vertex.flags;
     output.position = mul(push.viewProj, world);

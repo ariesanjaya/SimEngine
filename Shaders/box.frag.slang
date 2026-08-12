@@ -3,7 +3,6 @@
 #include "gi_resolve.slang"
 
 /// Harus sama dengan `kInstanceReceiveShadows` di VulkanRenderer.cpp.
-static const uint kReceiveShadows = 1u;
 
 /// Dipakai saat GI mati. **Penambal, dan disebut penambal.** Ia yang membuat
 /// bentuk kotak terbaca tanpa GI, dan ia pula yang harus hilang begitu GI
@@ -26,7 +25,7 @@ float4 main(BoxVarying input) : SV_Target {
     float ndotl = max(dot(normal, lightDir), 0.0);
     // Yang tidak menerima bayangan tetap dihitung n·l-nya — ia tersinari
     // seperti biasa, hanya tidak pernah tergelapkan oleh yang lain.
-    float shadow = (input.flags & kReceiveShadows) != 0u
+    float shadow = (input.flags & kFlagReceiveShadows) != 0u
                        ? sampleShadow(input.worldPosition, normal)
                        : 1.0;
     float viewDepth = dot(input.worldPosition - shadowParams.cameraPosition.xyz,
