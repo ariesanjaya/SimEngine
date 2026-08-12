@@ -91,6 +91,33 @@ struct MeshRendererComponent {
     float lodBias = 0.0f;
 };
 
+/// Memutar sebuah klip animasi pada mesh ber-rig entity ini.
+///
+/// **Rangkanya tidak dirujuk, dan itu disengaja.** Rangka datang dari aset mesh
+/// di `MeshRendererComponent` — ia satu-satunya rangka yang indeks bone-nya
+/// cocok dengan bobot skin yang sudah ada di GPU. Rujukan rangka tersendiri
+/// berarti dua sumber yang bisa berselisih, dan selisihnya muncul sebagai kulit
+/// yang mengikuti tulang yang salah, bukan sebagai galat.
+struct AnimatorComponent {
+    /// Klipnya. Boleh `.simanim` maupun `.fbx` — yang kedua diimpor saat itu
+    /// juga, sehingga sebuah berkas Mixamo bisa dipasang tanpa langkah impor
+    /// tersendiri lebih dulu.
+    AssetRef clip;
+    /// Berjalan di editor, bukan hanya saat Play. Animasi yang hanya bergerak di
+    /// Play adalah animasi yang tidak bisa disetel — dan menyetelnya justru yang
+    /// dilakukan orang di editor.
+    bool playing = true;
+    bool loop = true;
+    /// Pengali kecepatan. Negatif memutar mundur.
+    float speed = 1.0f;
+
+    /// Waktu pemutaran, detik. **Keadaan runtime, tidak ikut disimpan**: waktu
+    /// yang ikut ke berkas level berarti setiap frame yang berjalan mengotori
+    /// level yang belum disunting siapa pun, dan tanda "ada perubahan belum
+    /// disimpan" yang menyala sendiri adalah tanda yang berhenti berarti.
+    float time = 0.0f;
+};
+
 enum class LightType : uint8_t {
     Directional = 0,
     Point = 1,

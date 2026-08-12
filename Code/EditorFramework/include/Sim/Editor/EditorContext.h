@@ -24,6 +24,8 @@ class ScriptRuntime;
 
 namespace sim::editor {
 
+class SkinnedPreview;
+
 /// Menjembatani Entity dan SelectionId.
 ///
 /// Digeser satu supaya nilai 0 tetap berarti "tidak ada": entity pertama entt
@@ -76,6 +78,10 @@ struct EditorContext {
     render::IMaterialPreview* materialPreview = nullptr;
     /// Pratinjau aset untuk Asset Browser. Dimiliki pemanggil EditorApp.
     render::IThumbnailCache* thumbnails = nullptr;
+    /// Pemutar klip animasi untuk mesh ber-rig. Dimiliki EditorApp; panel
+    /// Viewport meneruskannya ke `SceneView::Build`. Null berarti mesh ber-rig
+    /// digambar pada bind pose-nya.
+    SkinnedPreview* animation = nullptr;
     const FrameLimiter* frameLimiter = nullptr;
 
     /// Pengaturan global illumination.

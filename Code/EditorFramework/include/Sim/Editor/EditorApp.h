@@ -11,6 +11,7 @@
 #include "Sim/Editor/Notifications.h"
 #include "Sim/Editor/PanelManager.h"
 #include "Sim/Editor/Selection.h"
+#include "Sim/Editor/SkinnedPreview.h"
 #include "Sim/Scene/World.h"
 
 #include <filesystem>
@@ -121,6 +122,8 @@ private:
     Selection selection_;
     ActionRegistry actions_;
     Notifications notifications_;
+    /// Pemutar klip animasi untuk mesh ber-rig di viewport.
+    SkinnedPreview animation_;
     EditorShell shell_;
     EditorScripting scripting_;
     EditorContext context_;

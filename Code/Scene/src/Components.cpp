@@ -115,6 +115,22 @@ void RegisterCoreComponents() {
             .Hidden();
         components.Register<GraphComponent>();
 
+        types.Type<AnimatorComponent>("Animator")
+            .Field<&AnimatorComponent::clip>("clip")
+            .Label("Clip")
+            .Tooltip("Berkas .simanim atau .fbx; rangkanya datang dari aset mesh")
+            .Field<&AnimatorComponent::playing>("playing")
+            .Label("Playing")
+            .Field<&AnimatorComponent::loop>("loop")
+            .Label("Loop")
+            .Field<&AnimatorComponent::speed>("speed")
+            .Label("Speed")
+            .Range(-4.0f, 4.0f);
+        // `time` sengaja tidak didaftarkan: ia keadaan runtime, dan medan yang
+        // berubah tiap frame di dalam berkas level berarti level yang mengotori
+        // dirinya sendiri tanpa ada yang menyuntingnya.
+        components.Register<AnimatorComponent>();
+
         types.Type<LightComponent>("Light")
             .Field<&LightComponent::type>("type")
             .EnumNames({"Directional", "Point", "Spot"})

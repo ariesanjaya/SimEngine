@@ -151,6 +151,22 @@ struct MeshData {
 MeshData BuildIndexedMesh(const std::vector<MeshVertex>& triangleSoup,
                           const std::vector<SkinInfluence>& influenceSoup = {});
 
+/// Memuat **hanya rangka** dari berkas FBX atau OBJ.
+///
+/// Urutan bone-nya sama persis dengan yang dihasilkan `LoadMesh` atas berkas
+/// yang sama — dan itu bukan kebetulan melainkan syarat: indeks bone di dalam
+/// `SkinInfluence` menunjuk ke urutan itu, jadi rangka yang urutannya berbeda
+/// menghasilkan kulit yang mengikuti tulang yang salah tanpa satu pun galat.
+///
+/// **Ada terpisah karena pemakainya tidak butuh geometrinya.** Yang memutar klip
+/// pada sebuah mesh ber-rig butuh nama dan hierarki bone untuk memasang track,
+/// bukan vertexnya — dan vertexnya sudah ada di GPU, diurai perender. Mengurai
+/// ulang rig sebelas megabyte hanya untuk membaca 65 nama adalah ongkos yang
+/// tidak perlu ada.
+///
+/// Mengembalikan rangka kosong pada kegagalan, dengan sebabnya di `error`.
+SkeletonData LoadSkeleton(const std::filesystem::path& path, std::string& error);
+
 /// Memuat mesh dari berkas FBX atau OBJ.
 ///
 /// **Menggantikan importir pass-through E5 untuk `AssetType::Mesh`.** Sampai

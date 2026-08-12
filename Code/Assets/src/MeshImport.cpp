@@ -206,15 +206,13 @@ MeshData BuildIndexedMesh(const std::vector<MeshVertex>& triangleSoup,
     return mesh;
 }
 
-MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
-    MeshData mesh;
-    error.clear();
-    std::error_code exists;
-    if (path.empty() || !std::filesystem::exists(path, exists)) {
-        error = "file not found";
-        return mesh;
-    }
-
+/// Opsi muat yang dipakai bersama impor mesh dan impor rangka.
+///
+/// **Satu tempat, karena keduanya harus menghasilkan rangka yang sama persis.**
+/// Indeks bone di buffer skin GPU menunjuk ke urutan yang dihasilkan `LoadMesh`;
+/// `LoadSkeleton` yang memuat dengan konvensi berbeda akan menghasilkan pose
+/// yang benar untuk rangka yang salah, tanpa satu pun galat.
+ufbx_load_opts SharedLoadOptions() {
     ufbx_load_opts options{};
     // **Sumbu dan satuan dikonversi oleh ufbx, bukan oleh kode di bawahnya.**
     // FBX menyimpan konvensinya sendiri di dalam berkas, dan berkas dari DCC
@@ -243,27 +241,22 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
     // 0,0992 m.
     options.space_conversion = UFBX_SPACE_CONVERSION_MODIFY_GEOMETRY;
     options.generate_missing_normals = true;
+    return options;
+}
 
-    ufbx_error loadError;
-    ufbx_scene* scene = ufbx_load_file(path.string().c_str(), &options, &loadError);
-    if (scene == nullptr) {
-        error = loadError.description.data != nullptr ? loadError.description.data
-                                                      : "cannot read file";
-        return mesh;
-    }
-
-    // --- rangka -----------------------------------------------------------
-    //
-    // `scene->nodes` terurut depth-first dengan induk selalu mendahului
-    // anaknya, jadi satu lintasan sudah menghasilkan urutan topologis yang
-    // dituntut `animation::Skeleton` — dan yang membuat transform global bisa
-    // dihitung satu lintasan maju tanpa rekursi.
-    std::unordered_map<const ufbx_node*, int> boneIndex;
+/// Membaca bone dari sebuah scene ufbx menjadi `SkeletonData`.
+///
+/// `scene->nodes` terurut depth-first dengan induk selalu mendahului anaknya,
+/// jadi satu lintasan sudah menghasilkan urutan topologis yang dituntut
+/// `animation::Skeleton` — dan yang membuat transform global bisa dihitung satu
+/// lintasan maju tanpa rekursi.
+void ReadSkeleton(const ufbx_scene& scene, SkeletonData& skeleton,
+                  std::unordered_map<const ufbx_node*, int>& boneIndex) {
     /// Bind pose dunia tiap bone, sejajar dengan `skeleton.bones`. Dipakai
     /// menurunkan transform lokal, lalu dibuang.
     std::vector<Mat4> worldBind;
-    for (std::size_t nodeIndex = 0; nodeIndex < scene->nodes.count; ++nodeIndex) {
-        const ufbx_node* node = scene->nodes.data[nodeIndex];
+    for (std::size_t nodeIndex = 0; nodeIndex < scene.nodes.count; ++nodeIndex) {
+        const ufbx_node* node = scene.nodes.data[nodeIndex];
         if (node == nullptr || node->is_root || node->bone == nullptr) {
             continue;
         }
@@ -273,12 +266,11 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
         bone.parent = parent != boneIndex.end() ? parent->second : -1;
 
         // **Diturunkan dari `node_to_world`, bukan dari `local_transform`.**
-        // Konversi satuan ufbx dipanggang ke transform node root, jadi transform
-        // lokal anak-anaknya tetap dalam satuan asli berkasnya. Terukur pada
-        // rig Mixamo: mesh-nya benar setinggi 1,80 m sementara translasi
-        // bone-nya masih 99,79 — sentimeter. Kulit yang diulit rangka seratus
-        // kali terlalu besar tidak menghasilkan satu pun galat; ia menghasilkan
-        // karakter yang lenyap.
+        // Keduanya sekarang sepakat karena konversi satuannya dipanggang ke
+        // geometri, tapi `node_to_world` tetap yang dipakai: ia satu-satunya
+        // yang benar apa pun mode konversinya, dan ia juga yang membuat bone
+        // yang induknya bukan bone — node bantu rigger di tengah rantai —
+        // tetap mendarat di tempat yang benar.
         const Mat4 bindWorld = ToMat4(node->node_to_world);
         Mat4 bindLocal = bindWorld;
         if (bone.parent >= 0) {
@@ -286,10 +278,71 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
         }
         Decompose(bindLocal, bone.translation, bone.rotation, bone.scale);
 
-        boneIndex.emplace(node, static_cast<int>(mesh.skeleton.bones.size()));
+        boneIndex.emplace(node, static_cast<int>(skeleton.bones.size()));
         worldBind.push_back(bindWorld);
-        mesh.skeleton.bones.push_back(std::move(bone));
+        skeleton.bones.push_back(std::move(bone));
     }
+}
+
+SkeletonData LoadSkeleton(const std::filesystem::path& path, std::string& error) {
+    SkeletonData skeleton;
+    error.clear();
+    std::error_code exists;
+    if (path.empty() || !std::filesystem::exists(path, exists)) {
+        error = "file not found";
+        return skeleton;
+    }
+
+    // **Opsi yang sama dengan `LoadMesh`, ditambah dua yang dilewati.** Yang
+    // sama itu wajib: indeks bone di buffer skin GPU menunjuk ke urutan yang
+    // dihasilkan `LoadMesh`, jadi rangka yang dimuat dengan konvensi berbeda
+    // menghasilkan pose yang benar untuk rangka yang salah — kulit yang
+    // terpelintir, tanpa satu pun galat.
+    ufbx_load_opts options = SharedLoadOptions();
+    // Vertex, indeks, dan kurva animasinya tidak dibaca. Yang dicari di sini
+    // hanya hierarki bone beserta bind pose-nya, dan keduanya ada di node —
+    // bukan di geometri. Pada rig Mixamo sebelas megabyte, ini bedanya antara
+    // mengurai seluruh mesh dan tidak.
+    options.ignore_geometry = true;
+    options.ignore_animation = true;
+    options.generate_missing_normals = false;
+
+    ufbx_error loadError;
+    ufbx_scene* scene = ufbx_load_file(path.string().c_str(), &options, &loadError);
+    if (scene == nullptr) {
+        error = loadError.description.data != nullptr ? loadError.description.data
+                                                      : "cannot read file";
+        return skeleton;
+    }
+    std::unordered_map<const ufbx_node*, int> boneIndex;
+    ReadSkeleton(*scene, skeleton, boneIndex);
+    ufbx_free_scene(scene);
+    if (!skeleton.IsValid()) {
+        error = "no bone in this file";
+    }
+    return skeleton;
+}
+
+MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
+    MeshData mesh;
+    error.clear();
+    std::error_code exists;
+    if (path.empty() || !std::filesystem::exists(path, exists)) {
+        error = "file not found";
+        return mesh;
+    }
+
+    const ufbx_load_opts options = SharedLoadOptions();
+    ufbx_error loadError;
+    ufbx_scene* scene = ufbx_load_file(path.string().c_str(), &options, &loadError);
+    if (scene == nullptr) {
+        error = loadError.description.data != nullptr ? loadError.description.data
+                                                      : "cannot read file";
+        return mesh;
+    }
+
+    std::unordered_map<const ufbx_node*, int> boneIndex;
+    ReadSkeleton(*scene, mesh.skeleton, boneIndex);
 
     // --- geometri ---------------------------------------------------------
     std::vector<MeshVertex> soup;

@@ -140,7 +140,8 @@ public:
         const auto height = static_cast<uint32_t>(size.y);
         renderer->Resize(width, height);
 
-        sceneView_.Build(*context.world, *context.selection, context.assets, renderer);
+        sceneView_.Build(*context.world, *context.selection, context.assets, renderer,
+                         context.animation);
         HandleCameraInput();
 
         render::ViewportDesc desc;

@@ -966,6 +966,52 @@ waktu di sepanjang klip, atas 320 perbandingan: selisih terbesar di bawah 0,1%
 untuk kedua klip. Berkasnya tidak ikut di repo, jadi ujinya berjalan hanya bila
 ditunjuk: `SIM_RIG_FBX=/path/rig.fbx SIM_CLIP_FBX=/path/Running.fbx ctest`.
 
+**Selesai: karakter yang benar-benar bergerak di viewport**
+(`Code/EditorFramework/{include/Sim/Editor/SkinnedPreview.h,src/SkinnedPreview.cpp}`,
+`Code/Scene/{include/Sim/Scene/Components.h,src/Components.cpp}`,
+`Code/EditorFramework/src/SceneView.cpp`, `Code/Assets/src/MeshImport.cpp`).
+Inilah yang menutup rantai E8.4: klip yang diimpor dicuplik menjadi pose, pose
+menjadi palet matriks kulit, dan paletnya masuk ke jalur GPU skinning yang sudah
+ada — `AnimatorComponent` di sebuah entity, dan karakternya berlari.
+
+- **`AnimatorComponent` tidak merujuk rangka.** Rangkanya datang dari aset mesh
+  di `MeshRendererComponent`, karena itu satu-satunya rangka yang indeks
+  bone-nya cocok dengan bobot skin yang sudah ada di GPU. Rujukan rangka
+  tersendiri berarti dua sumber yang bisa berselisih, dan selisihnya muncul
+  sebagai kulit yang mengikuti tulang yang salah.
+- **Berkas `.fbx` boleh dirujuk langsung sebagai klip**, bukan hanya `.simanim`.
+  Memaksanya lewat langkah impor lebih dulu berarti sebuah berkas Mixamo tidak
+  bisa dicoba tanpa ritual — dan mencobanya justru hal pertama yang ingin
+  dilakukan orang.
+- **Waktunya keadaan runtime, tidak ikut diserialisasi.** Medan yang berubah tiap
+  frame di dalam berkas level berarti level yang mengotori dirinya sendiri tanpa
+  ada yang menyuntingnya, dan tanda "ada perubahan belum disimpan" yang menyala
+  sendiri adalah tanda yang berhenti berarti. Ia juga dibungkus ke dalam durasi
+  klipnya tiap frame: waktu yang tumbuh tanpa batas kehilangan presisi float-nya
+  sesudah beberapa jam, dan yang terlihat adalah animasi yang makin tersendat
+  pada editor yang dibiarkan terbuka.
+- **Berjalan di editor, bukan hanya saat Play.** Animasi yang hanya bergerak di
+  Play adalah animasi yang tidak bisa disetel — dan menyetelnya justru yang
+  dilakukan orang di editor.
+- **`LoadSkeleton` yang baru membaca rangka tanpa geometrinya.** Yang memutar
+  klip butuh nama dan hierarki bone untuk memasang track, bukan vertexnya — dan
+  vertexnya sudah ada di GPU, diurai perender. Terukur: rig Y Bot terbaca
+  **6 ms** lewat jalur ini, terhadap 118 ms untuk mengurai mesh penuh. Ujinya
+  menyatakan sifat yang benar-benar berarti: **urutan bone-nya harus sama persis
+  dengan yang dihasilkan `LoadMesh`** — rangka yang sama tapi berurutan lain
+  menghasilkan pose yang benar untuk tulang yang salah.
+- **Palet yang panjangnya tidak cocok ditolak, bukan dipotong.** Panjang yang
+  berbeda berarti pose itu milik rangka lain; bind pose yang jelas-jelas diam
+  jauh lebih mudah dilacak daripada kulit yang terpelintir.
+
+Diuji ujung ke ujung: entity ber-`MeshRenderer` dan ber-`Animator` yang menunjuk
+`Y Bot.fbx` dan `Running.fbx` menghasilkan palet 65 matriks yang **bukan** bind
+pose pada frame pertama — palet satuan terlihat persis sama dengan animasi yang
+berjalan benar, jadi itu diperiksa tersendiri — berubah sesudah seperempat detik,
+benar-benar diam saat `playing` dimatikan, dan waktunya tetap terbungkus di dalam
+durasi klip sesudah 200 langkah. Animator pada mesh tanpa rangka tidak
+menghasilkan palet sama sekali.
+
 **Selesai: sistem task pose, mengikuti Esoterica**
 (`Code/Animation/{include/Sim/Animation/PoseTask.h,src/PoseTask.cpp}`, acuan
 `/home/arie/SDK/Esoterica/Code/Engine/Animation/TaskSystem`).

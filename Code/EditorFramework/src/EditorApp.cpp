@@ -63,6 +63,7 @@ bool EditorApp::Initialize(const Config& config) {
     context_.viewportRenderer = config.viewportRenderer;
     context_.materialPreview = config.materialPreview;
     context_.thumbnails = config.thumbnails;
+    context_.animation = &animation_;
     context_.scripts = config.scripts;
     context_.frameLimiter = config.frameLimiter;
     context_.lockedFps = config.lockedFps;
@@ -556,6 +557,10 @@ void EditorApp::DrawFrame(float deltaSeconds) {
     if (context_.thumbnails != nullptr) {
         context_.thumbnails->Update();
     }
+    // Mendahului panel juga, dan alasannya sama: panel Viewport membaca palet
+    // yang dihasilkannya, jadi memajukan waktu SESUDAH panel digambar berarti
+    // yang tergambar selalu pose frame sebelumnya.
+    animation_.Update(world_, &assets_, deltaSeconds);
 #if SIM_WITH_LUA
     // Dipasang di frame pertama, bukan di Initialize(). Runtime Lua baru
     // di-Initialize SETELAH EditorApp — ia butuh World dan AssetDatabase yang

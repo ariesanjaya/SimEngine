@@ -3,8 +3,10 @@
 #include "Sim/Core/Math.h"
 #include "Sim/Render/IViewportRenderer.h"
 #include "Sim/Render/Types.h"
+#include "Sim/Editor/SkinnedPreview.h"
 #include "Sim/Scene/World.h"
 
+#include <span>
 #include <vector>
 
 namespace sim::assets {
@@ -75,13 +77,16 @@ public:
     /// dipertahankan dengan sengaja:** entity yang punya MeshRenderer tapi tidak
     /// menggambar apa pun adalah entity yang tidak bisa diklik, tidak bisa
     /// dipilih, dan karena itu tidak bisa diperbaiki.
+    /// `animation` boleh null — mesh ber-rig lalu digambar pada bind pose-nya.
     void Build(scene::World& world, const Selection& selection,
                const assets::AssetDatabase* assets = nullptr,
-               render::IViewportRenderer* renderer = nullptr);
+               render::IViewportRenderer* renderer = nullptr,
+               const SkinnedPreview* animation = nullptr);
 
 private:
     void AppendLight(const scene::LightComponent& light, const Mat4& matrix);
-    void AppendSkinPalette(uint32_t boneCount, render::MeshInstance& instance);
+    void AppendSkinPalette(uint32_t boneCount, std::span<const Mat4> palette,
+                           render::MeshInstance& instance);
 
 public:
 

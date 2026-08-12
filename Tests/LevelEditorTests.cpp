@@ -7,6 +7,7 @@
 #include "Sim/Editor/SceneCommands.h"
 #include "Sim/Editor/SceneView.h"
 #include "Sim/Editor/Selection.h"
+#include "Sim/Editor/SkinnedPreview.h"
 #include "Sim/Scene/Components.h"
 #include "Sim/Scene/Serialization.h"
 #include "Sim/Scene/World.h"
@@ -15,6 +16,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -681,4 +683,113 @@ TEST_CASE("Mesh tanpa rangka tidak menyita satu matriks pun") {
     CHECK(scene.skinMatrices.empty());
     // Nol berarti "digambar tanpa kulit", dan itulah jalur seluruh adegan statis.
     CHECK(scene.meshes[0].skinCount == 0);
+}
+
+// --- pemutaran klip di viewport -------------------------------------------------
+
+TEST_CASE("Animator memutar klip FBX pada mesh ber-rig dan paletnya berubah terhadap waktu") {
+    // Rig dan klipnya tidak ikut di repo:
+    //   SIM_RIG_FBX=/path/rig.fbx SIM_CLIP_FBX=/path/Running.fbx ctest
+    const char* rigPath = std::getenv("SIM_RIG_FBX");
+    const char* clipPath = std::getenv("SIM_CLIP_FBX");
+    if (rigPath == nullptr || clipPath == nullptr || !std::filesystem::exists(rigPath) ||
+        !std::filesystem::exists(clipPath)) {
+        return;
+    }
+
+    // Folder aset sementara berisi keduanya. Disalin, bukan ditunjuk: AssetDatabase
+    // memberi GUID lewat berkas `.meta` di sebelah asetnya, dan menaburi folder
+    // sumber orang dengan berkas itu bukan yang boleh dilakukan sebuah test.
+    static std::atomic<int> counter{0};
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() /
+        ("simanim_" + std::to_string(counter.fetch_add(1)) + "_" + std::to_string(::getpid()));
+    std::filesystem::create_directories(root);
+    std::error_code copyError;
+    std::filesystem::copy_file(rigPath, root / "rig.fbx", copyError);
+    std::filesystem::copy_file(clipPath, root / "clip.fbx", copyError);
+    REQUIRE(!copyError);
+
+    assets::AssetDatabase database;
+    REQUIRE(database.Initialize({root, nullptr, 1.0f}));
+    const assets::AssetRecord* rigRecord = database.FindByRelativePath("rig.fbx");
+    const assets::AssetRecord* clipRecord = database.FindByRelativePath("clip.fbx");
+    REQUIRE(rigRecord != nullptr);
+    REQUIRE(clipRecord != nullptr);
+
+    scene::World world;
+    const scene::Entity entity = world.Create("Karakter");
+    scene::MeshRendererComponent renderer;
+    renderer.mesh = AssetRef{rigRecord->guid};
+    world.Add<scene::MeshRendererComponent>(entity, renderer);
+    scene::AnimatorComponent animator;
+    animator.clip = AssetRef{clipRecord->guid};
+    world.Add<scene::AnimatorComponent>(entity, animator);
+
+    SkinnedPreview preview;
+    preview.Update(world, &database, 0.0f);
+    CHECK(preview.AnimatedCount() == 1);
+    const std::vector<Mat4> first(preview.PaletteFor(entity).begin(),
+                                  preview.PaletteFor(entity).end());
+    REQUIRE(first.size() > 30);  // rig Mixamo: 65 bone
+
+    // **Pose awal bukan bind pose.** Palet yang seluruhnya matriks satuan berarti
+    // klipnya tidak sampai ke bone mana pun — dan itu terlihat persis sama dengan
+    // animasi yang berjalan benar pada frame pertama, jadi ia harus diperiksa.
+    int moved = 0;
+    for (const Mat4& matrix : first) {
+        if (matrix != Mat4(1.0f)) {
+            ++moved;
+        }
+    }
+    CHECK(moved > 10);
+
+    // Maju seperempat detik: paletnya harus berubah.
+    preview.Update(world, &database, 0.25f);
+    const std::span<const Mat4> second = preview.PaletteFor(entity);
+    REQUIRE(second.size() == first.size());
+    int changed = 0;
+    for (std::size_t i = 0; i < first.size(); ++i) {
+        if (first[i] != second[i]) {
+            ++changed;
+        }
+    }
+    CHECK(changed > 10);
+    CHECK(world.TryGet<scene::AnimatorComponent>(entity)->time == doctest::Approx(0.25f));
+
+    // Dijeda berarti benar-benar diam — bukan sekadar lebih lambat.
+    world.TryGet<scene::AnimatorComponent>(entity)->playing = false;
+    const std::vector<Mat4> held(second.begin(), second.end());
+    preview.Update(world, &database, 0.5f);
+    const std::span<const Mat4> after = preview.PaletteFor(entity);
+    REQUIRE(after.size() == held.size());
+    for (std::size_t i = 0; i < held.size(); ++i) {
+        REQUIRE(held[i] == after[i]);
+    }
+
+    // Waktu dibungkus di dalam durasi klipnya, bukan tumbuh tanpa batas: waktu
+    // yang membesar terus kehilangan presisi float-nya sesudah beberapa jam, dan
+    // yang terlihat adalah animasi yang makin tersendat.
+    world.TryGet<scene::AnimatorComponent>(entity)->playing = true;
+    for (int i = 0; i < 200; ++i) {
+        preview.Update(world, &database, 0.1f);
+    }
+    const float wrapped = world.TryGet<scene::AnimatorComponent>(entity)->time;
+    CHECK(wrapped >= 0.0f);
+    CHECK(wrapped < 10.0f);
+
+    std::error_code cleanup;
+    std::filesystem::remove_all(root, cleanup);
+}
+
+TEST_CASE("Animator tanpa mesh ber-rig tidak menghasilkan palet") {
+    scene::World world;
+    const scene::Entity entity = world.Create("Kotak");
+    world.Add<scene::MeshRendererComponent>(entity, scene::MeshRendererComponent{});
+    world.Add<scene::AnimatorComponent>(entity, scene::AnimatorComponent{});
+
+    SkinnedPreview preview;
+    preview.Update(world, nullptr, 0.016f);
+    CHECK(preview.AnimatedCount() == 0);
+    CHECK(preview.PaletteFor(entity).empty());
 }

@@ -647,6 +647,38 @@ TEST_CASE("indeks bone di luar palet tidak membaca memori orang lain") {
     CHECK(SkinPoint(influence, palette, Vec3(0.0f)).y == doctest::Approx(2.5f));
 }
 
+TEST_CASE("rangka tanpa geometri sama persis dengan rangka hasil impor mesh") {
+    using namespace sim::assets;
+
+    const char* rigPath = std::getenv("SIM_RIG_FBX");
+    if (rigPath == nullptr || !std::filesystem::exists(rigPath)) {
+        return;
+    }
+
+    std::string meshError;
+    std::string skeletonError;
+    const MeshData mesh = LoadMesh(rigPath, meshError);
+    const SkeletonData skeleton = LoadSkeleton(rigPath, skeletonError);
+    REQUIRE(mesh.skeleton.IsValid());
+    REQUIRE(skeleton.IsValid());
+
+    // **Urutannya yang harus sama, bukan sekadar isinya.** Indeks bone di dalam
+    // `SkinInfluence` menunjuk ke urutan yang dihasilkan `LoadMesh`; rangka yang
+    // sama tapi berurutan lain menghasilkan pose yang benar untuk tulang yang
+    // salah, dan yang terlihat adalah kulit yang terpelintir — bukan galat.
+    REQUIRE(skeleton.bones.size() == mesh.skeleton.bones.size());
+    for (std::size_t i = 0; i < skeleton.bones.size(); ++i) {
+        INFO("bone " << i);
+        CHECK(skeleton.bones[i].name == mesh.skeleton.bones[i].name);
+        CHECK(skeleton.bones[i].parent == mesh.skeleton.bones[i].parent);
+        CHECK(skeleton.bones[i].translation.x ==
+              doctest::Approx(mesh.skeleton.bones[i].translation.x));
+        CHECK(skeleton.bones[i].translation.y ==
+              doctest::Approx(mesh.skeleton.bones[i].translation.y));
+        CHECK(skeleton.bones[i].scale.x == doctest::Approx(mesh.skeleton.bones[i].scale.x));
+    }
+}
+
 TEST_CASE("rig ber-skin terbaca dengan satuan yang sejalan antara mesh dan rangka") {
     using namespace sim::assets;
 

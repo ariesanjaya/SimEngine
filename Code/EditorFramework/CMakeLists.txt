@@ -11,12 +11,14 @@ sim_add_library(EditorFramework
         src/Notifications.cpp
         src/SceneCommands.cpp
         src/SceneView.cpp
+        src/SkinnedPreview.cpp
         src/PanelManager.cpp
         src/PropertyGrid.cpp
         src/PanelRegistry.cpp
         src/Selection.cpp
         src/Widgets.cpp
     PUBLIC_DEPS
+        Sim::Animation
         Sim::Assets
         Sim::Core
         Sim::Render
