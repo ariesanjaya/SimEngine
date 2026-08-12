@@ -989,6 +989,15 @@ TEST_CASE("Warna instance datang dari material, bukan lagi dari komponen") {
     CHECK(scene.meshes[0].color.g == doctest::Approx(0.65f));
     CHECK(scene.meshes[0].color.b == doctest::Approx(0.70f));
 
+    // Slot material yang kosong dikirim ber-alpha nol, bukan diisi warna bawaan:
+    // nol berarti "tidak ditetapkan", dan renderer lalu memakai material yang
+    // tertulis di berkas mesh — yang tidak diketahui editor. Mengisinya di sini
+    // akan menimpa model yang membawa warnanya sendiri.
+    const render::ViewportScene withSlots = view.Scene();
+    for (const Vec4& color : withSlots.partColors) {
+        CHECK(color.a == doctest::Approx(0.0f));
+    }
+
     // Tanpa pustaka bawaan sama sekali editor tetap menggambar sesuatu, bukan
     // hitam: entity yang tidak terlihat adalah entity yang tidak bisa dipilih.
     SceneView bare;

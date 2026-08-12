@@ -382,7 +382,7 @@ TEST_CASE("Pemakai aset ditemukan lewat reflection, termasuk yang bersarang") {
 
     const Entity plain = world.Create("Plain");
     const Entity user = world.Create("User");
-    world.Add<MeshRendererComponent>(user).material = AssetRef{texture};
+    world.Add<MeshRendererComponent>(user).materials.push_back(AssetRef{texture});
     const Entity child = world.Create("Child", user);
     world.Add<MeshRendererComponent>(child).mesh = AssetRef{texture};
 

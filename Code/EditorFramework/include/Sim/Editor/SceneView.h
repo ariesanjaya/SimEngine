@@ -93,6 +93,8 @@ private:
     Vec4 MaterialColor(const assets::AssetDatabase* assets, const Uuid& guid);
     /// Warna material bawaan editor — yang mengisi mesh tanpa material sendiri.
     Vec4 BuiltinColor(const assets::AssetDatabase* builtinAssets);
+    void AppendPartColors(const scene::MeshRendererComponent& renderer, uint32_t partCount,
+                          const assets::AssetDatabase* assets, render::MeshInstance& instance);
 
 public:
 
@@ -132,6 +134,8 @@ private:
     /// Palet kulit seluruh instance ber-skin, bersambung. Tiap `MeshInstance`
     /// menunjuk ruasnya sendiri di sini.
     std::vector<Mat4> skinMatrices_;
+    /// Warna per slot material seluruh instance, bersambung.
+    std::vector<Vec4> partColors_;
     std::vector<render::LineSegment> lines_;
     std::vector<render::LightInstance> lights_;
     std::vector<Pickable> pickables_;

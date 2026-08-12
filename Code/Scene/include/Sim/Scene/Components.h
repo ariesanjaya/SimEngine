@@ -84,7 +84,15 @@ struct MeshRendererComponent {
     /// Rujukan berisi GUID, bukan nama berkas. Itulah yang membuat mengganti
     /// nama atau memindahkan mesh tidak menyentuh satu pun berkas level.
     AssetRef mesh;
-    AssetRef material;
+    /// Satu slot per ruas mesh, sesuai urutan `assets::MeshData::parts`.
+    ///
+    /// **Sebuah daftar, bukan satu rujukan.** Sebuah berkas mesh kerap membawa
+    /// lebih dari satu material — rig Mixamo dua, shader ball lima — dan satu
+    /// rujukan untuk seluruh mesh berarti kelima ruasnya terpaksa memakai
+    /// material yang sama. Slot kosong diisi material bawaan editor; daftar yang
+    /// lebih pendek daripada jumlah ruas diperlakukan sama, jadi menambah
+    /// material di berkasnya tidak merusak level yang sudah ada.
+    std::vector<AssetRef> materials;
     bool castShadows = true;
     bool receiveShadows = true;
     /// Menggeser pemilihan tingkat detail: negatif memilih mesh yang lebih

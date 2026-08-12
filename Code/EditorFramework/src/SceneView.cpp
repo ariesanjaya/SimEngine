@@ -93,6 +93,7 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                       const assets::AssetDatabase* builtinAssets) {
     meshes_.clear();
     skinMatrices_.clear();
+    partColors_.clear();
     lights_.clear();
     lines_.clear();
     icons_.clear();
@@ -126,13 +127,9 @@ void SceneView::Build(scene::World& world, const Selection& selection,
             instance.color = kMeshColor;
             instance.selected = selected;
             if (const auto* meshRenderer = world.TryGet<scene::MeshRendererComponent>(entity)) {
-                // **Warna datang dari material, bukan dari komponen.** Yang
-                // ditetapkan entity menang untuk seluruh mesh; ruas yang punya
-                // material di berkasnya ditimpa renderer sendiri; sisanya
-                // memakai material bawaan editor.
-                instance.color = meshRenderer->material.IsValid()
-                                     ? MaterialColor(assets, meshRenderer->material.guid)
-                                     : BuiltinColor(builtinAssets);
+                // Warna mundur untuk ruas yang tidak punya material di mana pun:
+                // material bawaan editor.
+                instance.color = BuiltinColor(builtinAssets);
                 instance.castShadows = meshRenderer->castShadows;
                 instance.receiveShadows = meshRenderer->receiveShadows;
 
@@ -149,6 +146,7 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                             instance.mesh = mesh.handle;
                             instance.boundsMin = mesh.boundsMin;
                             instance.boundsMax = mesh.boundsMax;
+                            AppendPartColors(*meshRenderer, mesh.partCount, assets, instance);
                             AppendSkinPalette(mesh.boneCount,
                                               animation != nullptr
                                                   ? animation->PaletteFor(entity)
@@ -189,6 +187,32 @@ void SceneView::Build(scene::World& world, const Selection& selection,
             icon.color = kEmptyColor;
         }
         icons_.push_back(icon);
+    }
+}
+
+/// Menyediakan warna tiap slot material sebuah instance.
+///
+/// **Slot kosong ditinggalkan ber-alpha nol, bukan diisi warna bawaan di sini.**
+/// Nol berarti "tidak ditetapkan", dan renderer lalu memakai material yang
+/// tertulis di berkas mesh untuk ruas itu — yang tidak diketahui editor. Mengisi
+/// warna bawaan di sini akan menimpanya, dan model yang berkasnya membawa
+/// warnanya sendiri akan tergambar abu-abu seluruhnya.
+void SceneView::AppendPartColors(const scene::MeshRendererComponent& renderer, uint32_t partCount,
+                                 const assets::AssetDatabase* assets,
+                                 render::MeshInstance& instance) {
+    if (partCount == 0) {
+        return;
+    }
+    instance.partFirst = static_cast<uint32_t>(partColors_.size());
+    instance.partCount = partCount;
+    for (uint32_t slot = 0; slot < partCount; ++slot) {
+        // Daftar yang lebih pendek daripada jumlah ruas diperlakukan sebagai
+        // slot kosong: menambah material di berkas mesh tidak boleh merusak
+        // level yang sudah menyebut sebagian di antaranya.
+        const bool assigned = slot < renderer.materials.size() &&
+                              renderer.materials[slot].IsValid();
+        partColors_.push_back(assigned ? MaterialColor(assets, renderer.materials[slot].guid)
+                                       : Vec4(0.0f));
     }
 }
 
@@ -319,6 +343,7 @@ render::ViewportScene SceneView::Scene() const {
     render::ViewportScene scene;
     scene.meshes = meshes_;
     scene.skinMatrices = skinMatrices_;
+    scene.partColors = partColors_;
     scene.lines = lines_;
     scene.lights = lights_;
     return scene;

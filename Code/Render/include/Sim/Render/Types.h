@@ -42,6 +42,10 @@ struct MeshAsset {
     Vec3 boundsMax{0.5f};
     /// False bila berkasnya gagal dimuat. Handle-nya lalu kubus satuan.
     bool loaded = false;
+    /// Berapa ruas bermaterial yang dimiliki mesh ini. Selalu >= 1 untuk mesh
+    /// yang berhasil dimuat — inilah jumlah slot material yang berarti untuk
+    /// entity yang memakainya.
+    uint32_t partCount = 1;
     /// Jumlah bone rangka yang mengulit mesh ini, atau nol bila tidak ber-skin.
     ///
     /// **Sebuah angka, bukan rangkanya.** Header publik Render sengaja bebas
@@ -316,6 +320,14 @@ struct MeshInstance {
     uint32_t skinFirst = 0;
     uint32_t skinCount = 0;
 
+    /// Ruas milik instance ini di dalam `ViewportScene::partColors`.
+    ///
+    /// Warna ber-alpha nol berarti "slot ini tidak ditetapkan" — renderer lalu
+    /// memakai material yang tertulis di berkas mesh untuk ruas itu, dan `color`
+    /// di bawah bila berkasnya pun tidak menyebut apa-apa.
+    uint32_t partFirst = 0;
+    uint32_t partCount = 0;
+
     Vec4 color{0.72f, 0.74f, 0.78f, 1.0f};
     bool selected = false;
     /// Ikut pass bayangan. Yang tidak menjatuhkan bayangan tetap digambar
@@ -392,6 +404,11 @@ struct ViewportScene {
     /// menggambar instance-nya sebagai mesh statis, bukan sebagai kulit yang
     /// membaca memori orang lain.
     std::span<const Mat4> skinMatrices;
+    /// Warna dasar per ruas seluruh instance frame ini, bersambung. Ditunjuk
+    /// tiap `MeshInstance` lewat `partFirst`/`partCount`, sama seperti palet
+    /// kulit — dan karena alasan yang sama: satu span per instance berarti satu
+    /// penyalinan per entity per frame.
+    std::span<const Vec4> partColors;
     std::span<const LineSegment> lines;
     /// Lampu punctual. Directional boleh ada di sini juga — renderer memakai
     /// yang pertama sebagai matahari dan mengabaikan sisanya, karena cascade

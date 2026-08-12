@@ -243,6 +243,11 @@ struct BoxInstance {
 /// geometri untuk dikelompokkan.
 struct DrawRun {
     MeshHandle mesh = kUnitCubeMesh;
+    /// Awal warna ruas milik instance-instance ini di `ViewportScene::partColors`,
+    /// atau `kNoPartColors`. **Ikut menjadi kunci ruas**: dua entity bermesh sama
+    /// dengan material berbeda tidak boleh digambar dalam satu panggilan.
+    uint32_t partColorFirst = 0;
+    uint32_t partColorCount = 0;
     /// Digambar lewat pipeline ber-kulit. **Ikut menjadi kunci ruas**, karena ia
     /// menentukan pipeline dan vertex buffer yang diikat: mesh ber-rig yang satu
     /// instance-nya dipasok pose dan satu lagi tidak adalah dua ruas, bukan satu
@@ -663,6 +668,8 @@ public:
             }
         }
 
+        partColors_.assign(scene.partColors.begin(), scene.partColors.end());
+
         lineVertices_.clear();
         for (const LineSegment& line : scene.lines) {
             lineVertices_.push_back({line.a, line.color});
@@ -980,7 +987,8 @@ public:
                 return asset;
             }
             const GpuMesh& mesh = *meshes_[static_cast<std::size_t>(found->second)];
-            return MeshAsset{found->second, mesh.boundsMin, mesh.boundsMax, true, mesh.boneCount};
+            return MeshAsset{found->second,   mesh.boundsMin, mesh.boundsMax, true,
+                             static_cast<uint32_t>(mesh.parts.size()), mesh.boneCount};
         }
 
         std::string error;
@@ -999,7 +1007,8 @@ public:
         const GpuMesh& uploaded = *meshes_[static_cast<std::size_t>(handle)];
         SIM_INFO("Render", "mesh ready: {} ({} tris, {} verts, {} bones)", key,
                  data.TriangleCount(), data.vertices.size(), uploaded.boneCount);
-        return MeshAsset{handle, data.boundsMin, data.boundsMax, true, uploaded.boneCount};
+        return MeshAsset{handle, data.boundsMin, data.boundsMax, true,
+                         static_cast<uint32_t>(uploaded.parts.size()), uploaded.boneCount};
     }
 
     TextureHandle ColorTarget() const override { return textureHandle_; }
@@ -1254,18 +1263,31 @@ private:
             }
 
             const bool skinned = IsSkinnable(mesh, scene.skinMatrices.size());
+            // Ruas warna yang benar-benar ada di larik pemanggil. Yang melewati
+            // ujungnya diabaikan seluruhnya, bukan dipotong: ruas separuh berarti
+            // sebagian material entity ini diambil dari entity lain.
+            uint32_t colorFirst = 0;
+            uint32_t colorCount = 0;
+            if (mesh.partCount > 0 && static_cast<std::size_t>(mesh.partFirst) + mesh.partCount <=
+                                          scene.partColors.size()) {
+                colorFirst = mesh.partFirst;
+                colorCount = mesh.partCount;
+            }
             const Vec4 color = mesh.selected ? kSelectedColor : mesh.color;
             const BoxInstance instance = MakeInstance(model, color, mesh.receiveShadows,
                                                       mesh.selected, skinned ? mesh.skinFirst : 0u);
             if (color.a >= 0.999f) {
-                gathered_.push_back(GatherEntry{mesh.mesh, skinned, instance, mesh.castShadows});
+                gathered_.push_back(
+                    GatherEntry{mesh.mesh, skinned, colorFirst, colorCount, instance,
+                                mesh.castShadows});
                 continue;
             }
             const float distance = glm::length(world.Centre() - eye);
             // Tembus pandang tidak pernah menjatuhkan bayangan — kaca yang
             // menghitamkan lantai di bawahnya adalah kesalahan yang lebih
             // mencolok daripada kaca yang tidak berbayang sama sekali.
-            sorted_.push_back(SortedEntry{distance, mesh.mesh, skinned, instance});
+            sorted_.push_back(
+                SortedEntry{distance, mesh.mesh, skinned, colorFirst, colorCount, instance});
         }
 
         // **Yang menjatuhkan bayangan lebih dulu, lalu dikelompokkan per mesh.**
@@ -1287,7 +1309,12 @@ private:
                              // memakai pipeline yang berbeda, jadi mencampurnya
                              // di dalam satu ruas berarti sebagian instance
                              // digambar lewat pipeline yang bukan miliknya.
-                             return static_cast<int>(a.skinned) > static_cast<int>(b.skinned);
+                             if (a.skinned != b.skinned) {
+                                 return static_cast<int>(a.skinned) > static_cast<int>(b.skinned);
+                             }
+                             // Kunci keempat: material yang berbeda adalah ruas
+                             // yang berbeda, karena warnanya dikirim per ruas.
+                             return a.colorFirst < b.colorFirst;
                          });
 
         opaque_.reserve(gathered_.size());
@@ -1295,7 +1322,7 @@ private:
             if (entry.caster) {
                 ++casterCount_;
             }
-            AppendRun(opaqueRuns_, entry.mesh, entry.skinned,
+            AppendRun(opaqueRuns_, entry.mesh, entry.skinned, entry.colorFirst, entry.colorCount,
                       static_cast<uint32_t>(opaque_.size()));
             opaque_.push_back(entry.instance);
         }
@@ -1306,8 +1333,9 @@ private:
             if (run.first >= casterCount_) {
                 break;
             }
-            casterRuns_.push_back(DrawRun{run.mesh, run.skinned, run.first,
-                                          std::min(run.count, casterCount_ - run.first)});
+            DrawRun caster = run;
+            caster.count = std::min(run.count, casterCount_ - run.first);
+            casterRuns_.push_back(caster);
         }
 
         // Belakang ke depan. Alpha blending tidak komutatif: dua kaca yang
@@ -1323,8 +1351,8 @@ private:
                   [](const SortedEntry& a, const SortedEntry& b) { return a.distance > b.distance; });
         transparent_.reserve(sorted_.size());
         for (const SortedEntry& entry : sorted_) {
-            AppendRun(transparentRuns_, entry.mesh, entry.skinned,
-                      static_cast<uint32_t>(transparent_.size()));
+            AppendRun(transparentRuns_, entry.mesh, entry.skinned, entry.colorFirst,
+                      entry.colorCount, static_cast<uint32_t>(transparent_.size()));
             transparent_.push_back(entry.instance);
         }
     }
@@ -1352,12 +1380,14 @@ private:
     /// Menambah instance ke ruas terakhir bila mesh dan jalurnya sama, atau
     /// membuka ruas baru.
     static void AppendRun(std::vector<DrawRun>& runs, MeshHandle mesh, bool skinned,
-                          uint32_t index) {
-        if (!runs.empty() && runs.back().mesh == mesh && runs.back().skinned == skinned) {
+                          uint32_t colorFirst, uint32_t colorCount, uint32_t index) {
+        if (!runs.empty() && runs.back().mesh == mesh && runs.back().skinned == skinned &&
+            runs.back().partColorFirst == colorFirst &&
+            runs.back().partColorCount == colorCount) {
             ++runs.back().count;
             return;
         }
-        runs.push_back(DrawRun{mesh, skinned, index, 1});
+        runs.push_back(DrawRun{mesh, colorFirst, colorCount, skinned, index, 1});
     }
 
     /// `useDepth` false berarti depth tidak dipasang sama sekali.
@@ -1557,12 +1587,23 @@ private:
             // Satu panggilan per ruas. Mesh yang berkasnya tidak menyebut
             // material punya tepat satu ruas, jadi ini tetap satu panggilan
             // untuk seluruh adegan statis yang sudah ada.
-            for (const GpuMesh::Part& part : mesh.parts) {
+            for (std::size_t partIndex = 0; partIndex < mesh.parts.size(); ++partIndex) {
+                const GpuMesh::Part& part = mesh.parts[partIndex];
                 if (part.indexCount == 0) {
                     continue;
                 }
                 BoxPush partPush = push;
+                // **Yang ditetapkan editor menang atas yang tertulis di berkas
+                // mesh.** Berkasnya adalah bagaimana model itu diekspor; slot
+                // material entity adalah keputusan orang yang menyusun adegan,
+                // dan keputusan itu tidak boleh dikalahkan oleh berkasnya.
                 partPush.partColor = part.baseColor;
+                if (partIndex < run.partColorCount) {
+                    const Vec4& assigned = partColors_[run.partColorFirst + partIndex];
+                    if (assigned.a > 0.0f) {
+                        partPush.partColor = assigned;
+                    }
+                }
                 vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(BoxPush),
                                    &partPush);
                 vkCmdDrawIndexed(cmd, part.indexCount, run.count, static_cast<int32_t>(0),
@@ -3323,10 +3364,17 @@ private:
     std::vector<BoxInstance> opaque_;
     std::vector<BoxInstance> transparent_;
     std::vector<BoxInstance> upload_;
+    /// Warna ruas frame ini, disalin dari `ViewportScene`. Disalin dan bukan
+    /// disimpan sebagai span: span pemanggil hanya sah selama `Render()`,
+    /// sementara perekaman command buffer membacanya di dalam recorder yang
+    /// dijalankan frame graph.
+    std::vector<Vec4> partColors_;
     struct SortedEntry {
         float distance = 0.0f;
         MeshHandle mesh = kUnitCubeMesh;
         bool skinned = false;
+        uint32_t colorFirst = 0;
+        uint32_t colorCount = 0;
         BoxInstance instance;
     };
     std::vector<SortedEntry> sorted_;
@@ -3334,6 +3382,8 @@ private:
     struct GatherEntry {
         MeshHandle mesh = kUnitCubeMesh;
         bool skinned = false;
+        uint32_t colorFirst = 0;
+        uint32_t colorCount = 0;
         BoxInstance instance;
         bool caster = false;
     };
