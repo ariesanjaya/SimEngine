@@ -25,10 +25,14 @@ namespace sim::animation {
 /// Karena itu kurvanya dicuplik menjadi kuaternion **saat sampling**, dan
 /// seluruh pencampuran terjadi setelah itu. Yang dibayar: gimbal lock adalah
 /// sifat kurva yang ditulis, terlihat dan bisa dikendalikan penulisnya — sama
-/// seperti di DCC mana pun. Klip yang kelak diimpor dari FBX/glTF di E8 membawa
-/// kunci kuaternion dan akan memerlukan jenis track tersendiri; itu memang
-/// jalur yang berbeda, dan menyamakannya sekarang hanya akan salah untuk
-/// keduanya.
+/// seperti di DCC mana pun.
+///
+/// Klip yang **diimpor** membawa kunci kuaternion dan memakai `RotationTrack`
+/// di bawah, bukan ketiga kanal ini. Itu memang jalur yang berbeda, dan
+/// menyamakan keduanya salah untuk keduanya: memaksa kuaternion menjadi Euler
+/// menuntut memilih satu dari dua cabang yang sama sahnya pada tiap kunci, dan
+/// pilihan yang salah adalah tulang yang berputar sepenuh lingkaran di antara
+/// dua frame yang berdampingan.
 enum class Channel : uint8_t {
     TranslationX,
     TranslationY,
@@ -65,6 +69,48 @@ struct Track {
     std::string bone;
     Channel channel = Channel::TranslationX;
     Curve curve;
+};
+
+/// Satu kunci rotasi kuaternion.
+struct RotationKey {
+    float time = 0.0f;
+    Quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
+};
+
+/// Rotasi sebuah bone sebagai kunci kuaternion — jalur klip yang diimpor.
+///
+/// **Satu track per bone, bukan tiga kanal.** Rotasi kuaternion tidak bisa
+/// dipisah menjadi tiga angka yang berdiri sendiri: x, y, z, dan w saling
+/// terikat oleh panjang satu, dan menyunting salah satunya sendirian
+/// menghasilkan sesuatu yang bukan rotasi lagi. Itu juga yang membuatnya tidak
+/// bisa ditampilkan di penyunting kurva — dan justru karena itu ia tidak
+/// dipaksakan ke sana.
+///
+/// Track ini **menang atas kanal Euler** pada bone yang sama. Sebuah klip
+/// lazimnya punya salah satunya saja; kalau keduanya ada, yang berasal dari
+/// berkas sumbernya lebih tepat daripada tiga kurva yang menghampiri hal yang
+/// sama.
+struct RotationTrack {
+    /// Sama seperti `Track::bone`: nama, bukan indeks. Lihat alasannya di sana.
+    std::string bone;
+    /// Terurut menaik menurut waktu. `AddKey` yang menjaganya.
+    std::vector<RotationKey> keys;
+
+    /// Menyisipkan pada urutan waktu yang benar; kunci pada waktu yang sama
+    /// persis diganti.
+    void AddKey(const RotationKey& key);
+
+    /// Rotasi pada sebuah waktu.
+    ///
+    /// **Nlerp jalur pendek, bukan slerp.** Alasannya sama dengan `Blend` di
+    /// Pose.h: pada kunci yang rapat keduanya tidak bisa dibedakan mata,
+    /// sedangkan slerp membawa dua fungsi trigonometri per bone per frame. Dua
+    /// kuaternion yang mewakili rotasi berdekatan bisa berlawanan tanda, dan
+    /// mencampurnya apa adanya membuat tulang berputar lewat jalan yang panjang.
+    ///
+    /// Di luar rentang kunci nilainya ditahan pada kunci terluar, sama dengan
+    /// `Curve::Evaluate` — bukan diekstrapolasi.
+    Quat Evaluate(float time) const;
 };
 
 /// Penanda yang memanggil sesuatu saat pemutaran melewatinya.
@@ -123,6 +169,20 @@ public:
     /// frame.
     int RemoveEmptyTracks();
 
+    // --- track rotasi kuaternion ----------------------------------------------
+
+    int RotationTrackCount() const { return static_cast<int>(rotationTracks_.size()); }
+    const RotationTrack& RotationTrackAt(int index) const;
+    RotationTrack& RotationTrackAt(int index);
+    const std::vector<RotationTrack>& RotationTracks() const { return rotationTracks_; }
+
+    /// Track rotasi sebuah bone, atau -1. **Satu per bone**, tidak seperti kanal
+    /// Euler yang tiga.
+    int FindRotationTrack(std::string_view bone) const;
+    int EnsureRotationTrack(const std::string& bone);
+    bool RemoveRotationTrack(int index);
+    void SetRotationTracks(const std::vector<RotationTrack>& tracks);
+
     // --- event ---------------------------------------------------------------
 
     const std::vector<Event>& Events() const { return events_; }
@@ -166,6 +226,7 @@ public:
 
 private:
     std::vector<Track> tracks_;
+    std::vector<RotationTrack> rotationTracks_;
     std::vector<Event> events_;
     std::vector<SyncMarker> sync_;
 };
@@ -187,6 +248,11 @@ public:
 
     /// Indeks bone untuk sebuah track, atau -1 kalau rangkanya tidak punya.
     int BoneFor(int track) const;
+    /// Sama, untuk track rotasi kuaternion. **Pemetaan terpisah**, karena
+    /// keduanya diindeks sendiri-sendiri di dalam klipnya — satu daftar bersama
+    /// akan menuntut pemanggilnya menghitung offset, dan offset yang salah
+    /// menganimasikan tulang yang salah.
+    int BoneForRotationTrack(int track) const;
     /// Track yang tidak menemukan bone-nya. Dipakai panel untuk memperlihatkan
     /// apa yang hilang saat sebuah klip dipasang ke rig yang salah — diam soal
     /// itu berarti animasi yang setengah berjalan tanpa sebab yang terlihat.
@@ -196,6 +262,7 @@ public:
 
 private:
     std::vector<int> boneForTrack_;
+    std::vector<int> boneForRotationTrack_;
     std::vector<std::string> unresolved_;
     int rootBone_ = -1;
 };

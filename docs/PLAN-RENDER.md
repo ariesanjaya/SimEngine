@@ -766,10 +766,10 @@ Terukur di editor (RTX 2060, viewport 1277x696):
 | `forward-opaque` | 0,014 ms |
 | Galat validation layer | **0** |
 
-**Yang belum ada dari E8.4:** LOD dan meshoptimizer, blend shape, impor klip
-animasi, material dan tekstur dari berkasnya, serta glTF — ufbx membaca FBX dan
-OBJ, dan `cgltf` masih menunggu. Indeks aset juga belum mencatat jumlah segitiga:
-itu menuntut medan baru di `ImportResult` beserta panel yang menampilkannya.
+**Yang belum ada dari E8.4:** LOD dan meshoptimizer, blend shape, material dan
+tekstur dari berkasnya, serta glTF — ufbx membaca FBX dan OBJ, dan `cgltf` masih
+menunggu. Indeks aset juga belum mencatat jumlah segitiga: itu menuntut medan
+baru di `ImportResult` beserta panel yang menampilkannya.
 
 **Selesai: impor rangka dan bobot skin dari FBX**
 (`Code/Assets/{include/Sim/Assets/MeshData.h,src/MeshImport.cpp}`). Diuji
@@ -889,6 +889,82 @@ diperiksa dengan pencatatan sementara di `DrawRuns`, karena bind pose yang benar
 terlihat sama persis dengan jalur berkulit yang tidak pernah dijalankan. Build
 Debug dengan `VK_LAYER_KHRONOS_validation` menyala: **nol galat dan nol
 peringatan validation layer** sepanjang jalannya.
+
+**Selesai: impor klip animasi dari FBX**
+(`Code/Animation/{include/Sim/Animation/ClipImport.h,src/ClipImport.cpp}`,
+`Code/Animation/{include/Sim/Animation/Clip.h,src/Clip.cpp}`,
+`Code/Assets/src/MeshImport.cpp`). Diuji terhadap `Running.fbx` dan
+`Defeated.fbx` yang dipasang ke rig `Y Bot.fbx`.
+
+- **Impor FBX ada di `Sim::Animation`, bukan di `Sim::Assets`.** Preseden yang
+  diikuti `Sim::Terrain`, yang mengurus sendiri baca-tulis heightmap PNG-nya:
+  modul yang memiliki bentuk datanya juga yang memiliki penerjemahan dari
+  berkasnya. Alternatifnya — bentuk klip netral di sisi aset lalu diterjemahkan
+  di sini — berarti seluruh model track, kunci, dan kurva dituliskan dua kali
+  untuk satu-satunya pembaca yang akan pernah ada.
+- **Kunci dipanggang lewat `ufbx_bake_anim`, bukan dibaca sebagai kurva mentah.**
+  FBX menyimpan rotasi sebagai kurva Euler beserta urutan rotasi, pre-rotation,
+  post-rotation, dan pivot yang semuanya ikut menentukan hasilnya. Menyusun ulang
+  rantai itu tangan berarti setiap potong yang terlewat menghasilkan animasi yang
+  *hampir* benar — jauh lebih sulit dilacak daripada yang jelas-jelas salah.
+- **Rotasi masuk sebagai track kuaternion tersendiri**, seperti yang sudah
+  dicatat `Clip.h` sejak E7.5. Memaksanya menjadi Euler menuntut memilih satu
+  dari dua cabang yang sama sahnya pada tiap kunci, dan pilihan yang salah adalah
+  tulang yang berputar sepenuh lingkaran di antara dua frame yang berdampingan.
+  Translasi dan skala tetap kanal skalar — keduanya memang bentuk yang keluar
+  dari pemanggangan, dan keduanya bisa disunting penyunting kurva yang sudah ada.
+- **Seluruh take diimpor, bukan yang pertama.** Berkas Mixamo selalu membawa
+  `Take 001` yang **tidak menganimasikan satu bone pun**, dan take yang berisi
+  ada di urutan kedua. Mengambil yang pertama begitu saja mengimpor klip kosong,
+  dan yang terlihat adalah aset yang bisa dipilih dan tidak melakukan apa-apa.
+  Take yang kosong dibuang; kalau tersisa tepat satu, klipnya dinamai menurut
+  berkasnya — nama take Mixamo adalah "mixamo.com", yang tidak memberi tahu
+  apa-apa, sementara "Running.fbx" justru nama yang dipilih orang.
+
+**Dua bug sungguhan, dan keduanya ditemukan oleh pembaca kedua.**
+
+*Pertama, mode konversi ruang.* ufbx punya tiga cara menyimpan konversi satuan,
+dan hanya satu yang menghasilkan transform lokal yang benar begitu dirangkai
+induk-ke-anak — yaitu persis yang dilakukan `Pose::ComputeGlobal`. Terukur dengan
+panjang tulang sebagai patokan, karena ia tidak boleh berubah apa pun posenya:
+
+| `space_conversion` | kunci skala | selisih panjang tulang terbesar |
+| --- | --- | --- |
+| `TRANSFORM_ROOT` | 1,0 | **9900%** — sentimeter, seratus kali |
+| `ADJUST_TRANSFORMS` | 0,01 | **100%** — 0,01 menumpuk tiap tingkat, rangkanya runtuh |
+| `MODIFY_GEOMETRY` | 1,0 | **0,0000%** |
+
+*Kedua, dan ini yang menarik: rangka hasil impor mesh ternyata sudah salah sejak
+commit sebelumnya.* `LoadMesh` memakai `TRANSFORM_ROOT`, jadi konversi satuan
+tinggal di node root — bone teratas mewarisi skala 0,01 dan seluruh keturunannya
+bertranslasi dalam sentimeter. Rangkanya tetap benar **secara global**, dan uji
+yang membandingkan posisi bone dengan kotak batas mesh karena itu lulus dengan
+tenang. Yang menangkapnya adalah pembaca kedua transform lokal itu: klip membawa
+translasi dalam meter berskala satu, dan bone yang tidak dianimasikan klip tetap
+memakai bind pose-nya — jadi tulang-tulang itu terlempar seratus kali terlalu
+jauh. Kedua importir sekarang memakai mode yang sama. Terukur: geometrinya tidak
+berubah sama sekali — batas Y Bot tetap (−0,973, 0,000, −0,161)..(0,973, 1,805,
+0,204), shader ball tetap 2,69 x 2,66 x 2,50 m — sementara skala lokal bone
+teratas berpindah dari 0,0100 menjadi 1,0000.
+
+**Kanal yang tetap sepanjang klip tidak diimpor sama sekali, dan itu syarat agar
+klipnya bisa dipakai rig lain.** Pada animasi rangka, satu-satunya bone yang
+translasinya benar-benar bergerak lazimnya adalah pinggul; translasi bone lain
+tetap, dan nilainya adalah panjang tulang rig yang mengekspor klip itu.
+Terukur: `Defeated.fbx` dan `Y Bot.fbx` sama-sama rig Mixamo bernama sama, tapi
+Spine2-nya 0,09322 m lawan 0,13459 m — dengan kanal tetap ikut diimpor, memasang
+klip Defeated ke Y Bot memendekkan tulang itu **30,7%**. Tanpanya, bone yang
+tidak dianimasikan tinggal di bind pose rig tujuan, yaitu persis arti retargeting
+yang dijanjikan `RetargetMap`: sudut yang sama, bukan titik yang sama. Rotasi
+tetap **tetap** diimpor — rotasi bind adalah orientasi tulang, bukan panjangnya.
+
+Terukur pada `Running.fbx`: **52 track rotasi, tepat tiga track skalar**
+(translasi pinggul, 20 kunci masing-masing), 0,633 detik pada 30 fps. Ujinya
+menyatakan invarian yang tidak bergantung pose mana pun — **panjang tulang di
+bawah klip harus sama dengan panjang tulang bind rignya**, diperiksa pada lima
+waktu di sepanjang klip, atas 320 perbandingan: selisih terbesar di bawah 0,1%
+untuk kedua klip. Berkasnya tidak ikut di repo, jadi ujinya berjalan hanya bila
+ditunjuk: `SIM_RIG_FBX=/path/rig.fbx SIM_CLIP_FBX=/path/Running.fbx ctest`.
 
 **Selesai: sistem task pose, mengikuti Esoterica**
 (`Code/Animation/{include/Sim/Animation/PoseTask.h,src/PoseTask.cpp}`, acuan

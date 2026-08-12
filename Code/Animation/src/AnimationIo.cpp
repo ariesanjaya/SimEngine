@@ -200,6 +200,31 @@ std::string SaveClipToString(const ClipDocument& document, const Clip& clip) {
     }
     root["tracks"] = std::move(tracks);
 
+    // Track rotasi kuaternion, jalur klip yang diimpor. Deret angka datar dengan
+    // alasan yang sama seperti di atas — lima angka per kunci, dan klip impor
+    // punya satu kunci per bone per frame.
+    Json rotations = Json::array();
+    for (const RotationTrack& track : clip.RotationTracks()) {
+        Json entry;
+        entry["bone"] = track.bone;
+        Json keys = Json::array();
+        for (const RotationKey& key : track.keys) {
+            keys.push_back(key.time);
+            // Urutan x, y, z, w — sama dengan tata letak memori glm, dan sama
+            // dengan yang ditulis setiap format yang menyimpan kuaternion.
+            // Menuliskan w lebih dulu di satu tempat saja menghasilkan rotasi
+            // yang hampir benar, dan "hampir" adalah jenis kesalahan yang paling
+            // lama tidak ketahuan.
+            keys.push_back(key.rotation.x);
+            keys.push_back(key.rotation.y);
+            keys.push_back(key.rotation.z);
+            keys.push_back(key.rotation.w);
+        }
+        entry["keys"] = std::move(keys);
+        rotations.push_back(std::move(entry));
+    }
+    root["rotationTracks"] = std::move(rotations);
+
     Json events = Json::array();
     for (const Event& event : clip.Events()) {
         events.push_back(Json{{"time", event.time}, {"name", event.name}});
@@ -267,6 +292,31 @@ AnimationIoResult LoadClipFromString(ClipDocument& document, Clip& clip, const s
         }
     }
     clip.SetTracks(tracks);
+
+    std::vector<RotationTrack> rotations;
+    if (const auto it = root.find("rotationTracks"); it != root.end() && it->is_array()) {
+        for (const Json& entry : *it) {
+            if (!entry.is_object()) {
+                continue;
+            }
+            RotationTrack track;
+            track.bone = entry.value("bone", std::string{});
+            if (const auto keys = entry.find("keys");
+                keys != entry.end() && keys->is_array() && keys->size() % 5 == 0) {
+                for (std::size_t i = 0; i + 4 < keys->size(); i += 5) {
+                    RotationKey key;
+                    key.time = (*keys)[i].get<float>();
+                    key.rotation = Quat((*keys)[i + 4].get<float>(), (*keys)[i + 1].get<float>(),
+                                        (*keys)[i + 2].get<float>(), (*keys)[i + 3].get<float>());
+                    track.AddKey(key);
+                }
+            }
+            if (!track.bone.empty()) {
+                rotations.push_back(std::move(track));
+            }
+        }
+    }
+    clip.SetRotationTracks(rotations);
 
     std::vector<Event> events;
     if (const auto it = root.find("events"); it != root.end() && it->is_array()) {

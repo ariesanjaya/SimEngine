@@ -86,6 +86,24 @@ private:
     std::vector<float> weights_;
 };
 
+/// Nlerp yang dipendekkan: `t` 0 menghasilkan `a`, 1 menghasilkan `b`.
+///
+/// Tanda `b` dibalik kalau hasil kalinya negatif. Tanpa itu, dua kuaternion yang
+/// mewakili rotasi berdekatan tapi bertanda berlawanan dicampur lewat jalan
+/// memutar 360° — terlihat sebagai karakter yang berputar penuh di tengah
+/// transisi yang seharusnya beberapa derajat.
+///
+/// **Di header, bukan di dalam satu berkas.** Pencampuran pose dan pencuplikan
+/// track rotasi kuaternion sama-sama membutuhkannya, dan dua salinan yang harus
+/// sepakat adalah dua salinan yang suatu saat tidak sepakat — dengan gejala
+/// berupa tulang yang berputar lewat jalan panjang di salah satu dari keduanya
+/// saja.
+///
+/// Nlerp, bukan slerp: pada bobot yang berubah mulus keduanya tidak bisa
+/// dibedakan mata, sedangkan slerp membawa dua fungsi trigonometri per bone per
+/// frame.
+Quat NlerpShortest(const Quat& a, const Quat& b, float t);
+
 /// Mencampur dua pose: `weight` 0 menghasilkan `a`, 1 menghasilkan `b`.
 ///
 /// **`out` boleh pose yang sama dengan `a` atau `b`.** Runtime graph

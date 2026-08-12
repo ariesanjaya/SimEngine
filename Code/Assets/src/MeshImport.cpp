@@ -223,6 +223,25 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
     // terbaring miring atau seribu kali terlalu besar, bukan galat.
     options.target_axes = ufbx_axes_right_handed_y_up;
     options.target_unit_meters = 1.0f;
+    // **Konversinya dipanggang ke geometri, bukan ke node root.** Ini yang
+    // membuat transform LOKAL tiap bone ikut benar, bukan hanya transform
+    // dunianya. Dengan `TRANSFORM_ROOT` — bawaan, dan yang dipakai di sini
+    // sampai impor klip mendarat — konversi satuan tinggal di node root, jadi
+    // bone teratas mewarisi skala 0,01 dan seluruh keturunannya bertranslasi
+    // dalam sentimeter. Rangkanya tetap benar **secara global**, dan karena itu
+    // uji yang membandingkan posisi bone dengan kotak batas mesh tidak
+    // menangkapnya; yang menangkapnya adalah pembaca kedua transform lokal itu,
+    // yaitu klip yang diimpor. Klip membawa translasi dalam meter berskala satu,
+    // dan bone yang tidak dianimasikan klip itu tetap memakai bind pose-nya —
+    // jadi konvensi yang berbeda di antara keduanya membuat tulang-tulang itu
+    // terlempar seratus kali terlalu jauh.
+    //
+    // Terukur: geometrinya **tidak berubah sama sekali** — batas Y Bot tetap
+    // (−0,973, 0,000, −0,161)..(0,973, 1,805, 0,204) dan shader ball tetap
+    // 2,69 x 2,66 x 2,50 m — sementara skala lokal bone teratas berpindah dari
+    // 0,0100 menjadi 1,0000 dan translasi lokal Spine dari 9,9235 menjadi
+    // 0,0992 m.
+    options.space_conversion = UFBX_SPACE_CONVERSION_MODIFY_GEOMETRY;
     options.generate_missing_normals = true;
 
     ufbx_error loadError;

@@ -5,6 +5,7 @@
 #include "Sim/Animation/GraphInstance.h"
 #include "Sim/Animation/Clip.h"
 #include "Sim/Animation/ClipHistory.h"
+#include "Sim/Animation/ClipImport.h"
 #include "Sim/Animation/Pose.h"
 #include "Sim/Animation/PoseTask.h"
 #include "Sim/Animation/Skeleton.h"
@@ -15,6 +16,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <map>
 #include <memory>
@@ -667,6 +669,235 @@ TEST_CASE("Klip bolak-balik lewat berkas beserta event dan penanda fase") {
     CHECK(loaded.SyncMarkers()[1].name == "RightFoot");
 
     CHECK(SaveClipToString(loadedDocument, loaded) == SaveClipToString(document, clip));
+}
+
+TEST_CASE("Track rotasi kuaternion mencuplik lewat jalur pendek dan menahan di ujungnya") {
+    RotationTrack track;
+    track.bone = "Hips";
+    // Sengaja dimasukkan terbalik: `AddKey` yang harus mengurutkannya, bukan
+    // pemanggilnya — track yang tidak terurut membuat pencarian binernya
+    // mengembalikan ruas yang salah, tanpa satu pun galat.
+    track.AddKey(RotationKey{1.0f, glm::angleAxis(glm::radians(90.0f), Vec3(0.0f, 1.0f, 0.0f))});
+    track.AddKey(RotationKey{0.0f, Quat(1.0f, 0.0f, 0.0f, 0.0f)});
+    REQUIRE(track.keys.size() == 2);
+    CHECK(track.keys[0].time == doctest::Approx(0.0f));
+
+    // Di luar rentang kunci nilainya ditahan, bukan diekstrapolasi — sama dengan
+    // `Curve::Evaluate`.
+    CHECK(NearlyEqual(track.Evaluate(-5.0f), track.keys[0].rotation));
+    CHECK(NearlyEqual(track.Evaluate(9.0f), track.keys[1].rotation));
+
+    // Di tengah, setengah jalan menuju 90 derajat. Nlerp bukan slerp, jadi
+    // sudutnya tidak persis 45 derajat — yang harus benar adalah sumbunya dan
+    // arah putarnya.
+    const Vec3 turned = track.Evaluate(0.5f) * Vec3(1.0f, 0.0f, 0.0f);
+    CHECK(turned.y == doctest::Approx(0.0f).epsilon(1e-5f));
+    CHECK(turned.x > 0.0f);
+    CHECK(turned.z < 0.0f);  // memutar ke arah -Z, sama dengan kunci ujungnya
+
+    // **Jalur pendek.** Kunci kedua dinegasikan mewakili rotasi yang sama persis;
+    // mencampurnya apa adanya akan memutar lewat jalan 360 derajat, dan yang
+    // terlihat adalah tulang yang berputar penuh di antara dua frame.
+    RotationTrack flipped;
+    flipped.bone = "Hips";
+    flipped.AddKey(track.keys[0]);
+    const Quat negated = track.keys[1].rotation;
+    flipped.AddKey(RotationKey{1.0f, Quat(-negated.w, -negated.x, -negated.y, -negated.z)});
+    const Vec3 sameTurn = flipped.Evaluate(0.5f) * Vec3(1.0f, 0.0f, 0.0f);
+    CHECK(sameTurn.x == doctest::Approx(turned.x).epsilon(1e-5f));
+    CHECK(sameTurn.z == doctest::Approx(turned.z).epsilon(1e-5f));
+}
+
+TEST_CASE("Track rotasi kuaternion menang atas kanal Euler pada bone yang sama") {
+    const Skeleton skeleton = MakeChain(2);
+    Clip clip;
+    clip.duration = 1.0f;
+
+    // Kanal Euler menyuruh Bone1 diam; track kuaternion menyuruhnya berputar.
+    // Yang berlaku harus yang dari berkas sumbernya — dan tanpa aturan yang
+    // jelas, yang berlaku adalah yang kebetulan dijalankan belakangan.
+    const int yaw = clip.EnsureTrack("Bone1", Channel::RotationY);
+    clip.TrackAt(yaw).curve.AddKey(CurveKey{0.0f, 0.0f, 0.0f, 0.0f, Interpolation::Linear});
+    const int rotation = clip.EnsureRotationTrack("Bone1");
+    clip.RotationTrackAt(rotation).AddKey(
+        RotationKey{0.0f, glm::angleAxis(glm::radians(90.0f), Vec3(0.0f, 0.0f, 1.0f))});
+
+    ClipBinding binding;
+    binding.Bind(clip, skeleton);
+    CHECK(binding.BoneForRotationTrack(0) == 1);
+    CHECK(binding.Unresolved().empty());
+
+    Pose pose;
+    SampleClip(clip, binding, skeleton, 0.0f, pose);
+    // Bone1 berpusat di y = 1; titik satu meter di atasnya harus mendarat satu
+    // meter di sebelah kirinya.
+    std::vector<BoneTransform> global;
+    pose.ComputeGlobal(skeleton, global);
+    const Vec3 tip = Vec3(global[1].ToMatrix() * Vec4(0.0f, 1.0f, 0.0f, 1.0f));
+    CHECK(tip.x == doctest::Approx(-1.0f).epsilon(1e-4f));
+    CHECK(tip.y == doctest::Approx(1.0f).epsilon(1e-4f));
+}
+
+TEST_CASE("Track rotasi yang tidak menemukan bone-nya dilaporkan, bukan didiamkan") {
+    const Skeleton skeleton = MakeChain(2);
+    Clip clip;
+    clip.EnsureRotationTrack("mixamorig:Hips");
+    clip.RotationTrackAt(0).AddKey(RotationKey{0.0f, Quat(1.0f, 0.0f, 0.0f, 0.0f)});
+
+    ClipBinding binding;
+    binding.Bind(clip, skeleton);
+    CHECK(binding.BoneForRotationTrack(0) == -1);
+    // Animasi yang setengah berjalan tanpa sebab yang terlihat lebih buruk
+    // daripada anggota badan yang jelas tidak bergerak.
+    REQUIRE(binding.Unresolved().size() == 1);
+    CHECK(binding.Unresolved()[0] == "mixamorig:Hips");
+}
+
+TEST_CASE("Track rotasi kuaternion ikut bolak-balik lewat berkas") {
+    TempDir dir("rotclip");
+    Clip clip;
+    clip.name = "Running";
+    const int track = clip.EnsureRotationTrack("mixamorig:Hips");
+    clip.RotationTrackAt(track).AddKey(
+        RotationKey{0.0f, glm::angleAxis(glm::radians(30.0f), glm::normalize(Vec3(1.0f, 2.0f, 3.0f)))});
+    clip.RotationTrackAt(track).AddKey(
+        RotationKey{0.5f, glm::angleAxis(glm::radians(-70.0f), Vec3(0.0f, 0.0f, 1.0f))});
+
+    ClipDocument document;
+    const std::filesystem::path path = dir / "Running.simanim";
+    REQUIRE(SaveClip(clip, document, path).ok);
+
+    Clip loaded;
+    ClipDocument loadedDocument;
+    REQUIRE(LoadClip(loaded, loadedDocument, path).ok);
+    REQUIRE(loaded.RotationTrackCount() == 1);
+    CHECK(loaded.RotationTrackAt(0).bone == "mixamorig:Hips");
+    REQUIRE(loaded.RotationTrackAt(0).keys.size() == 2);
+    // **Urutan x,y,z,w yang salah menghasilkan rotasi yang hampir benar**, dan
+    // "hampir" adalah jenis kesalahan yang paling lama tidak ketahuan — jadi
+    // yang diperiksa nilainya, bukan sekadar jumlah kuncinya.
+    for (std::size_t i = 0; i < 2; ++i) {
+        CHECK(NearlyEqual(loaded.RotationTrackAt(0).keys[i].rotation,
+                          clip.RotationTrackAt(0).keys[i].rotation));
+    }
+    CHECK(SaveClipToString(loadedDocument, loaded) == SaveClipToString(document, clip));
+}
+
+TEST_CASE("Klip FBX yang diimpor menjaga panjang tulang rignya") {
+    // Rig dan klipnya tidak ikut di repo, jadi ujinya berjalan hanya bila
+    // ditunjuk keduanya:
+    //   SIM_RIG_FBX=/path/rig.fbx SIM_CLIP_FBX=/path/Running.fbx ctest
+    const char* rigPath = std::getenv("SIM_RIG_FBX");
+    const char* clipPath = std::getenv("SIM_CLIP_FBX");
+    if (rigPath == nullptr || clipPath == nullptr || !std::filesystem::exists(rigPath) ||
+        !std::filesystem::exists(clipPath)) {
+        return;
+    }
+
+    std::string error;
+    const sim::assets::MeshData rig = sim::assets::LoadMesh(rigPath, error);
+    REQUIRE(rig.skeleton.IsValid());
+
+    Skeleton skeleton;
+    std::vector<Bone> bones;
+    bones.reserve(rig.skeleton.bones.size());
+    for (const sim::assets::SkeletonBone& source : rig.skeleton.bones) {
+        Bone bone;
+        bone.name = source.name;
+        bone.parent = source.parent;
+        bone.bind.translation = source.translation;
+        bone.bind.rotation = source.rotation;
+        bone.bind.scale = source.scale;
+        bones.push_back(std::move(bone));
+    }
+    REQUIRE(skeleton.SetBones(bones));
+
+    const std::vector<Clip> clips = ImportClipsFromFbx(clipPath, error);
+    INFO("import error: " << error);
+    REQUIRE(clips.size() == 1);
+    const Clip& clip = clips.front();
+    // Take "Take 001" milik berkas Mixamo tidak menganimasikan satu bone pun,
+    // dan mengambil take pertama begitu saja akan mengimpornya alih-alih yang
+    // berisi.
+    CHECK(clip.name == std::filesystem::path(clipPath).stem().string());
+    CHECK(clip.duration > 0.05f);
+    CHECK(clip.RotationTrackCount() > 0);
+    CHECK(clip.frameRate > 1.0f);
+
+    // **Bentuk klip impor: rotasi lewat kuaternion, translasi hanya di bone yang
+    // benar-benar berpindah.** Terukur pada `Running.fbx`: 52 track rotasi dan
+    // tepat tiga track skalar, ketiganya translasi pinggul. Kanal rotasi Euler
+    // tidak boleh muncul sama sekali — memaksa kuaternion ke sana menuntut
+    // memilih satu dari dua cabang yang sama sahnya pada tiap kunci.
+    std::string translated;
+    for (const Track& track : clip.Tracks()) {
+        INFO("track skalar " << track.bone << " kanal " << ToString(track.channel));
+        CHECK(ChannelGroup(track.channel) != ChannelGroup(Channel::RotationX));
+        if (translated.empty()) {
+            translated = track.bone;
+        }
+        // Kalau lebih dari satu bone membawa translasi, salah satunya hampir
+        // pasti proporsi rig sumber yang lolos — dan itulah yang membuat klip
+        // tidak bisa dipasang ke rig lain.
+        CHECK(track.bone == translated);
+    }
+
+    ClipBinding binding;
+    binding.Bind(clip, skeleton);
+    // Nama bone rig dan klipnya sama-sama `mixamorig:*`, jadi tidak boleh ada
+    // satu pun track yang menggantung.
+    for (const std::string& missing : binding.Unresolved()) {
+        INFO("track tanpa bone: " << missing);
+        CHECK(false);
+    }
+
+    // **Panjang tulang adalah invarian yang tidak bergantung pose mana pun**,
+    // jadi ia bisa membandingkan klip dengan rig tanpa tahu apa pun tentang
+    // gerakan yang dibawanya. Ia juga yang menangkap kesalahan satuan: mode
+    // konversi ruang ufbx yang salah menghasilkan tulang seratus kali terlalu
+    // panjang, atau rangka yang runtuh — dan keduanya tidak menghasilkan galat.
+    const std::vector<BoneTransform>& bind = skeleton.GlobalBind();
+    std::vector<BoneTransform> global;
+    Pose pose;
+    float worst = 0.0f;
+    std::string worstBone;
+    float worstTime = 0.0f;
+    int compared = 0;
+    for (int step = 0; step <= 4; ++step) {
+        const float time = clip.duration * static_cast<float>(step) / 4.0f;
+        SampleClip(clip, binding, skeleton, time, pose);
+        pose.ComputeGlobal(skeleton, global);
+        for (int i = 0; i < skeleton.BoneCount(); ++i) {
+            const int parent = skeleton.Bone(i).parent;
+            if (parent < 0) {
+                continue;
+            }
+            const auto self = static_cast<std::size_t>(i);
+            const auto up = static_cast<std::size_t>(parent);
+            const float bindLength = glm::length(bind[self].translation - bind[up].translation);
+            if (bindLength < 1e-4f) {
+                continue;
+            }
+            const float poseLength =
+                glm::length(global[self].translation - global[up].translation);
+            const float drift = std::abs(poseLength - bindLength) / bindLength;
+            // Nama tulangnya ikut dicatat, bukan hanya angkanya: "ada yang
+            // meleset 30%" tidak memberi tahu apa pun tentang di mana harus
+            // mencari, dan tulang yang meleset hampir selalu menunjuk langsung
+            // ke sebabnya.
+            if (drift > worst) {
+                worst = drift;
+                worstBone = skeleton.Bone(i).name;
+                worstTime = time;
+            }
+            ++compared;
+        }
+    }
+    INFO("panjang tulang terburuk menyimpang " << worst * 100.0f << "% pada '" << worstBone
+                                               << "' di detik " << worstTime << ", atas "
+                                               << compared << " perbandingan");
+    CHECK(compared > 100);
+    CHECK(worst < 1e-3f);
 }
 
 // --- kriteria terima ----------------------------------------------------------

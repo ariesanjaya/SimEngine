@@ -110,6 +110,96 @@ int Clip::RemoveEmptyTracks() {
     return removed;
 }
 
+// --- track rotasi kuaternion --------------------------------------------------
+
+void RotationTrack::AddKey(const RotationKey& key) {
+    const auto at = std::lower_bound(keys.begin(), keys.end(), key.time,
+                                     [](const RotationKey& candidate, float time) {
+                                         return candidate.time < time;
+                                     });
+    if (at != keys.end() && at->time == key.time) {
+        *at = key;
+        return;
+    }
+    keys.insert(at, key);
+}
+
+Quat RotationTrack::Evaluate(float time) const {
+    if (keys.empty()) {
+        return Quat(1.0f, 0.0f, 0.0f, 0.0f);
+    }
+    if (time <= keys.front().time) {
+        return keys.front().rotation;
+    }
+    if (time >= keys.back().time) {
+        return keys.back().rotation;
+    }
+    // Kunci pertama yang waktunya melewati `time`; pendahulunya pasti ada,
+    // karena kedua ujungnya sudah ditangani di atas.
+    const auto upper = std::upper_bound(keys.begin(), keys.end(), time,
+                                        [](float at, const RotationKey& candidate) {
+                                            return at < candidate.time;
+                                        });
+    const RotationKey& next = *upper;
+    const RotationKey& previous = *(upper - 1);
+    const float span = next.time - previous.time;
+    // Dua kunci pada waktu yang sama tidak mungkin lolos `AddKey`, tapi klip
+    // yang dimuat dari berkas suntingan tangan bisa saja membawanya — dan
+    // pembagian dengan nol di sini menghasilkan NaN yang menjalar ke seluruh
+    // pose, bukan galat.
+    const float t = span > 1e-8f ? (time - previous.time) / span : 0.0f;
+    return NlerpShortest(previous.rotation, next.rotation, t);
+}
+
+const RotationTrack& Clip::RotationTrackAt(int index) const {
+    static const RotationTrack kFallback;
+    if (index < 0 || index >= RotationTrackCount()) {
+        return kFallback;
+    }
+    return rotationTracks_[static_cast<std::size_t>(index)];
+}
+
+RotationTrack& Clip::RotationTrackAt(int index) {
+    static RotationTrack fallback;
+    if (index < 0 || index >= RotationTrackCount()) {
+        fallback = RotationTrack{};
+        return fallback;
+    }
+    return rotationTracks_[static_cast<std::size_t>(index)];
+}
+
+int Clip::FindRotationTrack(std::string_view bone) const {
+    for (int i = 0; i < RotationTrackCount(); ++i) {
+        if (rotationTracks_[static_cast<std::size_t>(i)].bone == bone) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+int Clip::EnsureRotationTrack(const std::string& bone) {
+    const int existing = FindRotationTrack(bone);
+    if (existing >= 0) {
+        return existing;
+    }
+    RotationTrack track;
+    track.bone = bone;
+    rotationTracks_.push_back(std::move(track));
+    return RotationTrackCount() - 1;
+}
+
+bool Clip::RemoveRotationTrack(int index) {
+    if (index < 0 || index >= RotationTrackCount()) {
+        return false;
+    }
+    rotationTracks_.erase(rotationTracks_.begin() + index);
+    return true;
+}
+
+void Clip::SetRotationTracks(const std::vector<RotationTrack>& tracks) {
+    rotationTracks_ = tracks;
+}
+
 // --- event --------------------------------------------------------------------
 
 std::size_t Clip::AddEvent(const Event& event) {
@@ -253,6 +343,16 @@ void ClipBinding::Bind(const Clip& clip, const Skeleton& skeleton, const Retarge
             unresolved_.push_back(clip.TrackAt(i).bone);
         }
     }
+    boneForRotationTrack_.assign(static_cast<std::size_t>(clip.RotationTrackCount()), -1);
+    for (int i = 0; i < clip.RotationTrackCount(); ++i) {
+        const std::string_view target = retarget.Resolve(clip.RotationTrackAt(i).bone);
+        const int bone = skeleton.Find(target);
+        boneForRotationTrack_[static_cast<std::size_t>(i)] = bone;
+        if (bone < 0) {
+            unresolved_.push_back(clip.RotationTrackAt(i).bone);
+        }
+    }
+
     std::sort(unresolved_.begin(), unresolved_.end());
     unresolved_.erase(std::unique(unresolved_.begin(), unresolved_.end()), unresolved_.end());
 
@@ -268,6 +368,13 @@ int ClipBinding::BoneFor(int track) const {
         return -1;
     }
     return boneForTrack_[static_cast<std::size_t>(track)];
+}
+
+int ClipBinding::BoneForRotationTrack(int track) const {
+    if (track < 0 || track >= static_cast<int>(boneForRotationTrack_.size())) {
+        return -1;
+    }
+    return boneForRotationTrack_[static_cast<std::size_t>(track)];
 }
 
 // --- sampling -----------------------------------------------------------------
@@ -345,6 +452,21 @@ void SampleClip(const Clip& clip, const ClipBinding& binding, const Skeleton& sk
         out.Local(static_cast<int>(i)).rotation = EulerToQuat(angles);
     }
 
+    // **Sesudah kanal Euler, dan itu yang membuatnya menang.** Klip lazimnya
+    // punya salah satunya saja; kalau keduanya ada, yang berasal dari berkas
+    // sumbernya lebih tepat daripada tiga kurva yang menghampiri hal yang sama.
+    for (int i = 0; i < clip.RotationTrackCount(); ++i) {
+        const int bone = binding.BoneForRotationTrack(i);
+        if (bone < 0) {
+            continue;
+        }
+        const RotationTrack& track = clip.RotationTrackAt(i);
+        if (track.keys.empty()) {
+            continue;
+        }
+        out.Local(bone).rotation = track.Evaluate(at);
+    }
+
     if (clip.extractRootMotion && binding.RootBone() >= 0) {
         // Root dikembalikan ke identitas: gerakannya sudah diserahkan ke
         // pemanggil lewat `SampleRootMotion`, dan membiarkannya di dua tempat
@@ -391,6 +513,19 @@ BoneTransform SampleRootMotion(const Clip& clip, const ClipBinding& binding,
             }
         }
         root.rotation = EulerToQuat(euler);
+        // Track kuaternion menang, sama seperti di `SampleClip`. Root motion yang
+        // memakai rotasi berbeda dari pose yang tergambar adalah karakter yang
+        // meluncur menyamping — cacat yang terlihat sebagai fisika yang salah,
+        // bukan sebagai animasi yang salah.
+        for (int i = 0; i < clip.RotationTrackCount(); ++i) {
+            if (binding.BoneForRotationTrack(i) != binding.RootBone()) {
+                continue;
+            }
+            const RotationTrack& track = clip.RotationTrackAt(i);
+            if (!track.keys.empty()) {
+                root.rotation = track.Evaluate(at);
+            }
+        }
         return root;
     };
 

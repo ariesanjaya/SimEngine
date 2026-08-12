@@ -4,6 +4,7 @@ sim_add_library(Animation
         src/AnimationIo.cpp
         src/Clip.cpp
         src/ClipHistory.cpp
+        src/ClipImport.cpp
         src/GraphInstance.cpp
         src/Pose.cpp
         src/PoseTask.cpp
@@ -14,4 +15,8 @@ sim_add_library(Animation
         # tangennya, sehingga penyunting kurvanya juga sama.
         Sim::Core
     PRIVATE_DEPS
-        nlohmann_json::nlohmann_json)
+        nlohmann_json::nlohmann_json
+        # Impor klip FBX. Privat: header publik Animation tidak membocorkan satu
+        # pun tipe ufbx — sama seperti Terrain yang mengurus PNG heightmap-nya
+        # sendiri lewat stb tanpa membocorkannya.
+        Ufbx::Ufbx)

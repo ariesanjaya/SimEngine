@@ -5,22 +5,6 @@
 namespace sim::animation {
 namespace {
 
-/// Nlerp yang dipendekkan.
-///
-/// Tanda `b` dibalik kalau hasil kalinya negatif. Tanpa itu, dua kuaternion yang
-/// mewakili rotasi berdekatan tapi bertanda berlawanan akan dicampur lewat jalan
-/// memutar 360° — terlihat sebagai karakter yang berputar penuh di tengah
-/// transisi yang seharusnya beberapa derajat.
-Quat NlerpShortest(const Quat& a, const Quat& b, float t) {
-    const float sign = glm::dot(a, b) < 0.0f ? -1.0f : 1.0f;
-    Quat result;
-    result.w = a.w + (b.w * sign - a.w) * t;
-    result.x = a.x + (b.x * sign - a.x) * t;
-    result.y = a.y + (b.y * sign - a.y) * t;
-    result.z = a.z + (b.z * sign - a.z) * t;
-    return glm::normalize(result);
-}
-
 BoneTransform Mix(const BoneTransform& a, const BoneTransform& b, float t) {
     BoneTransform result;
     result.translation = a.translation + (b.translation - a.translation) * t;
@@ -30,6 +14,16 @@ BoneTransform Mix(const BoneTransform& a, const BoneTransform& b, float t) {
 }
 
 }  // namespace
+
+Quat NlerpShortest(const Quat& a, const Quat& b, float t) {
+    const float sign = glm::dot(a, b) < 0.0f ? -1.0f : 1.0f;
+    Quat result;
+    result.w = a.w + (b.w * sign - a.w) * t;
+    result.x = a.x + (b.x * sign - a.x) * t;
+    result.y = a.y + (b.y * sign - a.y) * t;
+    result.z = a.z + (b.z * sign - a.z) * t;
+    return glm::normalize(result);
+}
 
 Pose::Pose(const Skeleton& skeleton) {
     Reset(skeleton);
