@@ -5,6 +5,7 @@
 #include "Sim/Editor/EditorContext.h"
 
 #include <string>
+#include <utility>
 
 namespace sim::editor {
 
@@ -80,8 +81,22 @@ public:
     bool* OpenFlag() { return &open_; }
 
     /// True saat panel sedang jadi jendela yang difokuskan. Diisi PanelManager.
+    ///
+    /// **Ini hasil pengamatan, bukan perintah.** PanelManager menimpanya tiap
+    /// frame dengan keadaan ImGui yang sebenarnya, jadi menyetelnya dari luar
+    /// tidak memindahkan fokus ke mana-mana — nilainya hilang di frame
+    /// berikutnya. Yang memindahkan fokus adalah `RequestFocus`.
     bool IsFocused() const { return focused_; }
     void SetFocused(bool focused) { focused_ = focused; }
+
+    /// Meminta jendela panel ini dibawa ke depan sekali, di frame berikutnya.
+    ///
+    /// Perlu untuk panel yang di-dock jadi tab: membukanya saja (`SetOpen`)
+    /// tidak terlihat kalau tabnya tertumpuk di belakang tab lain — orang klik
+    /// ganda sebuah aset, dan layarnya tampak tidak berubah sama sekali.
+    void RequestFocus() { focusRequested_ = true; }
+    /// Mengambil sekaligus menghapus permintaannya. Dipanggil PanelManager.
+    bool TakeFocusRequest() { return std::exchange(focusRequested_, false); }
 
 private:
     std::string id_;
@@ -89,6 +104,7 @@ private:
     PanelCategory category_;
     bool open_ = true;
     bool focused_ = false;
+    bool focusRequested_ = false;
 };
 
 }  // namespace sim::editor

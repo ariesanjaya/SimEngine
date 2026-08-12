@@ -116,7 +116,7 @@ bool EditorApp::Initialize(const Config& config) {
                 continue;
             }
             panel->SetOpen(true);
-            panel->SetFocused(true);
+            panel->RequestFocus();
             return true;
         }
         return false;
@@ -595,115 +595,307 @@ void EditorApp::PickFolder(const std::filesystem::path& start,
 /// Layar pemilih project, digambar sebagai ganti seluruh shell editor.
 void EditorApp::DrawProjectManager() {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
-    ImGui::SetNextWindowPos(viewport->WorkPos);
-    ImGui::SetNextWindowSize(viewport->WorkSize);
+    const ImVec2 origin = viewport->WorkPos;
+    const ImVec2 size = viewport->WorkSize;
+
+    ImGui::SetNextWindowPos(origin);
+    ImGui::SetNextWindowSize(size);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
     ImGui::Begin("##ProjectManager", nullptr,
                  ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                      ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
+    ImGui::PopStyleVar();
 
-    ImGui::Dummy(ImVec2(0.0f, viewport->WorkSize.y * 0.06f));
-    const float width = std::min(720.0f, viewport->WorkSize.x - 80.0f);
-    ImGui::SetCursorPosX((viewport->WorkSize.x - width) * 0.5f);
-    ImGui::BeginChild("##ProjectManagerBody", ImVec2(width, 0.0f));
+    // Layar ini dipandang dari jarak yang berbeda dengan sisa editor: orang
+    // membacanya sekali, sebelum ada yang bisa dikerjakan. Ukuran font yang pas
+    // untuk panel penuh kontrol terlalu kecil untuk daftar yang harus terbaca
+    // sekilas.
+    const float baseFont = ImGui::GetFontSize();
+    ImGui::PushFont(nullptr, baseFont * 1.25f);
+    const float em = ImGui::GetFontSize();
+    const float margin = em * 3.0f;
+    ImDrawList* draw = ImGui::GetWindowDrawList();
 
-    ImGui::PushFont(nullptr, ImGui::GetFontSize() * 1.6f);
-    ImGui::TextUnformatted("SimEngine");
+    // Latar gradien, digambar sendiri alih-alih memakai warna tema. Layar ini
+    // bukan bagian dari dockspace dan tidak punya panel di belakangnya — tanpa
+    // latarnya sendiri yang terlihat hanya warna kosong jendela utama.
+    draw->AddRectFilledMultiColor(origin, ImVec2(origin.x + size.x, origin.y + size.y),
+                                  IM_COL32(22, 24, 62, 255), IM_COL32(38, 22, 78, 255),
+                                  IM_COL32(96, 32, 98, 255), IM_COL32(152, 86, 46, 255));
+
+    const float barHeight = em * 3.2f;
+    draw->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + barHeight),
+                        IM_COL32(16, 16, 19, 255));
+    const ImVec2 mark(origin.x + em * 1.7f, origin.y + barHeight * 0.5f);
+    draw->AddCircleFilled(mark, em * 0.8f, IM_COL32(64, 72, 104, 255), 32);
+    draw->AddCircleFilled(mark, em * 0.34f, IM_COL32(16, 16, 19, 255), 24);
+
+    const ImVec2 tabPos(origin.x + em * 3.6f, origin.y + (barHeight - em * 1.1f) * 0.5f);
+    draw->AddText(ImGui::GetFont(), em * 1.1f, tabPos, IM_COL32(124, 180, 255, 255), "Projects");
+    const float tabWidth = ImGui::CalcTextSize("Projects").x * 1.1f;
+    draw->AddLine(ImVec2(tabPos.x, origin.y + barHeight - em * 0.2f),
+                  ImVec2(tabPos.x + tabWidth, origin.y + barHeight - em * 0.2f),
+                  IM_COL32(64, 132, 232, 255), em * 0.16f);
+
+    const float headingY = origin.y + barHeight + em * 1.6f;
+    ImGui::SetCursorScreenPos(ImVec2(origin.x + margin, headingY));
+    ImGui::PushFont(nullptr, baseFont * 2.0f);
+    ImGui::TextUnformatted("My Projects");
     ImGui::PopFont();
-    ImGui::TextDisabled("Pilih project untuk mulai bekerja.");
-    ImGui::Spacing();
-    ImGui::Separator();
-    ImGui::Spacing();
 
+    // Tombolnya sejajar judul di tepi kanan, dan membuka dialog alih-alih
+    // memajang formulirnya. Yang dilakukan orang di layar ini hampir selalu
+    // membuka project yang sudah ada; formulir "project baru" yang selalu
+    // terbuka menempatkan pekerjaan yang jarang di atas yang sering.
+    const float buttonHeight = ImGui::GetFrameHeight();
+    const float newWidth = em * 8.4f;
+    ImGui::SetCursorScreenPos(
+        ImVec2(origin.x + size.x - margin - newWidth - buttonHeight - 1.0f, headingY));
+    ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.16f, 0.45f, 0.85f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonHovered, ImVec4(0.24f, 0.55f, 0.95f, 1.0f));
+    ImGui::PushStyleColor(ImGuiCol_ButtonActive, ImVec4(0.12f, 0.36f, 0.72f, 1.0f));
+    ImGui::BeginDisabled(dialogOpen_);
+    if (ImGui::Button("New Project...", ImVec2(newWidth, buttonHeight))) {
+        ImGui::OpenPopup("##NewProject");
+    }
+    ImGui::SameLine(0.0f, 1.0f);
+    if (ImGui::ArrowButton("##ProjectMore", ImGuiDir_Down)) {
+        ImGui::OpenPopup("##ProjectMenu");
+    }
+    ImGui::EndDisabled();
+    ImGui::PopStyleColor(3);
+
+    if (ImGui::BeginPopup("##ProjectMenu")) {
+        if (ImGui::MenuItem("Open Existing Project...")) {
+            PickFolder(newProjectRoot_,
+                       [this](const std::filesystem::path& chosen) { OpenProject(chosen); });
+        }
+        ImGui::Separator();
+        // Kotak teksnya tetap ada. Dialog sistem tidak selalu tersedia — mesin
+        // tanpa portal desktop, atau sesi jarak jauh — dan jalur yang ditempel
+        // tangan adalah satu-satunya jalan masuk di sana.
+        ImGui::SetNextItemWidth(em * 18.0f);
+        ImGui::InputTextWithHint("##OpenProjectPath", "or paste a path", &openProjectPath_);
+        if (ImGui::IsItemDeactivatedAfterEdit() && !openProjectPath_.empty()) {
+            OpenProject(std::filesystem::path(openProjectPath_));
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    ImGui::SetNextWindowPos(ImVec2(origin.x + size.x * 0.5f, origin.y + size.y * 0.5f),
+                            ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+    if (ImGui::BeginPopupModal("##NewProject", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        ImGui::PushFont(nullptr, baseFont * 1.5f);
+        ImGui::TextUnformatted("New Project");
+        ImGui::PopFont();
+        ImGui::Spacing();
+
+        ImGui::SetNextItemWidth(em * 22.0f);
+        ImGui::InputTextWithHint("##NewProjectName", "Project name", &newProjectName_);
+
+        // Lokasinya diperlihatkan, tidak hanya diandaikan: "di mana project saya
+        // tadi disimpan" adalah pertanyaan yang muncul justru saat editor sudah
+        // ditutup, dan jawabannya harus terlihat saat membuatnya.
+        ImGui::BeginDisabled(dialogOpen_);
+        if (ImGui::Button("Choose location...")) {
+            PickFolder(newProjectRoot_,
+                       [this](const std::filesystem::path& chosen) { newProjectRoot_ = chosen; });
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        ImGui::TextDisabled("%s", (newProjectRoot_ / ProjectLibrary::SanitizeFolderName(
+                                                        newProjectName_.empty() ? "ProjectName"
+                                                                                : newProjectName_))
+                                      .string()
+                                      .c_str());
+
+        ImGui::Spacing();
+        ImGui::Separator();
+        ImGui::Spacing();
+        const bool nameUsable = !ProjectLibrary::SanitizeFolderName(newProjectName_).empty();
+        ImGui::BeginDisabled(!nameUsable || newProjectRoot_.empty() || dialogOpen_);
+        if (ImGui::Button("Create", ImVec2(em * 7.0f, buttonHeight))) {
+            CreateProject(newProjectRoot_, newProjectName_);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel", ImVec2(em * 7.0f, buttonHeight))) {
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    float gridTop = headingY + em * 3.4f;
     if (!projectError_.empty()) {
+        ImGui::SetCursorScreenPos(ImVec2(origin.x + margin, gridTop));
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.40f, 1.0f));
         ImGui::TextWrapped("%s", projectError_.c_str());
         ImGui::PopStyleColor();
-        ImGui::Spacing();
+        gridTop += em * 2.0f;
     }
 
-    ImGui::SeparatorText("Project baru");
-    ImGui::SetNextItemWidth(width * 0.55f);
-    ImGui::InputTextWithHint("##NewProjectName", "Nama project", &newProjectName_);
-    ImGui::SameLine();
-    const bool nameUsable = !ProjectLibrary::SanitizeFolderName(newProjectName_).empty();
-    ImGui::BeginDisabled(!nameUsable || newProjectRoot_.empty() || dialogOpen_);
-    if (ImGui::Button("Buat", ImVec2(120.0f, 0.0f))) {
-        CreateProject(newProjectRoot_, newProjectName_);
-    }
-    ImGui::EndDisabled();
-
-    // Lokasinya diperlihatkan, tidak hanya diandaikan: "di mana project saya tadi
-    // disimpan" adalah pertanyaan yang muncul justru saat editor sudah ditutup,
-    // dan jawabannya harus terlihat saat membuatnya.
-    ImGui::BeginDisabled(dialogOpen_);
-    if (ImGui::Button("Pilih lokasi...")) {
-        PickFolder(newProjectRoot_, [this](const std::filesystem::path& chosen) {
-            newProjectRoot_ = chosen;
-        });
-    }
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::TextDisabled("%s", (newProjectRoot_ / ProjectLibrary::SanitizeFolderName(
-                                                    newProjectName_.empty() ? "NamaProject"
-                                                                            : newProjectName_))
-                                  .string()
-                                  .c_str());
-
-    ImGui::Spacing();
-    ImGui::SeparatorText("Buka project yang sudah ada");
-    ImGui::BeginDisabled(dialogOpen_);
-    if (ImGui::Button("Pilih folder project...", ImVec2(width * 0.55f, 0.0f))) {
-        PickFolder(newProjectRoot_,
-                   [this](const std::filesystem::path& chosen) { OpenProject(chosen); });
-    }
-    ImGui::EndDisabled();
-    ImGui::SameLine();
-    ImGui::SetNextItemWidth(width * 0.28f);
-    // Kotak teksnya tetap ada di samping tombolnya. Dialog sistem tidak selalu
-    // tersedia — mesin tanpa portal desktop, atau sesi jarak jauh — dan jalur
-    // yang ditempel tangan adalah satu-satunya jalan masuk di sana.
-    ImGui::InputTextWithHint("##OpenProjectPath", "atau tempel jalurnya", &openProjectPath_);
-    if (ImGui::IsItemDeactivatedAfterEdit() && !openProjectPath_.empty()) {
-        OpenProject(std::filesystem::path(openProjectPath_));
-    }
-
-    ImGui::Spacing();
-    ImGui::SeparatorText("Terakhir dibuka");
-    if (projects_.Recent().empty()) {
-        ImGui::TextDisabled("Belum ada. Buat satu di atas untuk mulai.");
-    }
     // Disalin lebih dulu: membuka sebuah project menulis ulang daftar ini, dan
     // menulis ulang wadah yang sedang diiterasi adalah iterator yang menggantung.
     const std::vector<RecentProject> recent = projects_.Recent();
     std::filesystem::path forget;
+
+    ImGui::SetCursorScreenPos(ImVec2(origin.x + margin, gridTop));
+    ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.0f, 0.0f, 0.0f, 0.0f));
+    ImGui::BeginChild("##ProjectGrid",
+                      ImVec2(size.x - margin * 2.0f, origin.y + size.y - gridTop - em * 1.5f));
+
+    if (recent.empty()) {
+        ImGui::TextDisabled("No projects yet. Start with \"New Project...\" above.");
+    }
+
+    // Teks yang lebih panjang dari kartunya dipotong, bukan dibiarkan meluber:
+    // satu nama panjang yang menembus tepi kartu merusak barisan grid-nya, dan
+    // grid yang barisnya tidak lurus tidak lebih rapi dari daftar biasa.
+    const auto ellipsize = [](const std::string& text, float limit) {
+        if (ImGui::CalcTextSize(text.c_str()).x <= limit) {
+            return text;
+        }
+        std::string cut = text;
+        while (!cut.empty() && ImGui::CalcTextSize((cut + "...").c_str()).x > limit) {
+            cut.pop_back();
+        }
+        return cut + "...";
+    };
+
+    const float cardWidth = em * 10.5f;
+    const float cardHeight = em * 13.0f;
+    const float spacing = ImGui::GetStyle().ItemSpacing.x;
+    const float avail = ImGui::GetContentRegionAvail().x;
+    const int columns = std::max(1, static_cast<int>((avail + spacing) / (cardWidth + spacing)));
+
+    int column = 0;
     for (const RecentProject& project : recent) {
+        if (column > 0) {
+            ImGui::SameLine();
+        }
         ImGui::PushID(project.path.string().c_str());
         const bool exists = project.Exists();
+        const std::string name = project.name.empty() ? "(unnamed)" : project.name;
+
+        // Satu grup per kartu supaya SameLine berikutnya berpatok pada kartunya
+        // secara utuh, bukan pada tombol terakhir yang digambar di dalamnya.
+        ImGui::BeginGroup();
+        const ImVec2 p0 = ImGui::GetCursorScreenPos();
+        const ImVec2 p1(p0.x + cardWidth, p0.y + cardHeight);
+
         ImGui::BeginDisabled(!exists);
-        if (ImGui::Button(project.name.empty() ? "(tanpa nama)" : project.name.c_str(),
-                          ImVec2(width * 0.55f, 0.0f))) {
+        if (ImGui::Selectable("##card", false, ImGuiSelectableFlags_AllowOverlap,
+                              ImVec2(cardWidth, cardHeight))) {
             OpenProject(project.path);
         }
         ImGui::EndDisabled();
-        ImGui::SameLine();
-        if (ImGui::SmallButton("Lupakan")) {
-            forget = project.path;
+        // Hover diukur dari kotaknya, bukan dari `IsItemHovered`: begitu tombol
+        // "Open" muncul di atas kartu, item itulah yang dianggap ImGui sedang
+        // di-hover — dan tombol yang syarat munculnya adalah hover pada item di
+        // bawahnya akan berkedip hilang tepat saat kursor sampai padanya.
+        const bool hovered = ImGui::IsWindowHovered() && ImGui::IsMouseHoveringRect(p0, p1);
+
+        draw->AddRectFilled(p0, p1, IM_COL32(24, 20, 30, 225), em * 0.25f);
+        draw->AddRect(p0, p1,
+                      hovered && exists ? IM_COL32(124, 180, 255, 255) : IM_COL32(96, 92, 116, 170),
+                      em * 0.25f, 0, em * 0.09f);
+
+        const ImVec2 center(p0.x + cardWidth * 0.5f, p0.y + cardHeight * 0.44f);
+        const float ring = em * 2.4f;
+        draw->AddCircleFilled(center, ring, IM_COL32(70, 78, 108, 120), 48);
+        draw->AddCircle(center, ring, IM_COL32(150, 160, 195, 150), 48, em * 0.26f);
+        draw->AddCircleFilled(center, ring * 0.5f, IM_COL32(24, 20, 30, 255), 32);
+
+        // Huruf awalnya, supaya kartu-kartu ini bisa dibedakan dari jauh tanpa
+        // membaca namanya — belum ada gambar pratinjau per project untuk dipakai.
+        char initial = name[0];
+        if (initial >= 'a' && initial <= 'z') {
+            initial = static_cast<char>(initial - 32);
         }
-        ImGui::SameLine();
+        const char letter[2] = {initial, '\0'};
+        const float letterSize = em * 1.7f;
+        const ImVec2 letterExtent = ImGui::CalcTextSize(letter);
+        const float letterScale = letterSize / em;
+        draw->AddText(ImGui::GetFont(), letterSize,
+                      ImVec2(center.x - letterExtent.x * letterScale * 0.5f,
+                             center.y - letterExtent.y * letterScale * 0.5f),
+                      IM_COL32(198, 208, 232, 235), letter);
+
+        if (!exists) {
+            const ImVec2 warn(p1.x - em * 1.4f, p0.y + em * 1.1f);
+            draw->AddTriangleFilled(ImVec2(warn.x, warn.y - em * 0.55f),
+                                    ImVec2(warn.x - em * 0.6f, warn.y + em * 0.45f),
+                                    ImVec2(warn.x + em * 0.6f, warn.y + em * 0.45f),
+                                    IM_COL32(240, 190, 60, 255));
+        }
+
+        if (hovered && exists) {
+            ImGui::SetCursorScreenPos(ImVec2(p0.x + em * 0.8f, p1.y - em * 2.3f));
+            if (ImGui::Button("Open", ImVec2(cardWidth - em * 1.6f, buttonHeight))) {
+                OpenProject(project.path);
+            }
+        }
+        if (hovered) {
+            ImGui::SetTooltip("%s", project.path.string().c_str());
+        }
+
+        ImGui::SetCursorScreenPos(ImVec2(p0.x, p1.y + em * 0.5f));
+        ImGui::TextUnformatted(ellipsize(name, cardWidth - em * 2.0f).c_str());
+        ImGui::SetCursorScreenPos(ImVec2(p1.x - em * 1.7f, p1.y + em * 0.45f));
+        if (ImGui::SmallButton("...")) {
+            ImGui::OpenPopup("##CardMenu");
+        }
+        if (ImGui::BeginPopup("##CardMenu")) {
+            if (ImGui::MenuItem("Forget")) {
+                forget = project.path;
+            }
+            if (ImGui::MenuItem("Copy path")) {
+                ImGui::SetClipboardText(project.path.string().c_str());
+            }
+            ImGui::EndPopup();
+        }
+
+        ImGui::SetCursorScreenPos(ImVec2(p0.x, p1.y + em * 1.8f));
         if (exists) {
-            ImGui::TextDisabled("%s", project.path.string().c_str());
+            // Nama folder induknya saja; jalur lengkapnya ada di tooltip. Jalur
+            // penuh di dalam kartu selebar ini selalu terpotong di tengah, dan
+            // potongan tengah sebuah jalur tidak memberi tahu apa pun.
+            ImGui::TextDisabled("%s", ellipsize(project.path.parent_path().filename().string(),
+                                                cardWidth)
+                                          .c_str());
         } else {
             // Ditandai, bukan disembunyikan: project yang lenyap dari daftar
             // tanpa penjelasan terbaca sebagai editor yang lupa.
-            ImGui::TextDisabled("%s — tidak ditemukan", project.path.string().c_str());
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.40f, 1.0f));
+            ImGui::TextUnformatted("not found");
+            ImGui::PopStyleColor();
         }
+
+        // Kursornya dikembalikan ke tepi bawah kartu, lalu sebuah item bernilai
+        // nol disodorkan di sana. Memindahkan kursor saja tidak cukup: ImGui
+        // menghitung batas sebuah grup dari item yang benar-benar diajukan, dan
+        // kursor yang melewati item terakhir tanpa item baru adalah persis
+        // keadaan yang diadukannya sebagai "extend window boundaries".
+        ImGui::SetCursorScreenPos(ImVec2(p0.x, p1.y + em * 3.2f));
+        ImGui::Dummy(ImVec2(cardWidth, 0.0f));
+        ImGui::EndGroup();
         ImGui::PopID();
+
+        if (++column >= columns) {
+            column = 0;
+        }
     }
+
+    ImGui::EndChild();
+    ImGui::PopStyleColor();
+
     if (!forget.empty() && projects_.Forget(forget)) {
         projects_.Save(configDir_ / "projects.json");
     }
 
-    ImGui::EndChild();
+    ImGui::PopFont();
     ImGui::End();
 }
 

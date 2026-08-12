@@ -115,6 +115,12 @@ void PanelManager::Draw(EditorContext& context) {
             windowFlags |= ImGuiWindowFlags_NoMove;
             openFlag = nullptr;
         }
+        // Harus sebelum Begin: SetNextWindowFocus juga yang memilih tab-nya di
+        // dalam dock node, dan itu satu-satunya cara panel yang tertumpuk di
+        // belakang tab lain benar-benar muncul saat dibuka lewat klik ganda.
+        if (panel->TakeFocusRequest()) {
+            ImGui::SetNextWindowFocus();
+        }
         const bool visible = ImGui::Begin(label.c_str(), openFlag, windowFlags);
         EnforceViewportPlacement();
         ClampFloatingWindow();
