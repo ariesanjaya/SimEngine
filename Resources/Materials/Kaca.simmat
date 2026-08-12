@@ -1,0 +1,22 @@
+{
+  "version": 1,
+  "parameters": [],
+  "nodes": [
+    {
+      "guid": "00000000-0000-4000-8000-000000000005",
+      "type": "output.surface",
+      "position": [
+        240.0,
+        80.0
+      ],
+      "pins": {
+        "baseColor": "float3(1.0)",
+        "baseMetalness": "0.0",
+        "opacity": "0.15",
+        "specularIor": "1.52",
+        "specularRoughness": "0.02"
+      }
+    }
+  ],
+  "links": []
+}

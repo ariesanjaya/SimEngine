@@ -88,7 +88,14 @@ public:
                 PanelCategory::Assets) {}
 
     void OnDraw(EditorContext& context) override {
-        assets::AssetDatabase* db = context.assets;
+        // **Dua pustaka, satu panel.** Isi bawaan editor dan aset project punya
+        // bentuk yang sama persis — folder, GUID, thumbnail — jadi menampilkan
+        // keduanya lewat panel yang berbeda berarti dua salinan kode yang harus
+        // sepakat. Yang berbeda hanya satu: yang bawaan tidak boleh ditulisi.
+        if (browsingBuiltin_ && context.builtinAssets == nullptr) {
+            browsingBuiltin_ = false;
+        }
+        assets::AssetDatabase* db = browsingBuiltin_ ? context.builtinAssets : context.assets;
         if (db == nullptr) {
             ImGui::TextDisabled("No asset database.");
             return;
@@ -105,7 +112,12 @@ public:
         const float detailWidth =
             showDetails ? std::clamp(available * 0.28f, 180.0f, kDetailWidth) : 0.0f;
 
+        DrawSourceTabs(context);
         DrawToolbar(*db, showDetails);
+        if (browsingBuiltin_) {
+            ImGui::TextDisabled(
+                "Isi bawaan editor — bisa dipakai langsung, tapi tidak bisa disunting di sini.");
+        }
         ImGui::Separator();
 
         // AlwaysUseWindowPadding: child tanpa border secara bawaan tidak punya
@@ -138,6 +150,36 @@ public:
     }
 
 private:
+    /// Sakelar Project / Built-in. Digambar lebih dulu supaya ia tidak ikut
+    /// menyusut bersama bilah alat di panel sempit: mengetahui pustaka mana yang
+    /// sedang dilihat lebih penting daripada penyaring tipe, karena aksi yang
+    /// tersedia berbeda di antara keduanya.
+    void DrawSourceTabs(EditorContext& context) {
+        if (context.builtinAssets == nullptr) {
+            return;
+        }
+        if (ImGui::BeginTabBar("##assetSource")) {
+            const bool project = ImGui::BeginTabItem("Project");
+            if (project) {
+                ImGui::EndTabItem();
+            }
+            const bool builtin = ImGui::BeginTabItem("Built-in");
+            if (builtin) {
+                ImGui::EndTabItem();
+            }
+            if (builtin != browsingBuiltin_) {
+                browsingBuiltin_ = builtin;
+                // Folder dan pencarian dikosongkan: nama folder pustaka yang satu
+                // tidak berarti apa-apa di pustaka yang lain, dan panel yang
+                // membuka "Meshes/" yang tidak ada di sana hanya memperlihatkan
+                // ruang kosong tanpa sebab yang terlihat.
+                currentFolder_.clear();
+                selected_ = Uuid{};
+            }
+            ImGui::EndTabBar();
+        }
+    }
+
     void DrawToolbar(const assets::AssetDatabase& db, bool roomy) {
         // Bilah alat ikut menyusut. Di panel sempit hanya pencarian dan tombol
         // tampilan yang tersisa; memaksakan seluruhnya akan membuat kotak
@@ -504,6 +546,25 @@ private:
             ImGui::TextDisabled("%s", record.name.c_str());
             ImGui::Separator();
 
+            if (browsingBuiltin_) {
+                // **Menyalin, bukan menyunting.** Isi bawaan ikut pemasangan
+                // editor: apa pun yang ditulis ke sana hilang pada pemasangan
+                // berikutnya, dan berkas yang lenyap tanpa sebab jauh lebih
+                // membingungkan daripada aksi yang memang tidak ditawarkan.
+                const bool hasProject = context.assets != nullptr;
+                ImGui::BeginDisabled(!hasProject);
+                if (ImGui::MenuItem("Salin ke project")) {
+                    CopyBuiltinToProject(context, db, record);
+                }
+                ImGui::EndDisabled();
+                if (ImGui::MenuItem("Copy GUID")) {
+                    ImGui::SetClipboardText(record.guid.ToString().c_str());
+                    context.notifications->Info("GUID copied");
+                }
+                ImGui::EndPopup();
+                return;
+            }
+
             if (ImGui::MenuItem("Rename")) {
                 renaming_ = record.guid;
                 renameBuffer_ = record.name;
@@ -573,6 +634,48 @@ private:
                               ? context.findExternalAssetUsers(record->guid)
                               : std::vector<std::string>{});
         DrawReferenceList("Uses", record->dependencies, db);
+    }
+
+    /// Menyalin sebuah aset bawaan ke dalam project yang sedang dibuka.
+    ///
+    /// **Berkas `.meta`-nya sengaja TIDAK ikut disalin.** GUID yang sama di dua
+    /// tempat berarti dua berkas yang mengaku aset yang sama, dan yang menang
+    /// bergantung urutan pemindaian — rujukan di dalam level lalu menunjuk salah
+    /// satunya secara acak. Salinan mendapat identitas barunya sendiri, seperti
+    /// berkas baru mana pun yang jatuh ke folder aset.
+    void CopyBuiltinToProject(EditorContext& context, assets::AssetDatabase& builtin,
+                              const assets::AssetRecord& record) {
+        if (context.assets == nullptr) {
+            return;
+        }
+        const std::filesystem::path source = builtin.AbsolutePath(record);
+        // Ditaruh pada jalur relatif yang sama seperti di pustaka bawaan:
+        // "Materials/Kayu.simmat" mendarat di "Materials/Kayu.simmat".
+        std::filesystem::path target = context.assets->Root() / record.relativePath;
+
+        std::error_code error;
+        std::filesystem::create_directories(target.parent_path(), error);
+        // Yang sudah ada tidak ditimpa melainkan diberi akhiran. Menimpa aset
+        // yang sudah disunting orang dengan versi bawaannya adalah kehilangan
+        // pekerjaan yang tidak bisa dibatalkan dari sini.
+        if (std::filesystem::exists(target, error)) {
+            const std::string stem = target.stem().string();
+            const std::string extension = target.extension().string();
+            int suffix = 1;
+            do {
+                target.replace_filename(stem + " (" + std::to_string(++suffix) + ")" + extension);
+            } while (std::filesystem::exists(target, error));
+        }
+
+        std::filesystem::copy_file(source, target, error);
+        if (error) {
+            context.notifications->Error("Cannot copy: " + error.message());
+            return;
+        }
+        // Pemindaian dipaksa selesai supaya asetnya langsung terlihat. Menunggu
+        // pemindaian latar berarti aksi yang tampak tidak melakukan apa pun.
+        context.assets->ScanNow();
+        context.notifications->Success("Copied to " + target.filename().string());
     }
 
     void DrawRenameField(EditorContext& context, assets::AssetDatabase& db,
@@ -766,6 +869,8 @@ private:
     float thumbnailSize_ = 72.0f;
     int typeFilter_ = 0;
     bool gridMode_ = true;
+    /// Sedang melihat pustaka bawaan, bukan aset project.
+    bool browsingBuiltin_ = false;
     bool justStartedRenaming_ = false;
 };
 

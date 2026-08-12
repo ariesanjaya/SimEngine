@@ -41,7 +41,11 @@ sim_add_test(SimMaterialTests
 # openpbr.slang harus membaca berkas yang sedang disunting orang — salinan yang
 # tertinggal satu build akan membuat test lulus atas kode yang sudah berubah.
 target_compile_definitions(SimMaterialTests
-    PRIVATE SIM_SHADER_DIR="${CMAKE_SOURCE_DIR}/Shaders")
+    PRIVATE SIM_SHADER_DIR="${CMAKE_SOURCE_DIR}/Shaders"
+    # Isi bawaan editor, dibaca dari folder sumber dengan alasan yang sama:
+    # yang diuji harus berkas yang sedang ada di repo, bukan salinan yang
+    # tertinggal satu build.
+    PRIVATE SIM_BUILTIN_DIR="${CMAKE_SOURCE_DIR}/Resources")
 
 # Terrain: penyimpanan heightmap berubin, brush, undo per goresan, dan
 # round-trip heightmap PNG 16-bit/RAW.

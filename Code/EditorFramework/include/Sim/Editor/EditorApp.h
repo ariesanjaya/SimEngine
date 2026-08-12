@@ -143,6 +143,11 @@ private:
     PanelManager panels_;
     scene::World world_;
     assets::AssetDatabase assets_;
+    /// Indeks isi bawaan editor, berakar di folder `Resources` di sebelah
+    /// executable. **Dibuka sekali saat start dan tidak pernah ditutup**: ia
+    /// tidak bergantung project mana pun, dan itulah seluruh gunanya — sebuah
+    /// pustaka yang isinya sama pada setiap project yang dibuka.
+    assets::AssetDatabase builtinAssets_;
     CommandHistory history_;
     Selection selection_;
     ActionRegistry actions_;

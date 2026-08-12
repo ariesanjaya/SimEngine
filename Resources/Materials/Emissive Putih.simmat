@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "parameters": [],
+  "nodes": [
+    {
+      "guid": "00000000-0000-4000-8000-000000000007",
+      "type": "output.surface",
+      "position": [
+        240.0,
+        80.0
+      ],
+      "pins": {
+        "baseColor": "float3(0.0)",
+        "emissive": "float3(6.0, 5.8, 5.4)"
+      }
+    }
+  ],
+  "links": []
+}

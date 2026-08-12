@@ -78,6 +78,11 @@ struct EditorContext {
     render::IMaterialPreview* materialPreview = nullptr;
     /// Pratinjau aset untuk Asset Browser. Dimiliki pemanggil EditorApp.
     render::IThumbnailCache* thumbnails = nullptr;
+    /// Indeks isi bawaan editor. Read-only: panel yang menampilkannya harus
+    /// mematikan aksi yang menulis — mengganti nama, memindahkan, menghapus —
+    /// karena yang ditulis di sana bukan milik pengguna dan akan hilang pada
+    /// pemasangan berikutnya.
+    assets::AssetDatabase* builtinAssets = nullptr;
     /// Folder `Resources` di sebelah executable: isi bawaan editor, read-only.
     /// **Bukan bagian project mana pun** — ia sama untuk setiap project yang
     /// dibuka, dan menyalinnya ke dalam project adalah pilihan pengguna, bukan

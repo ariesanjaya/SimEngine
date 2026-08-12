@@ -80,6 +80,14 @@ bool EditorApp::Initialize(const Config& config) {
     context_.shaderDir = config.shaderDir.string();
     context_.builtinDir = config.resourceDir.string();
 
+    // Pustaka bawaan dibuka di sini, bukan di `OpenProject`: isinya sama untuk
+    // setiap project, dan membukanya ulang tiap kali project berganti berarti
+    // memindai folder yang tidak berubah berkali-kali dalam satu sesi.
+    if (!resourceDir_.empty()) {
+        builtinAssets_.Initialize({resourceDir_, config.tasks, 30.0f, 60.0f});
+        context_.builtinAssets = &builtinAssets_;
+    }
+
     // **Indeks aset belum dibuka di sini.** Akarnya milik project, dan belum ada
     // project sampai seseorang memilihnya — itulah yang membedakan susunan ini
     // dari yang sebelumnya, tempat folder aset editor dan folder aset pekerjaan
@@ -743,6 +751,10 @@ void EditorApp::DrawFrame(float deltaSeconds) {
     // Mendahului panel: hasil pemindaian latar diterapkan di sini, sehingga
     // seluruh panel dalam frame ini melihat daftar aset yang sama.
     assets_.Update(deltaSeconds);
+    // Ikut diperbarui walaupun isinya jarang berubah: saat isi bawaan sedang
+    // dikerjakan, editor yang tidak melihat perubahannya menuntut restart untuk
+    // setiap suntingan.
+    builtinAssets_.Update(deltaSeconds);
     ApplyTimeOfDay(deltaSeconds);
     if (context_.thumbnails != nullptr) {
         context_.thumbnails->Update();

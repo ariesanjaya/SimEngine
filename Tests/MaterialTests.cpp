@@ -1616,3 +1616,50 @@ TEST_CASE("Skinning menormalisasi bobot dan mengabaikan translasi pada arah") {
     CHECK(module.find("mul((float3x3)bone, normal)") != std::string::npos);
     CHECK(module.find("mul((float3x3)bone, tangent)") != std::string::npos);
 }
+
+// --- material bawaan editor ----------------------------------------------------
+
+TEST_CASE("Setiap material bawaan editor terbaca, sah, dan menghasilkan berkas yang sama") {
+    // **Isi bawaan yang tidak bisa dimuat lebih buruk daripada tidak ada isi
+    // bawaan sama sekali**: ia muncul di Asset Browser, disalin orang sebagai
+    // titik awal, lalu gagal justru sesudah dipakai. Ujinya membaca berkas yang
+    // benar-benar dikirim editor, bukan salinan di folder build.
+    const std::filesystem::path folder = std::filesystem::path(SIM_BUILTIN_DIR) / "Materials";
+    REQUIRE_MESSAGE(std::filesystem::is_directory(folder),
+                    "folder material bawaan tidak ada di " SIM_BUILTIN_DIR);
+
+    int checked = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(folder)) {
+        if (!entry.is_regular_file() || entry.path().extension() != ".simmat") {
+            continue;
+        }
+        INFO("material bawaan " << entry.path().filename().string());
+        MaterialGraph graph;
+        const MaterialIoResult loaded = LoadMaterialFromFile(graph, entry.path());
+        CHECK(loaded.ok);
+        CHECK(loaded.error.empty());
+
+        // Tepat satu output surface: material bawaan adalah titik awal, dan
+        // titik awal yang sudah bercabang bukan titik awal lagi.
+        REQUIRE(graph.nodes.size() == 1);
+        CHECK(graph.nodes[0].type == kSurfaceOutputType);
+        CHECK_FALSE(graph.nodes[0].pinValues.empty());
+
+        const ValidationResult validation = ValidateMaterial(graph);
+        for (const MaterialIssue& issue : validation.errors) {
+            INFO("galat validasi: " << issue.message);
+            CHECK(false);
+        }
+        CHECK(validation.ok);
+
+        // Bolak-balik tanpa perubahan menghasilkan teks yang sama persis. Tanpa
+        // sifat ini, membuka lalu menyimpan sebuah material bawaan menghasilkan
+        // diff yang tidak mengubah apa pun — dan diff semacam itu yang membuat
+        // orang berhenti membaca diff.
+        MaterialGraph again;
+        REQUIRE(LoadMaterialFromString(again, SaveMaterialToString(graph)).ok);
+        CHECK(SaveMaterialToString(again) == SaveMaterialToString(graph));
+        ++checked;
+    }
+    CHECK(checked >= 4);
+}
