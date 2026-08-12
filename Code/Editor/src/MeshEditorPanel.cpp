@@ -78,6 +78,18 @@ public:
         : Panel(panel_id::kMeshEditor, std::string(icons::kMesh) + "  Mesh Editor",
                 PanelCategory::Authoring) {}
 
+    bool OpenAsset(const Uuid& guid, EditorContext& context) override {
+        if (context.assets == nullptr) {
+            return false;
+        }
+        const assets::AssetRecord* record = context.assets->Find(guid);
+        if (record == nullptr || record->type != assets::AssetType::Mesh) {
+            return false;
+        }
+        Open(context, *record);
+        return true;
+    }
+
     void OnDraw(EditorContext& context) override {
         render::IViewportRenderer* preview = context.meshPreview;
         if (context.assets == nullptr) {
@@ -85,11 +97,16 @@ public:
             return;
         }
 
-        DrawAssetPicker(context);
+        DrawHeader(context);
         ImGui::Separator();
 
         if (meshPath_.empty()) {
-            ImGui::TextDisabled("Pilih sebuah aset mesh untuk membukanya.");
+            // **Tidak ada daftar aset di sini.** Yang menelusuri aset adalah
+            // Asset Browser; editor yang punya daftarnya sendiri adalah daftar
+            // kedua yang harus dijaga sepakat dengan yang pertama — dan dua
+            // tempat untuk menemukan berkas yang sama membuat keduanya
+            // setengah dipakai.
+            ImGui::TextDisabled("Klik ganda sebuah aset mesh di Asset Browser untuk membukanya.");
             return;
         }
         if (!mesh_.IsValid()) {
@@ -115,23 +132,14 @@ public:
     }
 
 private:
-    void DrawAssetPicker(EditorContext& context) {
-        const std::string label = meshPath_.empty() ? "(belum ada)" : assetName_;
-        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18.0f);
-        if (ImGui::BeginCombo("Mesh", label.c_str())) {
-            for (const assets::AssetRecord& record : context.assets->All()) {
-                if (record.type != assets::AssetType::Mesh) {
-                    continue;
-                }
-                const bool selected = record.guid == assetGuid_;
-                if (ImGui::Selectable(record.relativePath.c_str(), selected)) {
-                    Open(context, record);
-                }
-            }
-            ImGui::EndCombo();
+    void DrawHeader(EditorContext& context) {
+        if (meshPath_.empty()) {
+            ImGui::TextDisabled("Mesh Editor");
+            return;
         }
+        ImGui::Text("%s", assetName_.c_str());
         ImGui::SameLine();
-        if (ImGui::Button("Muat ulang") && !meshPath_.empty()) {
+        if (ImGui::SmallButton("Muat ulang")) {
             Reload(context);
         }
 
@@ -142,7 +150,7 @@ private:
                            meshPath_.rfind(".gltf") == meshPath_.size() - 5);
         if (gltf) {
             ImGui::SameLine();
-            if (ImGui::Button("Keluarkan tekstur")) {
+            if (ImGui::SmallButton("Keluarkan tekstur")) {
                 ExtractTextures(context);
             }
         }

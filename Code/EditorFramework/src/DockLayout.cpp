@@ -13,10 +13,25 @@ namespace {
 
 /// ImHashStr me-reset hash-nya saat menemukan "###", jadi "###id" menghasilkan
 /// ImGuiID yang sama dengan "Judul Apa Pun###id". Berkat itu layout tidak perlu
+
+
 /// tahu judul panel — hanya id-nya, yang memang tidak pernah berubah.
 void Dock(const char* panelId, ImGuiID node) {
     const std::string key = std::string("###") + panelId;
     ImGui::DockBuilderDockWindow(key.c_str(), node);
+}
+
+/// Editor yang membuka sebuah aset menempel di node yang sama dengan Viewport.
+///
+/// **Sebagai tab di sebelah viewport, bukan panel tersendiri di pinggir.** Yang
+/// dibuka editor ini adalah dokumen — satu mesh, satu material, satu klip — dan
+/// dokumen menempati ruang utama, bergantian dengan adegan yang sedang disusun.
+/// Menaruhnya di kolom sempit berarti pratinjau 3D-nya selebar daftar berkas.
+void DockDocumentEditors(ImGuiID center) {
+    Dock(panel_id::kMeshEditor, center);
+    Dock(panel_id::kMaterialEditor, center);
+    Dock(panel_id::kAnimationEditor, center);
+    Dock(panel_id::kParticleEditor, center);
 }
 
 ImGuiID ResetRoot(ImGuiID dockspaceId) {
@@ -50,6 +65,7 @@ void BuildLevelLayout(ImGuiID dockspaceId) {
     Dock(panel_id::kHistory, right);
     Dock(panel_id::kPreferences, right);
     Dock(panel_id::kViewport, center);
+    DockDocumentEditors(center);
 
     ImGui::DockBuilderFinish(dockspaceId);
 }
@@ -70,6 +86,7 @@ void BuildAuthoringLayout(ImGuiID dockspaceId) {
     Dock(panel_id::kConsole, bottom);
     Dock(panel_id::kLuaConsole, bottom);
     Dock(panel_id::kViewport, center);
+    DockDocumentEditors(center);
 
     ImGui::DockBuilderFinish(dockspaceId);
 }
@@ -93,6 +110,7 @@ void BuildDebugLayout(ImGuiID dockspaceId) {
     Dock(panel_id::kPreferences, bottomRight);
     Dock(panel_id::kInspector, center);
     Dock(panel_id::kViewport, center);
+    DockDocumentEditors(center);
 
     ImGui::DockBuilderFinish(dockspaceId);
 }

@@ -107,6 +107,20 @@ bool EditorApp::Initialize(const Config& config) {
     context_.findExternalAssetUsers = [this](const Uuid& guid) {
         return FindExternalAssetUsers(guid);
     };
+    // Panel ditanya berurutan; yang pertama menerima yang menang. Tidak ada
+    // tabel "ekstensi ini milik editor itu" di mana pun — editor yang
+    // menyatakannya sendiri lewat `Panel::OpenAsset`.
+    context_.openAsset = [this](const Uuid& guid) {
+        for (const std::unique_ptr<Panel>& panel : panels_.Panels()) {
+            if (panel == nullptr || !panel->OpenAsset(guid, context_)) {
+                continue;
+            }
+            panel->SetOpen(true);
+            panel->SetFocused(true);
+            return true;
+        }
+        return false;
+    };
     context_.requestExit = [this]() { RequestExit(); };
     context_.requestResetLayout = [this]() { shell_.RequestResetLayout(); };
     context_.requestPlay = [this]() { Play(); };

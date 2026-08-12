@@ -737,6 +737,16 @@ private:
             ImGui::EndDragDropSource();
         }
 
+        // Klik ganda membuka asetnya di editor yang menanganinya. Panel yang
+        // tidak punya editornya diam saja — dan itu disebutkan, karena klik ganda
+        // yang tidak melakukan apa pun terbaca sebagai editor yang menggantung.
+        if (ImGui::IsItemHovered() && ImGui::IsMouseDoubleClicked(ImGuiMouseButton_Left) &&
+            context.openAsset) {
+            if (!context.openAsset(record.guid)) {
+                context.notifications->Info("Belum ada editor untuk " + record.name);
+            }
+        }
+
         if (ImGui::BeginPopupContextItem("##assetmenu")) {
             selected_ = record.guid;
             ImGui::TextDisabled("%s", record.name.c_str());

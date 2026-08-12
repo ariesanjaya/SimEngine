@@ -83,6 +83,9 @@ struct EditorContext {
     /// ini sama-sama menggambar `ImGui::Image()`, dan satu target berarti yang
     /// belakangan menimpa yang duluan. Null bila perangkat tidak mendukungnya.
     render::IViewportRenderer* meshPreview = nullptr;
+    /// Membuka sebuah aset di editor yang menanganinya, lalu memberinya fokus.
+    /// Mengembalikan false bila tidak ada panel yang mau menerimanya.
+    std::function<bool(const Uuid&)> openAsset;
     /// Indeks isi bawaan editor. Read-only: panel yang menampilkannya harus
     /// mematikan aksi yang menulis — mengganti nama, memindahkan, menghapus —
     /// karena yang ditulis di sana bukan milik pengguna dan akan hilang pada

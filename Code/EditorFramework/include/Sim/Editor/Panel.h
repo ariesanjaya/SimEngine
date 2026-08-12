@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Sim/Core/Uuid.h"
+
 #include "Sim/Editor/EditorContext.h"
 
 #include <string>
@@ -36,6 +38,16 @@ public:
     /// Dipanggil sekali per frame walau panel tertutup. Untuk pekerjaan yang
     /// harus tetap berjalan (mis. polling hasil job import).
     virtual void OnUpdate(EditorContext& /*context*/) {}
+
+    /// Membuka sebuah aset di panel ini. Mengembalikan false bila panel ini
+    /// tidak menangani jenis aset itu.
+    ///
+    /// **Panelnya yang memutuskan, bukan sebuah tabel tipe di tempat lain.**
+    /// Yang tahu jenis berkas apa yang bisa dibuka sebuah editor hanyalah editor
+    /// itu sendiri, dan tabel terpusat adalah tempat yang harus diingat setiap
+    /// kali sebuah editor baru lahir — persis yang dihindari pendaftaran panel
+    /// lewat SIM_REGISTER_PANEL.
+    virtual bool OpenAsset(const Uuid& /*guid*/, EditorContext& /*context*/) { return false; }
 
     /// Flag ImGui tambahan untuk jendela panel ini (mis. MenuBar, NoScrollbar).
     virtual int WindowFlags() const { return 0; }
