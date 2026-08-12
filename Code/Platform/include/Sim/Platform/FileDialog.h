@@ -59,6 +59,7 @@ void ShowOpenFolderDialog(std::string_view defaultLocation, FileDialogCallback d
 
 /// Memilih sebuah berkas yang sudah ada. Ketentuan yang sama dengan di atas.
 void ShowOpenFileDialog(std::span<const FileDialogFilter> filters,
-                        std::string_view defaultLocation, FileDialogCallback done);
+                        std::string_view defaultLocation, FileDialogCallback done,
+                        bool allowMany = false);
 
 }  // namespace sim::platform

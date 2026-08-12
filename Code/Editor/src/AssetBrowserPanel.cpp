@@ -2,6 +2,7 @@
 #include "Sim/Core/Log.h"
 #include "Sim/Editor/Command.h"
 #include "Sim/Editor/Icons.h"
+#include "Sim/Platform/FileDialog.h"
 #include "Sim/Editor/Notifications.h"
 #include "Sim/Editor/Panel.h"
 #include "Sim/Editor/PanelIds.h"
@@ -124,7 +125,7 @@ public:
         // padding sama sekali, sehingga isinya menempel persis di pemisah.
         ImGui::BeginChild("##tree", ImVec2(treeWidth, 0.0f),
                           ImGuiChildFlags_ResizeX | ImGuiChildFlags_AlwaysUseWindowPadding);
-        DrawFolderTree(*db);
+        DrawFolderTree(context, *db);
         ImGui::EndChild();
 
         ImGui::SameLine();
@@ -218,7 +219,7 @@ private:
         }
     }
 
-    void DrawFolderTree(const assets::AssetDatabase& db) {
+    void DrawFolderTree(EditorContext& context, assets::AssetDatabase& db) {
         if (!favourites_.empty()) {
             ImGui::TextDisabled("FAVOURITES");
             for (const std::string& folder : favourites_) {
@@ -238,7 +239,7 @@ private:
             currentFolder_.clear();
         }
         DrawFolderDropTarget("");
-        DrawFolderContextMenu("");
+        DrawFolderContextMenu(context, db, "");
 
         // Daftar folder sudah terurut menurut abjad, jadi induk selalu mendahului
         // anaknya. Indentasi cukup dihitung dari jumlah pemisahnya — tanpa perlu
@@ -256,7 +257,7 @@ private:
                 currentFolder_ = folder;
             }
             DrawFolderDropTarget(folder);
-            DrawFolderContextMenu(folder);
+            DrawFolderContextMenu(context, db, folder);
             ImGui::PopID();
 
             ImGui::Unindent((depth + 1.0f) * ImGui::GetFontSize());
@@ -279,10 +280,26 @@ private:
         ImGui::EndDragDropTarget();
     }
 
-    void DrawFolderContextMenu(const std::string& folder) {
+    void DrawFolderContextMenu(EditorContext& context, assets::AssetDatabase& db,
+                               const std::string& folder) {
         if (!ImGui::BeginPopupContextItem("##foldermenu")) {
             return;
         }
+        ImGui::TextDisabled("%s", folder.empty() ? "Assets" : folder.c_str());
+        ImGui::Separator();
+
+        // Pustaka bawaan ikut pemasangan editor: apa pun yang ditulis ke sana
+        // hilang pada pemasangan berikutnya.
+        ImGui::BeginDisabled(browsingBuiltin_ || dialogOpen_);
+        if (ImGui::MenuItem("Folder baru")) {
+            CreateFolder(context, db, folder);
+        }
+        if (ImGui::MenuItem("Import aset...")) {
+            ImportAssets(context, db, folder);
+        }
+        ImGui::EndDisabled();
+        ImGui::Separator();
+
         const auto it = std::find(favourites_.begin(), favourites_.end(), folder);
         const bool isFavourite = it != favourites_.end();
         if (ImGui::MenuItem(isFavourite ? "Remove from favourites" : "Add to favourites")) {
@@ -293,6 +310,101 @@ private:
             }
         }
         ImGui::EndPopup();
+    }
+
+    /// Membuat folder baru di dalam `parent` (relatif terhadap akar aset).
+    ///
+    /// **Namanya dibuat unik, bukan ditanyakan lewat dialog.** Folder yang lahir
+    /// langsung dan bisa diganti nama di tempat lebih cepat daripada dialog yang
+    /// harus diisi sebelum apa pun terjadi — dan mengganti namanya sudah ada
+    /// jalurnya lewat sistem berkas.
+    void CreateFolder(EditorContext& context, assets::AssetDatabase& db,
+                      const std::string& parent) {
+        const std::filesystem::path base =
+            parent.empty() ? db.Root() : db.Root() / std::filesystem::path(parent);
+        std::filesystem::path target = base / "New Folder";
+        int suffix = 1;
+        std::error_code error;
+        while (std::filesystem::exists(target, error)) {
+            target = base / ("New Folder " + std::to_string(++suffix));
+        }
+        std::filesystem::create_directories(target, error);
+        if (error) {
+            context.notifications->Error("Cannot create the folder: " + error.message());
+            return;
+        }
+        // Pemindaian dipaksa selesai supaya foldernya langsung terlihat.
+        // Menunggu pemindaian latar berarti aksi yang tampak tidak melakukan
+        // apa pun.
+        db.ScanNow();
+        currentFolder_ = parent.empty()
+                             ? target.filename().string()
+                             : parent + "/" + target.filename().string();
+        context.notifications->Success("Folder " + target.filename().string() + " dibuat");
+    }
+
+    /// Menyalin berkas yang dipilih pengguna ke dalam sebuah folder aset.
+    ///
+    /// **Menyalin, bukan menautkan.** Aset yang tinggal di luar folder project
+    /// hilang begitu project dipindahkan atau dibuka di mesin lain, dan yang
+    /// terlihat adalah level yang kehilangan separuh isinya tanpa sebab.
+    void ImportAssets(EditorContext& context, assets::AssetDatabase& db,
+                      const std::string& folder) {
+        if (dialogOpen_) {
+            return;
+        }
+        dialogOpen_ = true;
+        // Penyaringnya menyebut yang bisa diimpor, dengan "semua berkas" di
+        // ujungnya: daftar yang hanya memuat yang dikenal membuat berkas yang
+        // sebenarnya bisa dipakai tampak tidak didukung.
+        static const std::array<platform::FileDialogFilter, 5> kFilters{
+            platform::FileDialogFilter{"Semua aset",
+                                       "fbx;obj;png;jpg;jpeg;tga;hdr;lua;simmat;simanim;simskel"},
+            platform::FileDialogFilter{"Mesh", "fbx;obj"},
+            platform::FileDialogFilter{"Tekstur", "png;jpg;jpeg;tga;hdr"},
+            platform::FileDialogFilter{"Skrip", "lua"},
+            platform::FileDialogFilter{"Semua berkas", "*"}};
+
+        const std::filesystem::path target =
+            folder.empty() ? db.Root() : db.Root() / std::filesystem::path(folder);
+        platform::ShowOpenFileDialog(
+            kFilters, target.string(),
+            [this, &context, &db, target](const platform::FileDialogResult& result) {
+                dialogOpen_ = false;
+                if (!result.error.empty()) {
+                    context.notifications->Error(result.error);
+                    return;
+                }
+                int copied = 0;
+                for (const std::filesystem::path& source : result.paths) {
+                    std::filesystem::path destination = target / source.filename();
+                    std::error_code error;
+                    // Yang sudah ada diberi akhiran, tidak ditimpa: menimpa aset
+                    // yang sudah dipakai level adalah kehilangan yang tidak bisa
+                    // dibatalkan dari sini.
+                    if (std::filesystem::exists(destination, error)) {
+                        const std::string stem = destination.stem().string();
+                        const std::string extension = destination.extension().string();
+                        int suffix = 1;
+                        do {
+                            destination.replace_filename(stem + " (" + std::to_string(++suffix) +
+                                                         ")" + extension);
+                        } while (std::filesystem::exists(destination, error));
+                    }
+                    std::filesystem::copy_file(source, destination, error);
+                    if (error) {
+                        context.notifications->Error(source.filename().string() + ": " +
+                                                     error.message());
+                        continue;
+                    }
+                    ++copied;
+                }
+                if (copied > 0) {
+                    db.ScanNow();
+                    context.notifications->Success(std::to_string(copied) + " aset diimpor");
+                }
+            },
+            /*allowMany=*/true);
     }
 
     void DrawBreadcrumb() {
@@ -331,6 +443,35 @@ private:
         return ContainsNoCase(record.name, search_);
     }
 
+    /// Menu klik kanan pada ruang kosong daftar aset.
+    ///
+    /// **Digambar sesudah isinya, dan itu yang membuat urutannya benar.**
+    /// `BeginPopupContextWindow` menyerah kalau sebuah item sudah mengklaim
+    /// klik kanan pada frame itu, jadi menu aset tetap menang di atas asetnya
+    /// sendiri — dan ruang kosong di sekitarnya mendapat menu folder ini.
+    void DrawEmptySpaceMenu(EditorContext& context, assets::AssetDatabase& db) {
+        if (!ImGui::BeginPopupContextWindow("##contentmenu",
+                                            ImGuiPopupFlags_MouseButtonRight |
+                                                ImGuiPopupFlags_NoOpenOverItems)) {
+            return;
+        }
+        ImGui::TextDisabled("%s", currentFolder_.empty() ? "Assets" : currentFolder_.c_str());
+        ImGui::Separator();
+        ImGui::BeginDisabled(browsingBuiltin_ || dialogOpen_);
+        if (ImGui::MenuItem("Folder baru")) {
+            CreateFolder(context, db, currentFolder_);
+        }
+        if (ImGui::MenuItem("Import aset...")) {
+            ImportAssets(context, db, currentFolder_);
+        }
+        ImGui::EndDisabled();
+        if (browsingBuiltin_) {
+            ImGui::Separator();
+            ImGui::TextDisabled("Pustaka bawaan tidak bisa disunting");
+        }
+        ImGui::EndPopup();
+    }
+
     void DrawItems(EditorContext& context, assets::AssetDatabase& db) {
         // Pencarian berlaku untuk seluruh sub-pohon, bukan hanya folder ini.
         // Mencari sesuatu lalu tidak menemukannya karena ia satu tingkat lebih
@@ -355,6 +496,9 @@ private:
         if (visible_.empty()) {
             ImGui::TextDisabled(searching ? "No assets match the search."
                                           : "This folder is empty.");
+            // Justru folder kosong yang paling butuh menu ini: ia tempat orang
+            // membuat folder pertamanya dan mengimpor aset pertamanya.
+            DrawEmptySpaceMenu(context, db);
             return;
         }
 
@@ -400,6 +544,7 @@ private:
                 }
             }
         }
+        DrawEmptySpaceMenu(context, db);
     }
 
     /// Memotong teks agar muat dalam `width`, dengan elipsis bila perlu.
@@ -871,6 +1016,10 @@ private:
     bool gridMode_ = true;
     /// Sedang melihat pustaka bawaan, bukan aset project.
     bool browsingBuiltin_ = false;
+    /// Sebuah dialog sistem sedang terbuka. Aksinya dimatikan selama itu — dua
+    /// dialog yang keduanya menyalin ke folder yang sama akan selesai dalam
+    /// urutan yang tidak bisa ditebak.
+    bool dialogOpen_ = false;
     bool justStartedRenaming_ = false;
 };
 

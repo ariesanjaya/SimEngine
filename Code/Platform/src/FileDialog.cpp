@@ -84,7 +84,8 @@ void ShowOpenFolderDialog(std::string_view defaultLocation, FileDialogCallback d
 }
 
 void ShowOpenFileDialog(std::span<const FileDialogFilter> filters,
-                        std::string_view defaultLocation, FileDialogCallback done) {
+                        std::string_view defaultLocation, FileDialogCallback done,
+                        bool allowMany) {
     auto pending = std::make_unique<PendingDialog>();
     pending->done = std::move(done);
 
@@ -101,7 +102,7 @@ void ShowOpenFileDialog(std::span<const FileDialogFilter> filters,
     SDL_ShowOpenFileDialog(&OnChosen, pending.release(), ParentHandle(),
                            converted.empty() ? nullptr : converted.data(),
                            static_cast<int>(converted.size()),
-                           OrNull(defaultLocation, location), /*allow_many=*/false);
+                           OrNull(defaultLocation, location), allowMany);
 }
 
 }  // namespace sim::platform
