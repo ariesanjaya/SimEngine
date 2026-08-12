@@ -33,14 +33,45 @@ void MeshSettings::SetCloth(std::string_view material, bool cloth) {
             return;
         }
     }
-    parts.push_back(MeshPartSettings{std::string(material), cloth});
+    MeshPartSettings part;
+    part.material = std::string(material);
+    part.cloth = cloth;
+    parts.push_back(std::move(part));
+}
+
+Uuid MeshSettings::MaterialFor(std::string_view material) const {
+    for (const MeshPartSettings& part : parts) {
+        if (part.material == material) {
+            return part.materialAsset;
+        }
+    }
+    return Uuid{};
+}
+
+void MeshSettings::SetMaterial(std::string_view material, const Uuid& asset) {
+    for (MeshPartSettings& part : parts) {
+        if (part.material == material) {
+            part.materialAsset = asset;
+            return;
+        }
+    }
+    MeshPartSettings part;
+    part.material = std::string(material);
+    part.materialAsset = asset;
+    parts.push_back(std::move(part));
 }
 
 void MeshSettings::Prune() {
+    // Entri yang tidak menandai kain DAN tidak menunjuk material tidak
+    // menyatakan apa pun — nilai bawaannya sudah sama dengan tidak adanya entri.
     const auto tail = std::remove_if(parts.begin(), parts.end(), [](const MeshPartSettings& part) {
-        return !part.cloth || part.material.empty();
+        return part.material.empty() || (!part.cloth && !part.materialAsset.IsValid());
     });
     parts.erase(tail, parts.end());
+}
+
+bool MeshSettings::Empty() const {
+    return parts.empty() && lodBias == 0.0f && castShadows && receiveShadows;
 }
 
 std::filesystem::path MeshSettingsPath(const std::filesystem::path& meshPath) {
@@ -64,6 +95,10 @@ bool LoadMeshSettings(MeshSettings& settings, const std::filesystem::path& meshP
         SIM_WARN("Assets", "Damaged mesh settings for {}: {}", meshPath.string(), error.what());
         return false;
     }
+    settings.lodBias = root.value("lodBias", 0.0f);
+    settings.castShadows = root.value("castShadows", true);
+    settings.receiveShadows = root.value("receiveShadows", true);
+
     const auto parts = root.find("parts");
     if (parts == root.end() || !parts->is_array()) {
         return false;
@@ -75,6 +110,7 @@ bool LoadMeshSettings(MeshSettings& settings, const std::filesystem::path& meshP
         MeshPartSettings part;
         part.material = entry.value("material", std::string{});
         part.cloth = entry.value("cloth", false);
+        part.materialAsset = Uuid::Parse(entry.value("materialAsset", std::string{}));
         if (!part.material.empty()) {
             settings.parts.push_back(std::move(part));
         }
@@ -103,9 +139,14 @@ bool SaveMeshSettings(const MeshSettings& settings, const std::filesystem::path&
 
     Json root;
     root["version"] = kVersion;
+    root["lodBias"] = trimmed.lodBias;
+    root["castShadows"] = trimmed.castShadows;
+    root["receiveShadows"] = trimmed.receiveShadows;
     Json parts = Json::array();
     for (const MeshPartSettings& part : trimmed.parts) {
-        parts.push_back(Json{{"material", part.material}, {"cloth", part.cloth}});
+        parts.push_back(Json{{"material", part.material},
+                             {"materialAsset", part.materialAsset.ToString()},
+                             {"cloth", part.cloth}});
     }
     root["parts"] = std::move(parts);
 

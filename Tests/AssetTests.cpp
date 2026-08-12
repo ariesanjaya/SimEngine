@@ -861,10 +861,31 @@ TEST_CASE("Penandaan kain disimpan di sebelah mesh dan dikunci nama material") {
     }
     CHECK(first == second);
 
+    // Material bawaan per ruas dan nilai bawaan komponen ikut bertahan: inilah
+    // yang mengisi MeshRendererComponent begitu mesh-nya ditetapkan.
+    const Uuid material = Uuid::Generate();
+    loaded.SetMaterial("Jubah", material);
+    loaded.lodBias = 1.5f;
+    loaded.castShadows = false;
+    REQUIRE(SaveMeshSettings(loaded, mesh));
+
+    MeshSettings again;
+    REQUIRE(LoadMeshSettings(again, mesh));
+    CHECK(again.MaterialFor("Jubah") == material);
+    CHECK(again.lodBias == doctest::Approx(1.5f));
+    CHECK_FALSE(again.castShadows);
+    CHECK(again.receiveShadows);
+    CHECK(again.MaterialFor("tidak pernah disebut").IsValid() == false);
+
     // Melepas penanda terakhir menghapus berkasnya: berkas pengaturan yang tidak
     // mengatur apa pun hanya menambah satu berkas yang harus ikut kontrol versi.
-    loaded.SetCloth("Jubah", false);
-    REQUIRE(SaveMeshSettings(loaded, mesh));
+    // Nilai bawaan komponen ikut ditimbang — berkas yang hanya berisi lodBias
+    // bukan berkas kosong.
+    again.SetCloth("Jubah", false);
+    again.SetMaterial("Jubah", Uuid{});
+    again.lodBias = 0.0f;
+    again.castShadows = true;
+    REQUIRE(SaveMeshSettings(again, mesh));
     CHECK_FALSE(std::filesystem::exists(MeshSettingsPath(mesh)));
 }
 

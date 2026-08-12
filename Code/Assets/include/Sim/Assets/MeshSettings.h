@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Sim/Core/Uuid.h"
+
 #include <filesystem>
 #include <string>
 #include <string_view>
@@ -15,6 +17,10 @@ namespace sim::assets {
 /// material bertahan pada ekspor ulang, dan ia juga yang dilihat orang di DCC-nya.
 struct MeshPartSettings {
     std::string material;
+    /// Material bawaan untuk ruas ini, dipasang ke `MeshRendererComponent`
+    /// begitu mesh-nya ditetapkan. Kosong berarti ruas ini memakai material
+    /// bawaan editor.
+    Uuid materialAsset;
     /// Ruas ini kain: yang menggerakkannya kelak simulasi, bukan kulit rangka.
     ///
     /// **Baru penandaannya, belum ada yang menjalankannya.** Simulasi kain
@@ -34,15 +40,29 @@ struct MeshPartSettings {
 struct MeshSettings {
     std::vector<MeshPartSettings> parts;
 
+    /// Nilai bawaan yang ikut terisi ke `MeshRendererComponent`. Yang di sini
+    /// **bukan yang berlaku saat menggambar** melainkan titik awal sebuah
+    /// entity: begitu tersalin ke komponennya, entity itu yang memilikinya, dan
+    /// menyunting mesh-nya lagi tidak menarik balik apa yang sudah disetel orang
+    /// per entity.
+    float lodBias = 0.0f;
+    bool castShadows = true;
+    bool receiveShadows = true;
+
     /// Benar bila ruas bermaterial itu ditandai kain. Nama yang tidak tercatat
     /// berarti bukan kain — bawaan yang benar untuk mesh yang belum disentuh.
     bool ClothFor(std::string_view material) const;
+    /// Material bawaan ruas bermaterial itu, atau GUID kosong.
+    Uuid MaterialFor(std::string_view material) const;
+    void SetMaterial(std::string_view material, const Uuid& asset);
     /// Menandai sebuah material. Entri yang belum ada dibuat.
     void SetCloth(std::string_view material, bool cloth);
     /// Membuang entri yang tidak menandai apa pun, supaya berkasnya tidak tumbuh
     /// oleh baris yang seluruhnya bernilai bawaan.
     void Prune();
-    bool Empty() const { return parts.empty(); }
+    /// Benar bila tidak ada satu pun yang perlu disimpan — termasuk nilai
+    /// bawaan komponennya.
+    bool Empty() const;
 };
 
 /// Jalur berkas pengaturan untuk sebuah berkas mesh.
