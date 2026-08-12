@@ -2,6 +2,7 @@
 
 #include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Editor/Command.h"
+#include "Sim/Editor/EditorApp.h"
 #include "Sim/Editor/EditorContext.h"
 #include "Sim/Editor/Gizmo.h"
 #include "Sim/Editor/SceneCommands.h"
@@ -928,4 +929,31 @@ TEST_CASE("Daftar project yang belum pernah ada bukan galat") {
     // pemakai barunya dengan pesan kesalahan.
     library.Load(scratch.path / "belum-ada.json");
     CHECK(library.Recent().empty());
+}
+
+TEST_CASE("EditorApp::CreateProject benar-benar membuat foldernya di lokasi bawaan") {
+    // Dilaporkan: menekan "Buat" tidak menghasilkan folder apa pun di bawah
+    // ~/Documents/SimEngine. Uji ini menjalankan jalur yang sama persis dengan
+    // yang dipanggil tombolnya, tanpa lapisan UI — supaya jelas sisi mana yang
+    // salah.
+    ScratchDir scratch;
+    const std::filesystem::path configDir = scratch.path / "config";
+    const std::filesystem::path projectsRoot = scratch.path / "Documents" / "SimEngine";
+
+    EditorApp app;
+    EditorApp::Config config;
+    config.configDir = configDir;
+    config.projectsRoot = projectsRoot;
+    REQUIRE(app.Initialize(config));
+    CHECK_FALSE(app.HasProject());
+
+    REQUIRE(app.CreateProject(projectsRoot, "Arena"));
+    CHECK(app.HasProject());
+    CHECK(app.CurrentProject().name == "Arena");
+    CHECK(std::filesystem::is_directory(projectsRoot / "Arena"));
+    CHECK(std::filesystem::exists(projectsRoot / "Arena" / "project.simproj"));
+    CHECK(std::filesystem::is_directory(projectsRoot / "Arena" / "Assets"));
+    CHECK(std::filesystem::exists(configDir / "projects.json"));
+
+    app.Shutdown();
 }
