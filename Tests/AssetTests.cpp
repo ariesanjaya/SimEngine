@@ -564,6 +564,89 @@ TEST_CASE("vertex yang sama tapi beda bobot skin tidak disatukan") {
     CHECK(plain.IsSkinned() == false);
 }
 
+TEST_CASE("palet satuan adalah bind pose, dan bind pose tidak memindahkan apa pun") {
+    using namespace sim::assets;
+
+    // **Inilah kriteria yang menjaga seluruh jalur GPU skinning.** Matriks kulit
+    // adalah `global × invers bind`; pada bind pose keduanya saling meniadakan,
+    // jadi paletnya satuan. Vertex yang bergeser sedikit pun di sini berarti ada
+    // transpose, urutan perkalian, atau normalisasi bobot yang salah — dan di
+    // viewport hal yang sama muncul sebagai karakter yang meledak, tanpa satu
+    // pun galat.
+    const std::vector<Mat4> palette(3, Mat4(1.0f));
+
+    SkinInfluence influence;
+    influence.bones = {0, 1, 2, 0};
+    influence.weights = {0.5f, 0.25f, 0.25f, 0.0f};
+
+    const Vec3 point(1.5f, -2.0f, 0.75f);
+    const Vec3 skinned = SkinPoint(influence, palette, point);
+    CHECK(skinned.x == doctest::Approx(point.x));
+    CHECK(skinned.y == doctest::Approx(point.y));
+    CHECK(skinned.z == doctest::Approx(point.z));
+
+    // Arah memakai bagian 3x3 saja: translasi bone tidak boleh menggeser normal.
+    std::vector<Mat4> shifted(1, glm::translate(Mat4(1.0f), Vec3(10.0f, 0.0f, 0.0f)));
+    SkinInfluence single;
+    single.bones = {0, 0, 0, 0};
+    single.weights = {1.0f, 0.0f, 0.0f, 0.0f};
+    const Vec3 normal = SkinDirection(single, shifted, Vec3(0.0f, 1.0f, 0.0f));
+    CHECK(normal.x == doctest::Approx(0.0f));
+    CHECK(normal.y == doctest::Approx(1.0f));
+    CHECK(SkinPoint(single, shifted, Vec3(0.0f)).x == doctest::Approx(10.0f));
+}
+
+TEST_CASE("bobot mencampur matriksnya, bukan hasil tiap bone sendiri-sendiri") {
+    using namespace sim::assets;
+
+    // Dua bone yang menarik ke arah berlawanan dengan bobot sama menaruh vertex
+    // tepat di tengah. Yang diuji bukan angka tengahnya melainkan bahwa yang
+    // dijumlahkan adalah matriksnya — bentuk yang dijalankan `skinMatrix` di
+    // `Shaders/skin_common.slang`, dan yang membuat satu perkalian
+    // matriks-vektor cukup untuk keempat pengaruh.
+    std::vector<Mat4> palette;
+    palette.push_back(glm::translate(Mat4(1.0f), Vec3(-4.0f, 0.0f, 0.0f)));
+    palette.push_back(glm::translate(Mat4(1.0f), Vec3(4.0f, 0.0f, 0.0f)));
+
+    SkinInfluence influence;
+    influence.bones = {0, 1, 0, 0};
+    influence.weights = {0.5f, 0.5f, 0.0f, 0.0f};
+    CHECK(SkinPoint(influence, palette, Vec3(0.0f)).x == doctest::Approx(0.0f));
+
+    influence.weights = {0.25f, 0.75f, 0.0f, 0.0f};
+    CHECK(SkinPoint(influence, palette, Vec3(0.0f)).x == doctest::Approx(2.0f));
+
+    // Rotasi 90° di sekitar Y, seluruh bobot pada satu bone: titik di +X pindah
+    // ke -Z. Kalau matriksnya tertranspose, ia pindah ke +Z — arah yang salah,
+    // tanpa panjang yang berubah, dan karena itu tidak terlihat sebagai cacat
+    // melainkan sebagai animasi yang "terbalik".
+    std::vector<Mat4> turned(1, glm::rotate(Mat4(1.0f), glm::radians(90.0f),
+                                            Vec3(0.0f, 1.0f, 0.0f)));
+    SkinInfluence single;
+    single.bones = {0, 0, 0, 0};
+    single.weights = {1.0f, 0.0f, 0.0f, 0.0f};
+    const Vec3 rotated = SkinPoint(single, turned, Vec3(1.0f, 0.0f, 0.0f));
+    CHECK(rotated.x == doctest::Approx(0.0f).epsilon(1e-5f));
+    CHECK(rotated.z == doctest::Approx(-1.0f).epsilon(1e-5f));
+}
+
+TEST_CASE("indeks bone di luar palet tidak membaca memori orang lain") {
+    using namespace sim::assets;
+
+    // Importir menjamin indeksnya di dalam batas, dan shader karena itu tidak
+    // memeriksanya — memeriksa batas di lingkaran terdalam adalah ongkos yang
+    // dibayar setiap vertex setiap frame. Yang di sini adalah jaring pengaman
+    // untuk sisi CPU, supaya rig cacat menghasilkan pose yang salah alih-alih
+    // pembacaan di luar batas.
+    const std::vector<Mat4> palette(1, glm::translate(Mat4(1.0f), Vec3(0.0f, 5.0f, 0.0f)));
+    SkinInfluence influence;
+    influence.bones = {0, 9, 0, 0};
+    influence.weights = {0.5f, 0.5f, 0.0f, 0.0f};
+
+    // Setengah mengikuti bone nol, setengahnya matriks satuan.
+    CHECK(SkinPoint(influence, palette, Vec3(0.0f)).y == doctest::Approx(2.5f));
+}
+
 TEST_CASE("rig ber-skin terbaca dengan satuan yang sejalan antara mesh dan rangka") {
     using namespace sim::assets;
 

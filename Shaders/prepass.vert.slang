@@ -6,7 +6,11 @@
 // varying tanpa pembaca adalah peringatan validasi di setiap pembuatan
 // pipeline, bukan sekadar pekerjaan yang terbuang.
 
-#include "instance_common.slang"
+// Set 1 untuk palet kulit, sama dengan pass forward: keduanya memakai pipeline
+// layout yang sama, dan set 0 di sana milik keadaan bayangan per-frame.
+#define SKIN_SET 1
+
+#include "skin_common.slang"
 
 struct PrepassPush {
     float4x4 viewProj;
@@ -21,14 +25,18 @@ struct PrepassVarying {
 
 [shader("vertex")]
 PrepassVarying main(BoxVertex vertex) {
+    float3 localPosition;
+    float3 localNormal;
+    applySkin(vertex, localPosition, localNormal);
+
     float4x4 model = instanceModel(vertex);
-    float4 world = mul(model, float4(vertex.position, 1.0));
+    float4 world = mul(model, float4(localPosition, 1.0));
 
     PrepassVarying output;
     // Normal ditransformasikan dengan matriks model apa adanya, sama dengan
     // pass forward — sah selama instance kotak hanya diputar dan diskalakan
     // seragam.
-    output.normal = normalize(mul((float3x3)model, vertex.normal));
+    output.normal = normalize(mul((float3x3)model, localNormal));
     output.position = mul(push.viewProj, world);
     return output;
 }

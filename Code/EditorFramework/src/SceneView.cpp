@@ -49,6 +49,7 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                       const assets::AssetDatabase* assets,
                       render::IViewportRenderer* renderer) {
     meshes_.clear();
+    skinMatrices_.clear();
     lights_.clear();
     lines_.clear();
     icons_.clear();
@@ -99,6 +100,7 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                             instance.mesh = mesh.handle;
                             instance.boundsMin = mesh.boundsMin;
                             instance.boundsMax = mesh.boundsMax;
+                            AppendSkinPalette(mesh.boneCount, instance);
                         }
                     }
                 }
@@ -135,6 +137,28 @@ void SceneView::Build(scene::World& world, const Selection& selection,
         }
         icons_.push_back(icon);
     }
+}
+
+/// Menyediakan palet kulit sebuah instance dan menunjuknya dari instance itu.
+///
+/// **Bind pose, yaitu matriks satuan — dan itu memang seluruh isinya untuk
+/// sekarang.** Matriks kulit adalah `global × invers bind`; pada bind pose
+/// keduanya saling meniadakan, jadi paletnya satuan dan yang tergambar adalah
+/// vertex apa adanya. Yang menggantinya adalah pose sungguhan begitu ada yang
+/// menghasilkannya — komponen animator, atau pratinjau Animation Editor.
+///
+/// **Diisi walaupun hasilnya sama dengan tidak diisi.** Jalur berkulit yang
+/// tidak pernah dijalankan siapa pun adalah jalur yang cacatnya baru ditemukan
+/// pada hari klip pertama masuk; diisi begini, seluruh rantainya — buffer skin,
+/// palet, pipeline, pass bayangan — berjalan di setiap frame editor, dan
+/// kesalahan apa pun di dalamnya langsung terlihat sebagai karakter yang cacat.
+void SceneView::AppendSkinPalette(uint32_t boneCount, render::MeshInstance& instance) {
+    if (boneCount == 0) {
+        return;
+    }
+    instance.skinFirst = static_cast<uint32_t>(skinMatrices_.size());
+    instance.skinCount = boneCount;
+    skinMatrices_.insert(skinMatrices_.end(), boneCount, Mat4(1.0f));
 }
 
 /// Menerjemahkan sebuah `LightComponent` menjadi lampu ruang dunia.
@@ -190,6 +214,7 @@ void SceneView::AppendLight(const scene::LightComponent& light, const Mat4& matr
 render::ViewportScene SceneView::Scene() const {
     render::ViewportScene scene;
     scene.meshes = meshes_;
+    scene.skinMatrices = skinMatrices_;
     scene.lines = lines_;
     scene.lights = lights_;
     return scene;

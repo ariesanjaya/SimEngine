@@ -196,6 +196,15 @@ static_assert(offsetof(BoxVertex, normal) == offsetof(assets::MeshVertex, normal
 static_assert(offsetof(BoxVertex, uv) == offsetof(assets::MeshVertex, uv),
               "offset uv harus sama");
 
+// `assets::SkinInfluence` diunggah apa adanya sebagai buffer skin, dan
+// `VkVertexInputAttributeDescription` di bawah menyebut formatnya secara
+// terpisah. Keduanya harus sepakat: indeks yang terbaca sebagai bobot tidak
+// menghasilkan galat apa pun — hanya kulit yang mengikuti bone yang salah.
+static_assert(sizeof(assets::SkinInfluence) == 24,
+              "SkinInfluence harus 24 byte: empat uint16 lalu empat float");
+static_assert(offsetof(assets::SkinInfluence, bones) == 0, "bones harus di offset 0");
+static_assert(offsetof(assets::SkinInfluence, weights) == 8, "weights harus di offset 8");
+
 /// Satu instance kotak. Tata letaknya harus sama persis dengan atribut instance
 /// di Shaders/box.vert.
 struct BoxInstance {
@@ -208,6 +217,14 @@ struct BoxInstance {
     /// bendera per-instance berikutnya tinggal mengambil bit berikutnya alih-alih
     /// menuntut atribut vertex baru.
     uint32_t flags;
+    /// Indeks matriks pertama instance ini di dalam buffer palet kulit.
+    ///
+    /// **Medan sendiri, bukan bit-bit sisa `flags`.** Ia bukan bendera: ia
+    /// dijumlahkan dengan indeks bone di shader, dan angka yang harus dibongkar
+    /// dari sebuah bitmask lebih dulu adalah angka yang suatu saat dibongkar
+    /// dengan pergeseran yang salah — tanpa satu pun galat, hanya karakter yang
+    /// memakai pose karakter lain.
+    uint32_t skinBase;
 };
 
 /// Satu panggilan gambar: sebuah mesh dan ruas instance yang memakainya.
@@ -218,6 +235,11 @@ struct BoxInstance {
 /// geometri untuk dikelompokkan.
 struct DrawRun {
     MeshHandle mesh = kUnitCubeMesh;
+    /// Digambar lewat pipeline ber-kulit. **Ikut menjadi kunci ruas**, karena ia
+    /// menentukan pipeline dan vertex buffer yang diikat: mesh ber-rig yang satu
+    /// instance-nya dipasok pose dan satu lagi tidak adalah dua ruas, bukan satu
+    /// ruas dengan cabang di dalamnya.
+    bool skinned = false;
     uint32_t first = 0;
     uint32_t count = 0;
 };
@@ -225,6 +247,16 @@ struct DrawRun {
 /// Bit 0 dari `BoxInstance::flags`. Harus sama dengan `kReceiveShadows` di
 /// Shaders/box.frag.
 constexpr uint32_t kInstanceReceiveShadows = 1u;
+
+/// Dua varian dari satu pasang shader: tanpa kulit dan dengan kulit.
+///
+/// **Dua pipeline, bukan satu dengan cabang runtime.** Yang membedakannya bukan
+/// hanya konstanta spesialisasinya melainkan juga stride binding skin — nol pada
+/// yang statis — dan stride adalah bagian dari pipeline, bukan sesuatu yang bisa
+/// diganti per draw.
+constexpr std::size_t kPipelineVariants = 2;
+/// Indeks 0 tanpa kulit, indeks 1 dengan kulit.
+using PipelineVariants = std::array<VkPipeline, kPipelineVariants>;
 
 constexpr Vec4 kSelectedColor{1.0f, 0.62f, 0.20f, 1.0f};
 
@@ -306,7 +338,8 @@ std::vector<BoxVertex> BuildUnitCube() {
     return vertices;
 }
 
-BoxInstance MakeInstance(const Mat4& model, const Vec4& color, bool receiveShadows) {
+BoxInstance MakeInstance(const Mat4& model, const Vec4& color, bool receiveShadows,
+                         uint32_t skinBase) {
     BoxInstance instance;
     // Kolom glm ditulis apa adanya sebagai empat atribut. Shader menyusunnya
     // kembali dengan `mat4(...)`, yang juga kolom-mayor — jadi keduanya cocok
@@ -317,6 +350,7 @@ BoxInstance MakeInstance(const Mat4& model, const Vec4& color, bool receiveShado
     instance.row3 = model[3];
     instance.color = color;
     instance.flags = receiveShadows ? kInstanceReceiveShadows : 0u;
+    instance.skinBase = skinBase;
     return instance;
 }
 
@@ -370,7 +404,23 @@ public:
                 !slot.clusterIndexBuffer.Create(device_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                                 sizeof(uint32_t) * 8192) ||
                 !slot.shadowFaceBuffer.Create(device_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                              sizeof(GpuShadowFace) * 64)) {
+                                              sizeof(GpuShadowFace) * 64) ||
+                !slot.skinBuffer.Create(device_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                        sizeof(Mat4) * 256)) {
+                return false;
+            }
+        }
+        // Pengaruh skin tiruan untuk jalur tak-ber-kulit.
+        //
+        // **Dipasang lewat binding ber-stride nol, jadi satu elemen melayani
+        // seluruh vertex mesh apa pun.** Slang mengunci daftar atribut entry
+        // point sebelum `kSkinned` dinilai, jadi pipeline statis pun harus
+        // menyediakan kedua atribut skin; menyediakannya dengan buffer sepanjang
+        // mesh berarti 24 byte per vertex nol yang tidak pernah dibaca siapa pun.
+        {
+            const assets::SkinInfluence empty{};
+            if (!dummySkin_.Create(device_, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, sizeof(empty)) ||
+                !dummySkin_.Write(&empty, sizeof(empty))) {
                 return false;
             }
         }
@@ -433,6 +483,7 @@ public:
         if (!WriteShadowDescriptors()) {
             return false;
         }
+        WriteSkinDescriptors();
         AdoptTargetLayout();
         AdoptShadowLayout();
         AdoptAtlasLayout();
@@ -576,6 +627,27 @@ public:
             upload_.insert(upload_.end(), transparent_.begin(), transparent_.end());
             slotReady = slot.buffer.Reserve(sizeof(BoxInstance) * upload_.size()) &&
                         slot.buffer.Write(upload_.data(), sizeof(BoxInstance) * upload_.size());
+        }
+
+        // **Paletnya diunggah utuh, bukan per instance yang lolos culling.**
+        // Indeks yang dipegang tiap instance menunjuk ke larik milik pemanggil,
+        // jadi memadatkannya berarti menomori ulang seluruhnya — satu lintasan
+        // tambahan untuk menghemat penyalinan yang sudah satu `memcpy`. Karakter
+        // yang keluar frustum tetap membayar paletnya; puluhan kilobyte per frame
+        // adalah harga yang jauh lebih murah daripada pemetaan ulang yang salah.
+        if (!scene.skinMatrices.empty()) {
+            const VkDeviceSize bytes = sizeof(Mat4) * scene.skinMatrices.size();
+            const VkBuffer before = slot.skinBuffer.Handle();
+            if (!slot.skinBuffer.Reserve(bytes) ||
+                !slot.skinBuffer.Write(scene.skinMatrices.data(), bytes)) {
+                SIM_WARN("Render", "cannot upload {} skin matrices", scene.skinMatrices.size());
+            } else if (slot.skinBuffer.Handle() != before) {
+                // Buffer yang tumbuh adalah `VkBuffer` yang lain. Descriptor yang
+                // masih menunjuk yang lama membaca memori yang sudah dibebaskan.
+                // Hanya set slot ini yang ditulis ulang — slot lain punya buffer
+                // sendiri, dan bisa saja masih dibaca GPU.
+                WriteSkinDescriptor(slot);
+            }
         }
 
         lineVertices_.clear();
@@ -743,7 +815,7 @@ public:
             probes_.RecordNormalBegin(command);
             BeginPrepassRendering(command, desc);
             if (slotReady && opaqueCount > 0) {
-                DrawInstances(command, prepassPipeline_, push, slot, opaqueRuns_, 0);
+                DrawInstances(command, prepassPipelines_, push, slot, opaqueRuns_, 0);
             }
             vkCmdEndRendering(command);
             probes_.RecordNormalEnd(command);
@@ -752,7 +824,7 @@ public:
             BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/true,
                            /*writeColor=*/true);
             if (slotReady && opaqueCount > 0) {
-                DrawInstances(command, opaquePipeline_, push, slot, opaqueRuns_, 0);
+                DrawInstances(command, opaquePipelines_, push, slot, opaqueRuns_, 0);
             }
             vkCmdEndRendering(command);
         };
@@ -760,7 +832,7 @@ public:
             BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/true,
                            /*writeColor=*/true);
             if (slotReady && transparentCount > 0) {
-                DrawInstances(command, transparentPipeline_, push, slot, transparentRuns_,
+                DrawInstances(command, transparentPipelines_, push, slot, transparentRuns_,
                               opaqueCount);
             }
             vkCmdEndRendering(command);
@@ -895,7 +967,7 @@ public:
                 return asset;
             }
             const GpuMesh& mesh = *meshes_[static_cast<std::size_t>(found->second)];
-            return MeshAsset{found->second, mesh.boundsMin, mesh.boundsMax, true};
+            return MeshAsset{found->second, mesh.boundsMin, mesh.boundsMax, true, mesh.boneCount};
         }
 
         std::string error;
@@ -911,9 +983,10 @@ public:
             SIM_ERROR("Render", "cannot upload mesh {}", key);
             return asset;
         }
-        SIM_INFO("Render", "mesh ready: {} ({} tris, {} verts)", key, data.TriangleCount(),
-                 data.vertices.size());
-        return MeshAsset{handle, data.boundsMin, data.boundsMax, true};
+        const GpuMesh& uploaded = *meshes_[static_cast<std::size_t>(handle)];
+        SIM_INFO("Render", "mesh ready: {} ({} tris, {} verts, {} bones)", key,
+                 data.TriangleCount(), data.vertices.size(), uploaded.boneCount);
+        return MeshAsset{handle, data.boundsMin, data.boundsMax, true, uploaded.boneCount};
     }
 
     TextureHandle ColorTarget() const override { return textureHandle_; }
@@ -952,7 +1025,13 @@ private:
         // submit slot ini selesai; satu buffer bersama akan ditimpa frame
         // berikutnya di tengah salinan frame ini.
         rhi::DynamicBuffer sdfStaging;
+        /// Palet kulit seluruh instance ber-skin frame ini. Per slot karena
+        /// alasan yang sama dengan yang lain: menulisinya sementara frame
+        /// sebelumnya masih membacanya adalah pose yang sesekali melompat satu
+        /// frame, bukan sebuah galat.
+        rhi::DynamicBuffer skinBuffer;
         VkDescriptorSet shadowSet = VK_NULL_HANDLE;
+        VkDescriptorSet skinSet = VK_NULL_HANDLE;
         uint64_t submitId = 0;
     };
 
@@ -1161,17 +1240,19 @@ private:
                 model = glm::scale(model, size);
             }
 
+            const bool skinned = IsSkinnable(mesh, scene.skinMatrices.size());
             const Vec4 color = mesh.selected ? kSelectedColor : mesh.color;
-            const BoxInstance instance = MakeInstance(model, color, mesh.receiveShadows);
+            const BoxInstance instance =
+                MakeInstance(model, color, mesh.receiveShadows, skinned ? mesh.skinFirst : 0u);
             if (color.a >= 0.999f) {
-                gathered_.push_back(GatherEntry{mesh.mesh, instance, mesh.castShadows});
+                gathered_.push_back(GatherEntry{mesh.mesh, skinned, instance, mesh.castShadows});
                 continue;
             }
             const float distance = glm::length(world.Centre() - eye);
             // Tembus pandang tidak pernah menjatuhkan bayangan — kaca yang
             // menghitamkan lantai di bawahnya adalah kesalahan yang lebih
             // mencolok daripada kaca yang tidak berbayang sama sekali.
-            sorted_.push_back(SortedEntry{distance, mesh.mesh, instance});
+            sorted_.push_back(SortedEntry{distance, mesh.mesh, skinned, instance});
         }
 
         // **Yang menjatuhkan bayangan lebih dulu, lalu dikelompokkan per mesh.**
@@ -1186,7 +1267,14 @@ private:
                              if (a.caster != b.caster) {
                                  return a.caster;
                              }
-                             return a.mesh < b.mesh;
+                             if (a.mesh != b.mesh) {
+                                 return a.mesh < b.mesh;
+                             }
+                             // Kunci ketiga: yang berkulit dan yang tidak
+                             // memakai pipeline yang berbeda, jadi mencampurnya
+                             // di dalam satu ruas berarti sebagian instance
+                             // digambar lewat pipeline yang bukan miliknya.
+                             return static_cast<int>(a.skinned) > static_cast<int>(b.skinned);
                          });
 
         opaque_.reserve(gathered_.size());
@@ -1194,7 +1282,8 @@ private:
             if (entry.caster) {
                 ++casterCount_;
             }
-            AppendRun(opaqueRuns_, entry.mesh, static_cast<uint32_t>(opaque_.size()));
+            AppendRun(opaqueRuns_, entry.mesh, entry.skinned,
+                      static_cast<uint32_t>(opaque_.size()));
             opaque_.push_back(entry.instance);
         }
         // Ruas bayangan adalah awalan daftar yang sama, dipotong di
@@ -1204,8 +1293,8 @@ private:
             if (run.first >= casterCount_) {
                 break;
             }
-            casterRuns_.push_back(
-                DrawRun{run.mesh, run.first, std::min(run.count, casterCount_ - run.first)});
+            casterRuns_.push_back(DrawRun{run.mesh, run.skinned, run.first,
+                                          std::min(run.count, casterCount_ - run.first)});
         }
 
         // Belakang ke depan. Alpha blending tidak komutatif: dua kaca yang
@@ -1221,19 +1310,41 @@ private:
                   [](const SortedEntry& a, const SortedEntry& b) { return a.distance > b.distance; });
         transparent_.reserve(sorted_.size());
         for (const SortedEntry& entry : sorted_) {
-            AppendRun(transparentRuns_, entry.mesh, static_cast<uint32_t>(transparent_.size()));
+            AppendRun(transparentRuns_, entry.mesh, entry.skinned,
+                      static_cast<uint32_t>(transparent_.size()));
             transparent_.push_back(entry.instance);
         }
     }
 
-    /// Menambah instance ke ruas terakhir bila mesh-nya sama, atau membuka ruas
-    /// baru.
-    static void AppendRun(std::vector<DrawRun>& runs, MeshHandle mesh, uint32_t index) {
-        if (!runs.empty() && runs.back().mesh == mesh) {
+    /// Apakah instance ini benar-benar bisa digambar lewat jalur berkulit.
+    ///
+    /// Tiga syarat, dan ketiganya bisa gagal sendiri-sendiri: mesh-nya harus
+    /// punya bobot skin di GPU, pemanggilnya harus memasok pose, dan pose itu
+    /// harus sepanjang rangkanya serta berada di dalam larik yang dikirimkannya.
+    /// **Yang gagal digambar sebagai mesh statis, bukan dilewati.** Vertexnya
+    /// sudah berada di bind pose, jadi yang terlihat adalah karakter yang berdiri
+    /// diam — bukan karakter yang lenyap, dan bukan pula shader yang membaca
+    /// matriks milik instance lain.
+    bool IsSkinnable(const MeshInstance& instance, std::size_t paletteSize) const {
+        if (instance.skinCount == 0 || instance.mesh >= meshes_.size()) {
+            return false;
+        }
+        const GpuMesh& mesh = *meshes_[static_cast<std::size_t>(instance.mesh)];
+        if (mesh.boneCount == 0 || instance.skinCount != mesh.boneCount) {
+            return false;
+        }
+        return static_cast<std::size_t>(instance.skinFirst) + instance.skinCount <= paletteSize;
+    }
+
+    /// Menambah instance ke ruas terakhir bila mesh dan jalurnya sama, atau
+    /// membuka ruas baru.
+    static void AppendRun(std::vector<DrawRun>& runs, MeshHandle mesh, bool skinned,
+                          uint32_t index) {
+        if (!runs.empty() && runs.back().mesh == mesh && runs.back().skinned == skinned) {
             ++runs.back().count;
             return;
         }
-        runs.push_back(DrawRun{mesh, index, 1});
+        runs.push_back(DrawRun{mesh, skinned, index, 1});
     }
 
     /// `useDepth` false berarti depth tidak dipasang sama sekali.
@@ -1369,29 +1480,39 @@ private:
         (void)desc;
     }
 
-    void DrawInstances(VkCommandBuffer cmd, VkPipeline pipeline, const BoxPush& push,
+    void DrawInstances(VkCommandBuffer cmd, const PipelineVariants& pipelines, const BoxPush& push,
                        InstanceSlot& slot, std::span<const DrawRun> runs, uint32_t instanceBase) {
         // Descriptor set diikat untuk setiap pipeline forward, termasuk prepass.
         // Prepass tidak membacanya, tapi layout-nya mendeklarasikannya — dan
         // set yang dideklarasikan tapi tidak terikat adalah pelanggaran meski
         // tidak ada yang membacanya.
-        if (pipeline == VK_NULL_HANDLE || runs.empty()) {
+        if (pipelines[0] == VK_NULL_HANDLE || runs.empty()) {
             return;
         }
-        vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1,
-                                &slot.shadowSet, 0, nullptr);
+        // Set 1 palet kulit, diikat untuk kedua varian. **Termasuk yang statis**:
+        // yang menentukan sebuah descriptor "terpakai" adalah modul SPIR-V, dan
+        // di sana cabang `kSkinned` masih ada — spesialisasi baru menilainya
+        // sesudah itu.
+        const std::array<VkDescriptorSet, 2> sets{slot.shadowSet, slot.skinSet};
+        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0,
+                                static_cast<uint32_t>(sets.size()), sets.data(), 0, nullptr);
         vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(BoxPush),
                            &push);
-        DrawRuns(cmd, slot, runs, instanceBase);
+        DrawRuns(cmd, slot, runs, instanceBase, pipelines);
     }
 
     /// Mengikat geometri tiap ruas lalu menggambarnya. Dipakai bersama pass
     /// forward dan pass bayangan — keduanya menggambar geometri yang sama
     /// dengan pipeline yang berbeda, dan menyalin pengikatannya ke dua tempat
     /// adalah cara termudah membuat keduanya suatu saat berbeda.
+    ///
+    /// **Pipeline diikat di sini, bukan oleh pemanggilnya.** Sejak jalur berkulit
+    /// ada, dua ruas berturut-turut bisa menuntut pipeline yang berbeda — dan
+    /// pemanggil yang mengikatnya sekali di awal akan menggambar sebagian ruas
+    /// lewat pipeline yang bukan miliknya, tanpa satu pun galat.
     void DrawRuns(VkCommandBuffer cmd, InstanceSlot& slot, std::span<const DrawRun> runs,
-                  uint32_t instanceBase) {
+                  uint32_t instanceBase, const PipelineVariants& pipelines) {
+        VkPipeline bound = VK_NULL_HANDLE;
         for (const DrawRun& run : runs) {
             if (run.count == 0 || run.mesh >= meshes_.size()) {
                 continue;
@@ -1400,9 +1521,24 @@ private:
             if (mesh.indexCount == 0) {
                 continue;
             }
-            const std::array<VkBuffer, 2> buffers{mesh.vertices.Handle(), slot.buffer.Handle()};
-            const std::array<VkDeviceSize, 2> offsets{0, 0};
-            vkCmdBindVertexBuffers(cmd, 0, 2, buffers.data(), offsets.data());
+            // Ruas berkulit yang mesh-nya ternyata tidak punya bobot digambar
+            // statis, bukan dilewati: `Gather` sudah menyaringnya, dan yang di
+            // sini adalah jaring pengaman supaya buffer skin yang tidak ada tidak
+            // pernah bisa terikat.
+            const bool skinned = run.skinned && mesh.skin.IsValid();
+            VkPipeline pipeline = pipelines[skinned ? 1u : 0u];
+            if (pipeline == VK_NULL_HANDLE) {
+                continue;
+            }
+            if (pipeline != bound) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+                bound = pipeline;
+            }
+            const std::array<VkBuffer, 3> buffers{
+                mesh.vertices.Handle(), slot.buffer.Handle(),
+                skinned ? mesh.skin.Handle() : dummySkin_.Handle()};
+            const std::array<VkDeviceSize, 3> offsets{0, 0, 0};
+            vkCmdBindVertexBuffers(cmd, 0, 3, buffers.data(), offsets.data());
             vkCmdBindIndexBuffer(cmd, mesh.indices.Handle(), 0, VK_INDEX_TYPE_UINT32);
             vkCmdDrawIndexed(cmd, mesh.indexCount, run.count, 0, 0, instanceBase + run.first);
         }
@@ -1418,6 +1554,23 @@ private:
             !mesh->indices.Create(device_, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indexBytes) ||
             !mesh->indices.Write(data.indices.data(), indexBytes)) {
             return kUnitCubeMesh;
+        }
+        // **Rangka yang lebih besar daripada yang bisa diindeks atribut skin
+        // ditolak seluruhnya, bukan dipotong.** Indeks bone-nya 16 bit, jadi rig
+        // di atas itu akan membungkus diam-diam ke bone yang salah — kulit yang
+        // mengikuti tulang acak, tanpa satu pun galat.
+        if (data.IsSkinned() && data.skeleton.bones.size() <= 0xFFFFu) {
+            const VkDeviceSize skinBytes = sizeof(assets::SkinInfluence) * data.influences.size();
+            if (mesh->skin.Create(device_, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, skinBytes) &&
+                mesh->skin.Write(data.influences.data(), skinBytes)) {
+                mesh->boneCount = static_cast<uint32_t>(data.skeleton.bones.size());
+            } else {
+                SIM_WARN("Render", "cannot upload skin weights; the mesh stays at its bind pose");
+                mesh->skin.Destroy();
+            }
+        } else if (data.IsSkinned()) {
+            SIM_WARN("Render", "skeleton has {} bones, above the 65535 an index can name",
+                     data.skeleton.bones.size());
         }
         mesh->indexCount = static_cast<uint32_t>(data.indices.size());
         mesh->boundsMin = data.boundsMin;
@@ -1620,22 +1773,29 @@ private:
         VkPushConstantRange range{};
         range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
         range.size = sizeof(BoxPush);
+        // Set 0 keadaan bayangan per-frame, set 1 palet kulit. Nomornya harus
+        // sama dengan `SKIN_SET` di box.vert dan prepass.vert.
+        const std::array<VkDescriptorSetLayout, 2> forwardSets{shadowSetLayout_, skinSetLayout_};
         VkPipelineLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         layoutInfo.pushConstantRangeCount = 1;
         layoutInfo.pPushConstantRanges = &range;
-        layoutInfo.setLayoutCount = 1;
-        layoutInfo.pSetLayouts = &shadowSetLayout_;
+        layoutInfo.setLayoutCount = static_cast<uint32_t>(forwardSets.size());
+        layoutInfo.pSetLayouts = forwardSets.data();
         SIM_VK_CHECK(
             vkCreatePipelineLayout(device_.Handle(), &layoutInfo, nullptr, &pipelineLayout_));
 
         // Pass bayangan memakai layout sendiri: ia tidak membaca peta bayangan,
         // dan mendeklarasikan descriptor set yang tidak pernah diikat berarti
-        // setiap draw-nya melanggar aturan validasi.
+        // setiap draw-nya melanggar aturan validasi. Yang tersisa untuknya hanya
+        // palet kulit — dan karena itu palet jatuh ke set 0 di sini, sama dengan
+        // `SKIN_SET` di shadow.vert.
         VkPipelineLayoutCreateInfo shadowLayoutInfo{};
         shadowLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         shadowLayoutInfo.pushConstantRangeCount = 1;
         shadowLayoutInfo.pPushConstantRanges = &range;
+        shadowLayoutInfo.setLayoutCount = 1;
+        shadowLayoutInfo.pSetLayouts = &skinSetLayout_;
         SIM_VK_CHECK(
             vkCreatePipelineLayout(device_.Handle(), &shadowLayoutInfo, nullptr, &shadowLayout_));
 
@@ -1675,13 +1835,21 @@ private:
         // dengan prepass: shader fragment yang menulis ke lampiran warna yang
         // tidak dipasang adalah peringatan validasi berulang, dan menghapusnya
         // juga jalur yang lebih cepat.
-        // Atribut 0 dan 2..5: posisi dan keempat kolom matriks. Normal, warna,
-        // dan bendera tidak dibaca pass bayangan.
-        shadowPipeline_ =
-            BuildPipeline(shadowVertex, VK_NULL_HANDLE, /*depthWrite=*/true,
-                          VK_COMPARE_OP_LESS_OR_EQUAL, /*blend=*/false, /*colorWrite=*/false,
-                          shadowLayout_, kShadowFormat, /*colorAttachment=*/VK_FORMAT_UNDEFINED,
-                          /*attributeMask=*/0b0011'1101u);
+        // Atribut 0, 2..5, dan 8..10: posisi, keempat kolom matriks, dan ketiga
+        // atribut skin. Normal, warna, dan bendera tidak dibaca pass bayangan.
+        //
+        // **Atribut skin ikut walaupun `kSkinned` mati.** Slang mengunci daftar
+        // antarmuka entry point sebelum konstanta spesialisasi dinilai, jadi
+        // ketiganya tetap ada di kedua varian — dan pipeline yang tidak
+        // menyediakan atribut yang dikonsumsi shader-nya adalah galat validasi
+        // di setiap draw.
+        for (std::size_t skinned = 0; skinned < kPipelineVariants; ++skinned) {
+            shadowPipelines_[skinned] = BuildPipeline(
+                shadowVertex, VK_NULL_HANDLE, /*depthWrite=*/true, VK_COMPARE_OP_LESS_OR_EQUAL,
+                /*blend=*/false, /*colorWrite=*/false, /*skinned=*/skinned != 0, shadowLayout_,
+                kShadowFormat, /*colorAttachment=*/VK_FORMAT_UNDEFINED,
+                /*attributeMask=*/0b0111'0011'1101u);
+        }
         vkDestroyShaderModule(device_.Handle(), shadowVertex, nullptr);
 
         // Tiga pipeline dari satu pasang shader. Yang berbeda hanya keadaan
@@ -1695,35 +1863,51 @@ private:
             CreateShaderModule(device_.Handle(), shaderDirectory / "prepass.vert.spv");
         VkShaderModule prepassFragment =
             CreateShaderModule(device_.Handle(), shaderDirectory / "prepass.frag.spv");
-        // Atribut 0..5: posisi, normal, dan keempat kolom matriks. Warna dan
-        // bendera tidak dibacanya.
-        prepassPipeline_ = BuildPipeline(prepassVertex, prepassFragment, /*depthWrite=*/true,
-                                         VK_COMPARE_OP_GREATER, /*blend=*/false,
-                                         /*colorWrite=*/true, /*layout=*/VK_NULL_HANDLE,
-                                         /*depthFormat=*/VK_FORMAT_UNDEFINED, kNormalFormat,
-                                         /*attributeMask=*/0b0011'1111u);
+        // Atribut 0..5 dan 8..10: posisi, normal, keempat kolom matriks, dan
+        // skin. Warna dan bendera tidak dibacanya.
+        for (std::size_t skinned = 0; skinned < kPipelineVariants; ++skinned) {
+            prepassPipelines_[skinned] =
+                BuildPipeline(prepassVertex, prepassFragment, /*depthWrite=*/true,
+                              VK_COMPARE_OP_GREATER, /*blend=*/false, /*colorWrite=*/true,
+                              /*skinned=*/skinned != 0, /*layout=*/VK_NULL_HANDLE,
+                              /*depthFormat=*/VK_FORMAT_UNDEFINED, kNormalFormat,
+                              /*attributeMask=*/0b0111'0011'1111u);
+            // Uji EQUAL, bukan GREATER: depth-nya sudah diisi prepass, jadi hanya
+            // fragmen yang benar-benar terlihat yang boleh menjalankan shader.
+            // Itulah gunanya prepass — bukan menghemat depth test, melainkan
+            // menghemat shading yang akan ditimpa.
+            //
+            // **Prepass dan forward karena itu wajib menghitung posisi yang sama
+            // persis**, termasuk kulitnya: prepass yang menaruh vertex di tempat
+            // berbeda satu ULP saja membuat uji EQUAL gagal, dan yang terlihat
+            // adalah karakter yang lenyap seluruhnya dari pass forward.
+            opaquePipelines_[skinned] =
+                BuildPipeline(vertex, fragment, /*depthWrite=*/false, VK_COMPARE_OP_EQUAL,
+                              /*blend=*/false, /*colorWrite=*/true, /*skinned=*/skinned != 0);
+            // Transparan diuji terhadap depth opaque tapi tidak menulisinya: dua
+            // permukaan tembus pandang harus sama-sama terlihat, dan yang di depan
+            // tidak boleh menghapus yang di belakang.
+            transparentPipelines_[skinned] =
+                BuildPipeline(vertex, fragment, /*depthWrite=*/false, VK_COMPARE_OP_GREATER,
+                              /*blend=*/true, /*colorWrite=*/true, /*skinned=*/skinned != 0);
+        }
         for (VkShaderModule module : {prepassVertex, prepassFragment}) {
             if (module != VK_NULL_HANDLE) {
                 vkDestroyShaderModule(device_.Handle(), module, nullptr);
             }
         }
-        // Uji EQUAL, bukan GREATER: depth-nya sudah diisi prepass, jadi hanya
-        // fragmen yang benar-benar terlihat yang boleh menjalankan shader.
-        // Itulah gunanya prepass — bukan menghemat depth test, melainkan
-        // menghemat shading yang akan ditimpa.
-        opaquePipeline_ = BuildPipeline(vertex, fragment, /*depthWrite=*/false,
-                                        VK_COMPARE_OP_EQUAL, /*blend=*/false, /*colorWrite=*/true);
-        // Transparan diuji terhadap depth opaque tapi tidak menulisinya: dua
-        // permukaan tembus pandang harus sama-sama terlihat, dan yang di depan
-        // tidak boleh menghapus yang di belakang.
-        transparentPipeline_ = BuildPipeline(vertex, fragment, /*depthWrite=*/false,
-                                             VK_COMPARE_OP_GREATER, /*blend=*/true,
-                                             /*colorWrite=*/true);
 
         vkDestroyShaderModule(device_.Handle(), vertex, nullptr);
         vkDestroyShaderModule(device_.Handle(), fragment, nullptr);
-        return prepassPipeline_ != VK_NULL_HANDLE && opaquePipeline_ != VK_NULL_HANDLE &&
-               transparentPipeline_ != VK_NULL_HANDLE && shadowPipeline_ != VK_NULL_HANDLE;
+        for (std::size_t skinned = 0; skinned < kPipelineVariants; ++skinned) {
+            if (prepassPipelines_[skinned] == VK_NULL_HANDLE ||
+                opaquePipelines_[skinned] == VK_NULL_HANDLE ||
+                transparentPipelines_[skinned] == VK_NULL_HANDLE ||
+                shadowPipelines_[skinned] == VK_NULL_HANDLE) {
+                return false;
+            }
+        }
+        return true;
     }
 
     /// `layout` dan `depthFormat` kosong berarti memakai milik pass forward.
@@ -1733,15 +1917,28 @@ private:
     /// validation layer.
     VkPipeline BuildPipeline(VkShaderModule vertex, VkShaderModule fragment, bool depthWrite,
                              VkCompareOp depthCompare, bool blend, bool colorWrite,
-                             VkPipelineLayout layout = VK_NULL_HANDLE,
+                             bool skinned = false, VkPipelineLayout layout = VK_NULL_HANDLE,
                              VkFormat depthFormat = VK_FORMAT_UNDEFINED,
                              VkFormat colorAttachment = VK_FORMAT_UNDEFINED,
-                             uint32_t attributeMask = 0xFFu) {
+                             uint32_t attributeMask = 0x7FFu) {
+        // `kSkinned`, konstanta spesialisasi 0 di `Shaders/skin_common.slang`.
+        // Ukurannya empat byte walaupun tipenya bool: Vulkan menyatakan
+        // konstanta spesialisasi boolean berukuran `VkBool32`, dan ukuran yang
+        // salah membuat nilainya diam-diam tidak berlaku.
+        const VkBool32 skinnedValue = skinned ? VK_TRUE : VK_FALSE;
+        const VkSpecializationMapEntry entry{0, 0, sizeof(VkBool32)};
+        VkSpecializationInfo specialization{};
+        specialization.mapEntryCount = 1;
+        specialization.pMapEntries = &entry;
+        specialization.dataSize = sizeof(skinnedValue);
+        specialization.pData = &skinnedValue;
+
         std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
         stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
         stages[0].module = vertex;
         stages[0].pName = "main";
+        stages[0].pSpecializationInfo = &specialization;
         stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
         stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
         stages[1].module = fragment;
@@ -1755,12 +1952,20 @@ private:
         // dibuang adalah persis pekerjaan yang prepass ada untuk menghindarinya.
         const uint32_t stageCount = colorWrite ? 2u : 1u;
 
-        const std::array<VkVertexInputBindingDescription, 2> bindings{
+        // Binding 2 adalah pengaruh skin. **Stride-nya nol pada varian statis**,
+        // dan itu yang membuat satu elemen tiruan melayani mesh apa pun: setiap
+        // vertex membaca offset yang sama, dan `kSkinned` yang mati membuang
+        // hasilnya. Buffer sepanjang mesh untuk data yang tidak pernah dibaca
+        // adalah 24 byte per vertex yang dibayar seluruh adegan statis.
+        const std::array<VkVertexInputBindingDescription, 3> bindings{
             VkVertexInputBindingDescription{0, sizeof(BoxVertex), VK_VERTEX_INPUT_RATE_VERTEX},
             VkVertexInputBindingDescription{1, sizeof(BoxInstance),
                                             VK_VERTEX_INPUT_RATE_INSTANCE},
+            VkVertexInputBindingDescription{
+                2, skinned ? static_cast<uint32_t>(sizeof(assets::SkinInfluence)) : 0u,
+                VK_VERTEX_INPUT_RATE_VERTEX},
         };
-        const std::array<VkVertexInputAttributeDescription, 8> attributes{
+        const std::array<VkVertexInputAttributeDescription, 11> attributes{
             VkVertexInputAttributeDescription{0, 0, VK_FORMAT_R32G32B32_SFLOAT,
                                               offsetof(BoxVertex, position)},
             VkVertexInputAttributeDescription{1, 0, VK_FORMAT_R32G32B32_SFLOAT,
@@ -1777,6 +1982,12 @@ private:
                                               offsetof(BoxInstance, color)},
             VkVertexInputAttributeDescription{7, 1, VK_FORMAT_R32_UINT,
                                               offsetof(BoxInstance, flags)},
+            VkVertexInputAttributeDescription{8, 2, VK_FORMAT_R16G16B16A16_UINT,
+                                              offsetof(assets::SkinInfluence, bones)},
+            VkVertexInputAttributeDescription{9, 2, VK_FORMAT_R32G32B32A32_SFLOAT,
+                                              offsetof(assets::SkinInfluence, weights)},
+            VkVertexInputAttributeDescription{10, 1, VK_FORMAT_R32_UINT,
+                                              offsetof(BoxInstance, skinBase)},
         };
         // Tiap pipeline menyebutkan atribut mana yang benar-benar dibacanya.
         // Buffer-nya sama dan stride-nya sama; yang berbeda hanya atribut yang
@@ -1790,7 +2001,7 @@ private:
         // adalah peringatan validasi di setiap pembuatan pipeline. Menyaringnya
         // di sini bukan sekadar meredam peringatan: atribut yang tidak diambil
         // memang tidak perlu diambil.
-        std::array<VkVertexInputAttributeDescription, 8> used{};
+        std::array<VkVertexInputAttributeDescription, 11> used{};
         uint32_t usedCount = 0;
         for (const VkVertexInputAttributeDescription& attribute : attributes) {
             if ((attributeMask & (1u << attribute.location)) != 0u) {
@@ -2039,7 +2250,82 @@ private:
         poolInfo.pPoolSizes = sizes.data();
         SIM_VK_CHECK(
             vkCreateDescriptorPool(device_.Handle(), &poolInfo, nullptr, &shadowPool_));
+        return CreateSkinDescriptors();
+    }
+
+    /// Set descriptor palet kulit: satu storage buffer, tahap vertex.
+    ///
+    /// **Set tersendiri, bukan binding ke-22 di set bayangan.** Pass bayangan
+    /// juga menggambar kulit, dan set bayangan berisi peta bayangan yang sedang
+    /// ia tulis — mengikatnya di sana berarti sebuah image dipakai sebagai
+    /// lampiran dan sebagai descriptor pada draw yang sama. Set kecil ini bisa
+    /// diikat kedua pass tanpa membawa apa pun yang bukan miliknya.
+    bool CreateSkinDescriptors() {
+        const VkDescriptorSetLayoutBinding binding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                                   VK_SHADER_STAGE_VERTEX_BIT, nullptr};
+        VkDescriptorSetLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layoutInfo.bindingCount = 1;
+        layoutInfo.pBindings = &binding;
+        SIM_VK_CHECK(
+            vkCreateDescriptorSetLayout(device_.Handle(), &layoutInfo, nullptr, &skinSetLayout_));
+
+        const VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                        static_cast<uint32_t>(slots_.size())};
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.maxSets = static_cast<uint32_t>(slots_.size());
+        poolInfo.poolSizeCount = 1;
+        poolInfo.pPoolSizes = &size;
+        SIM_VK_CHECK(vkCreateDescriptorPool(device_.Handle(), &poolInfo, nullptr, &skinPool_));
+
+        std::vector<VkDescriptorSetLayout> layouts(slots_.size(), skinSetLayout_);
+        VkDescriptorSetAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocateInfo.descriptorPool = skinPool_;
+        allocateInfo.descriptorSetCount = static_cast<uint32_t>(layouts.size());
+        allocateInfo.pSetLayouts = layouts.data();
+        std::vector<VkDescriptorSet> sets(slots_.size());
+        if (vkAllocateDescriptorSets(device_.Handle(), &allocateInfo, sets.data()) != VK_SUCCESS) {
+            SIM_ERROR("Render", "cannot allocate skin descriptor sets");
+            return false;
+        }
+        for (std::size_t i = 0; i < slots_.size(); ++i) {
+            slots_[i].skinSet = sets[i];
+        }
+        // Isinya ditulis `WriteSkinDescriptors` sesudah buffer slot dibuat.
+        // Layout-nya dibutuhkan lebih awal daripada itu — `CreatePipelines`
+        // memakainya — jadi keduanya memang terjadi pada saat yang berbeda.
         return true;
+    }
+
+    /// Menunjuk ulang tiap set ke buffer palet slot-nya.
+    ///
+    /// **Dipanggil ulang setiap kali buffer-nya tumbuh.** `DynamicBuffer::Reserve`
+    /// membuat `VkBuffer` baru saat kapasitasnya kurang, dan descriptor yang
+    /// masih menunjuk buffer lama adalah descriptor yang menunjuk memori yang
+    /// sudah dibebaskan — kerusakan yang muncul sebagai pose acak pada frame
+    /// tempat sebuah karakter kedua masuk ke adegan, bukan sebagai galat.
+    void WriteSkinDescriptor(const InstanceSlot& slot) {
+        const VkDescriptorBufferInfo buffer{slot.skinBuffer.Handle(), 0, VK_WHOLE_SIZE};
+        VkWriteDescriptorSet write{};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = slot.skinSet;
+        write.dstBinding = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        write.pBufferInfo = &buffer;
+        vkUpdateDescriptorSets(device_.Handle(), 1, &write, 0, nullptr);
+    }
+
+    /// Seluruh slot sekaligus. **Hanya saat start.** Di tengah frame yang boleh
+    /// ditulis ulang hanyalah set milik slot yang sudah ditunggu selesai; slot
+    /// lain bisa saja masih dibaca GPU, dan menulisi descriptor yang sedang
+    /// dipakai adalah kerusakan yang muncul di frame yang salah.
+    void WriteSkinDescriptors() {
+        for (const InstanceSlot& slot : slots_) {
+            WriteSkinDescriptor(slot);
+        }
     }
 
     bool CreateShadowAtlas() {
@@ -2132,10 +2418,12 @@ private:
         // pertama kalau areanya kebetulan bertemu.
         vkCmdBeginRendering(cmd, &info);
 
-        if (shadowPipeline_ != VK_NULL_HANDLE && casterCount > 0 && slot.buffer.IsValid()) {
-            // Pengikatan geometri pindah ke dalam `DrawRuns`: sejak ada lebih
-            // dari satu mesh, buffer yang diikat berbeda per ruas.
-            vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
+        if (shadowPipelines_[0] != VK_NULL_HANDLE && casterCount > 0 && slot.buffer.IsValid()) {
+            // Pengikatan geometri dan pipeline pindah ke dalam `DrawRuns`: sejak
+            // ada lebih dari satu mesh, buffer yang diikat berbeda per ruas —
+            // dan sejak ada jalur berkulit, pipeline-nya juga.
+            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowLayout_, 0, 1,
+                                    &slot.skinSet, 0, nullptr);
 
             for (const ShadowAtlasEntry& entry : atlasAllocation_.entries) {
                 const VkViewport viewport{static_cast<float>(entry.x),
@@ -2152,7 +2440,7 @@ private:
                 const BoxPush push{entry.viewProjection};
                 vkCmdPushConstants(cmd, shadowLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
                                    sizeof(BoxPush), &push);
-                DrawRuns(cmd, slot, casterRuns_, 0);
+                DrawRuns(cmd, slot, casterRuns_, 0, shadowPipelines_);
             }
         }
         vkCmdEndRendering(cmd);
@@ -2465,6 +2753,14 @@ private:
     }
 
     void DestroyShadowMap() {
+        if (skinPool_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(device_.Handle(), skinPool_, nullptr);
+            skinPool_ = VK_NULL_HANDLE;
+        }
+        if (skinSetLayout_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(device_.Handle(), skinSetLayout_, nullptr);
+            skinSetLayout_ = VK_NULL_HANDLE;
+        }
         if (shadowPool_ != VK_NULL_HANDLE) {
             vkDestroyDescriptorPool(device_.Handle(), shadowPool_, nullptr);
             shadowPool_ = VK_NULL_HANDLE;
@@ -2714,7 +3010,7 @@ private:
     }
 
     void RecordShadowPass(VkCommandBuffer cmd, InstanceSlot& slot, uint32_t casterCount) {
-        if (shadowPipeline_ == VK_NULL_HANDLE) {
+        if (shadowPipelines_[0] == VK_NULL_HANDLE) {
             return;
         }
         for (int i = 0; i < cascades_.count; ++i) {
@@ -2750,10 +3046,11 @@ private:
             if (casterCount > 0 && slot.buffer.IsValid()) {
                 const Cascade& cascade = cascades_.cascades[static_cast<size_t>(i)];
                 const BoxPush push{cascade.viewProjection};
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
+                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowLayout_, 0, 1,
+                                        &slot.skinSet, 0, nullptr);
                 vkCmdPushConstants(cmd, shadowLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
                                    sizeof(BoxPush), &push);
-                DrawRuns(cmd, slot, casterRuns_, 0);
+                DrawRuns(cmd, slot, casterRuns_, 0, shadowPipelines_);
             }
             vkCmdEndRendering(cmd);
         }
@@ -2781,7 +3078,9 @@ private:
             slot.clusterIndexBuffer.Destroy();
             slot.shadowFaceBuffer.Destroy();
             slot.sdfStaging.Destroy();
+            slot.skinBuffer.Destroy();
         }
+        dummySkin_.Destroy();
         hiz_.Destroy();
         post_.Destroy();
         sky_.Destroy();
@@ -2792,9 +3091,16 @@ private:
         }
         meshes_.clear();
         meshByPath_.clear();
-        for (VkPipeline* pipeline :
-             {&prepassPipeline_, &opaquePipeline_, &transparentPipeline_, &gridPipeline_,
-              &linePipeline_, &shadowPipeline_, &sdfDebugPipeline_}) {
+        for (PipelineVariants* variants : {&prepassPipelines_, &opaquePipelines_,
+                                           &transparentPipelines_, &shadowPipelines_}) {
+            for (VkPipeline& pipeline : *variants) {
+                if (pipeline != VK_NULL_HANDLE) {
+                    vkDestroyPipeline(device_.Handle(), pipeline, nullptr);
+                    pipeline = VK_NULL_HANDLE;
+                }
+            }
+        }
+        for (VkPipeline* pipeline : {&gridPipeline_, &linePipeline_, &sdfDebugPipeline_}) {
             if (*pipeline != VK_NULL_HANDLE) {
                 vkDestroyPipeline(device_.Handle(), *pipeline, nullptr);
                 *pipeline = VK_NULL_HANDLE;
@@ -2951,7 +3257,13 @@ private:
     VkDescriptorSetLayout shadowSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool shadowPool_ = VK_NULL_HANDLE;
     VkPipelineLayout shadowLayout_ = VK_NULL_HANDLE;
-    VkPipeline shadowPipeline_ = VK_NULL_HANDLE;
+    PipelineVariants shadowPipelines_{};
+    /// Palet kulit: set descriptor tersendiri, dipakai pass forward (set 1) dan
+    /// pass bayangan (set 0).
+    VkDescriptorSetLayout skinSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool skinPool_ = VK_NULL_HANDLE;
+    /// Satu elemen pengaruh skin nol, dipasang ber-stride nol oleh jalur statis.
+    rhi::DynamicBuffer dummySkin_;
     VkPipelineLayout sdfDebugLayout_ = VK_NULL_HANDLE;
     VkPipeline sdfDebugPipeline_ = VK_NULL_HANDLE;
     ResourceId shadowId_ = kInvalidResource;
@@ -2959,9 +3271,9 @@ private:
     CascadeSet cascades_;
 
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
-    VkPipeline prepassPipeline_ = VK_NULL_HANDLE;
-    VkPipeline opaquePipeline_ = VK_NULL_HANDLE;
-    VkPipeline transparentPipeline_ = VK_NULL_HANDLE;
+    PipelineVariants prepassPipelines_{};
+    PipelineVariants opaquePipelines_{};
+    PipelineVariants transparentPipelines_{};
 
     std::array<InstanceSlot, 3> slots_;
     std::size_t slotIndex_ = 0;
@@ -2971,12 +3283,14 @@ private:
     struct SortedEntry {
         float distance = 0.0f;
         MeshHandle mesh = kUnitCubeMesh;
+        bool skinned = false;
         BoxInstance instance;
     };
     std::vector<SortedEntry> sorted_;
     /// Instance buram sebelum diurutkan menjadi ruas.
     struct GatherEntry {
         MeshHandle mesh = kUnitCubeMesh;
+        bool skinned = false;
         BoxInstance instance;
         bool caster = false;
     };
@@ -2994,7 +3308,15 @@ private:
     struct GpuMesh {
         rhi::DynamicBuffer vertices;
         rhi::DynamicBuffer indices;
+        /// Pengaruh skin, sejajar dengan `vertices`. Tidak dibuat sama sekali
+        /// untuk mesh tanpa rangka — 24 byte per vertex adalah harga yang tidak
+        /// ada gunanya dibayar mesh statis, dan mesh statis adalah hampir
+        /// seluruh isi adegan.
+        rhi::DynamicBuffer skin;
         uint32_t indexCount = 0;
+        /// Nol berarti mesh ini tidak punya rangka, jadi tidak pernah digambar
+        /// lewat pipeline ber-kulit.
+        uint32_t boneCount = 0;
         Vec3 boundsMin{-0.5f};
         Vec3 boundsMax{0.5f};
     };

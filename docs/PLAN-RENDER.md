@@ -766,10 +766,10 @@ Terukur di editor (RTX 2060, viewport 1277x696):
 | `forward-opaque` | 0,014 ms |
 | Galat validation layer | **0** |
 
-**Yang belum ada dari E8.4:** LOD dan meshoptimizer, GPU skinning, blend shape,
-material dan tekstur dari berkasnya, serta glTF — ufbx membaca FBX dan OBJ, dan
-`cgltf` masih menunggu. Indeks aset juga belum mencatat jumlah segitiga: itu
-menuntut medan baru di `ImportResult` beserta panel yang menampilkannya.
+**Yang belum ada dari E8.4:** LOD dan meshoptimizer, blend shape, impor klip
+animasi, material dan tekstur dari berkasnya, serta glTF — ufbx membaca FBX dan
+OBJ, dan `cgltf` masih menunggu. Indeks aset juga belum mencatat jumlah segitiga:
+itu menuntut medan baru di `ImportResult` beserta panel yang menampilkannya.
 
 **Selesai: impor rangka dan bobot skin dari FBX**
 (`Code/Assets/{include/Sim/Assets/MeshData.h,src/MeshImport.cpp}`). Diuji
@@ -808,9 +808,87 @@ Terukur juga: 65 bone, 55.320 segitiga, selisih terbesar jumlah bobot dari satu
 **0,000000**, nol indeks bone di luar batas. Rig-nya tidak ikut di repo, jadi
 ujinya berjalan hanya bila ditunjuk: `SIM_RIG_FBX=/path/rig.fbx ctest`.
 
-**Yang belum ada: GPU skinning.** Rangka dan bobotnya sudah ada di sisi CPU dan
-sudah diuji, tapi renderer belum mengunggah matriks kulit maupun menerapkannya
-di vertex shader — jadi karakter ber-rig masih digambar pada bind pose-nya.
+**Selesai: GPU skinning**
+(`Shaders/{skin_common,instance_common,box.vert,prepass.vert,shadow.vert}.slang`,
+`Code/Render/{include/Sim/Render/Types.h,src/VulkanRenderer.cpp}`,
+`Code/EditorFramework/src/SceneView.cpp`,
+`Code/Assets/{include/Sim/Assets/MeshData.h,src/MeshImport.cpp}`).
+
+Bobot skin sekarang diunggah sebagai vertex buffer kedua, palet matriks kulit
+sebagai storage buffer per frame, dan ketiga tahap vertex yang menggambar
+geometri — forward, prepass, bayangan — menerapkannya.
+
+- **Renderer tidak mengenal rangka sama sekali.** Yang menyeberang seam adalah
+  `ViewportScene::skinMatrices` — satu larik matriks kulit yang ditunjuk tiap
+  `MeshInstance` lewat `skinFirst`/`skinCount` — dan sebuah `boneCount` di
+  `MeshAsset` supaya pemanggilnya tahu sepanjang apa paletnya. Nama bone,
+  hierarki, dan bind pose tidak pernah lewat sini; kalau suatu saat perlu,
+  berarti ada seam yang bocor.
+- **Yang dikirim matriks kulit, bukan transform bone.** `global × invers bind`,
+  persis keluaran `Pose::ComputeSkinning`. Mengirim transform global saja berarti
+  setiap vertex harus dikembalikan ke ruang bind di dalam vertex shader: satu
+  inversi matriks per vertex per frame untuk hasil yang tidak berubah selama
+  rangkanya tidak berubah.
+- **Dua pipeline per pass, bukan satu dengan cabang runtime.** Yang membedakan
+  keduanya bukan hanya konstanta spesialisasi `kSkinned` melainkan juga stride
+  binding skin — dan stride adalah bagian dari pipeline, bukan sesuatu yang bisa
+  diganti per draw. Ruas gambar karena itu dikelompokkan per (mesh, berkulit),
+  dan pipeline diikat di dalam `DrawRuns`, bukan sekali di awal pass.
+- **Atribut skin ada di kedua varian, dan itu tuntutan Slang bukan pilihan.**
+  Daftar antarmuka `OpEntryPoint` terkunci di modul sebelum konstanta
+  spesialisasi dinilai — terbukti lewat `spirv-dis`: `boneIndices`,
+  `boneWeights`, dan `skinBase` tetap ada dengan `kSkinned` mati, begitu pula
+  descriptor `skinPalette`. Jalur statis karena itu memasang buffer pengaruh
+  tiruan **ber-stride nol**, satu elemen untuk mesh apa pun, dan tetap mengikat
+  set paletnya. Buffer sepanjang mesh untuk data yang tidak pernah dibaca adalah
+  24 byte per vertex yang dibayar seluruh adegan statis.
+- **Palet ada di set 1 pada forward dan set 0 pada bayangan.** Bukan
+  ketidakrapian: set 0 milik forward berisi peta bayangan, dan pass bayangan
+  sedang menulisinya — mengikat set itu di sana berarti satu image dipakai
+  sebagai lampiran sekaligus descriptor pada draw yang sama. `SKIN_SET` disebut
+  tiap shader supaya nomornya tetap satu tempat per pipeline layout.
+- **Bayangan ikut berkulit.** Bayangan yang tetap berdiri di bind pose sementara
+  karakternya bergerak adalah bayangan yang lepas dari pemiliknya — cacat yang
+  jauh lebih mencolok daripada tidak ada bayangan sama sekali. Prepass juga:
+  forward menguji depth dengan `EQUAL`, jadi prepass yang menaruh vertex di
+  tempat yang sedikit berbeda membuat karakternya lenyap seluruhnya.
+- **Rig di atas 65.535 bone ditolak, bukan dipotong.** Indeks bone-nya 16 bit,
+  dan yang membungkus diam-diam adalah kulit yang mengikuti tulang acak.
+- **Palet diunggah utuh, tidak dipadatkan ke instance yang lolos culling.**
+  Indeksnya menunjuk larik milik pemanggil, jadi memadatkannya berarti menomori
+  ulang seluruhnya — satu lintasan tambahan untuk menghemat penyalinan yang sudah
+  satu `memcpy`.
+
+**Palet yang dikirim editor masih satuan, yaitu bind pose** — matriks kulit
+adalah `global × invers bind`, dan pada bind pose keduanya saling meniadakan.
+Yang tergambar karena itu sama persis dengan sebelumnya, dan itu memang kriteria
+terimanya: **jalur berkulit pada bind pose harus tidak memindahkan apa pun.**
+Ia tetap dikirim setiap frame walaupun hasilnya sama dengan tidak dikirim —
+jalur yang tidak pernah dijalankan siapa pun adalah jalur yang cacatnya baru
+ditemukan pada hari klip pertama masuk. Yang menggantinya dengan pose sungguhan
+adalah impor klip FBX beserta yang menjalankannya.
+
+Diuji: palet satuan tidak menggeser titik mana pun; bobot mencampur **matriksnya**
+(dua bone berlawanan arah berbobot 0,25/0,75 menaruh titik pada 2,0 dari −4 dan
++4); rotasi 90° pada sumbu Y memindahkan (1,0,0) ke (0,0,−1) — arah yang salah
+kalau matriksnya tertranspose, dan panjangnya tetap sehingga tidak terlihat
+sebagai cacat melainkan sebagai animasi yang terbalik; indeks bone di luar palet
+jatuh ke matriks satuan alih-alih membaca memori orang lain. Dan rantai penuhnya
+di `SimAnimationTests`: `Pose::ComputeSkinning` pada rantai dua bone, bone anak
+diputar 90° pada Z, titik satu meter di atasnya mendarat tepat di (−1, 1, 0).
+
+Sisi editornya diuji lewat perender palsu yang hanya menjawab jumlah bone: dua
+karakter mendapat ruas palet yang berurutan dan tidak tumpang tindih — ruas yang
+bertumpuk adalah dua karakter yang memakai pose yang sama, dan itu terlihat
+sebagai kembar yang bergerak serempak, bukan sebagai galat — palet tidak menumpuk
+antar-frame, dan mesh tanpa rangka tidak menyita satu matriks pun.
+
+Terukur di editor (RTX 2060, rig Mixamo `Y Bot.fbx`): **65 bone, 55.320
+segitiga, 35.440 vertex**, dan ruasnya benar-benar diikat ke pipeline berkulit —
+diperiksa dengan pencatatan sementara di `DrawRuns`, karena bind pose yang benar
+terlihat sama persis dengan jalur berkulit yang tidak pernah dijalankan. Build
+Debug dengan `VK_LAYER_KHRONOS_validation` menyala: **nol galat dan nol
+peringatan validation layer** sepanjang jalannya.
 
 **Selesai: sistem task pose, mengikuti Esoterica**
 (`Code/Animation/{include/Sim/Animation/PoseTask.h,src/PoseTask.cpp}`, acuan

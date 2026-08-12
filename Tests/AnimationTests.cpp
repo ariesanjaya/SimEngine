@@ -8,6 +8,7 @@
 #include "Sim/Animation/Pose.h"
 #include "Sim/Animation/PoseTask.h"
 #include "Sim/Animation/Skeleton.h"
+#include "Sim/Assets/MeshData.h"
 
 #include <doctest/doctest.h>
 
@@ -165,6 +166,56 @@ TEST_CASE("Matriks invers bind membatalkan bind pose") {
             }
         }
     }
+}
+
+TEST_CASE("Pose menggerakkan kulit persis sejauh bone yang mengulitinya") {
+    // **Rantai penuhnya, dari pose sampai vertex.** `Pose::ComputeSkinning`
+    // menghasilkan palet, `assets::SkinPoint` menerapkannya — dan yang terakhir
+    // adalah acuan CPU untuk `skinMatrix` di `Shaders/skin_common.slang`. Yang
+    // diuji di sini karena itu bukan salah satunya melainkan bahwa keduanya
+    // bersambung: palet yang benar dengan penerapan yang salah, atau sebaliknya,
+    // sama-sama menghasilkan karakter yang cacat tanpa satu pun galat.
+    const Skeleton skeleton = MakeChain(2);  // Root di 0, Bone1 di y = 1.
+    Pose pose(skeleton);
+    std::vector<Mat4> palette;
+
+    // Bind pose: paletnya satuan, jadi vertex tidak boleh bergeser sedikit pun.
+    pose.ComputeSkinning(skeleton, palette);
+    REQUIRE(palette.size() == 2);
+
+    sim::assets::SkinInfluence toChild;
+    toChild.bones = {1, 0, 0, 0};
+    toChild.weights = {1.0f, 0.0f, 0.0f, 0.0f};
+    const Vec3 tip(0.0f, 2.0f, 0.0f);  // Satu meter di atas Bone1.
+    Vec3 skinned = sim::assets::SkinPoint(toChild, palette, tip);
+    CHECK(skinned.x == doctest::Approx(0.0f));
+    CHECK(skinned.y == doctest::Approx(2.0f));
+
+    // Bone1 diputar 90° pada sumbu Z. Ia berpusat di y = 1, jadi titik satu meter
+    // di atasnya harus mendarat satu meter di sebelah kirinya: (-1, 1, 0).
+    pose.Local(1).rotation = glm::angleAxis(glm::radians(90.0f), Vec3(0.0f, 0.0f, 1.0f));
+    pose.ComputeSkinning(skeleton, palette);
+    skinned = sim::assets::SkinPoint(toChild, palette, tip);
+    CHECK(skinned.x == doctest::Approx(-1.0f).epsilon(1e-4f));
+    CHECK(skinned.y == doctest::Approx(1.0f).epsilon(1e-4f));
+    CHECK(skinned.z == doctest::Approx(0.0f).epsilon(1e-4f));
+
+    // Vertex yang seluruhnya mengikuti Root tidak ikut bergerak — kalau ia ikut,
+    // yang salah adalah paletnya, bukan penerapannya.
+    sim::assets::SkinInfluence toRoot;
+    toRoot.bones = {0, 0, 0, 0};
+    toRoot.weights = {1.0f, 0.0f, 0.0f, 0.0f};
+    CHECK(sim::assets::SkinPoint(toRoot, palette, tip).y == doctest::Approx(2.0f));
+
+    // Setengah-setengah mendarat di antara keduanya. Angkanya bukan titik tengah
+    // busur — linear blend skinning memang menyusutkan sendi yang ditekuk, dan
+    // itu sifat metodenya, bukan cacat penerapannya.
+    sim::assets::SkinInfluence half;
+    half.bones = {0, 1, 0, 0};
+    half.weights = {0.5f, 0.5f, 0.0f, 0.0f};
+    const Vec3 middle = sim::assets::SkinPoint(half, palette, tip);
+    CHECK(middle.x == doctest::Approx(-0.5f).epsilon(1e-4f));
+    CHECK(middle.y == doctest::Approx(1.5f).epsilon(1e-4f));
 }
 
 TEST_CASE("Euler bolak-balik lewat kuaternion") {

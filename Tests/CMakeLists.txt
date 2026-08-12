@@ -74,7 +74,13 @@ sim_add_test(SimAnimationTests
     SOURCES
         AnimationTests.cpp
     DEPS
-        Sim::Animation)
+        Sim::Animation
+        # Kriteria "pose menggerakkan kulit" melintasi dua modul dengan sengaja:
+        # yang menghasilkan palet ada di Animation, yang menerapkannya — acuan
+        # CPU untuk vertex shader — ada di Assets. Menguji keduanya sendiri-
+        # sendiri tidak menangkap sambungannya, dan justru di sambungan itulah
+        # kesalahan skinning bersembunyi.
+        Sim::Assets)
 
 # Particle: model efek `.simfx`, kurva/gradient, dan simulasi CPU deterministik.
 sim_add_test(SimParticleTests

@@ -81,6 +81,7 @@ public:
 
 private:
     void AppendLight(const scene::LightComponent& light, const Mat4& matrix);
+    void AppendSkinPalette(uint32_t boneCount, render::MeshInstance& instance);
 
 public:
 
@@ -117,6 +118,9 @@ public:
 
 private:
     std::vector<render::MeshInstance> meshes_;
+    /// Palet kulit seluruh instance ber-skin, bersambung. Tiap `MeshInstance`
+    /// menunjuk ruasnya sendiri di sini.
+    std::vector<Mat4> skinMatrices_;
     std::vector<render::LineSegment> lines_;
     std::vector<render::LightInstance> lights_;
     std::vector<Pickable> pickables_;

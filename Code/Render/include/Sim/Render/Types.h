@@ -42,6 +42,14 @@ struct MeshAsset {
     Vec3 boundsMax{0.5f};
     /// False bila berkasnya gagal dimuat. Handle-nya lalu kubus satuan.
     bool loaded = false;
+    /// Jumlah bone rangka yang mengulit mesh ini, atau nol bila tidak ber-skin.
+    ///
+    /// **Sebuah angka, bukan rangkanya.** Header publik Render sengaja bebas
+    /// dari tipe modul lain — itu seam #1 di docs/ARCHITECTURE.md — dan yang
+    /// dibutuhkan pemanggil untuk mengirim pose hanyalah panjang paletnya. Nama
+    /// bone, hierarki, dan bind pose datang dari sisi aset, dari berkas yang
+    /// sama.
+    uint32_t boneCount = 0;
 };
 
 enum class DrawMode : uint8_t {
@@ -293,6 +301,21 @@ struct MeshInstance {
     MeshHandle mesh = kUnitCubeMesh;
     Vec3 boundsMin{-0.5f, -0.5f, -0.5f};
     Vec3 boundsMax{0.5f, 0.5f, 0.5f};
+
+    /// Ruas milik instance ini di dalam `ViewportScene::skinMatrices`.
+    ///
+    /// `skinCount` nol berarti instance ini digambar tanpa kulit — jalur yang
+    /// berlaku untuk seluruh mesh statis, dan juga untuk mesh ber-rig yang tidak
+    /// dipasok pose. Yang tergambar lalu adalah vertexnya apa adanya, yaitu
+    /// bind pose-nya.
+    ///
+    /// **Ruas ke dalam satu larik bersama, bukan span per instance.** Seluruh
+    /// pose satu frame diunggah sekali sebagai satu buffer; satu span per
+    /// instance berarti satu penyalinan per karakter per frame, dan renderer
+    /// yang menyusun ulang larik yang sudah bersebelahan di memori pemanggilnya.
+    uint32_t skinFirst = 0;
+    uint32_t skinCount = 0;
+
     Vec4 color{0.72f, 0.74f, 0.78f, 1.0f};
     bool selected = false;
     /// Ikut pass bayangan. Yang tidak menjatuhkan bayangan tetap digambar
@@ -356,6 +379,19 @@ struct LineSegment {
 /// tepat. Panel Viewport menggambarnya sendiri sebagai overlay 2D.
 struct ViewportScene {
     std::span<const MeshInstance> meshes;
+    /// Palet kulit seluruh instance ber-skin frame ini, bersambung.
+    ///
+    /// Isinya **matriks kulit — global × invers bind** — bukan transform bone,
+    /// yaitu persis yang dihasilkan `animation::Pose::ComputeSkinning`.
+    /// Mengirim transform global saja berarti setiap vertex harus dikembalikan
+    /// ke ruang bind di dalam vertex shader: satu inversi matriks per vertex per
+    /// frame untuk hasil yang tidak berubah selama rangkanya tidak berubah.
+    ///
+    /// Renderer tidak mengenal rangka mana pun; yang dibacanya hanya ruas yang
+    /// ditunjuk tiap `MeshInstance`. Ruas yang melewati ujung larik ini
+    /// menggambar instance-nya sebagai mesh statis, bukan sebagai kulit yang
+    /// membaca memori orang lain.
+    std::span<const Mat4> skinMatrices;
     std::span<const LineSegment> lines;
     /// Lampu punctual. Directional boleh ada di sini juga — renderer memakai
     /// yang pertama sebagai matahari dan mengabaikan sisanya, karena cascade

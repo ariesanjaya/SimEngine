@@ -129,6 +129,32 @@ void SkinInfluence::Normalize() {
     }
 }
 
+Mat4 SkinMatrix(const SkinInfluence& influence, std::span<const Mat4> palette) {
+    // **Matriksnya yang dijumlahkan, bukan titik hasilnya.** Keduanya sama
+    // secara matematis — transform linear atas jumlah berbobot — tapi yang ini
+    // satu perkalian matriks-vektor untuk posisi dan satu lagi untuk normal,
+    // bukan empat masing-masing. Shader melakukannya persis begini.
+    Mat4 skin(0.0f);
+    for (int i = 0; i < kMaxInfluences; ++i) {
+        const std::size_t bone = influence.bones[static_cast<std::size_t>(i)];
+        if (bone >= palette.size()) {
+            skin += Mat4(1.0f) * influence.weights[static_cast<std::size_t>(i)];
+            continue;
+        }
+        skin += palette[bone] * influence.weights[static_cast<std::size_t>(i)];
+    }
+    return skin;
+}
+
+Vec3 SkinPoint(const SkinInfluence& influence, std::span<const Mat4> palette, const Vec3& point) {
+    return Vec3(SkinMatrix(influence, palette) * Vec4(point, 1.0f));
+}
+
+Vec3 SkinDirection(const SkinInfluence& influence, std::span<const Mat4> palette,
+                   const Vec3& direction) {
+    return Mat3(SkinMatrix(influence, palette)) * direction;
+}
+
 int SkeletonData::Find(std::string_view name) const {
     for (std::size_t i = 0; i < bones.size(); ++i) {
         if (bones[i].name == name) {

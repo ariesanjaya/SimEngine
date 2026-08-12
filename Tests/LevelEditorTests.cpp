@@ -1,5 +1,6 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 
+#include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Editor/Command.h"
 #include "Sim/Editor/EditorContext.h"
 #include "Sim/Editor/Gizmo.h"
@@ -12,7 +13,10 @@
 
 #include <doctest/doctest.h>
 
+#include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -547,4 +551,134 @@ TEST_CASE("Warna, intensitas, dan bendera bayangan lampu sampai ke renderer") {
     CHECK(scene.lights[0].color.g == doctest::Approx(0.5f));
     CHECK(scene.lights[0].intensity == doctest::Approx(3.0f));
     CHECK(scene.lights[0].castShadows == false);
+}
+
+// --- palet kulit ---------------------------------------------------------------
+
+namespace {
+
+/// Perender palsu yang hanya menjawab pertanyaan "berapa bone mesh ini".
+///
+/// **Palsu, bukan `StubRenderer`.** Yang diuji di sini adalah sisi editor dari
+/// seam skinning — apakah `SceneView` menyusun palet dan menunjuknya dengan
+/// benar — dan itu menuntut sebuah `AcquireMesh` yang bisa dibuat menjawab apa
+/// saja. Perender sungguhan menuntut GPU; `StubRenderer` selalu menjawab nol.
+class BoneCountRenderer final : public render::IViewportRenderer {
+public:
+    explicit BoneCountRenderer(uint32_t boneCount) : boneCount_(boneCount) {}
+
+    render::MeshAsset AcquireMesh(std::string_view) override {
+        render::MeshAsset asset;
+        asset.handle = 1;
+        asset.loaded = true;
+        asset.boneCount = boneCount_;
+        return asset;
+    }
+
+    void Resize(uint32_t, uint32_t) override {}
+    void Render(const render::ViewportDesc&, const render::ViewportScene&) override {}
+    render::TextureHandle ColorTarget() const override { return render::kInvalidTexture; }
+    Vec2 ColorTargetUvMax() const override { return Vec2(1.0f); }
+    uint32_t Width() const override { return 1; }
+    uint32_t Height() const override { return 1; }
+    const char* Name() const override { return "BoneCountRenderer"; }
+
+private:
+    uint32_t boneCount_ = 0;
+};
+
+/// Folder aset sementara berisi satu berkas mesh, beserta database-nya.
+struct MeshFixture {
+    MeshFixture() {
+        static std::atomic<int> counter{0};
+        root = std::filesystem::temp_directory_path() /
+               ("simskin_" + std::to_string(counter.fetch_add(1)) + "_" +
+                std::to_string(::getpid()));
+        std::filesystem::create_directories(root);
+        std::ofstream(root / "rig.fbx") << "bukan fbx sungguhan";
+        database.Initialize({root, nullptr, 1.0f});
+    }
+    ~MeshFixture() {
+        std::error_code error;
+        std::filesystem::remove_all(root, error);
+    }
+    MeshFixture(const MeshFixture&) = delete;
+    MeshFixture& operator=(const MeshFixture&) = delete;
+
+    /// GUID berkas mesh-nya, atau tidak sah kalau pemindaian gagal.
+    Uuid Guid() const {
+        const assets::AssetRecord* record = database.FindByRelativePath("rig.fbx");
+        return record != nullptr ? record->guid : Uuid{};
+    }
+
+    std::filesystem::path root;
+    assets::AssetDatabase database;
+};
+
+scene::Entity MakeSkinnedMesh(scene::World& world, const char* name, const Uuid& mesh) {
+    const scene::Entity entity = world.Create(name);
+    scene::MeshRendererComponent renderer;
+    renderer.mesh = AssetRef{mesh};
+    world.Add<scene::MeshRendererComponent>(entity, renderer);
+    return entity;
+}
+
+}  // namespace
+
+TEST_CASE("Tiap karakter mendapat ruas paletnya sendiri, berurutan tanpa tumpang tindih") {
+    MeshFixture fixture;
+    const Uuid mesh = fixture.Guid();
+    REQUIRE(mesh.IsValid());
+
+    scene::World world;
+    Selection selection;
+    MakeSkinnedMesh(world, "Hero", mesh);
+    MakeSkinnedMesh(world, "Villain", mesh);
+
+    // Tiga bone, dua karakter. **Ruas yang tumpang tindih adalah dua karakter
+    // yang memakai pose yang sama**, dan itu terlihat sebagai kembar yang
+    // bergerak serempak — bukan sebagai galat.
+    BoneCountRenderer renderer(3);
+    SceneView view;
+    view.Build(world, selection, &fixture.database, &renderer);
+    const render::ViewportScene scene = view.Scene();
+
+    REQUIRE(scene.meshes.size() == 2);
+    CHECK(scene.skinMatrices.size() == 6);
+    CHECK(scene.meshes[0].skinCount == 3);
+    CHECK(scene.meshes[1].skinCount == 3);
+    CHECK(scene.meshes[0].skinFirst != scene.meshes[1].skinFirst);
+    for (const render::MeshInstance& instance : scene.meshes) {
+        CHECK(instance.skinFirst + instance.skinCount <= scene.skinMatrices.size());
+    }
+
+    // Isinya bind pose, yaitu matriks satuan: matriks kulit adalah
+    // `global × invers bind`, dan pada bind pose keduanya saling meniadakan.
+    for (const Mat4& matrix : scene.skinMatrices) {
+        CHECK(matrix == Mat4(1.0f));
+    }
+
+    // Dibangun ulang tiap frame, jadi paletnya tidak boleh menumpuk.
+    view.Build(world, selection, &fixture.database, &renderer);
+    CHECK(view.Scene().skinMatrices.size() == 6);
+}
+
+TEST_CASE("Mesh tanpa rangka tidak menyita satu matriks pun") {
+    MeshFixture fixture;
+    const Uuid mesh = fixture.Guid();
+    REQUIRE(mesh.IsValid());
+
+    scene::World world;
+    Selection selection;
+    MakeSkinnedMesh(world, "Batu", mesh);
+
+    BoneCountRenderer renderer(0);
+    SceneView view;
+    view.Build(world, selection, &fixture.database, &renderer);
+    const render::ViewportScene scene = view.Scene();
+
+    REQUIRE(scene.meshes.size() == 1);
+    CHECK(scene.skinMatrices.empty());
+    // Nol berarti "digambar tanpa kulit", dan itulah jalur seluruh adegan statis.
+    CHECK(scene.meshes[0].skinCount == 0);
 }

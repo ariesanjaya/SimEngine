@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -34,6 +35,13 @@ struct MeshVertex {
 inline constexpr int kMaxInfluences = 4;
 
 /// Pengaruh skinning satu vertex.
+///
+/// **Tata letaknya ABI dengan atribut skin di `Shaders/instance_common.slang`.**
+/// Struct ini diunggah apa adanya sebagai vertex buffer kedua — `bones` menjadi
+/// `R16G16B16A16_UINT` pada lokasi 8, `weights` menjadi `R32G32B32A32_SFLOAT`
+/// pada lokasi 9. Menyisipkan medan di antaranya menggeser bobot menjadi indeks
+/// dan sebaliknya, dan yang terlihat bukan galat melainkan kulit yang mengikuti
+/// bone yang salah.
 struct SkinInfluence {
     std::array<uint16_t, kMaxInfluences> bones{};
     std::array<float, kMaxInfluences> weights{};
@@ -48,6 +56,32 @@ struct SkinInfluence {
     /// Membuang yang terlemah bila lebih dari empat, lalu menormalkan sisanya.
     void Normalize();
 };
+
+/// Jumlah berbobot keempat matriks kulit sebuah vertex.
+///
+/// **Acuan CPU untuk yang dijalankan vertex shader.** `skinMatrix` di
+/// `Shaders/skin_common.slang` menghitung hal yang sama persis, dan keduanya
+/// diuji terhadap pose yang sama — rumus yang berselisih di antara keduanya
+/// muncul sebagai kulit yang benar di satu tempat dan salah di tempat lain,
+/// tanpa satu pun galat.
+///
+/// Indeks bone di luar `palette` diperlakukan sebagai matriks satuan. Shader
+/// tidak memeriksanya — memeriksa batas di lingkaran terdalam adalah ongkos yang
+/// dibayar setiap vertex setiap frame untuk keadaan yang dijaga importir — jadi
+/// yang di sini adalah jaring pengaman untuk ujinya, bukan perilaku yang ditiru.
+Mat4 SkinMatrix(const SkinInfluence& influence, std::span<const Mat4> palette);
+
+/// Titik ruang bind yang sudah diulit. Sama dengan `skinPosition` di shader.
+Vec3 SkinPoint(const SkinInfluence& influence, std::span<const Mat4> palette, const Vec3& point);
+
+/// Arah (normal, tangent) yang sudah diulit: bagian 3x3 matriks kulit saja.
+///
+/// Benar untuk bone rotasi + translasi + skala seragam; skala tak seragam
+/// menuntut invers transpose. Hasilnya **tidak** dinormalkan — shader
+/// menormalkannya sesudah transform instance, dan menormalkan dua kali bukan
+/// hal yang sama dengan menormalkan sekali di ujung.
+Vec3 SkinDirection(const SkinInfluence& influence, std::span<const Mat4> palette,
+                   const Vec3& direction);
 
 /// Satu bone hasil impor: nama, induk, dan transform bind terhadap induknya.
 struct SkeletonBone {

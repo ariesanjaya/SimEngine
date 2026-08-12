@@ -10,7 +10,13 @@
 // dan yang membuat validation layer tidak mengeluh soal shader yang menulis ke
 // lampiran warna yang tidak dipasang.
 
-#include "instance_common.slang"
+// **Set 0, bukan set 1 seperti pass forward.** Pass ini sedang menulis peta
+// bayangan yang ada di dalam set 0 milik forward, jadi ia tidak boleh mengikat
+// set itu sama sekali — layout-nya karena itu hanya berisi palet kulit, dan
+// palet itu jatuh ke nomor nol.
+#define SKIN_SET 0
+
+#include "skin_common.slang"
 
 struct ShadowPush {
     float4x4 lightViewProj;
@@ -20,6 +26,10 @@ struct ShadowPush {
 
 [shader("vertex")]
 float4 main(BoxVertex vertex) : SV_Position {
+    // Kulit ikut di sini, dan itu wajib bukan tambahan: bayangan yang tetap
+    // berdiri di bind pose sementara karakternya bergerak adalah bayangan yang
+    // lepas dari pemiliknya — cacat yang jauh lebih mencolok daripada tidak ada
+    // bayangan sama sekali.
     float4x4 model = instanceModel(vertex);
-    return mul(push.lightViewProj, mul(model, float4(vertex.position, 1.0)));
+    return mul(push.lightViewProj, mul(model, float4(skinPosition(vertex), 1.0)));
 }
