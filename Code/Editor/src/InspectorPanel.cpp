@@ -1,3 +1,6 @@
+#include "Sim/Assets/AssetDatabase.h"
+#include "Sim/Assets/MeshData.h"
+#include "Sim/Assets/MeshSettings.h"
 #include "Sim/Editor/Command.h"
 #include "Sim/Editor/Icons.h"
 #include "Sim/Editor/Panel.h"
@@ -218,6 +221,10 @@ private:
                 result.edited = result.edited || exposed.edited;
                 result.finished = result.finished || exposed.finished;
 
+                if (ops.type->name == "MeshRenderer") {
+                    result.edited = ApplyMeshDefaults(context, primary, data) || result.edited;
+                }
+
                 if (result.edited && context.history != nullptr) {
                     ApplyEdit(context, world, ops, items, data);
                 }
@@ -361,6 +368,9 @@ private:
     }
 
     std::unordered_map<Uuid, std::vector<scene::ScriptProperty>> declarations_;
+    /// Aset mesh yang terakhir terlihat per entity. Inilah yang membedakan
+    /// "baru saja dipasang" dari "sudah begitu sejak tadi".
+    std::unordered_map<scene::Entity, Uuid> lastMesh_;
     uint64_t declarationVersion_ = 0;
 #endif
 
@@ -380,6 +390,102 @@ private:
     }
 
     /// Meneruskan suntingan pada objek utama ke seluruh seleksi.
+    /// Mengisi slot yang masih kosong dari bawaan aset mesh-nya, dan menggambar
+    /// tombol reset.
+    ///
+    /// **Hanya slot kosong, dan hanya saat aset mesh-nya berganti.** Mengisinya
+    /// tiap frame akan mengembalikan slot yang baru saja sengaja dikosongkan
+    /// orang; menimpanya berarti memilih mesh menghapus penyetelan yang sudah
+    /// dilakukan. Yang menimpa hanyalah tombol reset, karena menimpa adalah
+    /// keputusan yang harus diminta.
+    ///
+    /// Mengembalikan true bila komponennya berubah — jalur suntingan biasa lalu
+    /// yang mengubahnya menjadi satu command yang bisa di-undo, bukan mutasi
+    /// diam-diam yang tidak bisa ditarik balik.
+    bool ApplyMeshDefaults(EditorContext& context, scene::Entity entity, void* data) {
+        auto& renderer = *static_cast<scene::MeshRendererComponent*>(data);
+        if (context.assets == nullptr) {
+            return false;
+        }
+
+        const Uuid previous = lastMesh_.count(entity) != 0 ? lastMesh_[entity] : Uuid{};
+        const bool changed = previous != renderer.mesh.guid;
+        lastMesh_[entity] = renderer.mesh.guid;
+
+        bool reset = false;
+        if (renderer.mesh.IsValid()) {
+            ImGui::Spacing();
+            if (ImGui::Button("Reset ke bawaan mesh")) {
+                reset = true;
+            }
+            ImGui::SameLine();
+            ImGui::TextDisabled("dari Mesh Editor");
+        }
+
+        // Aset mesh yang baru dipasang mengisi slot kosong; tombolnya menimpa
+        // seluruhnya. Selain kedua saat itu, tidak ada yang disentuh.
+        if (!reset && !changed) {
+            return false;
+        }
+        if (!renderer.mesh.IsValid()) {
+            return false;
+        }
+
+        const assets::AssetRecord* record = context.assets->Find(renderer.mesh.guid);
+        if (record == nullptr) {
+            return false;
+        }
+        const std::filesystem::path meshPath = context.assets->AbsolutePath(*record);
+        assets::MeshSettings settings;
+        if (!assets::LoadMeshSettings(settings, meshPath)) {
+            return false;
+        }
+
+        // Nama material per ruas hanya ada di berkas mesh-nya, jadi ia diurai di
+        // sini — sekali, saat aset berganti atau reset ditekan, bukan tiap frame.
+        std::string error;
+        const assets::MeshData mesh = assets::LoadMesh(meshPath, error);
+        if (!mesh.IsValid()) {
+            return false;
+        }
+
+        bool touched = false;
+        if (renderer.materials.size() < mesh.parts.size()) {
+            renderer.materials.resize(mesh.parts.size());
+            touched = true;
+        }
+        for (std::size_t part = 0; part < mesh.parts.size(); ++part) {
+            const int material = mesh.parts[part].material;
+            if (material < 0 || static_cast<std::size_t>(material) >= mesh.materials.size()) {
+                continue;
+            }
+            const Uuid preferred =
+                settings.MaterialFor(mesh.materials[static_cast<std::size_t>(material)].name);
+            if (!preferred.IsValid()) {
+                continue;
+            }
+            if (reset || !renderer.materials[part].IsValid()) {
+                renderer.materials[part] = AssetRef{preferred};
+                touched = true;
+            }
+        }
+
+        // Nilai bawaan komponennya hanya diisi saat reset, atau saat yang ada
+        // masih persis nilai awalnya — itu arti "slot kosong" untuk sebuah
+        // angka yang tidak punya keadaan kosong.
+        if (reset || renderer.lodBias == 0.0f) {
+            touched = touched || renderer.lodBias != settings.lodBias;
+            renderer.lodBias = settings.lodBias;
+        }
+        if (reset || (renderer.castShadows && renderer.receiveShadows)) {
+            touched = touched || renderer.castShadows != settings.castShadows ||
+                      renderer.receiveShadows != settings.receiveShadows;
+            renderer.castShadows = settings.castShadows;
+            renderer.receiveShadows = settings.receiveShadows;
+        }
+        return touched;
+    }
+
     void ApplyEdit(EditorContext& context, scene::World& world, const scene::ComponentOps& ops,
                    std::vector<SetComponentsCommand::Item>& items, void* primaryData) {
         const std::string after = scene::SerializeComponent(*ops.type, primaryData);
