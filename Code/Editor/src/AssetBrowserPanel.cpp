@@ -146,6 +146,7 @@ public:
             ImGui::EndChild();
         }
 
+        DrawCreatePrompt(context, *db);
         DrawDeletePrompt(context, *db);
         // Dijalankan setelah seluruh pohon digambar: memindahkan berkas memicu
         // pemindaian ulang yang mengganti daftar folder yang sedang ditelusuri.
@@ -153,6 +154,9 @@ public:
     }
 
 private:
+    /// Jenis aset yang sedang dinamai. `None` berarti tidak ada prompt terbuka.
+    enum class CreateKind { None, Folder, Material };
+
     /// Sakelar Project / Built-in. Digambar lebih dulu supaya ia tidak ikut
     /// menyusut bersama bilah alat di panel sempit: mengetahui pustaka mana yang
     /// sedang dilihat lebih penting daripada penyaring tipe, karena aksi yang
@@ -294,10 +298,10 @@ private:
         // hilang pada pemasangan berikutnya.
         ImGui::BeginDisabled(browsingBuiltin_ || dialogOpen_);
         if (ImGui::MenuItem("Folder baru")) {
-            CreateFolder(context, db, folder);
+            BeginCreate(CreateKind::Folder, folder);
         }
         if (ImGui::MenuItem("Material baru")) {
-            CreateMaterial(context, db, folder);
+            BeginCreate(CreateKind::Material, folder);
         }
         if (ImGui::MenuItem("Import aset...")) {
             ImportAssets(context, db, folder);
@@ -317,55 +321,108 @@ private:
         ImGui::EndPopup();
     }
 
-    /// Membuat folder baru di dalam `parent` (relatif terhadap akar aset).
+    /// Membuka prompt nama. Berkasnya belum dibuat di sini.
     ///
-    /// **Namanya dibuat unik, bukan ditanyakan lewat dialog.** Folder yang lahir
-    /// langsung dan bisa diganti nama di tempat lebih cepat daripada dialog yang
-    /// harus diisi sebelum apa pun terjadi — dan mengganti namanya sudah ada
-    /// jalurnya lewat sistem berkas.
-    void CreateFolder(EditorContext& context, assets::AssetDatabase& db,
-                      const std::string& parent) {
+    /// **Nama dulu, berkas belakangan.** Aset yang lahir dengan nama bawaan lalu
+    /// menunggu diganti nama meninggalkan "New Folder 3" di mana-mana setiap kali
+    /// seseorang berubah pikiran di tengah jalan — dan berkas yang terlanjur ada
+    /// adalah sampah yang harus dibersihkan sendiri, bukan sesuatu yang batal
+    /// dengan menekan Escape.
+    void BeginCreate(CreateKind kind, const std::string& folder) {
+        createKind_ = kind;
+        createFolder_ = folder;
+        createName_ = kind == CreateKind::Folder ? "New Folder" : "NewMaterial";
+        createError_.clear();
+        createFocus_ = true;
+    }
+
+    static std::string TrimName(const std::string& text) {
+        const std::size_t first = text.find_first_not_of(" \t");
+        if (first == std::string::npos) {
+            return {};
+        }
+        return text.substr(first, text.find_last_not_of(" \t") - first + 1);
+    }
+
+    /// Menolak nama yang tidak bisa menjadi satu entri di dalam foldernya.
+    ///
+    /// **Ditolak dengan alasannya, bukan dibersihkan diam-diam.** Nama yang
+    /// mengandung "/" adalah orang yang sedang mengetik jalur; membuang bagian
+    /// depannya tanpa berkata apa-apa membuat berkasnya muncul di folder yang
+    /// tidak ia maksud, dan ".." membuatnya muncul di luar folder aset sama
+    /// sekali.
+    bool ValidateName(const std::string& name) {
+        if (name.find('/') != std::string::npos || name.find('\\') != std::string::npos) {
+            createError_ = "The name cannot contain a path.";
+            return false;
+        }
+        if (name == "." || name == "..") {
+            createError_ = "That name is reserved.";
+            return false;
+        }
+        return true;
+    }
+
+    /// Membuat folder bernama `name` di dalam `parent` (relatif terhadap akar
+    /// aset). False berarti promptnya tetap terbuka dengan `createError_` terisi.
+    bool CreateFolder(EditorContext& context, assets::AssetDatabase& db,
+                      const std::string& parent, const std::string& name) {
+        if (!ValidateName(name)) {
+            return false;
+        }
         const std::filesystem::path base =
             parent.empty() ? db.Root() : db.Root() / std::filesystem::path(parent);
-        std::filesystem::path target = base / "New Folder";
-        int suffix = 1;
+        const std::filesystem::path target = base / name;
         std::error_code error;
-        while (std::filesystem::exists(target, error)) {
-            target = base / ("New Folder " + std::to_string(++suffix));
+        if (std::filesystem::exists(target, error)) {
+            createError_ = "\"" + name + "\" already exists here.";
+            return false;
         }
         std::filesystem::create_directories(target, error);
         if (error) {
-            context.notifications->Error("Cannot create the folder: " + error.message());
-            return;
+            createError_ = "Cannot create the folder: " + error.message();
+            return false;
         }
         // Pemindaian dipaksa selesai supaya foldernya langsung terlihat.
         // Menunggu pemindaian latar berarti aksi yang tampak tidak melakukan
         // apa pun.
         db.ScanNow();
-        currentFolder_ = parent.empty()
-                             ? target.filename().string()
-                             : parent + "/" + target.filename().string();
-        context.notifications->Success("Folder " + target.filename().string() + " dibuat");
+        currentFolder_ = parent.empty() ? name : parent + "/" + name;
+        context.notifications->Success("Folder " + name + " created");
+        return true;
     }
 
-    /// Membuat material kosong di dalam `folder`.
+    /// Membuat material kosong bernama `name` di dalam `folder`.
     ///
     /// **Di folder tempat orang mengklik kanan, bukan selalu di `Materials/`.**
     /// Material Editor membuat miliknya di folder tetap karena ia tidak punya
     /// gagasan "folder yang sedang dibuka"; panel ini punya, dan menaruh berkas
     /// di tempat lain daripada yang ditunjuk orang adalah cara tercepat membuat
     /// orang kehilangan berkasnya sendiri.
-    void CreateMaterial(EditorContext& context, assets::AssetDatabase& db,
-                        const std::string& folder) {
+    bool CreateMaterial(EditorContext& context, assets::AssetDatabase& db,
+                        const std::string& folder, const std::string& name) {
+        if (!ValidateName(name)) {
+            return false;
+        }
         const std::filesystem::path base =
             folder.empty() ? db.Root() : db.Root() / std::filesystem::path(folder);
         std::error_code error;
         std::filesystem::create_directories(base, error);
 
-        std::filesystem::path path = base / "NewMaterial.simmat";
-        int suffix = 0;
-        while (std::filesystem::exists(path, error)) {
-            path = base / ("NewMaterial" + std::to_string(++suffix) + ".simmat");
+        // Ekstensinya ditambahkan hanya kalau belum diketik: yang mengetik
+        // "Batu.simmat" tidak sedang meminta "Batu.simmat.simmat".
+        const std::string extension = ".simmat";
+        std::string fileName = name;
+        if (fileName.size() < extension.size() ||
+            fileName.compare(fileName.size() - extension.size(), extension.size(), extension) !=
+                0) {
+            fileName += extension;
+        }
+
+        const std::filesystem::path path = base / fileName;
+        if (std::filesystem::exists(path, error)) {
+            createError_ = "\"" + fileName + "\" already exists here.";
+            return false;
         }
 
         // Satu simpul keluaran permukaan, sama dengan yang dibuat Material
@@ -379,16 +436,89 @@ private:
         graph.nodes.push_back(std::move(output));
 
         if (!material::SaveMaterialToFile(graph, path).ok) {
-            context.notifications->Error("Tidak bisa membuat " + path.filename().string());
-            return;
+            createError_ = "Cannot write " + fileName;
+            return false;
         }
         db.ScanNow();
         if (const assets::AssetRecord* record = db.FindByRelativePath(
-                folder.empty() ? path.filename().string()
-                               : folder + "/" + path.filename().string())) {
+                folder.empty() ? fileName : folder + "/" + fileName)) {
             selected_ = record->guid;
         }
-        context.notifications->Success(path.filename().string() + " dibuat");
+        context.notifications->Success(fileName + " created");
+        return true;
+    }
+
+    /// Prompt nama untuk aset baru. Menyusul `DrawDeletePrompt`: keduanya modal
+    /// di lingkup panel, bukan di dalam child mana pun, supaya ID popup-nya tidak
+    /// ikut berpindah bersama isi yang sedang digambar.
+    void DrawCreatePrompt(EditorContext& context, assets::AssetDatabase& db) {
+        if (createKind_ == CreateKind::None) {
+            return;
+        }
+        const bool folderMode = createKind_ == CreateKind::Folder;
+        const char* title = folderMode ? "New folder" : "New material";
+        if (!ImGui::IsPopupOpen(title)) {
+            ImGui::OpenPopup(title);
+        }
+
+        const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+        ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        if (!ImGui::BeginPopupModal(title, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            return;
+        }
+
+        ImGui::TextDisabled("in %s", createFolder_.empty() ? "Assets" : createFolder_.c_str());
+        ImGui::Spacing();
+
+        // Fokus diarahkan ke kotaknya sekali saat prompt muncul. Prompt yang
+        // meminta nama tapi menunggu satu klik lagi sebelum bisa diketik adalah
+        // langkah tambahan yang tidak menghasilkan apa pun.
+        if (createFocus_) {
+            ImGui::SetKeyboardFocusHere();
+            createFocus_ = false;
+        }
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18.0f);
+        const bool submitted =
+            ImGui::InputText("##createname", &createName_,
+                             ImGuiInputTextFlags_EnterReturnsTrue |
+                                 ImGuiInputTextFlags_AutoSelectAll);
+        if (!folderMode) {
+            ImGui::SameLine();
+            ImGui::TextDisabled(".simmat");
+        }
+        if (!createError_.empty()) {
+            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.40f, 1.0f));
+            ImGui::TextUnformatted(createError_.c_str());
+            ImGui::PopStyleColor();
+        }
+
+        ImGui::Spacing();
+        const std::string name = TrimName(createName_);
+        ImGui::BeginDisabled(name.empty());
+        const bool confirm =
+            ImGui::Button("Create", ImVec2(120.0f, 0.0f)) || (submitted && !name.empty());
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        const bool cancel =
+            ImGui::Button("Cancel", ImVec2(120.0f, 0.0f)) || ImGui::IsKeyPressed(ImGuiKey_Escape);
+
+        if (confirm) {
+            createError_.clear();
+            const bool created = folderMode ? CreateFolder(context, db, createFolder_, name)
+                                            : CreateMaterial(context, db, createFolder_, name);
+            // Yang gagal membiarkan promptnya terbuka bersama pesannya. Menutupnya
+            // berarti seluruh langkahnya harus diulang untuk memperbaiki satu huruf.
+            if (created) {
+                createKind_ = CreateKind::None;
+                ImGui::CloseCurrentPopup();
+            } else {
+                createFocus_ = true;
+            }
+        } else if (cancel) {
+            createKind_ = CreateKind::None;
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
     }
 
     /// Menyalin berkas yang dipilih pengguna ke dalam sebuah folder aset.
@@ -507,10 +637,10 @@ private:
         ImGui::Separator();
         ImGui::BeginDisabled(browsingBuiltin_ || dialogOpen_);
         if (ImGui::MenuItem("Folder baru")) {
-            CreateFolder(context, db, currentFolder_);
+            BeginCreate(CreateKind::Folder, currentFolder_);
         }
         if (ImGui::MenuItem("Material baru")) {
-            CreateMaterial(context, db, currentFolder_);
+            BeginCreate(CreateKind::Material, currentFolder_);
         }
         if (ImGui::MenuItem("Import aset...")) {
             ImportAssets(context, db, currentFolder_);
@@ -1065,6 +1195,14 @@ private:
     std::string search_;
     std::string currentFolder_;
     std::string renameBuffer_;
+
+    CreateKind createKind_ = CreateKind::None;
+    /// Folder tujuan, dibekukan saat prompt dibuka: orang bisa berpindah folder
+    /// di balik prompt, dan berkasnya harus tetap lahir di tempat yang ditunjuk.
+    std::string createFolder_;
+    std::string createName_;
+    std::string createError_;
+    bool createFocus_ = false;
     std::vector<std::string> favourites_;
     std::vector<Uuid> deleteUsers_;
     /// Pemakai di luar indeks aset, sudah berbentuk teks siap tampil.
