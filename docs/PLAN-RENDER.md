@@ -784,11 +784,47 @@ mendarat (lihat di bawah); yang tersisa dua, dan yang kedua besar.
    sama sekali. `box.frag` sekarang hanya `input.color.rgb` dikali cahaya — tidak
    ada roughness, tidak ada metalness, tidak ada tekstur — jadi material yang
    diimpor tidak punya tempat untuk diperlihatkan selain warna dasarnya.
-   Mesinnya sudah ada dan berjalan di `VulkanMaterialPreview`: modul dirakit
-   `AssembleMaterialModule`, dikompilasi lewat `ShaderCache`, parameternya di
-   satu blok uniform dan teksturnya di set 2. Yang belum ada adalah mengangkatnya
-   ke pass forward — pipeline per material, pengelompokan draw per material, dan
-   unggahan tekstur yang dimiliki renderer.
+
+**Yang bagus, dan yang harus diperiksa sebelum mulai.** Seam-nya sudah benar:
+`IMaterialPreview::SetMaterial` menerima **SPIR-V mentah** beserta ukuran blok
+parameter dan jumlah teksturnya, jadi yang merakit dan mengompilasi material
+adalah editor, dan `Sim::Render` tidak pernah mengenal `Sim::Material` sama
+sekali. Pass forward bisa memakai bentuk yang sama persis.
+
+Yang **tidak** bisa diangkat begitu saja adalah sisanya — dan ini yang membuat
+pekerjaannya jauh lebih besar daripada "pindahkan preview ke pass forward".
+Modul material dan pipeline kotak tidak sepakat pada tiga hal sekaligus:
+
+| | modul material | `box.vert` sekarang |
+| --- | --- | --- |
+| Atribut vertex | 0 posisi, 1 normal, **2 tangent**, 3 uv0, 4 warna, 5–6 skin | 0 posisi, 1 normal, 2–5 kolom matriks, 6 warna, 7 bendera, 8–10 skin |
+| Transform instance | storage buffer, set 0 binding 2 | atribut vertex ber-rate instance |
+| Matriks kulit | set 0 binding 1 | set 1 (forward) / set 0 (bayangan) |
+
+Tiga akibatnya, berurutan dari yang paling menentukan:
+
+- **`MeshVertex` belum punya tangent sama sekali** — sekarang hanya posisi,
+  normal, dan uv. Peta normal tidak berarti apa-apa tanpanya, jadi tangent harus
+  dibangkitkan saat impor (dan disatukan dengan benar pada seam UV, yang punya
+  jebakannya sendiri).
+- **Set 0 milik modul material bukan set 0 milik renderer.** Modul menulis
+  `FrameParams` sendiri — viewProj, kamera, satu arah cahaya, SH probe — sementara
+  set 0 renderer memuat 21 binding: cascade bayangan, daftar cluster lampu, atlas
+  spot/point, clipmap SDF, dan seluruh tekstur GI. Selama modul memakai
+  `FrameParams`-nya sendiri, material **tidak punya akses ke bayangan, cluster
+  lampu, maupun GI** — jadi mengganti `box.frag` dengannya bukan peningkatan
+  melainkan kemunduran. Yang harus diputuskan lebih dulu: apakah `FrameParams`
+  modul diperluas menjadi set 0 renderer seutuhnya (dan `AssembleMaterialModule`
+  ikut menuliskan seluruh binding itu), atau material mendapat set keempat.
+- **Transform instance pindah dari atribut ke storage buffer**, yang menyentuh
+  `Gather`, buffer instance, dan keempat pipeline yang sudah ada.
+
+**Karena itu ini bukan pekerjaan satu duduk, dan tidak boleh dimulai separuh:**
+selama pass forward setengah bermigrasi, viewport tidak menggambar apa-apa.
+Urutan yang masuk akal: putuskan bentuk set 0 lebih dulu → tangent di importir →
+transform instance lewat storage buffer (pipeline kotak masih dipakai, jadi bisa
+diuji sendiri) → baru pipeline material di pass forward, dengan `box.frag`
+dipertahankan sebagai jalur mundur sampai yang baru terbukti.
 
 **Satu keputusan yang menunggu, dan sebaiknya diambil sebelum nomor 1:** apa yang
 terjadi pada `MeshRendererComponent::baseColor` begitu berkasnya membawa material
