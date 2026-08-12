@@ -323,6 +323,119 @@ SkeletonData LoadSkeleton(const std::filesystem::path& path, std::string& error)
     return skeleton;
 }
 
+/// Menyusun ulang indeks supaya segitiga bermaterial sama bersebelahan, lalu
+/// mencatat ruasnya.
+///
+/// **Diurutkan, bukan sekadar dicatat batasnya.** Segitiga bermaterial sama
+/// tidak dijamin berdampingan di dalam berkasnya — sebuah node bisa
+/// menyelang-nyeling dua material muka demi muka — dan ruas yang dicatat apa
+/// adanya lalu menjadi ratusan panggilan gambar untuk dua material. Urutan di
+/// dalam satu material dipertahankan (`stable`), karena urutan segitiga
+/// menentukan hasil pada permukaan tembus pandang.
+void GroupByMaterial(MeshData& mesh, const std::vector<int>& triangleMaterial) {
+    const std::size_t triangles = mesh.indices.size() / 3;
+    mesh.parts.clear();
+    if (triangles == 0) {
+        return;
+    }
+    // Berkas tanpa material sama sekali tetap mendapat satu ruas. Jalur gambar
+    // karena itu tidak perlu membedakan "punya ruas" dan "tidak".
+    if (triangleMaterial.size() != triangles || mesh.materials.empty()) {
+        mesh.parts.push_back(SubMesh{0, static_cast<uint32_t>(mesh.indices.size()), -1});
+        return;
+    }
+
+    std::vector<std::size_t> order(triangles);
+    for (std::size_t i = 0; i < triangles; ++i) {
+        order[i] = i;
+    }
+    std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+        return triangleMaterial[a] < triangleMaterial[b];
+    });
+
+    std::vector<uint32_t> sorted;
+    sorted.reserve(mesh.indices.size());
+    for (const std::size_t triangle : order) {
+        sorted.push_back(mesh.indices[triangle * 3]);
+        sorted.push_back(mesh.indices[triangle * 3 + 1]);
+        sorted.push_back(mesh.indices[triangle * 3 + 2]);
+    }
+    mesh.indices = std::move(sorted);
+
+    for (std::size_t i = 0; i < triangles;) {
+        const int material = triangleMaterial[order[i]];
+        std::size_t end = i;
+        while (end < triangles && triangleMaterial[order[end]] == material) {
+            ++end;
+        }
+        mesh.parts.push_back(SubMesh{static_cast<uint32_t>(i * 3),
+                                     static_cast<uint32_t>((end - i) * 3), material});
+        i = end;
+    }
+}
+
+/// Jalur tekstur relatif yang bisa dipakai di mesin lain.
+///
+/// FBX menyimpan dua jalur: absolut milik mesin yang mengekspornya — yang hampir
+/// tidak pernah ada di mesin yang membukanya — dan relatif terhadap berkas FBX
+/// itu sendiri. Yang dipakai yang relatif, dengan pemisah dinormalkan ke `/`
+/// karena berkas dari Windows menulis `..\\checkerA.tga` dan `std::filesystem`
+/// di Linux membaca seluruhnya sebagai satu nama berkas.
+std::string TexturePath(const ufbx_texture* texture) {
+    if (texture == nullptr) {
+        return {};
+    }
+    std::string relative = texture->relative_filename.data != nullptr
+                               ? texture->relative_filename.data
+                               : "";
+    if (relative.empty() && texture->filename.data != nullptr) {
+        // Tidak ada jalur relatif: yang tersisa hanya nama berkasnya, diambil
+        // dari ujung jalur absolutnya. Menebak foldernya lebih buruk daripada
+        // menyerahkan nama saja — yang mencarinya tahu di mana ia menaruh
+        // teksturnya, kode ini tidak.
+        relative = std::filesystem::path(texture->filename.data).filename().string();
+    }
+    std::replace(relative.begin(), relative.end(), '\\', '/');
+    return relative;
+}
+
+/// Nilai skalar pertama sebuah map, atau `fallback` bila tidak disebutkan.
+float MapScalar(const ufbx_material_map& map, float fallback) {
+    return map.has_value ? static_cast<float>(map.value_real) : fallback;
+}
+
+Vec3 MapColor(const ufbx_material_map& map, const Vec3& fallback) {
+    if (!map.has_value) {
+        return fallback;
+    }
+    return Vec3(static_cast<float>(map.value_vec4.x), static_cast<float>(map.value_vec4.y),
+                static_cast<float>(map.value_vec4.z));
+}
+
+/// Menerjemahkan sebuah material ufbx menjadi bentuk datar kita.
+///
+/// **`pbr` dibaca, bukan `fbx`.** ufbx menurunkan medan PBR-nya dari Lambert dan
+/// Phong ketika berkasnya memang hanya punya itu — terukur pada rig Mixamo,
+/// `pbr.base_color` dan `pbr.roughness` terisi walaupun `features.pbr.enabled`
+/// bernilai nol. Membaca `fbx.diffuse_color` sendiri berarti menuliskan ulang
+/// penurunan itu, dengan hasil yang berbeda untuk berkas yang memang PBR.
+MeshMaterial ReadMaterial(const ufbx_material& source) {
+    MeshMaterial material;
+    material.name = source.name.data != nullptr ? source.name.data : "";
+    material.baseColor = MapColor(source.pbr.base_color, Vec3(0.8f));
+    material.roughness = MapScalar(source.pbr.roughness, 0.5f);
+    material.metalness = MapScalar(source.pbr.metalness, 0.0f);
+    material.emissive = MapColor(source.pbr.emission_color, Vec3(0.0f));
+    material.opacity = MapScalar(source.pbr.opacity, 1.0f);
+
+    material.baseColorTexture = TexturePath(source.pbr.base_color.texture);
+    material.normalTexture = TexturePath(source.pbr.normal_map.texture);
+    material.roughnessTexture = TexturePath(source.pbr.roughness.texture);
+    material.metalnessTexture = TexturePath(source.pbr.metalness.texture);
+    material.emissiveTexture = TexturePath(source.pbr.emission_color.texture);
+    return material;
+}
+
 MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
     MeshData mesh;
     error.clear();
@@ -349,6 +462,11 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
     std::vector<SkinInfluence> influenceSoup;
     std::vector<uint32_t> triangleIndices;
     bool anySkin = false;
+    /// Material tiap segitiga di dalam `soup`, sejajar dengan soup/3.
+    std::vector<int> triangleMaterial;
+    /// Material scene → indeks di `mesh.materials`, supaya material yang dipakai
+    /// dua node tidak tercatat dua kali.
+    std::unordered_map<const ufbx_material*, int> materialIndex;
 
     for (std::size_t nodeIndex = 0; nodeIndex < scene->nodes.count; ++nodeIndex) {
         const ufbx_node* node = scene->nodes.data[nodeIndex];
@@ -384,6 +502,25 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
 
         triangleIndices.resize(std::max<std::size_t>(source->max_face_triangles * 3, 3));
 
+        // Material node ini, dicatat sekali. `face_material` mengindeks daftar
+        // ini, bukan daftar material scene.
+        std::vector<int> nodeMaterial(node->materials.count, -1);
+        for (std::size_t m = 0; m < node->materials.count; ++m) {
+            const ufbx_material* source_material = node->materials.data[m];
+            if (source_material == nullptr) {
+                continue;
+            }
+            const auto found = materialIndex.find(source_material);
+            if (found != materialIndex.end()) {
+                nodeMaterial[m] = found->second;
+                continue;
+            }
+            const auto index = static_cast<int>(mesh.materials.size());
+            mesh.materials.push_back(ReadMaterial(*source_material));
+            materialIndex.emplace(source_material, index);
+            nodeMaterial[m] = index;
+        }
+
         for (std::size_t faceIndex = 0; faceIndex < source->faces.count; ++faceIndex) {
             const ufbx_face face = source->faces.data[faceIndex];
             // Segi banyak dipecah menjadi segitiga oleh ufbx. Memecahnya sendiri
@@ -392,6 +529,19 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
             // segitiga yang saling menimpa.
             const uint32_t triangles = ufbx_triangulate_face(
                 triangleIndices.data(), triangleIndices.size(), source, face);
+
+            int faceMaterial = -1;
+            if (faceIndex < source->face_material.count) {
+                const uint32_t slot = source->face_material.data[faceIndex];
+                if (slot < nodeMaterial.size()) {
+                    faceMaterial = nodeMaterial[slot];
+                }
+            } else if (nodeMaterial.size() == 1) {
+                // Berkas yang tidak menyebut material per muka tapi punya satu
+                // material untuk seluruh node — bentuk yang lazim.
+                faceMaterial = nodeMaterial[0];
+            }
+            triangleMaterial.insert(triangleMaterial.end(), triangles, faceMaterial);
 
             for (uint32_t corner = 0; corner < triangles * 3; ++corner) {
                 const uint32_t index = triangleIndices[corner];
@@ -452,13 +602,18 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
         error = "no mesh geometry in file";
         return mesh;
     }
-    // Rangka disalin lebih dulu: `BuildIndexedMesh` mengembalikan mesh baru.
+    // Rangka dan material disalin lebih dulu: `BuildIndexedMesh` mengembalikan
+    // mesh baru.
     SkeletonData skeleton = std::move(mesh.skeleton);
+    std::vector<MeshMaterial> materials = std::move(mesh.materials);
     mesh = BuildIndexedMesh(soup, anySkin ? influenceSoup : std::vector<SkinInfluence>{});
     mesh.skeleton = std::move(skeleton);
+    mesh.materials = std::move(materials);
     if (!mesh.IsValid()) {
         error = "mesh has no triangles";
+        return mesh;
     }
+    GroupByMaterial(mesh, triangleMaterial);
     return mesh;
 }
 

@@ -732,3 +732,85 @@ TEST_CASE("rig ber-skin terbaca dengan satuan yang sejalan antara mesh dan rangk
     CHECK(highest.x <= mesh.boundsMax.x + slack);
     CHECK(highest.y <= mesh.boundsMax.y + slack);
 }
+
+TEST_CASE("Mesh ber-material terbagi menjadi ruas yang berurutan tanpa celah") {
+    using namespace sim::assets;
+
+    const char* rigPath = std::getenv("SIM_RIG_FBX");
+    if (rigPath == nullptr || !std::filesystem::exists(rigPath)) {
+        return;
+    }
+
+    std::string error;
+    const MeshData mesh = LoadMesh(rigPath, error);
+    REQUIRE(mesh.IsValid());
+
+    // Rig Mixamo punya dua node bermaterial berbeda, dan importir menggabungkan
+    // seluruh node menjadi satu mesh — jadi mesh gabungannya tidak bisa lagi
+    // digambar dengan satu panggilan.
+    REQUIRE(mesh.materials.size() >= 2);
+    REQUIRE(mesh.parts.size() >= 2);
+
+    // **Ruasnya harus menutupi seluruh indeks, berurutan, tanpa celah maupun
+    // tumpang tindih.** Celah berarti segitiga yang tidak pernah digambar;
+    // tumpang tindih berarti segitiga yang digambar dua kali dengan dua
+    // material — dan yang kedua terlihat sebagai z-fighting, bukan sebagai
+    // kesalahan pembagian.
+    uint32_t cursor = 0;
+    for (const SubMesh& part : mesh.parts) {
+        CHECK(part.firstIndex == cursor);
+        CHECK(part.indexCount > 0);
+        CHECK(part.indexCount % 3 == 0);
+        CHECK(part.material >= 0);
+        CHECK(part.material < static_cast<int>(mesh.materials.size()));
+        cursor += part.indexCount;
+    }
+    CHECK(cursor == mesh.indices.size());
+
+    // Satu ruas per material, tidak lebih: segitiga bermaterial sama harus sudah
+    // dikumpulkan bersebelahan, kalau tidak dua material menjadi ratusan draw.
+    CHECK(mesh.parts.size() == mesh.materials.size());
+
+    // Indeksnya tetap menunjuk vertex yang ada sesudah disusun ulang.
+    for (const uint32_t index : mesh.indices) {
+        REQUIRE(index < mesh.vertices.size());
+    }
+
+    for (const MeshMaterial& material : mesh.materials) {
+        INFO("material " << material.name);
+        CHECK_FALSE(material.name.empty());
+        CHECK(material.roughness >= 0.0f);
+        CHECK(material.roughness <= 1.0f);
+    }
+}
+
+TEST_CASE("Jalur tekstur dinormalkan supaya bisa dibaca di mesin lain") {
+    using namespace sim::assets;
+
+    // shaderBall memakai pemisah Windows dan jalur naik satu tingkat —
+    // `..\checkerA.tga` — dan std::filesystem di Linux membaca seluruhnya
+    // sebagai satu nama berkas kalau pemisahnya tidak dinormalkan.
+    const std::filesystem::path ball = std::filesystem::path(SIM_MESH_DIR) / "shaderBall.fbx";
+    if (!std::filesystem::exists(ball)) {
+        return;
+    }
+    std::string error;
+    const MeshData mesh = LoadMesh(ball, error);
+    REQUIRE(mesh.IsValid());
+    REQUIRE(mesh.materials.size() >= 2);
+
+    int withTexture = 0;
+    for (const MeshMaterial& material : mesh.materials) {
+        if (material.baseColorTexture.empty()) {
+            continue;
+        }
+        ++withTexture;
+        INFO("tekstur " << material.baseColorTexture);
+        CHECK(material.baseColorTexture.find('\\') == std::string::npos);
+        // Relatif, bukan absolut: jalur absolut di dalam FBX menunjuk mesin
+        // tempat ia diekspor dan hampir tidak pernah ada di mesin yang
+        // membukanya.
+        CHECK_FALSE(std::filesystem::path(material.baseColorTexture).is_absolute());
+    }
+    CHECK(withTexture > 0);
+}

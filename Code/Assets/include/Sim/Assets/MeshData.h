@@ -105,6 +105,55 @@ struct SkeletonData {
     bool IsTopological() const;
 };
 
+/// Material seperti yang tertulis di berkas mesh-nya.
+///
+/// **Bentuk yang sengaja dangkal, bukan `MaterialGraph`.** Yang ada di FBX
+/// adalah beberapa angka dan beberapa jalur tekstur; menerjemahkannya langsung
+/// menjadi graph di sini berarti modul Assets harus mengenal katalog node
+/// material, dan itu modul yang lain. Yang menerjemahkannya adalah yang punya
+/// keduanya — sama seperti rangka, yang di sini datar dan menjadi
+/// `animation::Skeleton` di tempat lain.
+struct MeshMaterial {
+    std::string name;
+    Vec3 baseColor{0.8f, 0.8f, 0.8f};
+    float roughness = 0.5f;
+    float metalness = 0.0f;
+    Vec3 emissive{0.0f, 0.0f, 0.0f};
+    float opacity = 1.0f;
+
+    /// Jalur tekstur **relatif terhadap berkas mesh-nya**, pemisahnya sudah
+    /// dinormalkan ke `/`. Kosong berarti tidak ada.
+    ///
+    /// Relatif, bukan absolut: jalur absolut di dalam berkas FBX menunjuk mesin
+    /// tempat ia diekspor — `C:\Users\...` — dan hampir tidak pernah ada di
+    /// mesin yang membukanya.
+    std::string baseColorTexture;
+    std::string normalTexture;
+    std::string roughnessTexture;
+    std::string metalnessTexture;
+    std::string emissiveTexture;
+
+    bool HasTexture() const {
+        return !baseColorTexture.empty() || !normalTexture.empty() ||
+               !roughnessTexture.empty() || !metalnessTexture.empty() ||
+               !emissiveTexture.empty();
+    }
+};
+
+/// Satu ruas indeks yang digambar dengan satu material.
+///
+/// **Ada karena seluruh node digabung menjadi satu mesh.** Penggabungan itu
+/// pilihan lama — satu buffer per aset alih-alih satu per node — dan harganya
+/// dibayar di sini: sebuah rig Mixamo punya dua node bermaterial berbeda, jadi
+/// mesh gabungannya tidak bisa lagi digambar dengan satu panggilan.
+struct SubMesh {
+    uint32_t firstIndex = 0;
+    uint32_t indexCount = 0;
+    /// Indeks ke `MeshData::materials`, atau -1 bila berkasnya tidak menyebut
+    /// material untuk ruas ini.
+    int material = -1;
+};
+
 /// Mesh dalam bentuk yang bisa langsung diunggah: segitiga, indeks 32-bit.
 struct MeshData {
     std::vector<MeshVertex> vertices;
@@ -113,6 +162,13 @@ struct MeshData {
     std::vector<SkinInfluence> influences;
     /// Rangka yang mengulit mesh ini. Kosong bila tidak ada.
     SkeletonData skeleton;
+    /// Material yang dirujuk berkasnya, sesuai urutan di dalamnya.
+    std::vector<MeshMaterial> materials;
+    /// Ruas indeks per material, berurutan dan tanpa celah. **Selalu berisi
+    /// sedikitnya satu ruas** untuk mesh yang sah — mesh tanpa material sama
+    /// sekali tetap punya satu ruas ber-`material` -1, sehingga jalur gambarnya
+    /// tidak perlu membedakan "punya ruas" dan "tidak".
+    std::vector<SubMesh> parts;
     /// AABB dalam ruang lokal mesh.
     Vec3 boundsMin{0.0f};
     Vec3 boundsMax{0.0f};
