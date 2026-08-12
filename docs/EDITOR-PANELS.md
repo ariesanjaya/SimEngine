@@ -311,3 +311,35 @@ Sumber log ditandai kategori (`[Asset]`, `[Lua]`, `[RHI]`).
 - **Asset References** — graf pemakaian aset.
 - **Profiler** — waktu frame per bagian (dipakai serius mulai E8).
 - **Statistics** — jumlah entity, memori, jumlah aset termuat.
+
+
+## Mesh Editor (rencana)
+
+Panel tersendiri di samping Animation Editor: membuka aset mesh, memperlihatkan
+rangka dan mesh ber-skin dalam **3D sungguhan**, dan menandai ruas mana yang kain.
+
+**Instance KEDUA `IViewportRenderer`, bukan perender baru.** Ini yang membuatnya
+murah, dan ini pula yang dulu ditolak untuk pratinjau material — di sana
+`ViewportScene` tidak punya tempat untuk sebuah material, jadi instance kedua
+hanya akan menggambar bola abu-abu. Untuk mesh justru sebaliknya:
+`ViewportScene` sudah persis bentuk yang dibutuhkan.
+
+- Mesh-nya satu `MeshInstance`. Warna per ruas sudah mengalir lewat
+  `partColors` sejak slot material mendarat, jadi karakter berlima material
+  tergambar berlima warna tanpa satu baris pun kode baru di perender.
+- Rangkanya `LineSegment` — satu ruas per bone dari posisi global induk ke
+  anaknya, dihitung dari `Skeleton::GlobalBind()`. Perender sudah punya pass
+  garis.
+- Pose, kulit, bayangan, dan langit ikut apa adanya. Yang menggambar karakter
+  bergerak di viewport utama adalah jalur yang sama persis.
+
+`CreateVulkanRenderer` sudah publik dan tiap `VulkanRenderer` memiliki
+`rhi::RenderTarget`-nya sendiri, jadi instance kedua tidak bertabrakan dengan
+viewport utama — sama seperti pratinjau material dan thumbnail yang sudah
+berdampingan sekarang.
+
+Yang perlu ditulis: satu medan di `EditorContext`, pembuatannya di `main()`,
+kamera orbit di dalam panel, pohon bone, daftar ruas beserta kotak centang kain
+(persistensinya sudah ada di `MeshSettings`), dan pewarnaan bobot skin per bone
+terpilih — yang terakhir menuntut warna per vertex, jadi ia menyusul: jalur
+warna yang ada sekarang per ruas, bukan per vertex.
