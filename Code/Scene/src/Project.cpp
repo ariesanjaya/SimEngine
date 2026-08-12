@@ -38,6 +38,8 @@ bool LoadProject(Project& project, const std::filesystem::path& path, std::strin
 
     project.name = root.value("name", std::string("Untitled"));
     project.assetsPath = root.value("assetsPath", std::string("Assets"));
+    project.levelsPath = root.value("levelsPath", std::string("Levels"));
+    project.prefabsPath = root.value("prefabsPath", std::string("Prefabs"));
     project.startupLevel = root.value("startupLevel", std::string{});
     project.root = file.parent_path();
     return true;
@@ -52,6 +54,8 @@ bool SaveProject(const Project& project, const std::filesystem::path& path) {
     nlohmann::ordered_json root;
     root["name"] = project.name;
     root["assetsPath"] = project.assetsPath;
+    root["levelsPath"] = project.levelsPath;
+    root["prefabsPath"] = project.prefabsPath;
     root["startupLevel"] = project.startupLevel;
 
     std::error_code ec;

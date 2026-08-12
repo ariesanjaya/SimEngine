@@ -15,6 +15,7 @@ sim_add_library(EditorFramework
         src/PanelManager.cpp
         src/PropertyGrid.cpp
         src/PanelRegistry.cpp
+        src/ProjectLibrary.cpp
         src/Selection.cpp
         src/Widgets.cpp
     PUBLIC_DEPS

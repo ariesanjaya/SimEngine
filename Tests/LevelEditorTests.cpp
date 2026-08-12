@@ -6,6 +6,7 @@
 #include "Sim/Editor/Gizmo.h"
 #include "Sim/Editor/SceneCommands.h"
 #include "Sim/Editor/SceneView.h"
+#include "Sim/Editor/ProjectLibrary.h"
 #include "Sim/Editor/Selection.h"
 #include "Sim/Editor/SkinnedPreview.h"
 #include "Sim/Scene/Components.h"
@@ -792,4 +793,139 @@ TEST_CASE("Animator tanpa mesh ber-rig tidak menghasilkan palet") {
     preview.Update(world, nullptr, 0.016f);
     CHECK(preview.AnimatedCount() == 0);
     CHECK(preview.PaletteFor(entity).empty());
+}
+
+// --- project manager -----------------------------------------------------------
+
+namespace {
+
+/// Folder sementara yang membersihkan dirinya sendiri.
+struct ScratchDir {
+    ScratchDir() {
+        static std::atomic<int> counter{0};
+        path = std::filesystem::temp_directory_path() /
+               ("simproj_" + std::to_string(counter.fetch_add(1)) + "_" +
+                std::to_string(::getpid()));
+        std::filesystem::create_directories(path);
+    }
+    ~ScratchDir() {
+        std::error_code error;
+        std::filesystem::remove_all(path, error);
+    }
+    ScratchDir(const ScratchDir&) = delete;
+    ScratchDir& operator=(const ScratchDir&) = delete;
+
+    std::filesystem::path path;
+};
+
+}  // namespace
+
+TEST_CASE("Nama project menjadi nama folder yang sah di sistem berkas mana pun") {
+    // Yang dibuang adalah aksara yang ditolak Windows, bukan hanya yang ditolak
+    // Linux: project dibuat di satu mesin dan dibuka di mesin lain, dan folder
+    // bernama "Level: 2" tidak bisa di-checkout di sana sama sekali.
+    CHECK(ProjectLibrary::SanitizeFolderName("Kota Tua") == "Kota Tua");
+    CHECK(ProjectLibrary::SanitizeFolderName("Level: 2") == "Level_ 2");
+    CHECK(ProjectLibrary::SanitizeFolderName("a/b\\c") == "a_b_c");
+    // Titik di awal ikut dibuang: sebuah nama project tidak boleh bisa menjadi
+    // folder tersembunyi, dan tidak boleh bisa menjadi `..`.
+    CHECK(ProjectLibrary::SanitizeFolderName("../rahasia") == "_rahasia");
+    CHECK(ProjectLibrary::SanitizeFolderName("..") .empty());
+    CHECK(ProjectLibrary::SanitizeFolderName(".git") == "git");
+    // Spasi dan titik di ujung dihapus Windows diam-diam, jadi nama yang diminta
+    // dan nama yang jadi akan berbeda — dan project yang foldernya bukan yang
+    // tertulis di daftar tidak bisa dibuka lagi dari sana.
+    CHECK(ProjectLibrary::SanitizeFolderName("  Arena . ") == "Arena");
+    CHECK(ProjectLibrary::SanitizeFolderName("...") .empty());
+    CHECK(ProjectLibrary::SanitizeFolderName("").empty());
+}
+
+TEST_CASE("Project baru lahir lengkap dengan foldernya, dan menolak menimpa yang sudah ada") {
+    ScratchDir scratch;
+    ProjectLibrary library;
+
+    scene::Project project;
+    std::string error;
+    REQUIRE(library.Create(scratch.path, "Kota Tua", project, error));
+    CHECK(project.name == "Kota Tua");
+    CHECK(project.root == scratch.path / "Kota Tua");
+    CHECK(std::filesystem::exists(project.root / "project.simproj"));
+    CHECK(std::filesystem::is_directory(project.AssetsDirectory()));
+    CHECK(std::filesystem::is_directory(project.LevelsDirectory()));
+    CHECK(std::filesystem::is_directory(project.PrefabsDirectory()));
+
+    // **Menolak menimpa, dan itu bukan kehati-hatian berlebihan.** Menimpa
+    // folder yang sudah berisi adalah satu-satunya cara alat seperti ini bisa
+    // menghapus pekerjaan orang.
+    scene::Project again;
+    CHECK_FALSE(library.Create(scratch.path, "Kota Tua", again, error));
+    CHECK_FALSE(error.empty());
+
+    // Dibuka kembali menghasilkan project yang sama.
+    scene::Project opened;
+    REQUIRE(library.Open(project.root, opened, error));
+    CHECK(opened.name == "Kota Tua");
+    CHECK(opened.AssetsDirectory() == project.AssetsDirectory());
+
+    // Folder yang hilang — git tidak menyimpan folder kosong — dibuat lagi saat
+    // dibuka, bukan menjadi alasan menolak.
+    std::error_code removeError;
+    std::filesystem::remove(opened.PrefabsDirectory(), removeError);
+    REQUIRE_FALSE(std::filesystem::exists(opened.PrefabsDirectory()));
+    scene::Project reopened;
+    REQUIRE(library.Open(project.root, reopened, error));
+    CHECK(std::filesystem::is_directory(reopened.PrefabsDirectory()));
+}
+
+TEST_CASE("Daftar project terakhir dibuka bertahan, terurut, dan tidak menggandakan diri") {
+    ScratchDir scratch;
+    ProjectLibrary library;
+    std::string error;
+
+    scene::Project first;
+    scene::Project second;
+    REQUIRE(library.Create(scratch.path, "Satu", first, error));
+    REQUIRE(library.Create(scratch.path, "Dua", second, error));
+
+    library.Remember(first, 100);
+    library.Remember(second, 200);
+    REQUIRE(library.Recent().size() == 2);
+    CHECK(library.Recent()[0].name == "Dua");
+
+    // Membuka yang lama lagi memindahkannya ke depan, bukan menambah entri.
+    library.Remember(first, 300);
+    REQUIRE(library.Recent().size() == 2);
+    CHECK(library.Recent()[0].name == "Satu");
+
+    const std::filesystem::path listFile = scratch.path / "projects.json";
+    REQUIRE(library.Save(listFile));
+
+    ProjectLibrary loaded;
+    loaded.Load(listFile);
+    REQUIRE(loaded.Recent().size() == 2);
+    CHECK(loaded.Recent()[0].name == "Satu");
+    CHECK(loaded.Recent()[1].name == "Dua");
+    CHECK(loaded.Recent()[0].Exists());
+
+    // Project yang berkasnya lenyap tetap tercatat, tapi ditandai: yang hilang
+    // dari daftar tanpa penjelasan terbaca sebagai editor yang lupa.
+    std::error_code removeError;
+    std::filesystem::remove_all(second.root, removeError);
+    ProjectLibrary afterDelete;
+    afterDelete.Load(listFile);
+    REQUIRE(afterDelete.Recent().size() == 2);
+    CHECK_FALSE(afterDelete.Recent()[1].Exists());
+
+    CHECK(afterDelete.Forget(second.root));
+    CHECK(afterDelete.Recent().size() == 1);
+    CHECK_FALSE(afterDelete.Forget(second.root));
+}
+
+TEST_CASE("Daftar project yang belum pernah ada bukan galat") {
+    ScratchDir scratch;
+    ProjectLibrary library;
+    // Keadaan pemakaian pertama. Editor yang menganggapnya galat akan menyapa
+    // pemakai barunya dengan pesan kesalahan.
+    library.Load(scratch.path / "belum-ada.json");
+    CHECK(library.Recent().empty());
 }

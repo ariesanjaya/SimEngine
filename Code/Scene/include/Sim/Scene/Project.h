@@ -14,14 +14,22 @@ namespace sim::scene {
 /// besar, dan diff-nya tetap terbaca.
 struct Project {
     std::string name = "Untitled";
-    /// Relatif terhadap folder project.
+    /// Relatif terhadap folder project. Ketiganya disebut, tidak ditebak dari
+    /// nama: project yang dipindahkan dari engine lain kerap sudah punya tata
+    /// letaknya sendiri, dan memaksanya berganti nama folder demi kecocokan
+    /// adalah perubahan yang tidak diminta siapa pun.
     std::string assetsPath = "Assets";
+    std::string levelsPath = "Levels";
+    std::string prefabsPath = "Prefabs";
     std::string startupLevel;
 
     /// Folder tempat project.simproj berada. Tidak ikut ditulis ke berkas.
     std::filesystem::path root;
 
     std::filesystem::path AssetsDirectory() const { return root / assetsPath; }
+    std::filesystem::path LevelsDirectory() const { return root / levelsPath; }
+    std::filesystem::path PrefabsDirectory() const { return root / prefabsPath; }
+    bool IsValid() const { return !root.empty(); }
     std::filesystem::path StartupLevelPath() const {
         return startupLevel.empty() ? std::filesystem::path{} : root / startupLevel;
     }
