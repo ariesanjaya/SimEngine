@@ -3,6 +3,7 @@ sim_add_library(Assets
         src/AssetDatabase.cpp
         src/AssetTypes.cpp
         src/Importer.cpp
+        src/GltfImport.cpp
         src/MeshImport.cpp
         src/MeshSettings.cpp
         src/Thumbnail.cpp
@@ -13,4 +14,5 @@ sim_add_library(Assets
     PRIVATE_DEPS
         Stb::Impl
         Ufbx::Ufbx
+        Cgltf::Cgltf
         nlohmann_json::nlohmann_json)

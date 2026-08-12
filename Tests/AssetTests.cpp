@@ -867,3 +867,63 @@ TEST_CASE("Penandaan kain disimpan di sebelah mesh dan dikunci nama material") {
     REQUIRE(SaveMeshSettings(loaded, mesh));
     CHECK_FALSE(std::filesystem::exists(MeshSettingsPath(mesh)));
 }
+
+TEST_CASE("glTF terbaca beserta material dan ruasnya") {
+    using namespace sim::assets;
+
+    // Berkasnya tidak ikut di repo: SIM_GLTF=/path/DamagedHelmet.glb ctest
+    const char* gltfPath = std::getenv("SIM_GLTF");
+    if (gltfPath == nullptr || !std::filesystem::exists(gltfPath)) {
+        return;
+    }
+
+    std::string error;
+    const MeshData mesh = LoadMesh(gltfPath, error);
+    INFO("error: " << error);
+    REQUIRE(mesh.IsValid());
+    CHECK(error.empty());
+
+    // **Satu ruas per primitive**, dan itu yang membuat glTF lebih mudah
+    // daripada FBX: materialnya per primitive, bukan per muka, jadi tidak ada
+    // yang perlu disusun ulang.
+    REQUIRE_FALSE(mesh.parts.empty());
+    REQUIRE_FALSE(mesh.materials.empty());
+    uint32_t cursor = 0;
+    for (const SubMesh& part : mesh.parts) {
+        CHECK(part.firstIndex == cursor);
+        CHECK(part.indexCount % 3 == 0);
+        cursor += part.indexCount;
+    }
+    CHECK(cursor == mesh.indices.size());
+    for (const uint32_t index : mesh.indices) {
+        REQUIRE(index < mesh.vertices.size());
+    }
+
+    // **Satuannya meter tanpa konversi apa pun.** glTF menetapkan tangan-kanan,
+    // Y ke atas, dan meter di dalam spesifikasinya — jadi model seukuran benda
+    // sungguhan harus keluar seukuran benda sungguhan, tanpa faktor seratus yang
+    // dua kali menjatuhkan importir FBX.
+    const Vec3 size = mesh.boundsMax - mesh.boundsMin;
+    CHECK(size.x > 0.01f);
+    CHECK(size.x < 100.0f);
+    CHECK(size.y < 100.0f);
+
+    // Materialnya ikut, bukan hanya geometrinya.
+    bool named = false;
+    bool textured = false;
+    for (const MeshMaterial& material : mesh.materials) {
+        INFO("material " << material.name);
+        named = named || !material.name.empty();
+        textured = textured || material.HasTexture();
+        CHECK(material.roughness >= 0.0f);
+        CHECK(material.roughness <= 1.0f);
+        CHECK(material.metalness >= 0.0f);
+        CHECK(material.metalness <= 1.0f);
+        // Jalur teksturnya tidak pernah absolut: yang tertanam di GLB tidak
+        // punya jalur sama sekali, dan yang punya URI relatif terhadap
+        // berkasnya.
+        CHECK_FALSE(std::filesystem::path(material.baseColorTexture).is_absolute());
+    }
+    CHECK(named);
+    CHECK(textured);
+}

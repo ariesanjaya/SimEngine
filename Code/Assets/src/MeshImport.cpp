@@ -5,6 +5,7 @@
 #include <ufbx.h>
 
 #include <algorithm>
+#include <cctype>
 #include <cstring>
 #include <unordered_map>
 
@@ -323,8 +324,7 @@ SkeletonData LoadSkeleton(const std::filesystem::path& path, std::string& error)
     return skeleton;
 }
 
-/// Menyusun ulang indeks supaya segitiga bermaterial sama bersebelahan, lalu
-/// mencatat ruasnya.
+/// Lihat catatan di `MeshData.h`.
 ///
 /// **Diurutkan, bukan sekadar dicatat batasnya.** Segitiga bermaterial sama
 /// tidak dijamin berdampingan di dalam berkasnya — sebuah node bisa
@@ -443,6 +443,18 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
     if (path.empty() || !std::filesystem::exists(path, exists)) {
         error = "file not found";
         return mesh;
+    }
+
+    // Dipilih menurut ekstensi, bukan dengan mengendus isinya. ufbx dan cgltf
+    // sama-sama menolak berkas yang bukan miliknya, jadi mencoba keduanya
+    // berurutan akan berhasil — tapi pesan galat yang sampai ke pengguna lalu
+    // datang dari pembaca yang salah, dan "not a readable glTF file" untuk
+    // sebuah FBX yang rusak menyesatkan sepenuhnya.
+    std::string extension = path.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (extension == ".gltf" || extension == ".glb") {
+        return LoadGltfMesh(path, error);
     }
 
     const ufbx_load_opts options = SharedLoadOptions();

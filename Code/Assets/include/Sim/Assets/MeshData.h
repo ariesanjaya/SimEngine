@@ -221,6 +221,28 @@ MeshData BuildIndexedMesh(const std::vector<MeshVertex>& triangleSoup,
 /// tidak perlu ada.
 ///
 /// Mengembalikan rangka kosong pada kegagalan, dengan sebabnya di `error`.
+/// Menyusun ulang indeks supaya segitiga bermaterial sama bersebelahan, lalu
+/// mencatat ruasnya di `mesh.parts`.
+///
+/// `triangleMaterial` sepanjang jumlah segitiga `mesh`. **Dipakai bersama kedua
+/// importir**: FBX dan glTF sama-sama menghasilkan segitiga bermaterial campur,
+/// dan pembagian yang ditulis dua kali adalah dua pembagian yang suatu saat
+/// tidak sepakat.
+void GroupByMaterial(MeshData& mesh, const std::vector<int>& triangleMaterial);
+
+/// Memuat mesh dari berkas glTF atau GLB.
+///
+/// **Jauh lebih sedikit jebakan daripada FBX**, dan itu sifat formatnya: glTF
+/// menetapkan tangan-kanan, Y ke atas, dan satuan meter di dalam
+/// spesifikasinya, jadi tidak ada konvensi yang harus ditebak. Materialnya pun
+/// per primitive, bukan per muka, sehingga memetakan satu-satu ke `SubMesh`.
+///
+/// **Tidak menulis apa pun ke disk.** Tekstur GLB tertanam di dalam berkasnya;
+/// yang tercatat di `MeshMaterial` hanyalah nama logisnya, dan yang
+/// mengeluarkannya menjadi berkas adalah langkah tersendiri yang dipanggil
+/// dengan sengaja.
+MeshData LoadGltfMesh(const std::filesystem::path& path, std::string& error);
+
 SkeletonData LoadSkeleton(const std::filesystem::path& path, std::string& error);
 
 /// Memuat mesh dari berkas FBX atau OBJ.

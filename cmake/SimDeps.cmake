@@ -336,6 +336,33 @@ target_compile_options(stb_impl PRIVATE -w)
 add_library(Stb::Impl ALIAS stb_impl)
 
 # ---------------------------------------------------------------------------
+# cgltf — pembaca glTF/GLB untuk impor mesh (E8.4)
+#
+# Header-only tanpa build system, jadi SOURCE_SUBDIR diarahkan ke folder tanpa
+# CMakeLists — pola yang sama dengan stb, VMA, dan ufbx.
+#
+# **Dikompilasi sebagai C, bukan C++**, dengan alasan yang sama seperti ufbx:
+# sumbernya C99 dan mengandalkan perilaku yang berbeda di kedua bahasa.
+# ---------------------------------------------------------------------------
+FetchContent_Declare(cgltf
+    GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
+    GIT_TAG        v1.14
+    GIT_SHALLOW    TRUE
+    SOURCE_SUBDIR  fuzz)
+FetchContent_MakeAvailable(cgltf)
+
+add_library(cgltf STATIC "${CMAKE_SOURCE_DIR}/Third-Party/cgltf/cgltf_impl.c")
+target_include_directories(cgltf SYSTEM PUBLIC ${cgltf_SOURCE_DIR})
+set_target_properties(cgltf PROPERTIES C_STANDARD 11 POSITION_INDEPENDENT_CODE ON)
+# Kode pihak ketiga: peringatannya bukan urusan kita, dan -Werror proyek ini
+# akan menggagalkan build karenanya.
+target_compile_options(cgltf PRIVATE -w)
+if(SIM_MATH_LIBRARY)
+    target_link_libraries(cgltf PRIVATE ${SIM_MATH_LIBRARY})
+endif()
+add_library(Cgltf::Cgltf ALIAS cgltf)
+
+# ---------------------------------------------------------------------------
 # ufbx — pembaca FBX untuk impor mesh (E8.4)
 #
 # Satu pasang .c/.h tanpa build system, jadi SOURCE_SUBDIR diarahkan ke folder
