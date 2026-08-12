@@ -126,6 +126,8 @@ private:
 
     void InstallCrashHandler();
     void DrawProjectManager();
+    void PickFolder(const std::filesystem::path& start,
+                    std::function<void(const std::filesystem::path&)> accept);
     /// Folder isi project yang sedang dibuka. Kosong bila belum ada project.
     std::filesystem::path AssetsDirectory() const;
     std::filesystem::path LevelsDirectory() const;
@@ -187,6 +189,11 @@ private:
     /// yang membuat orang tidak sengaja membuat project bernama salah.
     std::string newProjectName_;
     std::string openProjectPath_;
+    /// Lokasi tempat project baru dibuat. Dimulai dari `projectsRoot_`, lalu
+    /// mengikuti apa pun yang terakhir dipilih lewat dialog.
+    std::filesystem::path newProjectRoot_;
+    /// Sebuah dialog sistem sedang terbuka. Tombolnya dimatikan selama itu.
+    bool dialogOpen_ = false;
     std::string projectError_;
     /// Kolam tugas dan folder cache graph, disimpan karena keduanya dibutuhkan
     /// lagi setiap kali sebuah project dibuka — bukan hanya sekali saat start.

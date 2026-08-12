@@ -1,5 +1,7 @@
 #include "Sim/Editor/EditorApp.h"
 
+#include "Sim/Platform/FileDialog.h"
+
 #include "Sim/Core/Log.h"
 #include "Sim/Editor/Gizmo.h"
 #include "Sim/Editor/Icons.h"
@@ -55,6 +57,7 @@ extern "C" void OnFatalSignal(int signal) {
 bool EditorApp::Initialize(const Config& config) {
     configDir_ = config.configDir;
     projectsRoot_ = config.projectsRoot;
+    newProjectRoot_ = projectsRoot_;
     resourceDir_ = config.resourceDir;
     tasks_ = config.tasks;
     graphCacheDir_ = configDir_ / "GraphCache";
@@ -543,6 +546,37 @@ void EditorApp::CloseProject() {
     project_ = scene::Project{};
 }
 
+/// Membuka dialog folder sistem, lalu menjalankan `accept` di main thread.
+///
+/// **Dijaga satu dialog pada satu waktu.** SDL akan dengan senang hati membuka
+/// dialog kedua di atas yang pertama, dan dua dialog yang keduanya menulis ke
+/// medan yang sama akan diselesaikan dalam urutan yang tidak bisa ditebak
+/// siapa pun.
+void EditorApp::PickFolder(const std::filesystem::path& start,
+                           std::function<void(const std::filesystem::path&)> accept) {
+    if (dialogOpen_) {
+        return;
+    }
+    dialogOpen_ = true;
+    platform::ShowOpenFolderDialog(
+        start.string(),
+        [this, accept = std::move(accept)](const platform::FileDialogResult& result) {
+            dialogOpen_ = false;
+            if (!result.error.empty()) {
+                // Gagal membuka dialog disebutkan; dibatalkan tidak. Yang
+                // pertama adalah editor yang tidak bisa melakukan sesuatu, yang
+                // kedua adalah keputusan pengguna — dan memberitahunya bahwa ia
+                // baru saja membatalkan sesuatu bukan kabar.
+                projectError_ = result.error;
+                return;
+            }
+            if (result.Cancelled()) {
+                return;
+            }
+            accept(result.First());
+        });
+}
+
 /// Layar pemilih project, digambar sebagai ganti seluruh shell editor.
 void EditorApp::DrawProjectManager() {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
@@ -577,32 +611,46 @@ void EditorApp::DrawProjectManager() {
     ImGui::InputTextWithHint("##NewProjectName", "Nama project", &newProjectName_);
     ImGui::SameLine();
     const bool nameUsable = !ProjectLibrary::SanitizeFolderName(newProjectName_).empty();
-    ImGui::BeginDisabled(!nameUsable || projectsRoot_.empty());
+    ImGui::BeginDisabled(!nameUsable || newProjectRoot_.empty() || dialogOpen_);
     if (ImGui::Button("Buat", ImVec2(120.0f, 0.0f))) {
-        CreateProject(projectsRoot_, newProjectName_);
+        CreateProject(newProjectRoot_, newProjectName_);
     }
     ImGui::EndDisabled();
-    if (!projectsRoot_.empty()) {
-        // Lokasinya diperlihatkan, tidak hanya diandaikan: "di mana project saya
-        // tadi disimpan" adalah pertanyaan yang muncul justru saat editor sudah
-        // ditutup, dan jawabannya harus terlihat saat membuatnya.
-        ImGui::TextDisabled("%s", (projectsRoot_ / ProjectLibrary::SanitizeFolderName(
-                                                       newProjectName_.empty() ? "NamaProject"
-                                                                               : newProjectName_))
-                                      .string()
-                                      .c_str());
+
+    // Lokasinya diperlihatkan, tidak hanya diandaikan: "di mana project saya tadi
+    // disimpan" adalah pertanyaan yang muncul justru saat editor sudah ditutup,
+    // dan jawabannya harus terlihat saat membuatnya.
+    ImGui::BeginDisabled(dialogOpen_);
+    if (ImGui::Button("Pilih lokasi...")) {
+        PickFolder(newProjectRoot_, [this](const std::filesystem::path& chosen) {
+            newProjectRoot_ = chosen;
+        });
     }
+    ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::TextDisabled("%s", (newProjectRoot_ / ProjectLibrary::SanitizeFolderName(
+                                                    newProjectName_.empty() ? "NamaProject"
+                                                                            : newProjectName_))
+                                  .string()
+                                  .c_str());
 
     ImGui::Spacing();
     ImGui::SeparatorText("Buka project yang sudah ada");
-    ImGui::SetNextItemWidth(width * 0.55f);
-    ImGui::InputTextWithHint("##OpenProjectPath", "Jalur folder project", &openProjectPath_);
-    ImGui::SameLine();
-    ImGui::BeginDisabled(openProjectPath_.empty());
-    if (ImGui::Button("Buka", ImVec2(120.0f, 0.0f))) {
-        OpenProject(std::filesystem::path(openProjectPath_));
+    ImGui::BeginDisabled(dialogOpen_);
+    if (ImGui::Button("Pilih folder project...", ImVec2(width * 0.55f, 0.0f))) {
+        PickFolder(newProjectRoot_,
+                   [this](const std::filesystem::path& chosen) { OpenProject(chosen); });
     }
     ImGui::EndDisabled();
+    ImGui::SameLine();
+    ImGui::SetNextItemWidth(width * 0.28f);
+    // Kotak teksnya tetap ada di samping tombolnya. Dialog sistem tidak selalu
+    // tersedia — mesin tanpa portal desktop, atau sesi jarak jauh — dan jalur
+    // yang ditempel tangan adalah satu-satunya jalan masuk di sana.
+    ImGui::InputTextWithHint("##OpenProjectPath", "atau tempel jalurnya", &openProjectPath_);
+    if (ImGui::IsItemDeactivatedAfterEdit() && !openProjectPath_.empty()) {
+        OpenProject(std::filesystem::path(openProjectPath_));
+    }
 
     ImGui::Spacing();
     ImGui::SeparatorText("Terakhir dibuka");

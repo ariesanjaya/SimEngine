@@ -11,6 +11,7 @@
 #include "Sim/Editor/Icons.h"
 #include "Sim/ImGuiIntegration/ImGuiLayer.h"
 #include "Sim/Platform/Display.h"
+#include "Sim/Platform/FileDialog.h"
 #include "Sim/Platform/Window.h"
 #include "Sim/RHI/Device.h"
 #include "Sim/RHI/Swapchain.h"
@@ -286,6 +287,11 @@ int main(int argc, char** argv) {
     bool running = true;
     std::string windowTitle;
 
+    // Dialog berkas sistem dibuat modal terhadap jendela utama. Dialog yang
+    // tidak punya induk bisa muncul di belakang editor, dan yang terlihat adalah
+    // editor yang membeku menunggu jendela yang tak seorang pun tahu ada.
+    platform::SetDialogParentWindow(&window);
+
     window.CenterOnPrimaryDisplay();
     window.Show();
 
@@ -413,6 +419,10 @@ int main(int argc, char** argv) {
     }
 
     SIM_INFO("Editor", "SimEditor stopping");
+    // Induk dialog dilepas sebelum jendelanya dihancurkan: sebuah dialog yang
+    // masih terbuka saat editor ditutup akan menunjuk jendela yang sudah tidak
+    // ada.
+    platform::SetDialogParentWindow(nullptr);
     app.Shutdown();
     device.WaitIdle();
 

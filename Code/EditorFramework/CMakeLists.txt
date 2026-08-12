@@ -22,6 +22,11 @@ sim_add_library(EditorFramework
         Sim::Animation
         Sim::Assets
         Sim::Core
+        # Dialog berkas sistem. Diagram dependensi di docs/ARCHITECTURE.md memang
+        # menggambar panah Platform → EditorFramework; ini pemakai pertamanya.
+        # Yang dipakai hanya `Sim/Platform/FileDialog.h`, dan header itu sengaja
+        # tidak membocorkan satu pun tipe SDL.
+        Sim::Platform
         Sim::Render
         Sim::Scene
         # Hanya inti ImGui: target ini tidak membawa header Vulkan maupun SDL,
