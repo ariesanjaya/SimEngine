@@ -617,6 +617,13 @@ public:
                                .count();
         }
 
+        // Peta HDR dimuat sebelum graph dibangun, karena graph memutuskan ada
+        // atau tidaknya pass langit dari berhasil-tidaknya pemuatan ini.
+        // `SetHdri` sendiri tidak melakukan apa-apa bila jalurnya tidak berubah.
+        if (desc.skySource == SkySource::HdrMap) {
+            sky_.SetHdri(std::filesystem::path(desc.hdriPath));
+        }
+
         UpdateClusters(desc, scene, aspect, slot);
         UpdateShadowUniforms(desc, viewProj, slot);
         BuildGraph(desc);
@@ -659,6 +666,16 @@ public:
         };
         if (skyId_ != kInvalidPass) {
             recorders[skyId_] = [&](VkCommandBuffer command) {
+                if (desc.skySource == SkySource::HdrMap) {
+                    // DONT_CARE, alasan yang sama dengan langit atmosferik:
+                    // petanya menutupi setiap piksel.
+                    BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/false,
+                                   /*writeColor=*/true, /*useDepth=*/false);
+                    sky_.RecordHdriDraw(command, invViewProj, desc.hdriIntensity,
+                                        desc.hdriRotation);
+                    vkCmdEndRendering(command);
+                    return;
+                }
                 sky_.RecordLuts(command, sunDirection_, desc.cameraHeightKm);
                 // DONT_CARE, bukan CLEAR: langit menutupi setiap piksel, jadi
                 // membersihkannya lebih dulu berarti menulis seluruh gambar dua
@@ -902,7 +919,9 @@ private:
         // perlu membersihkan warna — dua clear pada gambar yang sama dalam satu
         // frame adalah pekerjaan yang salah satunya pasti terbuang.
         skyId_ = kInvalidPass;
-        if (desc.skyEnabled && sky_.IsValid()) {
+        const bool hdriSky = desc.skySource == SkySource::HdrMap && sky_.HdriIsValid();
+        if (desc.skyEnabled && sky_.IsValid() &&
+            (desc.skySource == SkySource::Atmosphere || hdriSky)) {
             skyId_ = graph_.AddPass("sky");
             graph_.Write(skyId_, sceneId_, Access::ColorWrite);
             // LUT-nya diurus `SkyAtmosphere` sendiri, bukan dilacak graph.
@@ -979,7 +998,8 @@ private:
         // yang sama — udara di antara kamera dan awan adalah udara yang sama
         // yang membiru di kejauhan.
         cloudId_ = kInvalidPass;
-        if (desc.skyEnabled && desc.clouds.enabled && sky_.CloudsAreValid()) {
+        if (desc.skyEnabled && desc.skySource == SkySource::Atmosphere &&
+            desc.clouds.enabled && sky_.CloudsAreValid()) {
             cloudId_ = graph_.AddPass("clouds");
             graph_.Read(cloudId_, depthId_, Access::ShaderRead);
             graph_.Write(cloudId_, sceneId_, Access::ColorWrite);
@@ -993,7 +1013,8 @@ private:
         // memendarkan kecerahan yang sesungguhnya tidak pernah sampai ke kamera,
         // dan yang terlihat adalah pendaran yang menembus kabut.
         aerialId_ = kInvalidPass;
-        if (desc.skyEnabled && desc.aerialPerspective && sky_.AerialIsValid()) {
+        if (desc.skyEnabled && desc.skySource == SkySource::Atmosphere &&
+            desc.aerialPerspective && sky_.AerialIsValid()) {
             aerialId_ = graph_.AddPass("aerial");
             graph_.Read(aerialId_, depthId_, Access::ShaderRead);
             graph_.Write(aerialId_, sceneId_, Access::ColorWrite);

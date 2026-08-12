@@ -968,6 +968,62 @@ adalah blue noise beserta akumulasi temporal — dan akumulasi temporal adalah
 pekerjaan yang sama dengan TAA, yang masih ada di daftar E8.8. Menyelesaikannya
 dua kali adalah menyelesaikannya sekali dengan cara yang salah.
 
+**Selesai: skybox HDRI sebagai sumber langit kedua**
+(`Code/Render/{include/Sim/Render/Ibl.h,src/Ibl.cpp,src/SkyAtmosphere.{h,cpp}}`,
+`Shaders/sky_hdri.frag.slang`). `ViewportDesc::skySource` memilih antara atmosfer
+Bruneton dan sebuah berkas `.hdr` equirectangular.
+
+**Alasannya biaya, dan biayanya terukur.** Pada viewport 1277×541 yang sama:
+
+| Pass | Atmosfer + awan | HDRI |
+| --- | --- | --- |
+| `sky` | 0,131 ms | **0,047 ms** |
+| `clouds` | 1,534 ms | — |
+| `aerial` | 0,133 ms | — |
+| **Total GPU frame** | **2,221 ms** | **0,429 ms** |
+
+- **HDRI mematikan kabut dan awan dengan sendirinya, bukan lewat sakelar
+  terpisah.** Keduanya milik model atmosfer prosedural: menumpuk kabut Bruneton
+  di atas foto langit berarti menghitung udara yang sama dua kali dengan dua
+  warna yang berlainan, dan yang terlihat adalah kabut yang warnanya tidak cocok
+  dengan langit di belakangnya. Editor mengatakannya, tidak menyembunyikannya —
+  sakelar yang hilang tanpa penjelasan terbaca sebagai editor yang rusak.
+- **Pengalinya sendiri, bukan `skyIntensity`.** Atmosfer Bruneton menghasilkan
+  angka dalam satuannya sendiri sehingga pengalinya berguna di sekitar 20;
+  berkas HDR sudah berisi radiansi sehingga pengalinya berguna di sekitar 1.
+  Satu angka untuk keduanya berarti berpindah sumber diam-diam mengalikan langit
+  dua puluh kali — yang tidak terlihat sebagai pengali yang salah melainkan
+  sebagai eksposur otomatis yang "menggelapkan segalanya".
+- **RGBA16F, bukan RGBA32F.** Peta 4096×2048 berharga 64 MB sebagai half dan
+  128 MB sebagai float penuh, dan yang dibedakan mata pada radiansi langit jauh
+  di bawah ketelitian half.
+- **`SetHdri` tidak melakukan apa-apa bila jalurnya tidak berubah**, karena ia
+  dipanggil tiap frame. Tanpa penjagaan itu, editor mendekode berkas enam
+  megabyte enam puluh kali per detik — yang muncul bukan sebagai galat melainkan
+  sebagai editor yang berjalan tiga frame per detik.
+
+**Sekaligus menutup lubang yang dicatat `Ibl.h` sejak awal.** Komentar di atas
+`GradientSky` menyebut "peta lingkungan sungguhan datang bersama importir tekstur
+HDR"; `EquirectEnvironment` adalah importir itu, dan karena ia
+mengimplementasikan `IEnvironmentSampler` yang sama, seluruh rantai IBL — SH
+iradiansi, prefilter spekular — menerimanya tanpa satu baris pun berubah. Diuji
+begitu: SH yang diproyeksikan dari peta terang-di-atas menghasilkan iradiansi
+yang lebih besar di normal ke atas daripada ke bawah.
+
+Uji yang menentukan tetap pemetaannya: **arah→uv dan uv→arah harus saling
+membalik.** Yang meleset tidak menghasilkan galat apa pun, hanya matahari di
+dalam HDRI yang muncul di arah berbeda dari matahari yang menyinari adegan — dan
+itu terlihat sebagai bayangan yang arahnya aneh, bukan sebagai peta yang
+terpasang terbalik. Diuji juga bahwa U membungkus sementara V menjepit: menjepit
+U meninggalkan jahitan tegak selebar satu texel dari zenit ke nadir, dan
+membungkus V mengambil warna kutub seberang tepat di zenit.
+
+**Dua hal yang belum ada, dan keduanya disengaja.** HDRI belum menyalakan IBL —
+ia baru menjadi latar, bukan sumber cahaya, jadi objek masih disinari matahari
+directional saja; jalurnya sudah terbuka lewat `IEnvironmentSampler` tapi
+pembakaran IBL-nya pekerjaan tersendiri. Dan jalur berkasnya belum tersimpan
+antar-jalan, sama dengan seluruh pengaturan langit yang lain.
+
 **Selesai: bloom** (`Code/Render/{include/Sim/Render/Bloom.h,src/Bloom.cpp}`,
 `Shaders/{bloom_down,bloom_up}.frag.slang`). Penurunan 13 cuplikan (Jimenez)
 lalu penaikan tenda 3×3, dengan pembobotan Karis pada penurunan pertama.

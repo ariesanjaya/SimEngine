@@ -17,6 +17,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <cstring>
 #include <string>
 
 namespace sim::editor {
@@ -84,10 +85,42 @@ public:
         ImGui::Separator();
         ImGui::Checkbox("Sky", &context.sky.enabled);
         if (context.sky.enabled) {
+            // Pemilih sumber lebih dulu: sisa pengaturan di bawahnya berbeda
+            // untuk keduanya, dan menampilkan slider yang tidak berpengaruh apa
+            // pun adalah cara tercepat membuat orang menyimpulkan yang salah
+            // tentang apa yang dikendalikannya.
+            const char* sources[] = {"Atmosphere", "HDRI map"};
+            int source = static_cast<int>(context.sky.source);
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
-            ImGui::SliderFloat("Sky gain", &context.sky.intensity, 0.0f, 100.0f, "%.0f");
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
-            ImGui::SliderFloat("Altitude", &context.sky.cameraHeightKm, 0.0f, 20.0f, "%.2f km");
+            if (ImGui::Combo("Source", &source, sources, IM_ARRAYSIZE(sources))) {
+                context.sky.source = static_cast<render::SkySource>(source);
+            }
+
+            if (context.sky.source == render::SkySource::Atmosphere) {
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+                ImGui::SliderFloat("Sky gain", &context.sky.intensity, 0.0f, 100.0f, "%.0f");
+            }
+
+            if (context.sky.source == render::SkySource::HdrMap) {
+                context.sky.hdriPath.resize(512);
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 22.0f);
+                if (ImGui::InputText("HDR file", context.sky.hdriPath.data(),
+                                     context.sky.hdriPath.size())) {
+                }
+                context.sky.hdriPath.resize(std::strlen(context.sky.hdriPath.c_str()));
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+                ImGui::SliderAngle("Rotation", &context.sky.hdriRotation, -180.0f, 180.0f);
+                // Pengalinya sendiri, bukan "Sky gain": berkas HDR sudah berisi
+                // radiansi, jadi rentang yang bergunanya di sekitar satu — dua
+                // puluh kali lipat dari yang berguna untuk atmosfer Bruneton.
+                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+                ImGui::SliderFloat("HDR gain", &context.sky.hdriIntensity, 0.0f, 10.0f, "%.2f");
+                // Yang dimatikan HDRI dikatakan, bukan disembunyikan diam-diam:
+                // sakelar yang hilang tanpa penjelasan terbaca sebagai editor
+                // yang rusak.
+                ImGui::TextDisabled("Aerial perspective and clouds are off in HDRI mode.");
+                ImGui::TextDisabled("Time-of-Day still drives shadows, not the sky.");
+            }
 
             // Kabut atmosferik. Sakelarnya terpisah dari langit karena biayanya
             // muncul sebagai pass tersendiri di tabel di atas — dan angka yang

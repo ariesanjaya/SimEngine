@@ -98,6 +98,12 @@ struct EditorContext {
         float cameraHeightKm = 0.5f;
         bool aerialPerspective = true;
         float aerialHaze = 1.0f;
+
+        /// Sumber langit, dan berkas HDR-nya bila sumbernya peta.
+        render::SkySource source = render::SkySource::Atmosphere;
+        std::string hdriPath;
+        float hdriRotation = 0.0f;
+        float hdriIntensity = 1.0f;
     } sky;
 
     /// Awan volumetrik. Terpisah dari `sky` karena biayanya berbeda satu orde,

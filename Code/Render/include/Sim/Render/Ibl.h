@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <filesystem>
 #include <vector>
 
 namespace sim::render {
@@ -45,6 +46,52 @@ public:
 
     Vec3 Sample(const Vec3& direction) const override;
 };
+
+// --- Peta lingkungan equirectangular -----------------------------------------
+
+/// Arah dunia → uv equirectangular (latitude-longitude), keduanya 0..1.
+///
+/// **Pemetaan yang tidak membalik tidak menghasilkan galat apa pun**, hanya
+/// langit yang isinya benar di tempat yang salah — matahari di HDRI muncul di
+/// arah yang berbeda dari matahari yang menerangi adegan, dan yang terlihat
+/// adalah bayangan yang "arahnya aneh" alih-alih peta yang terpasang terbalik.
+/// Karena itu keduanya ada, dan keduanya diuji saling membalik.
+Vec2 DirectionToEquirectUv(const Vec3& direction);
+Vec3 EquirectUvToDirection(const Vec2& uv);
+
+/// Peta lingkungan HDR equirectangular, dibaca per arah.
+///
+/// **Ini yang ditunggu `GradientSky`.** Catatan di atas kelas itu menyebut
+/// "peta lingkungan sungguhan datang bersama importir tekstur HDR"; ini
+/// importirnya, dan karena ia mengimplementasikan antarmuka yang sama, seluruh
+/// rantai IBL — SH iradiansi, prefilter spekular — langsung menerimanya tanpa
+/// satu baris pun berubah.
+class EquirectEnvironment final : public IEnvironmentSampler {
+public:
+    uint32_t width = 0;
+    uint32_t height = 0;
+    /// RGB linear, baris demi baris, tiga float per texel.
+    std::vector<float> pixels;
+
+    bool IsValid() const {
+        return width > 0 && height > 0 &&
+               pixels.size() >= static_cast<std::size_t>(width) * height * 3;
+    }
+
+    /// Cuplikan bilinear. **Membungkus di U dan menjepit di V**, dan keduanya
+    /// harus berbeda: U adalah lingkaran penuh, jadi menjepitnya meninggalkan
+    /// jahitan tegak selebar satu texel yang membelah langit; V berakhir di
+    /// kutub, jadi membungkusnya mengambil warna dari kutub seberang.
+    Vec3 SampleUv(const Vec2& uv) const;
+
+    Vec3 Sample(const Vec3& direction) const override;
+};
+
+/// Memuat berkas Radiance `.hdr` sebagai peta equirectangular.
+///
+/// Mengembalikan peta kosong bila berkasnya tidak ada atau tidak bisa didekode;
+/// pemanggil memeriksa `IsValid()`.
+EquirectEnvironment LoadHdrEquirect(const std::filesystem::path& path);
 
 /// Enam muka cubemap, urutan Vulkan: +X, −X, +Y, −Y, +Z, −Z.
 inline constexpr int kCubeFaceCount = 6;

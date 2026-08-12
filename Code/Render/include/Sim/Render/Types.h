@@ -6,6 +6,7 @@
 
 #include <cstdint>
 #include <span>
+#include <string_view>
 
 namespace sim::render {
 
@@ -69,6 +70,19 @@ struct PostProcessSettings {
     float adaptationDarkenSeconds = 1.2f;
 
     BloomSettings bloom;
+};
+
+/// Dari mana langit datang.
+enum class SkySource : uint8_t {
+    /// Atmosfer Bruneton-Hillaire: dihitung dari fisika, berubah terhadap
+    /// matahari, dan memberi awan volumetrik udara untuk ditinggali.
+    Atmosphere,
+    /// Peta lingkungan HDR equirectangular. **Satu cuplikan tekstur** alih-alih
+    /// empat pass LUT ditambah raymarch — dan awannya sudah ada di dalam
+    /// gambarnya. Yang tidak bisa dilakukannya adalah berubah terhadap waktu:
+    /// matahari di HDRI diam di tempatnya, jadi Time-of-Day tidak lagi
+    /// menggerakkan langit walaupun ia tetap menggerakkan bayangan.
+    HdrMap,
 };
 
 /// Awan volumetrik.
@@ -183,6 +197,28 @@ struct ViewportDesc {
     float skyIntensity = 20.0f;
     /// Ketinggian kamera di atas permukaan laut, kilometer.
     float cameraHeightKm = 0.5f;
+
+    /// Sumber langitnya. HDRI mematikan aerial perspective dan awan volumetrik
+    /// dengan sendirinya: keduanya milik model atmosfer prosedural, dan
+    /// menumpuknya di atas foto langit berarti menghitung udara yang sama dua
+    /// kali dengan dua warna yang berlainan.
+    SkySource skySource = SkySource::Atmosphere;
+    /// Jalur berkas `.hdr` saat `skySource` adalah `HdrMap`. Hanya sah selama
+    /// panggilan `Render` — renderer menyalin apa yang perlu disimpannya.
+    std::string_view hdriPath;
+    /// Putaran mendatar peta HDR, radian. Yang dipakai menyelaraskan matahari di
+    /// dalam petanya dengan matahari yang menyinari adegan.
+    float hdriRotation = 0.0f;
+    /// Pengali radiansi peta HDR.
+    ///
+    /// **Terpisah dari `skyIntensity`, dan itu bukan duplikasi.** Atmosfer
+    /// Bruneton menghasilkan angka dalam satuannya sendiri, jadi pengalinya
+    /// berguna di sekitar 20; berkas HDR sudah berisi radiansi, jadi pengalinya
+    /// berguna di sekitar 1. Satu angka untuk keduanya berarti berpindah sumber
+    /// diam-diam mengalikan langit dua puluh kali — yang tidak terlihat sebagai
+    /// pengali yang salah melainkan sebagai eksposur otomatis yang "menggelapkan
+    /// segalanya".
+    float hdriIntensity = 1.0f;
 
     /// Aerial perspective: udara yang berada **di antara** kamera dan permukaan.
     ///

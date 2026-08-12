@@ -2,6 +2,9 @@
 
 #include "Sim/Core/Log.h"
 #include "Sim/Render/CloudNoise.h"
+#include "Sim/Render/Ibl.h"
+
+#include <glm/gtc/packing.hpp>
 
 #include <algorithm>
 #include <chrono>
@@ -328,6 +331,19 @@ bool SkyAtmosphere::Create(rhi::Device& device, const std::filesystem::path& sha
         return false;
     }
 
+    // Equirect membungkus di U dan menjepit di V. Menjepit keduanya
+    // meninggalkan jahitan tegak selebar satu texel yang membelah langit dari
+    // zenit ke nadir; membungkus keduanya mengambil warna kutub seberang tepat
+    // di zenit.
+    VkSamplerCreateInfo hdriSamplerInfo = samplerInfo;
+    hdriSamplerInfo.addressModeU = VK_SAMPLER_ADDRESS_MODE_REPEAT;
+    hdriSamplerInfo.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    hdriSamplerInfo.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    if (vkCreateSampler(device_->Handle(), &hdriSamplerInfo, nullptr, &hdriSampler_) !=
+        VK_SUCCESS) {
+        return false;
+    }
+
     if (!CreateImage(transmittance_, kTransmittanceWidth, kTransmittanceHeight) ||
         !CreateImage(multiscatter_, kMultiscatterSize, kMultiscatterSize) ||
         !CreateImage(skyView_, kSkyViewWidth, kSkyViewHeight) || !CreateAerialImage()) {
@@ -356,10 +372,10 @@ bool SkyAtmosphere::Create(rhi::Device& device, const std::filesystem::path& sha
         }
     }
 
-    const VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 12};
+    const VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 13};
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets = 5;
+    poolInfo.maxSets = 6;
     poolInfo.poolSizeCount = 1;
     poolInfo.pPoolSizes = &size;
     if (vkCreateDescriptorPool(device_->Handle(), &poolInfo, nullptr, &pool_) != VK_SUCCESS) {
@@ -367,10 +383,10 @@ bool SkyAtmosphere::Create(rhi::Device& device, const std::filesystem::path& sha
     }
 
     // Kedua set aerial memakai tata letak dua sumber yang sama dengan sky-view.
-    const std::array<VkDescriptorSetLayout, 5> layouts{setLayouts_[0], setLayouts_[1],
+    const std::array<VkDescriptorSetLayout, 6> layouts{setLayouts_[0], setLayouts_[1],
                                                        setLayouts_[2], setLayouts_[1],
-                                                       setLayouts_[1]};
-    std::array<VkDescriptorSet, 5> sets{};
+                                                       setLayouts_[1], setLayouts_[0]};
+    std::array<VkDescriptorSet, 6> sets{};
     VkDescriptorSetAllocateInfo allocateInfo{};
     allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
     allocateInfo.descriptorPool = pool_;
@@ -385,6 +401,10 @@ bool SkyAtmosphere::Create(rhi::Device& device, const std::filesystem::path& sha
     drawSet_ = sets[2];
     aerialLutSet_ = sets[3];
     aerialApplySet_ = sets[4];
+    // Set HDRI dibiarkan kosong sampai `SetHdri` memasang petanya. Pipeline-nya
+    // tetap dibuat: yang menentukan boleh-tidaknya menggambar adalah
+    // `HdriIsValid`, bukan ada-tidaknya pipeline.
+    hdriSet_ = sets[5];
 
     std::vector<VkDescriptorImageInfo> images;
     std::vector<VkWriteDescriptorSet> writes;
@@ -430,7 +450,10 @@ bool SkyAtmosphere::Create(rhi::Device& device, const std::filesystem::path& sha
                         aerialLutPipeline_) ||
         !CreatePipeline(shaderDirectory, "sky_aerial_apply.frag.spv", setLayouts_[1],
                         sizeof(AerialApplyPush), sceneFormat, vertexUv_, aerialApplyLayout_,
-                        aerialApplyPipeline_, /*blend=*/true)) {
+                        aerialApplyPipeline_, /*blend=*/true) ||
+        !CreatePipeline(shaderDirectory, "sky_hdri.frag.spv", setLayouts_[0],
+                        sizeof(Mat4) + sizeof(Vec4), sceneFormat, vertexUv_, hdriLayout_,
+                        hdriPipeline_)) {
         return false;
     }
     return true;
@@ -663,6 +686,81 @@ void SkyAtmosphere::RecordDraw(VkCommandBuffer cmd, const Mat4& invViewProj,
     vkCmdDraw(cmd, 3, 1, 0, 0);
 }
 
+bool SkyAtmosphere::SetHdri(const std::filesystem::path& path) {
+    if (device_ == nullptr) {
+        return false;
+    }
+    // Jalur yang sama berarti tidak ada yang perlu dilakukan. Tanpa penjagaan
+    // ini, memanggilnya tiap frame berarti mendekode berkas enam megabyte enam
+    // puluh kali per detik — yang tidak muncul sebagai galat melainkan sebagai
+    // editor yang berjalan tiga frame per detik.
+    if (path.string() == hdriPath_) {
+        return hdri_.IsValid();
+    }
+    hdriPath_ = path.string();
+    hdri_.Destroy();
+    if (path.empty()) {
+        return false;
+    }
+
+    const EquirectEnvironment environment = LoadHdrEquirect(path);
+    if (!environment.IsValid()) {
+        return false;
+    }
+
+    // RGBA16F, bukan RGBA32F. Peta 4096×2048 berharga 64 MB sebagai half dan
+    // 128 MB sebagai float penuh, sementara yang dibedakan mata pada radiansi
+    // langit jauh di bawah ketelitian half.
+    const std::size_t texels = static_cast<std::size_t>(environment.width) * environment.height;
+    std::vector<uint32_t> packed(texels * 2);
+    for (std::size_t i = 0; i < texels; ++i) {
+        const float r = environment.pixels[i * 3];
+        const float g = environment.pixels[i * 3 + 1];
+        const float b = environment.pixels[i * 3 + 2];
+        packed[i * 2] = glm::packHalf2x16(Vec2(r, g));
+        packed[i * 2 + 1] = glm::packHalf2x16(Vec2(b, 1.0f));
+    }
+    if (!hdri_.Create(*device_, environment.width, environment.height,
+                      VK_FORMAT_R16G16B16A16_SFLOAT, 8, packed.data())) {
+        SIM_ERROR("Render", "cannot upload HDR environment {}", hdriPath_);
+        return false;
+    }
+
+    const VkDescriptorImageInfo info{hdriSampler_, hdri_.View(),
+                                     VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = hdriSet_;
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.pImageInfo = &info;
+    vkUpdateDescriptorSets(device_->Handle(), 1, &write, 0, nullptr);
+
+    SIM_INFO("Render", "HDR environment ready ({}x{}, {})", environment.width,
+             environment.height, hdriPath_);
+    return true;
+}
+
+void SkyAtmosphere::RecordHdriDraw(VkCommandBuffer cmd, const Mat4& invViewProj, float intensity,
+                                   float rotationRadians) {
+    if (!HdriIsValid() || hdriPipeline_ == VK_NULL_HANDLE) {
+        return;
+    }
+    struct HdriPush {
+        Mat4 invViewProj{1.0f};
+        Vec4 params{0.0f};
+    } push;
+    push.invViewProj = invViewProj;
+    push.params = Vec4(intensity, rotationRadians, 0.0f, 0.0f);
+
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, hdriPipeline_);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, hdriLayout_, 0, 1, &hdriSet_, 0,
+                            nullptr);
+    vkCmdPushConstants(cmd, hdriLayout_, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(push), &push);
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+}
+
 bool SkyAtmosphere::CreateClouds(const std::filesystem::path& shaderDirectory,
                                  VkFormat sceneFormat) {
     if (device_ == nullptr || !IsValid()) {
@@ -887,6 +985,14 @@ void SkyAtmosphere::Destroy() {
     dropPipeline(aerialLutPipeline_, aerialLutLayout_);
     dropPipeline(aerialApplyPipeline_, aerialApplyLayout_);
     dropPipeline(cloudPipeline_, cloudLayout_);
+    dropPipeline(hdriPipeline_, hdriLayout_);
+
+    hdri_.Destroy();
+    hdriPath_.clear();
+    if (hdriSampler_ != VK_NULL_HANDLE) {
+        vkDestroySampler(device_->Handle(), hdriSampler_, nullptr);
+        hdriSampler_ = VK_NULL_HANDLE;
+    }
 
     cloudShape_.Destroy();
     cloudDetail_.Destroy();

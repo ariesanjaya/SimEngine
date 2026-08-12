@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Sim/RHI/Device.h"
+#include "Sim/RHI/Texture.h"
 #include "Sim/RHI/Texture3D.h"
 #include "Sim/Render/Atmosphere.h"
 #include "Sim/Render/Types.h"
@@ -8,6 +9,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <string>
 
 namespace sim::render {
 
@@ -88,6 +90,26 @@ public:
     void RecordAerialApply(VkCommandBuffer cmd, const Mat4& invViewProj,
                            const Vec3& cameraPosition, float maxDistanceKm, float intensity);
 
+    /// Memasang peta lingkungan HDR equirectangular sebagai sumber langit.
+    ///
+    /// **Sumber langit kedua, bukan pengganti.** Atmosfer Bruneton menghitung
+    /// langitnya dari fisika — itu yang membuat matahari terbenam benar dan awan
+    /// volumetrik punya udara untuk ditinggali — dan membayarnya dengan empat
+    /// pass LUT ditambah raymarch. HDRI membayar **satu cuplikan tekstur**, dan
+    /// sudah berisi awan yang difoto sungguhan. Yang tidak bisa dilakukannya
+    /// hanyalah berubah terhadap waktu.
+    ///
+    /// Tidak melakukan apa-apa bila `path` sama dengan yang sedang terpasang;
+    /// pemanggil boleh memanggilnya tiap frame. Mengembalikan true bila ada peta
+    /// yang siap dipakai sesudahnya.
+    bool SetHdri(const std::filesystem::path& path);
+
+    bool HdriIsValid() const { return hdri_.IsValid(); }
+
+    /// Menggambar HDRI-nya. Pemanggil yang membuka dan menutup rendering.
+    void RecordHdriDraw(VkCommandBuffer cmd, const Mat4& invViewProj, float intensity,
+                        float rotationRadians);
+
     /// Sisi ubin derau awan. Bentuk 64³ dan rincian 32³.
     ///
     /// **Bukan 128³ seperti acuannya.** Acuan membangkitkannya di compute
@@ -164,6 +186,16 @@ private:
     VkDescriptorPool cloudPool_ = VK_NULL_HANDLE;
     rhi::Texture3D cloudShape_;
     rhi::Texture3D cloudDetail_;
+    /// Peta lingkungan HDR, beserta jalur yang sedang terpasang. Jalurnya
+    /// disimpan supaya `SetHdri` boleh dipanggil tiap frame tanpa memuat ulang
+    /// berkas enam megabyte enam puluh kali per detik.
+    rhi::Texture2D hdri_;
+    std::string hdriPath_;
+    /// Sampler tersendiri: equirect **membungkus di U dan menjepit di V**, dan
+    /// sampler bawaan `Texture2D` menjepit keduanya — yang meninggalkan jahitan
+    /// tegak selebar satu texel membelah langit dari zenit ke nadir.
+    VkSampler hdriSampler_ = VK_NULL_HANDLE;
+    VkDescriptorSet hdriSet_ = VK_NULL_HANDLE;
     VkSampler cloudSampler_ = VK_NULL_HANDLE;
     VkImageView depthView_ = VK_NULL_HANDLE;
     VkSampler depthSampler_ = VK_NULL_HANDLE;
@@ -183,6 +215,8 @@ private:
     VkPipeline aerialApplyPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout cloudLayout_ = VK_NULL_HANDLE;
     VkPipeline cloudPipeline_ = VK_NULL_HANDLE;
+    VkPipelineLayout hdriLayout_ = VK_NULL_HANDLE;
+    VkPipeline hdriPipeline_ = VK_NULL_HANDLE;
 
     /// Transmitansi dibangun sekali; sisanya saat mataharinya bergerak cukup
     /// jauh. Ambangnya bukan "berubah sama sekali": matahari yang digerakkan

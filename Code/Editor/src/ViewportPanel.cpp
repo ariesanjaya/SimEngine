@@ -151,6 +151,10 @@ public:
         desc.gi = context.gi;
         desc.post = context.post;
         desc.skyEnabled = context.sky.enabled;
+        desc.skySource = context.sky.source;
+        desc.hdriPath = context.sky.hdriPath;
+        desc.hdriRotation = context.sky.hdriRotation;
+        desc.hdriIntensity = context.sky.hdriIntensity;
         desc.skyIntensity = context.sky.intensity;
         desc.cameraHeightKm = context.sky.cameraHeightKm;
         desc.aerialPerspective = context.sky.aerialPerspective;

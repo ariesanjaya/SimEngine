@@ -3951,6 +3951,112 @@ TEST_CASE("udara memakan biru dan mengembalikannya sebagai kabut biru") {
     CHECK(black.z > 0.0f);
 }
 
+// --- E8.8: peta lingkungan equirectangular -----------------------------------
+
+TEST_CASE("pemetaan equirect membalik dengan tepat di kedua arah") {
+    using namespace sim::render;
+
+    // **Pemetaan yang tidak membalik tidak menghasilkan galat apa pun**, hanya
+    // langit yang isinya benar di tempat yang salah: matahari di HDRI muncul di
+    // arah yang berbeda dari matahari yang menerangi adegan, dan yang terlihat
+    // adalah bayangan yang "arahnya aneh" alih-alih peta yang terpasang
+    // terbalik.
+    for (int yi = 1; yi < 32; ++yi) {
+        for (int xi = 0; xi < 32; ++xi) {
+            const Vec2 uv((static_cast<float>(xi) + 0.5f) / 32.0f,
+                          (static_cast<float>(yi) + 0.5f) / 32.0f);
+            const Vec3 direction = EquirectUvToDirection(uv);
+            CHECK(glm::length(direction) == doctest::Approx(1.0f).epsilon(1e-4f));
+            const Vec2 back = DirectionToEquirectUv(direction);
+            CHECK(back.x == doctest::Approx(uv.x).epsilon(1e-3f));
+            CHECK(back.y == doctest::Approx(uv.y).epsilon(1e-3f));
+        }
+    }
+
+    // Dan arah-arah yang bisa diperiksa tangan. v = 0 adalah zenit, v = 1 nadir,
+    // dan u = 0,5 adalah −Z yaitu arah pandang bawaan kamera.
+    CHECK(EquirectUvToDirection(Vec2(0.5f, 0.0f)).y == doctest::Approx(1.0f));
+    CHECK(EquirectUvToDirection(Vec2(0.5f, 1.0f)).y == doctest::Approx(-1.0f));
+    const Vec3 forward = EquirectUvToDirection(Vec2(0.5f, 0.5f));
+    CHECK(forward.z == doctest::Approx(-1.0f).epsilon(1e-4f));
+    CHECK(DirectionToEquirectUv(Vec3(0.0f, 1.0f, 0.0f)).y == doctest::Approx(0.0f));
+    CHECK(DirectionToEquirectUv(Vec3(0.0f, 0.0f, -1.0f)).x == doctest::Approx(0.5f));
+}
+
+TEST_CASE("peta equirect membungkus di U dan menjepit di V") {
+    using namespace sim::render;
+
+    // Dua texel dengan warna berbeda di ujung kiri dan kanan baris yang sama.
+    EquirectEnvironment environment;
+    environment.width = 4;
+    environment.height = 2;
+    environment.pixels.assign(4 * 2 * 3, 0.0f);
+    const auto set = [&](uint32_t x, uint32_t y, const Vec3& color) {
+        const std::size_t at = (static_cast<std::size_t>(y) * 4 + x) * 3;
+        environment.pixels[at] = color.x;
+        environment.pixels[at + 1] = color.y;
+        environment.pixels[at + 2] = color.z;
+    };
+    for (uint32_t y = 0; y < 2; ++y) {
+        for (uint32_t x = 0; x < 4; ++x) {
+            set(x, y, Vec3(0.5f));
+        }
+    }
+    set(0, 0, Vec3(1.0f, 0.0f, 0.0f));
+    set(3, 0, Vec3(0.0f, 0.0f, 1.0f));
+
+    // **U membungkus.** Tepat di u = 0 texel pertama dan texel terakhir saling
+    // bertetangga, jadi cuplikan di sana harus memadu keduanya. Sampler yang
+    // menjepit mengembalikan texel pertama apa adanya — dan yang terlihat adalah
+    // jahitan tegak selebar satu texel yang membelah langit dari zenit ke nadir.
+    const Vec3 seam = environment.SampleUv(Vec2(0.0f, 0.25f));
+    CHECK(seam.x == doctest::Approx(0.5f).epsilon(0.01f));
+    CHECK(seam.z == doctest::Approx(0.5f).epsilon(0.01f));
+
+    // **V menjepit.** Di atas baris pertama tidak ada apa-apa; membungkusnya
+    // akan mengambil warna dari kutub seberang, yaitu langit yang tiba-tiba
+    // menjadi tanah tepat di zenit.
+    const Vec3 top = environment.SampleUv(Vec2(0.125f, 0.0f));
+    CHECK(top.x == doctest::Approx(1.0f));
+    const Vec3 above = environment.SampleUv(Vec2(0.125f, -0.5f));
+    CHECK(above.x == doctest::Approx(top.x));
+
+    // Peta kosong menjawab hitam alih-alih membaca larik kosong.
+    const EquirectEnvironment empty;
+    CHECK(empty.IsValid() == false);
+    CHECK(empty.Sample(Vec3(0.0f, 1.0f, 0.0f)).x == doctest::Approx(0.0f));
+}
+
+TEST_CASE("peta equirect adalah IEnvironmentSampler yang utuh") {
+    using namespace sim::render;
+
+    // **Sifat yang membuatnya berguna melampaui skybox:** ia antarmuka yang
+    // sama dengan `GradientSky`, jadi seluruh rantai IBL menerimanya tanpa satu
+    // baris pun berubah. Yang diuji di sini bukan warnanya melainkan bahwa
+    // rantai itu benar-benar jalan di atasnya.
+    EquirectEnvironment environment;
+    environment.width = 8;
+    environment.height = 4;
+    environment.pixels.assign(8 * 4 * 3, 0.0f);
+    for (uint32_t y = 0; y < 4; ++y) {
+        for (uint32_t x = 0; x < 8; ++x) {
+            // Terang di atas, gelap di bawah — lingkungan yang iradiansinya
+            // punya arah yang jelas.
+            const float value = y < 2 ? 4.0f : 0.25f;
+            const std::size_t at = (static_cast<std::size_t>(y) * 8 + x) * 3;
+            environment.pixels[at] = value;
+            environment.pixels[at + 1] = value;
+            environment.pixels[at + 2] = value;
+        }
+    }
+
+    const Sh9 sh = ProjectIrradiance(environment, 4096);
+    const Vec3 up = EvaluateIrradiance(sh, Vec3(0.0f, 1.0f, 0.0f));
+    const Vec3 down = EvaluateIrradiance(sh, Vec3(0.0f, -1.0f, 0.0f));
+    CHECK(up.y > down.y);
+    CHECK(down.y >= 0.0f);
+}
+
 // --- E8.8: derau awan volumetrik ---------------------------------------------
 
 TEST_CASE("derau awan menyambung di ketiga tepinya") {

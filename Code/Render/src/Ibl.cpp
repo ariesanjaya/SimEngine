@@ -1,5 +1,9 @@
 #include "Sim/Render/Ibl.h"
 
+#include "Sim/Core/Log.h"
+
+#include <stb_image.h>
+
 #include <algorithm>
 #include <cmath>
 
@@ -75,6 +79,91 @@ Vec3 GradientSky::Sample(const Vec3& direction) const {
         radiance += sunRadiance;
     }
     return radiance;
+}
+
+Vec2 DirectionToEquirectUv(const Vec3& direction) {
+    const Vec3 d = glm::normalize(direction);
+    // atan2(x, −z): pada u = 0 arahnya −Z, yaitu arah pandang bawaan kamera.
+    // Konvensi mana pun sah asalkan kedua arah pemetaannya sepakat; yang tidak
+    // sah adalah dua konvensi yang berbeda di dua tempat, dan itu tidak muncul
+    // sebagai galat melainkan sebagai langit yang berputar terhadap mataharinya.
+    const float longitude = std::atan2(d.x, -d.z);
+    const float latitude = std::asin(std::clamp(d.y, -1.0f, 1.0f));
+    return Vec2(longitude / (2.0f * kPi) + 0.5f, 0.5f - latitude / kPi);
+}
+
+Vec3 EquirectUvToDirection(const Vec2& uv) {
+    const float longitude = (uv.x - 0.5f) * 2.0f * kPi;
+    const float latitude = (0.5f - uv.y) * kPi;
+    const float cosLatitude = std::cos(latitude);
+    return Vec3(cosLatitude * std::sin(longitude), std::sin(latitude),
+                -cosLatitude * std::cos(longitude));
+}
+
+Vec3 EquirectEnvironment::SampleUv(const Vec2& uv) const {
+    if (!IsValid()) {
+        return Vec3(0.0f);
+    }
+    // Membungkus di U, menjepit di V. U adalah lingkaran penuh — menjepitnya
+    // meninggalkan jahitan tegak selebar satu texel yang membelah langit — dan V
+    // berakhir di kutub, tempat membungkus akan mengambil warna dari kutub
+    // seberang.
+    const float x = uv.x * static_cast<float>(width) - 0.5f;
+    const float y = std::clamp(uv.y, 0.0f, 1.0f) * static_cast<float>(height) - 0.5f;
+    const auto x0 = static_cast<int32_t>(std::floor(x));
+    const auto y0 = static_cast<int32_t>(std::floor(y));
+    const float fx = x - static_cast<float>(x0);
+    const float fy = y - static_cast<float>(y0);
+
+    const auto wrapX = [&](int32_t value) {
+        const auto w = static_cast<int32_t>(width);
+        const int32_t result = value % w;
+        return result < 0 ? result + w : result;
+    };
+    const auto clampY = [&](int32_t value) {
+        return std::clamp(value, 0, static_cast<int32_t>(height) - 1);
+    };
+    const auto texel = [&](int32_t px, int32_t py) {
+        const std::size_t at =
+            (static_cast<std::size_t>(clampY(py)) * width + static_cast<uint32_t>(wrapX(px))) * 3;
+        return Vec3(pixels[at], pixels[at + 1], pixels[at + 2]);
+    };
+
+    const Vec3 top = glm::mix(texel(x0, y0), texel(x0 + 1, y0), fx);
+    const Vec3 bottom = glm::mix(texel(x0, y0 + 1), texel(x0 + 1, y0 + 1), fx);
+    return glm::mix(top, bottom, fy);
+}
+
+Vec3 EquirectEnvironment::Sample(const Vec3& direction) const {
+    return SampleUv(DirectionToEquirectUv(direction));
+}
+
+EquirectEnvironment LoadHdrEquirect(const std::filesystem::path& path) {
+    EquirectEnvironment environment;
+    if (path.empty() || !std::filesystem::exists(path)) {
+        return environment;
+    }
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    // `stbi_loadf` mendekode Radiance RGBE menjadi float linear. **Tiga kanal
+    // diminta secara eksplisit**: berkas HDR tidak punya alfa, dan meminta empat
+    // membuat stb mengarang kanal keempat yang lalu ikut termakan memori di
+    // setiap texel tanpa membawa satu bit informasi pun.
+    float* decoded = stbi_loadf(path.string().c_str(), &width, &height, &channels, 3);
+    if (decoded == nullptr || width <= 0 || height <= 0) {
+        SIM_WARN("Render", "cannot decode HDR environment {}: {}", path.string(),
+                 stbi_failure_reason() != nullptr ? stbi_failure_reason() : "unknown");
+        if (decoded != nullptr) {
+            stbi_image_free(decoded);
+        }
+        return environment;
+    }
+    environment.width = static_cast<uint32_t>(width);
+    environment.height = static_cast<uint32_t>(height);
+    environment.pixels.assign(decoded, decoded + static_cast<std::size_t>(width) * height * 3);
+    stbi_image_free(decoded);
+    return environment;
 }
 
 Vec3 CubeFaceDirection(int face, float u, float v) {

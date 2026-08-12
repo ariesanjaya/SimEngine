@@ -37,7 +37,10 @@ sim_add_library(Render
     # Vulkan, sehingga modul Editor yang me-link Render tidak ikut melihatnya.
     PRIVATE_DEPS
         Sim::Assets
-        Sim::RHI)
+        Sim::RHI
+        # stb_image, untuk mendekode peta lingkungan HDR. Privat: header publik
+        # Render tidak membocorkannya, sama dengan Assets dan Vegetation.
+        Stb::Impl)
 
 sim_compile_shaders(SimShadersGrid
     SOURCES
@@ -70,7 +73,8 @@ sim_compile_shaders(SimShadersGrid
         ${CMAKE_SOURCE_DIR}/Shaders/sky_draw.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/sky_aerial.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/sky_aerial_apply.frag.slang
-        ${CMAKE_SOURCE_DIR}/Shaders/sky_clouds.frag.slang)
+        ${CMAKE_SOURCE_DIR}/Shaders/sky_clouds.frag.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/sky_hdri.frag.slang)
 # openpbr.slang sengaja tidak ada di daftar ini. Ia modul pustaka tanpa entry
 # point — yang mengompilasinya adalah `AssembleMaterialModule`, yang menanamnya
 # ke dalam modul material lalu menyerahkannya ke ShaderCache. Menambahkannya di
