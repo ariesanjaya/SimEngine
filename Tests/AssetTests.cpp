@@ -977,3 +977,37 @@ TEST_CASE("Tekstur glTF yang tertanam dikeluarkan dengan nama yang dirujuk mater
     check >> contents;
     CHECK(contents == "sudah");
 }
+
+TEST_CASE("Nama berkas dari dalam aset tidak bisa keluar dari foldernya") {
+    using namespace sim::assets;
+
+    // **Nama di dalam berkas aset adalah masukan yang tidak dipercaya.** Sebuah
+    // .glb yang diunduh bisa menamai gambarnya "../../../.bashrc", dan nama itu
+    // menjadi nama berkas saat gambarnya dikeluarkan — jadi membuka sebuah model
+    // tidak boleh berarti mengizinkan model itu menulis ke mana pun.
+    CHECK(SafeAssetFileName("albedo.png") == "albedo.png");
+    CHECK(SafeAssetFileName("../../../.bashrc").empty() == false);
+    CHECK(SafeAssetFileName("../../../.bashrc") == ".bashrc");
+    CHECK(SafeAssetFileName("textures/albedo.png") == "albedo.png");
+    // Pemisah gaya Windows disamakan lebih dulu: std::filesystem di Linux
+    // membaca "..\rahasia" sebagai satu nama berkas utuh, jadi penyaring yang
+    // hanya memeriksa '/' melewatkannya.
+    CHECK(SafeAssetFileName("..\\..\\rahasia.png") == "rahasia.png");
+    CHECK(SafeAssetFileName("/etc/passwd") == "passwd");
+    CHECK(SafeAssetFileName("..").empty());
+    CHECK(SafeAssetFileName(".").empty());
+    CHECK(SafeAssetFileName("").empty());
+
+    // Apa pun yang dikembalikan harus benar-benar satu komponen: menggabungnya
+    // dengan sebuah folder tidak boleh menghasilkan jalur di luar folder itu.
+    for (const char* hostile :
+         {"../../../.bashrc", "textures/../../x.png", "..\\..\\rahasia.png", "/etc/passwd"}) {
+        const std::string safe = SafeAssetFileName(hostile);
+        if (safe.empty()) {
+            continue;
+        }
+        const std::filesystem::path joined = std::filesystem::path("/tmp/project") / safe;
+        INFO(hostile << " -> " << joined.string());
+        CHECK(joined.parent_path() == std::filesystem::path("/tmp/project"));
+    }
+}

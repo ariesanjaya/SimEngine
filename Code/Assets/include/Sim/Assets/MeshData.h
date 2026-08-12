@@ -243,6 +243,20 @@ void GroupByMaterial(MeshData& mesh, const std::vector<int>& triangleMaterial);
 /// dengan sengaja.
 MeshData LoadGltfMesh(const std::filesystem::path& path, std::string& error);
 
+/// Mengubah nama berkas yang datang DARI SEBUAH BERKAS ASET menjadi satu
+/// komponen jalur yang aman, atau string kosong bila tidak ada yang tersisa.
+///
+/// **Nama di dalam berkas aset adalah masukan yang tidak dipercaya.** Sebuah
+/// `.glb` yang diunduh orang bisa menamai gambarnya `../../../.bashrc`, dan
+/// nama itu dipakai sebagai nama berkas saat gambarnya dikeluarkan — jadi tanpa
+/// penyaringan ini, membuka sebuah model berarti mengizinkan model itu menulis
+/// ke mana pun. Model diunduh dari internet setiap hari; ini bukan keadaan yang
+/// jauh.
+///
+/// Yang dikembalikan selalu nama berkas telanjang: seluruh komponen folder
+/// dibuang, begitu pula `.` dan `..`.
+std::string SafeAssetFileName(std::string_view name);
+
 /// Mengeluarkan tekstur sebuah berkas glTF/GLB menjadi berkas di `folder`.
 ///
 /// **Langkah tersendiri, bukan bagian `LoadMesh`.** `LoadMesh` dipanggil

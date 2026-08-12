@@ -130,6 +130,27 @@ void SkinInfluence::Normalize() {
     }
 }
 
+std::string SafeAssetFileName(std::string_view name) {
+    // Pemisah gaya Windows disamakan lebih dulu: `std::filesystem` di Linux
+    // membaca `..\\rahasia` sebagai satu nama berkas utuh, sehingga
+    // `filename()` mengembalikannya bulat-bulat — dan penyaring yang hanya
+    // memeriksa `/` melewatkannya.
+    std::string normalized(name);
+    std::replace(normalized.begin(), normalized.end(), '\\', '/');
+
+    std::string leaf = std::filesystem::path(normalized).filename().string();
+    if (leaf == "." || leaf == "..") {
+        return {};
+    }
+    // Sesudah `filename()` seharusnya tidak ada pemisah yang tersisa; diperiksa
+    // lagi karena yang dijaga di sini adalah penulisan berkas, dan pemeriksaan
+    // kedua jauh lebih murah daripada kesalahan yang dijaganya.
+    if (leaf.find('/') != std::string::npos || leaf.find('\\') != std::string::npos) {
+        return {};
+    }
+    return leaf;
+}
+
 Mat4 SkinMatrix(const SkinInfluence& influence, std::span<const Mat4> palette) {
     // **Matriksnya yang dijumlahkan, bukan titik hasilnya.** Keduanya sama
     // secara matematis — transform linear atas jumlah berbobot — tapi yang ini

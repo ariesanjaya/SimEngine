@@ -403,15 +403,36 @@ bool ExtractGltfTextures(const std::filesystem::path& path, const std::filesyste
             std::strncmp(image.uri, "data:", 5) != 0) {
             std::string uri = image.uri;
             std::replace(uri.begin(), uri.end(), '\\', '/');
-            const std::filesystem::path source = path.parent_path() / uri;
-            const std::filesystem::path destination = folder / std::filesystem::path(uri).filename();
+
+            // **Jalur yang keluar dari folder modelnya ditolak.** URI di dalam
+            // berkas menentukan berkas mana yang DIBACA, jadi `../../../../etc/
+            // passwd` menyalin berkas mana pun ke dalam project — nama tujuannya
+            // yang sudah disaring tidak menolong sama sekali, karena yang
+            // berbahaya di sini pembacaannya, bukan penulisannya.
+            const std::filesystem::path root = std::filesystem::weakly_canonical(
+                path.parent_path(), code);
+            const std::filesystem::path source =
+                std::filesystem::weakly_canonical(path.parent_path() / uri, code);
+            const auto rootText = root.string();
+            const auto sourceText = source.string();
+            if (code || rootText.empty() || sourceText.rfind(rootText, 0) != 0) {
+                SIM_WARN("Assets", "{}: texture '{}' points outside the model folder; skipped",
+                         path.string(), uri);
+                continue;
+            }
+
+            const std::string leaf = SafeAssetFileName(uri);
+            if (leaf.empty()) {
+                continue;
+            }
+            const std::filesystem::path destination = folder / leaf;
             if (std::filesystem::exists(destination, code) ||
                 !std::filesystem::exists(source, code)) {
                 continue;
             }
             std::filesystem::copy_file(source, destination, code);
             if (!code) {
-                outWritten.push_back(destination.filename().string());
+                outWritten.push_back(leaf);
             }
             continue;
         }
@@ -424,9 +445,16 @@ bool ExtractGltfTextures(const std::filesystem::path& path, const std::filesyste
             continue;
         }
 
+        // **Nama dari dalam berkas adalah masukan yang tidak dipercaya.** Sebuah
+        // `.glb` bisa menamai gambarnya `../../../.bashrc`, dan nama itulah yang
+        // menjadi nama berkas di sini — tanpa penyaringan, membuka sebuah model
+        // berarti mengizinkan model itu menulis ke mana pun.
         std::string name = image.name != nullptr && image.name[0] != '\0'
-                               ? std::string(image.name) + ExtensionFor(image)
-                               : "embedded_" + std::to_string(i) + ExtensionFor(image);
+                               ? SafeAssetFileName(std::string(image.name) + ExtensionFor(image))
+                               : std::string();
+        if (name.empty()) {
+            name = "embedded_" + std::to_string(i) + ExtensionFor(image);
+        }
         const std::filesystem::path destination = folder / name;
         if (std::filesystem::exists(destination, code)) {
             continue;
