@@ -13,6 +13,19 @@ namespace sim::assets {
 namespace {
 
 constexpr const char* kMetaExtension = ".meta";
+
+/// Berkas pendamping yang bukan aset.
+///
+/// **Berkas pengaturan bukan sesuatu yang dirujuk siapa pun.** `.simmeshcfg`
+/// menyimpan penandaan sebuah mesh dan hanya dibaca lewat mesh-nya; kalau ia
+/// ikut terindeks, ia mendapat GUID dan `.meta`-nya sendiri, muncul di Asset
+/// Browser sebagai berkas tak dikenal, dan `.meta` itu tertinggal sebagai
+/// yatim begitu penandaan terakhirnya dilepas — karena berkas pengaturan yang
+/// tidak mengatur apa pun memang dihapus.
+bool IsSidecar(const std::filesystem::path& path) {
+    const std::string extension = path.extension().string();
+    return extension == kMetaExtension || extension == ".simmeshcfg";
+}
 constexpr int kMetaVersion = 1;
 
 /// Path relatif dengan '/' sebagai pemisah, apa pun platformnya.
@@ -236,7 +249,7 @@ AssetDatabase::ScanResult AssetDatabase::Scan(const std::filesystem::path& root,
             continue;
         }
         // Berkas .meta adalah milik database, bukan aset tersendiri.
-        if (entry.path().extension() == kMetaExtension) {
+        if (IsSidecar(entry.path())) {
             continue;
         }
 

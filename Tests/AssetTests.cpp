@@ -1011,3 +1011,19 @@ TEST_CASE("Nama berkas dari dalam aset tidak bisa keluar dari foldernya") {
         CHECK(joined.parent_path() == std::filesystem::path("/tmp/project"));
     }
 }
+
+TEST_CASE("Berkas pengaturan mesh tidak ikut terdaftar sebagai aset") {
+    TempDir temp;
+    WriteFile(temp.Path() / "rig.fbx", "bukan fbx");
+    WriteFile(temp.Path() / "rig.fbx.simmeshcfg", "{\"version\":1,\"parts\":[]}");
+
+    AssetDatabase db;
+    REQUIRE(db.Initialize({temp.Path(), nullptr, 1.0f}));
+    // Berkas pengaturan hanya dibaca lewat mesh-nya. Kalau ia ikut terindeks, ia
+    // mendapat GUID dan .meta sendiri, muncul di Asset Browser sebagai berkas
+    // tak dikenal, dan .meta itu tertinggal yatim begitu penandaan terakhirnya
+    // dilepas — karena berkas pengaturan yang kosong memang dihapus.
+    CHECK(db.All().size() == 1);
+    CHECK(db.FindByRelativePath("rig.fbx.simmeshcfg") == nullptr);
+    CHECK_FALSE(std::filesystem::exists(temp.Path() / "rig.fbx.simmeshcfg.meta"));
+}
