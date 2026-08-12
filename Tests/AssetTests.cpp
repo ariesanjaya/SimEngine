@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -488,4 +489,131 @@ TEST_CASE("shaderBall.fbx terbaca sebagai geometri yang masuk akal") {
     for (std::size_t i = 0; i < mesh.vertices.size(); i += 97) {
         CHECK(glm::length(mesh.vertices[i].normal) == doctest::Approx(1.0f).epsilon(0.01f));
     }
+}
+
+
+// --- E8.4: rangka dan bobot skin ----------------------------------------------
+
+TEST_CASE("bobot skin dinormalkan, dan vertex tanpa pengaruh tidak runtuh") {
+    using namespace sim::assets;
+
+    SkinInfluence influence;
+    influence.bones = {3, 7, 0, 0};
+    influence.weights = {0.5f, 0.25f, 0.0f, 0.0f};
+    influence.Normalize();
+    // **Bobot yang tidak berjumlah satu menyusutkan vertexnya ke arah titik
+    // asal**, dan yang terlihat adalah permukaan yang berkerut di tempat
+    // tertentu — bukan galat.
+    CHECK(influence.WeightSum() == doctest::Approx(1.0f));
+    CHECK(influence.weights[0] == doctest::Approx(2.0f / 3.0f));
+    CHECK(influence.weights[1] == doctest::Approx(1.0f / 3.0f));
+
+    // Nol di seluruh bobot berarti vertex itu runtuh ke titik asal. Ia harus
+    // mengikuti bone pertama sepenuhnya alih-alih hilang.
+    SkinInfluence empty;
+    empty.Normalize();
+    CHECK(empty.WeightSum() == doctest::Approx(1.0f));
+    CHECK(empty.weights[0] == doctest::Approx(1.0f));
+}
+
+TEST_CASE("rangka menolak urutan yang bukan topologis") {
+    using namespace sim::assets;
+
+    SkeletonData skeleton;
+    skeleton.bones.push_back(SkeletonBone{"Root", -1, {}, {}, {}});
+    skeleton.bones.push_back(SkeletonBone{"Spine", 0, {}, {}, {}});
+    CHECK(skeleton.IsTopological());
+    CHECK(skeleton.Find("Spine") == 1);
+    CHECK(skeleton.Find("Tidak Ada") == -1);
+
+    // Induk yang menyusul anaknya membuat transform global tidak bisa dihitung
+    // satu lintasan maju — dan satu lintasan maju itulah alasan urutannya
+    // dituntut sejak awal.
+    skeleton.bones.push_back(SkeletonBone{"Salah", 3, {}, {}, {}});
+    CHECK(skeleton.IsTopological() == false);
+}
+
+TEST_CASE("vertex yang sama tapi beda bobot skin tidak disatukan") {
+    using namespace sim::assets;
+
+    // **Menyatukannya berarti separuh permukaan mengikuti bone yang salah** —
+    // yang terlihat sebagai kulit yang tertarik ke arah yang tidak masuk akal,
+    // bukan sebagai galat.
+    const MeshVertex vertex{Vec3(1.0f, 2.0f, 3.0f), Vec3(0.0f, 1.0f, 0.0f), Vec2(0.0f)};
+    std::vector<MeshVertex> soup(6, vertex);
+
+    SkinInfluence hip;
+    hip.bones = {0, 0, 0, 0};
+    hip.weights = {1.0f, 0.0f, 0.0f, 0.0f};
+    SkinInfluence knee;
+    knee.bones = {5, 0, 0, 0};
+    knee.weights = {1.0f, 0.0f, 0.0f, 0.0f};
+    std::vector<SkinInfluence> influences{hip, hip, hip, knee, knee, knee};
+
+    const MeshData mesh = BuildIndexedMesh(soup, influences);
+    REQUIRE(mesh.IsValid());
+    CHECK(mesh.vertices.size() == 2);
+    CHECK(mesh.influences.size() == 2);
+    CHECK(mesh.indices.size() == 6);
+
+    // Tanpa pengaruh, keenamnya memang satu vertex — itu perilaku lama yang
+    // harus tetap berlaku untuk mesh statis.
+    const MeshData plain = BuildIndexedMesh(soup);
+    CHECK(plain.vertices.size() == 1);
+    CHECK(plain.influences.empty());
+    CHECK(plain.IsSkinned() == false);
+}
+
+TEST_CASE("rig ber-skin terbaca dengan satuan yang sejalan antara mesh dan rangka") {
+    using namespace sim::assets;
+
+    // Berkas rig tidak ikut di repo, jadi ujinya dijalankan hanya bila
+    // ditunjuk: `SIM_RIG_FBX=/path/ke/rig.fbx ctest`.
+    const char* rigPath = std::getenv("SIM_RIG_FBX");
+    if (rigPath == nullptr || !std::filesystem::exists(rigPath)) {
+        return;
+    }
+
+    std::string error;
+    const MeshData mesh = LoadMesh(rigPath, error);
+    REQUIRE(mesh.IsValid());
+    REQUIRE(mesh.IsSkinned());
+    CHECK(mesh.skeleton.IsTopological());
+
+    for (const SkinInfluence& influence : mesh.influences) {
+        CHECK(influence.WeightSum() == doctest::Approx(1.0f).epsilon(1e-4f));
+        for (int i = 0; i < kMaxInfluences; ++i) {
+            if (influence.weights[i] > 0.0f) {
+                CHECK(influence.bones[i] < mesh.skeleton.bones.size());
+            }
+        }
+    }
+
+    // **Ini uji yang menentukan, dan yang menangkap satu bug sungguhan.**
+    // Konversi satuan ufbx dipanggang ke transform node root, jadi transform
+    // lokal anak-anaknya tetap dalam satuan asli berkasnya. Bind pose yang
+    // diambil apa adanya dari sana menghasilkan rangka seratus kali lebih besar
+    // daripada kulitnya — dan kulit yang diulit rangka seratus kali terlalu
+    // besar tidak menghasilkan satu pun galat, ia menghasilkan karakter yang
+    // lenyap. Yang membuktikan keduanya sejalan: posisi global bone harus
+    // berada di dalam kotak batas mesh-nya.
+    std::vector<Mat4> global(mesh.skeleton.bones.size());
+    Vec3 lowest(1e9f);
+    Vec3 highest(-1e9f);
+    for (std::size_t i = 0; i < mesh.skeleton.bones.size(); ++i) {
+        const SkeletonBone& bone = mesh.skeleton.bones[i];
+        const Mat4 local = glm::translate(Mat4(1.0f), bone.translation) *
+                           glm::mat4_cast(bone.rotation) * glm::scale(Mat4(1.0f), bone.scale);
+        global[i] = bone.parent >= 0 ? global[static_cast<std::size_t>(bone.parent)] * local : local;
+        const Vec3 position(global[i][3]);
+        lowest = glm::min(lowest, position);
+        highest = glm::max(highest, position);
+    }
+    // Longgar sepersepuluh meter: ujung jari dan rambut boleh sedikit melewati
+    // bone terluar, tapi seratus kali lipat tidak mungkin lolos.
+    const float slack = 0.1f;
+    CHECK(lowest.x >= mesh.boundsMin.x - slack);
+    CHECK(lowest.y >= mesh.boundsMin.y - slack);
+    CHECK(highest.x <= mesh.boundsMax.x + slack);
+    CHECK(highest.y <= mesh.boundsMax.y + slack);
 }

@@ -771,6 +771,47 @@ material dan tekstur dari berkasnya, serta glTF — ufbx membaca FBX dan OBJ, da
 `cgltf` masih menunggu. Indeks aset juga belum mencatat jumlah segitiga: itu
 menuntut medan baru di `ImportResult` beserta panel yang menampilkannya.
 
+**Selesai: impor rangka dan bobot skin dari FBX**
+(`Code/Assets/{include/Sim/Assets/MeshData.h,src/MeshImport.cpp}`). Diuji
+terhadap rig Mixamo `Y Bot.fbx` beserta animasi `Running.fbx` dan
+`Defeated.fbx`.
+
+- **Empat pengaruh per vertex, dan itu batas yang dipilih bukan diwarisi.**
+  Pengaruh kelima dan seterusnya hampir selalu berbobot di bawah satu persen —
+  yang tidak bisa dibedakan mata — sementara masing-masing menambah satu indeks,
+  satu bobot, dan satu perkalian matriks per vertex per frame. Yang dibuang
+  dinormalkan kembali ke empat yang tersisa: bobot yang tidak berjumlah satu
+  menyusutkan vertexnya ke arah titik asal.
+- **Pengaruh skin ikut menjadi bagian kunci penyatuan vertex.** Dua titik yang
+  sama persis tapi berbeda bobot skin adalah dua vertex yang berbeda;
+  menyatukannya berarti separuh permukaan mengikuti bone yang salah.
+- **Bone diurutkan topologis dari urutan depth-first ufbx**, jadi transform
+  global bisa dihitung satu lintasan maju tanpa rekursi.
+
+**Satu bug sungguhan yang ditangkap ujinya, dan yang sempat mendarat.**
+Konversi satuan ufbx dipanggang ke transform node root, jadi `local_transform`
+anak-anaknya tetap dalam satuan asli berkasnya. Terukur: mesh Y Bot benar
+setinggi 1,80 m sementara translasi bone-nya 99,79 — sentimeter. Kulit yang
+diulit rangka seratus kali terlalu besar tidak menghasilkan satu pun galat; ia
+menghasilkan karakter yang lenyap. Bind pose karena itu diturunkan dari
+`node_to_world`, bukan dari `local_transform`.
+
+Uji yang menjaganya menyatakan sifat yang benar-benar berarti: **posisi global
+bone harus berada di dalam kotak batas mesh-nya.** Terukur sesudah perbaikan:
+
+| | x | y | z |
+| --- | --- | --- | --- |
+| Bone (global bind) | −0,973..0,973 | 0,031..1,786 | −0,109..0,213 |
+| Batas mesh | −0,973..0,973 | 0,000..1,805 | −0,161..0,204 |
+
+Terukur juga: 65 bone, 55.320 segitiga, selisih terbesar jumlah bobot dari satu
+**0,000000**, nol indeks bone di luar batas. Rig-nya tidak ikut di repo, jadi
+ujinya berjalan hanya bila ditunjuk: `SIM_RIG_FBX=/path/rig.fbx ctest`.
+
+**Yang belum ada: GPU skinning.** Rangka dan bobotnya sudah ada di sisi CPU dan
+sudah diuji, tapi renderer belum mengunggah matriks kulit maupun menerapkannya
+di vertex shader — jadi karakter ber-rig masih digambar pada bind pose-nya.
+
 **Selesai: sistem task pose, mengikuti Esoterica**
 (`Code/Animation/{include/Sim/Animation/PoseTask.h,src/PoseTask.cpp}`, acuan
 `/home/arie/SDK/Esoterica/Code/Engine/Animation/TaskSystem`).
