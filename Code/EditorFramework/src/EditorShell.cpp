@@ -4,6 +4,8 @@
 #include "Sim/Editor/Actions.h"
 #include "Sim/Editor/Command.h"
 #include "Sim/Editor/Icons.h"
+#include "Sim/Editor/PanelIds.h"
+#include "Sim/Editor/PanelManager.h"
 #include "Sim/Editor/Selection.h"
 #include "Sim/Editor/Widgets.h"
 
@@ -30,6 +32,27 @@ float StatusBarHeight() {
 void PlannedMenuItem(const char* icon, const char* label, const char* shortcut = nullptr) {
     const std::string text = std::string(icon) + "  " + label;
     ImGui::MenuItem(text.c_str(), shortcut, false, false);
+}
+
+/// Item menu yang membuka sebuah panel dan memberinya fokus.
+///
+/// **Tercentang saat panelnya terbuka**, sama seperti menu Window: entri menu
+/// yang tidak memperlihatkan keadaan membuat orang mengkliknya dua kali dan
+/// menutup kembali panel yang baru saja dibukanya.
+void PanelMenuItem(PanelManager& panels, const char* icon, const char* label, const char* id) {
+    Panel* panel = panels.Find(id);
+    if (panel == nullptr) {
+        // Panelnya tidak terdaftar di build ini — Lua mati, misalnya. Ditampilkan
+        // nonaktif alih-alih disembunyikan: susunan menu yang berubah menurut
+        // opsi build adalah susunan yang tidak bisa diajarkan.
+        PlannedMenuItem(icon, label);
+        return;
+    }
+    const std::string text = std::string(icon) + "  " + label;
+    if (ImGui::MenuItem(text.c_str(), nullptr, panel->IsOpen())) {
+        panel->SetOpen(true);
+        panel->SetFocused(true);
+    }
 }
 
 }  // namespace
@@ -103,14 +126,15 @@ void EditorShell::DrawMenuBar(EditorContext& context, PanelManager& panels) {
     ActionRegistry* actions = context.actions;
 
     if (ImGui::BeginMenu("File")) {
-        PlannedMenuItem(icons::kAdd, "New Level", "Ctrl+N");
-        PlannedMenuItem(icons::kOpen, "Open Level...", "Ctrl+O");
-        PlannedMenuItem(icons::kSave, "Save Level", "Ctrl+S");
-        PlannedMenuItem(icons::kSave, "Save Level As...", "Ctrl+Shift+S");
-        ImGui::Separator();
-        PlannedMenuItem(icons::kFolder, "Open Project...");
-        ImGui::Separator();
         if (actions != nullptr) {
+            actions->MenuItem("level.new");
+            actions->MenuItem("level.open");
+            actions->MenuItem("level.save");
+            actions->MenuItem("level.save_as");
+            actions->MenuItem("level.reload");
+            ImGui::Separator();
+            actions->MenuItem("project.close");
+            ImGui::Separator();
             actions->MenuItem("editor.exit");
         }
         ImGui::EndMenu();
@@ -121,11 +145,12 @@ void EditorShell::DrawMenuBar(EditorContext& context, PanelManager& panels) {
             actions->MenuItem("edit.undo");
             actions->MenuItem("edit.redo");
             ImGui::Separator();
-        }
-        PlannedMenuItem(icons::kDuplicate, "Duplicate", "Ctrl+D");
-        PlannedMenuItem(icons::kDelete, "Delete", "Delete");
-        ImGui::Separator();
-        if (actions != nullptr) {
+            actions->MenuItem("entity.copy");
+            actions->MenuItem("entity.paste");
+            actions->MenuItem("entity.paste_as_child");
+            actions->MenuItem("entity.duplicate");
+            actions->MenuItem("entity.delete");
+            ImGui::Separator();
             actions->MenuItem("selection.clear");
             actions->MenuItem("edit.clear_history");
         }
@@ -133,22 +158,38 @@ void EditorShell::DrawMenuBar(EditorContext& context, PanelManager& panels) {
     }
 
     if (ImGui::BeginMenu("Entity")) {
-        PlannedMenuItem(icons::kEntity, "Create Empty");
-        PlannedMenuItem(icons::kEntityGroup, "Create Child");
+        if (actions != nullptr) {
+            actions->MenuItem("entity.create");
+            actions->MenuItem("entity.duplicate");
+            actions->MenuItem("entity.delete");
+        }
         ImGui::Separator();
+        // Prefab belum punya aksinya; entrinya tetap ditampilkan supaya susunan
+        // menu tidak berubah lagi setelah orang terbiasa dengan posisinya.
         PlannedMenuItem(icons::kPrefab, "Save as Prefab...");
         ImGui::EndMenu();
     }
 
     if (ImGui::BeginMenu("Tools")) {
-        // Panel-panel ini lahir di E7.
-        PlannedMenuItem(icons::kMaterialEditor, "Material Editor");
-        PlannedMenuItem(icons::kParticleEditor, "Particle Editor");
-        PlannedMenuItem(icons::kTerrainEditor, "Terrain Editor");
-        PlannedMenuItem(icons::kVegetationEditor, "Vegetation Editor");
-        PlannedMenuItem(icons::kAnimationEditor, "Animation Editor");
+        // Membuka panelnya, bukan aksi tersendiri: "Material Editor" di menu ini
+        // dan "Material Editor" di menu Window adalah hal yang sama, dan dua
+        // jalur menuju satu panel adalah dua jalur yang suatu saat berselisih
+        // soal panel mana yang sedang terbuka.
+        PanelMenuItem(panels, icons::kMaterialEditor, "Material Editor",
+                      panel_id::kMaterialEditor);
+        PanelMenuItem(panels, icons::kParticleEditor, "Particle Editor",
+                      panel_id::kParticleEditor);
+        PanelMenuItem(panels, icons::kTerrainEditor, "Terrain Editor", panel_id::kTerrainEditor);
+        PanelMenuItem(panels, icons::kVegetationEditor, "Vegetation Editor",
+                      panel_id::kVegetationEditor);
+        PanelMenuItem(panels, icons::kAnimationEditor, "Animation Editor",
+                      panel_id::kAnimationEditor);
         ImGui::Separator();
-        PlannedMenuItem(icons::kLua, "Lua Console");
+        PanelMenuItem(panels, icons::kLua, "Lua Console", panel_id::kLuaConsole);
+        PanelMenuItem(panels, icons::kScript, "Script Editor", panel_id::kScriptEditor);
+        PanelMenuItem(panels, icons::kNodeGraph, "Graph Editor", panel_id::kGraphEditor);
+        ImGui::Separator();
+        // Keduanya memang belum ada panelnya.
         PlannedMenuItem(icons::kAiAssistant, "AI Assistant");
         PlannedMenuItem(icons::kAiBridge, "AI Bridge");
         ImGui::EndMenu();
