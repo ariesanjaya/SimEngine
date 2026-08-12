@@ -1,5 +1,6 @@
 #include "Sim/Editor/SceneView.h"
 
+#include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Editor/EditorContext.h"
 #include "Sim/Editor/Icons.h"
 #include "Sim/Editor/Selection.h"
@@ -44,7 +45,9 @@ bool RayIntersectsAabb(const Vec3& origin, const Vec3& direction, const Vec3& bo
 
 }  // namespace
 
-void SceneView::Build(scene::World& world, const Selection& selection) {
+void SceneView::Build(scene::World& world, const Selection& selection,
+                      const assets::AssetDatabase* assets,
+                      render::IViewportRenderer* renderer) {
     meshes_.clear();
     lights_.clear();
     lines_.clear();
@@ -70,17 +73,35 @@ void SceneView::Build(scene::World& world, const Selection& selection) {
         if (world.Has<scene::MeshRendererComponent>(entity)) {
             render::MeshInstance instance;
             instance.transform = matrix;
-            // Kubus satuan sampai mesh sungguhan bisa dimuat di E5/E8. Batas
-            // ini dipakai bersama oleh yang digambar dan yang bisa diklik,
-            // jadi keduanya tidak mungkin berbeda.
+            // Kubus satuan adalah nilai mundur, bukan satu-satunya pilihan lagi:
+            // aset mesh yang bisa dimuat menggantikan batas ini dengan batasnya
+            // sendiri. Batas itu dipakai bersama oleh yang digambar dan yang
+            // bisa diklik, jadi keduanya tidak mungkin berbeda.
             instance.boundsMin = Vec3(-0.5f);
             instance.boundsMax = Vec3(0.5f);
             instance.color = kMeshColor;
             instance.selected = selected;
-            if (const auto* renderer = world.TryGet<scene::MeshRendererComponent>(entity)) {
-                instance.color = Vec4(renderer->baseColor, 1.0f);
-                instance.castShadows = renderer->castShadows;
-                instance.receiveShadows = renderer->receiveShadows;
+            if (const auto* meshRenderer = world.TryGet<scene::MeshRendererComponent>(entity)) {
+                instance.color = Vec4(meshRenderer->baseColor, 1.0f);
+                instance.castShadows = meshRenderer->castShadows;
+                instance.receiveShadows = meshRenderer->receiveShadows;
+
+                // GUID → jalur → geometri. **Renderer yang menyimpan cache-nya**,
+                // bukan di sini: yang bisa memutuskan sebuah mesh sudah ada di
+                // GPU hanyalah yang memegang buffer-nya, dan cache kedua di
+                // editor adalah cache yang suatu saat tidak sepakat dengan yang
+                // pertama.
+                if (assets != nullptr && renderer != nullptr && meshRenderer->mesh.IsValid()) {
+                    if (const assets::AssetRecord* record = assets->Find(meshRenderer->mesh.guid)) {
+                        const render::MeshAsset mesh =
+                            renderer->AcquireMesh(assets->AbsolutePath(*record).string());
+                        if (mesh.loaded) {
+                            instance.mesh = mesh.handle;
+                            instance.boundsMin = mesh.boundsMin;
+                            instance.boundsMax = mesh.boundsMax;
+                        }
+                    }
+                }
             }
             meshes_.push_back(instance);
 

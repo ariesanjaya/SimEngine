@@ -22,6 +22,12 @@ sim_add_test(SimAssetTests
     DEPS
         Sim::Assets)
 
+# Folder mesh sumber, bukan salinannya di build — alasan yang sama dengan
+# SIM_SHADER_DIR di bawah: uji yang membaca aset harus membaca berkas yang
+# sedang ada di repo, bukan salinan yang tertinggal satu build.
+target_compile_definitions(SimAssetTests
+    PRIVATE SIM_MESH_DIR="${CMAKE_SOURCE_DIR}/Resources/Meshes")
+
 # Material: model graph `.simmat`, katalog node (keluarannya mengikuti OpenPBR
 # Surface v1.1), validasi, tata letak blok uniform, dan cache SPIR-V. Tidak
 # butuh Lua maupun editor.

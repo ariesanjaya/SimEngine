@@ -18,6 +18,32 @@ namespace sim::render {
 using TextureHandle = uint64_t;
 inline constexpr TextureHandle kInvalidTexture = 0;
 
+/// Handle buram ke geometri mesh yang sudah ada di GPU.
+///
+/// **Nol berarti kubus satuan, bukan berarti kesalahan.** Aset mesh yang belum
+/// ditetapkan, yang gagal dimuat, dan yang sedang menunggu semuanya menggambar
+/// kubus — sama seperti sebelum importir ada. Yang tidak boleh terjadi adalah
+/// entity yang punya MeshRenderer tapi tidak menggambar apa pun: yang hilang
+/// dari viewport tidak bisa diklik, tidak bisa dipilih, dan karena itu tidak
+/// bisa diperbaiki.
+using MeshHandle = uint64_t;
+inline constexpr MeshHandle kUnitCubeMesh = 0;
+
+/// Geometri yang siap dipakai beserta batas ruang lokalnya.
+///
+/// Batasnya ikut mengalir balik karena **yang digambar dan yang bisa diklik
+/// harus memakai kotak yang sama.** Editor menghitung picking dari batas ini,
+/// renderer menghitung culling dan bayangan dari batas yang sama; dua sumber
+/// berarti objek yang tampak tapi tak bisa dipilih, dan penyebabnya sulit
+/// dilacak.
+struct MeshAsset {
+    MeshHandle handle = kUnitCubeMesh;
+    Vec3 boundsMin{-0.5f};
+    Vec3 boundsMax{0.5f};
+    /// False bila berkasnya gagal dimuat. Handle-nya lalu kubus satuan.
+    bool loaded = false;
+};
+
 enum class DrawMode : uint8_t {
     Lit,
     Unlit,
@@ -256,6 +282,15 @@ struct ViewportDesc {
 /// untuk frustum culling dan mengabaikan bagian wireframe-nya.
 struct MeshInstance {
     Mat4 transform{1.0f};
+    /// Geometrinya. `kUnitCubeMesh` berarti kubus satuan yang diskalakan ke
+    /// `boundsMin/boundsMax` — perilaku yang berlaku sebelum importir mesh ada,
+    /// dan yang tetap berlaku untuk entity tanpa aset mesh.
+    ///
+    /// **Untuk mesh sungguhan, `transform` dipakai apa adanya.** Vertexnya sudah
+    /// berada di ruang lokal yang sama dengan batasnya, jadi memetakannya ulang
+    /// lewat kotak batas — seperti yang harus dilakukan kubus — akan menskalakan
+    /// mesh dua kali.
+    MeshHandle mesh = kUnitCubeMesh;
     Vec3 boundsMin{-0.5f, -0.5f, -0.5f};
     Vec3 boundsMax{0.5f, 0.5f, 0.5f};
     Vec4 color{0.72f, 0.74f, 0.78f, 1.0f};

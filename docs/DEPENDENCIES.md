@@ -100,7 +100,7 @@ Ditambahkan saat dibutuhkan, dicatat di sini supaya keputusannya tidak diulang:
 
 | Paket | Untuk apa |
 |---|---|
-| **ufbx** / **cgltf** | impor mesh & animasi (FBX seperti `Defeated.fbx`, dan glTF) |
+| **cgltf** | impor glTF. `ufbx` sudah masuk di E8.4 dan membaca FBX serta OBJ |
 | **meshoptimizer** | optimisasi vertex cache, generasi LOD, simplifikasi |
 | **PhysX 5** | fisika — sumber lokal di `/home/arie/SDK/PhysX-main` |
 | **OpenAL Soft** | audio — sumber lokal di `/home/arie/SDK/openal-soft-1.25.2` |

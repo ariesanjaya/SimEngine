@@ -336,7 +336,38 @@ target_compile_options(stb_impl PRIVATE -w)
 add_library(Stb::Impl ALIAS stb_impl)
 
 # ---------------------------------------------------------------------------
+# ufbx — pembaca FBX untuk impor mesh (E8.4)
+#
+# Satu pasang .c/.h tanpa build system, jadi SOURCE_SUBDIR diarahkan ke folder
+# tanpa CMakeLists — pola yang sama dengan stb dan VMA.
+#
+# **Dikompilasi sebagai C, bukan C++.** ufbx menulis C99 dan mengandalkan
+# perilaku yang berbeda di kedua bahasa; mengompilasinya sebagai C++ berhasil
+# di sebagian besar kompiler dan gagal dengan cara yang sulit dilacak di
+# sisanya.
+# ---------------------------------------------------------------------------
+FetchContent_Declare(ufbx
+    GIT_REPOSITORY https://github.com/ufbx/ufbx.git
+    GIT_TAG        v0.20.0
+    GIT_SHALLOW    TRUE
+    SOURCE_SUBDIR  misc)
+FetchContent_MakeAvailable(ufbx)
+
+add_library(ufbx STATIC "${ufbx_SOURCE_DIR}/ufbx.c")
+target_include_directories(ufbx SYSTEM PUBLIC ${ufbx_SOURCE_DIR})
+set_target_properties(ufbx PROPERTIES C_STANDARD 11 POSITION_INDEPENDENT_CODE ON)
+# Kode pihak ketiga: peringatannya bukan urusan kita, dan -Werror proyek ini
+# akan menggagalkan build karenanya.
+target_compile_options(ufbx PRIVATE -w)
+# libm untuk sqrt/pow yang dipakai penguraian geometrinya.
+find_library(SIM_MATH_LIBRARY m)
+if(SIM_MATH_LIBRARY)
+    target_link_libraries(ufbx PRIVATE ${SIM_MATH_LIBRARY})
+endif()
+add_library(Ufbx::Ufbx ALIAS ufbx)
+
+# ---------------------------------------------------------------------------
 # Ditambahkan pada milestone berikutnya (lihat docs/DEPENDENCIES.md):
 #   A0   cpp-httplib              transport HTTP untuk MCP server
-#   E8   ufbx, cgltf, meshoptimizer
+#   E8   cgltf, meshoptimizer
 # ---------------------------------------------------------------------------

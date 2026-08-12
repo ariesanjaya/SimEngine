@@ -38,6 +38,19 @@ public:
     /// akan membuat panel berkedip saat diseret.
     virtual void Resize(uint32_t width, uint32_t height) = 0;
 
+    /// Memuat geometri sebuah berkas mesh, atau mengembalikan yang sudah dimuat.
+    ///
+    /// **Di-cache per jalur, dan itu wajib bukan optimisasi.** Pemanggilnya
+    /// adalah pembangun daftar gambar, yang berjalan tiap frame untuk setiap
+    /// entity; tanpa cache, sebuah FBX sebelas megabyte diurai enam puluh kali
+    /// per detik per entity — yang muncul bukan sebagai galat melainkan sebagai
+    /// editor yang berhenti merespons begitu sebuah mesh ditetapkan.
+    ///
+    /// Jalur yang gagal dimuat dicatat sebagai gagal dan tidak dicoba lagi:
+    /// mencoba ulang tiap frame berarti membaca berkas rusak enam puluh kali per
+    /// detik sambil membanjiri log.
+    virtual MeshAsset AcquireMesh(std::string_view path) = 0;
+
     virtual void Render(const ViewportDesc& desc, const ViewportScene& scene) = 0;
 
     /// Handle tekstur hasil render terakhir, siap dilempar ke ImGui::Image().

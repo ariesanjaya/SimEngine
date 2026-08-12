@@ -1,10 +1,15 @@
 #pragma once
 
 #include "Sim/Core/Math.h"
+#include "Sim/Render/IViewportRenderer.h"
 #include "Sim/Render/Types.h"
 #include "Sim/Scene/World.h"
 
 #include <vector>
+
+namespace sim::assets {
+class AssetDatabase;
+}
 
 namespace sim::editor {
 
@@ -63,7 +68,16 @@ public:
     };
 
     /// Menyusun ulang seluruh daftar dari isi world.
-    void Build(scene::World& world, const Selection& selection);
+    /// Membangun daftar gambar dan daftar pickable untuk frame ini.
+    ///
+    /// `assets` dan `renderer` boleh null — daftarnya tetap terbangun, hanya
+    /// setiap mesh renderer menggambar kubus satuan. **Itu perilaku yang
+    /// dipertahankan dengan sengaja:** entity yang punya MeshRenderer tapi tidak
+    /// menggambar apa pun adalah entity yang tidak bisa diklik, tidak bisa
+    /// dipilih, dan karena itu tidak bisa diperbaiki.
+    void Build(scene::World& world, const Selection& selection,
+               const assets::AssetDatabase* assets = nullptr,
+               render::IViewportRenderer* renderer = nullptr);
 
 private:
     void AppendLight(const scene::LightComponent& light, const Mat4& matrix);

@@ -6,6 +6,7 @@
 #include "FrameGraphExecutor.h"
 #include "ProbeField.h"
 #include "SdfClipmapResource.h"
+#include "Sim/Assets/MeshData.h"
 #include "Sim/Core/Log.h"
 #include "Sim/RHI/Buffer.h"
 #include "Sim/RHI/Device.h"
@@ -172,10 +173,28 @@ struct LineVertex {
     Vec4 color;
 };
 
+/// **Tata letaknya harus sama persis dengan `assets::MeshVertex`.** Selama
+/// keduanya cocok, kubus bawaan dan mesh yang diimpor memakai pipeline yang
+/// sama — dan pipeline kedua yang hanya berbeda pada offset atribut adalah
+/// pipeline yang suatu saat berbeda pada hal lain tanpa ada yang menyadarinya.
+///
+/// `uv` belum dibaca shader mana pun; ia ada karena mesh yang diimpor membawanya
+/// dan membuang atribut yang sudah ada di berkasnya berarti mengimpornya lagi
+/// begitu material bertekstur mendarat.
 struct BoxVertex {
     Vec3 position;
     Vec3 normal;
+    Vec2 uv;
 };
+
+static_assert(sizeof(BoxVertex) == sizeof(assets::MeshVertex),
+              "BoxVertex dan assets::MeshVertex harus setata letak — keduanya "
+              "memakai pipeline yang sama, dan selisih satu byte menggeser "
+              "seluruh mesh alih-alih menghasilkan galat");
+static_assert(offsetof(BoxVertex, normal) == offsetof(assets::MeshVertex, normal),
+              "offset normal harus sama");
+static_assert(offsetof(BoxVertex, uv) == offsetof(assets::MeshVertex, uv),
+              "offset uv harus sama");
 
 /// Satu instance kotak. Tata letaknya harus sama persis dengan atribut instance
 /// di Shaders/box.vert.
@@ -189,6 +208,18 @@ struct BoxInstance {
     /// bendera per-instance berikutnya tinggal mengambil bit berikutnya alih-alih
     /// menuntut atribut vertex baru.
     uint32_t flags;
+};
+
+/// Satu panggilan gambar: sebuah mesh dan ruas instance yang memakainya.
+///
+/// **Ruas, bukan daftar per instance.** Seluruh instance yang memakai mesh yang
+/// sama digambar dengan satu `vkCmdDrawIndexed` ber-`instanceCount` — bentuk
+/// yang sama dengan sebelum importir mesh ada, hanya kini ada lebih dari satu
+/// geometri untuk dikelompokkan.
+struct DrawRun {
+    MeshHandle mesh = kUnitCubeMesh;
+    uint32_t first = 0;
+    uint32_t count = 0;
 };
 
 /// Bit 0 dari `BoxInstance::flags`. Harus sama dengan `kReceiveShadows` di
@@ -265,12 +296,12 @@ std::vector<BoxVertex> BuildUnitCube() {
         const Vec3 a1 = centre + t * 0.5f - b * 0.5f;
         const Vec3 a2 = centre + t * 0.5f + b * 0.5f;
         const Vec3 a3 = centre - t * 0.5f + b * 0.5f;
-        vertices.push_back({a0, n});
-        vertices.push_back({a1, n});
-        vertices.push_back({a2, n});
-        vertices.push_back({a0, n});
-        vertices.push_back({a2, n});
-        vertices.push_back({a3, n});
+        vertices.push_back({a0, n, Vec2(0.0f, 0.0f)});
+        vertices.push_back({a1, n, Vec2(1.0f, 0.0f)});
+        vertices.push_back({a2, n, Vec2(1.0f, 1.0f)});
+        vertices.push_back({a0, n, Vec2(0.0f, 0.0f)});
+        vertices.push_back({a2, n, Vec2(1.0f, 1.0f)});
+        vertices.push_back({a3, n, Vec2(0.0f, 1.0f)});
     }
     return vertices;
 }
@@ -712,7 +743,7 @@ public:
             probes_.RecordNormalBegin(command);
             BeginPrepassRendering(command, desc);
             if (slotReady && opaqueCount > 0) {
-                DrawInstances(command, prepassPipeline_, push, slot, 0, opaqueCount);
+                DrawInstances(command, prepassPipeline_, push, slot, opaqueRuns_, 0);
             }
             vkCmdEndRendering(command);
             probes_.RecordNormalEnd(command);
@@ -721,7 +752,7 @@ public:
             BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/true,
                            /*writeColor=*/true);
             if (slotReady && opaqueCount > 0) {
-                DrawInstances(command, opaquePipeline_, push, slot, 0, opaqueCount);
+                DrawInstances(command, opaquePipeline_, push, slot, opaqueRuns_, 0);
             }
             vkCmdEndRendering(command);
         };
@@ -729,8 +760,8 @@ public:
             BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/true,
                            /*writeColor=*/true);
             if (slotReady && transparentCount > 0) {
-                DrawInstances(command, transparentPipeline_, push, slot, opaqueCount,
-                              transparentCount);
+                DrawInstances(command, transparentPipeline_, push, slot, transparentRuns_,
+                              opaqueCount);
             }
             vkCmdEndRendering(command);
         };
@@ -847,6 +878,42 @@ public:
         slotIndex_ = (slotIndex_ + 1) % slots_.size();
         drawnOpaque_ = opaqueCount;
         drawnTransparent_ = transparentCount;
+    }
+
+    MeshAsset AcquireMesh(std::string_view path) override {
+        MeshAsset asset;
+        if (path.empty()) {
+            return asset;
+        }
+        const std::string key(path);
+        const auto found = meshByPath_.find(key);
+        if (found != meshByPath_.end()) {
+            // Kubus satuan di sini berarti "sudah pernah dicoba dan gagal".
+            // Mencobanya lagi berarti mengurai berkas rusak enam puluh kali per
+            // detik sambil membanjiri log dengan pesan yang sama.
+            if (found->second == kUnitCubeMesh) {
+                return asset;
+            }
+            const GpuMesh& mesh = *meshes_[static_cast<std::size_t>(found->second)];
+            return MeshAsset{found->second, mesh.boundsMin, mesh.boundsMax, true};
+        }
+
+        std::string error;
+        const assets::MeshData data = assets::LoadMesh(std::filesystem::path(key), error);
+        if (!data.IsValid()) {
+            SIM_WARN("Render", "cannot load mesh {}: {}", key, error);
+            meshByPath_.emplace(key, kUnitCubeMesh);
+            return asset;
+        }
+        const MeshHandle handle = UploadMesh(data);
+        meshByPath_.emplace(key, handle);
+        if (handle == kUnitCubeMesh) {
+            SIM_ERROR("Render", "cannot upload mesh {}", key);
+            return asset;
+        }
+        SIM_INFO("Render", "mesh ready: {} ({} tris, {} verts)", key, data.TriangleCount(),
+                 data.vertices.size());
+        return MeshAsset{handle, data.boundsMin, data.boundsMax, true};
     }
 
     TextureHandle ColorTarget() const override { return textureHandle_; }
@@ -1063,11 +1130,14 @@ private:
     void Gather(const ViewportDesc& desc, const ViewportScene& scene, const Mat4& viewProj) {
         opaque_.clear();
         transparent_.clear();
+        opaqueRuns_.clear();
+        casterRuns_.clear();
+        transparentRuns_.clear();
+        gathered_.clear();
+        sorted_.clear();
         casterCount_ = 0;
         const Frustum frustum(viewProj);
         const Vec3 eye = desc.camera.position;
-
-        sorted_.clear();
 
         for (const MeshInstance& mesh : scene.meshes) {
             const Aabb local{mesh.boundsMin, mesh.boundsMax};
@@ -1075,50 +1145,95 @@ private:
             if (!frustum.Intersects(world)) {
                 continue;
             }
-            // Kotak batas dipetakan ke kubus satuan: geser ke pusatnya lalu skala
-            // ke ukurannya. Begitu mesh sungguhan masuk di E8.4, langkah ini
-            // hilang — transform instance-nya dipakai apa adanya.
-            const Vec3 centre = (mesh.boundsMin + mesh.boundsMax) * 0.5f;
-            const Vec3 size = glm::max(mesh.boundsMax - mesh.boundsMin, Vec3(1e-4f));
+
+            // **Dua jalur, dan perbedaannya bukan optimisasi.** Kubus satuan
+            // harus dipetakan ke kotak batasnya — geser ke pusat lalu skala ke
+            // ukurannya — karena vertexnya membentang -0,5..0,5 apa pun batasnya.
+            // Mesh yang diimpor vertexnya **sudah** berada di ruang lokal yang
+            // sama dengan batasnya, jadi pemetaan yang sama akan menskalakannya
+            // dua kali: sebuah shader ball setinggi 2,7 m menjadi setinggi 7,2 m,
+            // dan tidak ada satu pun galat yang menyertainya.
             Mat4 model = mesh.transform;
-            model = glm::translate(model, centre);
-            model = glm::scale(model, size);
+            if (mesh.mesh == kUnitCubeMesh) {
+                const Vec3 centre = (mesh.boundsMin + mesh.boundsMax) * 0.5f;
+                const Vec3 size = glm::max(mesh.boundsMax - mesh.boundsMin, Vec3(1e-4f));
+                model = glm::translate(model, centre);
+                model = glm::scale(model, size);
+            }
 
             const Vec4 color = mesh.selected ? kSelectedColor : mesh.color;
+            const BoxInstance instance = MakeInstance(model, color, mesh.receiveShadows);
             if (color.a >= 0.999f) {
-                // **Yang menjatuhkan bayangan diletakkan lebih dulu.** Pass
-                // bayangan lalu tinggal menggambar awalan daftarnya, tanpa
-                // atribut tambahan dan tanpa cabang di shader. Trik yang sama
-                // dengan pemisahan buram/tembus pandang di bawah, dan urutan di
-                // antara sesama buram memang tidak berarti apa-apa — semuanya
-                // diuji depth.
-                if (mesh.castShadows) {
-                    opaque_.insert(opaque_.begin() + static_cast<std::ptrdiff_t>(casterCount_),
-                                   MakeInstance(model, color, mesh.receiveShadows));
-                    ++casterCount_;
-                } else {
-                    opaque_.push_back(MakeInstance(model, color, mesh.receiveShadows));
-                }
+                gathered_.push_back(GatherEntry{mesh.mesh, instance, mesh.castShadows});
                 continue;
             }
             const float distance = glm::length(world.Centre() - eye);
             // Tembus pandang tidak pernah menjatuhkan bayangan — kaca yang
             // menghitamkan lantai di bawahnya adalah kesalahan yang lebih
             // mencolok daripada kaca yang tidak berbayang sama sekali.
-            sorted_.push_back(
-                SortedEntry{distance, MakeInstance(model, color, mesh.receiveShadows)});
+            sorted_.push_back(SortedEntry{distance, mesh.mesh, instance});
+        }
+
+        // **Yang menjatuhkan bayangan lebih dulu, lalu dikelompokkan per mesh.**
+        // Kunci pertama menjaga sifat lama: pass bayangan menggambar awalan
+        // daftarnya tanpa atribut tambahan dan tanpa cabang di shader. Kunci
+        // kedua yang baru: satu draw per mesh, bukan satu draw per instance.
+        // `stable_sort`, bukan `sort` — urutan di antara instance bermesh sama
+        // memang tidak berarti apa-apa, tapi urutan yang berubah-ubah tiap frame
+        // membuat setiap perbandingan gambar menjadi tidak bisa dipakai.
+        std::stable_sort(gathered_.begin(), gathered_.end(),
+                         [](const GatherEntry& a, const GatherEntry& b) {
+                             if (a.caster != b.caster) {
+                                 return a.caster;
+                             }
+                             return a.mesh < b.mesh;
+                         });
+
+        opaque_.reserve(gathered_.size());
+        for (const GatherEntry& entry : gathered_) {
+            if (entry.caster) {
+                ++casterCount_;
+            }
+            AppendRun(opaqueRuns_, entry.mesh, static_cast<uint32_t>(opaque_.size()));
+            opaque_.push_back(entry.instance);
+        }
+        // Ruas bayangan adalah awalan daftar yang sama, dipotong di
+        // `casterCount_`. Dipotong, bukan dibangun ulang: dua daftar yang harus
+        // sepakat adalah dua daftar yang suatu saat tidak sepakat.
+        for (const DrawRun& run : opaqueRuns_) {
+            if (run.first >= casterCount_) {
+                break;
+            }
+            casterRuns_.push_back(
+                DrawRun{run.mesh, run.first, std::min(run.count, casterCount_ - run.first)});
         }
 
         // Belakang ke depan. Alpha blending tidak komutatif: dua kaca yang
         // dicampur dengan urutan terbalik menghasilkan warna yang berbeda, dan
         // "berbeda" di sini berarti kaca yang lebih jauh terlihat di depan yang
         // lebih dekat.
-        std::sort(sorted_.begin(), sorted_.end(),
+        //
+        // **Urutan menang atas pengelompokan di sini**, kebalikan dari yang
+        // buram. Mengelompokkan tembus pandang per mesh berarti menggambarnya di
+        // luar urutan jaraknya, dan yang didapat — beberapa draw call lebih
+        // sedikit — jauh lebih murah daripada yang hilang.
+        std::stable_sort(sorted_.begin(), sorted_.end(),
                   [](const SortedEntry& a, const SortedEntry& b) { return a.distance > b.distance; });
         transparent_.reserve(sorted_.size());
         for (const SortedEntry& entry : sorted_) {
+            AppendRun(transparentRuns_, entry.mesh, static_cast<uint32_t>(transparent_.size()));
             transparent_.push_back(entry.instance);
         }
+    }
+
+    /// Menambah instance ke ruas terakhir bila mesh-nya sama, atau membuka ruas
+    /// baru.
+    static void AppendRun(std::vector<DrawRun>& runs, MeshHandle mesh, uint32_t index) {
+        if (!runs.empty() && runs.back().mesh == mesh) {
+            ++runs.back().count;
+            return;
+        }
+        runs.push_back(DrawRun{mesh, index, 1});
     }
 
     /// `useDepth` false berarti depth tidak dipasang sama sekali.
@@ -1255,12 +1370,12 @@ private:
     }
 
     void DrawInstances(VkCommandBuffer cmd, VkPipeline pipeline, const BoxPush& push,
-                       InstanceSlot& slot, uint32_t first, uint32_t count) {
+                       InstanceSlot& slot, std::span<const DrawRun> runs, uint32_t instanceBase) {
         // Descriptor set diikat untuk setiap pipeline forward, termasuk prepass.
         // Prepass tidak membacanya, tapi layout-nya mendeklarasikannya — dan
         // set yang dideklarasikan tapi tidak terikat adalah pelanggaran meski
         // tidak ada yang membacanya.
-        if (pipeline == VK_NULL_HANDLE || count == 0) {
+        if (pipeline == VK_NULL_HANDLE || runs.empty()) {
             return;
         }
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
@@ -1268,20 +1383,68 @@ private:
                                 &slot.shadowSet, 0, nullptr);
         vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(BoxPush),
                            &push);
-        const std::array<VkBuffer, 2> buffers{cubeBuffer_.Handle(), slot.buffer.Handle()};
-        const std::array<VkDeviceSize, 2> offsets{0, 0};
-        vkCmdBindVertexBuffers(cmd, 0, 2, buffers.data(), offsets.data());
-        vkCmdDraw(cmd, cubeVertexCount_, count, 0, first);
+        DrawRuns(cmd, slot, runs, instanceBase);
     }
 
+    /// Mengikat geometri tiap ruas lalu menggambarnya. Dipakai bersama pass
+    /// forward dan pass bayangan — keduanya menggambar geometri yang sama
+    /// dengan pipeline yang berbeda, dan menyalin pengikatannya ke dua tempat
+    /// adalah cara termudah membuat keduanya suatu saat berbeda.
+    void DrawRuns(VkCommandBuffer cmd, InstanceSlot& slot, std::span<const DrawRun> runs,
+                  uint32_t instanceBase) {
+        for (const DrawRun& run : runs) {
+            if (run.count == 0 || run.mesh >= meshes_.size()) {
+                continue;
+            }
+            const GpuMesh& mesh = *meshes_[static_cast<std::size_t>(run.mesh)];
+            if (mesh.indexCount == 0) {
+                continue;
+            }
+            const std::array<VkBuffer, 2> buffers{mesh.vertices.Handle(), slot.buffer.Handle()};
+            const std::array<VkDeviceSize, 2> offsets{0, 0};
+            vkCmdBindVertexBuffers(cmd, 0, 2, buffers.data(), offsets.data());
+            vkCmdBindIndexBuffer(cmd, mesh.indices.Handle(), 0, VK_INDEX_TYPE_UINT32);
+            vkCmdDrawIndexed(cmd, mesh.indexCount, run.count, 0, 0, instanceBase + run.first);
+        }
+    }
+
+    /// Mengunggah sebuah mesh dan mengembalikan handle-nya, atau nol bila gagal.
+    MeshHandle UploadMesh(const assets::MeshData& data) {
+        auto mesh = std::make_unique<GpuMesh>();
+        const VkDeviceSize vertexBytes = sizeof(assets::MeshVertex) * data.vertices.size();
+        const VkDeviceSize indexBytes = sizeof(uint32_t) * data.indices.size();
+        if (!mesh->vertices.Create(device_, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, vertexBytes) ||
+            !mesh->vertices.Write(data.vertices.data(), vertexBytes) ||
+            !mesh->indices.Create(device_, VK_BUFFER_USAGE_INDEX_BUFFER_BIT, indexBytes) ||
+            !mesh->indices.Write(data.indices.data(), indexBytes)) {
+            return kUnitCubeMesh;
+        }
+        mesh->indexCount = static_cast<uint32_t>(data.indices.size());
+        mesh->boundsMin = data.boundsMin;
+        mesh->boundsMax = data.boundsMax;
+        meshes_.push_back(std::move(mesh));
+        return static_cast<MeshHandle>(meshes_.size() - 1);
+    }
+
+    /// Kubus satuan menjadi mesh nol.
+    ///
+    /// **Diberi buffer indeks walaupun tidak butuh**, supaya seluruh jalur
+    /// gambar memakai `vkCmdDrawIndexed` tanpa kecuali. Satu cabang "mesh ini
+    /// berindeks, yang itu tidak" akan berlipat di setiap pass yang menggambar
+    /// geometri — dan pass bayangan, prepass, forward buram, dan forward tembus
+    /// pandang semuanya menggambar geometri yang sama.
     bool CreateCube() {
         const std::vector<BoxVertex> vertices = BuildUnitCube();
-        cubeVertexCount_ = static_cast<uint32_t>(vertices.size());
-        if (!cubeBuffer_.Create(device_, VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
-                                sizeof(BoxVertex) * vertices.size())) {
-            return false;
+        assets::MeshData cube;
+        cube.vertices.resize(vertices.size());
+        std::memcpy(cube.vertices.data(), vertices.data(), sizeof(BoxVertex) * vertices.size());
+        cube.indices.resize(vertices.size());
+        for (std::size_t i = 0; i < vertices.size(); ++i) {
+            cube.indices[i] = static_cast<uint32_t>(i);
         }
-        return cubeBuffer_.Write(vertices.data(), sizeof(BoxVertex) * vertices.size());
+        cube.ComputeBounds();
+        meshes_.clear();
+        return UploadMesh(cube) == kUnitCubeMesh && !meshes_.empty();
     }
 
     /// Pipeline grid dan garis, dipinjam apa adanya dari shader yang sudah ada.
@@ -1970,10 +2133,9 @@ private:
         vkCmdBeginRendering(cmd, &info);
 
         if (shadowPipeline_ != VK_NULL_HANDLE && casterCount > 0 && slot.buffer.IsValid()) {
+            // Pengikatan geometri pindah ke dalam `DrawRuns`: sejak ada lebih
+            // dari satu mesh, buffer yang diikat berbeda per ruas.
             vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
-            const std::array<VkBuffer, 2> buffers{cubeBuffer_.Handle(), slot.buffer.Handle()};
-            const std::array<VkDeviceSize, 2> offsets{0, 0};
-            vkCmdBindVertexBuffers(cmd, 0, 2, buffers.data(), offsets.data());
 
             for (const ShadowAtlasEntry& entry : atlasAllocation_.entries) {
                 const VkViewport viewport{static_cast<float>(entry.x),
@@ -1990,7 +2152,7 @@ private:
                 const BoxPush push{entry.viewProjection};
                 vkCmdPushConstants(cmd, shadowLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
                                    sizeof(BoxPush), &push);
-                vkCmdDraw(cmd, cubeVertexCount_, casterCount, 0, 0);
+                DrawRuns(cmd, slot, casterRuns_, 0);
             }
         }
         vkCmdEndRendering(cmd);
@@ -2591,10 +2753,7 @@ private:
                 vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowPipeline_);
                 vkCmdPushConstants(cmd, shadowLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
                                    sizeof(BoxPush), &push);
-                const std::array<VkBuffer, 2> buffers{cubeBuffer_.Handle(), slot.buffer.Handle()};
-                const std::array<VkDeviceSize, 2> offsets{0, 0};
-                vkCmdBindVertexBuffers(cmd, 0, 2, buffers.data(), offsets.data());
-                vkCmdDraw(cmd, cubeVertexCount_, casterCount, 0, 0);
+                DrawRuns(cmd, slot, casterRuns_, 0);
             }
             vkCmdEndRendering(cmd);
         }
@@ -2631,7 +2790,8 @@ private:
             vmaDestroyBuffer(device_.Allocator(), cache_.buffer, cache_.allocation);
             cache_.buffer = VK_NULL_HANDLE;
         }
-        cubeBuffer_.Destroy();
+        meshes_.clear();
+        meshByPath_.clear();
         for (VkPipeline* pipeline :
              {&prepassPipeline_, &opaquePipeline_, &transparentPipeline_, &gridPipeline_,
               &linePipeline_, &shadowPipeline_, &sdfDebugPipeline_}) {
@@ -2798,8 +2958,6 @@ private:
     PassId shadowPassId_ = kInvalidPass;
     CascadeSet cascades_;
 
-    rhi::DynamicBuffer cubeBuffer_;
-    uint32_t cubeVertexCount_ = 0;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline prepassPipeline_ = VK_NULL_HANDLE;
     VkPipeline opaquePipeline_ = VK_NULL_HANDLE;
@@ -2812,11 +2970,40 @@ private:
     std::vector<BoxInstance> upload_;
     struct SortedEntry {
         float distance = 0.0f;
+        MeshHandle mesh = kUnitCubeMesh;
         BoxInstance instance;
     };
     std::vector<SortedEntry> sorted_;
+    /// Instance buram sebelum diurutkan menjadi ruas.
+    struct GatherEntry {
+        MeshHandle mesh = kUnitCubeMesh;
+        BoxInstance instance;
+        bool caster = false;
+    };
+    std::vector<GatherEntry> gathered_;
+    /// Ruas draw: satu panggilan gambar per mesh yang berurutan.
+    std::vector<DrawRun> opaqueRuns_;
+    std::vector<DrawRun> casterRuns_;
+    std::vector<DrawRun> transparentRuns_;
     /// Banyaknya entri di awal `opaque_` yang menjatuhkan bayangan.
     uint32_t casterCount_ = 0;
+
+    /// Geometri yang sudah ada di GPU. Indeks nol selalu kubus satuan, yaitu
+    /// nilai mundur untuk setiap mesh renderer yang asetnya belum ada, gagal
+    /// dimuat, atau memang belum ditetapkan.
+    struct GpuMesh {
+        rhi::DynamicBuffer vertices;
+        rhi::DynamicBuffer indices;
+        uint32_t indexCount = 0;
+        Vec3 boundsMin{-0.5f};
+        Vec3 boundsMax{0.5f};
+    };
+    /// `unique_ptr`, karena `DynamicBuffer` tidak bisa dipindah — dan vektor yang
+    /// tumbuh akan memindahkan isinya.
+    std::vector<std::unique_ptr<GpuMesh>> meshes_;
+    /// Jalur → handle. Jalur yang gagal dimuat dipetakan ke kubus satuan supaya
+    /// ia tidak dicoba lagi setiap frame.
+    std::unordered_map<std::string, MeshHandle> meshByPath_;
     uint32_t drawnOpaque_ = 0;
     uint32_t drawnTransparent_ = 0;
 };

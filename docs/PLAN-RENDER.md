@@ -707,6 +707,70 @@ Impor mesh (ufbx/cgltf) menggantikan importer pass-through E5, LOD dari
 meshoptimizer, GPU skinning dengan skinning buffer, blend shape.
 **Titik sambung:** Animation Editor memutar mesh skinned sungguhan.
 
+**Selesai: geometri mesh sungguhan di viewport**
+(`Code/Assets/{include/Sim/Assets/MeshData.h,src/MeshImport.cpp}`,
+`Code/EditorFramework/src/SceneView.cpp`, `Code/Render/src/VulkanRenderer.cpp`).
+Aset mesh yang ditetapkan di `MeshRendererComponent` sekarang benar-benar
+digambar; sebelum ini setiap mesh renderer menggambar kubus satuan, tidak peduli
+aset mana yang dirujuk.
+
+**Rantainya putus di tiga tempat, dan ketiganya memang sengaja dibiarkan sampai
+sekarang:** `.fbx` ditangani `PassThroughImporter` yang hanya memeriksa berkasnya
+ada, `SceneView` tidak pernah membaca `MeshRendererComponent::mesh`, dan renderer
+hanya punya satu geometri — `BuildUnitCube()` — yang digambar untuk seluruh
+instance dengan satu panggilan.
+
+- **ufbx, bukan penguraian sendiri.** Sumbu dan satuan dikonversi olehnya, bukan
+  oleh kode di atasnya: FBX menyimpan konvensinya di dalam berkas dan berkas dari
+  DCC yang berbeda memakai konvensi yang berbeda. Mengoreksinya tangan berarti
+  menebak konvensi sumbernya, dan tebakan yang salah menghasilkan mesh yang
+  terbaring miring atau seratus kali terlalu besar — bukan galat.
+- **Seluruh node digabung menjadi satu mesh**, masing-masing sudah dikalikan
+  `geometry_to_world`-nya. Yang hilang adalah struktur hierarkinya; yang didapat
+  adalah satu buffer per aset alih-alih satu per node.
+- **Vertex kembar disatukan dengan perbandingan bit-per-bit, bukan bertoleransi.**
+  Toleransi menyatukan dua sisi sebuah rusuk tajam yang normalnya memang berbeda,
+  dan yang terlihat adalah tepi kotak yang membulat sendiri.
+- **Cache ada di renderer, bukan di editor.** Yang bisa memutuskan sebuah mesh
+  sudah ada di GPU hanyalah yang memegang buffer-nya. Cache-nya wajib bukan
+  optimisasi: pemanggilnya adalah pembangun daftar gambar, yang berjalan tiap
+  frame untuk setiap entity — tanpa cache, FBX sebelas megabyte diurai enam puluh
+  kali per detik. Jalur yang gagal dimuat dicatat gagal dan tidak dicoba lagi.
+- **Draw dikelompokkan per mesh.** Instance buram diurutkan dengan dua kunci:
+  yang menjatuhkan bayangan lebih dulu — sifat lama yang membuat pass bayangan
+  cukup menggambar awalan daftarnya — lalu per handle mesh. Tembus pandang tetap
+  diurutkan jarak saja: mengelompokkannya per mesh berarti menggambarnya di luar
+  urutan, dan beberapa draw call lebih sedikit jauh lebih murah daripada yang
+  hilang.
+- **Kubus satuan menjadi mesh nol**, lengkap dengan buffer indeks yang tidak
+  dibutuhkannya, supaya seluruh jalur gambar memakai `vkCmdDrawIndexed` tanpa
+  kecuali. Ia juga tetap menjadi nilai mundur untuk setiap mesh renderer yang
+  asetnya belum ditetapkan atau gagal dimuat — entity yang tidak menggambar apa
+  pun adalah entity yang tidak bisa diklik, tidak bisa dipilih, dan karena itu
+  tidak bisa diperbaiki.
+
+**Satu kesalahan yang dijaga uji, dan yang sempat saya buat:** kubus satuan harus
+dipetakan ke kotak batasnya — geser ke pusat lalu skala ke ukurannya — karena
+vertexnya membentang -0,5..0,5 apa pun batasnya. Mesh yang diimpor vertexnya
+**sudah** berada di ruang lokal yang sama dengan batasnya, jadi pemetaan yang
+sama menskalakannya dua kali: shader ball setinggi 2,7 m menjadi setinggi 7,2 m,
+tanpa satu pun galat yang menyertainya.
+
+Terukur di editor (RTX 2060, viewport 1277x696):
+
+| Yang diukur | Hasil |
+| --- | --- |
+| `shaderBall.fbx` | **67.832 segitiga, 35.897 vertex** |
+| Batas hasil impor | 2,69 x 2,66 x 2,50 m, alas di y ~ 0,02 |
+| Waktu urai (release) | **118 ms**, sekali per aset |
+| `forward-opaque` | 0,014 ms |
+| Galat validation layer | **0** |
+
+**Yang belum ada dari E8.4:** LOD dan meshoptimizer, GPU skinning, blend shape,
+material dan tekstur dari berkasnya, serta glTF — ufbx membaca FBX dan OBJ, dan
+`cgltf` masih menunggu. Indeks aset juga belum mencatat jumlah segitiga: itu
+menuntut medan baru di `ImportResult` beserta panel yang menampilkannya.
+
 ### E8.5 — Terrain
 Rendering terrain ter-tile dengan LOD berbasis jarak (clipmap atau quadtree),
 sampling splat map, blending material layer, culling per-tile, hole.

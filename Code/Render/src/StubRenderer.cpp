@@ -233,6 +233,11 @@ public:
         }
     }
 
+    /// Stub tidak punya geometri sama sekali — ia menggambar wireframe kotak
+    /// dari batas instance. Mengembalikan handle kubus satuan berarti pemanggil
+    /// tetap mendapat batas yang masuk akal alih-alih mesh yang lenyap.
+    MeshAsset AcquireMesh(std::string_view) override { return MeshAsset{}; }
+
     TextureHandle ColorTarget() const override { return textureHandle_; }
     Vec2 ColorTargetUvMax() const override {
         return Vec2(target_.UvMaxU(), target_.UvMaxV());

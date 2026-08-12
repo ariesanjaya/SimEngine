@@ -2,6 +2,7 @@
 
 #include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Assets/Importer.h"
+#include "Sim/Assets/MeshData.h"
 #include "Sim/Core/FileWatcher.h"
 #include "Sim/Core/TaskPool.h"
 
@@ -363,4 +364,128 @@ TEST_CASE("berkas yang ditimpa dilaporkan sebagai berubah, yang diam tidak") {
     // Daftar perubahan hanya berlaku satu frame.
     db.Update(0.1f);
     CHECK(db.ChangedThisUpdate().empty());
+}
+
+// --- E8.4: impor mesh ---------------------------------------------------------
+
+TEST_CASE("indeks mesh menyatukan vertex kembar tanpa melunakkan tepi tajam") {
+    using namespace sim::assets;
+
+    // Dua segitiga yang berbagi sebuah tepi, tapi normalnya berbeda — persis
+    // keadaan di rusuk sebuah kubus.
+    //
+    // **Perbandingannya bit-per-bit, bukan bertoleransi.** Toleransi menyatukan
+    // kedua sisi rusuk itu menjadi satu vertex bernormal rata-rata, dan yang
+    // terlihat adalah tepi kotak yang membulat sendiri. Yang dicari di sini
+    // hanyalah vertex yang benar-benar sama, yaitu yang muncul karena satu titik
+    // dipakai beberapa segitiga.
+    const Vec3 shared0(0.0f, 0.0f, 0.0f);
+    const Vec3 shared1(1.0f, 0.0f, 0.0f);
+    const Vec3 up(0.0f, 1.0f, 0.0f);
+    const Vec3 forward(0.0f, 0.0f, 1.0f);
+
+    std::vector<MeshVertex> soup;
+    soup.push_back(MeshVertex{shared0, up, Vec2(0.0f)});
+    soup.push_back(MeshVertex{shared1, up, Vec2(0.0f)});
+    soup.push_back(MeshVertex{Vec3(0.0f, 0.0f, 1.0f), up, Vec2(0.0f)});
+    // Segitiga kedua memakai dua titik yang sama persis, bernormal sama.
+    soup.push_back(MeshVertex{shared0, up, Vec2(0.0f)});
+    soup.push_back(MeshVertex{shared1, up, Vec2(0.0f)});
+    soup.push_back(MeshVertex{Vec3(1.0f, 0.0f, 1.0f), up, Vec2(0.0f)});
+    // Segitiga ketiga memakai titik yang sama tapi bernormal lain — tepi tajam.
+    soup.push_back(MeshVertex{shared0, forward, Vec2(0.0f)});
+    soup.push_back(MeshVertex{shared1, forward, Vec2(0.0f)});
+    soup.push_back(MeshVertex{Vec3(0.0f, 1.0f, 0.0f), forward, Vec2(0.0f)});
+
+    const MeshData mesh = BuildIndexedMesh(soup);
+    REQUIRE(mesh.IsValid());
+    // Segitiganya utuh: sembilan sudut, tiga segitiga.
+    CHECK(mesh.indices.size() == 9);
+    CHECK(mesh.TriangleCount() == 3);
+    // Dua vertex kembar bernormal sama disatukan; yang bernormal beda tidak.
+    // 9 sudut - 2 kembar = 7 vertex.
+    CHECK(mesh.vertices.size() == 7);
+
+    // Setiap indeks menunjuk vertex yang sah.
+    for (const uint32_t index : mesh.indices) {
+        CHECK(index < mesh.vertices.size());
+    }
+}
+
+TEST_CASE("batas mesh dihitung dari vertexnya, dan aman saat kosong") {
+    using namespace sim::assets;
+
+    MeshData mesh;
+    mesh.ComputeBounds();
+    CHECK(mesh.boundsMin.x == doctest::Approx(0.0f));
+    CHECK(mesh.boundsMax.x == doctest::Approx(0.0f));
+
+    mesh.vertices.push_back(MeshVertex{Vec3(-2.0f, 1.0f, 0.5f), Vec3(0, 1, 0), Vec2(0.0f)});
+    mesh.vertices.push_back(MeshVertex{Vec3(3.0f, -4.0f, 7.0f), Vec3(0, 1, 0), Vec2(0.0f)});
+    mesh.ComputeBounds();
+    CHECK(mesh.boundsMin.x == doctest::Approx(-2.0f));
+    CHECK(mesh.boundsMin.y == doctest::Approx(-4.0f));
+    CHECK(mesh.boundsMin.z == doctest::Approx(0.5f));
+    CHECK(mesh.boundsMax.x == doctest::Approx(3.0f));
+    CHECK(mesh.boundsMax.y == doctest::Approx(1.0f));
+    CHECK(mesh.boundsMax.z == doctest::Approx(7.0f));
+}
+
+TEST_CASE("segitiga yang tidak genap tiga ditolak, bukan dipotong") {
+    using namespace sim::assets;
+
+    // Dipotong diam-diam berarti mesh yang kehilangan segitiga terakhirnya tanpa
+    // ada yang tahu — dan yang terlihat adalah lubang di permukaan, bukan galat.
+    std::vector<MeshVertex> soup(4);
+    CHECK(BuildIndexedMesh(soup).IsValid() == false);
+    CHECK(BuildIndexedMesh({}).IsValid() == false);
+}
+
+TEST_CASE("berkas yang tidak ada menjawab galat, bukan mesh separuh jadi") {
+    using namespace sim::assets;
+
+    std::string error;
+    const MeshData mesh = LoadMesh("tidak-ada-berkas-ini.fbx", error);
+    CHECK(mesh.IsValid() == false);
+    CHECK(!error.empty());
+}
+
+TEST_CASE("shaderBall.fbx terbaca sebagai geometri yang masuk akal") {
+    using namespace sim::assets;
+
+    const std::filesystem::path path =
+        std::filesystem::path(SIM_MESH_DIR) / "shaderBall.fbx";
+    if (!std::filesystem::exists(path)) {
+        return;  // aset opsional; ketiadaannya bukan kegagalan uji
+    }
+
+    std::string error;
+    const MeshData mesh = LoadMesh(path, error);
+    REQUIRE(mesh.IsValid());
+    CHECK(error.empty());
+    CHECK(mesh.TriangleCount() > 1000);
+
+    // **Satuannya meter, dan itu yang paling mudah salah.** FBX menyimpan
+    // satuannya sendiri di dalam berkas — sentimeter pada berkas dari banyak
+    // DCC — dan mesh yang tidak dikonversi muncul seratus kali terlalu besar.
+    // Itu tidak terlihat sebagai galat melainkan sebagai kamera yang berada di
+    // dalam objek.
+    const Vec3 size = mesh.boundsMax - mesh.boundsMin;
+    CHECK(size.x > 0.5f);
+    CHECK(size.x < 20.0f);
+    CHECK(size.y > 0.5f);
+    CHECK(size.y < 20.0f);
+
+    // Berdiri di atas titik asal, bukan terkubur di bawahnya: alasnya di sekitar
+    // nol. Sumbu yang tertukar akan memindahkannya ke samping.
+    CHECK(mesh.boundsMin.y > -0.5f);
+    CHECK(mesh.boundsMin.y < 0.5f);
+
+    // Setiap indeks sah, dan normalnya ternormalisasi.
+    for (const uint32_t index : mesh.indices) {
+        REQUIRE(index < mesh.vertices.size());
+    }
+    for (std::size_t i = 0; i < mesh.vertices.size(); i += 97) {
+        CHECK(glm::length(mesh.vertices[i].normal) == doctest::Approx(1.0f).epsilon(0.01f));
+    }
 }
