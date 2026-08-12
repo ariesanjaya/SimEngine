@@ -6,6 +6,7 @@ sim_add_library(Animation
         src/ClipHistory.cpp
         src/GraphInstance.cpp
         src/Pose.cpp
+        src/PoseTask.cpp
         src/Skeleton.cpp
     PUBLIC_DEPS
         # `Curve` tinggal di Core dan dipakai bersama Particle (E7.2) dan Terrain

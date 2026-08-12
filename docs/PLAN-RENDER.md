@@ -771,6 +771,57 @@ material dan tekstur dari berkasnya, serta glTF — ufbx membaca FBX dan OBJ, da
 `cgltf` masih menunggu. Indeks aset juga belum mencatat jumlah segitiga: itu
 menuntut medan baru di `ImportResult` beserta panel yang menampilkannya.
 
+**Selesai: sistem task pose, mengikuti Esoterica**
+(`Code/Animation/{include/Sim/Animation/PoseTask.h,src/PoseTask.cpp}`, acuan
+`/home/arie/SDK/Esoterica/Code/Engine/Animation/TaskSystem`).
+
+**Inti rancangan yang membedakan Esoterica dari runtime animasi yang lazim:
+simpul graph tidak menghasilkan pose.** Ia mendaftarkan sebuah *task* dan
+mengembalikan indeksnya; pose baru terbentuk saat daftar task dijalankan. Yang
+didapat ada tiga, dan ketiganya tidak mungkin didapat kalau pencampuran terjadi
+di dalam simpul:
+
+- Pembaruan graph menjadi murah dan bebas pose. Simpul yang bobotnya nol tidak
+  pernah mendaftarkan task, jadi cabang yang tidak terlihat tidak pernah
+  dicuplik — sementara runtime yang mencampur di tempat sudah terlanjur mencuplik
+  sebelum tahu bobotnya nol.
+- Daftar task bisa dijalankan pada rangka LOD yang berbeda, atau tidak
+  dijalankan sama sekali untuk karakter di kejauhan, tanpa menyentuh graph.
+- Daftar task adalah data: bisa diserialisasi, dikirim lewat jaringan, atau
+  direkam untuk diputar ulang saat mencari sebab sebuah pose yang salah.
+
+Bentuknya **DAG, bukan pohon.** Sebuah task boleh dirujuk lebih dari satu task
+lain, dan itulah yang membuat satu klip yang dicuplik sekali bisa masuk ke dua
+blend tanpa dicuplik dua kali — sesuatu yang tidak punya tempat untuk dinyatakan
+pada runtime yang mencampur pose di dalam simpulnya. Diuji: task bersama
+dijalankan tepat sekali, dan task yang tidak menyumbang ke akar tidak dijalankan
+sama sekali.
+
+**Kolam buffer pose, dan pelepasan tepat waktu.** Blend menulis ke buffer masukan
+pertamanya, dan `TaskSystem` menghitung berapa banyak task yang membutuhkan hasil
+tiap task supaya buffer dilepas begitu pemakai terakhirnya selesai. Terukur:
+rantai sembilan blend berturut-turut memakai **puncak dua buffer**, bukan
+sembilan — kolam yang tumbuh linear terhadap kedalaman graph adalah kolam yang
+tidak melepas apa pun. Sesudah eksekusi, pemakaiannya kembali nol.
+
+Akar yang tidak sah menghasilkan **bind pose, bukan pose kosong**: karakter yang
+runtuh ke titik asal jauh lebih sulit dilacak daripada karakter yang berdiri diam,
+yang langsung terbaca sebagai "graph-nya tidak menghasilkan apa-apa".
+
+**Yang belum ada, dan urutannya sudah jelas.** Sistem task adalah lantainya;
+di atasnya menyusul simpul graph berpasangan Definition/instance — definisi yang
+tidak berubah dan dibagi seluruh karakter, instance yang dialamati indeks dan
+di-resolve menjadi pointer sekali saat instantiasi — beserta pemisahan
+`PoseNode`/`ValueNode` dan `GraphPoseNodeResult` yang mengembalikan indeks task,
+delta root motion, dan rentang event. Sesudahnya sync track dan state machine
+sebagai satu jenis simpul di antara yang lain.
+
+`AnimationGraph` bergaya Mecanim yang sudah ada — parameter, lapis, state,
+transisi, blend tree — **sengaja belum disentuh.** Ia berjalan, punya ujinya,
+punya panelnya, dan punya serialisasinya; menggantinya sebelum runtime penggantinya
+lengkap berarti mematikan satu-satunya jalur animasi yang bekerja demi jalur yang
+belum bekerja.
+
 ### E8.5 — Terrain
 Rendering terrain ter-tile dengan LOD berbasis jarak (clipmap atau quadtree),
 sampling splat map, blending material layer, culling per-tile, hole.

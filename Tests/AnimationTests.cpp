@@ -6,14 +6,17 @@
 #include "Sim/Animation/Clip.h"
 #include "Sim/Animation/ClipHistory.h"
 #include "Sim/Animation/Pose.h"
+#include "Sim/Animation/PoseTask.h"
 #include "Sim/Animation/Skeleton.h"
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <map>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -1392,4 +1395,166 @@ TEST_CASE("Menyunting sesudah undo membuang cabang redo") {
     history.End();
     CHECK(history.RedoDepth() == 0);
     CHECK(history.UndoDepth() == 1);
+}
+
+
+// --- E8.4: sistem task pose (mengikuti Esoterica) -----------------------------
+
+namespace {
+
+/// Task yang mencatat urutan jalannya. Dipakai memeriksa bahwa dependensi
+/// benar-benar mendahului yang membutuhkannya.
+class RecordingTask final : public PoseTask {
+public:
+    RecordingTask(std::vector<int>* log, int id, std::vector<TaskIndex> dependencies)
+        : PoseTask(std::move(dependencies)), log_(log), id_(id) {}
+
+    int Execute(const TaskContext& context) override {
+        log_->push_back(id_);
+        if (!dependencies_.empty()) {
+            // Memakai ulang buffer dependensi pertama, sama seperti blend.
+            return (*context.results)[static_cast<std::size_t>(dependencies_[0])];
+        }
+        return context.pool->Acquire();
+    }
+    const char* Name() const override { return "Recording"; }
+
+private:
+    std::vector<int>* log_;
+    int id_;
+};
+
+}  // namespace
+
+TEST_CASE("task dijalankan sesudah dependensinya, dan hanya yang menyumbang") {
+    const Skeleton skeleton = MakeChain(3);
+    TaskSystem tasks;
+    tasks.Reset(skeleton);
+
+    std::vector<int> order;
+    const TaskIndex a = tasks.Register(std::make_unique<RecordingTask>(&order, 1, std::vector<TaskIndex>{}));
+    const TaskIndex b = tasks.Register(std::make_unique<RecordingTask>(&order, 2, std::vector<TaskIndex>{}));
+    const TaskIndex ab = tasks.Register(std::make_unique<RecordingTask>(&order, 3, std::vector<TaskIndex>{a, b}));
+    // Task yang tidak menyumbang ke akar. **Ia tidak boleh dijalankan sama
+    // sekali:** simpul yang mendaftarkan task lalu dibuang oleh blend berbobot
+    // nol tidak boleh membayar pencuplikannya.
+    tasks.Register(std::make_unique<RecordingTask>(&order, 99, std::vector<TaskIndex>{}));
+
+    Pose result(skeleton);
+    CHECK(tasks.Execute(ab, result, 0.0f));
+
+    REQUIRE(order.size() == 3);
+    // Kedua dependensi mendahului yang membutuhkannya.
+    const auto positionOf = [&](int id) {
+        return std::find(order.begin(), order.end(), id) - order.begin();
+    };
+    CHECK(positionOf(1) < positionOf(3));
+    CHECK(positionOf(2) < positionOf(3));
+    CHECK(std::find(order.begin(), order.end(), 99) == order.end());
+    CHECK(tasks.ExecutedCount() == 3);
+}
+
+TEST_CASE("task yang dipakai dua kali dijalankan sekali") {
+    const Skeleton skeleton = MakeChain(3);
+    TaskSystem tasks;
+    tasks.Reset(skeleton);
+
+    // Inilah yang membuat sistem task berupa DAG dan bukan pohon: satu klip yang
+    // dicuplik sekali masuk ke dua blend tanpa dicuplik dua kali. Runtime yang
+    // mencampur pose di dalam simpulnya tidak punya tempat untuk menyatakan itu.
+    std::vector<int> order;
+    const TaskIndex shared = tasks.Register(std::make_unique<RecordingTask>(&order, 1, std::vector<TaskIndex>{}));
+    const TaskIndex other = tasks.Register(std::make_unique<RecordingTask>(&order, 2, std::vector<TaskIndex>{}));
+    const TaskIndex left = tasks.Register(std::make_unique<RecordingTask>(&order, 3, std::vector<TaskIndex>{shared, other}));
+    const TaskIndex right = tasks.Register(std::make_unique<RecordingTask>(&order, 4, std::vector<TaskIndex>{shared, left}));
+
+    Pose result(skeleton);
+    CHECK(tasks.Execute(right, result, 0.0f));
+    CHECK(std::count(order.begin(), order.end(), 1) == 1);
+    CHECK(tasks.ExecutedCount() == 4);
+}
+
+TEST_CASE("buffer pose dilepas begitu pemakai terakhirnya selesai") {
+    const Skeleton skeleton = MakeChain(4);
+    const Clip clipA = MakeSlideClip("A", 0.0f, 10.0f, 1.0f);
+    const Clip clipB = MakeSlideClip("B", 0.0f, 20.0f, 1.0f);
+    ClipBinding bindA;
+    bindA.Bind(clipA, skeleton);
+    ClipBinding bindB;
+    bindB.Bind(clipB, skeleton);
+
+    TaskSystem tasks;
+    tasks.Reset(skeleton);
+
+    // Rantai blend yang dalam. **Pemakaian puncaknya harus tetap**, bukan tumbuh
+    // sepanjang rantai: blend menulis ke buffer masukan pertamanya, jadi setiap
+    // tingkat melepas satu buffer segera setelah memakainya. Kolam yang tumbuh
+    // linear terhadap kedalaman graph adalah kolam yang tidak melepas apa pun.
+    TaskIndex current = tasks.Register(std::make_unique<SampleTask>(clipA, bindA, 0.5f));
+    for (int i = 0; i < 8; ++i) {
+        const TaskIndex next = tasks.Register(std::make_unique<SampleTask>(clipB, bindB, 0.5f));
+        current = tasks.Register(std::make_unique<BlendTask>(current, next, 0.5f));
+    }
+
+    Pose result(skeleton);
+    CHECK(tasks.Execute(current, result, 0.0f));
+    CHECK(tasks.Pool().PeakInUse() <= 2);
+    // Dan seluruhnya dikembalikan sesudah selesai — angka yang tidak pernah
+    // turun berarti ada yang lupa dilepas.
+    CHECK(tasks.Pool().InUse() == 0);
+}
+
+TEST_CASE("blend task menghasilkan pose yang sama dengan Blend langsung") {
+    const Skeleton skeleton = MakeChain(3);
+    const Clip clipA = MakeSlideClip("A", 4.0f, 4.0f, 1.0f);
+    const Clip clipB = MakeSlideClip("B", 8.0f, 8.0f, 1.0f);
+    ClipBinding bindA;
+    bindA.Bind(clipA, skeleton);
+    ClipBinding bindB;
+    bindB.Bind(clipB, skeleton);
+
+    TaskSystem tasks;
+    tasks.Reset(skeleton);
+    const TaskIndex a = tasks.Register(std::make_unique<SampleTask>(clipA, bindA, 0.0f));
+    const TaskIndex b = tasks.Register(std::make_unique<SampleTask>(clipB, bindB, 0.0f));
+    const TaskIndex blended = tasks.Register(std::make_unique<BlendTask>(a, b, 0.25f));
+
+    Pose viaTasks(skeleton);
+    REQUIRE(tasks.Execute(blended, viaTasks, 0.0f));
+
+    Pose poseA(skeleton);
+    Pose poseB(skeleton);
+    SampleClip(clipA, bindA, skeleton, 0.0f, poseA);
+    SampleClip(clipB, bindB, skeleton, 0.0f, poseB);
+    Pose direct(skeleton);
+    Blend(poseA, poseB, 0.25f, direct);
+
+    // 4 dan 8 pada bobot 0,25 → 5. Yang diperiksa bukan angkanya saja melainkan
+    // bahwa jalur task menghasilkan hal yang sama persis dengan jalur langsung:
+    // dua jalur yang berbeda hasilnya adalah dua jalur yang salah satunya tidak
+    // pernah diuji.
+    CHECK(viaTasks.Local(1).translation.x == doctest::Approx(5.0f));
+    for (int bone = 0; bone < skeleton.BoneCount(); ++bone) {
+        CHECK(viaTasks.Local(bone).translation.x ==
+              doctest::Approx(direct.Local(bone).translation.x));
+    }
+}
+
+TEST_CASE("akar yang tidak sah menghasilkan bind pose, bukan pose kosong") {
+    const Skeleton skeleton = MakeChain(3);
+    TaskSystem tasks;
+    tasks.Reset(skeleton);
+
+    // Karakter yang runtuh ke titik asal jauh lebih sulit dilacak daripada
+    // karakter yang berdiri di bind pose — yang kedua langsung terbaca sebagai
+    // "graph-nya tidak menghasilkan apa-apa".
+    Pose result;
+    CHECK(tasks.Execute(kInvalidTask, result, 0.0f) == false);
+    CHECK(result.BoneCount() == skeleton.BoneCount());
+    CHECK(result.Local(1).translation.y == doctest::Approx(1.0f));
+
+    const TaskIndex reference = tasks.Register(std::make_unique<ReferencePoseTask>());
+    CHECK(tasks.Execute(reference, result, 0.0f));
+    CHECK(result.Local(1).translation.y == doctest::Approx(1.0f));
+    CHECK(tasks.Pool().InUse() == 0);
 }
