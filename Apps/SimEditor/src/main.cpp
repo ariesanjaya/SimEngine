@@ -224,6 +224,17 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Pratinjau mesh: instance KEDUA `IViewportRenderer`, dengan target
+    // rendernya sendiri. Tiap `VulkanRenderer` memiliki `RenderTarget`-nya
+    // sendiri, jadi keduanya tidak bertabrakan — dan Mesh Editor karena itu
+    // memakai jalur gambar yang sama persis dengan viewport utama, lengkap
+    // dengan kulit, warna per ruas, dan pass garis untuk rangkanya.
+    std::unique_ptr<render::IViewportRenderer> meshPreview =
+        render::CreateVulkanRenderer(device, imguiLayer.Textures(), rendererDesc);
+    if (meshPreview == nullptr) {
+        SIM_WARN("Editor", "Mesh preview unavailable; the Mesh Editor will say so");
+    }
+
     // Preview material: instance kedua dengan target rendernya sendiri.
     // Null bukan kegagalan fatal — menyunting graph material tidak menuntut
     // preview, dan panel menampilkan alasannya alih-alih menolak dibuka.
@@ -256,6 +267,7 @@ int main(int argc, char** argv) {
     appConfig.shaderDir = rendererDesc.shaderDirectory;
     appConfig.viewportRenderer = renderer.get();
     appConfig.materialPreview = materialPreview.get();
+    appConfig.meshPreview = meshPreview.get();
     appConfig.frameLimiter = &frameLimiter;
     appConfig.lockedFps = frameLock.hz;
     appConfig.frameLockReason = frameLock.reason;
@@ -427,6 +439,7 @@ int main(int argc, char** argv) {
     device.WaitIdle();
 
     renderer.reset();
+    meshPreview.reset();
 #if SIM_WITH_LUA
 #endif
     imguiLayer.Shutdown();

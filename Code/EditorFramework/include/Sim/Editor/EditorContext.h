@@ -78,6 +78,11 @@ struct EditorContext {
     render::IMaterialPreview* materialPreview = nullptr;
     /// Pratinjau aset untuk Asset Browser. Dimiliki pemanggil EditorApp.
     render::IThumbnailCache* thumbnails = nullptr;
+    /// Perender kedua untuk Mesh Editor: target rendernya sendiri, dengan
+    /// alasan yang sama seperti pratinjau material — panel Viewport dan panel
+    /// ini sama-sama menggambar `ImGui::Image()`, dan satu target berarti yang
+    /// belakangan menimpa yang duluan. Null bila perangkat tidak mendukungnya.
+    render::IViewportRenderer* meshPreview = nullptr;
     /// Indeks isi bawaan editor. Read-only: panel yang menampilkannya harus
     /// mematikan aksi yang menulis — mengganti nama, memindahkan, menghapus —
     /// karena yang ditulis di sana bukan milik pengguna dan akan hilang pada

@@ -45,6 +45,8 @@ public:
         std::filesystem::path shaderDir;
         render::IViewportRenderer* viewportRenderer = nullptr;
         render::IMaterialPreview* materialPreview = nullptr;
+        /// Perender kedua untuk Mesh Editor. Boleh null.
+        render::IViewportRenderer* meshPreview = nullptr;
         const FrameLimiter* frameLimiter = nullptr;
         float lockedFps = 60.0f;
         std::string frameLockReason;

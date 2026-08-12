@@ -69,6 +69,7 @@ bool EditorApp::Initialize(const Config& config) {
     context_.world = &world_;
     context_.viewportRenderer = config.viewportRenderer;
     context_.materialPreview = config.materialPreview;
+    context_.meshPreview = config.meshPreview;
     context_.thumbnails = config.thumbnails;
     context_.animation = &animation_;
     context_.scripts = config.scripts;

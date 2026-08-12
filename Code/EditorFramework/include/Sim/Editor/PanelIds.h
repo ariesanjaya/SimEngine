@@ -18,6 +18,7 @@ inline constexpr const char* kParticleEditor = "particleeditor";
 inline constexpr const char* kTerrainEditor = "terraineditor";
 inline constexpr const char* kVegetationEditor = "vegetationeditor";
 inline constexpr const char* kAnimationEditor = "animationeditor";
+inline constexpr const char* kMeshEditor = "mesheditor";
 inline constexpr const char* kTimeOfDay = "timeofday";
 inline constexpr const char* kStatistics = "statistics";
 inline constexpr const char* kHistory = "history";
