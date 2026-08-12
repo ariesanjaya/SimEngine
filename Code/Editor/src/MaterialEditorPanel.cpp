@@ -144,15 +144,11 @@ public:
         DrawToolbar(context);
         ImGui::Separator();
 
-        const float listWidth = ImGui::GetFontSize() * 10.0f;
-        if (ImGui::BeginChild("##materials", ImVec2(listWidth, 0.0f), ImGuiChildFlags_ResizeX)) {
-            DrawMaterialList(context);
-        }
-        ImGui::EndChild();
-
-        ImGui::SameLine();
+        // Lihat catatan yang sama di Particle dan Mesh Editor: penelusuran aset
+        // milik Asset Browser, bukan milik tiap editor.
         if (!openGuid_.IsValid()) {
-            ImGui::TextColored(kHintColor, "Pick a material on the left, or create one.");
+            ImGui::TextColored(kHintColor,
+                               "Klik ganda sebuah material di Asset Browser, atau buat yang baru.");
         } else if (instanceMode_) {
             // Instance tidak punya graph sendiri, jadi tidak ada kanvas untuk
             // digambar. Menampilkan graph induknya di sini akan mengundang
@@ -219,26 +215,6 @@ private:
         } else {
             ImGui::TextColored(kErrorColor, "%s  %d error(s)", icons::kLogError,
                                static_cast<int>(compiled_.errors.size()));
-        }
-    }
-
-    void DrawMaterialList(EditorContext& context) {
-        if (ImGui::Button("New Material", ImVec2(-FLT_MIN, 0.0f))) {
-            CreateMaterial(context);
-        }
-        ImGui::Spacing();
-
-        for (const assets::AssetRecord& record : context.assets->All()) {
-            if (record.type != assets::AssetType::Material) {
-                continue;
-            }
-            const bool selected = record.guid == openGuid_;
-            if (ImGui::Selectable(record.name.c_str(), selected)) {
-                Open(context, record.guid);
-            }
-            if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
-                ImGui::SetTooltip("%s", record.relativePath.c_str());
-            }
         }
     }
 

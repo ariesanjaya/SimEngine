@@ -64,15 +64,13 @@ public:
         DrawToolbar(context);
         ImGui::Separator();
 
-        const float listWidth = ImGui::GetFontSize() * 10.0f;
-        if (ImGui::BeginChild("##effects", ImVec2(listWidth, 0.0f), ImGuiChildFlags_ResizeX)) {
-            DrawEffectList(context);
-        }
-        ImGui::EndChild();
-
-        ImGui::SameLine();
+        // **Tidak ada daftar aset di sini.** Yang menelusuri aset adalah Asset
+        // Browser; editor yang punya daftarnya sendiri adalah daftar kedua yang
+        // harus dijaga sepakat dengan yang pertama — dan dua tempat untuk
+        // menemukan berkas yang sama membuat keduanya setengah dipakai.
         if (!openGuid_.IsValid()) {
-            ImGui::TextColored(kHintColor, "Pick an effect on the left, or create one.");
+            ImGui::TextColored(kHintColor,
+                               "Klik ganda sebuah efek di Asset Browser, atau buat yang baru.");
             return;
         }
 
@@ -160,22 +158,6 @@ private:
         }
         ImGui::SameLine();
         ImGui::TextColored(kHintColor, "%s%s", openName_.c_str(), dirty_ ? " *" : "");
-    }
-
-    void DrawEffectList(EditorContext& context) {
-        if (ImGui::Button("New Effect", ImVec2(-FLT_MIN, 0.0f))) {
-            CreateEffect(context);
-        }
-        ImGui::Spacing();
-
-        for (const assets::AssetRecord& record : context.assets->All()) {
-            if (record.type != assets::AssetType::Particle) {
-                continue;
-            }
-            if (ImGui::Selectable(record.name.c_str(), record.guid == openGuid_)) {
-                Open(context, record.guid);
-            }
-        }
     }
 
     void DrawSplitter(float width) {

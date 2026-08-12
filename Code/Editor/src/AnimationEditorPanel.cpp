@@ -169,13 +169,8 @@ public:
         DrawToolbar(context);
         ImGui::Separator();
 
-        const float listWidth = ImGui::GetFontSize() * 11.0f;
-        if (ImGui::BeginChild("##assets", ImVec2(listWidth, 0.0f), ImGuiChildFlags_ResizeX)) {
-            DrawAssetList(context);
-        }
-        ImGui::EndChild();
-        ImGui::SameLine();
-
+        // Penelusuran aset milik Asset Browser; lihat catatan yang sama di
+        // Mesh, Material, dan Particle Editor.
         if (ImGui::BeginChild("##main", ImVec2(0.0f, 0.0f))) {
             if (ImGui::BeginTabBar("##tabs")) {
                 if (ImGui::BeginTabItem((std::string(icons::kBone) + "  Skeleton").c_str())) {
@@ -271,61 +266,6 @@ private:
                 history_.Undo(clip_);
             }
             clipDirty_ = true;
-        }
-    }
-
-    void DrawAssetList(EditorContext& context) {
-        if (ImGui::Button("New Skeleton", ImVec2(-FLT_MIN, 0.0f))) {
-            CreateSkeleton(context);
-        }
-        ImGui::BeginDisabled(!skeletonGuid_.IsValid());
-        if (ImGui::Button("New Clip", ImVec2(-FLT_MIN, 0.0f))) {
-            CreateClip(context);
-        }
-        ImGui::EndDisabled();
-        widgets::Tooltip(skeletonGuid_.IsValid()
-                             ? "Create a clip for the open skeleton"
-                             : "Open a skeleton first — a clip is written against one");
-        ImGui::Spacing();
-
-        ImGui::TextColored(kHintColor, "Skeletons");
-        for (const assets::AssetRecord& record : context.assets->All()) {
-            if (record.type != assets::AssetType::Skeleton) {
-                continue;
-            }
-            const std::string label = std::string(icons::kBone) + "  " + record.name;
-            if (ImGui::Selectable(label.c_str(), record.guid == skeletonGuid_)) {
-                OpenSkeleton(context, record.guid);
-            }
-        }
-
-        ImGui::BeginDisabled(!skeletonGuid_.IsValid());
-        if (ImGui::Button("New Graph", ImVec2(-FLT_MIN, 0.0f))) {
-            CreateGraph(context);
-        }
-        ImGui::EndDisabled();
-        ImGui::Spacing();
-        ImGui::TextColored(kHintColor, "Clips");
-        for (const assets::AssetRecord& record : context.assets->All()) {
-            if (record.type != assets::AssetType::AnimationClip) {
-                continue;
-            }
-            const std::string label = std::string(icons::kAssetAnimation) + "  " + record.name;
-            if (ImGui::Selectable(label.c_str(), record.guid == clipGuid_)) {
-                OpenClip(context, record.guid);
-            }
-        }
-
-        ImGui::Spacing();
-        ImGui::TextColored(kHintColor, "Graphs");
-        for (const assets::AssetRecord& record : context.assets->All()) {
-            if (record.type != assets::AssetType::AnimationGraph) {
-                continue;
-            }
-            const std::string label = std::string(icons::kNodeGraph) + "  " + record.name;
-            if (ImGui::Selectable(label.c_str(), record.guid == graphGuid_)) {
-                OpenGraph(context, record.guid);
-            }
         }
     }
 
