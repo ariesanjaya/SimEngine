@@ -98,6 +98,117 @@ std::size_t WhiteboxMesh::MergeCoplanar(float toleranceDegrees) {
     return merged;
 }
 
+bool WhiteboxMesh::Build(WhiteboxMesh& out, const WhiteboxData& data, std::string& error) {
+    HalfEdgeMesh mesh;
+    for (const Vec3& position : data.positions) {
+        mesh.AddVertex(position);
+    }
+    for (const std::vector<uint32_t>& face : data.faces) {
+        std::vector<VertexHandle> loop;
+        loop.reserve(face.size());
+        for (const uint32_t index : face) {
+            if (index >= data.positions.size()) {
+                error = "sebuah face menunjuk simpul yang tidak ada";
+                return false;
+            }
+            loop.push_back(static_cast<VertexHandle>(index));
+        }
+        if (mesh.AddFace(loop) == FaceHandle::Invalid) {
+            error = "sebuah face ditolak: simpulnya berulang, terlalu sedikit, atau "
+                    "geometrinya non-manifold";
+            return false;
+        }
+    }
+    mesh.FinalizeBoundaries();
+
+    const MeshCheck topology = mesh.CheckInvariants();
+    if (!topology.ok) {
+        error = "topologi hasil muat tidak sah: " + topology.error;
+        return false;
+    }
+
+    WhiteboxMesh box;
+    box.mesh_ = std::move(mesh);
+    box.polygons_.Reset(box.mesh_);
+    box.polygonMaterial_.assign(box.mesh_.FaceCount(), kNoMaterial);
+
+    // Rusuk tersembunyi dicari lewat pasangan simpulnya. Toleransi dibuka lebar
+    // karena berkasnya sudah menyatakan pengelompokan yang dahulu sah — menolak
+    // di sini berarti berkas yang tersimpan benar tidak bisa dimuat kembali.
+    for (const auto& [a, b] : data.hiddenEdges) {
+        bool found = false;
+        for (uint32_t e = 0; e < box.mesh_.EdgeCount() && !found; ++e) {
+            const auto [first, second] = box.mesh_.EdgeHalfEdges(static_cast<EdgeHandle>(e));
+            if (!IsValid(first) || !IsValid(second)) {
+                continue;
+            }
+            const uint32_t from = static_cast<uint32_t>(box.mesh_.GetHalfEdge(first).origin);
+            const uint32_t to = static_cast<uint32_t>(box.mesh_.GetHalfEdge(second).origin);
+            if ((from == a && to == b) || (from == b && to == a)) {
+                box.polygons_.HideEdge(box.mesh_, static_cast<EdgeHandle>(e), 180.0f);
+                found = true;
+            }
+        }
+        if (!found) {
+            error = "sebuah rusuk tersembunyi menunjuk pasangan simpul yang tidak bertetangga";
+            return false;
+        }
+    }
+
+    // Material dibaca dari face perwakilan tiap poligon. Menyimpannya per face
+    // membuat bentuk berkasnya tidak perlu tahu apa itu poligon sama sekali.
+    for (const PolygonHandle polygon : box.polygons_.Polygons()) {
+        const uint32_t representative = Index(polygon);
+        if (representative < data.faceMaterials.size()) {
+            box.polygonMaterial_[representative] = data.faceMaterials[representative];
+        }
+    }
+
+    const MeshCheck check = box.CheckInvariants();
+    if (!check.ok) {
+        error = check.error;
+        return false;
+    }
+
+    out = std::move(box);
+    return true;
+}
+
+WhiteboxData WhiteboxMesh::ToData() const {
+    WhiteboxData data;
+    data.positions.reserve(mesh_.VertexCount());
+    for (uint32_t v = 0; v < mesh_.VertexCount(); ++v) {
+        data.positions.push_back(mesh_.GetVertex(static_cast<VertexHandle>(v)).position);
+    }
+    data.faces.reserve(mesh_.FaceCount());
+    data.faceMaterials.reserve(mesh_.FaceCount());
+    for (uint32_t f = 0; f < mesh_.FaceCount(); ++f) {
+        const FaceHandle face = static_cast<FaceHandle>(f);
+        std::vector<uint32_t> loop;
+        for (const VertexHandle vertex : mesh_.FaceVertices(face)) {
+            loop.push_back(static_cast<uint32_t>(vertex));
+        }
+        data.faces.push_back(std::move(loop));
+        data.faceMaterials.push_back(PolygonMaterial(polygons_.FacePolygon(face)));
+    }
+
+    for (uint32_t e = 0; e < mesh_.EdgeCount(); ++e) {
+        const EdgeHandle edge = static_cast<EdgeHandle>(e);
+        if (!polygons_.IsEdgeHidden(edge)) {
+            continue;
+        }
+        const auto [first, second] = mesh_.EdgeHalfEdges(edge);
+        const uint32_t a = static_cast<uint32_t>(mesh_.GetHalfEdge(first).origin);
+        const uint32_t b = static_cast<uint32_t>(mesh_.GetHalfEdge(second).origin);
+        data.hiddenEdges.emplace_back(std::min(a, b), std::max(a, b));
+    }
+    // Diurutkan supaya keluarannya tetap: berkas yang isinya bergeser tanpa ada
+    // yang menyuntingnya menghasilkan diff palsu, dan diff palsu membuat yang
+    // sungguhan tidak terbaca.
+    std::sort(data.hiddenEdges.begin(), data.hiddenEdges.end());
+    return data;
+}
+
 int WhiteboxMesh::PolygonMaterial(PolygonHandle polygon) const {
     const uint32_t index = Index(polygon);
     return index < polygonMaterial_.size() ? polygonMaterial_[index] : kNoMaterial;

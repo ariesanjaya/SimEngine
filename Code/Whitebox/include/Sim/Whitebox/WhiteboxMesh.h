@@ -6,6 +6,8 @@
 #include "Sim/Whitebox/Polygon.h"
 
 #include <cstdint>
+#include <string>
+#include <utility>
 #include <vector>
 
 /// Whitebox utuh: topologi, pengelompokan sisi, dan material per sisi.
@@ -23,8 +25,30 @@ namespace sim::whitebox {
 /// sah.
 inline constexpr int kNoMaterial = -1;
 
+/// Whitebox dalam bentuk paling telanjang: angka, tanpa struktur.
+///
+/// **Ini bentuk yang disimpan dan yang dipertukarkan**, dan ia sengaja tidak
+/// menyebut half-edge sama sekali. Rusuk tersembunyi disimpan sebagai pasangan
+/// simpul, bukan nomor rusuk: nomor rusuk lahir dari urutan pembangunan, dan
+/// berkas yang isinya bergantung pada urutan pembangunan akan rusak diam-diam
+/// begitu pembangunannya diperbaiki.
+struct WhiteboxData {
+    std::vector<Vec3> positions;
+    std::vector<std::vector<uint32_t>> faces;
+    /// Pasangan simpul, selalu ditulis dengan yang kecil lebih dulu.
+    std::vector<std::pair<uint32_t, uint32_t>> hiddenEdges;
+    /// Sejajar dengan `faces`. Tiap face membawa material poligonnya, jadi
+    /// bentuk ini tidak perlu tahu apa itu poligon.
+    std::vector<int> faceMaterials;
+};
+
 class WhiteboxMesh {
 public:
+    /// Menyusun dari angka. False beserta sebabnya bila datanya tidak masuk akal.
+    static bool Build(WhiteboxMesh& out, const WhiteboxData& data, std::string& error);
+    /// Kebalikannya, dan keluarannya tetap untuk masukan yang sama.
+    WhiteboxData ToData() const;
+
     /// Memulai dari kubus satuan, titik awal setiap blockout.
     static WhiteboxMesh MakeCube();
     /// Kubus yang tiap sisinya dua segitiga, seperti yang datang dari importir.

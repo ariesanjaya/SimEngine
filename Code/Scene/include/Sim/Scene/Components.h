@@ -442,6 +442,22 @@ struct VehicleComponent {
     VehicleDriveKind drive = VehicleDriveKind::RearWheel;
 };
 
+/// Blok whitebox: geometri yang dirancang di dalam editor, bukan diimpor.
+///
+/// **Terpisah dari `MeshRendererComponent`, dan keduanya dipakai bersama.**
+/// Yang di sini menyimpan rujukan ke topologi yang bisa disunting; yang di sana
+/// menggambar segitiga hasilnya beserta material per ruasnya. Menyatukan
+/// keduanya berarti setiap mesh impor ikut membawa medan whitebox yang tidak
+/// pernah dipakainya.
+struct WhiteboxComponent {
+    /// Aset `.simwhitebox` — simpul, rusuk, sisi, dan slot materialnya.
+    AssetRef whitebox;
+
+    /// Menggambar rusuk sisi di viewport supaya bentuknya terbaca saat
+    /// merancang. Dimatikan saat memeriksa tampilan akhirnya.
+    bool showEdges = true;
+};
+
 struct CameraComponent {
     float fovYRadians = 1.047f;  // 60°
     float nearZ = 0.05f;

@@ -307,6 +307,14 @@ void RegisterCoreComponents() {
             .EnumNames({"Front Wheel", "Rear Wheel", "All Wheel"});
         components.Register<VehicleComponent>();
 
+        types.Type<WhiteboxComponent>("Whitebox")
+            .Field<&WhiteboxComponent::whitebox>("whitebox")
+            .Label("Whitebox Asset")
+            .Tooltip("Topologi yang bisa disunting; segitiganya dibangun dari sini")
+            .Field<&WhiteboxComponent::showEdges>("showEdges")
+            .Label("Show Edges");
+        components.Register<WhiteboxComponent>();
+
         types.Type<CameraComponent>("Camera")
             .Field<&CameraComponent::fovYRadians>("fovY")
             .Label("Field of View")

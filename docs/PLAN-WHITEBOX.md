@@ -269,14 +269,31 @@ menghapus tampilan blockout.
 Ruas kosong tidak diterbitkan: ia satu panggilan gambar yang tidak menggambar apa
 pun, dan satu slot material yang menyesatkan.
 
-### W4 — Aset `.simwhitebox` dan komponen · ⬜
+### W4 — Aset `.simwhitebox` dan komponen · ✅
 
 Topologi tersimpan, `WhiteboxComponent` lewat refleksi.
 
 **Kriteria terima**
 - Simpan-muat-simpan menghasilkan byte yang sama, aturan yang sama dengan E3.
-- Yang dimuat bisa disunting lagi: ekstrusi sesudah muat ulang bekerja sama
-  persis seperti sebelum disimpan.
+  Berkas yang isinya bergeser tanpa ada yang menyuntingnya menghasilkan diff
+  palsu di kontrol versi, dan diff palsu membuat yang sungguhan tidak terbaca.
+- Yang dimuat bisa disunting lagi: ekstrusi sesudah muat ulang menghasilkan
+  **berkas yang sama persis** dengan ekstrusi yang sama sebelum disimpan — bukan
+  sekadar "berhasil dijalankan".
+- Berkas yang rusak ditolak beserta sebabnya, bukan "gagal memuat".
+
+**Rusuk tersembunyi disimpan sebagai pasangan simpul, bukan nomor rusuk.** Nomor
+rusuk lahir dari urutan pembangunan, dan berkas yang isinya bergantung pada
+urutan pembangunan akan rusak diam-diam begitu pembangunannya diperbaiki.
+
+**Material disimpan per face**, sehingga bentuk berkasnya tidak perlu tahu apa
+itu poligon sama sekali — pengelompokan dipulihkan dari rusuk tersembunyi, dan
+materialnya dibaca dari face perwakilannya.
+
+`WhiteboxComponent` terpisah dari `MeshRendererComponent` dan keduanya dipakai
+bersama: yang satu menyimpan rujukan ke topologi yang bisa disunting, yang lain
+menggambar segitiga hasilnya beserta material per ruasnya. Menyatukannya berarti
+setiap mesh impor ikut membawa medan whitebox yang tidak pernah dipakainya.
 
 ### W5 — Penyuntingan di viewport · ⬜
 
