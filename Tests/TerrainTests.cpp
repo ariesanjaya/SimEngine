@@ -1668,3 +1668,208 @@ TEST_CASE("L1: normalnya beda tengah, bukan beda maju") {
     // Dan **bukan** beda maju, yang akan menjawab 9.
     CHECK(std::abs(slope - 9.0f) > 0.5f);
 }
+
+// ============================================================================
+// L2 — LOD dan jahitan di antaranya
+// ============================================================================
+
+namespace {
+
+/// Simpul mesh di sepanjang sebuah tepi, terurut menurut sumbu yang berjalan.
+std::vector<Vec3> EdgeVertices(const assets::MeshData& mesh, bool alongZ, float at) {
+    std::vector<Vec3> edge;
+    for (const assets::MeshVertex& vertex : mesh.vertices) {
+        const float fixed = alongZ ? vertex.position.x : vertex.position.z;
+        if (std::abs(fixed - at) < 1e-4f) {
+            edge.push_back(vertex.position);
+        }
+    }
+    std::sort(edge.begin(), edge.end(), [alongZ](const Vec3& a, const Vec3& b) {
+        return alongZ ? a.z < b.z : a.x < b.x;
+    });
+    return edge;
+}
+
+/// Bukit yang tidak simetris dan tidak linear, supaya "berada pada ruas" bukan
+/// pernyataan yang bidang datar mana pun akan lolos.
+void SculptHills(Terrain& terrain) {
+    for (int y = 0; y < terrain.SamplesY(); ++y) {
+        for (int x = 0; x < terrain.SamplesX(); ++x) {
+            const float fx = static_cast<float>(x);
+            const float fy = static_cast<float>(y);
+            terrain.SetHeightAt(x, y,
+                                20.0f + 8.0f * std::sin(fx * 0.35f) + 5.0f * std::cos(fy * 0.5f) +
+                                    0.05f * fx * fy);
+        }
+    }
+}
+
+}  // namespace
+
+TEST_CASE("L2: LOD n menghasilkan (S/2^n)^2 quad dan tetap menyentuh tepi ubin") {
+    TerrainDesc desc = SmallDesc();
+    desc.tileSamples = 16;
+    Terrain terrain(desc);
+    SculptHills(terrain);
+
+    for (int lod = 0; lod <= 3; ++lod) {
+        const assets::MeshData mesh = BuildTileMesh(terrain, 0, 0, lod);
+        REQUIRE_MESSAGE(mesh.IsValid(), "LOD ", lod);
+        const int step = LodStep(lod);
+        const std::size_t quads = static_cast<std::size_t>(16 / step) * (16 / step);
+        INFO("LOD " << lod);
+        CHECK(mesh.indices.size() == quads * 6);
+
+        // Perinciannya turun, jangkauannya tidak: ubin yang menyusut saat kamera
+        // menjauh meninggalkan celah yang tepat sebesar ubinnya.
+        CHECK(mesh.boundsMin.x == doctest::Approx(0.0f).epsilon(0.001));
+        CHECK(mesh.boundsMax.x == doctest::Approx(16.0f).epsilon(0.001));
+        CHECK(mesh.boundsMin.z == doctest::Approx(0.0f).epsilon(0.001));
+        CHECK(mesh.boundsMax.z == doctest::Approx(16.0f).epsilon(0.001));
+    }
+}
+
+TEST_CASE("L2: tepi halus dijahit ke ruas tepi tetangga yang kasar") {
+    // **Kriteria terima L2, dinyatakan geometris.** Retakan LOD adalah satu
+    // baris piksel latar di antara dua ubin — mustahil dilihat uji headless
+    // sebagai gambar, tetapi persis terukur sebagai posisi simpul: setiap simpul
+    // tepi yang lebih halus harus terletak pada ruas tepi yang lebih kasar.
+    TerrainDesc desc = SmallDesc();
+    desc.tileSamples = 16;
+    Terrain terrain(desc);
+    SculptHills(terrain);
+
+    // Ubin kiri halus (LOD 0), ubin kanan kasar (LOD 2). Yang halus yang
+    // menjahit.
+    TileNeighborLods neighbors;
+    neighbors.positiveX = 2;
+    const assets::MeshData fine = BuildTileMesh(terrain, 0, 0, 0, neighbors);
+    const assets::MeshData coarse = BuildTileMesh(terrain, 1, 0, 2);
+    REQUIRE(fine.IsValid());
+    REQUIRE(coarse.IsValid());
+
+    const std::vector<Vec3> fineEdge = EdgeVertices(fine, /*alongZ=*/true, 16.0f);
+    const std::vector<Vec3> coarseEdge = EdgeVertices(coarse, /*alongZ=*/true, 16.0f);
+    REQUIRE(fineEdge.size() == 17);  // 16 quad halus + 1
+    REQUIRE(coarseEdge.size() == 5);  // 4 quad kasar + 1
+
+    for (const Vec3& point : fineEdge) {
+        // Ruas kasar yang mengapitnya.
+        std::size_t segment = 0;
+        while (segment + 2 < coarseEdge.size() && coarseEdge[segment + 1].z < point.z - 1e-4f) {
+            ++segment;
+        }
+        const Vec3& a = coarseEdge[segment];
+        const Vec3& b = coarseEdge[segment + 1];
+        const float t = (point.z - a.z) / (b.z - a.z);
+        const float onSegment = a.y * (1.0f - t) + b.y * t;
+        INFO("z = " << point.z << ", tinggi " << point.y << " vs ruas " << onSegment);
+        CHECK(point.y == doctest::Approx(onSegment).epsilon(0.0001));
+    }
+
+    // Dan tanpa penjahitan, tepinya memang **tidak** berimpit — kalau tidak,
+    // uji di atas lolos untuk implementasi yang tidak menjahit apa pun.
+    const assets::MeshData unstitched = BuildTileMesh(terrain, 0, 0, 0);
+    const std::vector<Vec3> raw = EdgeVertices(unstitched, /*alongZ=*/true, 16.0f);
+    REQUIRE(raw.size() == fineEdge.size());
+    float largest = 0.0f;
+    for (std::size_t i = 0; i < raw.size(); ++i) {
+        largest = std::max(largest, std::abs(raw[i].y - fineEdge[i].y));
+    }
+    INFO("selisih terbesar " << largest << " m");
+    CHECK(largest > 0.1f);
+}
+
+TEST_CASE("L2: sudut ubin tidak tergeser oleh penjahitan") {
+    // Sudut adalah ujung dua tepi sekaligus. Yang menjahitnya dua kali
+    // memindahkannya ke tempat yang bukan milik tepi mana pun — dan retakan di
+    // sudut adalah lubang, bukan garis.
+    TerrainDesc desc = SmallDesc();
+    desc.tileSamples = 16;
+    Terrain terrain(desc);
+    SculptHills(terrain);
+
+    TileNeighborLods neighbors;
+    neighbors.positiveX = 3;
+    neighbors.positiveY = 3;
+    neighbors.negativeX = 3;
+    neighbors.negativeY = 3;
+    const assets::MeshData mesh = BuildTileMesh(terrain, 0, 0, 0, neighbors);
+    REQUIRE(mesh.IsValid());
+
+    const std::vector<Vec3> edge = EdgeVertices(mesh, /*alongZ=*/true, 16.0f);
+    REQUIRE(!edge.empty());
+    // Keempat sudut tetap pada tinggi sampelnya sendiri.
+    CHECK(edge.front().y == doctest::Approx(terrain.HeightAt(16, 0)).epsilon(0.001));
+    CHECK(edge.back().y == doctest::Approx(terrain.HeightAt(16, 16)).epsilon(0.001));
+}
+
+TEST_CASE("L2: tetangga yang lebih halus tidak menggeser apa pun") {
+    // Menjahit hanya berlaku satu arah: yang halus menyesuaikan diri ke yang
+    // kasar. Kalau keduanya bergerak, tidak ada yang menjadi acuan dan
+    // retakannya berpindah alih-alih tertutup.
+    //
+    // **Uji ini mengunci perilaku, bukan menangkap bug.** Diperiksa lewat
+    // mutasi: mengganti syarat `> lod` menjadi `!= lod` — sehingga penjahitan
+    // ikut berjalan terhadap tetangga yang lebih halus — tidak menggagalkan
+    // satu pun dari 1292 pernyataan. Sebabnya struktural: daftar simpul
+    // tetangga yang lebih halus selalu **superset** daftar milik ubin ini, jadi
+    // setiap simpul mendarat tepat pada titik acuannya dan penjahitannya
+    // berakhir sebagai operasi kosong. Syarat `> lod` karena itu adalah
+    // penghematan, bukan syarat kebenaran — dan menyebutnya begitu lebih
+    // berguna daripada menyiratkan uji ini menjaga sesuatu yang tidak
+    // dijaganya.
+    TerrainDesc desc = SmallDesc();
+    desc.tileSamples = 16;
+    Terrain terrain(desc);
+    SculptHills(terrain);
+
+    TileNeighborLods finer;
+    finer.positiveX = 0;
+    finer.negativeY = 0;
+    const assets::MeshData coarse = BuildTileMesh(terrain, 0, 0, 2, finer);
+    const assets::MeshData alone = BuildTileMesh(terrain, 0, 0, 2);
+    REQUIRE(coarse.IsValid());
+    REQUIRE(coarse.vertices.size() == alone.vertices.size());
+    for (std::size_t i = 0; i < coarse.vertices.size(); ++i) {
+        CHECK(coarse.vertices[i].position.y == alone.vertices[i].position.y);
+    }
+}
+
+TEST_CASE("L2: pemilih LOD monoton dan tidak melompat dua tingkat") {
+    constexpr int kMaxLod = 4;
+    const float tileSize = 64.0f;
+
+    int previous = 0;
+    for (int step = 0; step <= 400; ++step) {
+        const float distance = static_cast<float>(step) * 8.0f;
+        const int lod = SelectLod(distance, tileSize, kMaxLod);
+        INFO("jarak " << distance << " m");
+        CHECK(lod >= previous);        // monoton
+        CHECK(lod - previous <= 1);    // tidak melompat dua tingkat
+        CHECK(lod <= kMaxLod);
+        previous = lod;
+    }
+    CHECK(previous == kMaxLod);  // benar-benar sampai ke ujungnya
+
+    // Perincian penuh di dekat, dan satu tingkat per penggandaan sesudahnya.
+    CHECK(SelectLod(0.0f, tileSize, kMaxLod) == 0);
+    CHECK(SelectLod(tileSize, tileSize, kMaxLod) == 0);
+    CHECK(SelectLod(tileSize * 1.5f, tileSize, kMaxLod) == 1);
+    CHECK(SelectLod(tileSize * 3.0f, tileSize, kMaxLod) == 2);
+    CHECK(SelectLod(tileSize * 5.0f, tileSize, kMaxLod) == 3);
+
+    // Ubin yang lebih besar bertahan pada perincian penuh lebih jauh: yang
+    // menentukan bukan jarak mutlak melainkan berapa piksel yang ditempatinya.
+    CHECK(SelectLod(200.0f, 64.0f, kMaxLod) > SelectLod(200.0f, 512.0f, kMaxLod));
+
+    // Kualitas menggeser seluruh ambangnya.
+    CHECK(SelectLod(tileSize * 3.0f, tileSize, kMaxLod, 4.0f) == 0);
+
+    // Masukan yang tidak masuk akal menjawab perincian penuh, bukan terkasar:
+    // ubin di depan hidung yang tiba-tiba menjadi empat segitiga jauh lebih
+    // terlihat daripada ubin jauh yang terlalu halus.
+    CHECK(SelectLod(std::numeric_limits<float>::quiet_NaN(), tileSize, kMaxLod) == 0);
+    CHECK(SelectLod(1000.0f, 0.0f, kMaxLod) == 0);
+    CHECK(SelectLod(1000.0f, tileSize, 0) == 0);
+}

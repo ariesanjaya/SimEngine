@@ -18,6 +18,37 @@ namespace sim::terrain {
 /// yang baru tahu ukurannya sesudah meshnya jadi sudah terlanjut membayarnya.
 int LodStep(int lod);
 
+/// Tingkat perincian keempat tetangga sebuah ubin.
+///
+/// **Yang halus menjahit ke yang kasar, bukan sebaliknya**, dan hanya satu sisi
+/// yang mengerjakannya. Kalau keduanya menyesuaikan diri, keduanya bergerak dan
+/// tidak ada yang menjadi acuan — retakannya berpindah alih-alih tertutup.
+///
+/// Nilai yang sama dengan atau lebih kecil daripada LOD ubinnya berarti "tidak
+/// ada yang perlu dijahit": tetangga yang lebih halus punya simpul di setiap
+/// tempat ubin ini punya, jadi tepinya sudah berimpit.
+struct TileNeighborLods {
+    int negativeX = 0;
+    int positiveX = 0;
+    int negativeY = 0;
+    int positiveY = 0;
+};
+
+/// LOD sebuah ubin pada jarak tertentu dari kamera.
+///
+/// **Fungsi murni**, tanpa kamera dan tanpa keadaan: yang menentukan perincian
+/// harus bisa diuji tanpa menggambar apa pun, dan yang membaca keadaan global
+/// hanya bisa diuji dengan menyiapkan keadaan global.
+///
+/// Aturannya satu tingkat per penggandaan jarak, diukur terhadap ukuran ubin
+/// itu sendiri: ubin sepuluh meter dan ubin satu kilometer tidak boleh berbagi
+/// ambang yang sama, karena yang menentukan seberapa kasar sebuah ubin boleh
+/// digambar adalah berapa piksel yang ditempatinya.
+///
+/// `quality` menggeser seluruh ambangnya: dua kali lipat berarti perincian penuh
+/// bertahan dua kali lebih jauh.
+int SelectLod(float distanceMeters, float tileSizeMeters, int maxLod, float quality = 1.0f);
+
 /// Mesh sebuah ubin, di **ruang lokal terrain** — titik asalnya sudut peta,
 /// bukan sudut ubin.
 ///
@@ -34,7 +65,8 @@ int LodStep(int lod);
 /// menjawab tinggi dasar untuk ubin yang belum pernah ditulis — jadi membangun
 /// mesh tidak membatalkan alokasi malas yang menjadi seluruh alasan terrain
 /// sebesar ini muat di memori.
-assets::MeshData BuildTileMesh(const Terrain& terrain, int tileX, int tileY, int lod = 0);
+assets::MeshData BuildTileMesh(const Terrain& terrain, int tileX, int tileY, int lod = 0,
+                               const TileNeighborLods& neighbors = {});
 
 /// Normal permukaan pada sebuah **sampel**, dari beda tengah heightmap-nya.
 ///

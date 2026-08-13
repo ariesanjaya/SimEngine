@@ -1,7 +1,10 @@
 #include "Sim/Terrain/TerrainMesh.h"
 
 #include <algorithm>
+#include <cmath>
+#include <functional>
 #include <glm/geometric.hpp>
+#include <limits>
 #include <vector>
 
 namespace sim::terrain {
@@ -44,9 +47,56 @@ bool AnyHole(const Terrain& terrain, int x, int y, int stepX, int stepY) {
     return false;
 }
 
+/// Menjahit sebuah simpul tepi ke ruas tepi tetangga yang lebih kasar.
+///
+/// `line` adalah daftar sampel milik ubin **kasar** di sepanjang tepi itu —
+/// dihasilkan `Columns` yang sama persis dengan yang dipakai ubin kasar untuk
+/// menyusun simpulnya. Dipakai bersama, bukan dihitung ulang: dua rumus yang
+/// "seharusnya sama" adalah dua rumus yang suatu saat tidak sama lagi, dan yang
+/// tidak sama di sini adalah retakan yang justru sedang ditutup.
+///
+/// Tinggi **dan** normalnya diinterpolasi. Tinggi saja menutup retakannya, dan
+/// normal yang tidak ikut meninggalkan garis terang di tempat retakan tadi —
+/// cacat yang lebih halus, dan karena itu lebih lama dicari.
+void SnapToCoarseEdge(const std::vector<int>& line, int at, float& height, Vec3& normal,
+                      const std::function<float(int)>& heightAt,
+                      const std::function<Vec3(int)>& normalAt) {
+    if (line.size() < 2 || at <= line.front() || at >= line.back()) {
+        return;
+    }
+    const auto upper = std::upper_bound(line.begin(), line.end(), at);
+    const int b = *upper;
+    const int a = *(upper - 1);
+    if (a == at) {
+        return;  // simpul ini juga dimiliki yang kasar; tidak ada yang digeser
+    }
+    const float t = static_cast<float>(at - a) / static_cast<float>(b - a);
+    height = heightAt(a) * (1.0f - t) + heightAt(b) * t;
+    normal = glm::normalize(normalAt(a) * (1.0f - t) + normalAt(b) * t);
+}
+
 }  // namespace
 
 int LodStep(int lod) { return 1 << std::clamp(lod, 0, 16); }
+
+int SelectLod(float distanceMeters, float tileSizeMeters, int maxLod, float quality) {
+    if (maxLod <= 0 || tileSizeMeters <= 0.0f || quality <= 0.0f) {
+        return 0;
+    }
+    const float threshold = tileSizeMeters * quality;
+    if (!(distanceMeters > threshold)) {
+        // Termasuk NaN: `!(a > b)` bukan `a <= b`, dan jarak NaN yang menjawab
+        // LOD terkasar akan membuat ubin di depan hidung tiba-tiba menjadi
+        // empat segitiga.
+        return 0;
+    }
+    // Satu tingkat per penggandaan. `log2` lalu dibulatkan ke bawah: yang
+    // membulatkan ke terdekat membuat ambangnya jatuh di tengah penggandaan,
+    // sehingga sebuah ubin berganti perincian saat ia masih menempati piksel
+    // dua kali lebih banyak daripada yang dianggarkan.
+    const int lod = static_cast<int>(std::floor(std::log2(distanceMeters / threshold))) + 1;
+    return std::clamp(lod, 0, maxLod);
+}
 
 Vec3 SampleNormal(const Terrain& terrain, int x, int y) {
     const float spacing = terrain.Desc().sampleSpacing;
@@ -63,7 +113,8 @@ Vec3 SampleNormal(const Terrain& terrain, int x, int y) {
     return glm::normalize(Vec3(-dx, 1.0f, -dz));
 }
 
-assets::MeshData BuildTileMesh(const Terrain& terrain, int tileX, int tileY, int lod) {
+assets::MeshData BuildTileMesh(const Terrain& terrain, int tileX, int tileY, int lod,
+                               const TileNeighborLods& neighbors) {
     assets::MeshData mesh;
 
     const TerrainDesc& desc = terrain.Desc();
@@ -93,11 +144,55 @@ assets::MeshData BuildTileMesh(const Terrain& terrain, int tileX, int tileY, int
     Vec3 boundsMin(std::numeric_limits<float>::max());
     Vec3 boundsMax(std::numeric_limits<float>::lowest());
 
+    // Tepi yang bertetangga dengan ubin lebih kasar dijahit ke sana. Daftar
+    // simpulnya dibangun dengan `Columns` yang sama, jadi ia sama persis dengan
+    // yang dipakai ubin kasar itu sendiri.
+    const std::vector<int> coarseLeft =
+        neighbors.negativeX > lod ? Columns(y0, y1, LodStep(neighbors.negativeX))
+                                  : std::vector<int>{};
+    const std::vector<int> coarseRight =
+        neighbors.positiveX > lod ? Columns(y0, y1, LodStep(neighbors.positiveX))
+                                  : std::vector<int>{};
+    const std::vector<int> coarseBack =
+        neighbors.negativeY > lod ? Columns(x0, x1, LodStep(neighbors.negativeY))
+                                  : std::vector<int>{};
+    const std::vector<int> coarseFront =
+        neighbors.positiveY > lod ? Columns(x0, x1, LodStep(neighbors.positiveY))
+                                  : std::vector<int>{};
+
     for (const int y : rows) {
         for (const int x : columns) {
-            const Vec3 position(static_cast<float>(x) * desc.sampleSpacing, terrain.HeightAt(x, y),
+            float height = terrain.HeightAt(x, y);
+            Vec3 normal = SampleNormal(terrain, x, y);
+
+            // Sudut ubin tidak dijahit dua kali: ia sudah menjadi ujung kedua
+            // tepi, dan `SnapToCoarseEdge` memang menolak ujung. Yang menjahit
+            // sudut dua kali akan menggesernya ke tempat yang bukan milik tepi
+            // mana pun.
+            if (x == x0 && !coarseLeft.empty()) {
+                SnapToCoarseEdge(
+                    coarseLeft, y, height, normal,
+                    [&](int at) { return terrain.HeightAt(x0, at); },
+                    [&](int at) { return SampleNormal(terrain, x0, at); });
+            } else if (x == x1 && !coarseRight.empty()) {
+                SnapToCoarseEdge(
+                    coarseRight, y, height, normal,
+                    [&](int at) { return terrain.HeightAt(x1, at); },
+                    [&](int at) { return SampleNormal(terrain, x1, at); });
+            } else if (y == y0 && !coarseBack.empty()) {
+                SnapToCoarseEdge(
+                    coarseBack, x, height, normal,
+                    [&](int at) { return terrain.HeightAt(at, y0); },
+                    [&](int at) { return SampleNormal(terrain, at, y0); });
+            } else if (y == y1 && !coarseFront.empty()) {
+                SnapToCoarseEdge(
+                    coarseFront, x, height, normal,
+                    [&](int at) { return terrain.HeightAt(at, y1); },
+                    [&](int at) { return SampleNormal(terrain, at, y1); });
+            }
+
+            const Vec3 position(static_cast<float>(x) * desc.sampleSpacing, height,
                                 static_cast<float>(y) * desc.sampleSpacing);
-            const Vec3 normal = SampleNormal(terrain, x, y);
 
             assets::MeshVertex vertex;
             vertex.position = position;

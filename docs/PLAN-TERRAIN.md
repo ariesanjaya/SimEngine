@@ -149,22 +149,64 @@ meter per pengulangan (`TerrainLayer::tileSize`), dan UV yang diregangkan per
 ubin membuat pengulangan itu berubah ukuran setiap kali seseorang mengganti
 jumlah ubin.
 
-### L2 — LOD · ⬜
+### L2 — LOD · ✅
 
 Tingkat perincian, dan jahitan di antaranya.
 
-- Mesh pada langkah sampel 2ⁿ.
-- Tepi ubin yang bertetangga dengan LOD lebih kasar **dijahit**, bukan dibiarkan:
-  retakan di batas LOD adalah cacat visual paling khas terrain, dan ia muncul
-  justru saat kamera bergerak.
-- Pilihan LOD adalah fungsi murni dari jarak dan ukuran ubin, supaya bisa diuji
-  tanpa kamera.
-
 **Kriteria terima**
-- LOD n menghasilkan (S/2ⁿ)² quad, dan batasnya tetap menyentuh tepi ubin.
-- Ubin LOD 0 di sebelah ubin LOD 1 tidak meninggalkan celah: setiap simpul tepi
-  yang lebih halus berada tepat pada ruas tepi yang lebih kasar.
-- Pemilih LOD monoton terhadap jarak, dan tidak pernah melompat dua tingkat.
+- LOD n menghasilkan (S/2ⁿ)² quad, dan batasnya tetap menyentuh tepi ubin. ✅
+  Jangkauannya diperiksa terpisah dari jumlah quad-nya: ubin yang ikut menyusut
+  saat kamera menjauh meninggalkan celah yang tepat sebesar ubinnya.
+- **Tepi halus berada tepat pada ruas tepi yang kasar.** ✅ Retakan LOD adalah
+  satu baris piksel latar di antara dua ubin — mustahil dilihat uji headless
+  sebagai gambar, tetapi persis terukur sebagai posisi simpul. Ujinya juga
+  memeriksa bahwa tanpa penjahitan tepinya memang **tidak** berimpit (selisih di
+  atas 0,1 m), sehingga ia tidak lolos untuk implementasi yang tidak menjahit
+  apa pun. Mematikan penjahitan menggugurkan 13 pernyataan.
+- Pemilih LOD monoton terhadap jarak, dan tidak pernah melompat dua tingkat. ✅
+  Diperiksa pada 401 jarak berurutan, ditambah ambang yang disebutkan angkanya.
+  Membulatkan ke terdekat alih-alih ke bawah menggugurkan ujinya.
+
+**Yang halus menjahit ke yang kasar, dan hanya satu sisi yang mengerjakannya.**
+Kalau keduanya menyesuaikan diri, keduanya bergerak dan tidak ada yang menjadi
+acuan — retakannya berpindah alih-alih tertutup.
+
+Daftar simpul tepi yang kasar dibangun lewat `Columns` yang **sama persis**
+dengan yang dipakai ubin kasar itu untuk menyusun simpulnya. Dipakai bersama,
+bukan dihitung ulang: dua rumus yang "seharusnya sama" adalah dua rumus yang
+suatu saat tidak sama lagi, dan yang tidak sama di sini adalah retakan yang
+justru sedang ditutup.
+
+Tinggi **dan** normalnya diinterpolasi. Tinggi saja menutup retakannya; normal
+yang tidak ikut meninggalkan garis terang di tempat retakan tadi — cacat yang
+lebih halus, dan karena itu lebih lama dicari.
+
+Sudut ubin sengaja tidak dijahit dua kali. Ia ujung dua tepi sekaligus, dan yang
+menggesernya dua kali memindahkannya ke tempat yang bukan milik tepi mana pun —
+retakan di sudut adalah lubang, bukan garis.
+
+**Syarat `tetangga > lod` adalah penghematan, bukan syarat kebenaran.** Ini
+ditemukan lewat mutasi, bukan dari membaca kode: menggantinya dengan `!= lod` —
+sehingga penjahitan ikut berjalan terhadap tetangga yang lebih halus — tidak
+menggagalkan satu pun dari 1292 pernyataan. Sebabnya struktural: daftar simpul
+tetangga yang lebih halus selalu superset daftar milik ubin ini, jadi setiap
+simpul mendarat tepat pada titik acuannya dan penjahitannya berakhir sebagai
+operasi kosong. Ujinya tetap ada untuk mengunci perilakunya, dan komentarnya
+menyebut bahwa ia mengunci, bukan menjaga.
+
+**Pemilih LOD-nya fungsi murni** dari jarak, ukuran ubin, dan sebuah pengali
+kualitas — tanpa kamera dan tanpa keadaan. Ambangnya diukur terhadap ukuran ubin
+itu sendiri, bukan jarak mutlak: yang menentukan seberapa kasar sebuah ubin boleh
+digambar adalah berapa piksel yang ditempatinya, dan ubin sepuluh meter tidak
+boleh berbagi ambang dengan ubin satu kilometer. Dibulatkan **ke bawah**, karena
+yang membulatkan ke terdekat menaruh ambangnya di tengah penggandaan — sehingga
+ubin berganti perincian saat ia masih menempati piksel dua kali lebih banyak
+daripada yang dianggarkan.
+
+Masukan yang tidak masuk akal — jarak NaN, ukuran ubin nol — menjawab perincian
+**penuh**, bukan terkasar. Perbandingannya karena itu ditulis `!(d > ambang)`
+dan bukan `d <= ambang`: ubin di depan hidung yang tiba-tiba menjadi empat
+segitiga jauh lebih terlihat daripada ubin jauh yang terlalu halus.
 
 ### L3 — Terrain di viewport · ⬜
 
