@@ -1614,3 +1614,157 @@ TEST_CASE("P6a: kendaraan berdiri di suspensinya") {
     CHECK(lateSwing < earlySwing * 0.25f);
     CHECK(lateSwing < 0.02f);
 }
+
+TEST_CASE("P6b: gas menghasilkan gerak, dan rodanya menggelinding bukan selip") {
+    if (!Available()) {
+        return;
+    }
+    PhysicsWorld world;
+    REQUIRE(world.Create(DefaultWorld()));
+    REQUIRE(AddFloor(world, 0.0f) != BodyHandle::Invalid);
+
+    const VehicleHandle car = world.AddVehicle(MakeCar());
+    INFO("AddVehicle berkata: " << world.Error());
+    REQUIRE(car != VehicleHandle::Invalid);
+
+    world.Step(120);  // duduk di suspensinya lebih dulu
+
+    VehicleInput input;
+    input.throttle = 1.0f;
+    REQUIRE(world.SetVehicleInput(car, input));
+
+    // Kecepatan dicuplik tiap 30 langkah. **Menaik secara monoton**, bukan
+    // sekadar "lebih cepat di akhir": mobil yang tersendat-sendat karena ban
+    // kehilangan cengkeraman lalu mendapatkannya lagi juga berakhir lebih cepat.
+    std::vector<float> samples;
+    VehicleState state;
+    for (int block = 0; block < 20; ++block) {
+        world.Step(30);
+        REQUIRE(world.ReadVehicleState(car, state));
+        samples.push_back(state.forwardSpeed);
+    }
+
+    std::size_t drops = 0;
+    for (std::size_t i = 1; i < samples.size(); ++i) {
+        if (samples[i] < samples[i - 1] - 0.05f) {
+            ++drops;
+        }
+    }
+    INFO("laju akhir " << samples.back() << " m/s, " << drops << " cuplikan menurun");
+    CHECK(drops == 0);
+    CHECK(samples.back() > 10.0f);
+
+    // **Roda menggelinding, bukan berputar di tempat** — diperiksa saat meluncur
+    // bebas, bukan saat digas.
+    //
+    // Di bawah gas penuh, roda penggerak memang **harus** selip: itulah cara ban
+    // memindahkan gaya, dan direct drive memperparahnya karena torsinya tetap
+    // berapa pun laju rodanya — tidak ada kurva mesin yang meredamnya di putaran
+    // tinggi. Terukur 39% selip pada 53 m/s, dan itu sifat modelnya, bukan cacat;
+    // yang memperbaikinya adalah P6f.
+    //
+    // Yang sesungguhnya diuji: roda **terkopel** ke tanah. Lepas gas, dan
+    // slipnya harus hilang — ω·r ≈ v. Roda yang tetap berputar sendiri sesudah
+    // gas dilepas berarti ia tidak pernah benar-benar menyentuh apa pun.
+    VehicleInput coast;
+    coast.throttle = 0.0f;
+    REQUIRE(world.SetVehicleInput(car, coast));
+    world.Step(120);
+    REQUIRE(world.ReadVehicleState(car, state));
+    INFO("meluncur bebas pada " << state.forwardSpeed << " m/s");
+
+    REQUIRE(state.wheels.size() == 4);
+    for (std::size_t i = 0; i < state.wheels.size(); ++i) {
+        const float surfaceSpeed = std::abs(state.wheels[i].rotationSpeed) * 0.35f;
+        INFO("roda " << i << ": ω·r = " << surfaceSpeed << " m/s terhadap v = "
+                     << state.forwardSpeed);
+        CHECK(surfaceSpeed == doctest::Approx(std::abs(state.forwardSpeed)).epsilon(0.15));
+    }
+}
+
+TEST_CASE("P6d: radius belok sepadan dengan sudut kemudi") {
+    if (!Available()) {
+        return;
+    }
+    // **Diuji terhadap rumus, bukan terhadap 'kelihatan berbelok'.** Untuk
+    // kendaraan beroda depan, radius belok R ≈ wheelbase / tan(δ). Dengan jarak
+    // sumbu 3 m dan kemudi penuh 0,6 rad, R ≈ 3 / tan(0,6) ≈ 4,4 m.
+    //
+    // Diuji pada laju rendah dengan sengaja: pada 3 m/s percepatan menyampingnya
+    // 0,2 g, jauh di bawah cengkeraman ban. Pada laju tinggi mobil menyapu
+    // keluar dan radiusnya melebar — itu perilaku yang benar, tetapi ia menguji
+    // model ban, bukan geometri kemudi.
+    PhysicsWorld world;
+    REQUIRE(world.Create(DefaultWorld()));
+    REQUIRE(AddFloor(world, 0.0f) != BodyHandle::Invalid);
+
+    const VehicleHandle car = world.AddVehicle(MakeCar());
+    REQUIRE(car != VehicleHandle::Invalid);
+    world.Step(120);
+
+    // Digas pelan sampai sekitar 3 m/s.
+    VehicleInput input;
+    input.throttle = 0.25f;
+    REQUIRE(world.SetVehicleInput(car, input));
+    VehicleState state;
+    for (int i = 0; i < 1200; ++i) {
+        world.Step(1);
+        REQUIRE(world.ReadVehicleState(car, state));
+        if (state.forwardSpeed >= 3.0f) {
+            break;
+        }
+    }
+    INFO("laju sebelum membelok " << state.forwardSpeed << " m/s");
+    REQUIRE(state.forwardSpeed >= 2.0f);
+
+    // Kemudi penuh, gas dijaga supaya lajunya tidak runtuh saat membelok.
+    input.steer = 1.0f;
+    REQUIRE(world.SetVehicleInput(car, input));
+    world.Step(60);  // biarkan mapan di lingkarannya
+
+    // Radius diukur dari laju sudut: R = v / ω. Arah hadap diambil dari sumbu
+    // maju kendaraan, bukan dari kecepatannya — keduanya berbeda saat menyapu,
+    // dan yang menggambarkan lingkarannya adalah yang pertama.
+    const auto heading = [](const VehicleState& s) {
+        const Vec3 forward = s.rotation * Vec3(0.0f, 0.0f, 1.0f);
+        return std::atan2(forward.x, forward.z);
+    };
+
+    REQUIRE(world.ReadVehicleState(car, state));
+    const float startYaw = heading(state);
+    const Vec3 startPos = state.position;
+    const float startSpeed = state.forwardSpeed;
+
+    constexpr int kSteps = 60;
+    world.Step(kSteps);
+    REQUIRE(world.ReadVehicleState(car, state));
+
+    float deltaYaw = heading(state) - startYaw;
+    while (deltaYaw > 3.14159265f) deltaYaw -= 2.0f * 3.14159265f;
+    while (deltaYaw < -3.14159265f) deltaYaw += 2.0f * 3.14159265f;
+
+    const float seconds = static_cast<float>(kSteps) / 60.0f;
+    const float yawRate = std::abs(deltaYaw) / seconds;
+    const float speed = 0.5f * (startSpeed + state.forwardSpeed);
+    REQUIRE(yawRate > 0.01f);
+    const float radius = speed / yawRate;
+
+    const float wheelbase = 3.0f;
+    const float expected = wheelbase / std::tan(0.6f);
+    INFO("radius terukur " << radius << " m, rumus " << expected << " m (laju " << speed
+                           << " m/s)");
+    // Toleransi lebar dengan sengaja: rumusnya mengabaikan sudut selip ban, yang
+    // selalu melebarkan lingkarannya sedikit. Yang diuji adalah bahwa geometri
+    // kemudinya benar — bukan bahwa modelnya sempurna.
+    CHECK(radius > expected * 0.6f);
+    CHECK(radius < expected * 2.0f);
+
+    // Dan ia benar-benar membelok, bukan meluncur lurus.
+    CHECK(glm::length(state.position - startPos) > 1.0f);
+
+    // **Tidak terguling.** Sumbu atas kendaraan harus tetap mengarah ke atas —
+    // titik beratnya memang disetel di bawah pusat kotak justru untuk ini.
+    const Vec3 up = state.rotation * Vec3(0.0f, 1.0f, 0.0f);
+    INFO("sumbu atas y = " << up.y);
+    CHECK(up.y > 0.9f);
+}

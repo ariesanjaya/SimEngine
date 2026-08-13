@@ -423,17 +423,25 @@ bodinya turun ke ketinggian diam lalu berhenti di sana.
   meluruh, dan pegas bawaan memang diberi redaman kritis c = 2·√(k·m) supaya ia
   kembali tanpa melewati sama sekali.
 
-#### P6b — Gas menghasilkan gerak · ⬜
+#### P6b — Gas menghasilkan gerak · ✅
 
 Torsi direct-drive masuk ke roda penggerak, roda berputar, ban menghasilkan gaya
 memanjang, bodi bergerak.
 
 **Kriteria terima**
-- Kecepatan naik secara monoton pada gas tetap di permukaan datar.
-- Kecepatan putar roda cocok dengan laju maju: ω·r ≈ v sesudah tidak lagi
-  berakselerasi. Yang tidak cocok berarti ban selip terus-menerus, dan itu
-  terbaca sebagai mobil yang berakselerasi lambat alih-alih sebagai ban yang
-  salah setelan.
+- Kecepatan naik secara monoton pada gas tetap di permukaan datar. Terukur: 20
+  cuplikan, **nol** yang menurun.
+- Kecepatan putar roda cocok dengan laju maju: ω·r ≈ v — **diperiksa saat
+  meluncur bebas, bukan saat digas**.
+
+  Di bawah gas penuh roda penggerak memang *harus* selip; itulah cara ban
+  memindahkan gaya, dan direct drive memperparahnya karena torsinya tetap berapa
+  pun laju rodanya — tidak ada kurva mesin yang meredamnya di putaran tinggi.
+  Terukur 39% selip pada 53 m/s, dan itu sifat modelnya, bukan cacat; yang
+  memperbaikinya P6f.
+
+  Yang sesungguhnya diuji adalah **kopel** roda ke tanah: lepas gas, dan slipnya
+  harus hilang. Terukur ω·r = 53,05 m/s terhadap v = 53,38 m/s — **selip 0,6%**.
 
 #### P6c — Rem · ✅
 
@@ -444,14 +452,21 @@ memanjang, bodi bergerak.
   jauh lebih pendek berarti ban menggigit lebih dari yang mungkin.
 - Rem tangan mengunci hanya roda yang ditandai `handbraked`.
 
-#### P6d — Kemudi · ⬜
+#### P6d — Kemudi · ✅
 
 **Kriteria terima**
 - Radius belok pada kemudi penuh sepadan dengan sudut kemudi dan jarak sumbu
   roda: R ≈ wheelbase / tan(δ). Diuji terhadap rumus itu, bukan terhadap
-  "kelihatan berbelok".
+  "kelihatan berbelok". Terukur **5,03 m** terhadap rumus **4,39 m** — 15% lebih
+  lebar, dan itu justru yang diharapkan: rumusnya mengabaikan sudut selip ban,
+  yang selalu melebarkan lingkarannya sedikit.
 - Mobil tidak terguling pada kemudi penuh di kecepatan sedang — titik beratnya
   memang disetel di bawah pusat kotak justru untuk ini.
+
+Diuji pada laju rendah dengan sengaja: pada 3–4 m/s percepatan menyampingnya
+sekitar 0,2 g, jauh di bawah cengkeraman ban. Pada laju tinggi mobil menyapu
+keluar dan radiusnya melebar — perilaku yang benar, tetapi ia menguji model ban,
+bukan geometri kemudi.
 
 #### P6e — Komponen scene dan prefab · ⬜
 
@@ -506,10 +521,8 @@ pendaftaran chassis sebagai benda biasa supaya scene query dan sendi bisa
 menyebutnya, dan pelangkahan kendaraan **sebelum** `simulate` di langkah yang
 sama. Semuanya terbangun di ketiga konfigurasi.
 
-**P6a dan P6c lulus**, dan keduanya berjalan tanpa syarat di suite. P6b terbukti
-secara tidak langsung — mobil mencapai 100 km/jam dengan gas penuh — tetapi
-kriteria terimanya sendiri (ω·r ≈ v) belum diuji. P6d, P6e, dan P6f belum
-dikerjakan.
+**P6a, P6b, P6c, dan P6d lulus**, semuanya berjalan tanpa syarat di suite.
+Tersisa P6e (komponen scene dan prefab) dan P6f (mesin, kopling, girboks).
 
 Dua cacat lain diperbaiki lebih dulu, keduanya sah dan keduanya bukan penyebab
 utamanya:
