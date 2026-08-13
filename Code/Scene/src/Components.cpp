@@ -204,7 +204,7 @@ void RegisterCoreComponents() {
 
         types.Type<ColliderComponent>("Collider")
             .Field<&ColliderComponent::shape>("shape")
-            .EnumNames({"Box", "Sphere", "Capsule", "Plane"})
+            .EnumNames({"Box", "Sphere", "Capsule", "Plane", "Cylinder"})
             .Tooltip("Plane tak hingga, hanya masuk akal untuk benda Static")
             .Field<&ColliderComponent::halfExtents>("halfExtents")
             .Label("Half Extents")

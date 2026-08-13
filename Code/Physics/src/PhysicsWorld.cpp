@@ -69,6 +69,43 @@ physx::PxTransform ToPx(const Vec3& position, const Quat& rotation) {
 
 }  // namespace
 
+/// Membuat convex hull silinder: prisma bersegi `kCylinderSides`.
+///
+/// **PhysX tidak punya silinder primitif.** Yang ada hanya kapsul, dan kapsul
+/// bukan silinder — ujungnya membulat, sehingga benda yang digambar bertutup
+/// rata akan beristirahat satu jari-jari lebih tinggi daripada yang terlihat.
+///
+/// Simpulnya diletakkan **pada** lingkaran, jadi hull-nya terkurung di dalam
+/// silinder sejati: berdiri di atas tutupnya tepat, berbaring di sisinya
+/// sekitar 0,5% lebih rendah. Tiga puluh dua sisi dipilih karena selisih itu
+/// sudah di bawah yang bisa dilihat, dan menambah sisi hanya menambah ongkos
+/// cooking.
+physx::PxConvexMesh* CookCylinder(physx::PxPhysics& physics,
+                                  const physx::PxCookingParams& cooking, float radius,
+                                  float halfHeight) {
+    constexpr physx::PxU32 kCylinderSides = 32;
+    physx::PxVec3 vertices[kCylinderSides * 2];
+    for (physx::PxU32 i = 0; i < kCylinderSides; ++i) {
+        const float angle = 2.0f * 3.14159265f * static_cast<float>(i) /
+                            static_cast<float>(kCylinderSides);
+        const float y = radius * std::cos(angle);
+        const float z = radius * std::sin(angle);
+        vertices[i] = physx::PxVec3(-halfHeight, y, z);
+        vertices[i + kCylinderSides] = physx::PxVec3(halfHeight, y, z);
+    }
+
+    physx::PxConvexMeshDesc desc;
+    desc.points.count = kCylinderSides * 2;
+    desc.points.stride = sizeof(physx::PxVec3);
+    desc.points.data = vertices;
+    // eCOMPUTE_CONVEX: kita hanya menyediakan titik, PhysX yang menyusun
+    // sisinya. Menyusunnya sendiri berarti satu lagi tempat yang bisa salah
+    // untuk hasil yang sama persis.
+    desc.flags = physx::PxConvexFlag::eCOMPUTE_CONVEX;
+
+    return PxCreateConvexMesh(cooking, desc, physics.getPhysicsInsertionCallback());
+}
+
 struct PhysicsWorld::Impl {
     physx::PxDefaultAllocator allocator;
     physx::PxFoundation* foundation = nullptr;
@@ -431,6 +468,22 @@ BodyHandle PhysicsWorld::AddBody(const BodyDesc& desc) {
         case ShapeKind::Plane:
             shape = physics->createShape(physx::PxPlaneGeometry(), *material);
             break;
+        case ShapeKind::Cylinder: {
+            physx::PxCookingParams cooking(physics->getTolerancesScale());
+            physx::PxConvexMesh* hull =
+                CookCylinder(*physics, cooking, std::max(desc.shape.radius, 1e-4f),
+                             std::max(desc.shape.halfExtents.x, 1e-4f));
+            if (hull == nullptr) {
+                impl_->error = "cooking the cylinder hull failed";
+                material->release();
+                return BodyHandle::Invalid;
+            }
+            shape = physics->createShape(physx::PxConvexMeshGeometry(hull), *material);
+            // Hull-nya dirujuk bentuknya; melepas rujukan kita di sini membuat
+            // PhysX yang memiliki masa hidupnya.
+            hull->release();
+            break;
+        }
     }
     if (shape == nullptr) {
         impl_->error = "createShape failed";
@@ -816,6 +869,9 @@ ArticulationHandle PhysicsWorld::AddArticulation(const ArticulationDesc& desc) {
 
     std::vector<physx::PxArticulationLink*> links;
     links.reserve(desc.links.size());
+    // Convex hull yang dimasak untuk link silinder. Dilepas sesudah seluruh
+    // bentuk dibuat: bentuknya yang memegang rujukan sesungguhnya.
+    std::vector<physx::PxConvexMesh*> hulls;
 
     for (const ArticulationLinkDesc& linkDesc : desc.links) {
         physx::PxArticulationLink* parentLink =
@@ -848,6 +904,23 @@ ArticulationHandle PhysicsWorld::AddArticulation(const ArticulationDesc& desc) {
                     std::max(linkDesc.shape.radius, 1e-4f),
                     std::max(linkDesc.shape.halfExtents.x, 1e-4f));
                 break;
+            case ShapeKind::Cylinder: {
+                physx::PxCookingParams cooking(impl_->physics->getTolerancesScale());
+                physx::PxConvexMesh* hull = CookCylinder(
+                    *impl_->physics, cooking, std::max(linkDesc.shape.radius, 1e-4f),
+                    std::max(linkDesc.shape.halfExtents.x, 1e-4f));
+                if (hull == nullptr) {
+                    impl_->error = "cooking an articulation link cylinder failed";
+                    material->release();
+                    articulation->release();
+                    return ArticulationHandle::Invalid;
+                }
+                geometry = physx::PxConvexMeshGeometry(hull);
+                // Hull dilepas sesudah bentuknya dibuat di bawah; sampai saat itu
+                // `geometry` masih memegangnya.
+                hulls.push_back(hull);
+                break;
+            }
             case ShapeKind::Plane:
                 // Bidang tak hingga tidak bisa menjadi bagian tubuh yang
                 // bergerak; ditolak di sini alih-alih dibiarkan PhysX menegur.
@@ -922,6 +995,10 @@ ArticulationHandle PhysicsWorld::AddArticulation(const ArticulationDesc& desc) {
         }
 
         links.push_back(link);
+    }
+
+    for (physx::PxConvexMesh* hull : hulls) {
+        hull->release();
     }
 
     // **Seluruh link dibuat sebelum articulation masuk ke scene.** PhysX tidak

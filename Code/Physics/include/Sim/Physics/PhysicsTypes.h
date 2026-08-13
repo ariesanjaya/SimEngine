@@ -53,6 +53,15 @@ enum class ShapeKind : uint8_t {
     /// Bidang tak hingga. Hanya sah untuk benda statis — bidang tak hingga yang
     /// bergerak tidak punya arti, dan PhysX menolaknya.
     Plane,
+    /// Silinder, sumbunya +X lokal seperti kapsul.
+    ///
+    /// **PhysX tidak punya silinder primitif**, jadi ia dimasak menjadi convex
+    /// hull — sebuah prisma segi banyak. Konsekuensinya perlu diketahui: berdiri
+    /// di atas tutupnya berjarak tepat setengah-tinggi, tetapi **berbaring di
+    /// sisinya** ia beristirahat pada apotema segi banyaknya, sekitar 0,5% lebih
+    /// rendah daripada jari-jari sesungguhnya. Itu selisih yang tidak terlihat
+    /// mata dan tidak layak dibayar dengan lebih banyak sisi.
+    Cylinder,
 };
 
 /// Bentuk tabrakan beserta ukurannya.
@@ -65,6 +74,7 @@ struct ShapeDesc {
     /// Setengah-ukuran untuk `Box`. Setengah-tinggi bagian silinder di `x` untuk
     /// `Capsule` — **bukan** tinggi penuhnya, karena itu konvensi PhysX dan
     /// menerjemahkannya di sini berarti dua konvensi untuk satu angka.
+    /// Untuk `Cylinder`, `x` adalah setengah-tinggi penuhnya.
     Vec3 halfExtents{0.5f, 0.5f, 0.5f};
     /// Jari-jari untuk `Sphere` dan `Capsule`.
     float radius = 0.5f;

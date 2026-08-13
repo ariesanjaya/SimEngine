@@ -301,6 +301,13 @@ enum class ColliderShape : uint8_t {
     Capsule,
     /// Bidang tak hingga; hanya masuk akal untuk benda statis.
     Plane,
+    /// Silinder bersumbu +X lokal. Memakai `radius` dan `halfHeight`.
+    ///
+    /// **Dimasak menjadi convex hull**, karena PhysX tidak punya silinder
+    /// primitif. Berdiri di atas tutupnya tepat; berbaring di sisinya sekitar
+    /// 0,5% lebih rendah daripada jari-jari sesungguhnya — selisih yang tidak
+    /// terlihat mata.
+    Cylinder,
 };
 
 /// Bentuk yang ditabrak, terpisah dari mesh yang digambar.
