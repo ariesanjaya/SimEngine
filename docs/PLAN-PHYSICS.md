@@ -389,7 +389,7 @@ yang disusun otomatis pasti bertumpuk di percabangan — dua paha berjarak 20 cm
 dengan jari-jari 10,5 cm sudah saling menembus sebelum langkah pertama.
 Menyalakannya menuntut bentuk yang disetel tangan.
 
-### P6 — Vehicle Dynamics · 🔶 sebagian
+### P6 — Vehicle Dynamics · ✅
 
 `PxVehicle` di atas rigid body. Roda, suspensi, mesin, transmisi.
 
@@ -498,12 +498,30 @@ transform entity-nya ditulis balik tiap langkah tanpa jalur terpisah.
   ejaan enum yang salah hanya ketahuan di sana. Terukur menempuh **44,1 m** dalam
   4 detik gas penuh.
 
-#### P6f — Mesin, kopling, girboks · ⬜
+#### P6f — Mesin, kopling, girboks · ✅
 
 `PxVehicleEngineDrive` di atas P6a–P6d. **Sengaja terakhir**: direct drive sudah
 cukup untuk seluruh kriteria terima di atas, dan menambahkan kurva torsi mesin
 di atas rantai yang belum terbukti berarti dua lapis yang belum terbukti
 sekaligus.
+
+Dipasang sebagai **mode**, bukan pengganti: `VehicleDriveModel::DirectDrive` tetap
+jalan dan tetap diuji. Urutan komponennya bercabang di dua tempat — respons
+perintah dan drivetrain — dan sisanya dipakai bersama.
+
+**Kriteria terima**
+- Putaran mesin tetap di dalam batasnya. Terukur **111,9–559,5 rad/s** dengan idle
+  105 dan redline 630. Yang berputar mundur atau melewati redline bukan mesin
+  melainkan angka yang lepas kendali, dan gejalanya muncul jauh kemudian sebagai
+  torsi yang tidak masuk akal.
+- Girboks otomatis berpindah naik. Terukur melalui **gigi 1 → 6**.
+- **Roda berhenti selip di laju tinggi** — inilah yang tidak bisa dilakukan direct
+  drive, dan alasan P6f ada.
+
+  Terukur berdampingan pada 25 m/s dengan gas penuh: direct drive **40,8%** selip,
+  engine drive **16,0%**. Torsi direct drive tetap berapa pun laju rodanya sehingga
+  ban tetap jenuh; kurva torsi mesin turun menjelang redline, jadi roda berhenti
+  memaksa dan mulai menggelinding. Bedanya berupa angka, bukan pendapat.
 
 #### Cacat yang menghentikan P6 pada percobaan pertama
 
@@ -546,8 +564,7 @@ pendaftaran chassis sebagai benda biasa supaya scene query dan sendi bisa
 menyebutnya, dan pelangkahan kendaraan **sebelum** `simulate` di langkah yang
 sama. Semuanya terbangun di ketiga konfigurasi.
 
-**P6a, P6b, P6c, dan P6d lulus**, semuanya berjalan tanpa syarat di suite.
-Tersisa P6e (komponen scene dan prefab) dan P6f (mesin, kopling, girboks).
+**Keenam sub-fase lulus**, semuanya berjalan tanpa syarat di suite.
 
 Dua cacat lain diperbaiki lebih dulu, keduanya sah dan keduanya bukan penyebab
 utamanya:
