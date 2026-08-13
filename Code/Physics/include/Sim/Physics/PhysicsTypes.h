@@ -76,6 +76,47 @@ enum class ShapeKind : uint8_t {
     /// bagian dalam, jadi tidak ada yang bisa menjawab "seberapa dalam benda
     /// ini menembus" — pertanyaan yang harus dijawab setiap kontak dinamis.
     TriangleMesh,
+    /// Kisi tinggi beraturan: heightmap terrain, dibaca apa adanya.
+    ///
+    /// **Bukan segitiga.** Ubin 512² adalah setengah juta segitiga; kisi yang
+    /// sama adalah 262 ribu angka enam belas bit. Solver menurunkan
+    /// segitiganya sendiri saat dibutuhkan, dan itulah seluruh alasan bentuk ini
+    /// ada.
+    ///
+    /// Hanya untuk benda statis dan kinematik, dengan alasan yang sama persis
+    /// seperti `TriangleMesh`.
+    HeightField,
+};
+
+/// Kisi tinggi beraturan, dalam bentuk yang tidak menyebut satu pun tipe PhysX.
+///
+/// **Sampelnya enam belas bit, bukan float, dan itu yang membuat pemindahannya
+/// persis.** `Sim::Terrain` menyimpan tingginya sebagai `uint16` di dalam
+/// rentang `[minHeight, maxHeight]`; PhysX menyimpannya sebagai `int16` dikali
+/// sebuah skala. Keduanya kisi enam belas bit, jadi perpindahannya adalah
+/// penggeseran titik nol — bukan pembulatan. Melewatkan float di antaranya
+/// berarti collider yang tidak pernah persis sama dengan yang digambar, dengan
+/// selisih yang terlalu kecil untuk dicari dan terlalu besar untuk diabaikan
+/// ketika sebuah benda berhenti setengah tenggelam.
+struct HeightFieldDesc {
+    /// Sampel mentah, baris demi baris: X berjalan cepat, Z lambat.
+    std::vector<uint16_t> samples;
+    /// Sampel sepanjang X dan sepanjang Z.
+    int width = 0;
+    int depth = 0;
+    /// Jarak antar sampel, meter.
+    float spacing = 1.0f;
+    /// Pemetaan sampel → meter: `minHeight` untuk 0, `maxHeight` untuk 65535.
+    float minHeight = 0.0f;
+    float maxHeight = 1.0f;
+    /// Sejajar `samples`, atau kosong. Bukan nol berarti petak yang bersudut
+    /// kiri-bawah di sampel itu tidak ada sama sekali.
+    std::vector<uint8_t> holes;
+
+    bool Valid() const {
+        return width >= 2 && depth >= 2 &&
+               samples.size() == static_cast<std::size_t>(width) * static_cast<std::size_t>(depth);
+    }
 };
 
 /// Bentuk tabrakan beserta ukurannya.
@@ -106,6 +147,12 @@ struct ShapeDesc {
     std::vector<Vec3> points;
     /// Segitiga untuk `TriangleMesh`: tiga indeks ke `points` per segitiga.
     std::vector<uint32_t> indices;
+    /// Kisi tinggi untuk `HeightField`.
+    ///
+    /// **Tidak berskala**, tidak seperti `points`. Kisi beraturan menyimpan
+    /// jarak sampelnya sebagai satu angka, jadi menskalakannya adalah mengalikan
+    /// satu angka — bukan menyentuh jutaan sampel yang isinya tidak berubah.
+    HeightFieldDesc heightField;
 };
 
 /// Sifat permukaan.

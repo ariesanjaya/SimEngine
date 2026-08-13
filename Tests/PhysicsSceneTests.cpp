@@ -8,6 +8,7 @@
 #include <doctest/doctest.h>
 
 #include <cmath>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -873,3 +874,252 @@ TEST_CASE("W6: whitebox cekung yang dinamis dilaporkan, bukan didiamkan") {
     CHECK(physics.Stats().concaveDynamic == 1);
     CHECK(physics.Stats().bodies == 3);
 }
+
+// ============================================================================
+// L5 / P4 — collider heightfield
+// ============================================================================
+
+namespace {
+
+/// Kisi tinggi berteras: datar per delapan sampel, naik lima meter tiap teras.
+///
+/// **Berteras, bukan menanjak.** Versi pertama uji ini memakai lereng tetap, dan
+/// setiap bola yang mendarat menggelinding turun lalu jatuh dari tepi peta —
+/// yang terbaca sebagai "collidernya tidak ada" padahal ia bekerja dengan benar.
+/// Permukaan datar membuat angka akhirnya berarti.
+///
+/// Tingginya bergantung pada X saja. Itu yang membuat sumbu yang tertukar
+/// terlihat: dengan baris dan kolom terbalik, tiga bola pada X berbeda akan
+/// membaca tinggi yang sama.
+///
+/// Ditulis di sini, bukan diambil dari `Sim::Terrain`. Uji ini menguji
+/// jembatannya, dan mengambil kisinya dari modul yang sama berarti satu bug
+/// pemetaan lolos dari keduanya karena keduanya salah dengan cara yang sama.
+ColliderGeometry TerraceField(int side = 33, float spacing = 1.0f) {
+    ColliderGeometry shape;
+    HeightFieldDesc& field = shape.heightField;
+    field.width = side;
+    field.depth = side;
+    field.spacing = spacing;
+    field.minHeight = 0.0f;
+    field.maxHeight = 100.0f;
+    field.samples.resize(static_cast<std::size_t>(side) * side);
+
+    for (int z = 0; z < side; ++z) {
+        for (int x = 0; x < side; ++x) {
+            const float meters = 10.0f + 5.0f * static_cast<float>(x / 8);
+            const float unit = (meters - field.minHeight) / (field.maxHeight - field.minHeight);
+            field.samples[static_cast<std::size_t>(z) * side + x] =
+                static_cast<uint16_t>(unit * 65535.0f + 0.5f);
+        }
+    }
+    return shape;
+}
+
+/// Tinggi yang dijanjikan kisi di atas, dalam meter.
+float TerraceHeight(float worldX) {
+    return 10.0f + 5.0f * static_cast<float>(static_cast<int>(worldX) / 8);
+}
+
+scene::Entity AddTerrainBody(scene::World& world, scene::RigidBodyKind kind,
+                             const Vec3& scale = Vec3(1.0f)) {
+    const scene::Entity entity = world.Create("Lanskap");
+    world.Add<scene::RigidBodyComponent>(entity).kind = kind;
+    world.Add<scene::ColliderComponent>(entity).shape = scene::ColliderShape::Terrain;
+    world.TryGet<scene::TransformComponent>(entity)->scale = scale;
+    world.MarkTransformDirty(entity);
+    return entity;
+}
+
+}  // namespace
+
+TEST_CASE("L5: benda berhenti pada ketinggian yang dijanjikan kisi tingginya") {
+    if (!Available()) {
+        return;
+    }
+    // **Kriteria terima P4.** Bukan "sesuatu tertahan" melainkan "tertahan
+    // persis di tinggi yang dilaporkan datanya" — dan diperiksa di tiga teras
+    // berbeda, karena satu titik bisa kebetulan benar pada kisi yang sumbunya
+    // tertukar.
+    scene::World world;
+    AddTerrainBody(world, scene::RigidBodyKind::Static);
+
+    struct Probe {
+        float x;
+        scene::Entity ball;
+    };
+    std::vector<Probe> probes;
+    for (const float x : {4.0f, 12.0f, 20.0f}) {
+        // **Dijatuhkan dari lima meter, bukan dari empat puluh lima.** Kisi
+        // tinggi tidak punya tebal: ia sebuah permukaan, bukan benda pejal.
+        // Bola berjari-jari 0,25 m yang jatuh dari 45 m bergerak 0,44 m tiap
+        // langkah — hampir sepanjang diameternya — dan deteksi tabrakan diskret
+        // melewatkannya. Itu sifat kisi tinggi di mesin fisika mana pun, bukan
+        // cacat yang bisa dibetulkan di sini; yang butuh benda cepat menyalakan
+        // CCD. Versi pertama uji ini menjatuhkannya dari 45 m dan lulus hanya
+        // pada teras tertinggi — yang jatuhnya paling pendek, dan karena itu
+        // paling lambat saat menyentuh.
+        probes.push_back(Probe{x, AddBall(world, Vec3(x, TerraceHeight(x) + 5.0f, 16.0f), 0.25f)});
+    }
+
+    PhysicsScene physics;
+    REQUIRE(physics.Build(world, {}, [](scene::Entity, ColliderGeometry& out) {
+        out = TerraceField();
+        return true;
+    }));
+    CHECK(physics.Stats().terrainNotStatic == 0);
+    CHECK(physics.Stats().bodies == 4);
+
+    physics.Step(world, 400);
+
+    for (const Probe& probe : probes) {
+        const float expected = TerraceHeight(probe.x) + 0.25f;
+        INFO("di x = " << probe.x << " berhenti di y = " << PositionOf(world, probe.ball).y
+                       << ", diharapkan " << expected);
+        CHECK(PositionOf(world, probe.ball).y == doctest::Approx(expected).epsilon(0.02));
+        // Dan tetap di tempatnya: teras yang datar tidak menggelindingkan apa
+        // pun, jadi bola yang bergeser berarti permukaannya miring padahal
+        // datanya rata.
+        CHECK(PositionOf(world, probe.ball).x == doctest::Approx(probe.x).epsilon(0.05));
+    }
+}
+
+TEST_CASE("L5: sampel enam belas bit berpindah tanpa pembulatan") {
+    if (!Available()) {
+        return;
+    }
+    // Kisi terrain dan kisi PhysX sama-sama enam belas bit, jadi perpindahannya
+    // penggeseran titik nol — bukan pembulatan. Yang melewatkan float di
+    // antaranya menghasilkan collider yang tidak pernah persis sama dengan yang
+    // digambar, dengan selisih yang terlalu kecil untuk dicari dan terlalu besar
+    // untuk diabaikan ketika sebuah benda berhenti setengah tenggelam.
+    //
+    // Tinggi yang **tidak** bulat dipilih sengaja: 37,5 m pada rentang 0..100 m
+    // adalah 24575,6 langkah, yang tidak mendarat tepat di sebuah sampel.
+    scene::World world;
+    AddTerrainBody(world, scene::RigidBodyKind::Static);
+    // Lima meter di atas permukaannya, dengan alasan yang sama seperti di atas.
+    const scene::Entity ball = AddBall(world, Vec3(8.0f, 42.5f, 8.0f), 0.5f);
+
+    ColliderGeometry flat;
+    HeightFieldDesc& field = flat.heightField;
+    field.width = 17;
+    field.depth = 17;
+    field.spacing = 1.0f;
+    field.minHeight = 0.0f;
+    field.maxHeight = 100.0f;
+    const uint16_t raw = static_cast<uint16_t>(37.5f / 100.0f * 65535.0f + 0.5f);
+    field.samples.assign(static_cast<std::size_t>(17) * 17, raw);
+
+    PhysicsScene physics;
+    REQUIRE(physics.Build(world, {}, [&](scene::Entity, ColliderGeometry& out) {
+        out = flat;
+        return true;
+    }));
+    physics.Step(world, 400);
+
+    // Tinggi yang benar-benar tersimpan di kisi enam belas bit, bukan 37,5
+    // bulat: yang membandingkannya dengan 37,5 sedang menguji pembulatan
+    // ujinya sendiri.
+    const float stored = static_cast<float>(raw) / 65535.0f * 100.0f;
+    INFO("tersimpan " << stored << " m, berhenti di " << PositionOf(world, ball).y);
+    CHECK(PositionOf(world, ball).y == doctest::Approx(stored + 0.5f).epsilon(0.002));
+}
+
+TEST_CASE("L5: sampel hole benar-benar berlubang") {
+    if (!Available()) {
+        return;
+    }
+    scene::World world;
+    AddTerrainBody(world, scene::RigidBodyKind::Static);
+    // Satu bola di atas lubang, satu di atas tanah utuh — yang kedua yang
+    // membuktikan lubangnya tidak melubangi seluruh peta.
+    const scene::Entity overHole = AddBall(world, Vec3(4.5f, 15.0f, 4.5f), 0.25f);
+    const scene::Entity overSolid = AddBall(world, Vec3(28.5f, 30.0f, 4.5f), 0.25f);
+
+    ColliderGeometry field = TerraceField();
+    field.heightField.holes.assign(field.heightField.samples.size(), 0);
+    // Petak 3×3 di dalam teras pertama, jauh dari tangganya: satu petak saja
+    // terlalu sempit untuk dijatuhi bola tanpa menyerempet tepinya.
+    for (int z = 3; z <= 5; ++z) {
+        for (int x = 3; x <= 5; ++x) {
+            field.heightField.holes[static_cast<std::size_t>(z) * 33 + x] = 1;
+        }
+    }
+
+    PhysicsScene physics;
+    REQUIRE(physics.Build(world, {}, [&](scene::Entity, ColliderGeometry& out) {
+        out = field;
+        return true;
+    }));
+    CHECK(physics.Stats().bodies == 3);
+    physics.Step(world, 400);
+
+    INFO("di atas lubang: y = " << PositionOf(world, overHole).y);
+    CHECK(PositionOf(world, overHole).y < -50.0f);
+    INFO("di atas tanah: y = " << PositionOf(world, overSolid).y);
+    CHECK(PositionOf(world, overSolid).y ==
+          doctest::Approx(TerraceHeight(28.5f) + 0.25f).epsilon(0.02));
+}
+
+TEST_CASE("L5: terrain yang dinamis dilewatkan beserta sebabnya") {
+    if (!Available()) {
+        return;
+    }
+    // **Dilewatkan, bukan dimundurkan ke kotak seperti whitebox.** Kotak
+    // setengah-ukuran 0,5 di tempat terrain empat kilometer bukan hampiran
+    // melainkan sesuatu yang lain sama sekali, dan benda yang bertumpu padanya
+    // melayang di udara.
+    //
+    // Kedua bagian dijalankan berurutan, bukan berdampingan: PhysX hanya
+    // mengizinkan satu foundation per proses, jadi dua `PhysicsScene` yang
+    // hidup bersamaan menggagalkan yang kedua karena sebab yang tidak ada
+    // hubungannya dengan yang diuji.
+    {
+        scene::World world;
+        AddTerrainBody(world, scene::RigidBodyKind::Dynamic);
+
+        PhysicsScene physics;
+        REQUIRE(physics.Build(world, {}, [](scene::Entity, ColliderGeometry& out) {
+            out = TerraceField();
+            return true;
+        }));
+        CHECK(physics.Stats().terrainNotStatic == 1);
+        CHECK(physics.Stats().bodies == 0);
+    }
+    {
+        // Tanpa pemasok bentuk sama sekali, hasilnya sama.
+        scene::World world;
+        AddTerrainBody(world, scene::RigidBodyKind::Static);
+        PhysicsScene physics;
+        REQUIRE(physics.Build(world));
+        CHECK(physics.Stats().terrainNotStatic == 1);
+        CHECK(physics.Stats().bodies == 0);
+    }
+}
+
+TEST_CASE("L5: skala entity meregangkan kisinya, bukan sampelnya") {
+    if (!Available()) {
+        return;
+    }
+    // Kisi beraturan menyimpan jarak sampelnya sebagai satu angka, jadi
+    // menskalakannya adalah mengalikan satu angka — bukan menyentuh jutaan
+    // sampel yang isinya tidak berubah.
+    scene::World world;
+    AddTerrainBody(world, scene::RigidBodyKind::Static, Vec3(2.0f, 3.0f, 2.0f));
+    // Pada skala 2 di XZ, dunia x = 12 adalah sampel x = 6 — teras pertama.
+    // Tingginya dikalikan 3.
+    const scene::Entity ball = AddBall(world, Vec3(12.0f, 35.0f, 12.0f), 0.25f);
+
+    PhysicsScene physics;
+    REQUIRE(physics.Build(world, {}, [](scene::Entity, ColliderGeometry& out) {
+        out = TerraceField();
+        return true;
+    }));
+    physics.Step(world, 500);
+
+    const float expected = TerraceHeight(6.0f) * 3.0f + 0.25f;
+    INFO("berhenti di y = " << PositionOf(world, ball).y << ", diharapkan " << expected);
+    CHECK(PositionOf(world, ball).y == doctest::Approx(expected).epsilon(0.02));
+}
+

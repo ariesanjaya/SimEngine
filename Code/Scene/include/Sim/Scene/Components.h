@@ -319,6 +319,12 @@ enum class ColliderShape : uint8_t {
     /// yang cekung tetap bisa dimasuki. Dinamis memakai selubung cembungnya,
     /// karena PhysX menolak mesh segitiga yang bergerak.
     Whitebox,
+    /// Bentuk diambil dari terrain yang dibawa entity ini.
+    ///
+    /// Kisi tinggi, bukan segitiga: ubin 512² adalah setengah juta segitiga,
+    /// dan kisinya 262 ribu angka. Hanya masuk akal untuk benda statis — dan
+    /// terrain yang bergerak bukan terrain melainkan sebuah lift raksasa.
+    Terrain,
 };
 
 /// Bentuk yang ditabrak, terpisah dari mesh yang digambar.

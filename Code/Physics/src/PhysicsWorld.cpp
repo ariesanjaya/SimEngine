@@ -162,6 +162,61 @@ physx::PxTriangleMesh* CookTriangleMesh(physx::PxPhysics& physics,
     return PxCreateTriangleMesh(cooking, desc, physics.getPhysicsInsertionCallback());
 }
 
+/// Kisi tinggi, dimasak dari sampel enam belas bit tanpa satu pun pembulatan.
+///
+/// `Sim::Terrain` menyimpan tinggi sebagai `uint16` di dalam `[min, max]`;
+/// PhysX menyimpannya sebagai `int16` dikali sebuah skala. Perpindahannya karena
+/// itu hanyalah penggeseran titik nol sebesar 32768, dan skalanya rentang dibagi
+/// 65535. Titik nolnya dikembalikan pemanggil lewat pose lokal bentuknya.
+physx::PxHeightField* CookHeightField(physx::PxPhysics& physics, const HeightFieldDesc& field) {
+    if (!field.Valid()) {
+        return nullptr;
+    }
+
+    // PhysX menyusun barisnya sepanjang X dan kolomnya sepanjang Z, dengan
+    // sampel berurutan per baris. Terrain menyimpannya terbalik — X yang
+    // berjalan cepat — jadi di sinilah transposnya, sekali, alih-alih setiap
+    // pembaca mengingat urutan yang mana.
+    const physx::PxU32 rows = static_cast<physx::PxU32>(field.width);
+    const physx::PxU32 columns = static_cast<physx::PxU32>(field.depth);
+    std::vector<physx::PxHeightFieldSample> samples(static_cast<std::size_t>(rows) * columns);
+
+    for (physx::PxU32 row = 0; row < rows; ++row) {
+        for (physx::PxU32 column = 0; column < columns; ++column) {
+            const std::size_t source =
+                static_cast<std::size_t>(column) * field.width + row;
+            physx::PxHeightFieldSample& out =
+                samples[static_cast<std::size_t>(row) * columns + column];
+            out.height = static_cast<physx::PxI16>(static_cast<int>(field.samples[source]) - 32768);
+
+            const bool hole = source < field.holes.size() && field.holes[source] != 0;
+            // Kedua segitiga petak ini dilubangi bersama. Melubangi satu saja
+            // menghasilkan setengah lubang berbentuk segitiga — bentuk yang
+            // tidak diminta siapa pun dan tidak bisa dicat di panel.
+            const physx::PxBitAndByte material =
+                hole ? physx::PxHeightFieldMaterial::eHOLE : physx::PxBitAndByte(0);
+            out.materialIndex0 = material;
+            out.materialIndex1 = material;
+        }
+    }
+
+    physx::PxHeightFieldDesc desc;
+    desc.nbRows = rows;
+    desc.nbColumns = columns;
+    desc.samples.data = samples.data();
+    desc.samples.stride = sizeof(physx::PxHeightFieldSample);
+
+    // Tanpa `PxCookingParams`: kisi tinggi tidak punya yang bisa disetel di sana.
+    // Ia sudah berbentuk kisi, jadi tidak ada penyederhanaan, penggabungan
+    // simpul, maupun pembangunan pohon yang perlu diarahkan.
+    return PxCreateHeightField(desc, physics.getPhysicsInsertionCallback());
+}
+
+/// Skala tinggi PhysX untuk sebuah kisi: satu satuan `int16` berapa meter.
+float HeightFieldScale(const HeightFieldDesc& field) {
+    return std::max((field.maxHeight - field.minHeight) / 65535.0f, 1e-7f);
+}
+
 struct PhysicsWorld::Impl {
     physx::PxDefaultAllocator allocator;
     physx::PxFoundation* foundation = nullptr;
@@ -551,6 +606,30 @@ BodyHandle PhysicsWorld::AddBody(const BodyDesc& desc) {
             }
             shape = physics->createShape(physx::PxConvexMeshGeometry(hull), *material);
             hull->release();
+            break;
+        }
+        case ShapeKind::HeightField: {
+            // Alasan yang sama persis dengan mesh segitiga: kisi tinggi tidak
+            // punya bagian dalam.
+            if (desc.kind == BodyKind::Dynamic) {
+                impl_->error = "a height field cannot be dynamic; make the body static or "
+                               "kinematic";
+                material->release();
+                return BodyHandle::Invalid;
+            }
+            physx::PxHeightField* field = CookHeightField(*physics, desc.shape.heightField);
+            if (field == nullptr) {
+                impl_->error = "cooking the height field failed; it needs at least two samples "
+                               "on each side and a sample count that matches its size";
+                material->release();
+                return BodyHandle::Invalid;
+            }
+            const HeightFieldDesc& grid = desc.shape.heightField;
+            shape = physics->createShape(
+                physx::PxHeightFieldGeometry(field, physx::PxMeshGeometryFlags(),
+                                             HeightFieldScale(grid), grid.spacing, grid.spacing),
+                *material);
+            field->release();
             break;
         }
         case ShapeKind::TriangleMesh: {
@@ -1027,6 +1106,12 @@ ArticulationHandle PhysicsWorld::AddArticulation(const ArticulationDesc& desc) {
                 hulls.push_back(hull);
                 break;
             }
+            case ShapeKind::HeightField:
+                impl_->error = "an articulation link cannot use a height field; it is always "
+                               "dynamic, and height fields cannot be";
+                material->release();
+                articulation->release();
+                return ArticulationHandle::Invalid;
             case ShapeKind::TriangleMesh:
                 // Link artikulasi selalu dinamis, dan mesh segitiga tidak bisa
                 // dinamis. Menolaknya di sini menyebut sebabnya; membiarkannya

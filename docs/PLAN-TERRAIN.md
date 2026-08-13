@@ -348,7 +348,7 @@ Seretan yang kursornya keluar peta di tengah jalan menyentuh di tempat terakhir
 yang sah alih-alih berhenti diam-diam — goresan yang putus di tengah
 menghasilkan dua entri undo untuk satu sapuan tangan.
 
-### L5 — Collider heightfield (P4) · ⬜
+### L5 — Collider heightfield (P4) · ✅
 
 Membuka kembali [P4 di PLAN-PHYSICS.md](PLAN-PHYSICS.md), yang memang ditunda
 sampai bagian ini ada.
@@ -361,10 +361,70 @@ sampai bagian ini ada.
 
 **Kriteria terima**
 - Benda yang dijatuhkan pada beberapa titik berhenti pada ketinggian yang sama
-  dengan `HeightAtWorld`, dalam toleransi yang ditulis.
-- Sampel hole benar-benar berlubang: benda yang jatuh di atasnya tidak tertahan.
-- Mengubah heightmap lalu membangun ulang collider ubin itu saja terlihat oleh
-  fisika, tanpa menyusun ulang seluruh scene.
+  dengan datanya. ✅ Tiga teras berbeda, karena satu titik bisa kebetulan benar
+  pada kisi yang sumbunya tertukar — dan menukar baris dengan kolom memang
+  menggugurkan ujinya.
+- Sampel hole benar-benar berlubang. ✅ Dengan bola kedua di atas tanah utuh,
+  yang membuktikan lubangnya tidak melubangi seluruh peta.
+- Mengubah heightmap terlihat oleh fisika tanpa menyusun ulang seluruh scene.
+  ⏸ **Tidak dikerjakan, dan sengaja.** Editor ini membuang seluruh suntingan
+  yang dilakukan selama Play begitu Stop ditekan — itu keputusan yang sudah
+  tercatat di `PhysicsScene.h`, karena keadaan solver tidak bisa dibangun ulang
+  di tengah jalan tanpa membuang momentum setiap benda. Memahat sambil Play
+  berjalan karena itu tidak punya arti hari ini, dan membangun mesin untuk
+  memperbarui collider di tengah simulasi berarti membangun untuk keadaan yang
+  belum ada.
+
+**Kisi tinggi, bukan segitiga.** Ubin 512² adalah setengah juta segitiga; kisi
+yang sama adalah 262 ribu angka enam belas bit. Solver menurunkan segitiganya
+sendiri saat dibutuhkan, dan itulah seluruh alasan bentuk ini ada.
+
+**Sampelnya berpindah tanpa satu pun pembulatan.** `Sim::Terrain` menyimpan
+tinggi sebagai `uint16` di dalam `[minHeight, maxHeight]`; PhysX menyimpannya
+sebagai `int16` dikali sebuah skala. Keduanya kisi enam belas bit, jadi
+perpindahannya adalah penggeseran titik nol sebesar 32768 — bukan pembulatan.
+Titik nolnya dikembalikan lewat pose lokal bentuknya, dan menghilangkan
+penggeseran itu menggugurkan empat dari lima uji.
+
+Melewatkan float di antaranya akan menghasilkan collider yang tidak pernah
+persis sama dengan yang digambar, dengan selisih yang terlalu kecil untuk dicari
+dan terlalu besar untuk diabaikan ketika sebuah benda berhenti setengah
+tenggelam. Ujinya membandingkan terhadap tinggi yang **benar-benar tersimpan**
+di kisi, bukan terhadap angka bulat yang dimasukkan — yang membandingkannya
+dengan angka bulat sedang menguji pembulatan ujinya sendiri.
+
+**Skalanya masuk ke jarak sampel dan skala tinggi, bukan ke jutaan sampelnya.**
+Kisi beraturan menyimpan jarak sampel sebagai satu angka; menskalakan isinya
+berarti menyentuh setiap sampel untuk hasil yang satu perkalian sudah
+memberikannya.
+
+**Terrain dinamis dilewatkan, bukan dimundurkan ke kotak seperti whitebox.**
+Kotak setengah-ukuran 0,5 di tempat terrain empat kilometer bukan hampiran
+melainkan sesuatu yang lain sama sekali, dan benda yang bertumpu padanya
+melayang di udara.
+
+**Satu kisi untuk seluruh peta, dengan batas yang disebutkan.** Peta 4 km pada
+jarak sampel 0,25 m adalah 268 juta sampel, dan tidak ada yang memasaknya. Yang
+melampaui 4096² ditolak beserta angkanya alih-alih menjadi alokasi satu gigabyte
+yang diam-diam. Collider per-ubin adalah langkah berikutnya ketika peta sebesar
+itu benar-benar ada; menambahkannya sekarang berarti mengubah `BodyDesc` menjadi
+berbentuk-jamak untuk kasus yang belum pernah diminta.
+
+**Kisi tinggi tidak punya tebal, dan benda cepat menembusnya.** Ini ditemukan
+lewat uji yang gagal, bukan dari membaca dokumentasi: versi pertama uji ini
+menjatuhkan bola berjari-jari 0,25 m dari 45 m, dan ia lulus **hanya pada teras
+tertinggi** — yang jatuhnya paling pendek. Pada 45 m bolanya bergerak 0,44 m tiap
+langkah, hampir sepanjang diameternya, dan deteksi tabrakan diskret
+melewatkannya. Itu sifat kisi tinggi di mesin fisika mana pun, bukan cacat yang
+bisa dibetulkan di sini — yang butuh benda cepat menyalakan CCD. Ujinya kini
+menjatuhkan dari lima meter, sehingga yang diukur adalah tinggi istirahatnya dan
+bukan batas deteksi tabrakan PhysX.
+
+Kisi ujinya juga sempat salah bentuk: ia lereng tetap, jadi setiap bola yang
+mendarat menggelinding turun lalu jatuh dari tepi peta — yang terbaca sebagai
+"collidernya tidak ada" padahal ia bekerja. Diganti teras datar, dan ditambah
+pemeriksaan bahwa bolanya tidak bergeser: permukaan yang miring padahal datanya
+rata akan terlihat di situ.
 
 ---
 

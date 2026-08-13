@@ -45,6 +45,10 @@ struct PhysicsSceneStats {
     /// mundur ke kotak, dan angka ini yang menjelaskan mengapa yang ditabrak
     /// tidak seperti yang digambar.
     std::size_t collidersWithoutGeometry = 0;
+    /// Collider `Terrain` yang dipasang pada benda dinamis, atau yang kisinya
+    /// tidak bisa dibaca. Kisi tinggi tidak bisa bergerak, jadi bendanya
+    /// dilewatkan alih-alih dibuat dengan bentuk yang salah.
+    std::size_t terrainNotStatic = 0;
     /// Whitebox cekung yang dipasang pada benda dinamis. Cekungannya terisi oleh
     /// selubung cembungnya — satu-satunya bentuk yang bisa bergerak menurut
     /// PhysX — jadi ruangannya tertutup dan lubangnya rata.
@@ -66,6 +70,9 @@ struct PhysicsSceneStats {
 /// tanpa membuang momentum setiap benda.
 /// Geometri tabrakan yang datangnya dari aset, bukan dari komponen.
 struct ColliderGeometry {
+    /// Kisi tinggi, bila entity ini terrain. Yang mengisinya tidak mengisi
+    /// `points`, dan sebaliknya.
+    HeightFieldDesc heightField;
     std::vector<Vec3> points;
     /// Tiga indeks per segitiga. Kosong berarti hanya selubung cembungnya yang
     /// bisa dipakai.

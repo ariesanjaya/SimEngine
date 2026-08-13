@@ -9,6 +9,7 @@
 #include "Sim/Editor/PropertyGrid.h"
 #include "Sim/Editor/SceneCommands.h"
 #include "Sim/Scene/AssetUsage.h"
+#include "Sim/Terrain/Terrain.h"
 #include "Sim/Whitebox/Collision.h"
 #include "Sim/Scene/Serialization.h"
 
@@ -1640,8 +1641,48 @@ void EditorApp::StartPhysics() {
     }
     // Bentuk whitebox dipasok dari sini, bukan dicari sendiri oleh fisika:
     // yang bisa mengubah GUID menjadi bentuk adalah yang memegang basis aset.
-    const auto whiteboxShape = [this](scene::Entity entity,
-                                      physics::ColliderGeometry& out) -> bool {
+    const auto shapeFromAsset = [this](scene::Entity entity,
+                                       physics::ColliderGeometry& out) -> bool {
+        if (const auto* terrainComponent = world_.TryGet<scene::TerrainComponent>(entity)) {
+            if (!terrainComponent->terrain.IsValid()) {
+                return false;
+            }
+            const assets::AssetRecord* record = assets_.Find(terrainComponent->terrain.guid);
+            if (record == nullptr) {
+                return false;
+            }
+            terrain::Terrain* map =
+                terrains_.Get(terrainComponent->terrain.guid, assets_.AbsolutePath(*record));
+            if (map == nullptr) {
+                return false;
+            }
+            // **Satu kisi untuk seluruh peta.** Batasnya disebut di sini, bukan
+            // dibiarkan menjadi alokasi satu gigabyte yang diam-diam: peta 4 km
+            // pada jarak sampel 0,25 m adalah 268 juta sampel, dan tidak ada
+            // yang memasaknya. Yang melampauinya ditolak beserta angkanya,
+            // sampai collider per-ubin ada.
+            constexpr std::size_t kMaxSamples = 4096u * 4096u;
+            const std::size_t samples = static_cast<std::size_t>(map->SamplesX()) *
+                                        static_cast<std::size_t>(map->SamplesY());
+            if (samples > kMaxSamples) {
+                SIM_WARN("Physics",
+                         "terrain '{}' has {} samples, more than the {} a single height field "
+                         "collider can hold; give it a coarser sample spacing",
+                         record->name, samples, kMaxSamples);
+                return false;
+            }
+
+            physics::HeightFieldDesc& field = out.heightField;
+            map->ReadAll(field.samples);
+            map->ReadHoles(field.holes);
+            field.width = map->SamplesX();
+            field.depth = map->SamplesY();
+            field.spacing = map->Desc().sampleSpacing;
+            field.minHeight = map->Desc().minHeight;
+            field.maxHeight = map->Desc().maxHeight;
+            return field.Valid();
+        }
+
         const auto* component = world_.TryGet<scene::WhiteboxComponent>(entity);
         if (component == nullptr || !component->whitebox.IsValid()) {
             return false;
@@ -1662,7 +1703,7 @@ void EditorApp::StartPhysics() {
         return true;
     };
 
-    if (!physics_.Build(world_, {}, whiteboxShape)) {
+    if (!physics_.Build(world_, {}, shapeFromAsset)) {
         SIM_WARN("Editor", "Physics could not start: {}", physics_.Error());
         notifications_.Warning("Physics could not start: " + physics_.Error());
         return;

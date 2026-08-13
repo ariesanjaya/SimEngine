@@ -326,7 +326,20 @@ sesuatu yang tidak pernah dipikirkan orang saat menyusun levelnya.
   menyentuhnya. `RemoveBody` karena itu menyapu sendi yang memegang aktornya
   lebih dulu. Uji dibuktikan bisa gagal dengan melumpuhkan penyapuan itu.
 
-### P4 — Custom Geometries · ⏸ ditunda
+### P4 — Custom Geometries · ✅ untuk heightfield terrain
+
+**Dikerjakan sebagai [L5 di PLAN-TERRAIN.md](PLAN-TERRAIN.md)**, setelah terrain
+punya bentuk untuk diuji. `ShapeKind::HeightField` memasak `PxHeightField` dari
+sampel enam belas bit `Sim::Terrain` tanpa satu pun pembulatan, dan
+`ColliderShape::Terrain` menyambungkannya lewat `ColliderGeometrySource` yang
+sudah ada sejak W6 — sehingga `Sim::Physics` tetap tidak membuka berkas.
+
+`PxCustomGeometry` sendiri **tidak** dipakai, dan tidak dibutuhkan: PhysX sudah
+punya kisi tinggi bawaan, dan yang bawaan lebih cepat daripada callback ke kode
+kita. Yang tersisa dari P4 adalah bentuk kustom yang benar-benar tidak ada di
+daftar bawaan — dan sampai ada yang memintanya, itu tidak ada.
+
+Catatan aslinya, disimpan karena alasannya masih berlaku:
 
 **Ditunda sampai Terrain Editor dikerjakan.** Seluruh nilai P4 ada pada
 heightfield yang membaca `Sim::Terrain` apa adanya, dan menyambungkan fisika

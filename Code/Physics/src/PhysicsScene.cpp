@@ -139,6 +139,7 @@ ShapeKind ToShapeKind(scene::ColliderShape shape) {
         // benda yang memakainya — segitiga bila diam, selubung bila bergerak —
         // jadi yang memutuskannya adalah `Build`, bukan pemetaan ini.
         case scene::ColliderShape::Whitebox: return ShapeKind::ConvexHull;
+        case scene::ColliderShape::Terrain: return ShapeKind::HeightField;
     }
     return ShapeKind::Box;
 }
@@ -171,6 +172,7 @@ ShapeDesc ToShapeDesc(const scene::ColliderComponent& collider, const Vec3& scal
         case ShapeKind::Plane:
         case ShapeKind::ConvexHull:
         case ShapeKind::TriangleMesh:
+        case ShapeKind::HeightField:
             // Titik-titiknya diisi `Build`, yang punya sumber bentuknya.
             break;
     }
@@ -257,7 +259,43 @@ bool PhysicsScene::Build(scene::World& world, const WorldDesc& desc,
         bodyDesc.kind = ToBodyKind(body->kind);
         bodyDesc.shape = ToShapeDesc(*collider, placement.scale);
 
-        if (collider->shape == scene::ColliderShape::Whitebox) {
+        if (collider->shape == scene::ColliderShape::Terrain) {
+            ColliderGeometry shape;
+            const bool movable = bodyDesc.kind == BodyKind::Dynamic;
+            if (movable || !geometry || !geometry(entity, shape) || !shape.heightField.Valid()) {
+                // Dilewatkan, bukan dimundurkan ke kotak seperti whitebox.
+                // Kotak setengah-ukuran 0,5 di tempat terrain empat kilometer
+                // bukan hampiran melainkan sesuatu yang lain sama sekali — dan
+                // benda yang bertumpu padanya melayang di udara.
+                ++stats_.terrainNotStatic;
+                SIM_WARN("Physics",
+                         "'{}' has a Terrain collider that cannot be built (it must be static, "
+                         "and its terrain must be readable), so it is not simulated",
+                         world.NameOf(entity));
+                continue;
+            }
+            bodyDesc.shape.kind = ShapeKind::HeightField;
+            bodyDesc.shape.heightField = std::move(shape.heightField);
+            // Skalanya masuk ke jarak sampel dan skala tinggi, bukan ke jutaan
+            // sampelnya. Kisi beraturan menyimpan jarak sampel sebagai satu
+            // angka — menskalakan isinya berarti menyentuh setiap sampel untuk
+            // hasil yang satu perkalian sudah memberikannya.
+            const float uniformXZ =
+                (std::abs(placement.scale.x) + std::abs(placement.scale.z)) * 0.5f;
+            bodyDesc.shape.heightField.spacing *= uniformXZ;
+            bodyDesc.shape.heightField.minHeight *= placement.scale.y;
+            bodyDesc.shape.heightField.maxHeight *= placement.scale.y;
+            // Titik nol `int16` dikembalikan lewat pose lokal bentuknya: PhysX
+            // menyimpan tinggi bertanda di sekitar nol, terrain menyimpannya
+            // tanpa tanda dari `minHeight`.
+            const float heightScale =
+                std::max((bodyDesc.shape.heightField.maxHeight -
+                          bodyDesc.shape.heightField.minHeight) /
+                             65535.0f,
+                         1e-7f);
+            bodyDesc.shape.localPosition =
+                Vec3(0.0f, bodyDesc.shape.heightField.minHeight + 32768.0f * heightScale, 0.0f);
+        } else if (collider->shape == scene::ColliderShape::Whitebox) {
             ColliderGeometry shape;
             if (geometry && geometry(entity, shape) && shape.points.size() >= 4) {
                 // Mesh segitiga hanya untuk yang tidak bergerak. Yang bergerak
