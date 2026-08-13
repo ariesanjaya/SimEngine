@@ -612,3 +612,81 @@ TEST_CASE("prefab Vehicle memang bisa dikemudikan") {
     INFO("menempuh " << travelled << " m dengan gas penuh");
     CHECK(travelled > 5.0f);
 }
+
+TEST_CASE("silinder berdiri di atas tutupnya pada ketinggian yang dihitung") {
+    if (!Available()) {
+        return;
+    }
+    // **PhysX tidak punya silinder primitif**, jadi ia dimasak menjadi convex
+    // hull. Yang diuji di sini adalah bahwa hasil masakannya benar-benar
+    // setinggi yang diminta — silinder yang dimasak salah tidak terlihat sebagai
+    // galat melainkan sebagai benda yang tenggelam atau melayang.
+    scene::World world;
+    AddGround(world);
+
+    const scene::Entity drum = world.Create("Drum");
+    world.Add<scene::RigidBodyComponent>(drum);
+    auto& collider = world.Add<scene::ColliderComponent>(drum);
+    collider.shape = scene::ColliderShape::Cylinder;
+    collider.radius = 0.5f;
+    collider.halfHeight = 0.4f;
+    // Sumbu silinder adalah +X lokal; diputar supaya berdiri tegak.
+    const float halfAngle = 0.25f * 3.14159265f;
+    auto& transform = *world.TryGet<scene::TransformComponent>(drum);
+    transform.position = Vec3(0.0f, 3.0f, 0.0f);
+    transform.rotation = Quat(std::cos(halfAngle), 0.0f, 0.0f, std::sin(halfAngle));
+    world.MarkTransformDirty(drum);
+
+    PhysicsScene physics;
+    REQUIRE(physics.Build(world));
+    CHECK(physics.Stats().bodies == 2);
+
+    physics.Step(world, 300);
+
+    // Berdiri di atas tutup datarnya: pusatnya tepat setengah-tinggi di atas
+    // lantai. Angka ini diketahui sebelum simulasinya dijalankan — dan berbeda
+    // dari kapsul, yang akan berhenti di 0,4 + 0,5 karena tudungnya membulat.
+    INFO("berhenti di y = " << PositionOf(world, drum).y);
+    CHECK(PositionOf(world, drum).y == doctest::Approx(0.4f).epsilon(0.05));
+}
+
+TEST_CASE("prefab Physics Cylinder jatuh ke atas Ground") {
+    if (!Available()) {
+        return;
+    }
+    const std::filesystem::path prefabs = std::filesystem::path(SIM_BUILTIN_DIR) / "Prefabs";
+    const auto load = [&](const std::filesystem::path& path, scene::World& world) {
+        std::ifstream stream(path);
+        REQUIRE_MESSAGE(stream, "tidak bisa membuka ", path.string());
+        const std::string text((std::istreambuf_iterator<char>(stream)),
+                               std::istreambuf_iterator<char>());
+        std::string rootGuid;
+        REQUIRE(scene::RestoreSubtree(world, scene::RemapGuids(text, &rootGuid), Uuid{}));
+        const scene::Entity entity = world.FindByGuid(Uuid::Parse(rootGuid));
+        REQUIRE(entity != scene::kNullEntity);
+        return entity;
+    };
+
+    scene::World world;
+    load(prefabs / "Environment" / "Ground.simprefab", world);
+    const scene::Entity cylinder =
+        load(prefabs / "Physics" / "Physics Cylinder.simprefab", world);
+
+    const auto* collider = world.TryGet<scene::ColliderComponent>(cylinder);
+    REQUIRE(collider != nullptr);
+    CHECK(collider->shape == scene::ColliderShape::Cylinder);
+
+    PhysicsScene physics;
+    REQUIRE(physics.Build(world));
+    CHECK(physics.Stats().bodies == 2);
+    CHECK(physics.Stats().skippedWithoutCollider == 0);
+
+    physics.Step(world, 300);
+
+    // Sumbunya +X dan prefabnya tidak diputar, jadi ia berbaring di sisinya:
+    // beristirahat pada apotema segi-32, sekitar 0,5% di bawah jari-jari 0,5.
+    const float rest = PositionOf(world, cylinder).y;
+    INFO("berhenti di y = " << rest);
+    CHECK(rest > 0.45f);
+    CHECK(rest < 0.51f);
+}

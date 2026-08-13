@@ -134,6 +134,7 @@ ShapeKind ToShapeKind(scene::ColliderShape shape) {
         case scene::ColliderShape::Sphere: return ShapeKind::Sphere;
         case scene::ColliderShape::Capsule: return ShapeKind::Capsule;
         case scene::ColliderShape::Plane: return ShapeKind::Plane;
+        case scene::ColliderShape::Cylinder: return ShapeKind::Cylinder;
     }
     return ShapeKind::Box;
 }
@@ -157,6 +158,10 @@ ShapeDesc ToShapeDesc(const scene::ColliderComponent& collider, const Vec3& scal
             // `ShapeDesc` menyimpan setengah-tinggi silinder kapsul di
             // `halfExtents.x` — konvensi PhysX, diterjemahkan di sini supaya
             // `ColliderComponent` bisa menyebutnya dengan namanya sendiri.
+            shape.halfExtents.x = collider.halfHeight * uniform;
+            break;
+        case ShapeKind::Cylinder:
+            shape.radius = collider.radius * uniform;
             shape.halfExtents.x = collider.halfHeight * uniform;
             break;
         case ShapeKind::Plane:
@@ -214,7 +219,8 @@ bool PhysicsScene::Build(scene::World& world, const WorldDesc& desc) {
         const Decomposed placement = Decompose(world.WorldMatrix(entity));
 
         const bool needsUniform = collider->shape == scene::ColliderShape::Sphere ||
-                                  collider->shape == scene::ColliderShape::Capsule;
+                                  collider->shape == scene::ColliderShape::Capsule ||
+                                  collider->shape == scene::ColliderShape::Cylinder;
         if (needsUniform && IsNonUniform(placement.scale)) {
             ++stats_.nonUniformScale;
             SIM_WARN("Physics",

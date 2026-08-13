@@ -1358,3 +1358,29 @@ TEST_CASE("unitSphere.obj cocok dengan collider Sphere yang dipasangkan padanya"
     CHECK((mesh.boundsMin.y + mesh.boundsMax.y) == doctest::Approx(0.0f).epsilon(0.02));
     CHECK((mesh.boundsMin.x + mesh.boundsMax.x) == doctest::Approx(0.0f).epsilon(0.02));
 }
+
+TEST_CASE("unitCylinder.obj cocok dengan collider Cylinder yang dipasangkan padanya") {
+    using namespace sim::assets;
+
+    // Aset yang dikirim, dan sebuah prefab bergantung padanya. Sumbunya +X —
+    // sama seperti kapsul dan silinder di `ColliderComponent` — jadi ia panjang
+    // pada X dan bundar pada YZ. Sumbu yang tertukar tidak terlihat sebagai
+    // galat, hanya sebagai tabung yang berbaring ke arah yang salah.
+    const std::filesystem::path path = std::filesystem::path(SIM_MESH_DIR) / "unitCylinder.obj";
+    REQUIRE(std::filesystem::exists(path));
+
+    std::string error;
+    const MeshData mesh = LoadMesh(path, error);
+    REQUIRE(mesh.IsValid());
+    CHECK(error.empty());
+    CHECK(mesh.TriangleCount() > 100);
+
+    const Vec3 size = mesh.boundsMax - mesh.boundsMin;
+    CHECK(size.x == doctest::Approx(1.0f).epsilon(0.02));   // tinggi penuh
+    CHECK(size.y == doctest::Approx(1.0f).epsilon(0.02));   // diameter
+    CHECK(size.z == doctest::Approx(1.0f).epsilon(0.02));
+
+    // Berpusat di titik asal, karena `ColliderComponent::offset` bawaannya nol.
+    CHECK((mesh.boundsMin.x + mesh.boundsMax.x) == doctest::Approx(0.0f).epsilon(0.02));
+    CHECK((mesh.boundsMin.y + mesh.boundsMax.y) == doctest::Approx(0.0f).epsilon(0.02));
+}

@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 3,
+  "entities": [
+    {
+      "guid": "00000000-0000-4000-8000-000000000013",
+      "components": {
+        "Name": {
+          "name": "Physics Cylinder"
+        },
+        "Transform": {
+          "position": [
+            0.0,
+            1.0,
+            0.0
+          ],
+          "rotation": [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "scale": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        "MeshRenderer": {
+          "mesh": "6d7e8f90-2b3c-4d5e-8f60-a1b2c3d4e5f7",
+          "materials": [],
+          "castShadows": true,
+          "receiveShadows": true,
+          "lodBias": 0.0
+        },
+        "RigidBody": {
+          "kind": "Dynamic",
+          "mass": 0.0,
+          "density": 1000.0,
+          "linearDamping": 0.0,
+          "angularDamping": 0.05,
+          "allowSleeping": true
+        },
+        "Collider": {
+          "shape": "Cylinder",
+          "halfExtents": [
+            0.5,
+            0.5,
+            0.5
+          ],
+          "radius": 0.5,
+          "halfHeight": 0.5,
+          "offset": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "staticFriction": 0.5,
+          "dynamicFriction": 0.5,
+          "restitution": 0.2
+        }
+      }
+    }
+  ]
+}
