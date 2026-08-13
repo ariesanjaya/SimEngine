@@ -383,6 +383,58 @@ struct JointComponent {
     float breakTorque = 0.0f;
 };
 
+/// Roda mana yang menerima torsi penggerak.
+enum class VehicleDriveKind : uint8_t {
+    FrontWheel,
+    RearWheel,
+    AllWheel,
+};
+
+/// Menjadikan entity sebuah kendaraan beroda empat.
+///
+/// **Menggantikan `RigidBodyComponent`, bukan melengkapinya.** Kendaraan sudah
+/// satu benda tegar di dalam dirinya, dan entity yang membawa keduanya akan
+/// disimulasikan dua kali di tempat yang sama.
+///
+/// **Yang disebut di sini adalah ukuran, bukan daftar roda.** Keempat roda
+/// diturunkan dari jarak sumbu dan jarak jejak — itulah dua angka yang dipikirkan
+/// orang saat merancang mobil, sedangkan empat koordinat lepas adalah empat
+/// kesempatan menaruh roda di tempat yang tidak simetris tanpa menyadarinya.
+/// Yang butuh susunan roda tak lazim — tiga roda, enam roda, roda yang miring —
+/// memakai `physics::VehicleDesc` langsung.
+struct VehicleComponent {
+    Vec3 chassisHalfExtents{0.9f, 0.5f, 2.2f};
+    float chassisMass = 1500.0f;
+
+    /// **Hampir selalu di bawah pusat geometrinya.** Titik berat setinggi pusat
+    /// kotak membuat mobil terguling di tikungan pertama, dan itu terbaca sebagai
+    /// fisika yang salah alih-alih sebagai satu angka yang lupa disetel.
+    Vec3 centerOfMassOffset{0.0f, -0.35f, 0.15f};
+
+    /// Jarak poros depan ke poros belakang, meter.
+    float wheelbase = 3.0f;
+    /// Jarak roda kiri ke roda kanan, meter.
+    float trackWidth = 1.6f;
+    /// Tinggi poros terhadap titik asal chassis. Negatif berarti di bawahnya.
+    float axleHeight = -0.4f;
+
+    float wheelRadius = 0.35f;
+    float wheelWidth = 0.25f;
+    float wheelMass = 20.0f;
+
+    float suspensionTravel = 0.3f;
+
+    float maxSteerAngle = 0.6f;
+    float peakDriveTorque = 1500.0f;
+    float maxBrakeTorque = 5000.0f;
+    float maxHandbrakeTorque = 8000.0f;
+
+    /// Gesekan ban terhadap permukaan. Satu berarti aspal kering.
+    float tireFriction = 1.0f;
+
+    VehicleDriveKind drive = VehicleDriveKind::RearWheel;
+};
+
 struct CameraComponent {
     float fovYRadians = 1.047f;  // 60°
     float nearZ = 0.05f;

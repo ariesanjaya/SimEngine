@@ -74,6 +74,40 @@ bool IsNonUniform(const Vec3& scale) {
     return largest > 1e-6f && (largest - smallest) / largest > 1e-3f;
 }
 
+/// Menyusun empat roda dari jarak sumbu dan jarak jejak.
+///
+/// **Diturunkan, bukan diketik satu per satu.** Jarak sumbu dan jarak jejak
+/// adalah dua angka yang dipikirkan orang saat merancang mobil; empat koordinat
+/// lepas adalah empat kesempatan menaruh roda tidak simetris tanpa menyadarinya.
+std::vector<VehicleWheelDesc> WheelsFrom(const scene::VehicleComponent& vehicle) {
+    const float halfBase = vehicle.wheelbase * 0.5f;
+    const float halfTrack = vehicle.trackWidth * 0.5f;
+
+    std::vector<VehicleWheelDesc> wheels;
+    wheels.reserve(4);
+    // Urutannya: depan-kiri, depan-kanan, belakang-kiri, belakang-kanan.
+    for (int i = 0; i < 4; ++i) {
+        const bool isFront = i < 2;
+        const bool isLeft = (i % 2) == 0;
+
+        VehicleWheelDesc wheel;
+        wheel.centerOffset = Vec3(isLeft ? halfTrack : -halfTrack, vehicle.axleHeight,
+                                  isFront ? halfBase : -halfBase);
+        wheel.radius = vehicle.wheelRadius;
+        wheel.width = vehicle.wheelWidth;
+        wheel.mass = vehicle.wheelMass;
+        wheel.suspensionTravel = vehicle.suspensionTravel;
+        wheel.steered = isFront;
+        wheel.driven = vehicle.drive == scene::VehicleDriveKind::AllWheel ||
+                       (vehicle.drive == scene::VehicleDriveKind::FrontWheel) == isFront;
+        // Rem tangan mengunci roda belakang — itu yang membuat mobil berputar
+        // alih-alih berhenti lurus, dan itulah gunanya.
+        wheel.handbraked = !isFront;
+        wheels.push_back(wheel);
+    }
+    return wheels;
+}
+
 JointKind ToJointKind(scene::JointType type) {
     switch (type) {
         case scene::JointType::Fixed: return JointKind::Fixed;
@@ -221,6 +255,62 @@ bool PhysicsScene::Build(scene::World& world, const WorldDesc& desc) {
         ++stats_.bodies;
     }
 
+    // Kendaraan disusun sesudah benda biasa dan sebelum sendi: sendi boleh
+    // menunjuk chassis sebuah kendaraan, jadi chassis-nya harus sudah terdaftar.
+    for (const scene::Entity entity : order) {
+        const auto* vehicleComponent = world.TryGet<scene::VehicleComponent>(entity);
+        if (vehicleComponent == nullptr) {
+            continue;
+        }
+        if (world.Has<scene::RigidBodyComponent>(entity)) {
+            // Bukan penolakan: kendaraannya tetap dibangun, karena itu yang
+            // jelas diminta entity ini. Yang dilaporkan adalah bahwa benda tegar
+            // keduanya diabaikan — dua benda di tempat yang sama akan saling
+            // mendorong dengan cara yang tidak bisa dijelaskan siapa pun.
+            ++stats_.vehiclesWithRigidBody;
+            SIM_WARN("Physics",
+                     "'{}' has both a Vehicle and a Rigid Body; the Rigid Body is ignored",
+                     world.NameOf(entity));
+        }
+
+        const Decomposed placement = Decompose(world.WorldMatrix(entity));
+
+        // Bukan `desc`: nama itu sudah dipakai parameter `WorldDesc` fungsi ini.
+        VehicleDesc vehicleDesc;
+        vehicleDesc.chassisHalfExtents = vehicleComponent->chassisHalfExtents * glm::abs(placement.scale);
+        vehicleDesc.chassisMass = vehicleComponent->chassisMass;
+        vehicleDesc.centerOfMassOffset = vehicleComponent->centerOfMassOffset;
+        vehicleDesc.wheels = WheelsFrom(*vehicleComponent);
+        vehicleDesc.maxSteerAngle = vehicleComponent->maxSteerAngle;
+        vehicleDesc.peakDriveTorque = vehicleComponent->peakDriveTorque;
+        vehicleDesc.maxBrakeTorque = vehicleComponent->maxBrakeTorque;
+        vehicleDesc.maxHandbrakeTorque = vehicleComponent->maxHandbrakeTorque;
+        vehicleDesc.tireFriction = vehicleComponent->tireFriction;
+        vehicleDesc.position = placement.position;
+        vehicleDesc.rotation = placement.rotation;
+
+        const VehicleHandle handle = simulation_.AddVehicle(vehicleDesc);
+        if (handle == VehicleHandle::Invalid) {
+            SIM_WARN("Physics", "the Vehicle on '{}' could not be created: {}",
+                     world.NameOf(entity), simulation_.Error());
+            continue;
+        }
+        ++stats_.vehicles;
+        vehiclesByEntity_.emplace(static_cast<uint32_t>(entity), handle);
+
+        // Chassis-nya ikut dilacak seperti benda dinamis, sehingga transform-nya
+        // ditulis balik ke scene tiap langkah tanpa jalur terpisah.
+        Tracked entry;
+        entry.entity = entity;
+        entry.body = simulation_.VehicleChassis(handle);
+        entry.scale = placement.scale;
+        entry.dynamic = true;
+        tracked_.push_back(entry);
+        if (entry.body != BodyHandle::Invalid) {
+            byEntity_.emplace(static_cast<uint32_t>(entity), entry.body);
+        }
+    }
+
     // **Sendi dibangun sesudah seluruh benda ada**, dalam sapuan kedua. Sendi
     // bisa menunjuk entity mana pun di level, termasuk yang tersusun di bawahnya
     // dalam hierarki — membangunnya di sapuan yang sama akan membuat sendi
@@ -307,7 +397,13 @@ void PhysicsScene::Clear() {
     simulation_.Destroy();
     tracked_.clear();
     byEntity_.clear();
+    vehiclesByEntity_.clear();
     stats_ = PhysicsSceneStats{};
+}
+
+VehicleHandle PhysicsScene::VehicleOf(scene::Entity entity) const {
+    const auto it = vehiclesByEntity_.find(static_cast<uint32_t>(entity));
+    return it == vehiclesByEntity_.end() ? VehicleHandle::Invalid : it->second;
 }
 
 BodyHandle PhysicsScene::BodyOf(scene::Entity entity) const {

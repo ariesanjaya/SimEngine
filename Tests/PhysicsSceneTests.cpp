@@ -507,3 +507,108 @@ TEST_CASE("menghapus entity yang dipegang sendi tidak meninggalkan aktor menggan
     INFO("beban di y = " << PositionOf(world, bob).y);
     CHECK(PositionOf(world, bob).y < 0.0f);
 }
+
+TEST_CASE("VehicleComponent membangun kendaraan yang berdiri di suspensinya") {
+    if (!Available()) {
+        return;
+    }
+    scene::World world;
+    AddGround(world);
+
+    const scene::Entity car = world.Create("Car");
+    world.Add<scene::VehicleComponent>(car);
+    world.TryGet<scene::TransformComponent>(car)->position = Vec3(0.0f, 1.5f, 0.0f);
+    world.MarkTransformDirty(car);
+
+    PhysicsScene physics;
+    REQUIRE(physics.Build(world));
+    CHECK(physics.Stats().vehicles == 1);
+    CHECK(physics.Stats().vehiclesWithRigidBody == 0);
+    REQUIRE(physics.VehicleOf(car) != VehicleHandle::Invalid);
+    // Chassis-nya terdaftar sebagai benda biasa, jadi sendi dan scene query bisa
+    // menyebutnya. Roda tidak — roda bukan benda tegar.
+    CHECK(physics.BodyOf(car) != BodyHandle::Invalid);
+
+    physics.Step(world, 180);
+
+    // Transform entity ikut ditulis balik seperti benda dinamis lain.
+    const float restY = PositionOf(world, car).y;
+    INFO("chassis berhenti di y = " << restY);
+    CHECK(restY > 0.9f);
+    CHECK(restY < 1.4f);
+
+    VehicleState state;
+    REQUIRE(physics.Simulation().ReadVehicleState(physics.VehicleOf(car), state));
+    REQUIRE(state.wheels.size() == 4);
+    for (const VehicleWheelState& wheel : state.wheels) {
+        CHECK(wheel.onGround);
+    }
+}
+
+TEST_CASE("Vehicle dan Rigid Body bersama dilaporkan, bukan didiamkan") {
+    if (!Available()) {
+        return;
+    }
+    // Dua benda tegar di tempat yang sama saling mendorong dengan cara yang tidak
+    // bisa dijelaskan siapa pun. Kendaraannya tetap dibangun — itu yang jelas
+    // diminta entity ini — dan yang lain disebutkan.
+    scene::World world;
+    AddGround(world);
+
+    const scene::Entity car = world.Create("Car");
+    world.Add<scene::VehicleComponent>(car);
+    world.Add<scene::RigidBodyComponent>(car);
+    world.Add<scene::ColliderComponent>(car);
+    world.TryGet<scene::TransformComponent>(car)->position = Vec3(0.0f, 1.5f, 0.0f);
+    world.MarkTransformDirty(car);
+
+    PhysicsScene physics;
+    REQUIRE(physics.Build(world));
+    CHECK(physics.Stats().vehicles == 1);
+    CHECK(physics.Stats().vehiclesWithRigidBody == 1);
+}
+
+TEST_CASE("prefab Vehicle memang bisa dikemudikan") {
+    if (!Available()) {
+        return;
+    }
+    // Diuji lewat berkasnya: nama komponen dan ejaan enum yang salah hanya
+    // ketahuan di sini, bukan di entity yang dibangun test.
+    const std::filesystem::path path = std::filesystem::path(SIM_BUILTIN_DIR) / "Prefabs" /
+                                       "Physics" / "Vehicle.simprefab";
+    std::ifstream stream(path);
+    REQUIRE_MESSAGE(stream, "tidak bisa membuka ", path.string());
+    const std::string text((std::istreambuf_iterator<char>(stream)),
+                           std::istreambuf_iterator<char>());
+
+    scene::World world;
+    AddGround(world);
+    std::string rootGuid;
+    REQUIRE(scene::RestoreSubtree(world, scene::RemapGuids(text, &rootGuid), Uuid{}));
+    const scene::Entity car = world.FindByGuid(Uuid::Parse(rootGuid));
+    REQUIRE(car != scene::kNullEntity);
+
+    const auto* component = world.TryGet<scene::VehicleComponent>(car);
+    REQUIRE(component != nullptr);
+    CHECK(component->drive == scene::VehicleDriveKind::RearWheel);
+    CHECK(component->wheelbase == doctest::Approx(3.0f));
+
+    PhysicsScene physics;
+    REQUIRE(physics.Build(world));
+    REQUIRE(physics.Stats().vehicles == 1);
+    const VehicleHandle handle = physics.VehicleOf(car);
+    REQUIRE(handle != VehicleHandle::Invalid);
+
+    physics.Step(world, 120);
+    const Vec3 start = PositionOf(world, car);
+
+    VehicleInput input;
+    input.throttle = 1.0f;
+    REQUIRE(physics.Simulation().SetVehicleInput(handle, input));
+    physics.Step(world, 240);
+
+    const Vec3 moved = PositionOf(world, car);
+    const float travelled = glm::length(Vec3(moved.x - start.x, 0.0f, moved.z - start.z));
+    INFO("menempuh " << travelled << " m dengan gas penuh");
+    CHECK(travelled > 5.0f);
+}

@@ -23,7 +23,10 @@
       "name": "linux-clang-debug",
       "displayName": "Linux Clang Debug",
       "inherits": "base",
-      "cacheVariables": { "CMAKE_BUILD_TYPE": "Debug" }
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "SIM_WERROR": "ON"
+      }
     },
     {
       "name": "linux-clang-release",

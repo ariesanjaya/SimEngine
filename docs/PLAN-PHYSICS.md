@@ -468,10 +468,35 @@ sekitar 0,2 g, jauh di bawah cengkeraman ban. Pada laju tinggi mobil menyapu
 keluar dan radiusnya melebar — perilaku yang benar, tetapi ia menguji model ban,
 bukan geometri kemudi.
 
-#### P6e — Komponen scene dan prefab · ⬜
+#### P6e — Komponen scene dan prefab · ✅
 
 `VehicleComponent` lewat refleksi, dijembatani `PhysicsScene`, plus satu prefab
 kendaraan yang bisa dijatuhkan ke level seperti Physics Box.
+
+**Yang disebut komponennya adalah ukuran, bukan daftar roda.** Keempat roda
+diturunkan dari jarak sumbu dan jarak jejak — dua angka yang dipikirkan orang saat
+merancang mobil, sedangkan empat koordinat lepas adalah empat kesempatan menaruh
+roda tidak simetris tanpa menyadarinya. Yang butuh susunan tak lazim — tiga roda,
+enam roda, roda miring — memakai `physics::VehicleDesc` langsung.
+
+**`VehicleComponent` menggantikan `RigidBodyComponent`, bukan melengkapinya.**
+Kendaraan sudah satu benda tegar di dalam dirinya. Entity yang membawa keduanya
+tetap dibangun sebagai kendaraan — itu yang jelas diminta — dan benda tegar
+keduanya dilaporkan lewat `PhysicsSceneStats::vehiclesWithRigidBody`, karena dua
+benda di tempat yang sama saling mendorong dengan cara yang tidak bisa dijelaskan
+siapa pun.
+
+Kendaraan disusun di sapuan tersendiri, sesudah benda biasa dan **sebelum** sendi:
+sendi boleh menunjuk chassis sebuah kendaraan, jadi chassis-nya harus sudah
+terdaftar. Chassis itu ikut dilacak seperti benda dinamis biasa, sehingga
+transform entity-nya ditulis balik tiap langkah tanpa jalur terpisah.
+
+**Kriteria terima**
+- Kendaraan dari komponen berdiri di suspensinya dengan keempat roda menapak, dan
+  transform entity-nya ikut diperbarui.
+- Prefab `Physics/Vehicle.simprefab` diuji **lewat berkasnya** — nama komponen dan
+  ejaan enum yang salah hanya ketahuan di sana. Terukur menempuh **44,1 m** dalam
+  4 detik gas penuh.
 
 #### P6f — Mesin, kopling, girboks · ⬜
 

@@ -33,6 +33,12 @@ struct PhysicsSceneStats {
     /// mendukungnya (bola, kapsul).
     std::size_t nonUniformScale = 0;
 
+    std::size_t vehicles = 0;
+    /// Entity ber-`VehicleComponent` yang juga membawa `RigidBodyComponent`.
+    /// Keduanya bersama berarti satu benda disimulasikan dua kali di tempat yang
+    /// sama; yang dipakai adalah kendaraannya, dan yang lain dilaporkan.
+    std::size_t vehiclesWithRigidBody = 0;
+
     std::size_t joints = 0;
     /// Sendi yang dilewati karena ujungnya tidak bisa dipakai — entity-nya
     /// sendiri bukan benda fisika, atau `connectedBody` menunjuk GUID yang tidak
@@ -74,7 +80,13 @@ public:
     const PhysicsWorld& Simulation() const { return simulation_; }
 
     /// Handle benda milik sebuah entity, atau `BodyHandle::Invalid`.
+    ///
+    /// Untuk entity kendaraan, ini chassis-nya — roda bukan benda tegar dan
+    /// karena itu tidak punya handle.
     BodyHandle BodyOf(scene::Entity entity) const;
+
+    /// Handle kendaraan milik sebuah entity, atau `VehicleHandle::Invalid`.
+    VehicleHandle VehicleOf(scene::Entity entity) const;
 
 private:
     /// Mendorong transform entity kinematik ke solver. Arah scene → fisika.
@@ -95,6 +107,7 @@ private:
     PhysicsWorld simulation_;
     std::vector<Tracked> tracked_;
     std::unordered_map<uint32_t, BodyHandle> byEntity_;
+    std::unordered_map<uint32_t, VehicleHandle> vehiclesByEntity_;
     PhysicsSceneStats stats_;
 };
 
