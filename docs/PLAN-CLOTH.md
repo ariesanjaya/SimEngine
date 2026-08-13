@@ -1,340 +1,253 @@
 # Plan Kain Interaktif (C0 → C6)
 
-Mengangkat solver kain GPU XRTailor menjadi library dan memakainya sebagai modul
-`Sim::Cloth` untuk kain yang bereaksi terhadap gerakan karakter saat runtime —
-bukan cache yang di-bake lebih dulu.
+Solver kain di **Vulkan compute**, dengan algoritma berbasis fase dari NvCloth
+sebagai rujukan.
 
-Dokumen ini memakai penomoran **C** supaya tidak bertabrakan dengan milestone
-editor (E) dan agentic AI (A) di [ROADMAP.md](ROADMAP.md).
+Penomoran **C** supaya tidak bertabrakan dengan E (editor/render), P (fisika),
+A (agentic AI), R (Embree), I (gambar), dan M (GI) di [ROADMAP.md](ROADMAP.md).
+
+> Rencana ini **menggantikan** versi sebelumnya yang bersandar pada ekstraksi
+> XRTailor/CUDA — disimpan sebagai
+> [PLAN-CLOTH-XRTAILOR-LAMA.md](PLAN-CLOTH-XRTAILOR-LAMA.md) karena analisa
+> ekstraksinya masih berguna. Alasan pergantiannya, beserta seluruh pengukuran
+> yang mendasarinya, ada di [ANALISA-KAIN.md](ANALISA-KAIN.md).
 
 ---
 
 ## Keputusan pokok
 
-**Yang diambil dari XRTailor hanya solvernya.** Aplikasi XRTailor membawa
-engine-nya sendiri: jendela GLFW, renderer OpenGL, scene graph, panel ImGui,
-loader glTF, dan exporter Alembic. Semuanya dibuang. Yang menarik cuma
-`physics/` dan `memory/`.
+**Kain interaktif adalah fitur baseline.** Baseline mencakup RX 5600 XT (RDNA1,
+AMD), yang tidak menjalankan CUDA. Itu mencoret PhysX PBD, `PxDeformableSurface`,
+XRTailor, **dan** backend GPU NvCloth sekaligus — keempatnya CUDA.
 
-**Kain tidak menggantikan jalur bake.** XRTailor tetap dipakai apa adanya untuk
-membangkitkan cache Alembik dari simulasi Quality mode. Modul `Sim::Cloth`
-melayani kasus lain: kain yang harus bereaksi terhadap input, jadi hanya Swift
-mode yang diport.
+**Karena itu Vulkan compute.** Ia satu-satunya jalur GPU yang berjalan di AMD,
+Intel, dan NVIDIA dengan kode yang sama. Bukan pilihan gaya: ia satu-satunya yang
+memenuhi syarat yang sudah ditetapkan.
 
-**Bergantung pada E8.4.** Obstacle kain adalah mesh karakter yang sudah di-skin.
-Selama GPU skinning E8.4 belum mendarat, C4 ke atas tidak bisa dikerjakan. C0–C3
-tidak bergantung padanya dan bisa dimulai sekarang.
+**Algoritmanya dari NvCloth, pustakanya tidak.** NvCloth tidak punya backend
+Vulkan — hanya `cuda/` dan `dx/` — jadi tidak ada yang bisa ditautkan. Yang
+diambil adalah **rancangan solvernya**, yang memang layak ditiru: ia solver kain
+PhysX 3 yang matang, sudah memecahkan self-collision, dan masih dikapalkan O3DE
+sampai hari ini lewat `NvClothCreateFactoryCPU()`.
 
----
+### Batas pemakaian NvCloth, dan kenapa ia ditulis di sini
 
-## Kenapa jalur ini layak
+Lisensinya **bukan BSD**. Ia "Nvidia Source Code License (1-Way Commercial)":
+permisif, mengizinkan karya turunan dengan syarat berbeda, tetapi menuntut
+**salinan lisensi ikut didistribusikan** dan **pemberitahuan atribusi
+dipertahankan** bila karyanya disertakan. Ada pula klausul yang menghentikan izin
+bila pemakainya menuntut paten NVIDIA.
 
-Diukur di RTX 2060 (mesin pengembangan yang sama dengan target), XRTailor v1.9.0
-Swift mode, garment 4.716 vertex di atas karakter 9.011 vertex:
+Konsekuensinya untuk rencana ini:
 
-| Yang diukur | Hasil |
-| --- | --- |
-| Partikel | 55.824 |
-| Waktu solver | **19,67 ms/frame → 50,84 FPS** |
-| GPU time total (termasuk render OpenGL bawaan XRTailor) | 19,75 ms |
-| Headless, 389 frame | 50–57 fps |
-| Quality mode (universal, 200 iterasi + impact zone) | **4–19 fps** |
+- **Yang diambil adalah algoritmanya** — pembagian kendala menjadi fase dan
+  urutan penyelesaiannya — dibaca, dipahami, lalu ditulis ulang di sini. Gagasan
+  tidak dilindungi hak cipta; ungkapannya iya.
+- **Tidak ada berkas NvCloth yang disalin ke pohon ini.** Kalau nanti ada yang
+  benar-benar diadaptasi baris demi baris, berkas lisensinya wajib ikut dan
+  atribusinya wajib dipertahankan — dan itu keputusan sadar yang dicatat di
+  commit, bukan sesuatu yang terjadi karena seseorang menempel kode.
 
-Kesimpulannya: **fisikanya sudah real-time, pembungkusnya yang tidak.** Swift
-mode masuk anggaran frame; Quality mode tidak dan memang tidak diport.
-
-Angka 19,67 ms itu untuk satu kain besar tanpa apa pun berjalan di sebelahnya.
-Di SimEngine ia harus berbagi frame dengan renderer, jadi C6 menetapkan anggaran
-waktu dan mekanisme mundurnya.
-
----
-
-## Batas ekstraksi
-
-Diukur dari pohon sumber XRTailor v1.9.0:
-
-| Bagian | Ukuran | Pemakaian `Global::` | Perlakuan |
-| --- | --- | --- | --- |
-| `physics/` | 13.712 baris, 95 file | **3** | **Ambil hampir apa adanya** |
-| `memory/` | 561 baris, 11 file | **0** | **Ambil apa adanya** |
-| `core/Scalar.hpp`, sebagian `utils/` | ~1.100 baris | — | Ambil |
-| `pipeline/` | 3.466 baris, 26 file | **267** | **Tulis ulang jadi facade tipis** |
-| `runtime/` | 10.190 baris, 79 file | banyak | **Buang** |
-| `config/` | 880 baris, 8 file | — | Buang, diganti aset `.simcloth` |
-
-Rasio inilah yang membuat rencana ini masuk akal: **14 ribu baris fisika bisa
-diambil hampir utuh, dan yang harus ditulis ulang hanya 3,5 ribu baris lem.**
-Solver-nya ternyata sudah hampir bersih — `physics/` menyentuh state global cuma
-tiga kali, dan hanya dua file yang mengimpor sesuatu dari `runtime/`
-(`DebugDrawingHelper.hpp` untuk gambar debug, dan `sdf/Collider.hpp` yang
-menarik `Actor.hpp`). Keduanya dipotong di C1.
-
-### Empat hal yang harus diselesaikan
-
-**1. `exit()` di 33 tempat.** Termasuk yang paling berbahaya:
-`MemoryPool.cu:24` mematikan proses saat node pool habis. Sebuah library tidak
-boleh membunuh host-nya. Semua diganti kode galat yang merambat ke pemanggil.
-
-**2. State global.** `Global::engine`, `Global::sim_params`, `Global::sim_config`
-adalah variabel `inline` di `Global.hpp` — satu simulasi per proses. Diganti
-struct context yang dioper eksplisit. Isinya sudah terpetakan: 30-an medan yang
-dipakai `pipeline/`, mayoritas parameter solver (`num_iterations`,
-`num_substeps`, `delta_time`, `max_speed`, `bvh_tolerance`,
-`num_collision_passes`, `enable_self_collision`, `long_range_stretchiness`, …)
-plus penghitung ukuran buffer.
-
-**3. Interop grafis.** `PhysicsMesh.cu` memanggil `cudaGraphicsGLRegisterBuffer`
-supaya solver menulis langsung ke VBO OpenGL. SimEngine memakai Vulkan, jadi ini
-harus diganti. Kabar baiknya permukaannya sempit: `RegisterBuffer(GLuint)`,
-`RegisterNewBuffer(GLuint)`, satu `cudaGraphicsResource*`, dan sepasang
-map/unmap — lima titik panggilan. Lihat C3 untuk pilihan penggantinya.
-
-**4. Sumber pose obstacle.** `ClothSolver.cpp:201` memanggil
-`gltf_loader_->UpdateAnimation(frame_index, …)` — pose diambil dari keyframe
-berkas GLB memakai penghitung frame internal. Diganti masukan dari luar: array
-posisi vertex obstacle yang sudah di-skin, dikirim SimEngine tiap frame.
+Ini bukan nasihat hukum. Ini batas kerja yang dipilih supaya pertanyaannya tidak
+pernah perlu diajukan.
 
 ---
 
-## Arsitektur target
+## Kenapa berbasis fase, bukan Jacobi
+
+Kendala kain berbagi partikel: dua kendala yang menyentuh partikel yang sama
+tidak boleh diproyeksikan bersamaan tanpa balapan. Ada dua jawaban, dan NvCloth
+memilih yang kedua:
+
+**Jacobi** — semua kendala dihitung dari posisi lama, hasilnya dirata-ratakan.
+Bebas balapan, satu dispatch, tetapi konvergensinya lebih lambat: kain terasa
+lebih kenyal pada jumlah iterasi yang sama.
+
+**Fase (pewarnaan)** — kendala dikelompokkan sehingga **tidak ada dua kendala di
+dalam satu fase yang berbagi partikel**. Tiap fase diproyeksikan Gauss-Seidel
+penuh, satu dispatch per fase, barrier di antaranya. Konvergensi jauh lebih baik
+per iterasi.
+
+NvCloth memakai fase bertipe `eVERTICAL`, `eHORIZONTAL`, `eSHEARING`, dan
+`eBENDING` — pengelompokan yang sekaligus punya arti fisik, bukan sekadar
+pewarnaan graf sembarang. Itu yang ditiru.
+
+**Dan pengelompokannya dikerjakan saat memasak aset, bukan saat memuat level.**
+Pola yang sama dengan bake SDF di `Sim::Volume` dan cooking convex di
+[PLAN-PHYSICS.md](PLAN-PHYSICS.md): hasilnya selalu sama, jadi menghitungnya tiap
+kali level dimuat adalah detik yang dibayar berulang untuk jawaban yang identik.
+
+---
+
+## Anggaran, dan ukuran yang muat di dalamnya
+
+Dari [ANALISA-KAIN.md](ANALISA-KAIN.md):
+
+| Anggaran kain | Partikel | Kira-kira |
+| --- | --- | --- |
+| 1,5 ms | 4.257 | grid 65×65 |
+| 2,0 ms | 5.676 | grid 75×75 |
+| 3,0 ms | 8.514 | grid 92×92 |
+
+Frame 60 fps hanya 16,67 ms dan GI sudah mengambil 3,0 ms di baseline. **Target
+C4: satu busana ~6.000 partikel di bawah 2 ms pada baseline.**
+
+Angka acuan CPU yang sudah diukur di mesin ini — 2,25 ms untuk 5.625 partikel,
+satu thread, 4 iterasi, tanpa SIMD — bukan pesaing melainkan **pagar**: solver
+GPU yang lebih lambat daripada itu tidak layak dipakai.
+
+---
+
+## Arsitektur
 
 ```
 Code/Cloth/
-  include/Sim/Cloth/            ← C++20 murni, tanpa CUDA, tanpa thrust
-      ClothSolver.h                 facade pImpl
-      ClothContext.h                parameter solver (pengganti Global::sim_params)
-      ClothAsset.h                  data .simcloth hasil parse
-      ClothComponent.h              komponen EnTT
-  src/                          ← C++20, boleh lihat Vulkan lewat Sim::RHI
-      ClothSolver.cpp               jembatan ke solver_impl
-      ClothSystem.cpp               iterasi EnTT, anggaran waktu, LOD
-      ClothIo.cpp                   baca/tulis .simcloth
-      VulkanCudaBridge.cpp          berbagi buffer dengan RHI
-  solver/                       ← dikompilasi nvcc, TIDAK dilihat clang
-      xrtailor/physics/**           vendored, patch minimal
-      xrtailor/memory/**            vendored
-      SolverImpl.cu                 pengganti pipeline/ XRTailor
+  include/Sim/Cloth/
+      ClothTypes.h      partikel, kendala, fase — tanpa tipe Vulkan
+      Fabric.h          data kendala termasak, hasil pengondisian aset
+      ClothSolver.h     antarmuka solver; backend dipilih saat dibuat
+  src/
+      FabricCook.cpp    mesh → fase, dijalankan importir
+      SolverCpu.cpp     acuan kebenaran, selalu ada
+      SolverCompute.cpp backend Vulkan
+Shaders/
+      cloth_integrate.comp.slang
+      cloth_solve_phase.comp.slang
+      cloth_normals.comp.slang
 ```
 
-Aturan yang menegakkan pemisahan: **tidak satu pun header di
-`include/Sim/Cloth/` boleh menyebut `cuda`, `thrust`, atau `__device__`.**
-Ditegakkan uji di C1, bukan disiplin — pola yang sama dengan aturan
-`Code/Editor` tidak boleh `#include <vulkan/vulkan.h>`.
+**Dua backend di balik satu antarmuka**, pola yang sudah terbukti dua kali di
+pohon ini — `Sim::ImageIO` berganti pustaka dua kali tanpa satu titik panggil
+berubah, dan `Sim::Volume` punya acuan CPU untuk raymarch GPU-nya.
 
-Alur data per frame:
+**Acuan CPU bukan cadangan melainkan alat uji.** Ia yang membuat pertanyaan
+"apakah solver GPU-nya benar" bisa dijawab angka, bukan tangkapan layar. Aturan
+yang sama dipakai `VolumeRaymarch` terhadap `volume_raymarch.frag.slang`.
 
-```
-Animation (E8.4)  →  skinning buffer (VkBuffer, posisi obstacle)
-                            │
-                            ▼
-ClothSystem.Update(dt)  →  Solver::SetObstaclePositions()
-                        →  Solver::Step(dt)          [CUDA]
-                        →  posisi kain di VkBuffer
-                            │
-                            ▼
-Render               →  draw seperti mesh biasa, tanpa readback
-```
+**`Sim::Cloth` tidak bergantung pada `Sim::Render`.** Ia menghasilkan posisi
+vertex; yang menggambarnya pemanggilnya. Sama seperti `Sim::Physics`.
 
----
+### Yang membuat Vulkan lebih sederhana daripada CUDA di sini
 
-## Toolchain: CUDA di dalam build clang
-
-SimEngine dibangun clang 18 dengan `LANGUAGES C CXX`; belum ada CUDA sama
-sekali. Ada dua cara dan yang kedua yang dipilih.
-
-**Ditolak — `enable_language(CUDA)` di build utama.** Menyeret pertanyaan
-kecocokan nvcc dengan clang sebagai host compiler ke seluruh proyek, dan membuat
-`SIM_WITH_CLOTH=OFF` tidak lagi benar-benar melepas CUDA dari konfigurasi.
-
-**Dipilih — target CUDA terpisah, nvcc dengan host g++ 13.3, ditautkan statis.**
-`Code/Cloth/solver/` dibangun sebagai static library sendiri lewat
-`ExternalProject` atau subdirektori dengan `enable_language(CUDA)` terpagar,
-memakai host compiler g++ yang sudah ada. Hasilnya `.a` yang ditautkan ke
-`SimCloth`. Karena keduanya memakai libstdc++ yang sama, ABI-nya cocok. Clang
-tidak pernah melihat satu baris pun CUDA, sehingga:
-
-- `-Wconversion` dan kawan-kawan di `SIM_STRICT_WARNINGS` tidak meledak di kode
-  vendored,
-- preset **asan/tsan tetap bisa dibangun** dengan `SIM_WITH_CLOTH=OFF`, dan itu
-  memang cara memakainya — sanitizer clang tidak mengerti kode device,
-- opsi `SIM_WITH_CLOTH` default **OFF**, sehingga kontributor tanpa CUDA Toolkit
-  tetap bisa membangun editor.
-
-Arsitektur GPU dipatok `-DSIM_CLOTH_CUDA_ARCH=75` (RTX 2060), bisa ditimpa.
-
-### Perbaikan XRTailor yang wajib ikut
-
-Sumber v1.9.0 **tidak bisa dikompilasi apa adanya** dengan CUDA 12.8/GCC 13.
-Tiga perbaikan ini sudah diverifikasi di `~/SDK/xrtailor-1.9.0` dan harus ikut
-saat vendoring:
-
-1. **`BVH.cu:644`** — libcu++ 12.x menolak extended `__device__` lambda sebagai
-   operator `thrust::reduce` tanpa trailing return type. Tambahkan `-> Bounds`.
-2. **Namespace ABI Thrust** — Thrust menyisipkan `__CUDA_ARCH_LIST__` ke inline
-   namespace; makro itu hanya ada di translation unit nvcc, jadi berkas host
-   yang menyebut `thrust::host_vector` di tanda tangan fungsi mengait ke
-   namespace berbeda dan link gagal. Definisikan `THRUST_DISABLE_ABI_NAMESPACE`,
-   `THRUST_IGNORE_ABI_NAMESPACE_ERROR`, `CUB_DISABLE_NAMESPACE_MAGIC`,
-   `CUB_IGNORE_NAMESPACE_MAGIC_ERROR` untuk semua bahasa di target solver.
-   *Di SimEngine masalah ini hilang dengan sendirinya kalau aturan "tidak ada
-   thrust di header publik" ditegakkan — tapi tetap berlaku di dalam
-   `solver/`.*
-3. **jsoncpp** tidak diperlukan sama sekali di sini; parsing config diganti
-   `.simcloth`. Ini menghapus satu dependensi beserta jebakan C++17-nya.
-
-Catatan bug yang sudah ditemukan dan harus tidak ikut terbawa: XRTailor crash
-(`cudaErrorIllegalAddress` di `PhysicsMesh.cu:679`) saat scene dibangun ulang
-lewat tombol Reset. Jalur rebuild itu tidak diport, tapi kalau nanti
-`Solver::Reset()` dibuat, akar masalahnya harus diselidiki dulu — bukan disalin.
+XRTailor harus memanggil `cudaGraphicsGLRegisterBuffer` dan memetakan sumber daya
+bolak-balik — lima titik panggil yang seluruhnya harus ditulis ulang untuk
+Vulkan. Di sini masalah itu **tidak ada**: buffer yang ditulis compute shader
+*adalah* buffer yang dibaca vertex shader. Satu `VkBuffer`, dua bit usage, satu
+barrier.
 
 ---
 
 ## Milestone
 
-### C0 — Vendoring & build · ⬜
+### C0 — `DeviceBuffer` di `Sim::RHI` · ⬜
 
-Salin `physics/`, `memory/`, `core/Scalar.hpp`, dan `utils/` yang dibutuhkan ke
-`Code/Cloth/solver/xrtailor/`. Terapkan tiga perbaikan build di atas. Buat
-target CUDA statis + opsi `SIM_WITH_CLOTH` (default OFF).
+Buffer device-local dengan staging upload dan readback. `DynamicBuffer` yang ada
+sekarang host-visible dan dipetakan permanen — memori yang salah untuk data yang
+dibaca-tulis puluhan ribu kali per frame.
 
-Vendoring **dicatat asalnya**: berkas `VENDOR.md` berisi versi XRTailor, commit,
-dan daftar patch lokal, mengikuti pola `docs/DEPENDENCIES.md`. Tidak lewat
-FetchContent — kode ini dipatch, dan patch yang hidup di build tree hilang saat
-cache dibersihkan.
-
-**Kriteria terima**
-- `cmake --preset linux-clang-release` tanpa opsi → sukses, tidak memanggil nvcc.
-- Ditambah `-DSIM_WITH_CLOTH=ON` → sukses, `libSimClothSolver.a` terbentuk.
-- Preset `linux-clang-asan` tetap sukses (dengan cloth OFF).
-
-### C1 — Facade tanpa CUDA & tanpa global · ⬜
-
-`Sim::Cloth::Solver` dengan pImpl. `ClothContext` menggantikan
-`Global::sim_params`. Semua `exit()` di kode yang diport diganti
-`std::expected`-style error atau kode galat. Potong `DebugDrawingHelper.hpp` dan
-ketergantungan `Actor.hpp` di `sdf/Collider.hpp`.
+**Ini utang yang sudah tercatat**, bukan ongkos kain: komentar `Buffer.h` sendiri
+menyebut "buffer device-local dengan staging di E8", dan mesh statis E8
+membutuhkannya lebih dulu.
 
 **Kriteria terima**
-- Uji doctest membuat **dua** `Solver` dalam satu proses, masing-masing
-  di-`Step()` 100 kali, keduanya memberi hasil berbeda sesuai parameternya.
-- Uji yang mem-`grep` header publik: nol kemunculan `cuda`, `thrust`,
-  `__device__`, `Global::`.
-- Pool memory yang habis mengembalikan galat, bukan mematikan proses — diuji
-  dengan pool sengaja dikecilkan.
+- Unggah, baca balik, bandingkan — byte yang keluar sama dengan yang masuk.
+- Dipakai dari dua frame berturut-turut tanpa hazard, diverifikasi lapisan
+  validasi.
 
-### C2 — Simulasi headless yang benar · ⬜
+### C1 — Dispatch compute pertama · ⬜
 
-Adegan uji: satu kain persegi jatuh ke bola statis, tanpa render sama sekali.
-Bandingkan dengan hasil XRTailor asli pada parameter yang sama.
+Pipeline compute, descriptor, dan barrier. **Tidak butuh perubahan build maupun
+device** — sudah diverifikasi: `slangc` mengompilasi `.comp.slang` dengan flag
+yang sama persis seperti shader lain, dan family antrian grafis yang dipilih
+`Device.cpp` juga membawa `VK_QUEUE_COMPUTE_BIT`.
 
-**Kriteria terima**
-- 300 frame tanpa NaN, tanpa energi meledak, kain diam di akhir.
-- Dua run dengan seed sama menghasilkan posisi identik bit-per-bit.
-- Waktu per frame tercatat ke log; untuk kain 5k vertex harus < 10 ms.
-
-### C3 — Kain tampil di viewport · ⬜
-
-Menyambungkan keluaran solver ke Vulkan. **Mulai dari yang sederhana:**
-
-*Tahap A — staging copy.* `cudaMemcpy` device→host, unggah ke `DynamicBuffer`.
-Terdengar boros, tapi hitung dulu: 4.716 vertex × 12 byte = **55 KB posisi per
-frame**, plus normal jadi 110 KB. Di 60 fps itu 6,6 MB/s — tidak terukur di PCIe
-mana pun. Biaya sebenarnya adalah titik sinkronisasi, dan XRTailor sudah
-memanggil `cudaDeviceSynchronize()` tiap frame.
-
-*Tahap B — zero-copy, hanya kalau profiling menuntutnya.* `VK_KHR_external_memory_fd`
-di sisi Vulkan, `cudaImportExternalMemory` + `cudaExternalMemoryGetMappedBuffer`
-di sisi CUDA, disinkronkan `VK_KHR_external_semaphore_fd` /
-`cudaImportExternalSemaphore`. Perlu menambah ekstensi device di
-`Code/RHI/src/Device.cpp` — saat ini hanya swapchain, debug utils, GPPD2, dan
-ray query opsional yang diaktifkan.
-
-Mendahulukan tahap A menjaga C3 tidak berubah jadi proyek interop berminggu-minggu
-sebelum ada satu piksel kain pun di layar.
+Polanya mengikuti pass yang sudah ada (`VolumePass`, `SkyAtmosphere`): satu
+berkas memiliki pipeline-nya sendiri, bukan lapisan RHI baru.
 
 **Kriteria terima**
-- Kain bergerak terlihat di viewport editor.
-- **Nol** galat validation layer.
-- Waktu pass `cloth-upload` tercatat di GpuProfiler.
+- Satu shader yang mengalikan buffer dengan skalar menghasilkan angka yang
+  dihitung CPU, dibandingkan elemen per elemen.
 
-### C4 — Obstacle dari modul Animation · ⬜ (butuh E8.4)
+### C2 — Memasak fabric · ⬜
 
-Ganti `UpdateAnimation(frame_index)` dengan `SetObstaclePositions(span)` yang
-diisi dari skinning buffer E8.4. BVH obstacle di-refit tiap frame.
+Mesh → daftar kendala → fase. Dijalankan importir, disimpan di samping asetnya.
 
 **Kriteria terima**
-- Kain mengikuti karakter yang animasinya dikendalikan Animation Graph.
-- Mengubah kecepatan playback tidak merusak simulasi.
-- Karakter di-teleport tidak membuat kain meledak — kain di-reset lembut, bukan
-  ditarik menembus badan.
+- **Tidak ada dua kendala di dalam satu fase yang berbagi partikel** — disisir
+  seluruhnya, bukan disampel. Inilah invarian yang membuat solver GPU-nya bebas
+  balapan, dan satu pelanggaran saja menghasilkan kain yang bergetar acak di
+  mesin tertentu saja.
+- Memasak dua kali menghasilkan byte yang sama.
 
-### C5 — Aset `.simcloth`, komponen, panel · ⬜
+### C3 — Solver CPU sebagai acuan · ⬜
 
-Format aset baru mengikuti pola `.simmat`/`.simfx`/`.simveg`: GUID stabil,
-referensi ke mesh garment, `MASS`, `ATTACHED_INDICES`, dan blok `BINDING`
-(`BOUNDARY`/`NEIGHBOR`/`UV_ISLAND`/`NONMANIFOLD_EDGES`, masing-masing dengan
-`INDICES`/`STIFFNESS`/`DISTANCE` yang sejajar per indeks) — struktur ini disalin
-dari config garment XRTailor karena sudah terbukti memadai. Plus parameter
-solver Swift mode.
-
-`ClothComponent` di EnTT menunjuk aset + entity karakter sebagai obstacle.
-Panel editor mengikuti konvensi E7, lengkap dengan command/undo.
+XPBD berbasis fase, satu thread, ditulis untuk dibaca. Bukan untuk performa.
 
 **Kriteria terima**
-- Pasang kain ke karakter lewat editor, simpan `.simlevel`, muat ulang, kain
-  tetap terpasang.
-- Rename berkas aset tidak memutus referensi (GUID, bukan path).
-- Uji doctest untuk serialisasi `.simcloth` — round-trip identik.
+- Kain digantung dua sudut mengendap simetris; simpangan kiri-kanan di bawah
+  toleransi yang ditulis.
+- Kain jatuh bebas mempertahankan panjang rusuk dalam 1% setelah 600 langkah.
 
-### C6 — Anggaran waktu & degradasi · ⬜
+### C4 — Solver compute · ⬜
 
-Kain adalah satu-satunya sistem yang bisa menghabiskan seluruh anggaran frame
-sendirian. Mekanisme yang wajib ada:
-
-- Anggaran milidetik per frame; kain yang melewatinya diturunkan iterasinya.
-- Kain di luar frustum atau jauh dari kamera ditidurkan, bangun bertahap dengan
-  warmup singkat — XRTailor memakai 50–120 frame pre-simulation untuk settle,
-  dan itu tidak bisa dibayar saat spawn di tengah gameplay.
-- Batas keras jumlah kain aktif; sisanya jatuh ke animasi bake.
+Integrasi, penyelesaian per fase, penghitungan normal — tiga shader.
 
 **Kriteria terima**
-- 10 karakter berkain di satu adegan tetap di atas 60 fps, dengan penurunan
-  kualitas yang terlihat wajar.
-- Statistik kain (jumlah aktif, ms terpakai) tampil di panel profiler.
+- **Hasilnya cocok dengan acuan CPU** dalam toleransi yang ditulis, pada adegan
+  dan jumlah iterasi yang sama.
+- 6.000 partikel di bawah **2 ms** pada baseline. Diukur, dicatat, dan
+  dibandingkan dengan pagar CPU 2,25 ms.
+
+### C5 — Tabrakan · ⬜
+
+Terhadap kapsul dan sphere dari collider yang sudah ada, ditambah self-collision.
+
+Bentuk tabrakannya diambil dari `Sim::Physics` — P2 sudah menyediakan
+`OverlapSphere` dan `SweepSphere`, dan collider karakter sudah ada di sana. Kain
+tidak membangun dunia keduanya.
+
+**Kriteria terima**
+- Kain yang dijatuhkan ke atas sphere tidak menembusnya pada langkah mana pun.
+- Self-collision menahan lipatan: kain yang dilipat tidak melewati dirinya
+  sendiri.
+
+### C6 — Komponen, aset, dan anggaran · ⬜
+
+`ClothComponent` lewat refleksi, aset `.simcloth`, dan degradasi saat anggaran
+terlampaui.
+
+**Kriteria terima**
+- Anggaran ditegakkan: melewatinya menurunkan iterasi lalu mematikan kain, dan
+  **mengatakannya di log** alih-alih diam-diam melambat.
+- Prefab kain bisa dijatuhkan ke level seperti Physics Box.
 
 ---
 
-## Risiko dan titik mundur
+## Risiko
 
-| Risiko | Tanda awal | Mundur ke |
-| --- | --- | --- |
-| Interop Vulkan-CUDA berlarut | C3 tahap B lewat dua minggu | Tetap di tahap A; 110 KB/frame tidak akan jadi hambatan |
-| nvcc + libstdc++ bentrok dengan clang | Link error simbol C++ di C0 | Bungkus batas library dengan `extern "C"` |
-| Solver tidak stabil dengan `dt` variabel | Kain meledak saat frame drop | Fixed timestep dengan akumulator, substep dibatasi |
-| Kain 5k vertex terlalu berat untuk anggaran | C2 mencatat > 10 ms | Turunkan resolusi garment; solver ini skalanya linear terhadap partikel |
-| E8.4 mundur jauh | — | C0–C3 tetap jalan dengan obstacle statis/analitik |
+**Compute belum pernah dipakai di mesin ini.** Empat puluh tujuh shader,
+semuanya vertex atau fragment — GI pun fragment. C1 sengaja dibuat sekecil
+mungkin supaya kegagalan di sana menunjuk infrastruktur, bukan solver.
 
----
+**Self-collision adalah bagian tersulit**, dan itu sebabnya ia di C5, bukan C4.
+NvCloth memakai grid spasial; menirunya di compute menuntut sorting atau atomic —
+keduanya jauh lebih rumit daripada kendala jarak. Kalau C5 meleset, kain tanpa
+self-collision masih berguna untuk bendera dan jubah longgar.
 
-## Yang tidak boleh ditunda
-
-Mengikuti prinsip yang sama di [ROADMAP.md](ROADMAP.md), tiga hal ini mahal
-diubah belakangan:
-
-- **Header publik bebas CUDA.** Kalau `thrust` bocor ke `include/Sim/Cloth/`
-  sekali saja, seluruh engine ikut butuh nvcc dan `SIM_WITH_CLOTH=OFF` berhenti
-  berarti. Ditegakkan uji sejak C1.
-- **Context, bukan global.** Menambahkan context ke kode yang sudah menulis ke
-  `Global::` berarti menyentuh 267 tempat dua kali.
-- **Catatan vendoring.** Tanpa `VENDOR.md` yang mencatat patch, upgrade XRTailor
-  berikutnya adalah pekerjaan arkeologi.
+**Baseline tidak ada di meja ini.** Pengukuran dilakukan di mesin pengembangan;
+angka RX 5600 XT harus datang dari perangkat sungguhan sebelum C4 disebut
+selesai. Menandainya lulus dengan angka RTX 2060 berarti menunda kejutan, bukan
+menghindarinya.
 
 ---
 
-## Lampiran: kenapa bukan jalur bake saja
+## Yang tidak berubah
 
-Jalur bake (`XRTailor → .abc → putar di engine`) tetap yang paling murah dan
-tetap dipertahankan untuk cutscene serta NPC beranimasi tetap. Plan ini
-dikerjakan hanya kalau kain harus **bereaksi** — terhadap tabrakan pemain,
-angin yang dikendalikan gameplay, atau pose yang tidak diketahui saat bake.
-Kalau kebutuhannya bukan itu, C0–C6 tidak perlu dikerjakan sama sekali.
+**Jalur bake Alembic tetap milik XRTailor apa adanya**, dijalankan sebagai alat
+luar untuk kain yang tidak bereaksi — bendera, gorden, busana latar. Ia tidak
+berjalan di dalam mesin, jadi ia tidak bertabrakan dengan apa pun di atas, dan ia
+satu-satunya yang memberi kualitas Quality mode.
+
+**Perkiraan articulation dari P5 tetap tersedia** sebagai jaring pengaman. Jubah
+sebagai strip bertaut jalan hari ini, di CPU, di mana pun — dan untuk jubah kecil
+di kejauhan tidak ada yang bisa membedakannya.
