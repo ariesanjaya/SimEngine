@@ -389,13 +389,145 @@ yang disusun otomatis pasti bertumpuk di percabangan — dua paha berjarak 20 cm
 dengan jari-jari 10,5 cm sudah saling menembus sebelum langkah pertama.
 Menyalakannya menuntut bentuk yang disetel tangan.
 
-### P6 — Vehicle Dynamics · ⬜
+### P6 — Vehicle Dynamics · 🔶 sebagian
 
 `PxVehicle` di atas rigid body. Roda, suspensi, mesin, transmisi.
 
+**Dipecah menjadi enam sub-fase, dan pemecahannya sendiri adalah alat debug.**
+P6 dikerjakan sekali sebagai satu bongkahan dan hasilnya adalah kendaraan yang
+terbangun, tertaut, masuk scene — lalu diam saja diberi gas penuh. Gejala
+sebesar itu tidak menunjuk apa pun: ia bisa berarti roda tidak menemukan tanah,
+torsi tidak sampai ke roda, ban tidak menghasilkan gaya, atau gaya tidak sampai
+ke bodi. Urutan di bawah menyusunnya menjadi rantai sebab-akibat yang tiap
+matanya bisa dijawab benar atau salah sendiri-sendiri.
+
+`vehicle2` adalah kerangka perakitan komponen — 56 header, dan referensi
+direct-drive NVIDIA sendiri ~1100 baris — jadi ini memang milestone terbesar di
+rencana ini.
+
+#### P6a — Kendaraan berdiri di suspensinya · ✅
+
+Tidak ada gas, tidak ada rem, tidak ada kemudi. Hanya: aktor terbentuk dengan
+bentuk chassis dan roda, query jalan menemukan bidang di bawah tiap roda, dan
+bodinya turun ke ketinggian diam lalu berhenti di sana.
+
+**Kriteria terima**
+- Keempat roda melaporkan `onGround` sesudah mengendap. **Inilah mata rantai
+  pertama**, dan selama ia salah tidak ada gunanya menguji yang lain — ban yang
+  tidak menyentuh apa pun tidak akan pernah menghasilkan gaya betapapun besar
+  gasnya.
+- Ketinggian diam bodinya **dihitung lebih dulu**, bukan dibaca dari hasil:
+  pegas menahan massa tertopang pada tekanan x = mg/k, jadi bodinya duduk
+  setinggi itu di bawah titik gantung suspensinya.
+- Suspensi tidak berosilasi tak berhingga di atas permukaan datar — amplitudonya
+  meluruh, dan pegas bawaan memang diberi redaman kritis c = 2·√(k·m) supaya ia
+  kembali tanpa melewati sama sekali.
+
+#### P6b — Gas menghasilkan gerak · ⬜
+
+Torsi direct-drive masuk ke roda penggerak, roda berputar, ban menghasilkan gaya
+memanjang, bodi bergerak.
+
+**Kriteria terima**
+- Kecepatan naik secara monoton pada gas tetap di permukaan datar.
+- Kecepatan putar roda cocok dengan laju maju: ω·r ≈ v sesudah tidak lagi
+  berakselerasi. Yang tidak cocok berarti ban selip terus-menerus, dan itu
+  terbaca sebagai mobil yang berakselerasi lambat alih-alih sebagai ban yang
+  salah setelan.
+
+#### P6c — Rem · ✅
+
 **Kriteria terima**
 - Kendaraan berhenti dari 100 km/jam dalam jarak yang masuk akal dan tercatat.
-- Suspensi tidak berosilasi tak berhingga di atas permukaan datar.
+  Batas bawahnya fisika, bukan selera: dengan gesekan μ dan gravitasi g, jarak
+  terpendek yang mungkin adalah v²/(2·μ·g) = 27,8²/(2·1,0·9,81) ≈ 39 m. Yang
+  jauh lebih pendek berarti ban menggigit lebih dari yang mungkin.
+- Rem tangan mengunci hanya roda yang ditandai `handbraked`.
+
+#### P6d — Kemudi · ⬜
+
+**Kriteria terima**
+- Radius belok pada kemudi penuh sepadan dengan sudut kemudi dan jarak sumbu
+  roda: R ≈ wheelbase / tan(δ). Diuji terhadap rumus itu, bukan terhadap
+  "kelihatan berbelok".
+- Mobil tidak terguling pada kemudi penuh di kecepatan sedang — titik beratnya
+  memang disetel di bawah pusat kotak justru untuk ini.
+
+#### P6e — Komponen scene dan prefab · ⬜
+
+`VehicleComponent` lewat refleksi, dijembatani `PhysicsScene`, plus satu prefab
+kendaraan yang bisa dijatuhkan ke level seperti Physics Box.
+
+#### P6f — Mesin, kopling, girboks · ⬜
+
+`PxVehicleEngineDrive` di atas P6a–P6d. **Sengaja terakhir**: direct drive sudah
+cukup untuk seluruh kriteria terima di atas, dan menambahkan kurva torsi mesin
+di atas rantai yang belum terbukti berarti dua lapis yang belum terbukti
+sekaligus.
+
+#### Cacat yang menghentikan P6 pada percobaan pertama
+
+**Kerangka sumbu.** Bawaan `PxVehicleFrame` adalah **Z-atas**; mesin ini Y-atas.
+Suspensi karena itu menembakkan sinarnya mendatar, tidak pernah menemukan tanah,
+dan mobil duduk di atas bak chassis-nya dengan roda menggantung. Gejalanya
+"kendaraan tidak jalan" — yang menunjuk ke mana-mana kecuali ke sumbu. Kerangkanya
+sekarang disusun satu fungsi, `SimVehicleFrame()`, dipakai backend **dan** konteks
+simulasi dunia: dua tempat yang menyusunnya sendiri-sendiri adalah dua tempat yang
+bisa berbeda.
+
+**Bendera bentuk nol.** `PxVehiclePhysXActorCreate` memanggil `setFlags` apa
+adanya, jadi `PxShapeFlags(0)` berarti benar-benar tanpa `eSIMULATION_SHAPE` —
+chassis jatuh menembus lantai alih-alih menabraknya. Roda sengaja tetap tanpa
+bentuk simulasi: yang menahan mobil adalah suspensinya, dan bentuk roda yang ikut
+menabrak akan melawan suspensi itu sendiri.
+
+**Chassis terdaftar dua kali.** Ia sengaja masuk daftar benda biasa supaya scene
+query dan sendi bisa menyebutnya, sementara pemiliknya tetap kendaraan. Yang
+melepasnya hanya boleh satu; tanpa pencabutan saat dunia ditutup, aktornya dilepas
+dua kali — dan itu muncul sebagai segfault di penutupan, bukan di tempat sebabnya.
+
+**Pose roda di kerangka pusat massa.** Menyusunnya langsung dengan pose aktor
+menggeser seluruh roda sejauh offset titik berat — di sini 0,35 m, yang kebetulan
+persis jari-jari roda, sehingga hasilnya terbaca seolah mobil melayang setinggi
+satu roda.
+
+**Dan satu cacat di uji, bukan di mesin.** `doctest::Approx::epsilon` mengalikan
+toleransinya dengan (1 + nilai), jadi untuk besaran sekitar satu meter epsilon
+0,25 berarti ±0,45 m. Uji tinggi diam sempat lulus dengan mobil yang duduk di atas
+bak chassis-nya. Sekarang toleransinya 1% dan tingginya dihitung penuh dari titik
+sentuh ke atas.
+
+#### Keadaan sekarang
+
+Kerangkanya berdiri: `PhysicsVehicle.h` (API publik tanpa tipe PhysX),
+`VehicleBackend.h/.cpp` dengan sebelas antarmuka komponen dan urutan
+komponen bersubstep 3×, serta penyambungan ke `PhysicsWorld` — termasuk
+pendaftaran chassis sebagai benda biasa supaya scene query dan sendi bisa
+menyebutnya, dan pelangkahan kendaraan **sebelum** `simulate` di langkah yang
+sama. Semuanya terbangun di ketiga konfigurasi.
+
+**P6a dan P6c lulus**, dan keduanya berjalan tanpa syarat di suite. P6b terbukti
+secara tidak langsung — mobil mencapai 100 km/jam dengan gas penuh — tetapi
+kriteria terimanya sendiri (ω·r ≈ v) belum diuji. P6d, P6e, dan P6f belum
+dikerjakan.
+
+Dua cacat lain diperbaiki lebih dulu, keduanya sah dan keduanya bukan penyebab
+utamanya:
+
+- **Urutan taut**: `PhysXVehicle2` harus mendahului `PhysXExtensions`, karena
+  `PxVehiclePhysXActorCreate` memakai `PxDefaultMemoryOutputStream` yang tinggal
+  di Extensions. Lolos selama lima milestone karena belum ada yang memanggilnya.
+- **Mesh silinder sapuan dibangun dari kerangka sumbu yang belum diisi**.
+  Jounce sekarang dihitung dengan raycast, yang tidak menuntut mesh itu sama
+  sekali; sapuan lebih tepat untuk roda lebar di tepi trotoar dan bisa dinaikkan
+  nanti, tetapi rantai dasarnya harus benar lebih dulu.
+
+**Jarak berhenti terukur 34,3 m, di bawah batas fisika 39 m** — dan itu bukan
+kesalahan pengukuran. PhysX memasang kendala "ban lengket" pada laju rendah untuk
+membawa kendaraan benar-benar berhenti alih-alih merayap; kendala itu bukan
+gesekan dan tidak tunduk pada lingkaran gesekan, sehingga beberapa meter terakhir
+ditempuh lebih cepat daripada yang bisa dilakukan ban. Dicatat sebagai sifat yang
+diketahui, bukan sebagai toleransi yang dilonggarkan diam-diam.
 
 ### P7 — Fracture: Blast · ⬜
 

@@ -3,6 +3,7 @@ sim_add_library(Physics
         src/PhysicsScene.cpp
         src/PhysicsWorld.cpp
         src/Ragdoll.cpp
+        src/VehicleBackend.cpp
     PUBLIC_DEPS
         # **Yang tidak ada di daftar ini justru yang penting: Sim::Render.**
         # Modul ini menghasilkan transform; yang menggambarnya adalah
