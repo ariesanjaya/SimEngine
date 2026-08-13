@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 
 #include "Sim/Whitebox/HalfEdgeMesh.h"
+#include "Sim/Whitebox/Operations.h"
 #include "Sim/Whitebox/Polygon.h"
 
 #include <doctest/doctest.h>
@@ -375,4 +376,181 @@ TEST_CASE("rusuk yang menyudut menolak digabung") {
     loose.Reset(cube);
     CHECK(loose.MergeCoplanar(cube, 91.0f) > 0);
     REQUIRE(loose.CheckInvariants(cube).ok);
+}
+
+namespace {
+
+/// Volume mesh tertutup lewat teorema divergensi.
+///
+/// **Oracle-nya sengaja ditulis di sini, bukan di pustakanya.** Uji yang
+/// membandingkan hasil terhadap fungsi milik pustaka yang sama hanya menguji
+/// bahwa pustaka itu konsisten dengan dirinya sendiri.
+float ClosedVolume(const HalfEdgeMesh& mesh) {
+    float total = 0.0f;
+    for (uint32_t f = 0; f < mesh.FaceCount(); ++f) {
+        const std::vector<VertexHandle> loop = mesh.FaceVertices(static_cast<FaceHandle>(f));
+        // Kipas segitiga dari simpul pertama; sah untuk poligon cembung, dan
+        // seluruh face di uji ini cembung.
+        for (std::size_t i = 1; i + 1 < loop.size(); ++i) {
+            const Vec3& a = mesh.GetVertex(loop[0]).position;
+            const Vec3& b = mesh.GetVertex(loop[i]).position;
+            const Vec3& c = mesh.GetVertex(loop[i + 1]).position;
+            total += glm::dot(a, glm::cross(b, c)) / 6.0f;
+        }
+    }
+    return std::abs(total);
+}
+
+/// Poligon yang normalnya paling dekat dengan sebuah arah.
+PolygonHandle PolygonFacing(const HalfEdgeMesh& mesh, const PolygonSet& polygons,
+                            const Vec3& direction) {
+    PolygonHandle best = PolygonHandle::Invalid;
+    float bestDot = -2.0f;
+    for (const PolygonHandle polygon : polygons.Polygons()) {
+        const float dot = glm::dot(polygons.PolygonNormal(mesh, polygon), direction);
+        if (dot > bestDot) {
+            bestDot = dot;
+            best = polygon;
+        }
+    }
+    return best;
+}
+
+}  // namespace
+
+TEST_CASE("mengekstrusi satu sisi kubus menghasilkan volume yang dihitung") {
+    // **Kriteria terima W2.** Kubus satuan bervolume 1; mendorong sisi atasnya
+    // sejauh d menghasilkan balok 1x1x(1+d). Angkanya diketahui sebelum
+    // operasinya dijalankan — bukan dibaca dari hasilnya.
+    HalfEdgeMesh mesh = MakeUnitCube();
+    PolygonSet polygons;
+    polygons.Reset(mesh);
+
+    INFO("volume awal " << ClosedVolume(mesh));
+    CHECK(ClosedVolume(mesh) == doctest::Approx(1.0f).epsilon(0.001));
+
+    const PolygonHandle top = PolygonFacing(mesh, polygons, Vec3(0.0f, 1.0f, 0.0f));
+    REQUIRE(IsValid(top));
+
+    const float distance = 0.75f;
+    const EditResult extruded = ExtrudePolygon(mesh, polygons, top, distance);
+    INFO(extruded.error);
+    REQUIRE(extruded.ok);
+
+    // Empat dinding baru menempel pada enam sisi lama.
+    CHECK(mesh.FaceCount() == 10);
+    CHECK(mesh.VertexCount() == 12);
+
+    INFO("volume sesudah " << ClosedVolume(mesh) << ", diharapkan " << (1.0f + distance));
+    CHECK(ClosedVolume(mesh) == doctest::Approx(1.0f + distance).epsilon(0.001));
+
+    // Invarian W0 dan W1 tetap berlaku sesudah operasinya — ini yang menangkap
+    // bedah topologi yang menghasilkan bentuk benar tetapi struktur rusak.
+    const MeshCheck topology = mesh.CheckInvariants();
+    INFO(topology.error);
+    CHECK(topology.ok);
+    const MeshCheck grouping = polygons.CheckInvariants(mesh);
+    INFO(grouping.error);
+    CHECK(grouping.ok);
+}
+
+TEST_CASE("ekstrusi berulang menumpuk sesuai jumlahnya") {
+    // Sekali bisa benar karena kebetulan. Empat kali berturut-turut menguji
+    // bahwa hasil tiap langkah benar-benar bisa dipakai langkah berikutnya.
+    HalfEdgeMesh mesh = MakeUnitCube();
+    PolygonSet polygons;
+    polygons.Reset(mesh);
+
+    float expected = 1.0f;
+    for (int i = 0; i < 4; ++i) {
+        const PolygonHandle top = PolygonFacing(mesh, polygons, Vec3(0.0f, 1.0f, 0.0f));
+        REQUIRE(IsValid(top));
+        const EditResult extruded = ExtrudePolygon(mesh, polygons, top, 0.5f);
+        INFO("putaran " << i << ": " << extruded.error);
+        REQUIRE(extruded.ok);
+        expected += 0.5f;
+
+        INFO("putaran " << i << " volume " << ClosedVolume(mesh) << " vs " << expected);
+        CHECK(ClosedVolume(mesh) == doctest::Approx(expected).epsilon(0.002));
+        REQUIRE(mesh.CheckInvariants().ok);
+        REQUIRE(polygons.CheckInvariants(mesh).ok);
+    }
+}
+
+TEST_CASE("ekstrusi nol tidak mengubah apa pun") {
+    // Kriteria terima W2. Menumbuhkan dinding berluas nol menghasilkan face yang
+    // normalnya tidak tertentu — tidak terlihat sekarang, muncul jauh kemudian
+    // sebagai bercak gelap di pencahayaan.
+    HalfEdgeMesh mesh = MakeUnitCube();
+    PolygonSet polygons;
+    polygons.Reset(mesh);
+
+    const std::size_t facesBefore = mesh.FaceCount();
+    const std::size_t verticesBefore = mesh.VertexCount();
+    const float volumeBefore = ClosedVolume(mesh);
+
+    const PolygonHandle top = PolygonFacing(mesh, polygons, Vec3(0.0f, 1.0f, 0.0f));
+    const EditResult extruded = ExtrudePolygon(mesh, polygons, top, 0.0f);
+    REQUIRE(extruded.ok);
+
+    CHECK(mesh.FaceCount() == facesBefore);
+    CHECK(mesh.VertexCount() == verticesBefore);
+    CHECK(ClosedVolume(mesh) == doctest::Approx(volumeBefore));
+    CHECK(mesh.CheckInvariants().ok);
+}
+
+TEST_CASE("menggeser sisi memindahkannya tanpa menumbuhkan dinding") {
+    // Beda dari ekstrusi, dan bedanya harus terlihat: geser memindahkan sisi
+    // beserta dinding yang sudah menempel, bukan menumbuhkan yang baru.
+    HalfEdgeMesh mesh = MakeUnitCube();
+    PolygonSet polygons;
+    polygons.Reset(mesh);
+
+    const PolygonHandle top = PolygonFacing(mesh, polygons, Vec3(0.0f, 1.0f, 0.0f));
+    REQUIRE(IsValid(top));
+
+    const EditResult moved = TranslatePolygon(mesh, polygons, top, Vec3(0.0f, 0.5f, 0.0f));
+    INFO(moved.error);
+    REQUIRE(moved.ok);
+
+    // Tidak ada geometri baru.
+    CHECK(mesh.FaceCount() == 6);
+    CHECK(mesh.VertexCount() == 8);
+    // Tetapi bentuknya berubah: balok setinggi 1,5.
+    INFO("volume " << ClosedVolume(mesh));
+    CHECK(ClosedVolume(mesh) == doctest::Approx(1.5f).epsilon(0.001));
+
+    CHECK(mesh.CheckInvariants().ok);
+    CHECK(polygons.CheckInvariants(mesh).ok);
+}
+
+TEST_CASE("ekstrusi mempertahankan pengelompokan poligon yang sudah ada") {
+    // Nomor face dipertahankan justru supaya ini berlaku: sisi yang sudah
+    // digabung dari beberapa segitiga tetap satu sisi sesudah didorong. Kalau
+    // tidak, mendorong sisi kubus impor akan memecahnya kembali menjadi
+    // segitiga di tangan pengguna.
+    HalfEdgeMesh mesh = MakeUnitCubeTriangulated();
+    PolygonSet polygons;
+    polygons.Reset(mesh);
+    REQUIRE(polygons.MergeCoplanar(mesh) == 6);
+    REQUIRE(polygons.PolygonCount() == 6);
+
+    const PolygonHandle top = PolygonFacing(mesh, polygons, Vec3(0.0f, 1.0f, 0.0f));
+    REQUIRE(IsValid(top));
+    REQUIRE(polygons.PolygonFaces(top).size() == 2);
+
+    const EditResult extruded = ExtrudePolygon(mesh, polygons, top, 0.5f);
+    INFO(extruded.error);
+    REQUIRE(extruded.ok);
+
+    // Sisi atasnya masih satu poligon berisi dua segitiga.
+    const std::vector<FaceHandle> faces = polygons.PolygonFaces(extruded.polygon);
+    INFO("sisi atas kini berisi " << faces.size() << " face");
+    CHECK(faces.size() == 2);
+
+    // Dan volumenya tetap yang dihitung.
+    INFO("volume " << ClosedVolume(mesh));
+    CHECK(ClosedVolume(mesh) == doctest::Approx(1.5f).epsilon(0.002));
+    CHECK(mesh.CheckInvariants().ok);
+    CHECK(polygons.CheckInvariants(mesh).ok);
 }

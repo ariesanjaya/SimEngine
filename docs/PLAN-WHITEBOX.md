@@ -205,16 +205,39 @@ menjadi dua kepingan terpisah adalah sisi yang separuhnya tidak ikut bergerak
 saat didorong — dan itu terlihat sebagai bug ekstrusi, bukan sebagai bug
 pengelompokan.
 
-### W2 — Ekstrusi dan geser · ⬜
+### W2 — Ekstrusi dan geser · ✅
 
 Operasi yang membuatnya berguna: dorong sebuah sisi keluar dan mesh bertambah.
 
 **Kriteria terima**
 - Mengekstrusi satu sisi kubus sejauh d menghasilkan volume yang **dihitung**:
   balok 1×1×(1+d). Diperiksa terhadap rumus, bukan terhadap tangkapan layar.
-- Invarian W0 tetap berlaku sesudah setiap operasi.
+
+  Oracle volumenya ditulis di dalam ujinya lewat teorema divergensi, **bukan
+  dipanggil dari pustakanya**: uji yang membandingkan hasil terhadap fungsi milik
+  pustaka yang sama hanya menguji bahwa pustaka itu konsisten dengan dirinya
+  sendiri.
+
+  Diuji juga empat kali berturut-turut, karena sekali bisa benar karena
+  kebetulan — yang diuji putaran kedua adalah bahwa hasil putaran pertama
+  benar-benar bisa dipakai lagi.
+- Invarian W0 **dan** W1 tetap berlaku sesudah setiap operasi. Ini yang menangkap
+  bedah topologi yang menghasilkan bentuk benar tetapi struktur rusak — dan bentuk
+  benar adalah persis yang dilihat orang saat memutuskan sesuatu sudah selesai.
 - Ekstrusi nol tidak mengubah apa pun — bukan menghasilkan face berluas nol yang
   merusak normal di kemudian hari.
+- Sisi yang sudah digabung dari beberapa segitiga **tetap satu sisi** sesudah
+  didorong. Tanpa ini, mendorong sisi kubus impor akan memecahnya kembali menjadi
+  segitiga di tangan pengguna.
+
+**Meshnya dibangun ulang, bukan disulam.** Menyulam pointer half-edge di tempat
+adalah tempat bug topologi hidup, dan mesh blockout berukuran puluhan sampai
+ratusan sisi — membangunnya ulang memakan mikrodetik. Yang ditukar adalah
+kerumitan dengan waktu, dan pada ukuran ini waktunya tidak terasa.
+
+Konsekuensi yang menopang W5: **nomor face dipertahankan**, jadi poligon dan
+seleksi bertahan melewati operasi. Face baru selalu ditambahkan di belakang,
+tidak pernah disisipkan.
 
 ### W3 — Material per-sisi · ⬜
 
