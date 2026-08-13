@@ -814,6 +814,13 @@ std::size_t Terrain::TilesResident() const {
     return count;
 }
 
+bool Terrain::TileResident(int tileX, int tileY) const {
+    if (tileX < 0 || tileY < 0 || tileX >= desc_.tilesX || tileY >= desc_.tilesY) {
+        return false;
+    }
+    return tiles_[static_cast<std::size_t>(tileY * desc_.tilesX + tileX)] != nullptr;
+}
+
 std::size_t Terrain::BytesResident() const {
     const std::size_t samplesPerTile = static_cast<std::size_t>(desc_.tileSamples) *
                                        static_cast<std::size_t>(desc_.tileSamples);

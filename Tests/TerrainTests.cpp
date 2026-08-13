@@ -3,6 +3,7 @@
 #include "Sim/Terrain/Terrain.h"
 #include "Sim/Terrain/TerrainBrush.h"
 #include "Sim/Terrain/TerrainIo.h"
+#include "Sim/Terrain/TerrainMesh.h"
 
 // Diminta sendiri: Terrain memakai Sim::ImageIO secara PRIVATE. Kriteria terima
 // I3 berbunyi berbeda tergantung ada tidaknya libtiff, dan uji yang tidak bisa
@@ -1436,4 +1437,234 @@ TEST_CASE("round-trip 16-bit identik lewat kedua jalur penulis") {
         loaded.ReadAll(roundTripped);
         CHECK(roundTripped == original);
     }
+}
+
+// ============================================================================
+// L1 — heightmap menjadi mesh
+// ============================================================================
+
+namespace {
+
+/// Simpul mesh yang paling dekat dengan sebuah posisi dunia, atau nullptr.
+const assets::MeshVertex* VertexNear(const assets::MeshData& mesh, float x, float z) {
+    const assets::MeshVertex* best = nullptr;
+    float bestDistance = 1e30f;
+    for (const assets::MeshVertex& vertex : mesh.vertices) {
+        const float dx = vertex.position.x - x;
+        const float dz = vertex.position.z - z;
+        const float distance = dx * dx + dz * dz;
+        if (distance < bestDistance) {
+            bestDistance = distance;
+            best = &vertex;
+        }
+    }
+    return bestDistance < 1e-6f ? best : nullptr;
+}
+
+TerrainDesc SmallDesc() {
+    TerrainDesc desc;
+    desc.tileSamples = 8;
+    desc.tilesX = 2;
+    desc.tilesY = 2;
+    desc.sampleSpacing = 1.0f;
+    desc.minHeight = 0.0f;
+    desc.maxHeight = 100.0f;
+    return desc;
+}
+
+}  // namespace
+
+TEST_CASE("L1: tiap simpul mesh ubin cocok dengan HeightAt sampelnya") {
+    Terrain terrain(SmallDesc());
+    // Bentuk yang tidak rata, supaya "cocok" bukan pernyataan tentang bidang
+    // datar yang mana pun akan lolos.
+    for (int y = 0; y < terrain.SamplesY(); ++y) {
+        for (int x = 0; x < terrain.SamplesX(); ++x) {
+            terrain.SetHeightAt(x, y, static_cast<float>((x * 7 + y * 13) % 23));
+        }
+    }
+
+    const assets::MeshData mesh = BuildTileMesh(terrain, 0, 0);
+    REQUIRE(mesh.IsValid());
+
+    // Ubin dalam membentang S+1 sampel: miliknya sendiri, ditambah sampel
+    // pertama milik tetangganya.
+    CHECK(mesh.vertices.size() == 9 * 9);
+    CHECK(mesh.indices.size() == 8 * 8 * 6);
+
+    for (int y = 0; y <= 8; ++y) {
+        for (int x = 0; x <= 8; ++x) {
+            const assets::MeshVertex* vertex = VertexNear(
+                mesh, static_cast<float>(x), static_cast<float>(y));
+            REQUIRE_MESSAGE(vertex != nullptr, "simpul (", x, ",", y, ") tidak ada");
+            CHECK(vertex->position.y == doctest::Approx(terrain.HeightAt(x, y)).epsilon(0.001));
+        }
+    }
+}
+
+TEST_CASE("L1: jahitan antar ubin berbagi simpul yang sama persis") {
+    // **Kriteria terima L1.** Retakan di batas ubin adalah cacat terrain yang
+    // paling khas, dan ia lahir dari dua ubin yang tidak sepakat tentang satu
+    // baris sampel. Di sini tidak ada baris yang disalin — yang di kanan
+    // membaca sampel yang sama lewat `RawAt`.
+    Terrain terrain(SmallDesc());
+    for (int y = 0; y < terrain.SamplesY(); ++y) {
+        for (int x = 0; x < terrain.SamplesX(); ++x) {
+            terrain.SetHeightAt(x, y, static_cast<float>((x * 3 + y * 5) % 17));
+        }
+    }
+
+    const assets::MeshData left = BuildTileMesh(terrain, 0, 0);
+    const assets::MeshData right = BuildTileMesh(terrain, 1, 0);
+    REQUIRE(left.IsValid());
+    REQUIRE(right.IsValid());
+
+    // Kolom x = 8 dimiliki ubin kanan dan dibaca ubin kiri. Keduanya harus
+    // menjawab tinggi **dan normal** yang sama persis: tinggi yang sama dengan
+    // normal berbeda tetap menghasilkan garis terang yang membelah peta.
+    for (int y = 0; y <= 8; ++y) {
+        const assets::MeshVertex* fromLeft = VertexNear(left, 8.0f, static_cast<float>(y));
+        const assets::MeshVertex* fromRight = VertexNear(right, 8.0f, static_cast<float>(y));
+        REQUIRE(fromLeft != nullptr);
+        REQUIRE(fromRight != nullptr);
+        INFO("baris y = " << y);
+        CHECK(fromLeft->position.y == fromRight->position.y);
+        CHECK(fromLeft->normal.x == fromRight->normal.x);
+        CHECK(fromLeft->normal.y == fromRight->normal.y);
+        CHECK(fromLeft->normal.z == fromRight->normal.z);
+    }
+}
+
+TEST_CASE("L1: ubin terakhir berhenti di tepi peta, tidak melampauinya") {
+    // Sampel terakhir peta adalah `SamplesX() - 1`, dan lebar dunia dihitung
+    // darinya. Ubin yang membentang satu sampel lebih jauh seperti tetangganya
+    // akan menumbuhkan jalur datar di luar peta — yang paling terlihat, karena
+    // di situlah orang berdiri untuk melihat batas dunia.
+    Terrain terrain(SmallDesc());
+    const assets::MeshData last = BuildTileMesh(terrain, 1, 1);
+    REQUIRE(last.IsValid());
+
+    CHECK(last.boundsMax.x == doctest::Approx(terrain.WorldWidth()).epsilon(0.001));
+    CHECK(last.boundsMax.z == doctest::Approx(terrain.WorldDepth()).epsilon(0.001));
+    // 8 sampel miliknya, tanpa satu pun dari tetangga yang tidak ada: 7 quad.
+    CHECK(last.vertices.size() == 8 * 8);
+    CHECK(last.indices.size() == 7 * 7 * 6);
+}
+
+TEST_CASE("L1: satu sampel hole membuang tepat satu quad") {
+    Terrain terrain(SmallDesc());
+    const assets::MeshData solid = BuildTileMesh(terrain, 0, 0);
+    REQUIRE(solid.IsValid());
+
+    terrain.SetHoleAt(3, 4, true);
+    const assets::MeshData holed = BuildTileMesh(terrain, 0, 0);
+    REQUIRE(holed.IsValid());
+
+    // Enam indeks lebih sedikit, dan simpulnya tetap: membuang simpul berarti
+    // menomori ulang seluruh mesh untuk satu quad.
+    CHECK(holed.indices.size() + 6 == solid.indices.size());
+    CHECK(holed.vertices.size() == solid.vertices.size());
+}
+
+TEST_CASE("L1: ubin yang seluruhnya berlubang tidak menghasilkan apa pun") {
+    Terrain terrain(SmallDesc());
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            terrain.SetHoleAt(x, y, true);
+        }
+    }
+    const assets::MeshData mesh = BuildTileMesh(terrain, 0, 0);
+    CHECK_FALSE(mesh.IsValid());
+    // Tanpa segitiga, simpulnya pun tidak diterbitkan: mengunggahnya adalah
+    // memori GPU untuk sesuatu yang tidak akan pernah tergambar.
+    CHECK(mesh.vertices.empty());
+}
+
+TEST_CASE("L1: membangun mesh tidak mewujudkan ubin mana pun") {
+    // **Alokasi malas adalah seluruh alasan terrain sebesar ini muat di
+    // memori.** Pembaca yang mewujudkan ubin hanya dengan membacanya
+    // membatalkannya diam-diam, dan yang terlihat bukan galat melainkan editor
+    // yang menghabiskan RAM saat membuka peta.
+    Terrain terrain(SmallDesc());
+    REQUIRE(terrain.TilesResident() == 0);
+
+    for (int ty = 0; ty < 2; ++ty) {
+        for (int tx = 0; tx < 2; ++tx) {
+            const assets::MeshData mesh = BuildTileMesh(terrain, tx, ty);
+            CHECK(mesh.IsValid());
+        }
+    }
+    CHECK(terrain.TilesResident() == 0);
+
+    // Dan menulis satu sampel mewujudkan tepat satu ubin, supaya angka di atas
+    // bukan sekadar pencacah yang tidak pernah bergerak.
+    terrain.SetHeightAt(1, 1, 5.0f);
+    CHECK(terrain.TilesResident() == 1);
+    CHECK(terrain.TileResident(0, 0));
+    CHECK_FALSE(terrain.TileResident(1, 0));
+}
+
+TEST_CASE("L1: normal datang dari heightmap, bukan dari segitiga") {
+    Terrain terrain(SmallDesc());
+    // Lereng tetap: tinggi naik satu meter tiap sampel ke arah +X, jarak sampel
+    // satu meter. Normalnya karena itu (−1, 1, 0)/√2 di mana pun — angka yang
+    // diketahui sebelum meshnya dibangun.
+    for (int y = 0; y < terrain.SamplesY(); ++y) {
+        for (int x = 0; x < terrain.SamplesX(); ++x) {
+            terrain.SetHeightAt(x, y, static_cast<float>(x));
+        }
+    }
+
+    const float root = std::sqrt(0.5f);
+    const Vec3 normal = SampleNormal(terrain, 4, 4);
+    CHECK(normal.x == doctest::Approx(-root).epsilon(0.001));
+    CHECK(normal.y == doctest::Approx(root).epsilon(0.001));
+    CHECK(normal.z == doctest::Approx(0.0f).epsilon(0.001));
+
+    // Dan mesh-nya membawa normal itu apa adanya. Normal segitiga akan menjawab
+    // hal yang sama untuk lereng tetap ini — karena itu pemeriksaan di bawah
+    // membandingkan **dua simpul satu quad**: normal segitiga membuat keduanya
+    // berbeda pada permukaan yang melengkung, dan sama pada yang datar.
+    const assets::MeshData mesh = BuildTileMesh(terrain, 0, 0);
+    REQUIRE(mesh.IsValid());
+    const assets::MeshVertex* vertex = VertexNear(mesh, 4.0f, 4.0f);
+    REQUIRE(vertex != nullptr);
+    CHECK(vertex->normal.x == doctest::Approx(-root).epsilon(0.001));
+    CHECK(vertex->normal.y == doctest::Approx(root).epsilon(0.001));
+
+    // Normal tegak lurus tangent-nya, karena keduanya diturunkan dari satu
+    // sumber. Dua perhitungan terpisah adalah dua yang bisa berselisih, dan
+    // yang berselisih di sini muncul sebagai peta normal yang miring.
+    const Vec3 tangent(vertex->tangent);
+    CHECK(glm::dot(tangent, Vec3(vertex->normal)) == doctest::Approx(0.0f).epsilon(0.001));
+    CHECK(glm::length(tangent) == doctest::Approx(1.0f).epsilon(0.001));
+}
+
+TEST_CASE("L1: normalnya beda tengah, bukan beda maju") {
+    // Lereng tetap tidak bisa membedakan keduanya — pada garis lurus setiap
+    // beda hingga menjawab hal yang sama. Yang membedakannya permukaan
+    // melengkung, dan itu justru keadaan biasa sebuah terrain.
+    //
+    // h(x) = x² pada jarak sampel satu meter. Di x = 4: beda tengah menjawab
+    // (25 − 9)/2 = 8, yang persis turunan analitiknya; beda maju menjawab
+    // 25 − 16 = 9. Selisih satu itulah yang membuat uji ini berarti.
+    TerrainDesc desc = SmallDesc();
+    desc.maxHeight = 1000.0f;
+    Terrain terrain(desc);
+    for (int y = 0; y < terrain.SamplesY(); ++y) {
+        for (int x = 0; x < terrain.SamplesX(); ++x) {
+            terrain.SetHeightAt(x, y, static_cast<float>(x * x));
+        }
+    }
+
+    // **Lerengnya yang diperiksa, bukan komponen normal yang sudah ternormalisasi.**
+    // Pada lereng securam ini normalisasi memampatkan selisihnya: lereng 8 dan
+    // lereng 9 hanya berbeda 0,0016 pada sumbu x, yang tenggelam di bawah
+    // toleransi mana pun yang masuk akal. Lerengnya sendiri berbeda 12%.
+    const Vec3 normal = SampleNormal(terrain, 4, 4);
+    const float slope = -normal.x / normal.y;
+    INFO("lereng terbaca " << slope);
+    CHECK(slope == doctest::Approx(8.0f).epsilon(0.01));
+    // Dan **bukan** beda maju, yang akan menjawab 9.
+    CHECK(std::abs(slope - 9.0f) > 0.5f);
 }

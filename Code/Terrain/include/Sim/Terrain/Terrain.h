@@ -287,6 +287,12 @@ public:
     /// jurnal undo. Dipakai test anggaran memori dan panel.
     std::size_t BytesResident() const;
     std::size_t TilesResident() const;
+    /// Apakah sebuah ubin sudah pernah ditulis.
+    ///
+    /// Dipakai yang menggambar dan yang menabrak: ubin yang belum pernah
+    /// disentuh datar setinggi `baseHeight`, dan membangun geometri untuknya
+    /// berarti membayar seluruh peta demi bentuk yang sudah diketahui.
+    bool TileResident(int tileX, int tileY) const;
     std::size_t UndoBytes() const { return undoBytes_; }
 
 private:

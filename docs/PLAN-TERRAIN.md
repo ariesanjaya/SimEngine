@@ -94,21 +94,60 @@ menjatuhkannya di tempat kursor kebetulan berada menaruh peta empat kilometer di
 sembarang tempat — dan hampir setiap kali yang berikutnya dilakukan orang adalah
 menolkan transformnya kembali.
 
-### L1 — Heightmap → mesh · ⬜
+### L1 — Heightmap → mesh · ✅
 
 `Sim::Terrain` menghasilkan geometri yang bisa digambar.
 
-- `BuildTileMesh(terrain, tileX, tileY, lod)` → `assets::MeshData`.
-- Normal dihitung dari heightmap, bukan dari segitiga: normal per-segitiga
-  membuat lereng landai terlihat berundak.
-- Sampel hole membuang quad-nya, bukan menurunkannya.
-
 **Kriteria terima**
-- Setiap simpul mesh sebuah ubin cocok dengan `HeightAt` pada sampel itu.
-- **Jahitan antar ubin tidak berlubang**: ubin membaca satu baris dari
-  tetangganya lewat `RawAt`, dan mesh dua ubin bersebelahan berbagi tepi yang
-  sama persis.
-- Satu sampel hole membuang tepat quad yang menyentuhnya, tidak lebih.
+- Setiap simpul mesh sebuah ubin cocok dengan `HeightAt` pada sampel itu. ✅
+  Diuji pada bentuk yang tidak rata, supaya "cocok" bukan pernyataan yang bidang
+  datar mana pun akan lolos.
+- **Jahitan antar ubin tidak berlubang.** ✅ Ubin membentang satu sampel lebih
+  jauh daripada miliknya, sampai sampel pertama tetangganya, dan membacanya
+  lewat `RawAt`. Yang dibaca hanya dibaca — tidak ada baris tepi yang disalin,
+  jadi tidak ada dua salinan yang bisa berbeda. Memotong bentangan itu satu
+  sampel menggugurkan dua uji.
+- Satu sampel hole membuang tepat satu quad. ✅ Lubang di mesin ini memang
+  **per-quad**, diindeks sampel kiri-bawahnya — jadi "tepat satu" adalah
+  pernyataan yang bisa diucapkan tanpa syarat.
+
+**Normalnya beda tengah heightmap, bukan normal segitiga dan bukan
+`NormalAtWorld`.** Dua alasan, keduanya tentang jahitan. Normal segitiga membuat
+lereng landai terlihat berundak, karena dua segitiga satu quad punya normal
+berbeda sementara permukaannya mulus. Dan beda tengah adalah fungsi murni dari
+koordinat sampel **global**, jadi simpul yang dimiliki dua ubin mendapat normal
+yang sama persis dari keduanya — sementara `NormalAtWorld` menjawab gradien sel
+bilinear, yang tepat di titik sampel memilih selnya secara asimetris. Benar,
+tetapi tidak simetris, dan yang tidak simetris di tepi ubin adalah garis terang
+yang membelah peta.
+
+Ujinya memeriksa **lerengnya**, bukan komponen normal yang sudah ternormalisasi.
+Versi pertamanya memeriksa `normal.x` dan gagal terhadap implementasi yang benar:
+pada lereng curam, normalisasi memampatkan selisihnya sampai lereng 8 dan lereng
+9 hanya berbeda 0,0016 — di bawah toleransi mana pun yang masuk akal. Lerengnya
+sendiri berbeda 12%. Dan lereng **tetap** tidak bisa membedakan beda tengah dari
+beda maju sama sekali; yang membedakannya permukaan melengkung, yang justru
+keadaan biasa sebuah terrain.
+
+**Ubin terakhir peta berhenti di sampel terakhir**, bukan membentang satu sampel
+lebih jauh seperti tetangganya. Yang melampauinya menumbuhkan jalur datar di
+luar peta — dan itu paling terlihat, karena di situlah orang berdiri untuk
+melihat batas dunia. Konsekuensinya ubin terakhir punya S−1 quad, bukan S, dan
+S−1 tidak habis dibagi langkah LOD mana pun kecuali satu; karena itu kolom
+terakhir selalu diikutkan walaupun langkahnya tidak mendarat tepat padanya.
+
+**Membangun mesh tidak mewujudkan ubin mana pun.** Ia hanya membaca lewat
+`RawAt`, yang menjawab tinggi dasar untuk ubin yang belum pernah ditulis.
+Alokasi malas adalah seluruh alasan terrain sebesar ini muat di memori, dan
+pembaca yang mewujudkan ubin hanya dengan membacanya membatalkannya diam-diam —
+yang terlihat bukan galat melainkan editor yang menghabiskan RAM saat membuka
+peta. Diuji, dan mutasi yang menulis balik sampel yang baru dibacanya
+menggugurkan ujinya.
+
+**UV dalam meter**, bukan 0..1 per ubin. Layer terrain menyebut ukurannya dalam
+meter per pengulangan (`TerrainLayer::tileSize`), dan UV yang diregangkan per
+ubin membuat pengulangan itu berubah ukuran setiap kali seseorang mengganti
+jumlah ubin.
 
 ### L2 — LOD · ⬜
 
