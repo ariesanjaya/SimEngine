@@ -10,7 +10,9 @@
 #include "Sim/Editor/ProjectLibrary.h"
 #include "Sim/Editor/Selection.h"
 #include "Sim/Editor/SkinnedPreview.h"
+#include "Sim/Editor/WhiteboxCommands.h"
 #include "Sim/Physics/PhysicsScene.h"
+#include "Sim/Whitebox/WhiteboxIo.h"
 #include "Sim/Scene/Components.h"
 
 #include <cmath>
@@ -1320,4 +1322,76 @@ TEST_CASE("Play menjalankan fisika, Stop mengembalikan level seperti semula") {
     CHECK(groundBody->kind == scene::RigidBodyKind::Static);
 
     app.Shutdown();
+}
+
+TEST_CASE("satu seretan whitebox menghasilkan tepat satu entri undo") {
+    // **Kriteria terima W5**, aturan yang sama dengan seretan gizmo transform:
+    // seretan nyata menghasilkan satu perintah per frame, dan semuanya harus
+    // menyatu. Kalau tidak, membatalkannya butuh puluhan Ctrl+Z — dan itu yang
+    // dirasakan pengguna sebagai undo yang rusak.
+    whitebox::WhiteboxMesh box = whitebox::WhiteboxMesh::MakeCube();
+    const whitebox::WhiteboxData start = box.ToData();
+
+    CommandHistory history;
+    const std::vector<whitebox::PolygonHandle> sides = box.Polygons().Polygons();
+    REQUIRE(sides.size() == 6);
+
+    // Empat puluh frame seretan: tiap frame mendorong sedikit lebih jauh dari
+    // keadaan awal, persis seperti gizmo yang dipegang.
+    for (int frame = 1; frame <= 40; ++frame) {
+        whitebox::WhiteboxMesh preview;
+        std::string error;
+        REQUIRE(whitebox::WhiteboxMesh::Build(preview, start, error));
+        const whitebox::PolygonHandle top =
+            preview.Polygons().Polygons()[static_cast<std::size_t>(sides.front())];
+        const whitebox::WhiteboxData before = box.ToData();
+        REQUIRE(preview.Extrude(top, static_cast<float>(frame) * 0.05f).ok);
+
+        history.Execute(std::make_unique<WhiteboxEditCommand>(&box, before, preview.ToData(),
+                                                              "Extrude"));
+    }
+    history.CloseMergeGroup();
+
+    INFO(history.Entries().size() << " entri");
+    CHECK(history.Entries().size() == 1);
+
+    // Membatalkannya sekali mengembalikan bentuk semula **persis**.
+    REQUIRE(history.Undo());
+    CHECK(whitebox::SaveToString(box) ==
+          [&] {
+              whitebox::WhiteboxMesh original;
+              std::string error;
+              whitebox::WhiteboxMesh::Build(original, start, error);
+              return whitebox::SaveToString(original);
+          }());
+
+    // Dan mengulanginya membawa kembali ke ujung seretan, bukan ke tengahnya.
+    REQUIRE(history.Redo());
+    CHECK(box.Mesh().FaceCount() == 10);
+    CHECK(box.CheckInvariants().ok);
+}
+
+TEST_CASE("menetapkan material sisi bisa dibatalkan, dan sisi berbeda tidak digabung") {
+    whitebox::WhiteboxMesh box = whitebox::WhiteboxMesh::MakeCube();
+    const std::vector<whitebox::PolygonHandle> sides = box.Polygons().Polygons();
+    REQUIRE(sides.size() == 6);
+
+    CommandHistory history;
+    history.Execute(std::make_unique<SetPolygonMaterialCommand>(&box, sides[0], 2));
+    history.Execute(std::make_unique<SetPolygonMaterialCommand>(&box, sides[0], 5));
+    // Sisi yang sama, satu gerakan: menyatu.
+    CHECK(history.Entries().size() == 1);
+    CHECK(box.PolygonMaterial(sides[0]) == 5);
+
+    // **Sisi berbeda adalah keputusan baru pengguna.** Menggabungkannya berarti
+    // satu Ctrl+Z membatalkan dua penetapan yang tidak berhubungan.
+    history.Execute(std::make_unique<SetPolygonMaterialCommand>(&box, sides[1], 3));
+    CHECK(history.Entries().size() == 2);
+
+    REQUIRE(history.Undo());
+    CHECK(box.PolygonMaterial(sides[1]) == whitebox::kNoMaterial);
+    CHECK(box.PolygonMaterial(sides[0]) == 5);
+
+    REQUIRE(history.Undo());
+    CHECK(box.PolygonMaterial(sides[0]) == whitebox::kNoMaterial);
 }

@@ -295,16 +295,41 @@ bersama: yang satu menyimpan rujukan ke topologi yang bisa disunting, yang lain
 menggambar segitiga hasilnya beserta material per ruasnya. Menyatukannya berarti
 setiap mesh impor ikut membawa medan whitebox yang tidak pernah dipakainya.
 
-### W5 — Penyuntingan di viewport · ⬜
+### W5 — Penyuntingan di viewport · 🔶 inti selesai, panel belum
 
 Pilih sisi, dorong dengan gizmo, tetapkan material.
 
 **Kriteria terima**
-- Memilih sisi memilih **poligon**, bukan segitiga di bawah kursor.
+- Memilih sisi memilih **poligon**, bukan segitiga di bawah kursor. ✅
+
+  Diuji dengan dua sinar yang mengenai **dua segitiga berbeda** pada sisi atas
+  kubus tersegitigakan: face-nya berlainan, poligonnya sama. Sisi belakang ikut
+  bisa diklik — perancang kerap bekerja dari dalam ruangan yang baru dibuatnya,
+  dan dinding yang tidak bisa dipilih dari dalam berarti dinding yang tidak bisa
+  dipindahkan tanpa memutar kamera keluar.
 - Satu seretan gizmo menghasilkan **satu** entri undo, aturan yang sama dengan
-  seretan transform yang sudah ada.
+  seretan transform yang sudah ada. ✅
+
+  Diuji dengan empat puluh frame seretan: satu entri, dan membatalkannya sekali
+  mengembalikan berkas yang byte-nya sama persis dengan sebelum seretan.
 - Menetapkan material ke sisi terpilih terlihat seketika, tanpa memuat ulang
-  aset.
+  aset. ✅ untuk perintahnya — penetapan bisa dibatalkan, dan **sisi berbeda
+  tidak digabung** karena berpindah sisi adalah keputusan baru pengguna.
+
+**Yang belum: panel dan gizmo-nya sendiri.** Yang sudah ada adalah seluruh yang
+bisa diuji tanpa ImGui — picking, perintah, dan penggabungan undo. Menyambungkan
+keduanya ke viewport menuntut verifikasi visual, dan itu tidak bisa dibuktikan
+uji headless.
+
+Cuplikan undo-nya **utuh, bukan tambalan**: operasi whitebox membangun ulang
+meshnya (keputusan W2), jadi tidak ada tambalan kecil yang bisa disimpan. Mesh
+blockout berukuran puluhan sampai ratusan sisi — cuplikannya beberapa kilobyte,
+dan ia persis terbalikkan. `MemoryCost` melaporkan ukuran sebenarnya supaya batas
+memori riwayat tetap berarti.
+
+Penetapan material dipisahkan dari perubahan bentuk: menyimpan cuplikan mesh utuh
+untuk mengganti satu bilangan bulat berarti riwayat yang penuh oleh salinan
+geometri yang tidak berubah.
 
 ### W6 — Collider dan ekspor · ⬜
 

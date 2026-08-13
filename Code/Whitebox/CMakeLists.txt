@@ -2,6 +2,7 @@ sim_add_library(Whitebox
     SOURCES
         src/HalfEdgeMesh.cpp
         src/Operations.cpp
+        src/Picking.cpp
         src/Polygon.cpp
         src/WhiteboxIo.cpp
         src/WhiteboxMesh.cpp

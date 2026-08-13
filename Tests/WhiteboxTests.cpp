@@ -2,6 +2,7 @@
 
 #include "Sim/Whitebox/HalfEdgeMesh.h"
 #include "Sim/Whitebox/Operations.h"
+#include "Sim/Whitebox/Picking.h"
 #include "Sim/Whitebox/WhiteboxIo.h"
 #include "Sim/Whitebox/WhiteboxMesh.h"
 #include "Sim/Whitebox/Polygon.h"
@@ -806,4 +807,62 @@ TEST_CASE("berkas whitebox bolak-balik lewat disk") {
     CHECK(loaded.UsedMaterialCount() == 2);  // slot 7 dan sisanya tanpa material
 
     std::filesystem::remove_all(directory, ec);
+}
+
+TEST_CASE("menunjuk sisi memilih poligon, bukan segitiga di bawah kursor") {
+    // **Kriteria terima W5.** Pengguna menunjuk sebuah sisi; bahwa sisi itu
+    // kebetulan tersusun dari dua segitiga adalah urusan mesin. Mengembalikan
+    // segitiga berarti mendorong "sisi" hanya menggerakkan separuhnya.
+    WhiteboxMesh box = WhiteboxMesh::MakeTriangulatedCube();
+    REQUIRE(box.MergeCoplanar() == 6);
+    REQUIRE(box.Polygons().PolygonCount() == 6);
+
+    // Dua sinar yang mengenai dua segitiga **berbeda** pada sisi atas yang sama.
+    // Diagonalnya membelah quad dari sudut ke sudut, jadi titik di kedua sisi
+    // diagonal itu jatuh di segitiga yang berlainan.
+    const PolygonHit a =
+        PickPolygon(box, Vec3(-0.3f, 2.0f, -0.2f), Vec3(0.0f, -1.0f, 0.0f));
+    const PolygonHit b =
+        PickPolygon(box, Vec3(0.3f, 2.0f, 0.2f), Vec3(0.0f, -1.0f, 0.0f));
+    REQUIRE(a.hit);
+    REQUIRE(b.hit);
+
+    INFO("face " << static_cast<uint32_t>(a.face) << " dan "
+                 << static_cast<uint32_t>(b.face));
+    CHECK(a.face != b.face);
+    // **Tetapi poligonnya sama.** Inilah yang diuji.
+    CHECK(a.polygon == b.polygon);
+
+    // Dan poligon itu memang sisi atasnya.
+    const Vec3 normal = box.Polygons().PolygonNormal(box.Mesh(), a.polygon);
+    CHECK(normal.y == doctest::Approx(1.0f).epsilon(0.01));
+
+    // Jaraknya terukur: dari y = 2 ke permukaan y = 0,5.
+    CHECK(a.distance == doctest::Approx(1.5f).epsilon(0.01));
+    CHECK(a.position.y == doctest::Approx(0.5f).epsilon(0.01));
+}
+
+TEST_CASE("sinar yang meleset dan yang menembus dari dalam") {
+    WhiteboxMesh box = WhiteboxMesh::MakeCube();
+
+    // Meleset di samping kubus.
+    CHECK_FALSE(PickPolygon(box, Vec3(5.0f, 2.0f, 0.0f), Vec3(0.0f, -1.0f, 0.0f)).hit);
+    // Arah bernorma nol ditolak alih-alih ditebak.
+    CHECK_FALSE(PickPolygon(box, Vec3(0.0f, 2.0f, 0.0f), Vec3(0.0f)).hit);
+    // Jangkauan yang lebih pendek daripada sasarannya tidak menjangkaunya.
+    CHECK_FALSE(PickPolygon(box, Vec3(0.0f, 2.0f, 0.0f), Vec3(0.0f, -1.0f, 0.0f), 1.0f).hit);
+
+    // **Dari dalam ruangan, sisi belakang tetap bisa diklik.** Perancang kerap
+    // bekerja dari dalam yang baru dibuatnya, dan dinding yang tidak bisa
+    // dipilih dari dalam berarti dinding yang tidak bisa dipindahkan tanpa
+    // memutar kamera keluar.
+    const PolygonHit inside = PickPolygon(box, Vec3(0.0f), Vec3(0.0f, 1.0f, 0.0f));
+    REQUIRE(inside.hit);
+    CHECK(inside.distance == doctest::Approx(0.5f).epsilon(0.01));
+
+    // Yang terdekat yang dipilih: dari luar, sisi depan mendahului sisi belakang.
+    const PolygonHit outside =
+        PickPolygon(box, Vec3(0.0f, 0.0f, 3.0f), Vec3(0.0f, 0.0f, -1.0f));
+    REQUIRE(outside.hit);
+    CHECK(outside.position.z == doctest::Approx(0.5f).epsilon(0.01));
 }
