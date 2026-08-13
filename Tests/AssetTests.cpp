@@ -2,8 +2,13 @@
 
 #include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Assets/Importer.h"
+#include "Sim/Assets/MaterialImport.h"
 #include "Sim/Assets/MeshData.h"
 #include "Sim/Assets/MeshSettings.h"
+#include "Sim/Assets/Thumbnail.h"
+#include "Sim/Material/MaterialGraph.h"
+#include "Sim/Material/MaterialValidation.h"
+
 #include "Sim/Core/FileWatcher.h"
 #include "Sim/Core/TaskPool.h"
 
@@ -706,8 +711,9 @@ TEST_CASE("rig ber-skin terbaca dengan satuan yang sejalan antara mesh dan rangk
     }
 
     // **Ini uji yang menentukan, dan yang menangkap satu bug sungguhan.**
-    // Konversi satuan ufbx dipanggang ke transform node root, jadi transform
-    // lokal anak-anaknya tetap dalam satuan asli berkasnya. Bind pose yang
+    // Konversi satuan yang dipanggang ke transform node root — yang dilakukan
+    // `FbxSystemUnit::ConvertScene`, dan karena itu tidak dipakai importirnya —
+    // meninggalkan transform lokal anak-anaknya dalam satuan asli. Bind pose yang
     // diambil apa adanya dari sana menghasilkan rangka seratus kali lebih besar
     // daripada kulitnya — dan kulit yang diulit rangka seratus kali terlalu
     // besar tidak menghasilkan satu pun galat, ia menghasilkan karakter yang
@@ -1047,4 +1053,279 @@ TEST_CASE("Berkas pengaturan mesh tidak ikut terdaftar sebagai aset") {
     CHECK(db.All().size() == 1);
     CHECK(db.FindByRelativePath("rig.fbx.simmeshcfg") == nullptr);
     CHECK_FALSE(std::filesystem::exists(temp.Path() / "rig.fbx.simmeshcfg.meta"));
+}
+
+TEST_CASE("unitCube.usda terbaca dalam meter dan Y-atas") {
+    using namespace sim::assets;
+
+    const std::filesystem::path path =
+        std::filesystem::path(SIM_MESH_DIR) / "unitCube.usda";
+    if (!std::filesystem::exists(path)) {
+        return;  // aset opsional; ketiadaannya bukan kegagalan uji
+    }
+
+    std::string error;
+    const MeshData mesh = LoadMesh(path, error);
+
+    // Build tanpa OpenUSD menolak berkasnya dengan alasan yang menyebut mesinnya.
+    // Itu jawaban yang benar untuk build itu, bukan kegagalan uji.
+    if (!mesh.IsValid() && error.find("no USD support") != std::string::npos) {
+        return;
+    }
+
+    REQUIRE(mesh.IsValid());
+    CHECK(error.empty());
+    // Enam muka segi empat, masing-masing jadi dua segitiga.
+    CHECK(mesh.TriangleCount() == 12);
+
+    // **Tiga konversi sekaligus, dan berkasnya dibuat supaya tidak ada yang bisa
+    // dilewati.** Panggungnya sentimeter, sumbu atasnya Z, dan kubusnya digeser
+    // oleh Xform induknya. Yang benar: kubus satu meter yang berdiri di atas
+    // bidang nol. Satuan yang tidak dikonversi membuatnya seratus kali lebih
+    // besar, sumbu yang tidak diputar menidurkannya, dan transform yang tidak
+    // dipanggang menguburnya setengah di bawah nol.
+    const Vec3 size = mesh.boundsMax - mesh.boundsMin;
+    CHECK(size.x == doctest::Approx(1.0f));
+    CHECK(size.y == doctest::Approx(1.0f));
+    CHECK(size.z == doctest::Approx(1.0f));
+    CHECK(mesh.boundsMin.y == doctest::Approx(0.0f));
+    CHECK(mesh.boundsMax.y == doctest::Approx(1.0f));
+
+    // Material terikatnya ikut terbaca, dengan nilai yang memang ada di berkasnya.
+    REQUIRE(mesh.materials.size() == 1);
+    CHECK(mesh.materials[0].name == "Paint");
+    CHECK(mesh.materials[0].baseColor.x == doctest::Approx(0.8f));
+    CHECK(mesh.materials[0].metalness == doctest::Approx(0.25f));
+    CHECK(mesh.materials[0].roughness == doctest::Approx(0.6f));
+}
+
+TEST_CASE("OBJ tanpa satuan terbaca sebagai meter, bukan sentimeter") {
+    using namespace sim::assets;
+
+    const std::filesystem::path path =
+        std::filesystem::path(SIM_MESH_DIR) / "unitTriangle.obj";
+    if (!std::filesystem::exists(path)) {
+        return;  // aset opsional; ketiadaannya bukan kegagalan uji
+    }
+
+    std::string error;
+    const MeshData mesh = LoadMesh(path, error);
+    REQUIRE(mesh.IsValid());
+    CHECK(error.empty());
+    CHECK(mesh.TriangleCount() == 1);
+
+    // **Seratus kali, dan itu satu-satunya angka yang menarik di sini.** OBJ
+    // tidak menyebut satuannya di mana pun, dan FBX SDK melaporkan panggung yang
+    // tidak menyebutnya sebagai sentimeter — bawaan pustakanya, bukan sesuatu
+    // yang ada di berkasnya. Importir yang mengalikannya seperti satuan
+    // sungguhan menghasilkan segitiga 2 x 3 sentimeter dari berkas yang jelas
+    // menuliskan 2 dan 3.
+    CHECK((mesh.boundsMax.x - mesh.boundsMin.x) == doctest::Approx(2.0f));
+    CHECK((mesh.boundsMax.y - mesh.boundsMin.y) == doctest::Approx(3.0f));
+}
+
+TEST_CASE("Tangent tiap vertex membentuk bingkai yang sah untuk peta normal") {
+    using namespace sim::assets;
+
+    // Ketiganya melewati importir yang berbeda — FBX, USD, dan OBJ lewat FBX
+    // SDK — dan bingkai tangent harus sah di ketiganya. Peta normal dibaca di
+    // ruang tangent, jadi bingkai yang miring atau merosot membelokkan cahaya
+    // ke arah yang salah tanpa menghasilkan satu pun galat.
+    for (const char* name : {"unitCube.usda", "unitTriangle.obj", "shaderBall.fbx"}) {
+        const std::filesystem::path path = std::filesystem::path(SIM_MESH_DIR) / name;
+        if (!std::filesystem::exists(path)) {
+            continue;  // aset opsional
+        }
+        std::string error;
+        const MeshData mesh = LoadMesh(path, error);
+        if (!mesh.IsValid() && error.find("no USD support") != std::string::npos) {
+            continue;  // build tanpa OpenUSD
+        }
+        INFO("mesh " << name << " error '" << error << "'");
+        REQUIRE(mesh.IsValid());
+
+        for (const MeshVertex& vertex : mesh.vertices) {
+            const Vec3 tangent(vertex.tangent);
+            // Sepanjang satu: bingkai yang tidak ternormalkan menskalakan arah
+            // yang dibaca dari peta normal, dan yang nol menghitamkannya.
+            CHECK(glm::length(tangent) == doctest::Approx(1.0f).epsilon(1e-3f));
+            // Tegak lurus normalnya. Toleransinya longgar karena normal yang
+            // dirata-rata di sudut tajam tidak pernah tegak lurus sempurna.
+            CHECK(std::abs(glm::dot(glm::normalize(vertex.normal), tangent)) < 1e-3f);
+            // Arah tangan hanya boleh +1 atau −1; nilai lain berarti `w` dipakai
+            // untuk hal lain, dan bitangent yang diturunkan darinya salah skala.
+            CHECK(std::abs(std::abs(vertex.tangent.w) - 1.0f) < 1e-6f);
+        }
+    }
+}
+
+TEST_CASE("Material impor menjadi instance dari satu induk bersama") {
+    using namespace sim::assets;
+
+    // Induknya ikut di repo, dan GUID-nya tertulis di dua tempat: berkas `.meta`
+    // di sebelahnya, dan tetapan di `MaterialImport.h`. Keduanya harus sama —
+    // instance yang menunjuk GUID yang tidak ada tidak menghasilkan galat, ia
+    // menghasilkan material yang diam-diam memakai bawaan.
+    const std::filesystem::path parentPath =
+        std::filesystem::path(SIM_BUILTIN_DIR) / kImportedMaterialAsset;
+    REQUIRE(std::filesystem::exists(parentPath));
+
+    std::ifstream metaFile(parentPath.string() + ".meta");
+    REQUIRE(metaFile.good());
+    const std::string meta((std::istreambuf_iterator<char>(metaFile)),
+                           std::istreambuf_iterator<char>());
+    INFO("meta " << meta);
+    CHECK(meta.find(std::string(kImportedMaterialGuid)) != std::string::npos);
+
+    const Uuid parent = Uuid::Parse(kImportedMaterialGuid);
+    REQUIRE(parent.IsValid());
+
+    // Induknya harus benar-benar sah dan benar-benar mengekspos kelima parameter
+    // yang ditimpa konverter. Instance yang menimpa parameter yang tidak ada di
+    // induknya tidak menghasilkan galat — `ResolveParameters` membuangnya diam-
+    // diam, dan materialnya memakai bawaan seolah impornya tidak pernah terjadi.
+    sim::material::MaterialGraph master;
+    const sim::material::MaterialIoResult masterIo =
+        sim::material::LoadMaterialFromFile(master, parentPath);
+    INFO("muat induk: " << masterIo.error);
+    REQUIRE(masterIo.ok);
+    CHECK(sim::material::ValidateMaterial(master).ok);
+    for (const char* name : {"baseColor", "metalness", "roughness", "emissive", "opacity"}) {
+        INFO("parameter " << name);
+        CHECK(master.FindParameter(name) != nullptr);
+    }
+
+    MeshMaterial source;
+    source.name = "Cat Merah";
+    source.baseColor = Vec3(0.8f, 0.1f, 0.05f);
+    source.metalness = 0.25f;
+    source.roughness = 0.4f;
+    source.emissive = Vec3(0.0f, 0.5f, 0.0f);
+    source.opacity = 0.75f;
+
+    const sim::material::MaterialInstance instance = MaterialInstanceFromMesh(source, parent);
+    CHECK(instance.parent == parent);
+    // Kelimanya ditimpa apa adanya: nilai itu dibaca dari berkas mesh-nya, jadi
+    // ia pernyataan tentang materialnya — bukan medan yang dibiarkan kosong.
+    REQUIRE(instance.overrides.size() == 5);
+
+    const auto* roughness = instance.Find("roughness");
+    REQUIRE(roughness != nullptr);
+    // **Disalin, bukan dikuadratkan.** `specularRoughness` OpenPBR perseptual,
+    // sama seperti `roughnessFactor` glTF; yang mengkuadratkannya di sini
+    // membuat setiap permukaan impor terlalu mengkilap.
+    CHECK(roughness->value.components[0] == doctest::Approx(0.4f));
+
+    const auto* baseColor = instance.Find("baseColor");
+    REQUIRE(baseColor != nullptr);
+    CHECK(baseColor->value.kind == sim::material::ValueKind::Float3);
+    CHECK(baseColor->value.components[0] == doctest::Approx(0.8f));
+    CHECK(baseColor->value.components[1] == doctest::Approx(0.1f));
+
+    const auto* opacity = instance.Find("opacity");
+    REQUIRE(opacity != nullptr);
+    CHECK(opacity->value.components[0] == doctest::Approx(0.75f));
+}
+
+TEST_CASE("Tiap material mesh ditulis sebagai satu berkas .simmatinst") {
+    using namespace sim::assets;
+
+    TempDir temp;
+    MeshData mesh;
+    MeshMaterial a;
+    a.name = "lambert1";
+    a.roughness = 0.2f;
+    MeshMaterial b;
+    b.name = "lambert1";  // nama yang sama: tidak boleh saling menimpa
+    b.roughness = 0.9f;
+    MeshMaterial c;
+    c.name = "../../lolos";  // nama dari berkas orang lain, bukan jalur
+    mesh.materials = {a, b, c};
+
+    const Uuid parent = Uuid::Parse(kImportedMaterialGuid);
+    std::vector<std::string> written;
+    std::string error;
+    REQUIRE(WriteMaterialInstances(mesh, temp.Path(), parent, written, error));
+    CHECK(error.empty());
+    REQUIRE(written.size() == 3);
+
+    CHECK(written[0] == "lambert1.simmatinst");
+    CHECK(written[1] == "lambert1 2.simmatinst");
+    // Nama yang mengandung `../` tidak boleh menjadi jalur naik.
+    CHECK(written[2].find('/') == std::string::npos);
+    CHECK(written[2].find("..") == std::string::npos);
+
+    for (const std::string& name : written) {
+        const std::filesystem::path path = temp.Path() / name;
+        INFO("berkas " << path.string());
+        REQUIRE(std::filesystem::exists(path));
+        sim::material::MaterialInstance loaded;
+        const sim::material::MaterialIoResult result =
+            sim::material::LoadInstanceFromFile(loaded, path);
+        REQUIRE(result.ok);
+        CHECK(loaded.parent == parent);
+    }
+
+    // Isinya benar-benar berbeda, bukan dua salinan berkas yang sama.
+    sim::material::MaterialInstance first;
+    sim::material::MaterialInstance second;
+    REQUIRE(sim::material::LoadInstanceFromFile(first, temp.Path() / written[0]).ok);
+    REQUIRE(sim::material::LoadInstanceFromFile(second, temp.Path() / written[1]).ok);
+    CHECK(first.Find("roughness")->value.components[0] == doctest::Approx(0.2f));
+    CHECK(second.Find("roughness")->value.components[0] == doctest::Approx(0.9f));
+}
+
+TEST_CASE("thumbnail dibuat dari berkas gambar dan di-cache") {
+    // Titik dekode ini dialihkan lewat `Sim::ImageIO` di I0. Sebelumnya tidak
+    // ada uji yang menyentuhnya sama sekali, jadi tidak ada yang bisa
+    // membedakan "masih bekerja" dari "sudah lama rusak".
+    const std::filesystem::path source =
+        std::filesystem::path(SIM_IMAGE_DIR) / "checker.png";
+    TempDir cache;
+
+    const ThumbnailImage thumbnail = MakeThumbnail(source, cache.Path(), 4);
+    REQUIRE(thumbnail.IsValid());
+    // Sumbernya 8x8; dikecilkan ke kotak 4 menghasilkan 4x4 dengan proporsi
+    // terjaga.
+    CHECK(thumbnail.width == 4);
+    CHECK(thumbnail.height == 4);
+    // Selalu RGBA8, apa pun jumlah kanal berkas asalnya — berkas ini RGB.
+    CHECK(thumbnail.rgba.size() == 4u * 4u * 4u);
+
+    // Gambar RGB tanpa alfa harus keluar opak. Alfa nol di sini membuat setiap
+    // thumbnail tekstur tanpa alfa menghilang tanpa satu pun galat.
+    for (std::size_t i = 0; i < 16; ++i) {
+        CHECK(thumbnail.rgba[i * 4 + 3] == 255);
+    }
+
+    SUBCASE("ukuran yang tidak mengecilkan disalin apa adanya") {
+        const ThumbnailImage full = MakeThumbnail(source, cache.Path(), 16);
+        REQUIRE(full.IsValid());
+        // maxSize di atas ukuran sumbernya tidak memperbesar: skalanya dijepit
+        // ke 1. Thumbnail yang diperbesar hanya membuang memori.
+        CHECK(full.width == 8);
+        CHECK(full.height == 8);
+        // piksel(x,y) = (x*32, y*32, (x+y) genap ? 255 : 0), lolos tanpa
+        // penskalaan sama sekali.
+        CHECK(full.rgba[0] == 0);
+        CHECK(full.rgba[2] == 255);
+        CHECK(full.rgba[4] == 32);
+        CHECK(full.rgba[6] == 0);
+    }
+
+    SUBCASE("panggilan kedua dilayani cache dan hasilnya identik") {
+        // Kunci cache adalah hash isi berkas. Yang diuji: jalur cache
+        // mengembalikan piksel yang sama, bukan piksel yang mirip.
+        const ThumbnailImage cached = MakeThumbnail(source, cache.Path(), 4);
+        REQUIRE(cached.IsValid());
+        CHECK(cached.width == thumbnail.width);
+        CHECK(cached.height == thumbnail.height);
+        CHECK(cached.rgba == thumbnail.rgba);
+    }
+
+    SUBCASE("berkas yang bukan gambar ditolak, bukan crash") {
+        const std::filesystem::path text = cache.Path() / "bukan-gambar.png";
+        std::ofstream(text) << "ini teks biasa";
+        CHECK_FALSE(MakeThumbnail(text, cache.Path(), 4).IsValid());
+    }
 }

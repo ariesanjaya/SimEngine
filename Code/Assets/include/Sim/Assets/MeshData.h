@@ -22,6 +22,16 @@ struct MeshVertex {
     Vec3 position{0.0f};
     Vec3 normal{0.0f, 1.0f, 0.0f};
     Vec2 uv{0.0f};
+    /// Tangent ruang dunia di `xyz`, arah tangan di `w` (+1 atau −1).
+    ///
+    /// **Tangan disimpan, bukan bitangent-nya.** Bitangent selalu bisa dihitung
+    /// ulang sebagai `cross(normal, tangent.xyz) * tangent.w`, jadi menyimpannya
+    /// utuh berarti dua belas byte lagi per vertex untuk sesuatu yang satu
+    /// perkalian silang sudah menghasilkannya. Tandanya tidak bisa dihitung
+    /// ulang: ia menyatakan apakah UV-nya bercermin di segitiga ini, dan peta
+    /// normal pada bagian yang bercermin tanpa tanda itu tampak cekung di tempat
+    /// yang seharusnya cembung.
+    Vec4 tangent{1.0f, 0.0f, 0.0f, 1.0f};
 };
 
 /// Paling banyak empat bone memengaruhi satu vertex.
@@ -190,6 +200,21 @@ struct MeshData {
     /// mesh yang sesungguhnya terlihat, dan yang tampak adalah objek yang lenyap
     /// saat kamera diputar sedikit.
     void ComputeBounds();
+
+    /// Menghitung tangent tiap vertex dari posisi dan UV segitiganya.
+    ///
+    /// **Dihitung di sini, bukan diserahkan ke shader.** Menurunkan tangent
+    /// per-piksel dari turunan layar bisa dilakukan, tapi hasilnya berbeda di
+    /// dalam satu segitiga dan berubah saat kamera bergerak — jahitan peta
+    /// normal lalu berkedip. Yang dihitung per vertex tetap sama setiap frame.
+    ///
+    /// Yang sudah punya tangent — glTF boleh membawa `TANGENT` sendiri —
+    /// sebaiknya tidak memanggil ini: tangent milik berkasnya cocok dengan peta
+    /// normal yang dipanggang bersamanya, dan yang dihitung ulang belum tentu.
+    ///
+    /// Mesh tanpa UV tidak punya tangent yang berarti; yang dihasilkan hanya
+    /// vektor tegak lurus normalnya, supaya bingkai shading tetap sah.
+    void ComputeTangents();
 };
 
 /// Menyatukan vertex kembar dan membangun indeksnya.
@@ -242,6 +267,18 @@ void GroupByMaterial(MeshData& mesh, const std::vector<int>& triangleMaterial);
 /// mengeluarkannya menjadi berkas adalah langkah tersendiri yang dipanggil
 /// dengan sengaja.
 MeshData LoadGltfMesh(const std::filesystem::path& path, std::string& error);
+
+/// Membaca mesh dari sebuah panggung USD (.usd/.usda/.usdc/.usdz).
+///
+/// **Seluruh panggung menjadi satu mesh.** Setiap `UsdGeomMesh` dipanggang ke
+/// ruang dunia dan disambung menjadi satu; hirarki xform di dalam berkasnya
+/// tidak punya tempat untuk hidup setelah diimpor. Satuan dan sumbu atas
+/// panggung diubah ke meter dan Y-atas, dan setiap `GeomSubset` bermaterial
+/// menjadi satu ruas tersendiri.
+///
+/// Build tanpa OpenUSD tetap menyediakan fungsi ini; yang dikembalikannya mesh
+/// kosong dengan `error` yang menyebut bahwa mesinnya yang tidak mendukung.
+MeshData LoadUsdMesh(const std::filesystem::path& path, std::string& error);
 
 /// Mengubah nama berkas yang datang DARI SEBUAH BERKAS ASET menjadi satu
 /// komponen jalur yang aman, atau string kosong bila tidak ada yang tersisa.

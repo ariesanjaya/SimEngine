@@ -1372,9 +1372,9 @@ private:
 
         TerrainIoResult result;
         if (exporting) {
-            result = raw ? SaveHeightmapRaw(terrain_, path) : SaveHeightmapPng(terrain_, path);
+            result = raw ? SaveHeightmapRaw(terrain_, path) : SaveHeightmapImage(terrain_, path);
         } else {
-            result = raw ? LoadHeightmapRaw(terrain_, path) : LoadHeightmapPng(terrain_, path);
+            result = raw ? LoadHeightmapRaw(terrain_, path) : LoadHeightmapImage(terrain_, path);
         }
 
         if (context.notifications == nullptr) {

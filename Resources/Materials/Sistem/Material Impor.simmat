@@ -1,0 +1,171 @@
+{
+  "version": 1,
+  "parameters": [
+    {
+      "name": "baseColor",
+      "kind": "float3",
+      "default": "float3(0.8)",
+      "tooltip": "Warna dasar. glTF: baseColorFactor.rgb",
+      "color": true
+    },
+    {
+      "name": "metalness",
+      "kind": "float",
+      "default": "0.0",
+      "tooltip": "glTF: metallicFactor. 0 = dielektrik, 1 = logam",
+      "range": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "name": "roughness",
+      "kind": "float",
+      "default": "0.5",
+      "tooltip": "glTF: roughnessFactor. Perseptual, sama seperti OpenPBR",
+      "range": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "name": "emissive",
+      "kind": "float3",
+      "default": "float3(0.0)",
+      "tooltip": "glTF: emissiveFactor x KHR_materials_emissive_strength",
+      "color": true
+    },
+    {
+      "name": "opacity",
+      "kind": "float",
+      "default": "1.0",
+      "tooltip": "glTF: baseColorFactor.a",
+      "range": [
+        0.0,
+        1.0
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "guid": "00000000-0000-4000-8000-00000000e7a0",
+      "type": "output.surface",
+      "position": [
+        420.0,
+        200.0
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000ba50",
+      "type": "param.get",
+      "position": [
+        80.0,
+        40.0
+      ],
+      "settings": {
+        "parameter": "baseColor"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000e7a1",
+      "type": "param.get",
+      "position": [
+        80.0,
+        130.0
+      ],
+      "settings": {
+        "parameter": "metalness"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000e7a2",
+      "type": "param.get",
+      "position": [
+        80.0,
+        220.0
+      ],
+      "settings": {
+        "parameter": "roughness"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000e7a3",
+      "type": "param.get",
+      "position": [
+        80.0,
+        310.0
+      ],
+      "settings": {
+        "parameter": "emissive"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000e7a4",
+      "type": "param.get",
+      "position": [
+        80.0,
+        400.0
+      ],
+      "settings": {
+        "parameter": "opacity"
+      }
+    }
+  ],
+  "links": [
+    {
+      "guid": "00000000-0000-4000-8000-000000000100",
+      "from": [
+        "00000000-0000-4000-8000-00000000ba50",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-00000000e7a0",
+        "baseColor"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000101",
+      "from": [
+        "00000000-0000-4000-8000-00000000e7a1",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-00000000e7a0",
+        "baseMetalness"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000102",
+      "from": [
+        "00000000-0000-4000-8000-00000000e7a2",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-00000000e7a0",
+        "specularRoughness"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000103",
+      "from": [
+        "00000000-0000-4000-8000-00000000e7a3",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-00000000e7a0",
+        "emissive"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000104",
+      "from": [
+        "00000000-0000-4000-8000-00000000e7a4",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-00000000e7a0",
+        "opacity"
+      ]
+    }
+  ]
+}

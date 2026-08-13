@@ -87,10 +87,16 @@ public:
     Vec3 Sample(const Vec3& direction) const override;
 };
 
-/// Memuat berkas Radiance `.hdr` sebagai peta equirectangular.
+/// Memuat peta lingkungan equirectangular berjangkauan dinamis lebar.
 ///
-/// Mengembalikan peta kosong bila berkasnya tidak ada atau tidak bisa didekode;
-/// pemanggil memeriksa `IsValid()`.
+/// **Formatnya ditentukan backend `Sim::ImageIO` yang aktif, bukan oleh fungsi
+/// ini.** Radiance `.hdr` selalu bisa; `.exr` ikut bisa ketika backend EXR
+/// terbangun. Berkas yang formatnya tidak didukung ditolak dengan pesan yang
+/// menyebut backend yang dibutuhkannya — bukan dengan "format tidak dikenal",
+/// yang mengirim orang memeriksa berkasnya.
+///
+/// Mengembalikan peta kosong bila berkasnya tidak ada, tidak bisa didekode, atau
+/// bukan peta RGB; pemanggil memeriksa `IsValid()`.
 EquirectEnvironment LoadHdrEquirect(const std::filesystem::path& path);
 
 /// Enam muka cubemap, urutan Vulkan: +X, −X, +Y, −Y, +Z, −Z.

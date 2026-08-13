@@ -9,10 +9,10 @@ sim_add_library(Vegetation
         # header. Vegetasi tanpa permukaan tidak punya tempat berdiri — jadi
         # ketergantungan ini bukan kemudahan melainkan definisinya.
         Sim::Terrain
-    # PRIVATE: header publik Vegetation tidak membocorkan nlohmann maupun stb.
-    # stb hanya dipakai satu arah di sini — dekodernya untuk membaca peta
-    # kepadatan; yang menulisnya adalah enkoder PNG milik modul Terrain, dipakai
-    # ulang supaya peta kepadatan dan peta bobot berformat sama persis.
+    # PRIVATE: header publik Vegetation tidak membocorkan nlohmann maupun
+    # ImageIO. Yang dibutuhkan di sini hanya satu arah — membaca peta kepadatan;
+    # yang menulisnya adalah enkoder PNG milik modul Terrain, dipakai ulang
+    # supaya peta kepadatan dan peta bobot berformat sama persis.
     PRIVATE_DEPS
-        nlohmann_json::nlohmann_json
-        Stb::Impl)
+        Sim::ImageIO
+        nlohmann_json::nlohmann_json)

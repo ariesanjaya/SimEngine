@@ -10,11 +10,32 @@ sim_add_test(SimSceneTests
     DEPS
         Sim::Scene)
 
+# ImageIO: seam dekode gambar, kapabilitas per backend, dan penanganan berkas
+# rusak. Bebas GPU dan bebas editor dengan sengaja — yang diuji adalah piksel
+# yang keluar dari berkas, dan itu bisa diperiksa tanpa satu pun display.
+sim_add_test(SimImageIOTests
+    SOURCES
+        ImageIOTests.cpp
+    DEPS
+        Sim::ImageIO)
+
+# Berkas gambar uji dibaca dari folder sumber, alasan yang sama dengan
+# SIM_MESH_DIR di bawah. SIM_CODE_DIR dipakai uji yang menyisir `Code/` untuk
+# memastikan tidak ada `stbi_` yang lolos ke luar backend stb.
+target_compile_definitions(SimImageIOTests
+    PRIVATE SIM_IMAGE_DIR="${CMAKE_SOURCE_DIR}/Resources/Images"
+    PRIVATE SIM_CODE_DIR="${CMAKE_SOURCE_DIR}/Code")
+
 sim_add_test(SimEditorTests
     SOURCES
         EditorTests.cpp
     DEPS
         Sim::EditorFramework)
+
+# Impor berkas sumber diuji terhadap mesh sungguhan di folder sumber, alasan
+# yang sama dengan SIM_MESH_DIR pada SimAssetTests.
+target_compile_definitions(SimEditorTests
+    PRIVATE SIM_MESH_DIR="${CMAKE_SOURCE_DIR}/Resources/Meshes")
 
 sim_add_test(SimAssetTests
     SOURCES
@@ -26,7 +47,14 @@ sim_add_test(SimAssetTests
 # SIM_SHADER_DIR di bawah: uji yang membaca aset harus membaca berkas yang
 # sedang ada di repo, bukan salinan yang tertinggal satu build.
 target_compile_definitions(SimAssetTests
-    PRIVATE SIM_MESH_DIR="${CMAKE_SOURCE_DIR}/Resources/Meshes")
+    PRIVATE SIM_MESH_DIR="${CMAKE_SOURCE_DIR}/Resources/Meshes"
+    # Gambar uji untuk jalur thumbnail, dibaca dari folder sumber dengan alasan
+    # yang sama. Isinya diterangkan di Tests/ImageIOTests.cpp.
+    PRIVATE SIM_IMAGE_DIR="${CMAKE_SOURCE_DIR}/Resources/Images"
+    # Material induk untuk material hasil impor tinggal di sini, beserta
+    # `.meta`-nya — dan GUID di berkas itu yang harus cocok dengan tetapan di
+    # `MaterialImport.h`.
+    PRIVATE SIM_BUILTIN_DIR="${CMAKE_SOURCE_DIR}/Resources")
 
 # Material: model graph `.simmat`, katalog node (keluarannya mengikuti OpenPBR
 # Surface v1.1), validasi, tata letak blok uniform, dan cache SPIR-V. Tidak
@@ -53,7 +81,15 @@ sim_add_test(SimTerrainTests
     SOURCES
         TerrainTests.cpp
     DEPS
-        Sim::Terrain)
+        Sim::Terrain
+        # Sim::ImageIO adalah dependensi privat Terrain, jadi uji harus
+        # memintanya sendiri — sama seperti SimRenderTests.
+        Sim::ImageIO)
+
+# Heightmap TIFF uji, dibaca dari folder sumber dengan alasan yang sama dengan
+# SIM_MESH_DIR. Isinya diterangkan di Tests/ImageIOTests.cpp.
+target_compile_definitions(SimTerrainTests
+    PRIVATE SIM_IMAGE_DIR="${CMAKE_SOURCE_DIR}/Resources/Images")
 
 # Vegetation: sebaran deterministik dari aturan penempatan, peta kepadatan yang
 # dicat, suntingan tangan yang bertahan, dan format `.simveg`.
@@ -70,7 +106,15 @@ sim_add_test(SimRenderTests
     SOURCES
         RenderTests.cpp
     DEPS
-        Sim::Render)
+        Sim::Render
+        # Sim::ImageIO adalah dependensi privat Render, jadi uji harus
+        # memintanya sendiri — sama seperti SimAnimationTests dengan Sim::Assets.
+        Sim::ImageIO)
+
+# Peta lingkungan uji untuk jalur IBL, dibaca dari folder sumber dengan alasan
+# yang sama dengan SIM_MESH_DIR di atas.
+target_compile_definitions(SimRenderTests
+    PRIVATE SIM_IMAGE_DIR="${CMAKE_SOURCE_DIR}/Resources/Images")
 
 # Animation: rangka berurutan topologis, klip berbasis kurva, pencampuran pose,
 # penanda fase, root motion, dan format `.simskel`/`.simanim`.
@@ -85,6 +129,11 @@ sim_add_test(SimAnimationTests
         # sendiri tidak menangkap sambungannya, dan justru di sambungan itulah
         # kesalahan skinning bersembunyi.
         Sim::Assets)
+
+# Aset klip uji — unitSpin.usda dan unitSpin.gltf — dibaca dari folder sumber,
+# alasan yang sama dengan SIM_MESH_DIR pada SimAssetTests.
+target_compile_definitions(SimAnimationTests
+    PRIVATE SIM_MESH_DIR="${CMAKE_SOURCE_DIR}/Resources/Meshes")
 
 # Particle: model efek `.simfx`, kurva/gradient, dan simulasi CPU deterministik.
 sim_add_test(SimParticleTests

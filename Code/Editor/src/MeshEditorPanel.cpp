@@ -14,6 +14,7 @@
 // juga sudah ada.
 
 #include "Sim/Assets/AssetDatabase.h"
+#include "Sim/Assets/MaterialImport.h"
 #include "Sim/Assets/MeshData.h"
 #include "Sim/Assets/MeshSettings.h"
 #include "Sim/Editor/EditorContext.h"
@@ -154,6 +155,16 @@ private:
                 ExtractTextures(context);
             }
         }
+        // **Berlaku untuk format apa pun**, tidak seperti tombol di atasnya:
+        // material sudah dinormalkan importirnya menjadi `MeshMaterial` sebelum
+        // sampai ke sini, jadi FBX dan USD memetakan ke lima parameter yang
+        // sama dengan glTF.
+        if (!mesh_.materials.empty()) {
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Buat material")) {
+                CreateMaterials(context);
+            }
+        }
     }
 
     /// Menulis tekstur yang tertanam menjadi berkas, di folder yang sama dengan
@@ -174,6 +185,30 @@ private:
             context.notifications->Success(
                 written.empty() ? "Semua teksturnya sudah ada"
                                 : std::to_string(written.size()) + " tekstur dikeluarkan");
+        }
+    }
+
+    /// Menulis satu `.simmatinst` per material mesh-nya, di sebelah mesh-nya.
+    ///
+    /// **Dipanggil dengan sengaja, bukan saat mesh dimuat**, dengan alasan yang
+    /// sama dengan tombol tekstur di sebelahnya: yang memuat mesh adalah
+    /// perender di jalur daftar gambar, dan fungsi yang menulis berkas sebagai
+    /// efek samping menggambar menulis berkas pada waktu yang tidak bisa
+    /// ditebak siapa pun.
+    void CreateMaterials(EditorContext& context) {
+        std::vector<std::string> written;
+        std::string error;
+        const std::filesystem::path folder = std::filesystem::path(meshPath_).parent_path();
+        const Uuid parent = Uuid::Parse(assets::kImportedMaterialGuid);
+        if (!assets::WriteMaterialInstances(mesh_, folder, parent, written, error)) {
+            if (context.notifications != nullptr) {
+                context.notifications->Error("Tidak bisa membuat material: " + error);
+            }
+            return;
+        }
+        context.assets->ScanNow();
+        if (context.notifications != nullptr) {
+            context.notifications->Success(std::to_string(written.size()) + " material dibuat");
         }
     }
 

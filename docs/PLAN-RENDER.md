@@ -703,7 +703,7 @@ titik sambung untuk global illumination, yang mengganti sumbernya tanpa mengubah
 satu baris pun model shading-nya. Lihat catatan GI di bawah.
 
 ### E8.4 — Mesh & animasi
-Impor mesh (ufbx/cgltf) menggantikan importer pass-through E5, LOD dari
+Impor mesh (FBX SDK/cgltf) menggantikan importer pass-through E5, LOD dari
 meshoptimizer, GPU skinning dengan skinning buffer, blend shape.
 **Titik sambung:** Animation Editor memutar mesh skinned sungguhan.
 
@@ -720,14 +720,17 @@ ada, `SceneView` tidak pernah membaca `MeshRendererComponent::mesh`, dan rendere
 hanya punya satu geometri — `BuildUnitCube()` — yang digambar untuk seluruh
 instance dengan satu panggilan.
 
-- **ufbx, bukan penguraian sendiri.** Sumbu dan satuan dikonversi olehnya, bukan
-  oleh kode di atasnya: FBX menyimpan konvensinya di dalam berkas dan berkas dari
-  DCC yang berbeda memakai konvensi yang berbeda. Mengoreksinya tangan berarti
-  menebak konvensi sumbernya, dan tebakan yang salah menghasilkan mesh yang
-  terbaring miring atau seratus kali terlalu besar — bukan galat.
+- **Autodesk FBX SDK, bukan penguraian sendiri.** FBX menyimpan konvensi sumbu
+  dan satuannya di dalam berkas, dan berkas dari DCC yang berbeda memakai
+  konvensi yang berbeda. Mengoreksinya tangan berarti menebak konvensi sumbernya,
+  dan tebakan yang salah menghasilkan mesh yang terbaring miring atau seratus
+  kali terlalu besar — bukan galat. Sumbunya dikonversi SDK lewat
+  `FbxAxisSystem::DeepConvertScene`; satuannya justru **tidak** (lihat bug
+  konversi ruang di bawah).
 - **Seluruh node digabung menjadi satu mesh**, masing-masing sudah dikalikan
-  `geometry_to_world`-nya. Yang hilang adalah struktur hierarkinya; yang didapat
-  adalah satu buffer per aset alih-alih satu per node.
+  `EvaluateGlobalTransform()` beserta offset geometrinya. Yang hilang adalah
+  struktur hierarkinya; yang didapat adalah satu buffer per aset alih-alih satu
+  per node.
 - **Vertex kembar disatukan dengan perbandingan bit-per-bit, bukan bertoleransi.**
   Toleransi menyatukan dua sisi sebuah rusuk tajam yang normalnya memang berbeda,
   dan yang terlihat adalah tepi kotak yang membulat sendiri.
@@ -767,7 +770,8 @@ Terukur di editor (RTX 2060, viewport 1277x696):
 | Galat validation layer | **0** |
 
 **Yang belum ada dari E8.4:** LOD dan meshoptimizer, blend shape, serta glTF —
-ufbx membaca FBX dan OBJ, dan `cgltf` masih menunggu. Indeks aset juga belum
+FBX SDK membaca FBX dan OBJ; glTF sejak itu mendarat lewat `cgltf`, dan USD
+lewat OpenUSD. Indeks aset juga belum
 mencatat jumlah segitiga: itu menuntut medan baru di `ImportResult` beserta panel
 yang menampilkannya.
 
@@ -848,16 +852,23 @@ terhadap rig Mixamo `Y Bot.fbx` beserta animasi `Running.fbx` dan
 - **Pengaruh skin ikut menjadi bagian kunci penyatuan vertex.** Dua titik yang
   sama persis tapi berbeda bobot skin adalah dua vertex yang berbeda;
   menyatukannya berarti separuh permukaan mengikuti bone yang salah.
-- **Bone diurutkan topologis dari urutan depth-first ufbx**, jadi transform
-  global bisa dihitung satu lintasan maju tanpa rekursi.
+- **Bone diurutkan topologis dari penelusuran melebar (breadth-first) hierarki
+  node**, jadi transform global bisa dihitung satu lintasan maju tanpa rekursi.
+  Urutannya ditelusuri sendiri, bukan diambil dari `FbxScene::GetNode`: yang
+  terakhir mengembalikan urutan objek di dalam berkasnya, dan di sana tidak ada
+  yang menjamin induk mendahului anaknya. Nomor bone yang dihasilkannya juga yang
+  ditunjuk `SkinInfluence`, jadi urutan itu bagian dari format aset — bukan
+  detail internal importir.
 
 **Satu bug sungguhan yang ditangkap ujinya, dan yang sempat mendarat.**
-Konversi satuan ufbx dipanggang ke transform node root, jadi `local_transform`
-anak-anaknya tetap dalam satuan asli berkasnya. Terukur: mesh Y Bot benar
-setinggi 1,80 m sementara translasi bone-nya 99,79 — sentimeter. Kulit yang
-diulit rangka seratus kali terlalu besar tidak menghasilkan satu pun galat; ia
-menghasilkan karakter yang lenyap. Bind pose karena itu diturunkan dari
-`node_to_world`, bukan dari `local_transform`.
+Konversi satuan yang dipanggang ke transform node root — yang dilakukan
+`FbxSystemUnit::ConvertScene`, dan karena itu tidak dipakai di sini —
+meninggalkan transform lokal anak-anaknya dalam satuan asli berkasnya. Terukur:
+mesh Y Bot benar setinggi 1,80 m sementara translasi bone-nya 99,79 —
+sentimeter. Kulit yang diulit rangka seratus kali terlalu besar tidak
+menghasilkan satu pun galat; ia menghasilkan karakter yang lenyap. Bind pose
+karena itu diturunkan dari transform global tiap node, bukan dari transform
+lokalnya.
 
 Uji yang menjaganya menyatakan sifat yang benar-benar berarti: **posisi global
 bone harus berada di dalam kotak batas mesh-nya.** Terukur sesudah perbaikan:
@@ -965,11 +976,21 @@ peringatan validation layer** sepanjang jalannya.
   berkasnya. Alternatifnya — bentuk klip netral di sisi aset lalu diterjemahkan
   di sini — berarti seluruh model track, kunci, dan kurva dituliskan dua kali
   untuk satu-satunya pembaca yang akan pernah ada.
-- **Kunci dipanggang lewat `ufbx_bake_anim`, bukan dibaca sebagai kurva mentah.**
-  FBX menyimpan rotasi sebagai kurva Euler beserta urutan rotasi, pre-rotation,
-  post-rotation, dan pivot yang semuanya ikut menentukan hasilnya. Menyusun ulang
-  rantai itu tangan berarti setiap potong yang terlewat menghasilkan animasi yang
-  *hampir* benar — jauh lebih sulit dilacak daripada yang jelas-jelas salah.
+- **Kunci dicuplik lewat `FbxNode::EvaluateLocalTransform`, bukan dibaca sebagai
+  kurva mentah.** FBX menyimpan rotasi sebagai kurva Euler beserta urutan rotasi,
+  pre-rotation, post-rotation, dan pivot yang semuanya ikut menentukan hasilnya.
+  Menyusun ulang rantai itu tangan berarti setiap potong yang terlewat
+  menghasilkan animasi yang *hampir* benar — jauh lebih sulit dilacak daripada
+  yang jelas-jelas salah. SDK mengevaluasi rantainya pada satu waktu, dan
+  importir mencuplik itu pada laju frame berkasnya.
+- **Belahan kuaternion disamakan antar-frame.** Tiap frame diuraikan sendiri,
+  jadi tandanya boleh berbalik di tengah klip tanpa ada yang berubah pada
+  rotasinya — dan dua kunci berurutan yang berseberangan belahan di-slerp lewat
+  jalan memutar, satu frame yang berputar hampir penuh lingkaran.
+- **Hanya bone yang benar-benar punya kurva di take itu yang dicuplik.** Track
+  rotasi tetap adalah orientasi bind rig **sumber**; memberikannya juga kepada
+  bone yang take-nya tidak menyentuh sama sekali menimpa bind pose rig tujuan —
+  kerusakan yang sama dengan kanal translasi tetap, lewat pintu yang lain.
 - **Rotasi masuk sebagai track kuaternion tersendiri**, seperti yang sudah
   dicatat `Clip.h` sejak E7.5. Memaksanya menjadi Euler menuntut memilih satu
   dari dua cabang yang sama sahnya pada tiap kunci, dan pilihan yang salah adalah
@@ -986,26 +1007,32 @@ peringatan validation layer** sepanjang jalannya.
 
 **Dua bug sungguhan, dan keduanya ditemukan oleh pembaca kedua.**
 
-*Pertama, mode konversi ruang.* ufbx punya tiga cara menyimpan konversi satuan,
-dan hanya satu yang menghasilkan transform lokal yang benar begitu dirangkai
-induk-ke-anak — yaitu persis yang dilakukan `Pose::ComputeGlobal`. Terukur dengan
-panjang tulang sebagai patokan, karena ia tidak boleh berubah apa pun posenya:
+*Pertama, di mana konversi satuan disimpan.* Yang menentukan bukan besar
+faktornya melainkan tempatnya tinggal, dan hanya satu tempat yang menghasilkan
+transform lokal yang benar begitu dirangkai induk-ke-anak — yaitu persis yang
+dilakukan `Pose::ComputeGlobal`. Terukur dengan panjang tulang sebagai patokan,
+karena ia tidak boleh berubah apa pun posenya:
 
-| `space_conversion` | kunci skala | selisih panjang tulang terbesar |
+| cara menyimpan konversi | skala lokal bone teratas | selisih panjang tulang terbesar |
 | --- | --- | --- |
-| `TRANSFORM_ROOT` | 1,0 | **9900%** — sentimeter, seratus kali |
-| `ADJUST_TRANSFORMS` | 0,01 | **100%** — 0,01 menumpuk tiap tingkat, rangkanya runtuh |
-| `MODIFY_GEOMETRY` | 1,0 | **0,0000%** |
+| skala pada node root (`FbxSystemUnit::ConvertScene`) | 1,0 | **9900%** — sentimeter, seratus kali |
+| faktor dikalikan ke tiap transform lokal | 0,01 | **100%** — 0,01 menumpuk tiap tingkat, rangkanya runtuh |
+| konjugasi `C·M·C⁻¹`, `C = s·I` (yang dipakai) | 1,0 | **0,0000%** |
+
+Yang ketiga bekerja karena konjugasi menskalakan **translasi saja** dan
+meninggalkan basis rotasi/skala apa adanya. Mengalikan dari kiri saja — cara
+kedua — menskalakan keduanya, dan skala 0,01 di tiap tingkat itulah yang
+meruntuhkan rangkanya.
 
 *Kedua, dan ini yang menarik: rangka hasil impor mesh ternyata sudah salah sejak
-commit sebelumnya.* `LoadMesh` memakai `TRANSFORM_ROOT`, jadi konversi satuan
-tinggal di node root — bone teratas mewarisi skala 0,01 dan seluruh keturunannya
-bertranslasi dalam sentimeter. Rangkanya tetap benar **secara global**, dan uji
-yang membandingkan posisi bone dengan kotak batas mesh karena itu lulus dengan
-tenang. Yang menangkapnya adalah pembaca kedua transform lokal itu: klip membawa
-translasi dalam meter berskala satu, dan bone yang tidak dianimasikan klip tetap
-memakai bind pose-nya — jadi tulang-tulang itu terlempar seratus kali terlalu
-jauh. Kedua importir sekarang memakai mode yang sama. Terukur: geometrinya tidak
+commit sebelumnya.* `LoadMesh` membiarkan konversi satuan tinggal di node root —
+bone teratas mewarisi skala 0,01 dan seluruh keturunannya bertranslasi dalam
+sentimeter. Rangkanya tetap benar **secara global**, dan uji yang membandingkan
+posisi bone dengan kotak batas mesh karena itu lulus dengan tenang. Yang
+menangkapnya adalah pembaca kedua transform lokal itu: klip membawa translasi
+dalam meter berskala satu, dan bone yang tidak dianimasikan klip tetap memakai
+bind pose-nya — jadi tulang-tulang itu terlempar seratus kali terlalu jauh.
+Kedua importir sekarang memakai cara yang sama. Terukur: geometrinya tidak
 berubah sama sekali — batas Y Bot tetap (−0,973, 0,000, −0,161)..(0,973, 1,805,
 0,204), shader ball tetap 2,69 x 2,66 x 2,50 m — sementara skala lokal bone
 teratas berpindah dari 0,0100 menjadi 1,0000.

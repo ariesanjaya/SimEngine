@@ -1,8 +1,7 @@
 #include "Sim/Assets/Thumbnail.h"
 
 #include "Sim/Core/Log.h"
-
-#include <stb_image.h>
+#include "Sim/ImageIO/ImageIO.h"
 
 #include <stb_image_resize2.h>
 
@@ -103,13 +102,26 @@ ThumbnailImage MakeThumbnail(const std::filesystem::path& path,
         return result;
     }
 
-    int width = 0;
-    int height = 0;
-    int channels = 0;
-    // Dipaksa 4 kanal: gambar 1 dan 3 kanal ikut dinaikkan jadi RGBA, sehingga
-    // jalur unggah GPU hanya perlu mengenal satu format.
-    stbi_uc* pixels = stbi_load_from_memory(bytes.data(), static_cast<int>(bytes.size()), &width,
-                                            &height, &channels, 4);
+    // Dipaksa 4 kanal 8-bit: gambar 1 dan 3 kanal ikut dinaikkan jadi RGBA, dan
+    // yang 16-bit maupun float diturunkan — sehingga jalur unggah GPU hanya
+    // perlu mengenal satu format.
+    imageio::ReadOptions options;
+    options.channels = 4;
+    options.type = imageio::PixelType::UInt8;
+
+    imageio::Image image;
+    // Ekstensinya ikut dikirim sebagai petunjuk: isinya sudah di memori, tapi
+    // backend yang memilih pembaca berdasarkan nama tetap membutuhkannya.
+    const imageio::ImageIoResult decoded =
+        imageio::Read(bytes, path.extension().string(), options, image);
+    if (!decoded) {
+        SIM_WARN("Assets", "thumbnail: {}", decoded.error);
+        return result;
+    }
+
+    const auto width = static_cast<int>(image.desc.width);
+    const auto height = static_cast<int>(image.desc.height);
+    const uint8_t* pixels = image.AsU8();
     if (pixels == nullptr || width <= 0 || height <= 0) {
         return result;
     }
@@ -135,7 +147,6 @@ ThumbnailImage MakeThumbnail(const std::filesystem::path& path,
                                   static_cast<int>(targetWidth),
                                   static_cast<int>(targetHeight), 0, STBIR_RGBA);
     }
-    stbi_image_free(pixels);
 
     WriteCache(cachePath, result);
     return result;

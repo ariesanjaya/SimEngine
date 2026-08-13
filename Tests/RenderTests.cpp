@@ -20,11 +20,19 @@
 #include "Sim/Render/TraceBackend.h"
 #include "Sim/Render/ShadowCascades.h"
 
+// Diminta sendiri: Render memakai Sim::ImageIO secara PRIVATE, jadi headernya
+// tidak sampai ke sini lewat Ibl.h. Yang dibutuhkan uji ini cuma kueri
+// kapabilitas — kriteria terima I2 berbunyi berbeda tergantung backend yang
+// terbangun, dan uji yang tidak bisa membedakan keduanya akan melewat diam di
+// salah satunya.
+#include "Sim/ImageIO/ImageIO.h"
+
 #include <doctest/doctest.h>
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <filesystem>
 #include <string>
 #include <utility>
 #include <vector>
@@ -4055,6 +4063,112 @@ TEST_CASE("peta equirect adalah IEnvironmentSampler yang utuh") {
     const Vec3 down = EvaluateIrradiance(sh, Vec3(0.0f, -1.0f, 0.0f));
     CHECK(up.y > down.y);
     CHECK(down.y >= 0.0f);
+}
+
+TEST_CASE("peta lingkungan HDR dimuat dari berkas") {
+    using namespace sim::render;
+
+    // Titik dekode ini dialihkan lewat `Sim::ImageIO` di I0, dan sebelumnya
+    // tidak ada satu pun uji yang menyentuhnya — jadi "masih bekerja persis
+    // seperti sebelumnya" adalah klaim yang tidak bisa diperiksa siapa pun.
+    // Berkasnya dibuat enkoder di luar mesin ini; isinya diterangkan di
+    // Tests/ImageIOTests.cpp.
+    const std::filesystem::path path =
+        std::filesystem::path(SIM_IMAGE_DIR) / "gradient.hdr";
+    const EquirectEnvironment environment = LoadHdrEquirect(path);
+
+    REQUIRE(environment.IsValid());
+    CHECK(environment.width == 8);
+    CHECK(environment.height == 4);
+    // Tiga kanal, bukan empat: berkas HDR tidak punya alfa, dan kanal keempat
+    // yang diarang akan menambah sepertiga memori tanpa satu bit informasi.
+    CHECK(environment.pixels.size() == 8u * 4u * 3u);
+
+    // piksel(x,y) = (x/8, y/4, 0.5), dan eksponen RGBE-nya dipatok sehingga
+    // nilainya tepat. Yang dijaga di sini adalah bahwa tidak ada gamma yang
+    // diterapkan diam-diam: 0.875 yang menjadi 0.73 tidak akan terlihat sebagai
+    // galat mana pun — hanya sebagai langit yang salah terang.
+    CHECK(environment.pixels[0] == doctest::Approx(0.0f).epsilon(0.0001));
+    CHECK(environment.pixels[2] == doctest::Approx(0.5f).epsilon(0.0001));
+    const std::size_t last = (3u * 8u + 7u) * 3u;
+    CHECK(environment.pixels[last] == doctest::Approx(7.0f / 8.0f).epsilon(0.0001));
+    CHECK(environment.pixels[last + 1] == doctest::Approx(3.0f / 4.0f).epsilon(0.0001));
+
+    // Berkas yang tidak ada mengembalikan lingkungan tidak valid, bukan crash.
+    CHECK_FALSE(LoadHdrEquirect(std::filesystem::path(SIM_IMAGE_DIR) / "hilang.hdr").IsValid());
+}
+
+TEST_CASE("EXR menghasilkan lingkungan yang sama dengan HDR dari sumber yang sama") {
+    using namespace sim::render;
+
+    // **Kriteria terima I2, dan bentuknya sengaja bukan "menghasilkan gambar".**
+    // Dua berkas ini berisi nilai yang sama persis, ditulis tangan oleh dua
+    // penulis yang berbeda — RGBE untuk `.hdr`, dan penulis EXR mandiri untuk
+    // `.exr` (lihat catatannya di Tests/ImageIOTests.cpp). Yang diuji adalah
+    // bahwa jalur muatnya sampai pada angka yang sama lewat keduanya.
+    const std::filesystem::path dir(SIM_IMAGE_DIR);
+    const EquirectEnvironment fromHdr = LoadHdrEquirect(dir / "gradient.hdr");
+    REQUIRE(fromHdr.IsValid());
+
+    if (!sim::imageio::CanRead(".exr")) {
+        // Tanpa backend EXR, `.exr` memang tidak ada di daftar format — dan
+        // yang dituntut kriteria terimanya justru itu: ditolak, bukan dimuat
+        // separuh. Asset Browser pun tidak menawarkannya.
+        CHECK_FALSE(LoadHdrEquirect(dir / "gradient.exr").IsValid());
+        MESSAGE("build ini tanpa tinyexr — .exr ditolak sebagaimana mestinya");
+        return;
+    }
+
+    const EquirectEnvironment fromExr = LoadHdrEquirect(dir / "gradient.exr");
+    REQUIRE(fromExr.IsValid());
+
+    CHECK(fromExr.width == fromHdr.width);
+    CHECK(fromExr.height == fromHdr.height);
+    REQUIRE(fromExr.pixels.size() == fromHdr.pixels.size());
+
+    // Toleransinya ditulis, bukan dikira-kira. Keduanya menyimpan nilai yang
+    // tepat pada float32 — RGBE dengan eksponen yang dipatok, EXR sebagai float
+    // penuh — jadi tidak ada alasan keduanya berbeda sama sekali. Toleransi
+    // longgar di sini akan menyembunyikan persis kesalahan yang dicari.
+    for (std::size_t i = 0; i < fromHdr.pixels.size(); ++i) {
+        CHECK(fromExr.pixels[i] == doctest::Approx(fromHdr.pixels[i]).epsilon(0.0001));
+    }
+
+    // Dan iradiansinya ikut sama, karena itulah yang benar-benar dipakai IBL.
+    const Sh9 hdrSh = ProjectIrradiance(fromHdr, 1024);
+    const Sh9 exrSh = ProjectIrradiance(fromExr, 1024);
+    for (const Vec3& direction : {Vec3(0.0f, 1.0f, 0.0f), Vec3(1.0f, 0.0f, 0.0f),
+                                  Vec3(0.0f, -1.0f, 0.0f)}) {
+        const Vec3 fromHdrIrradiance = EvaluateIrradiance(hdrSh, direction);
+        const Vec3 fromExrIrradiance = EvaluateIrradiance(exrSh, direction);
+        CHECK(fromExrIrradiance.x == doctest::Approx(fromHdrIrradiance.x).epsilon(0.0001));
+        CHECK(fromExrIrradiance.y == doctest::Approx(fromHdrIrradiance.y).epsilon(0.0001));
+        CHECK(fromExrIrradiance.z == doctest::Approx(fromHdrIrradiance.z).epsilon(0.0001));
+    }
+}
+
+TEST_CASE("EXR yang bukan peta RGB ditolak") {
+    using namespace sim::render;
+
+    if (!sim::imageio::CanRead(".exr")) {
+        return;  // tanpa tinyexr tidak ada `.exr` untuk ditolak dengan alasan ini
+    }
+
+    // Bentuknya sama persis dengan HDRI — 8x4, tiga kanal float. Yang
+    // membedakannya cuma nama kanalnya, dan itu satu-satunya yang bisa
+    // membedakan render multi-channel dari peta lingkungan.
+    const std::filesystem::path path =
+        std::filesystem::path(SIM_IMAGE_DIR) / "aov-bukan-lingkungan.exr";
+    REQUIRE(std::filesystem::exists(path));
+    CHECK_FALSE(LoadHdrEquirect(path).IsValid());
+
+    // Dan yang dibaca lewat lapisan I/O tetap sah — yang menolak adalah aturan
+    // "ini bukan peta lingkungan", bukan dekodernya. Membedakan keduanya
+    // penting: berkasnya baik-baik saja, pemakaiannya yang salah.
+    sim::imageio::Image image;
+    REQUIRE(sim::imageio::Read(path, sim::imageio::ReadOptions{}, image).ok);
+    REQUIRE(image.desc.channelNames.size() == 3);
+    CHECK(image.desc.channelNames[0] != "R");
 }
 
 // --- E8.8: derau awan volumetrik ---------------------------------------------

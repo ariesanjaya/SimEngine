@@ -16,6 +16,11 @@ Logs/
 *.lo
 *.o
 *.obj
+# ...tapi `.obj` juga ekstensi mesh Wavefront, dan mesin ini mengimpornya. Aturan
+# di atas datang dari template C++ yang memaksudkan berkas objek MSVC; tanpa
+# pengecualian ini, aset mesh .obj tidak pernah ikut ter-commit dan uji yang
+# membacanya melewat diam-diam di setiap mesin selain yang membuatnya.
+!Resources/Meshes/*.obj
 *.gch
 *.pch
 *.ilk
@@ -46,3 +51,12 @@ install_manifest.txt
 vcpkg_installed/
 *.dwo
 Testing/
+
+# OpenUSD dan OpenImageIO yang dibawa di dalam pohon: ratusan megabyte biner
+# pihak ketiga, bukan sumber yang disunting siapa pun di sini. Sisi berkas di
+# Third-Party/ memang ditulis tangan dan ikut di repo; kedua ini yang tidak.
+#
+# Keduanya opsional: yang tidak menyediakannya tetap bisa membangun seluruh
+# mesin. Cara menyediakannya ada di docs/DEPENDENCIES.md.
+Third-Party/OpenUSD/
+Third-Party/OpenImageIO/

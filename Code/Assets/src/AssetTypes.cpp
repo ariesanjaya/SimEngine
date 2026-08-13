@@ -1,5 +1,7 @@
 #include "Sim/Assets/AssetTypes.h"
 
+#include "Sim/ImageIO/ImageIO.h"
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -35,18 +37,32 @@ AssetType TypeFromExtension(std::string_view extension) {
     std::transform(lower.begin(), lower.end(), lower.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 
-    static const std::array<std::pair<const char*, AssetType>, 25> kTable{{
-        {".png", AssetType::Texture},
-        {".jpg", AssetType::Texture},
-        {".jpeg", AssetType::Texture},
-        {".tga", AssetType::Texture},
-        {".bmp", AssetType::Texture},
-        {".hdr", AssetType::Texture},
-        {".psd", AssetType::Texture},
+    // **Tekstur ditanyakan, bukan dipatok.** Daftar ekstensi gambar yang
+    // konstan di sini adalah akar cacat `.psd`: `.psd` terdaftar sebagai
+    // tekstur sementara yang benar-benar bisa membacanya bergantung pada
+    // backend yang aktif — dan janji yang tidak bisa ditepati lebih buruk
+    // daripada format yang tidak ada. `Sim::ImageIO` membangkitkan daftarnya
+    // dari kemampuan yang sungguh terkompilasi, jadi ia yang ditanya.
+    //
+    // Arah ketergantungannya sekali jalan: AssetTypes membaca kapabilitas
+    // ImageIO, bukan sebaliknya. Membalikkannya berarti ImageIO harus tahu apa
+    // itu aset, dan modul yang menghasilkan piksel tidak perlu tahu itu.
+    if (imageio::CanRead(lower)) {
+        return AssetType::Texture;
+    }
+
+    static const std::array<std::pair<const char*, AssetType>, 22> kTable{{
         {".obj", AssetType::Mesh},
         {".fbx", AssetType::Mesh},
         {".gltf", AssetType::Mesh},
         {".glb", AssetType::Mesh},
+        // Keempatnya panggung USD yang sama, berbeda pengemasan: .usda teks,
+        // .usdc biner, .usdz arsip, dan .usd yang bisa jadi teks maupun biner.
+        // Yang membedakannya urusan pembacanya, bukan urusan indeks aset.
+        {".usd", AssetType::Mesh},
+        {".usda", AssetType::Mesh},
+        {".usdc", AssetType::Mesh},
+        {".usdz", AssetType::Mesh},
         {".simmat", AssetType::Material},
         {".simmatinst", AssetType::Material},
         {".simfx", AssetType::Particle},

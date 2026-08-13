@@ -27,6 +27,16 @@ set(CMAKE_LIBRARY_OUTPUT_DIRECTORY "${PROJECT_BINARY_DIR}/bin")
 option(SIM_BUILD_EDITOR     "Bangun aplikasi editor"                    ON)
 option(SIM_BUILD_TESTS      "Bangun unit test (doctest)"                ON)
 option(SIM_WITH_LUA         "Bangun runtime scripting Lua"              ON)
+# Backend gambar tambahan. Keduanya ON, dan keduanya benar-benar opsional: yang
+# mematikannya tetap bisa membangun seluruh mesin, dan yang hilang cuma format
+# tambahannya. Ada sebagai opsi supaya jalur tanpa keduanya bisa diuji dengan
+# sengaja — jalur yang tidak pernah dijalankan siapa pun adalah jalur yang
+# rusaknya baru ketahuan di mesin orang lain.
+option(SIM_WITH_EXR         "Impor OpenEXR lewat tinyexr"               ON)
+option(SIM_WITH_TIFF        "Impor TIFF lewat libtiff"                  ON)
+# OIIO opsional dan didahulukan: bila ada ia menang untuk setiap format yang
+# diklaimnya. Yang tidak menyediakannya tidak kehilangan apa pun kecuali DDS.
+option(SIM_WITH_OIIO        "Backend OpenImageIO bila tersedia"          ON)
 option(SIM_WERROR           "Perlakukan warning sebagai error"          OFF)
 option(SIM_STRICT_WARNINGS  "Aktifkan -Wconversion dan kawan-kawannya"  OFF)
 
@@ -44,6 +54,10 @@ include(SimShaders)
 
 # --- Modul ------------------------------------------------------------------
 add_subdirectory(Code/Core)
+# ImageIO: dekode dan enkode gambar untuk pengondisian aset (I0). Didaftarkan
+# sebelum Assets, Render, Terrain, dan Vegetation karena keempatnya memakainya —
+# alias `Sim::ImageIO` harus sudah ada saat mereka menyebutnya.
+add_subdirectory(Code/ImageIO)
 add_subdirectory(Code/Reflect)
 add_subdirectory(Code/Scene)
 add_subdirectory(Code/Assets)

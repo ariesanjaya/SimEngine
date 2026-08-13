@@ -1,11 +1,12 @@
 #include "Sim/Render/Ibl.h"
 
 #include "Sim/Core/Log.h"
-
-#include <stb_image.h>
+#include "Sim/ImageIO/ImageIO.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <string>
 
 namespace sim::render {
 namespace {
@@ -138,31 +139,82 @@ Vec3 EquirectEnvironment::Sample(const Vec3& direction) const {
     return SampleUv(DirectionToEquirectUv(direction));
 }
 
+/// Apakah tiga kanal pertama benar-benar merah, hijau, biru.
+///
+/// **`.exr` dengan kanal depth, velocity, dan objectId punya bentuk yang sama
+/// persis dengan HDRI** — dimensi yang sama, jumlah kanal yang sama, tipe yang
+/// sama. Yang membedakannya cuma nama kanalnya, dan tanpa pemeriksaan ini
+/// berkas semacam itu dimuat sebagai lingkungan yang menyala dengan warna yang
+/// tidak berarti apa-apa. Tidak ada galat di mana pun; hanya adegan yang
+/// pencahayaannya aneh.
+///
+/// Nama kanal yang kosong berarti formatnya memang tidak menyimpannya — PNG dan
+/// Radiance tidak punya — dan di situ tidak ada yang bisa diperiksa.
+bool IsRgbEquirect(const imageio::ImageDesc& desc, std::string& found) {
+    if (desc.channelNames.empty()) {
+        return true;
+    }
+    static constexpr std::array<const char*, 3> kExpected{"R", "G", "B"};
+    bool matches = desc.channelNames.size() >= kExpected.size();
+    for (std::size_t i = 0; i < kExpected.size() && matches; ++i) {
+        matches = desc.channelNames[i] == kExpected[i];
+    }
+    if (matches) {
+        return true;
+    }
+    for (const std::string& name : desc.channelNames) {
+        found += found.empty() ? name : ", " + name;
+    }
+    return false;
+}
+
 EquirectEnvironment LoadHdrEquirect(const std::filesystem::path& path) {
     EquirectEnvironment environment;
     if (path.empty() || !std::filesystem::exists(path)) {
         return environment;
     }
-    int width = 0;
-    int height = 0;
-    int channels = 0;
-    // `stbi_loadf` mendekode Radiance RGBE menjadi float linear. **Tiga kanal
-    // diminta secara eksplisit**: berkas HDR tidak punya alfa, dan meminta empat
-    // membuat stb mengarang kanal keempat yang lalu ikut termakan memori di
-    // setiap texel tanpa membawa satu bit informasi pun.
-    float* decoded = stbi_loadf(path.string().c_str(), &width, &height, &channels, 3);
-    if (decoded == nullptr || width <= 0 || height <= 0) {
-        SIM_WARN("Render", "cannot decode HDR environment {}: {}", path.string(),
-                 stbi_failure_reason() != nullptr ? stbi_failure_reason() : "unknown");
-        if (decoded != nullptr) {
-            stbi_image_free(decoded);
-        }
+    // Format yang tidak didukung dijawab di sini, sebelum dekode, supaya
+    // pesannya menyebut apa yang kurang. Tanpa backend EXR, `.exr` memang tidak
+    // muncul di daftar format sama sekali — Asset Browser tidak menawarkannya,
+    // dan yang sampai ke sini cuma berkas yang jalurnya diketik tangan.
+    if (!imageio::CanRead(path.extension().string())) {
+        SIM_WARN("Render", "cannot use {} as environment: no image backend reads {} ({})",
+                 path.string(), path.extension().string(), imageio::BackendSummary());
         return environment;
     }
-    environment.width = static_cast<uint32_t>(width);
-    environment.height = static_cast<uint32_t>(height);
-    environment.pixels.assign(decoded, decoded + static_cast<std::size_t>(width) * height * 3);
-    stbi_image_free(decoded);
+    // Float linear, **tiga kanal secara eksplisit**: peta lingkungan tidak
+    // punya alfa, dan meminta empat membuat backend mengarang kanal keempat
+    // yang lalu ikut termakan memori di setiap texel tanpa membawa satu bit
+    // informasi pun.
+    imageio::ReadOptions options;
+    options.channels = 3;
+    options.type = imageio::PixelType::Float32;
+
+    imageio::Image image;
+    const imageio::ImageIoResult decoded = imageio::Read(path, options, image);
+    if (!decoded) {
+        SIM_WARN("Render", "cannot decode HDR environment: {}", decoded.error);
+        return environment;
+    }
+    if (image.desc.width == 0 || image.desc.height == 0) {
+        SIM_WARN("Render", "HDR environment is empty: {}", path.string());
+        return environment;
+    }
+
+    std::string found;
+    if (!IsRgbEquirect(image.desc, found)) {
+        SIM_WARN("Render",
+                 "{} is not an RGB environment map: channels found are [{}]. "
+                 "Multi-channel renders (depth, velocity, cryptomatte) are not "
+                 "environment maps.",
+                 path.string(), found);
+        return environment;
+    }
+
+    environment.width = image.desc.width;
+    environment.height = image.desc.height;
+    const float* pixels = image.AsF32();
+    environment.pixels.assign(pixels, pixels + image.desc.SampleCount());
     return environment;
 }
 

@@ -1,13 +1,9 @@
 #include "Sim/Assets/Importer.h"
 
 #include "Sim/Core/Log.h"
+#include "Sim/ImageIO/ImageIO.h"
 
 #include <nlohmann/json.hpp>
-
-// Jangan tambahkan STBI_NO_STDIO di sini: stb memeriksanya dengan #ifndef, jadi
-// mendefinisikannya bahkan bernilai 0 akan mematikan stbi_info() dan seluruh
-// jalur baca-dari-berkas.
-#include <stb_image.h>
 
 #include <algorithm>
 #include <fstream>
@@ -30,18 +26,16 @@ public:
 
     ImportResult Import(const std::filesystem::path& path) const override {
         ImportResult result;
-        int width = 0;
-        int height = 0;
-        int channels = 0;
-        if (stbi_info(path.string().c_str(), &width, &height, &channels) == 0) {
-            result.error = stbi_failure_reason() != nullptr ? stbi_failure_reason()
-                                                            : "unrecognised image";
+        imageio::ImageDesc desc;
+        const imageio::ImageIoResult probed = imageio::Probe(path, desc);
+        if (!probed) {
+            result.error = probed.error;
             return result;
         }
         result.ok = true;
-        result.width = static_cast<uint32_t>(width);
-        result.height = static_cast<uint32_t>(height);
-        result.channels = static_cast<uint32_t>(channels);
+        result.width = desc.width;
+        result.height = desc.height;
+        result.channels = desc.channels;
         return result;
     }
 };

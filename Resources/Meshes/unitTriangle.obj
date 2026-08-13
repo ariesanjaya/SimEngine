@@ -1,0 +1,12 @@
+# Segitiga 2 x 3 meter untuk menguji impor OBJ.
+#
+# OBJ tidak punya tempat untuk menyimpan satuan maupun sumbu atas, jadi angka di
+# bawah ini adalah meter apa adanya. Itu justru yang diujinya: FBX SDK melaporkan
+# panggung tanpa satuan sebagai sentimeter — bawaannya, bukan sesuatu yang dibaca
+# dari berkasnya — dan importir yang mengalikannya seperti satuan sungguhan
+# mengecilkan setiap OBJ seratus kali.
+v 0.0 0.0 0.0
+v 2.0 0.0 0.0
+v 0.0 3.0 0.0
+vn 0.0 0.0 1.0
+f 1//1 2//1 3//1

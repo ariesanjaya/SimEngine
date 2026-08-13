@@ -72,18 +72,28 @@ TerrainIoResult LoadTerrain(Terrain& terrain, TerrainDocument& document,
 
 // --- heightmap mentah --------------------------------------------------------
 
-/// PNG greyscale 16-bit. Formatnya persis yang dipertukarkan World Machine,
-/// Gaea, dan sejenisnya, jadi ekspor dari sana bisa langsung dipakai.
-TerrainIoResult SaveHeightmapPng(const Terrain& terrain, const std::filesystem::path& path);
-/// Menuntut ukuran PNG cocok dengan terrain. Menskala ulang diam-diam adalah
+/// Menulis heightmap; formatnya dari ekstensi berkasnya.
+///
+/// **PNG greyscale 16-bit dan TIFF 16-bit**, keduanya tanpa kehilangan dan
+/// keduanya persis yang dipertukarkan World Machine, Gaea, dan sejenisnya —
+/// jadi ekspor ke sana dan impor dari sana lewat berkas yang sama.
+TerrainIoResult SaveHeightmapImage(const Terrain& terrain, const std::filesystem::path& path);
+
+/// Menuntut ukuran gambar cocok dengan terrain. Menskala ulang diam-diam adalah
 /// cara paling halus untuk merusak peta seseorang: hasilnya terlihat masuk akal
 /// dan tetap salah.
-TerrainIoResult LoadHeightmapPng(Terrain& terrain, const std::filesystem::path& path);
+TerrainIoResult LoadHeightmapImage(Terrain& terrain, const std::filesystem::path& path);
 
-/// Membaca PNG apa adanya, tanpa menuntut ukurannya cocok. Dipakai panel untuk
-/// menawarkan menyesuaikan terrain sebelum mengimpor.
-TerrainIoResult ReadHeightmapPng(const std::filesystem::path& path, std::vector<Sample>& samples,
-                                 int& width, int& height);
+/// Membaca heightmap apa adanya, tanpa menuntut ukurannya cocok. Dipakai panel
+/// untuk menawarkan menyesuaikan terrain sebelum mengimpor.
+///
+/// **Menerima setiap format yang bisa dibaca backend yang aktif** — PNG 8/16-bit
+/// selalu, TIFF 16-bit dan 32-bit float bila libtiff ada. Yang 8-bit dinaikkan
+/// dan yang float dikuantisasi, dan **keduanya dicatat di log**: heightmap yang
+/// diam-diam kehilangan ketelitian terlihat persis seperti heightmap yang
+/// memang begitu.
+TerrainIoResult ReadHeightmapImage(const std::filesystem::path& path,
+                                   std::vector<Sample>& samples, int& width, int& height);
 
 /// RAW: uint16 little-endian, tanpa header. Tidak bisa membawa ukurannya
 /// sendiri, jadi ukuran terrain yang menentukan — itu sifat formatnya, bukan
