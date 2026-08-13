@@ -38,9 +38,10 @@ sim_add_library(Render
     PRIVATE_DEPS
         Sim::Assets
         Sim::RHI
-        # stb_image, untuk mendekode peta lingkungan HDR. Privat: header publik
-        # Render tidak membocorkannya, sama dengan Assets dan Vegetation.
-        Stb::Impl)
+        # Peta lingkungan dibaca lewat Sim::ImageIO, bukan lewat stb langsung.
+        # Privat: header publik Render tidak membocorkannya, sama dengan Assets
+        # dan Vegetation.
+        Sim::ImageIO)
 
 sim_compile_shaders(SimShadersGrid
     SOURCES

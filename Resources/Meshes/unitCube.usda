@@ -1,0 +1,76 @@
+#usda 1.0
+(
+    """Kubus satu meter untuk menguji impor USD.
+
+    Sengaja tidak memakai bawaan mana pun: satuannya sentimeter, sumbu atasnya Z,
+    dan mesh-nya duduk di bawah satu Xform yang menggesernya. Ketiganya harus
+    dikerjakan importir sebelum hasilnya cocok dengan yang diharapkan uji —
+    berkas yang sudah dalam meter dan Y-atas akan lulus walau konversinya hilang.
+
+    Xform-nya juga yang membuat berkas ini menyentuh UsdGeomXformCache, tempat
+    ketidakcocokan ABI TfHashMap dulu jatuh. Lihat catatan di cmake/SimDeps.cmake.
+    """
+    defaultPrim = "Root"
+    metersPerUnit = 0.01
+    upAxis = "Z"
+)
+
+def Xform "Root"
+{
+    double3 xformOp:translate = (0, 0, 50)
+    uniform token[] xformOpOrder = ["xformOp:translate"]
+
+    def Mesh "Cube" (
+        prepend apiSchemas = ["MaterialBindingAPI"]
+    )
+    {
+        int[] faceVertexCounts = [4, 4, 4, 4, 4, 4]
+        int[] faceVertexIndices = [
+            0, 3, 2, 1,
+            4, 5, 6, 7,
+            0, 1, 5, 4,
+            1, 2, 6, 5,
+            2, 3, 7, 6,
+            3, 0, 4, 7,
+        ]
+        point3f[] points = [
+            (-50, -50, -50),
+            ( 50, -50, -50),
+            ( 50,  50, -50),
+            (-50,  50, -50),
+            (-50, -50,  50),
+            ( 50, -50,  50),
+            ( 50,  50,  50),
+            (-50,  50,  50),
+        ]
+        texCoord2f[] primvars:st = [(0, 0), (1, 0), (1, 1), (0, 1)] (
+            interpolation = "faceVarying"
+        )
+        int[] primvars:st:indices = [
+            0, 1, 2, 3,
+            0, 1, 2, 3,
+            0, 1, 2, 3,
+            0, 1, 2, 3,
+            0, 1, 2, 3,
+            0, 1, 2, 3,
+        ]
+        rel material:binding = </Root/Materials/Paint>
+    }
+
+    def Scope "Materials"
+    {
+        def Material "Paint"
+        {
+            token outputs:surface.connect = </Root/Materials/Paint/Surface.outputs:surface>
+
+            def Shader "Surface"
+            {
+                uniform token info:id = "UsdPreviewSurface"
+                color3f inputs:diffuseColor = (0.8, 0.2, 0.1)
+                float inputs:metallic = 0.25
+                float inputs:roughness = 0.6
+                token outputs:surface
+            }
+        }
+    }
+}

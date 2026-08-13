@@ -10,6 +10,7 @@
 #include "Sim/Editor/EditorApp.h"
 #include "Sim/Editor/Icons.h"
 #include "Sim/ImGuiIntegration/ImGuiLayer.h"
+#include "Sim/ImageIO/ImageIO.h"
 #include "Sim/Platform/Display.h"
 #include "Sim/Platform/FileDialog.h"
 #include "Sim/Platform/Window.h"
@@ -140,6 +141,10 @@ int main(int argc, char** argv) {
     const std::filesystem::path configDir = ConfigDirectory();
     Log::Init(configDir / "Logs" / "editor.log");
     SIM_INFO("Editor", "SimEditor 0.1.0 starting");
+    // Backend gambar dicatat beserta versinya. Berkas yang terbaca di satu
+    // mesin dan ditolak di mesin lain hampir selalu berarti backendnya berbeda,
+    // dan tanpa baris ini satu-satunya cara mengetahuinya adalah membangun ulang.
+    SIM_INFO("Editor", "ImageIO backend: {}", imageio::BackendSummary());
 
     if (!platform::InitPlatform()) {
         return 1;

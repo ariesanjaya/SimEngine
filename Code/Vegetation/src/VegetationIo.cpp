@@ -1,9 +1,9 @@
 #include "Sim/Vegetation/VegetationIo.h"
 
+#include "Sim/ImageIO/ImageIO.h"
 #include "Sim/Terrain/TerrainIo.h"
 
 #include <nlohmann/json.hpp>
-#include <stb_image.h>
 
 #include <algorithm>
 #include <cmath>
@@ -40,20 +40,23 @@ std::string CompanionName(const std::filesystem::path& path, const std::string& 
 VegetationIoResult ReadMaskFile(const std::filesystem::path& path, std::vector<uint8_t>& values,
                                 int& width, int& height) {
     VegetationIoResult result;
-    int channels = 0;
-    stbi_uc* pixels = stbi_load(path.string().c_str(), &width, &height, &channels, 1);
-    if (pixels == nullptr) {
-        result.error = std::string("cannot read ") + path.string() + ": " + stbi_failure_reason();
+    imageio::ReadOptions options;
+    options.channels = 1;
+    options.type = imageio::PixelType::UInt8;
+
+    imageio::Image image;
+    const imageio::ImageIoResult decoded = imageio::Read(path, options, image);
+    if (!decoded) {
+        result.error = decoded.error;
         return result;
     }
+    width = static_cast<int>(image.desc.width);
+    height = static_cast<int>(image.desc.height);
     if (width <= 0 || height <= 0) {
-        stbi_image_free(pixels);
         result.error = "image is empty: " + path.string();
         return result;
     }
-    values.assign(pixels,
-                  pixels + static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
-    stbi_image_free(pixels);
+    values = std::move(image.bytes);
     result.ok = true;
     return result;
 }

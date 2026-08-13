@@ -1,8 +1,13 @@
 #include "Sim/Terrain/TerrainIo.h"
 
-#include <nlohmann/json.hpp>
-#include <stb_image.h>
+#include "Sim/Core/Log.h"
+#include "Sim/ImageIO/ImageIO.h"
 
+#include <nlohmann/json.hpp>
+
+#include <algorithm>
+#include <cmath>
+#include <cstring>
 #include <fstream>
 #include <sstream>
 
@@ -35,18 +40,80 @@ std::string CompanionName(const std::filesystem::path& path, const std::string& 
     return path.stem().string() + suffix;
 }
 
+/// Membungkus sampel menjadi gambar satu kanal untuk diserahkan ke `Sim::ImageIO`.
+///
+/// Menyalin, bukan menunjuk. Salinan seukuran heightmap memang tidak gratis,
+/// tapi jalur ini berjalan sekali per simpan — dan alternatifnya adalah
+/// antarmuka gambar yang memegang pointer milik orang lain, yang harganya
+/// dibayar di setiap pemakaian berikutnya.
+imageio::Image WrapSamples(const void* data, int width, int height, imageio::PixelType type) {
+    imageio::ImageDesc desc;
+    desc.width = static_cast<uint32_t>(width);
+    desc.height = static_cast<uint32_t>(height);
+    desc.channels = 1;
+    desc.type = type;
+    imageio::Image image;
+    image.Allocate(desc);
+    std::memcpy(image.bytes.data(), data, image.bytes.size());
+    return image;
+}
+
+/// Mengubah heightmap float menjadi sampel 16-bit, dan **mencatat bagaimana**.
+///
+/// Dua sumber yang sama-sama sah datang sebagai TIFF float dan artinya berbeda:
+/// World Machine dan Gaea mengekspor 0..1 ternormalisasi, sementara DEM dari
+/// sumber GIS berisi meter di atas permukaan laut. Menjepit keduanya ke 0..1
+/// akan meratakan yang kedua menjadi dataran tinggi seragam — tanpa satu pun
+/// galat, dan terlihat seperti data yang memang datar.
+///
+/// Jadi rentangnya dibaca dari isinya, lalu dipetakan, lalu **dicatat**. Yang
+/// tidak boleh terjadi adalah kuantisasi yang tidak disebut di mana pun.
+void QuantiseFloatHeights(const float* values, std::size_t count, const std::string& what,
+                          std::vector<Sample>& samples) {
+    float low = values[0];
+    float high = values[0];
+    for (std::size_t i = 1; i < count; ++i) {
+        low = std::min(low, values[i]);
+        high = std::max(high, values[i]);
+    }
+
+    const bool normalised = low >= 0.0f && high <= 1.0f;
+    const float scale = normalised ? 1.0f : (high > low ? 1.0f / (high - low) : 0.0f);
+    const float bias = normalised ? 0.0f : -low;
+
+    samples.resize(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        const float unit = std::clamp((values[i] + bias) * scale, 0.0f, 1.0f);
+        samples[i] = static_cast<Sample>(std::lround(unit * static_cast<float>(kSampleMax)));
+    }
+
+    if (normalised) {
+        SIM_INFO("Terrain", "{}: float heights 0..1 quantised to 16-bit ({} levels)", what,
+                 static_cast<int>(kSampleMax) + 1);
+    } else {
+        SIM_INFO("Terrain",
+                 "{}: float heights {:.4g}..{:.4g} rescaled to the terrain's full 16-bit range; "
+                 "set the terrain's min/max height to match the source units",
+                 what, static_cast<double>(low), static_cast<double>(high));
+    }
+}
+
 TerrainIoResult ReadMaskPng(const std::filesystem::path& path, std::vector<uint8_t>& values,
                             int& width, int& height) {
     TerrainIoResult result;
-    int channels = 0;
-    stbi_uc* pixels = stbi_load(path.string().c_str(), &width, &height, &channels, 1);
-    if (pixels == nullptr) {
-        result.error = std::string("cannot read ") + path.string() + ": " + stbi_failure_reason();
+    imageio::ReadOptions options;
+    options.channels = 1;
+    options.type = imageio::PixelType::UInt8;
+
+    imageio::Image image;
+    const imageio::ImageIoResult decoded = imageio::Read(path, options, image);
+    if (!decoded) {
+        result.error = decoded.error;
         return result;
     }
-    values.assign(pixels,
-                  pixels + static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
-    stbi_image_free(pixels);
+    width = static_cast<int>(image.desc.width);
+    height = static_cast<int>(image.desc.height);
+    values = std::move(image.bytes);
     result.ok = true;
     return result;
 }
@@ -167,7 +234,7 @@ TerrainIoResult SaveTerrain(const Terrain& terrain, const TerrainDocument& docum
     // ulang tidak cocok dengan heightmap di sebelahnya.
     copy.desc = terrain.Desc();
 
-    const TerrainIoResult heights = SaveHeightmapPng(terrain, path.parent_path() / copy.heightmapFile);
+    const TerrainIoResult heights = SaveHeightmapImage(terrain, path.parent_path() / copy.heightmapFile);
     if (!heights.ok) {
         return heights;
     }
@@ -238,7 +305,7 @@ TerrainIoResult LoadTerrain(Terrain& terrain, TerrainDocument& document,
 
     if (!document.heightmapFile.empty()) {
         const TerrainIoResult heights =
-            LoadHeightmapPng(terrain, path.parent_path() / document.heightmapFile);
+            LoadHeightmapImage(terrain, path.parent_path() / document.heightmapFile);
         if (!heights.ok) {
             return heights;
         }
@@ -325,44 +392,93 @@ TerrainIoResult LoadHolePng(Terrain& terrain, const std::filesystem::path& path)
     return result;
 }
 
-TerrainIoResult SaveHeightmapPng(const Terrain& terrain, const std::filesystem::path& path) {
+TerrainIoResult SaveHeightmapImage(const Terrain& terrain, const std::filesystem::path& path) {
     TerrainIoResult result;
     std::vector<Sample> samples;
     terrain.ReadAll(samples);
-    const std::vector<unsigned char> png =
-        EncodeHeightmapPng(samples.data(), terrain.SamplesX(), terrain.SamplesY());
-    if (png.empty()) {
-        result.error = "PNG encode failed";
-        return result;
-    }
-    result.ok = WriteFile(path, png.data(), png.size(), result.error);
+
+    // Formatnya dari ekstensinya — PNG 16-bit lewat enkoder sendiri, TIFF
+    // 16-bit lewat libtiff. Keduanya tanpa kehilangan, dan uji I3 menuntut
+    // round-trip lewat keduanya identik bit per bit.
+    const imageio::Image image = WrapSamples(samples.data(), terrain.SamplesX(),
+                                             terrain.SamplesY(), imageio::PixelType::UInt16);
+    const imageio::ImageIoResult written = imageio::Write(path, image);
+    result.ok = written.ok;
+    result.error = written.error;
     return result;
 }
 
-TerrainIoResult ReadHeightmapPng(const std::filesystem::path& path, std::vector<Sample>& samples,
-                                 int& width, int& height) {
+TerrainIoResult ReadHeightmapImage(const std::filesystem::path& path,
+                                   std::vector<Sample>& samples, int& width, int& height) {
     TerrainIoResult result;
-    int channels = 0;
-    // Dibaca dengan stb, bukan dengan dekoder tandingan buatan sendiri. Menulis
-    // dan membaca dengan implementasi yang sama akan membuat round-trip lulus
-    // walaupun berkasnya bukan PNG yang sah — yang diuji hanya konsistensi
-    // dengan diri sendiri.
-    stbi_us* pixels = stbi_load_16(path.string().c_str(), &width, &height, &channels, 1);
-    if (pixels == nullptr) {
-        result.error = std::string("cannot read ") + path.string() + ": " + stbi_failure_reason();
+    // **Tipenya tidak dipaksa di sini.** Yang ada di berkas dibaca apa adanya,
+    // lalu diterjemahkan di bawah — karena terjemahannya berbeda menurut
+    // tipenya, dan menyerahkannya ke konversi umum akan menjepit heightmap
+    // float bermeter ke 0..1 tanpa ada yang menyebutnya.
+    imageio::ReadOptions options;
+    options.channels = 1;
+
+    imageio::Image image;
+    const imageio::ImageIoResult decoded = imageio::Read(path, options, image);
+    if (!decoded) {
+        result.error = decoded.error;
         return result;
     }
-    samples.assign(pixels, pixels + static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
-    stbi_image_free(pixels);
+    width = static_cast<int>(image.desc.width);
+    height = static_cast<int>(image.desc.height);
+    const std::size_t count = image.desc.SampleCount();
+
+    switch (image.desc.type) {
+        case imageio::PixelType::UInt16:
+            samples.assign(image.AsU16(), image.AsU16() + count);
+            break;
+        case imageio::PixelType::UInt8: {
+            // 8-bit dinaikkan, bukan ditolak: peta 8-bit tetap dipakai sebagai
+            // sketsa kasar. Yang dijaga adalah bahwa putih tetap menjadi puncak
+            // penuh — 255 × 257 = 65535, bukan 65280.
+            const uint8_t* values = image.AsU8();
+            samples.resize(count);
+            for (std::size_t i = 0; i < count; ++i) {
+                samples[i] = static_cast<Sample>(static_cast<uint32_t>(values[i]) * 257u);
+            }
+            SIM_INFO("Terrain", "{}: 8-bit heightmap widened to 16-bit; only 256 distinct heights",
+                     path.string());
+            break;
+        }
+        case imageio::PixelType::Float32:
+            QuantiseFloatHeights(image.AsF32(), count, path.string(), samples);
+            break;
+    }
     result.ok = true;
     return result;
 }
 
-TerrainIoResult LoadHeightmapPng(Terrain& terrain, const std::filesystem::path& path) {
+std::vector<unsigned char> EncodeHeightmapPng(const Sample* samples, int width, int height) {
+    if (samples == nullptr || width <= 0 || height <= 0) {
+        return {};
+    }
+    std::vector<unsigned char> bytes;
+    const imageio::Image image =
+        WrapSamples(samples, width, height, imageio::PixelType::UInt16);
+    imageio::Encode(image, ".png", bytes);
+    return bytes;
+}
+
+std::vector<unsigned char> EncodeMaskPng(const uint8_t* values, int width, int height) {
+    if (values == nullptr || width <= 0 || height <= 0) {
+        return {};
+    }
+    std::vector<unsigned char> bytes;
+    const imageio::Image image = WrapSamples(values, width, height, imageio::PixelType::UInt8);
+    imageio::Encode(image, ".png", bytes);
+    return bytes;
+}
+
+TerrainIoResult LoadHeightmapImage(Terrain& terrain, const std::filesystem::path& path) {
     std::vector<Sample> samples;
     int width = 0;
     int height = 0;
-    TerrainIoResult result = ReadHeightmapPng(path, samples, width, height);
+    TerrainIoResult result = ReadHeightmapImage(path, samples, width, height);
     if (!result.ok) {
         return result;
     }

@@ -193,6 +193,8 @@ struct BoxVertex {
     Vec3 position;
     Vec3 normal;
     Vec2 uv;
+    /// Tangent ruang dunia, arah tangan di `w`. Lihat `assets::MeshVertex`.
+    Vec4 tangent;
 };
 
 static_assert(sizeof(BoxVertex) == sizeof(assets::MeshVertex),
@@ -203,6 +205,8 @@ static_assert(offsetof(BoxVertex, normal) == offsetof(assets::MeshVertex, normal
               "offset normal harus sama");
 static_assert(offsetof(BoxVertex, uv) == offsetof(assets::MeshVertex, uv),
               "offset uv harus sama");
+static_assert(offsetof(BoxVertex, tangent) == offsetof(assets::MeshVertex, tangent),
+              "offset tangent harus sama");
 
 // `assets::SkinInfluence` diunggah apa adanya sebagai buffer skin, dan
 // `VkVertexInputAttributeDescription` di bawah menyebut formatnya secara
@@ -345,12 +349,15 @@ std::vector<BoxVertex> BuildUnitCube() {
         const Vec3 a1 = centre + t * 0.5f - b * 0.5f;
         const Vec3 a2 = centre + t * 0.5f + b * 0.5f;
         const Vec3 a3 = centre - t * 0.5f + b * 0.5f;
-        vertices.push_back({a0, n, Vec2(0.0f, 0.0f)});
-        vertices.push_back({a1, n, Vec2(1.0f, 0.0f)});
-        vertices.push_back({a2, n, Vec2(1.0f, 1.0f)});
-        vertices.push_back({a0, n, Vec2(0.0f, 0.0f)});
-        vertices.push_back({a2, n, Vec2(1.0f, 1.0f)});
-        vertices.push_back({a3, n, Vec2(0.0f, 1.0f)});
+        // Tangent kubus sudah diketahui per muka, jadi ia ditulis langsung
+        // alih-alih diturunkan dari UV: kubus ini tidak pernah lewat importir.
+        const Vec4 tangent(t, 1.0f);
+        vertices.push_back({a0, n, Vec2(0.0f, 0.0f), tangent});
+        vertices.push_back({a1, n, Vec2(1.0f, 0.0f), tangent});
+        vertices.push_back({a2, n, Vec2(1.0f, 1.0f), tangent});
+        vertices.push_back({a0, n, Vec2(0.0f, 0.0f), tangent});
+        vertices.push_back({a2, n, Vec2(1.0f, 1.0f), tangent});
+        vertices.push_back({a3, n, Vec2(0.0f, 1.0f), tangent});
     }
     return vertices;
 }

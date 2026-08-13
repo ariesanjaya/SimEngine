@@ -12,6 +12,7 @@ sim_add_library(EditorFramework
         src/SceneCommands.cpp
         src/SceneView.cpp
         src/SkinnedPreview.cpp
+        src/SourceImport.cpp
         src/PanelManager.cpp
         src/PropertyGrid.cpp
         src/PanelRegistry.cpp

@@ -1,0 +1,146 @@
+{
+ "asset": {
+  "version": "2.0",
+  "generator": "SimEngine test asset - satu node beranimasi, lihat Tests/AnimationTests.cpp"
+ },
+ "scene": 0,
+ "scenes": [
+  {
+   "nodes": [
+    0
+   ]
+  }
+ ],
+ "nodes": [
+  {
+   "name": "Bone0",
+   "mesh": 0
+  }
+ ],
+ "meshes": [
+  {
+   "primitives": [
+    {
+     "attributes": {
+      "POSITION": 1
+     },
+     "indices": 0
+    }
+   ]
+  }
+ ],
+ "animations": [
+  {
+   "name": "Spin",
+   "samplers": [
+    {
+     "input": 2,
+     "output": 3,
+     "interpolation": "LINEAR"
+    },
+    {
+     "input": 2,
+     "output": 4,
+     "interpolation": "LINEAR"
+    }
+   ],
+   "channels": [
+    {
+     "sampler": 0,
+     "target": {
+      "node": 0,
+      "path": "rotation"
+     }
+    },
+    {
+     "sampler": 1,
+     "target": {
+      "node": 0,
+      "path": "translation"
+     }
+    }
+   ]
+  }
+ ],
+ "bufferViews": [
+  {
+   "buffer": 0,
+   "byteOffset": 0,
+   "byteLength": 8
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 8,
+   "byteLength": 36
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 44,
+   "byteLength": 12
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 56,
+   "byteLength": 48
+  },
+  {
+   "buffer": 0,
+   "byteOffset": 104,
+   "byteLength": 36
+  }
+ ],
+ "accessors": [
+  {
+   "bufferView": 0,
+   "componentType": 5123,
+   "count": 3,
+   "type": "SCALAR"
+  },
+  {
+   "bufferView": 1,
+   "componentType": 5126,
+   "count": 3,
+   "type": "VEC3",
+   "min": [
+    0,
+    0,
+    0
+   ],
+   "max": [
+    1,
+    1,
+    0
+   ]
+  },
+  {
+   "bufferView": 2,
+   "componentType": 5126,
+   "count": 3,
+   "type": "SCALAR",
+   "min": [
+    0.0
+   ],
+   "max": [
+    1.0
+   ]
+  },
+  {
+   "bufferView": 3,
+   "componentType": 5126,
+   "count": 3,
+   "type": "VEC4"
+  },
+  {
+   "bufferView": 4,
+   "componentType": 5126,
+   "count": 3,
+   "type": "VEC3"
+  }
+ ],
+ "buffers": [
+  {
+   "byteLength": 140,
+   "uri": "data:application/octet-stream;base64,AAABAAIAAAAAAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAPwAAgD8AAAAAAAAAAAAAAAAAAIA/AAAAAAAAAAAV78M+XoNsPwAAAAAAAAAA8wQ1P/MENT8AAAAAAAAAAAAAAAAAAAAAAACAPwAAAAAAAAAAAAAAQAAAAAA="
+  }
+ ]
+}

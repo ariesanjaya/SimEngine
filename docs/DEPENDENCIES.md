@@ -42,7 +42,7 @@ berikutnya tidak menyentuh jaringan. Untuk build sepenuhnya offline setelah itu:
 Shader ball dibundel sebagai **aset contoh**, bukan sebagai bagian engine: ia
 disemai ke folder aset proyek saat proyek itu belum punya folder `Meshes`, lalu
 dipakai entity "Shader Ball" di level contoh. FBX, bukan OBJ yang ada di sumber
-yang sama: `ufbx` yang dijadwalkan E8 membaca FBX, sedangkan OBJ menuntut
+yang sama: FBX SDK yang dipakai E8 membaca FBX, sedangkan OBJ menuntut
 pembaca tersendiri yang tidak ada di rencana mana pun. Ia juga lebih kecil di
 git meski lebih besar di disk — 1,6 MB terkompresi berbanding 1,8 MB.
 
@@ -100,12 +100,200 @@ Ditambahkan saat dibutuhkan, dicatat di sini supaya keputusannya tidak diulang:
 
 | Paket | Untuk apa |
 |---|---|
-| **cgltf** | impor glTF. `ufbx` sudah masuk di E8.4 dan membaca FBX serta OBJ |
+| **cgltf** | impor glTF. FBX SDK sudah masuk di E8.4 dan membaca FBX serta OBJ |
+| **Autodesk FBX SDK** | impor FBX (mesh, rangka, klip). **Dicari, tidak diunduh, dan wajib** — lihat di bawah |
 | **meshoptimizer** | optimisasi vertex cache, generasi LOD, simplifikasi |
+| **OpenUSD** | impor `.usd/.usda/.usdc/.usdz`. **Opsional dan dicari, tidak diunduh** — lihat di bawah |
+| **tinyexr** | impor OpenEXR untuk IBL (I2). **Opsional** (`SIM_WITH_EXR`), satu header lewat FetchContent |
+| **libtiff** | impor/ekspor heightmap TIFF 16/32-bit (I3). **Opsional** (`SIM_WITH_TIFF`), dicari di sistem |
+| **OpenImageIO** | backend gambar yang **didahulukan bila ada** — DDS, PSD utuh, metadata colorspace. **Opsional** (`SIM_WITH_OIIO`), dicari, tidak diunduh — lihat di bawah |
 | **PhysX 5** | fisika — sumber lokal di `/home/arie/SDK/PhysX-main` |
 | **OpenAL Soft** | audio — sumber lokal di `/home/arie/SDK/openal-soft-1.25.2` |
 | **Tracy** | profiler (opsional, `SIM_WITH_TRACY`) |
 | **slang** | bahasa shader (sudah tersedia sebagai `slangc` di Vulkan SDK) |
+
+### Autodesk FBX SDK — wajib, dan tidak bisa diambil sendiri
+
+Impor FBX — mesh, rangka, dan klip animasi — memakai FBX SDK resmi Autodesk.
+**Ia satu-satunya kebergantungan berlisensi milik**, dan itu menetapkan tiga hal
+yang tidak berlaku untuk yang lain di berkas ini:
+
+- **Tidak bisa diambil FetchContent dan tidak boleh divendor ke repo ini.**
+  Pengunduhannya menuntut penerimaan perjanjian lisensi Autodesk, per orang.
+- **Biner yang menautnya tunduk pada perjanjian itu.** Ini keputusan distribusi,
+  bukan sekadar keputusan teknis.
+- **Tidak ada jalur cadangan.** Tanpa SDK-nya, konfigurasi berhenti dengan pesan
+  yang menyebut alasannya — berbeda dengan OpenUSD di bawah, yang dilewati diam
+  bila tidak ada. FBX adalah format yang dipakai aset contoh engine ini sendiri
+  (`Resources/Meshes/shaderBall.fbx`), jadi build tanpanya tidak akan berguna.
+
+Pasang SDK-nya (Linux, x64) lalu arahkan build ke sana:
+
+```bash
+# Pemasang dari Autodesk, dijalankan sekali per mesin.
+./fbx20203_fbxsdk_linux ~/SDK/fbxsdk
+```
+
+Bawaannya menunjuk `$HOME/SDK/fbxsdk`; folder lain disetel dengan
+`-DSIM_FBXSDK_ROOT=<folder>`. Baris `Autodesk FBX SDK dipakai dari ...` pada
+keluaran CMake menandakan ia ditemukan.
+
+Yang ditautkan adalah `lib/release/libfbxsdk.a` yang **statis**, bukan `.so`-nya.
+Yang dinamis menuntut `libfbxsdk.so` ikut ditemukan saat dijalankan, dan
+satu-satunya tempat ia tinggal adalah folder pemasangan milik satu mesin — biner
+yang dipindah lalu berhenti bekerja dengan pesan dari loader, bukan dari mesin
+ini. Yang statis menyeret libxml2 dan zlib, dan keduanya memang ada di mana-mana.
+
+> **Membaca berkas tidak boleh menulis apa pun.** Bawaan SDK membongkar media
+> tertanam ke sebuah folder `<nama>.fbm/` di sebelah berkas FBX-nya — di dalam
+> folder aset milik orang lain — lalu menulis ulang jalur tekstur supaya menunjuk
+> ke sana. `IMP_FBX_EXTRACT_EMBEDDED_DATA` karena itu dimatikan di
+> `MeshImport.cpp`.
+
+### OpenUSD — dicari, tidak dibangun
+
+Semua kebergantungan lain diambil lewat FetchContent karena masing-masing
+berbiaya detik sampai satu menit. OpenUSD bukan salah satunya: ia menyeret
+oneTBB, dan membangun keduanya dari nol memakan puluhan menit dan ratusan
+megabyte. Menjadikannya wajib berarti setiap orang yang hanya ingin mengubah
+satu panel editor membayar biaya itu pada build bersihnya yang pertama.
+
+Jadi ia dipakai kalau ada dan dilewati kalau tidak. Build tanpanya tetap utuh;
+yang hilang hanya impor USD, dan berkas `.usd` yang dibuka di sana ditolak
+dengan alasan yang menyebut mesinnya — bukan dengan "format tidak dikenal" yang
+mengirim orang memeriksa berkasnya.
+
+Menyediakannya, sekali per mesin:
+
+```bash
+# oneTBB — headernya tidak ikut paket runtime distro
+git clone --depth 1 --branch v2022.0.0 https://github.com/uxlfoundation/oneTBB.git
+cmake -S oneTBB -B tbb-build -DCMAKE_BUILD_TYPE=Release -DTBB_TEST=OFF \
+      -DCMAKE_INSTALL_PREFIX=$HOME/SDK/usd -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+cmake --build tbb-build --target install -j
+
+# OpenUSD, monolitik dan tanpa Python/imaging — yang dipakai importir hanya
+# pembaca panggungnya
+git clone --depth 1 --branch v25.05 \
+      https://github.com/PixarAnimationStudios/OpenUSD.git
+cmake -S OpenUSD -B usd-build -DCMAKE_BUILD_TYPE=Release \
+      -DCMAKE_INSTALL_PREFIX=$HOME/SDK/usd -DCMAKE_PREFIX_PATH=$HOME/SDK/usd \
+      -DPXR_ENABLE_PYTHON_SUPPORT=OFF -DPXR_BUILD_IMAGING=OFF \
+      -DPXR_BUILD_USD_IMAGING=OFF -DPXR_BUILD_USDVIEW=OFF \
+      -DPXR_BUILD_TESTS=OFF -DPXR_BUILD_EXAMPLES=OFF -DPXR_BUILD_TUTORIALS=OFF \
+      -DPXR_BUILD_USD_TOOLS=OFF -DPXR_BUILD_MONOLITHIC=ON \
+      -DPXR_ENABLE_MATERIALX_SUPPORT=OFF -DPXR_ENABLE_GL_SUPPORT=OFF \
+      -DCMAKE_POSITION_INDEPENDENT_CODE=ON
+cmake --build usd-build --target install -j
+```
+
+Lalu konfigurasikan SimEngine dengan `-DSIM_USD_ROOT=$HOME/SDK/usd`. Baris
+`OpenUSD ditemukan:` pada keluaran CMake menandakan impor USD ikut terbangun.
+
+#### Kompiler yang membangun USD ikut menentukan ABI-nya
+
+`pxr/base/tf/hashmap.h` memilih induk `TfHashMap` lewat
+`ARCH_HAS_GNU_STL_EXTENSIONS`, dan `pxr/base/arch/defines.h` menyalakan makro itu
+hanya pada Linux **dengan GCC**. Dibangun GCC, `TfHashMap` mewarisi
+`__gnu_cxx::hash_map` dan besarnya 40 bait; header yang sama dibaca Clang
+mewarisi `std::unordered_map` dan besarnya 56. Setiap kelas USD yang menyimpan
+`TfHashMap` karena itu punya offset anggota yang berbeda di kedua sisi.
+
+Yang tidak cocok tidak gagal saat ditautkan — ia jatuh belakangan, sebagai
+segfault di dalam destruktor USD yang di-inline ke pemanggilnya, pada berkas
+`.usda` sekecil satu kubus.
+
+Ini tidak perlu diurus sendiri: SimDeps.cmake membaca cabang mana yang dipakai
+langsung dari tabel simbol pustakanya dan menyamakan sisi pemanggil. Yang perlu
+diketahui hanya bahwa **paket USD tidak bisa dipertukarkan begitu saja** — yang
+dibangun Clang dan yang dibangun GCC bukan barang yang sama, dan menukar isi
+`SIM_USD_ROOT` tanpa mengonfigurasi ulang membuat build memakai kesimpulan lama.
+
+### Backend gambar — tiga lapis, satu wajib
+
+`Sim::ImageIO` memilih backend per ekstensi, dan yang lebih mampu menang:
+
+| Lapis | Opsi | Format | Wajib? |
+|---|---|---|---|
+| **stb** | — | PNG, JPEG, TGA, BMP, HDR, PSD terbatas. Satu-satunya yang **menulis** PNG greyscale 8/16-bit | **ya** |
+| **tinyexr** | `SIM_WITH_EXR` | `.exr` | tidak |
+| **libtiff** | `SIM_WITH_TIFF` | `.tif`/`.tiff`, baca dan tulis | tidak |
+| **OpenImageIO** | `SIM_WITH_OIIO` | semuanya di atas + `.dds`, PSD utuh, metadata colorspace | tidak |
+
+Build bersih hanya butuh stb — tujuh format, nol setup. Dengan tinyexr dan
+libtiff (`apt install libtiff-dev zlib1g-dev`) menjadi sepuluh. Dengan OIIO,
+sebelas, dan `.psd` serta metadata colorspace ikut benar.
+
+```bash
+sudo apt install libtiff-dev zlib1g-dev
+```
+
+Aturan ruang warna dan alfa yang berlaku untuk setiap tekstur ada di
+[TEXTURE-CONVENTIONS.md](TEXTURE-CONVENTIONS.md).
+
+#### OpenImageIO — didahulukan bila ada, tidak pernah wajib
+
+**Yang ditambahkannya** ketika hadir: impor `.dds` untuk aset lama, PSD yang
+utuh alih-alih composited view 8/16-bit saja, metadata colorspace untuk PNG dan
+JPEG (yang tidak dibaca stb sama sekali), dan `ImageBufAlgo` untuk pembandingan
+gambar di I5.
+
+**Kenapa tidak dijadikan syarat.** Biayanya terukur: **396 MB** arsip statik yang
+harus disalin dengan tangan, ditambah rantai yang tidak disebut paketnya di mana
+pun — boost 1.78 (×4), pugixml, dan fmt 10.2.1. Paket OIIO yang dibawa
+distribusi OpenUSD memasang `detail/fmt/format.h` sebagai shim satu baris yang
+meneruskan ke `<fmt/format.h>`, jadi ia memang tidak bisa dipakai dari luar
+tanpa fmt sendiri; dan versinya tidak bebas dipilih karena fmt 12 yang dibawa
+spdlog membuang hal-hal yang masih dipakai header OIIO 2.5. Menjadikannya syarat
+berarti SimEngine kehilangan sifat "bisa dibangun hanya dengan FetchContent dan
+Vulkan SDK".
+
+**Root sendiri, bukan menumpang paket OpenUSD.** Distribusi OpenUSD kebetulan
+membawa header OIIO, dan menaruhnya di sana berarti header itu masuk include
+path setiap target yang menautkan `Usd::Usd` — termasuk target yang tidak boleh
+melihatnya. `Third-Party/OpenImageIO/` menutup itu secara struktural.
+
+**Header saja tidak cukup.** Paket OpenUSD membawa headernya tanpa pustakanya,
+dan kalau hanya header yang ada `#include <OpenImageIO/imageio.h>` kompilasi
+dengan sukses lalu gagal saat link. SimDeps memeriksa keduanya dan melewati
+backend ini — dengan pesan yang menyebut sebabnya — bila hanya headernya ada.
+
+Menyediakannya, sekali per mesin:
+
+```bash
+# Berkasnya ada di paket OpenUSD yang sama yang mengisi Third-Party/OpenUSD.
+# Sesuaikan $USD_PKG dengan paket yang dipakai.
+USD_PKG=$HOME/.cache/packman/chk/usd.py310.manylinux_2_35_x86_64.stock.release/0.25.05.post.2-gl.15479+b8a1f40c
+D=Third-Party/OpenImageIO
+mkdir -p "$D/include" "$D/lib"
+cp -a "$USD_PKG"/include/OpenImageIO "$USD_PKG"/include/Imath "$D/include/"
+cp -a "$USD_PKG"/lib/libOpenImageIO.a "$USD_PKG"/lib/libOpenImageIO_Util.a "$D/lib/"
+for b in filesystem thread atomic system; do cp -a "$USD_PKG"/lib/libboost_$b.so* "$D/lib/"; done
+
+# Pustaka pendukung dari distro; sonamenya cocok dengan yang dipakai saat
+# arsipnya dibangun, jadi tidak perlu disalin ke dalam pohon ini.
+sudo apt install libtiff-dev libjpeg-dev libpng-dev zlib1g-dev libpugixml-dev
+```
+
+Baris `OpenImageIO 2.5.18 dipakai dari ...` pada keluaran CMake menandakan
+backendnya ikut terbangun. **boost datang dari paket yang sama, bukan dari
+distro**: arsipnya dibangun terhadap boost 1.78 dan boost tidak menjanjikan ABI
+stabil antar-versi.
+
+**Bukan karena OpenUSD.** Layak diluruskan karena mudah dikira begitu: USD tidak
+pernah mendekode gambar. Ia merujuk tekstur sebagai jalur aset eksternal, dan
+kaitan USD dengan OIIO hidup di **Hydra/Hio** — `hioOiio` adalah plugin
+`libusd_hio`, bagian imaging. Paket USD yang dipakai di sini tidak membawa
+imaging sama sekali, dan tidak satu pun dari 20 pustaka USD yang di-vendor
+merujuk simbol OIIO. Alasan memakai OIIO adalah kemampuan gambarnya, bukan
+integrasi USD-nya.
+
+**Tindihan antar-backend itu disengaja.** Ketika OIIO ada, ia membaca format yang
+sama dengan ketiga backend lain — dan `SimImageIOTests` memanfaatkannya: setiap
+fixture dibaca lewat **setiap** backend yang mengaku bisa, lalu dituntut identik
+bit per bit. Itulah yang mengadu penyusunan ulang kanal EXR dan pembacaan strip
+TIFF yang ditulis di sini dengan implementasi yang sudah dipakai seluruh
+industri.
 
 ## Yang sengaja tidak dipakai
 

@@ -5,6 +5,10 @@ set(_sim_editor_deps
     Sim::ImGuiIntegration
     Sim::Render
     Sim::EditorFramework
+    # Diminta sendiri, walau Render dan Assets sudah menautkannya: keduanya
+    # memakainya secara PRIVATE, jadi headernya tidak sampai ke sini. Yang
+    # dipakai main.cpp cuma satu baris ringkasan backend untuk log startup.
+    Sim::ImageIO
     # WHOLE_ARCHIVE: panel mendaftarkan dirinya lewat inisialisasi statik
     # (SIM_REGISTER_PANEL). Tanpa ini linker membuang berkas objek yang
     # simbolnya tidak pernah dirujuk secara eksplisit, dan panel-panelnya hilang

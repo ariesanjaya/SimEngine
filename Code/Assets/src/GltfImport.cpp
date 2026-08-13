@@ -145,6 +145,11 @@ MeshData LoadGltfMesh(const std::filesystem::path& path, std::string& error) {
     std::unordered_map<const cgltf_material*, int> materialIndex;
     std::unordered_map<const cgltf_node*, int> boneIndex;
     bool anySkin = false;
+    /// Tangent hanya dihitung ulang kalau ada primitive yang tidak membawanya.
+    /// Berkas campuran — sebagian membawa, sebagian tidak — dihitung ulang
+    /// seluruhnya: satu mesh dengan dua asal bingkai tangent lebih sulit
+    /// dijelaskan daripada satu mesh yang seluruh bingkainya diturunkan sama.
+    bool everyPrimitiveHasTangents = true;
 
     // --- rangka -------------------------------------------------------------
     //
@@ -225,6 +230,7 @@ MeshData LoadGltfMesh(const std::filesystem::path& path, std::string& error) {
     std::vector<float> positions;
     std::vector<float> normals;
     std::vector<float> uvs;
+    std::vector<float> tangents;
     std::vector<float> joints;
     std::vector<float> weights;
     std::vector<int> triangleMaterial;
@@ -251,6 +257,7 @@ MeshData LoadGltfMesh(const std::filesystem::path& path, std::string& error) {
             positions.clear();
             normals.clear();
             uvs.clear();
+            tangents.clear();
             joints.clear();
             weights.clear();
             for (cgltf_size a = 0; a < primitive.attributes_count; ++a) {
@@ -266,6 +273,15 @@ MeshData LoadGltfMesh(const std::filesystem::path& path, std::string& error) {
                         if (attribute.index == 0) {
                             ReadFloats(attribute.data, uvs, 2);
                         }
+                        break;
+                    // **Tangent milik berkasnya dipakai kalau ada.** Peta normal
+                    // dipanggang terhadap bingkai tangent tertentu, dan yang
+                    // dihitung ulang dari UV belum tentu bingkai yang sama —
+                    // jahitan lalu terlihat sebagai garis yang pencahayaannya
+                    // patah. glTF menyimpannya sebagai VEC4 dengan arah tangan
+                    // di `w`, yaitu bentuk yang sama dengan `MeshVertex`.
+                    case cgltf_attribute_type_tangent:
+                        ReadFloats(attribute.data, tangents, 4);
                         break;
                     case cgltf_attribute_type_joints:
                         if (attribute.index == 0) {
@@ -301,6 +317,11 @@ MeshData LoadGltfMesh(const std::filesystem::path& path, std::string& error) {
             const bool skinned = !mesh.skeleton.bones.empty() && joints.size() == vertexCount * 4 &&
                                  weights.size() == vertexCount * 4;
             anySkin = anySkin || skinned;
+            const bool hasTangents = tangents.size() == vertexCount * 4;
+            everyPrimitiveHasTangents = everyPrimitiveHasTangents && hasTangents;
+            // Transform yang mencerminkan membalik arah tangan; `w` di berkasnya
+            // menyatakan tangan di ruang objek, bukan di ruang dunia.
+            const float mirror = glm::determinant(Mat3(toWorld)) < 0.0f ? -1.0f : 1.0f;
 
             const auto emit = [&](std::size_t index) {
                 MeshVertex vertex;
@@ -316,6 +337,18 @@ MeshData LoadGltfMesh(const std::filesystem::path& path, std::string& error) {
                 }
                 if (uvs.size() >= (index + 1) * 2) {
                     vertex.uv = Vec2(uvs[index * 2], uvs[index * 2 + 1]);
+                }
+                if (hasTangents) {
+                    // Tangent adalah vektor singgung: ia ikut matriks modelnya,
+                    // bukan invers-transposnya seperti normal.
+                    const Vec3 direction =
+                        Mat3(toWorld) * Vec3(tangents[index * 4], tangents[index * 4 + 1],
+                                             tangents[index * 4 + 2]);
+                    const float length = glm::length(direction);
+                    if (length > 1e-8f) {
+                        vertex.tangent =
+                            Vec4(direction / length, tangents[index * 4 + 3] * mirror);
+                    }
                 }
                 soup.push_back(vertex);
 
@@ -369,6 +402,9 @@ MeshData LoadGltfMesh(const std::filesystem::path& path, std::string& error) {
         return mesh;
     }
     GroupByMaterial(mesh, triangleMaterial);
+    if (!everyPrimitiveHasTangents) {
+        mesh.ComputeTangents();
+    }
     return mesh;
 }
 

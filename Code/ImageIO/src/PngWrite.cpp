@@ -15,18 +15,25 @@
 // berbeda dalam hal-hal yang baru terlihat pada berkas orang lain — pilihan
 // filter, ukuran keluaran, penanganan gambar kosong.
 //
+// **Dulu tinggal di `Sim::Terrain`, dan pindah ke sini pada I3.** Rencananya
+// semula menghapusnya begitu ada pustaka yang menulis PNG 16-bit sendiri —
+// dan tidak ada: tinyexr menulis EXR, libtiff menulis TIFF, `stbi_write_png`
+// hanya 8 bit. Jadi enkoder ini tetap ada, permanen; yang berubah cuma
+// tempatnya — sekarang ia di belakang seam bersama seluruh I/O gambar yang
+// lain, bukan setengah di modul terrain.
+//
 // Filternya adaptif per baris. Tanpa filter, heightmap 16-bit nyaris tidak
 // terkompresi sama sekali — dan PNG yang seukuran RAW tidak ada gunanya, karena
 // RAW sudah tersedia.
 
-#include "Sim/Terrain/TerrainIo.h"
+#include "PngWrite.h"
 
 #include <stb_impl.h>
 
 #include <cstdlib>
 #include <cstring>
 
-namespace sim::terrain {
+namespace sim::imageio {
 namespace {
 
 uint32_t Crc32(const unsigned char* data, std::size_t length, uint32_t crc = 0xffffffffU) {
@@ -168,34 +175,42 @@ std::vector<unsigned char> EncodePng(const std::vector<unsigned char>& raw, int 
 
 }  // namespace
 
-std::vector<unsigned char> EncodeHeightmapPng(const Sample* samples, int width, int height) {
-    if (samples == nullptr || width <= 0 || height <= 0) {
-        return {};
+bool EncodeGreyscalePng(const Image& image, std::vector<uint8_t>& out) {
+    const ImageDesc& desc = image.desc;
+    if (desc.width == 0 || desc.height == 0 || desc.channels != 1) {
+        return false;
     }
+    const auto width = static_cast<int>(desc.width);
+    const auto height = static_cast<int>(desc.height);
+
+    if (desc.type == PixelType::UInt8) {
+        const uint8_t* values = image.AsU8();
+        const std::vector<unsigned char> raw(
+            values, values + static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
+        out = EncodePng(raw, width, height, 8);
+        return !out.empty();
+    }
+
+    if (desc.type != PixelType::UInt16) {
+        return false;
+    }
+    const uint16_t* samples = image.AsU16();
     // PNG menyimpan sampel 16-bit big-endian, apa pun endianness mesinnya.
     const std::size_t stride = static_cast<std::size_t>(width) * 2u;
     std::vector<unsigned char> raw(stride * static_cast<std::size_t>(height));
     for (int y = 0; y < height; ++y) {
         for (int x = 0; x < width; ++x) {
-            const Sample value = samples[static_cast<std::size_t>(y) *
-                                             static_cast<std::size_t>(width) +
-                                         static_cast<std::size_t>(x)];
+            const uint16_t value = samples[static_cast<std::size_t>(y) *
+                                               static_cast<std::size_t>(width) +
+                                           static_cast<std::size_t>(x)];
             raw[static_cast<std::size_t>(y) * stride + static_cast<std::size_t>(x) * 2u] =
                 static_cast<unsigned char>(value >> 8);
             raw[static_cast<std::size_t>(y) * stride + static_cast<std::size_t>(x) * 2u + 1u] =
                 static_cast<unsigned char>(value & 0xffU);
         }
     }
-    return EncodePng(raw, width, height, 16);
+    out = EncodePng(raw, width, height, 16);
+    return !out.empty();
 }
 
-std::vector<unsigned char> EncodeMaskPng(const uint8_t* values, int width, int height) {
-    if (values == nullptr || width <= 0 || height <= 0) {
-        return {};
-    }
-    const std::vector<unsigned char> raw(
-        values, values + static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
-    return EncodePng(raw, width, height, 8);
-}
-
-}  // namespace sim::terrain
+}  // namespace sim::imageio

@@ -75,11 +75,14 @@ const animation::Clip* SkinnedPreview::AcquireClip(const std::filesystem::path& 
 
     animation::Clip clip;
     std::string error;
-    // **Berkas FBX boleh dirujuk langsung sebagai klip.** Memaksanya lewat
-    // langkah impor ke `.simanim` lebih dulu berarti sebuah berkas Mixamo tidak
-    // bisa dicoba tanpa ritual — dan mencobanya justru hal pertama yang ingin
-    // dilakukan orang. Yang memanggangnya menjadi `.simanim` tetap berguna, tapi
-    // ia menjadi pilihan, bukan syarat.
+    // **Berkas sumber boleh dirujuk langsung sebagai klip** — FBX, glTF, maupun
+    // USD. Memaksanya lewat langkah impor ke `.simanim` lebih dulu berarti
+    // sebuah berkas Mixamo tidak bisa dicoba tanpa ritual — dan mencobanya
+    // justru hal pertama yang ingin dilakukan orang. Yang memanggangnya menjadi
+    // `.simanim` tetap berguna, tapi ia menjadi pilihan, bukan syarat.
+    //
+    // Yang bukan `.simanim` diserahkan ke `ImportClips`, dan ia yang memilih
+    // pembacanya menurut ekstensi.
     std::filesystem::path extension = path.extension();
     std::string lowered = extension.string();
     std::transform(lowered.begin(), lowered.end(), lowered.begin(),
@@ -91,7 +94,7 @@ const animation::Clip* SkinnedPreview::AcquireClip(const std::filesystem::path& 
             error = result.error;
         }
     } else {
-        std::vector<animation::Clip> imported = animation::ImportClipsFromFbx(path, error);
+        std::vector<animation::Clip> imported = animation::ImportClips(path, error);
         if (!imported.empty()) {
             // Yang pertama. Berkas bertake banyak menuntut cara memilihnya, dan
             // itu medan baru di komponennya — bukan tebakan diam-diam di sini.

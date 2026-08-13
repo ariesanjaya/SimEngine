@@ -4,6 +4,11 @@
 #include "Sim/Terrain/TerrainBrush.h"
 #include "Sim/Terrain/TerrainIo.h"
 
+// Diminta sendiri: Terrain memakai Sim::ImageIO secara PRIVATE. Kriteria terima
+// I3 berbunyi berbeda tergantung ada tidaknya libtiff, dan uji yang tidak bisa
+// membedakan keduanya akan melewat diam di salah satunya.
+#include "Sim/ImageIO/ImageIO.h"
+
 #include <doctest/doctest.h>
 
 #include <cmath>
@@ -351,10 +356,10 @@ TEST_CASE("Kriteria 4: round-trip PNG 16-bit tanpa kehilangan presisi") {
     source.SetRawAt(1, 0, kSampleMax);
 
     const std::filesystem::path png = dir / "height.png";
-    REQUIRE(SaveHeightmapPng(source, png).ok);
+    REQUIRE(SaveHeightmapImage(source, png).ok);
 
     Terrain loaded(desc);
-    const TerrainIoResult result = LoadHeightmapPng(loaded, png);
+    const TerrainIoResult result = LoadHeightmapImage(loaded, png);
     INFO(result.error);
     REQUIRE(result.ok);
 
@@ -384,7 +389,7 @@ TEST_CASE("PNG yang ditulis benar-benar terkompresi, bukan sekadar RAW berbungku
 
     const std::filesystem::path png = dir / "h.png";
     const std::filesystem::path raw = dir / "h.raw";
-    REQUIRE(SaveHeightmapPng(terrain, png).ok);
+    REQUIRE(SaveHeightmapImage(terrain, png).ok);
     REQUIRE(SaveHeightmapRaw(terrain, raw).ok);
 
     const auto pngSize = std::filesystem::file_size(png);
@@ -425,10 +430,10 @@ TEST_CASE("Heightmap PNG berukuran lain ditolak, bukan diskala diam-diam") {
     TempDir dir("mismatch");
     Terrain small(TerrainDesc{32, 1, 1});
     const std::filesystem::path png = dir / "small.png";
-    REQUIRE(SaveHeightmapPng(small, png).ok);
+    REQUIRE(SaveHeightmapImage(small, png).ok);
 
     Terrain big(TerrainDesc{32, 2, 2});
-    const TerrainIoResult result = LoadHeightmapPng(big, png);
+    const TerrainIoResult result = LoadHeightmapImage(big, png);
     // Menskala ulang diam-diam adalah cara paling halus untuk merusak peta
     // seseorang: hasilnya terlihat masuk akal dan tetap salah.
     CHECK_FALSE(result.ok);
@@ -440,7 +445,7 @@ TEST_CASE("Heightmap PNG berukuran lain ditolak, bukan diskala diam-diam") {
     std::vector<Sample> samples;
     int w = 0;
     int h = 0;
-    REQUIRE(ReadHeightmapPng(png, samples, w, h).ok);
+    REQUIRE(ReadHeightmapImage(png, samples, w, h).ok);
     CHECK(w == 32);
     CHECK(h == 32);
 }
@@ -690,10 +695,10 @@ TEST_CASE("Memuat heightmap tidak mewujudkan ubin yang seluruhnya datar") {
     REQUIRE(source.TilesResident() == 1);
 
     const std::filesystem::path png = dir / "sparse.png";
-    REQUIRE(SaveHeightmapPng(source, png).ok);
+    REQUIRE(SaveHeightmapImage(source, png).ok);
 
     Terrain loaded(desc);
-    REQUIRE(LoadHeightmapPng(loaded, png).ok);
+    REQUIRE(LoadHeightmapImage(loaded, png).ok);
 
     // Berkas heightmap memuat seluruh peta, jadi tanpa penyaringan ini memuat
     // terrain akan membatalkan seluruh guna alokasi malas: membuka terrain
@@ -1303,4 +1308,132 @@ TEST_CASE("Profil kuas cat masih berarti setelah kuasnya ditahan") {
     // Dan di luar jari-jari tetap tidak tersentuh: pembulatan menjauhi hanya
     // berlaku pada sampel yang bobot kuasnya bukan nol.
     CHECK(terrain.WeightAt(1, 53, 32) == 0);
+}
+
+// --- I3: heightmap TIFF ------------------------------------------------------
+
+TEST_CASE("heightmap TIFF 16-bit dimuat dengan nilai yang benar") {
+    // **Nilainya yang diperiksa, bukan bentuknya.** Heightmap yang dimuat dengan
+    // dimensi benar tapi rentang tinggi meleset terlihat persis seperti terrain
+    // yang memang begitu — tidak ada galat di mana pun, hanya lembah yang salah
+    // dalam.
+    //
+    // Berkasnya ditulis tangan, di luar libtiff, dan **dimampatkan deflate**:
+    // heightmap dari World Machine, Gaea, dan sumber GIS tidak pernah TIFF
+    // mentah, jadi fixture tanpa kompresi tidak akan membuktikan apa-apa.
+    // Isinya diterangkan di Tests/ImageIOTests.cpp.
+    const std::filesystem::path tiff = std::filesystem::path(SIM_IMAGE_DIR) / "ramp16.tif";
+    if (!sim::imageio::CanRead(".tif")) {
+        MESSAGE("build ini tanpa libtiff — TIFF dilewati");
+        std::vector<Sample> ignored;
+        int w = 0;
+        int h = 0;
+        CHECK_FALSE(ReadHeightmapImage(tiff, ignored, w, h).ok);
+        return;
+    }
+
+    std::vector<Sample> samples;
+    int width = 0;
+    int height = 0;
+    const TerrainIoResult result = ReadHeightmapImage(tiff, samples, width, height);
+    INFO(result.error);
+    REQUIRE(result.ok);
+    CHECK(width == 8);
+    CHECK(height == 8);
+    REQUIRE(samples.size() == 64);
+
+    // sampel(x,y) = (y*8 + x) * 1024, apa adanya — tanpa penskalaan ulang.
+    for (std::size_t i = 0; i < samples.size(); ++i) {
+        CHECK(samples[i] == static_cast<Sample>(i * 1024));
+    }
+
+    SUBCASE("PNG dan TIFF dengan isi yang sama menghasilkan sampel yang sama") {
+        // Dua format, dua pustaka, dua penulis tangan yang berbeda. Kalau
+        // keduanya tidak sampai pada angka yang sama, salah satu jalurnya salah.
+        std::vector<Sample> fromPng;
+        int pngWidth = 0;
+        int pngHeight = 0;
+        REQUIRE(ReadHeightmapImage(std::filesystem::path(SIM_IMAGE_DIR) / "ramp16.png", fromPng,
+                                   pngWidth, pngHeight)
+                    .ok);
+        CHECK(pngWidth == width);
+        CHECK(pngHeight == height);
+        CHECK(fromPng == samples);
+    }
+}
+
+TEST_CASE("heightmap TIFF 32-bit float tidak dipotong diam-diam") {
+    if (!sim::imageio::CanRead(".tif")) {
+        return;
+    }
+
+    // Berkasnya berisi meter, 100..1675 — bentuk yang keluar dari DEM GIS.
+    // Menjepitnya ke 0..1 akan meratakan seluruhnya menjadi dataran tinggi
+    // seragam; yang benar adalah memetakan rentangnya dan **mencatat** bahwa
+    // itu dilakukan.
+    std::vector<Sample> samples;
+    int width = 0;
+    int height = 0;
+    const TerrainIoResult result = ReadHeightmapImage(
+        std::filesystem::path(SIM_IMAGE_DIR) / "heights-metres.tif", samples, width, height);
+    INFO(result.error);
+    REQUIRE(result.ok);
+    REQUIRE(samples.size() == 64);
+
+    // Rentangnya terpakai penuh: yang terendah menjadi nol, yang tertinggi
+    // menjadi puncak. Kalau nilainya terjepit, keduanya akan bertumpuk di ujung
+    // atas dan seluruh relief hilang.
+    CHECK(samples.front() == 0);
+    CHECK(samples.back() == kSampleMax);
+
+    // Dan yang di antaranya tersebar merata, karena sumbernya memang tangga
+    // seragam. Ini yang membedakan "dipetakan" dari "dijepit".
+    for (std::size_t i = 0; i < samples.size(); ++i) {
+        const auto expected = static_cast<Sample>(
+            std::lround(static_cast<double>(i) / 63.0 * static_cast<double>(kSampleMax)));
+        CHECK(samples[i] == expected);
+    }
+}
+
+TEST_CASE("round-trip 16-bit identik lewat kedua jalur penulis") {
+    // Kriteria terima I3. Dua penulis yang berbeda — enkoder PNG tangan dan
+    // libtiff — harus mengembalikan sampel yang sama persis, bit per bit.
+    // Penulis yang kehilangan satu bit di ujung rentang tidak akan terlihat
+    // pada terrain mana pun sampai seseorang membandingkan dua berkas.
+    TempDir dir("writers");
+    TerrainDesc desc{32, 2, 2, 1.0f, 0.0f, 1000.0f, 0.0f};
+    Terrain source(desc);
+
+    // Pola yang memakai seluruh rentang termasuk kedua ujungnya, dengan alasan
+    // yang sama seperti round-trip PNG di atas.
+    for (int y = 0; y < source.SamplesY(); ++y) {
+        for (int x = 0; x < source.SamplesX(); ++x) {
+            source.SetRawAt(x, y, static_cast<Sample>((x * 517 + y * 8191) & 0xffff));
+        }
+    }
+    source.SetRawAt(0, 0, 0);
+    source.SetRawAt(1, 0, kSampleMax);
+
+    std::vector<Sample> original;
+    source.ReadAll(original);
+
+    std::vector<std::string> written{"height.png"};
+    if (sim::imageio::CanWrite(".tif")) {
+        written.emplace_back("height.tif");
+    }
+
+    for (const std::string& name : written) {
+        INFO("lewat " << name);
+        const std::filesystem::path path = dir / name;
+        REQUIRE(SaveHeightmapImage(source, path).ok);
+
+        Terrain loaded(desc);
+        const TerrainIoResult result = LoadHeightmapImage(loaded, path);
+        INFO(result.error);
+        REQUIRE(result.ok);
+
+        std::vector<Sample> roundTripped;
+        loaded.ReadAll(roundTripped);
+        CHECK(roundTripped == original);
+    }
 }

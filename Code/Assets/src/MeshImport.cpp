@@ -2,12 +2,14 @@
 
 #include "Sim/Core/Log.h"
 
-#include <ufbx.h>
+#include <fbxsdk.h>
 
 #include <algorithm>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 #include <unordered_map>
+#include <vector>
 
 namespace sim::assets {
 namespace {
@@ -48,16 +50,18 @@ struct VertexHash {
     }
 };
 
-Mat4 ToMat4(const ufbx_matrix& m) {
-    // ufbx menyimpan tiga kolom rotasi/skala ditambah satu kolom translasi;
-    // glm kolom-mayor, jadi kolomnya dipetakan satu-satu.
+/// **Ditranspos, bukan disalin kolom demi kolom.** FBX SDK mengalikan vektor
+/// baris dari kiri (`v' = v · M`), jadi translasinya ada di baris ke-3; glm
+/// mengalikan vektor kolom dari kanan (`v' = M · v`) dan menaruh translasi di
+/// kolom ke-3. Menyalinnya apa adanya menghasilkan matriks transpos — rotasi
+/// yang terbalik arah dan translasi yang tercecer ke baris skala.
+Mat4 ToMat4(const FbxAMatrix& m) {
     Mat4 out(1.0f);
-    for (int column = 0; column < 3; ++column) {
-        out[column] = Vec4(static_cast<float>(m.cols[column].x), static_cast<float>(m.cols[column].y),
-                           static_cast<float>(m.cols[column].z), 0.0f);
+    for (int i = 0; i < 4; ++i) {
+        const FbxVector4 row = m.GetRow(i);
+        out[i] = Vec4(static_cast<float>(row[0]), static_cast<float>(row[1]),
+                      static_cast<float>(row[2]), static_cast<float>(row[3]));
     }
-    out[3] = Vec4(static_cast<float>(m.cols[3].x), static_cast<float>(m.cols[3].y),
-                  static_cast<float>(m.cols[3].z), 1.0f);
     return out;
 }
 
@@ -90,9 +94,14 @@ void Decompose(const Mat4& matrix, Vec3& translation, Quat& rotation, Vec3& scal
     rotation = glm::normalize(glm::quat_cast(basis));
 }
 
-Vec3 ToVec3(const ufbx_vec3& value) {
-    return Vec3(static_cast<float>(value.x), static_cast<float>(value.y),
-                static_cast<float>(value.z));
+Vec3 ToVec3(const FbxVector4& value) {
+    return Vec3(static_cast<float>(value[0]), static_cast<float>(value[1]),
+                static_cast<float>(value[2]));
+}
+
+Vec3 ToVec3(const FbxDouble3& value) {
+    return Vec3(static_cast<float>(value[0]), static_cast<float>(value[1]),
+                static_cast<float>(value[2]));
 }
 
 }  // namespace
@@ -108,6 +117,69 @@ void MeshData::ComputeBounds() {
     for (const MeshVertex& vertex : vertices) {
         boundsMin = glm::min(boundsMin, vertex.position);
         boundsMax = glm::max(boundsMax, vertex.position);
+    }
+}
+
+void MeshData::ComputeTangents() {
+    if (vertices.empty()) {
+        return;
+    }
+    // Dua akumulator per vertex: arah U dan arah V. Yang kedua hanya dipakai
+    // untuk menentukan tandanya, lalu dibuang.
+    std::vector<Vec3> alongU(vertices.size(), Vec3(0.0f));
+    std::vector<Vec3> alongV(vertices.size(), Vec3(0.0f));
+
+    for (std::size_t i = 0; i + 2 < indices.size(); i += 3) {
+        const uint32_t a = indices[i];
+        const uint32_t b = indices[i + 1];
+        const uint32_t c = indices[i + 2];
+        if (a >= vertices.size() || b >= vertices.size() || c >= vertices.size()) {
+            continue;
+        }
+        const Vec3 edge1 = vertices[b].position - vertices[a].position;
+        const Vec3 edge2 = vertices[c].position - vertices[a].position;
+        const Vec2 duv1 = vertices[b].uv - vertices[a].uv;
+        const Vec2 duv2 = vertices[c].uv - vertices[a].uv;
+
+        // Determinan nol berarti segitiganya tidak punya luas di ruang UV —
+        // tiga titik yang dipetakan ke satu garis, atau ke satu titik. Tidak ada
+        // arah U yang bisa diturunkan dari sana, dan membaginya menghasilkan
+        // inf yang menular ke seluruh vertex yang berbagi sudut itu.
+        const float determinant = duv1.x * duv2.y - duv2.x * duv1.y;
+        if (std::abs(determinant) < 1e-12f) {
+            continue;
+        }
+        const float inverse = 1.0f / determinant;
+        const Vec3 u = (edge1 * duv2.y - edge2 * duv1.y) * inverse;
+        const Vec3 v = (edge2 * duv1.x - edge1 * duv2.x) * inverse;
+        for (const uint32_t corner : {a, b, c}) {
+            alongU[corner] += u;
+            alongV[corner] += v;
+        }
+    }
+
+    for (std::size_t i = 0; i < vertices.size(); ++i) {
+        const Vec3 normal = vertices[i].normal;
+        Vec3 tangent = alongU[i];
+        // **Diortogonalkan terhadap normalnya (Gram-Schmidt).** Rata-rata
+        // beberapa segitiga hampir tidak pernah tegak lurus normal yang juga
+        // dirata-rata, dan bingkai yang miring memiringkan setiap arah yang
+        // dibaca dari peta normal.
+        tangent -= normal * glm::dot(normal, tangent);
+        if (glm::dot(tangent, tangent) < 1e-16f) {
+            // Tidak ada UV, atau seluruh segitiganya merosot. Sumbu mana pun
+            // yang tegak lurus normal sama sahnya — yang penting bingkainya
+            // tidak merosot, karena bingkai nol menghitamkan seluruh vertex.
+            const Vec3 axis = std::abs(normal.x) < 0.9f ? Vec3(1.0f, 0.0f, 0.0f)
+                                                        : Vec3(0.0f, 1.0f, 0.0f);
+            tangent = glm::cross(axis, normal);
+        }
+        tangent = glm::normalize(tangent);
+        // UV yang bercermin membalik arah tangan. Tanpa tandanya, peta normal di
+        // sisi yang dicerminkan membelokkan cahaya ke arah yang berlawanan.
+        const float handedness =
+            glm::dot(glm::cross(normal, tangent), alongV[i]) < 0.0f ? -1.0f : 1.0f;
+        vertices[i].tangent = Vec4(tangent, handedness);
     }
 }
 
@@ -228,72 +300,185 @@ MeshData BuildIndexedMesh(const std::vector<MeshVertex>& triangleSoup,
     return mesh;
 }
 
-/// Opsi muat yang dipakai bersama impor mesh dan impor rangka.
+/// Panggung FBX beserta manajer yang memilikinya.
 ///
-/// **Satu tempat, karena keduanya harus menghasilkan rangka yang sama persis.**
-/// Indeks bone di buffer skin GPU menunjuk ke urutan yang dihasilkan `LoadMesh`;
-/// `LoadSkeleton` yang memuat dengan konvensi berbeda akan menghasilkan pose
-/// yang benar untuk rangka yang salah, tanpa satu pun galat.
-ufbx_load_opts SharedLoadOptions() {
-    ufbx_load_opts options{};
-    // **Sumbu dan satuan dikonversi oleh ufbx, bukan oleh kode di bawahnya.**
-    // FBX menyimpan konvensinya sendiri di dalam berkas, dan berkas dari DCC
-    // yang berbeda memakai konvensi yang berbeda. Mengoreksinya tangan berarti
-    // menebak konvensi sumbernya — dan tebakan yang salah menghasilkan mesh yang
-    // terbaring miring atau seribu kali terlalu besar, bukan galat.
-    options.target_axes = ufbx_axes_right_handed_y_up;
-    options.target_unit_meters = 1.0f;
-    // **Konversinya dipanggang ke geometri, bukan ke node root.** Ini yang
-    // membuat transform LOKAL tiap bone ikut benar, bukan hanya transform
-    // dunianya. Dengan `TRANSFORM_ROOT` — bawaan, dan yang dipakai di sini
-    // sampai impor klip mendarat — konversi satuan tinggal di node root, jadi
-    // bone teratas mewarisi skala 0,01 dan seluruh keturunannya bertranslasi
-    // dalam sentimeter. Rangkanya tetap benar **secara global**, dan karena itu
-    // uji yang membandingkan posisi bone dengan kotak batas mesh tidak
-    // menangkapnya; yang menangkapnya adalah pembaca kedua transform lokal itu,
-    // yaitu klip yang diimpor. Klip membawa translasi dalam meter berskala satu,
-    // dan bone yang tidak dianimasikan klip itu tetap memakai bind pose-nya —
-    // jadi konvensi yang berbeda di antara keduanya membuat tulang-tulang itu
-    // terlempar seratus kali terlalu jauh.
+/// **Satu destruktor untuk semuanya.** `FbxManager::Destroy` membongkar setiap
+/// objek yang dibuat di bawahnya — importer, scene, dan seluruh node di
+/// dalamnya. Membebaskannya satu per satu berarti ada `Destroy` yang bisa
+/// terlewat pada jalur galat, dan FBX SDK tidak mengeluh; ia hanya menahan
+/// memorinya sampai proses berakhir.
+class FbxSceneHandle {
+public:
+    FbxSceneHandle() = default;
+    ~FbxSceneHandle() {
+        if (manager_ != nullptr) {
+            manager_->Destroy();
+        }
+    }
+    FbxSceneHandle(const FbxSceneHandle&) = delete;
+    FbxSceneHandle& operator=(const FbxSceneHandle&) = delete;
+
+    bool Open(const std::filesystem::path& path, bool readAnimation, std::string& error);
+
+    FbxManager* Manager() const { return manager_; }
+    FbxScene* Scene() const { return scene_; }
+    /// Pengali dari satuan panggung ke meter.
+    double UnitScale() const { return unitScale_; }
+
+private:
+    FbxManager* manager_ = nullptr;
+    FbxScene* scene_ = nullptr;
+    double unitScale_ = 1.0;
+};
+
+bool FbxSceneHandle::Open(const std::filesystem::path& path, bool readAnimation,
+                          std::string& error) {
+    manager_ = FbxManager::Create();
+    if (manager_ == nullptr) {
+        error = "cannot create the FBX SDK manager";
+        return false;
+    }
+    FbxIOSettings* io = FbxIOSettings::Create(manager_, IOSROOT);
+    // Kurva animasi hanya dibaca importir klip. Rig Mixamo membawa dua take
+    // sepanjang ratusan frame, dan menguraikannya untuk mesh yang tidak memakai
+    // satu pun kurvanya adalah pekerjaan yang seluruhnya terbuang.
+    io->SetBoolProp(IMP_FBX_ANIMATION, readAnimation);
+    // **Media tertanam TIDAK dibongkar ke disk.** Bawaannya menyala, dan yang
+    // menyala menulis sebuah folder `<nama>.fbm/` di sebelah berkas FBX-nya —
+    // di dalam folder aset milik orang lain, sebagai efek samping dari sekadar
+    // membaca. Ia juga menulis ulang jalur relatif tiap tekstur supaya menunjuk
+    // ke sana, sehingga yang tercatat di aset bukan lagi jalur yang ada di dalam
+    // berkasnya. Mesin ini memuat teksturnya sendiri lewat jalur itu.
+    io->SetBoolProp(IMP_FBX_EXTRACT_EMBEDDED_DATA, false);
+    manager_->SetIOSettings(io);
+
+    FbxImporter* importer = FbxImporter::Create(manager_, "");
+    if (importer == nullptr) {
+        error = "cannot create the FBX importer";
+        return false;
+    }
+    if (!importer->Initialize(path.string().c_str(), -1, manager_->GetIOSettings())) {
+        error = importer->GetStatus().GetErrorString();
+        return false;
+    }
+    scene_ = FbxScene::Create(manager_, "sim");
+    if (scene_ == nullptr || !importer->Import(scene_)) {
+        error = importer->GetStatus().GetErrorString();
+        scene_ = nullptr;
+        return false;
+    }
+
+    // **Sumbunya dikonversi dalam-dalam; satuannya tidak dikonversi sama
+    // sekali.** Keduanya sengaja ditangani berbeda.
     //
-    // Terukur: geometrinya **tidak berubah sama sekali** — batas Y Bot tetap
-    // (−0,973, 0,000, −0,161)..(0,973, 1,805, 0,204) dan shader ball tetap
-    // 2,69 x 2,66 x 2,50 m — sementara skala lokal bone teratas berpindah dari
-    // 0,0100 menjadi 1,0000 dan translasi lokal Spine dari 9,9235 menjadi
-    // 0,0992 m.
-    options.space_conversion = UFBX_SPACE_CONVERSION_MODIFY_GEOMETRY;
-    options.generate_missing_normals = true;
-    return options;
+    // Sumbu: `DeepConvertScene` menulis ulang transform seluruh hierarkinya,
+    // bukan hanya menyisipkan satu rotasi di node root. Yang menyisipkan di root
+    // tetap benar secara global, tapi transform LOKAL tiap bone lalu masih dalam
+    // konvensi berkasnya — dan transform lokal itulah yang dibaca klip.
+    //
+    // Satuan: dibiarkan, lalu dikalikan sendiri di `NodeWorld`. `ConvertScene`
+    // milik SDK menaruh faktor satuannya sebagai skala pada node root, sehingga
+    // bone teratas mewarisi skala 0,01 dan seluruh keturunannya bertranslasi
+    // dalam sentimeter. Rangkanya tetap benar **secara global** — jadi uji yang
+    // membandingkan posisi bone dengan kotak batas mesh tidak menangkapnya —
+    // sementara klip yang mengambil transform lokal membawa translasi meter
+    // berskala satu, dan bone yang tidak dianimasikan klip itu tetap memakai
+    // bind pose sentimeternya. Yang terlihat: tulang-tulang terlempar seratus
+    // kali terlalu jauh, tanpa satu pun galat.
+    const FbxAxisSystem target(FbxAxisSystem::OpenGL);
+    if (scene_->GetGlobalSettings().GetAxisSystem() != target) {
+        target.DeepConvertScene(scene_);
+    }
+
+    // **Berkas yang tidak menyebut satuannya dibaca sebagai meter, bukan sebagai
+    // sentimeter.** OBJ tidak punya tempat untuk menyimpan satuan sama sekali,
+    // dan panggung yang tidak menyebutnya dilaporkan SDK sebagai sentimeter —
+    // bawaannya, bukan sesuatu yang dibaca dari berkasnya. Mengalikannya seperti
+    // satuan sungguhan mengecilkan setiap OBJ seratus kali; yang terlihat bukan
+    // galat melainkan model yang seakan hilang di kejauhan.
+    std::string extension = path.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    unitScale_ =
+        extension == ".obj"
+            ? 1.0
+            : scene_->GetGlobalSettings().GetSystemUnit().GetConversionFactorTo(FbxSystemUnit::m);
+    return true;
 }
 
-/// Membaca bone dari sebuah scene ufbx menjadi `SkeletonData`.
+/// Transform global sebuah node, dalam meter dan ruang mesin.
 ///
-/// `scene->nodes` terurut depth-first dengan induk selalu mendahului anaknya,
-/// jadi satu lintasan sudah menghasilkan urutan topologis yang dituntut
-/// `animation::Skeleton` — dan yang membuat transform global bisa dihitung satu
-/// lintasan maju tanpa rekursi.
-void ReadSkeleton(const ufbx_scene& scene, SkeletonData& skeleton,
-                  std::unordered_map<const ufbx_node*, int>& boneIndex) {
+/// **Satuannya dikonjugasikan, bukan sekadar dikalikan.** Mengubah satuan adalah
+/// pergantian basis `C = s·I`, jadi matriks yang benar adalah `C·M·C⁻¹` dan
+/// bukan `C·M`. Bedanya justru pada yang penting: konjugasi meninggalkan basis
+/// rotasi/skala apa adanya dan hanya menskalakan translasinya, sehingga skala
+/// lokal bone tetap 1,0 alih-alih menjadi 0,01 dan menumpuk tiap tingkat sampai
+/// rangkanya runtuh. Yang mengalikan dari kiri saja menskalakan keduanya.
+Mat4 NodeWorld(FbxNode* node, double unitScale) {
+    Mat4 world = ToMat4(node->EvaluateGlobalTransform());
+    world[3] = Vec4(Vec3(world[3]) * static_cast<float>(unitScale), 1.0f);
+    return world;
+}
+
+/// Node scene per tingkat kedalaman, induk selalu mendahului anaknya.
+///
+/// **Ditelusuri sendiri, bukan lewat `FbxScene::GetNode`.** Yang dikembalikan
+/// scene adalah urutan objek di dalam berkasnya, dan tidak ada yang menjamin
+/// induk mendahului anaknya di sana. `SkeletonData::IsTopological` menuntut
+/// jaminan itu, dan yang membacanya — `Pose::ComputeGlobal` — menghitung
+/// transform global satu lintasan maju tanpa rekursi.
+///
+/// **Melebar, bukan menurun, dan itu bukan pilihan bebas.** Keduanya menaruh
+/// induk sebelum anaknya, tapi keduanya menghasilkan NOMOR bone yang berbeda —
+/// dan nomor itu yang ditunjuk `SkinInfluence` di dalam buffer skin, yang
+/// tersimpan di aset mesh yang sudah diimpor. Urutan melebar adalah urutan yang
+/// dipakai pembaca sebelumnya; menggantinya berarti setiap aset yang sudah ada
+/// menunjuk tulang yang salah, dan yang terlihat adalah kulit terpelintir tanpa
+/// satu pun galat.
+std::vector<FbxNode*> SceneNodes(FbxScene& scene) {
+    std::vector<FbxNode*> nodes;
+    FbxNode* root = scene.GetRootNode();
+    if (root == nullptr) {
+        return nodes;
+    }
+    // Root-nya sendiri tidak ikut: ia node sintetis milik SDK, bukan sesuatu
+    // yang ada di dalam berkasnya.
+    for (int i = 0; i < root->GetChildCount(); ++i) {
+        nodes.push_back(root->GetChild(i));
+    }
+    // Vektornya sekaligus antrean: yang sudah dikunjungi tetap di depan, yang
+    // baru ditambahkan di belakang.
+    for (std::size_t head = 0; head < nodes.size(); ++head) {
+        FbxNode* node = nodes[head];
+        for (int i = 0; i < node->GetChildCount(); ++i) {
+            nodes.push_back(node->GetChild(i));
+        }
+    }
+    return nodes;
+}
+
+/// Membaca bone dari sebuah scene FBX menjadi `SkeletonData`.
+void ReadSkeleton(FbxScene& scene, double unitScale, SkeletonData& skeleton,
+                  std::unordered_map<const FbxNode*, int>& boneIndex) {
     /// Bind pose dunia tiap bone, sejajar dengan `skeleton.bones`. Dipakai
     /// menurunkan transform lokal, lalu dibuang.
     std::vector<Mat4> worldBind;
-    for (std::size_t nodeIndex = 0; nodeIndex < scene.nodes.count; ++nodeIndex) {
-        const ufbx_node* node = scene.nodes.data[nodeIndex];
-        if (node == nullptr || node->is_root || node->bone == nullptr) {
+    for (FbxNode* node : SceneNodes(scene)) {
+        if (node->GetSkeleton() == nullptr) {
             continue;
         }
         SkeletonBone bone;
-        bone.name = node->name.data != nullptr ? node->name.data : "";
-        const auto parent = node->parent != nullptr ? boneIndex.find(node->parent) : boneIndex.end();
+        bone.name = node->GetName() != nullptr ? node->GetName() : "";
+        const auto parent =
+            node->GetParent() != nullptr ? boneIndex.find(node->GetParent()) : boneIndex.end();
         bone.parent = parent != boneIndex.end() ? parent->second : -1;
 
-        // **Diturunkan dari `node_to_world`, bukan dari `local_transform`.**
-        // Keduanya sekarang sepakat karena konversi satuannya dipanggang ke
-        // geometri, tapi `node_to_world` tetap yang dipakai: ia satu-satunya
-        // yang benar apa pun mode konversinya, dan ia juga yang membuat bone
-        // yang induknya bukan bone — node bantu rigger di tengah rantai —
-        // tetap mendarat di tempat yang benar.
-        const Mat4 bindWorld = ToMat4(node->node_to_world);
+        // **Diturunkan dari transform global, bukan dari transform lokal.**
+        // Keduanya sepakat untuk rantai yang seluruhnya bone, tapi yang global
+        // juga membuat bone yang induknya BUKAN bone — node bantu rigger di
+        // tengah rantai — tetap mendarat di tempat yang benar, karena transform
+        // node bantu itu ikut terbawa ke dalamnya.
+        const Mat4 bindWorld = NodeWorld(node, unitScale);
         Mat4 bindLocal = bindWorld;
         if (bone.parent >= 0) {
             bindLocal = glm::inverse(worldBind[static_cast<std::size_t>(bone.parent)]) * bindWorld;
@@ -315,30 +500,17 @@ SkeletonData LoadSkeleton(const std::filesystem::path& path, std::string& error)
         return skeleton;
     }
 
-    // **Opsi yang sama dengan `LoadMesh`, ditambah dua yang dilewati.** Yang
-    // sama itu wajib: indeks bone di buffer skin GPU menunjuk ke urutan yang
-    // dihasilkan `LoadMesh`, jadi rangka yang dimuat dengan konvensi berbeda
-    // menghasilkan pose yang benar untuk rangka yang salah — kulit yang
-    // terpelintir, tanpa satu pun galat.
-    ufbx_load_opts options = SharedLoadOptions();
-    // Vertex, indeks, dan kurva animasinya tidak dibaca. Yang dicari di sini
-    // hanya hierarki bone beserta bind pose-nya, dan keduanya ada di node —
-    // bukan di geometri. Pada rig Mixamo sebelas megabyte, ini bedanya antara
-    // mengurai seluruh mesh dan tidak.
-    options.ignore_geometry = true;
-    options.ignore_animation = true;
-    options.generate_missing_normals = false;
-
-    ufbx_error loadError;
-    ufbx_scene* scene = ufbx_load_file(path.string().c_str(), &options, &loadError);
-    if (scene == nullptr) {
-        error = loadError.description.data != nullptr ? loadError.description.data
-                                                      : "cannot read file";
+    // **Dibuka dengan cara yang sama persis dengan `LoadMesh`.** Itu wajib:
+    // indeks bone di buffer skin GPU menunjuk ke urutan yang dihasilkan
+    // `LoadMesh`, jadi rangka yang dimuat dengan konvensi berbeda menghasilkan
+    // pose yang benar untuk rangka yang salah — kulit yang terpelintir, tanpa
+    // satu pun galat.
+    FbxSceneHandle handle;
+    if (!handle.Open(path, /*readAnimation=*/false, error)) {
         return skeleton;
     }
-    std::unordered_map<const ufbx_node*, int> boneIndex;
-    ReadSkeleton(*scene, skeleton, boneIndex);
-    ufbx_free_scene(scene);
+    std::unordered_map<const FbxNode*, int> boneIndex;
+    ReadSkeleton(*handle.Scene(), handle.UnitScale(), skeleton, boneIndex);
     if (!skeleton.IsValid()) {
         error = "no bone in this file";
     }
@@ -402,58 +574,103 @@ void GroupByMaterial(MeshData& mesh, const std::vector<int>& triangleMaterial) {
 /// itu sendiri. Yang dipakai yang relatif, dengan pemisah dinormalkan ke `/`
 /// karena berkas dari Windows menulis `..\\checkerA.tga` dan `std::filesystem`
 /// di Linux membaca seluruhnya sebagai satu nama berkas.
-std::string TexturePath(const ufbx_texture* texture) {
+std::string TexturePath(const FbxProperty& property) {
+    if (!property.IsValid()) {
+        return {};
+    }
+    // Tekstur berlapis — campuran beberapa berkas dalam satu saluran — hanya
+    // diambil lapis pertamanya. Mesin ini punya satu slot tekstur per saluran,
+    // dan mencampurnya di importir berarti memanggang hasil campuran itu ke
+    // sebuah berkas baru yang tidak diminta siapa pun.
+    const FbxFileTexture* texture = property.GetSrcObject<FbxFileTexture>(0);
     if (texture == nullptr) {
         return {};
     }
-    std::string relative = texture->relative_filename.data != nullptr
-                               ? texture->relative_filename.data
-                               : "";
-    if (relative.empty() && texture->filename.data != nullptr) {
+    std::string relative =
+        texture->GetRelativeFileName() != nullptr ? texture->GetRelativeFileName() : "";
+    if (relative.empty() && texture->GetFileName() != nullptr) {
         // Tidak ada jalur relatif: yang tersisa hanya nama berkasnya, diambil
         // dari ujung jalur absolutnya. Menebak foldernya lebih buruk daripada
         // menyerahkan nama saja — yang mencarinya tahu di mana ia menaruh
         // teksturnya, kode ini tidak.
-        relative = std::filesystem::path(texture->filename.data).filename().string();
+        relative = std::filesystem::path(texture->GetFileName()).filename().string();
     }
     std::replace(relative.begin(), relative.end(), '\\', '/');
     return relative;
 }
 
-/// Nilai skalar pertama sebuah map, atau `fallback` bila tidak disebutkan.
-float MapScalar(const ufbx_material_map& map, float fallback) {
-    return map.has_value ? static_cast<float>(map.value_real) : fallback;
+/// Nilai skalar sebuah properti material, atau `fallback` bila tidak ada.
+float PropertyScalar(const FbxSurfaceMaterial& source, const char* name, float fallback) {
+    const FbxProperty property = source.FindProperty(name);
+    return property.IsValid() ? static_cast<float>(property.Get<FbxDouble>()) : fallback;
 }
 
-Vec3 MapColor(const ufbx_material_map& map, const Vec3& fallback) {
-    if (!map.has_value) {
-        return fallback;
-    }
-    return Vec3(static_cast<float>(map.value_vec4.x), static_cast<float>(map.value_vec4.y),
-                static_cast<float>(map.value_vec4.z));
+Vec3 PropertyColor(const FbxSurfaceMaterial& source, const char* name, const Vec3& fallback) {
+    const FbxProperty property = source.FindProperty(name);
+    return property.IsValid() ? ToVec3(property.Get<FbxDouble3>()) : fallback;
 }
 
-/// Menerjemahkan sebuah material ufbx menjadi bentuk datar kita.
+/// Menerjemahkan sebuah material FBX menjadi bentuk datar kita.
 ///
-/// **`pbr` dibaca, bukan `fbx`.** ufbx menurunkan medan PBR-nya dari Lambert dan
-/// Phong ketika berkasnya memang hanya punya itu — terukur pada rig Mixamo,
-/// `pbr.base_color` dan `pbr.roughness` terisi walaupun `features.pbr.enabled`
-/// bernilai nol. Membaca `fbx.diffuse_color` sendiri berarti menuliskan ulang
-/// penurunan itu, dengan hasil yang berbeda untuk berkas yang memang PBR.
-MeshMaterial ReadMaterial(const ufbx_material& source) {
+/// **Diturunkan dari Lambert/Phong, bukan dibaca dari medan PBR.** FBX SDK
+/// menyajikan material apa adanya seperti tersimpan di berkasnya, dan yang
+/// tersimpan di berkas Mixamo maupun shaderBall adalah Phong — tidak ada satu
+/// pun medan `base_color` atau `roughness` di sana untuk dibaca. Penurunannya
+/// karena itu dikerjakan di sini:
+///
+/// - `roughness` dari `ShininessExponent`, lewat `1 − sqrt(kilap / 100)`.
+///   Material tanpa kilap sama sekali — setiap Lambert — jatuh ke 0,5, karena
+///   "tidak disebutkan" bukan berarti "cermin" maupun "sepenuhnya kasar".
+/// - `metalness` selalu nol. Phong tidak punya konsepnya, dan menurunkannya dari
+///   `ReflectionFactor` membuat setiap permukaan yang sekadar memantul menjadi
+///   logam — rig Mixamo menyetel 0,5 di sana untuk sendi yang bukan logam.
+/// - `opacity` dari properti `Opacity` bila ada. **Bukan dari
+///   `TransparencyFactor`**: berkas Maya menulis 1,0 di sana sambil menaruh
+///   hitam di `TransparentColor`, yang berarti tembus pandang nol — membacanya
+///   sebagai `1 − faktor` menjadikan setiap material sepenuhnya tembus, dan
+///   yang terlihat adalah model yang lenyap.
+MeshMaterial ReadMaterial(const FbxSurfaceMaterial& source) {
     MeshMaterial material;
-    material.name = source.name.data != nullptr ? source.name.data : "";
-    material.baseColor = MapColor(source.pbr.base_color, Vec3(0.8f));
-    material.roughness = MapScalar(source.pbr.roughness, 0.5f);
-    material.metalness = MapScalar(source.pbr.metalness, 0.0f);
-    material.emissive = MapColor(source.pbr.emission_color, Vec3(0.0f));
-    material.opacity = MapScalar(source.pbr.opacity, 1.0f);
+    material.name = source.GetName() != nullptr ? source.GetName() : "";
+    material.baseColor = PropertyColor(source, FbxSurfaceMaterial::sDiffuse, Vec3(0.8f));
+    material.emissive = PropertyColor(source, FbxSurfaceMaterial::sEmissive, Vec3(0.0f));
+    material.metalness = 0.0f;
 
-    material.baseColorTexture = TexturePath(source.pbr.base_color.texture);
-    material.normalTexture = TexturePath(source.pbr.normal_map.texture);
-    material.roughnessTexture = TexturePath(source.pbr.roughness.texture);
-    material.metalnessTexture = TexturePath(source.pbr.metalness.texture);
-    material.emissiveTexture = TexturePath(source.pbr.emission_color.texture);
+    const FbxProperty shininess = source.FindProperty(FbxSurfaceMaterial::sShininess);
+    material.roughness =
+        shininess.IsValid()
+            ? std::clamp(1.0f - std::sqrt(std::max(static_cast<float>(shininess.Get<FbxDouble>()),
+                                                   0.0f) /
+                                          100.0f),
+                         0.0f, 1.0f)
+            : 0.5f;
+
+    const FbxProperty opacity = source.FindProperty("Opacity");
+    if (opacity.IsValid()) {
+        material.opacity =
+            std::clamp(static_cast<float>(opacity.Get<FbxDouble>()), 0.0f, 1.0f);
+    } else {
+        // Tanpa `Opacity`, yang tersisa adalah warna tembusnya dikali faktornya.
+        const Vec3 transparent =
+            PropertyColor(source, FbxSurfaceMaterial::sTransparentColor, Vec3(0.0f));
+        const float factor =
+            PropertyScalar(source, FbxSurfaceMaterial::sTransparencyFactor, 0.0f);
+        const float amount = (transparent.x + transparent.y + transparent.z) / 3.0f * factor;
+        material.opacity = std::clamp(1.0f - amount, 0.0f, 1.0f);
+    }
+
+    material.baseColorTexture = TexturePath(source.FindProperty(FbxSurfaceMaterial::sDiffuse));
+    material.normalTexture = TexturePath(source.FindProperty(FbxSurfaceMaterial::sNormalMap));
+    if (material.normalTexture.empty()) {
+        // Sebagian eksportir menaruh peta normalnya di slot bump. Keduanya
+        // bukan hal yang sama, tapi berkas yang mengisi slot bump dengan peta
+        // normal jauh lebih banyak daripada yang benar-benar memakai bump.
+        material.normalTexture = TexturePath(source.FindProperty(FbxSurfaceMaterial::sBump));
+    }
+    material.roughnessTexture = TexturePath(source.FindProperty(FbxSurfaceMaterial::sShininess));
+    material.metalnessTexture =
+        TexturePath(source.FindProperty(FbxSurfaceMaterial::sReflectionFactor));
+    material.emissiveTexture = TexturePath(source.FindProperty(FbxSurfaceMaterial::sEmissive));
     return material;
 }
 
@@ -466,7 +683,7 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
         return mesh;
     }
 
-    // Dipilih menurut ekstensi, bukan dengan mengendus isinya. ufbx dan cgltf
+    // Dipilih menurut ekstensi, bukan dengan mengendus isinya. FBX SDK dan cgltf
     // sama-sama menolak berkas yang bukan miliknya, jadi mencoba keduanya
     // berurutan akan berhasil — tapi pesan galat yang sampai ke pengguna lalu
     // datang dari pembaca yang salah, dan "not a readable glTF file" untuk
@@ -477,150 +694,222 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
     if (extension == ".gltf" || extension == ".glb") {
         return LoadGltfMesh(path, error);
     }
-
-    const ufbx_load_opts options = SharedLoadOptions();
-    ufbx_error loadError;
-    ufbx_scene* scene = ufbx_load_file(path.string().c_str(), &options, &loadError);
-    if (scene == nullptr) {
-        error = loadError.description.data != nullptr ? loadError.description.data
-                                                      : "cannot read file";
-        return mesh;
+    if (extension == ".usd" || extension == ".usda" || extension == ".usdc" ||
+        extension == ".usdz") {
+        return LoadUsdMesh(path, error);
     }
 
-    std::unordered_map<const ufbx_node*, int> boneIndex;
-    ReadSkeleton(*scene, mesh.skeleton, boneIndex);
+    FbxSceneHandle handle;
+    if (!handle.Open(path, /*readAnimation=*/false, error)) {
+        return mesh;
+    }
+    FbxScene& scene = *handle.Scene();
+    const auto unitScale = static_cast<float>(handle.UnitScale());
+
+    // **Ditriangulasi oleh SDK-nya, bukan dengan kipas sendiri.** Kipas
+    // sederhana benar hanya untuk segi banyak cembung; muka cekung — yang ada di
+    // hampir setiap model sungguhan — terurai menjadi segitiga yang saling
+    // menimpa. Ini mengganti atribut mesh tiap node, jadi ia harus mendahului
+    // setiap pointer FbxMesh yang disimpan.
+    FbxGeometryConverter converter(handle.Manager());
+    converter.Triangulate(&scene, /*pReplace=*/true);
+
+    std::unordered_map<const FbxNode*, int> boneIndex;
+    ReadSkeleton(scene, handle.UnitScale(), mesh.skeleton, boneIndex);
 
     // --- geometri ---------------------------------------------------------
     std::vector<MeshVertex> soup;
     std::vector<SkinInfluence> influenceSoup;
-    std::vector<uint32_t> triangleIndices;
     bool anySkin = false;
     /// Material tiap segitiga di dalam `soup`, sejajar dengan soup/3.
     std::vector<int> triangleMaterial;
     /// Material scene → indeks di `mesh.materials`, supaya material yang dipakai
     /// dua node tidak tercatat dua kali.
-    std::unordered_map<const ufbx_material*, int> materialIndex;
+    std::unordered_map<const FbxSurfaceMaterial*, int> materialIndex;
 
-    for (std::size_t nodeIndex = 0; nodeIndex < scene->nodes.count; ++nodeIndex) {
-        const ufbx_node* node = scene->nodes.data[nodeIndex];
-        if (node == nullptr || node->is_root || node->mesh == nullptr) {
+    /// Satu pengaruh bone atas satu titik kendali, sebelum dipotong jadi empat.
+    struct ControlWeight {
+        int bone = -1;
+        float weight = 0.0f;
+    };
+    std::vector<std::vector<ControlWeight>> controlWeights;
+
+    for (FbxNode* node : SceneNodes(scene)) {
+        FbxMesh* source = node->GetMesh();
+        if (source == nullptr) {
             continue;
         }
-        const ufbx_mesh* source = node->mesh;
 
+        // **Offset geometri ikut, dan ia bukan bagian dari transform node.** FBX
+        // menyimpan pivot khusus-atribut yang tidak diwarisi anak-anaknya;
+        // `EvaluateGlobalTransform` tidak memuatnya. Node yang memakainya —
+        // lazim pada berkas dari 3ds Max — menaruh geometrinya bergeser dari
+        // tempat node-nya berada, dan yang melewatkannya menggeser bagian itu
+        // saja sementara sisanya benar.
+        FbxAMatrix geometry;
+        geometry.SetT(node->GetGeometricTranslation(FbxNode::eSourcePivot));
+        geometry.SetR(node->GetGeometricRotation(FbxNode::eSourcePivot));
+        geometry.SetS(node->GetGeometricScaling(FbxNode::eSourcePivot));
         // Transform geometri→dunia sudah memuat seluruh rantai induknya. Memakai
         // transform lokal saja akan menumpuk setiap bagian di titik asal, yang
         // terlihat sebagai mesh yang "hancur" alih-alih sebagai transform yang
         // terlupa.
-        const ufbx_matrix& toWorld = node->geometry_to_world;
-        const ufbx_matrix normalMatrix = ufbx_matrix_for_normals(&toWorld);
+        const Mat4 toWorld = ToMat4(node->EvaluateGlobalTransform() * geometry);
+        const Mat3 normalMatrix = glm::transpose(glm::inverse(Mat3(toWorld)));
+
+        // Normal yang tidak ada dibangkitkan, bukan dibiarkan nol: mesh tanpa
+        // normal digambar hitam pekat, dan itu terbaca sebagai kesalahan shader.
+        if (source->GetElementNormalCount() == 0) {
+            source->GenerateNormals();
+        }
+
+        // **`GetStringAt`, bukan `operator[]`.** Yang terakhir mengembalikan
+        // `FbxString&`, dan menampungnya sebagai `const char*` lewat konversi
+        // implisit menghasilkan pointer ke sementara yang sudah mati di akhir
+        // pernyataan itu juga. Namanya lalu tidak cocok dengan set UV mana pun,
+        // `GetPolygonVertexUV` menjawab "tidak ada", dan seluruh mesh kehilangan
+        // UV-nya tanpa satu pun galat — hanya tekstur yang tidak muncul.
+        FbxStringList uvSetNames;
+        source->GetUVSetNames(uvSetNames);
+        const char* uvSet = uvSetNames.GetCount() > 0 ? uvSetNames.GetStringAt(0) : nullptr;
 
         // Skin deformer pertama saja. Mesh dengan lebih dari satu adalah mesh
         // yang diulit dua rangka sekaligus, dan tidak ada arti tunggal untuk
         // "bone nomor tiga" di sana.
-        const ufbx_skin_deformer* skin =
-            source->skin_deformers.count > 0 ? source->skin_deformers.data[0] : nullptr;
-        std::vector<int> clusterBone;
+        FbxSkin* skin =
+            source->GetDeformerCount(FbxDeformer::eSkin) > 0
+                ? static_cast<FbxSkin*>(source->GetDeformer(0, FbxDeformer::eSkin))
+                : nullptr;
+        const int controlPointCount = source->GetControlPointsCount();
+        const FbxVector4* controlPoints = source->GetControlPoints();
         if (skin != nullptr) {
-            clusterBone.resize(skin->clusters.count, -1);
-            for (std::size_t i = 0; i < skin->clusters.count; ++i) {
-                const ufbx_node* boneNode = skin->clusters.data[i]->bone_node;
-                const auto found = boneNode != nullptr ? boneIndex.find(boneNode) : boneIndex.end();
-                if (found != boneIndex.end()) {
-                    clusterBone[i] = found->second;
+            controlWeights.assign(static_cast<std::size_t>(std::max(controlPointCount, 0)), {});
+            for (int c = 0; c < skin->GetClusterCount(); ++c) {
+                const FbxCluster* cluster = skin->GetCluster(c);
+                if (cluster == nullptr) {
+                    continue;
                 }
+                const auto found = cluster->GetLink() != nullptr
+                                       ? boneIndex.find(cluster->GetLink())
+                                       : boneIndex.end();
+                if (found == boneIndex.end()) {
+                    continue;
+                }
+                const int* points = cluster->GetControlPointIndices();
+                const double* weights = cluster->GetControlPointWeights();
+                for (int w = 0; w < cluster->GetControlPointIndicesCount(); ++w) {
+                    const int point = points[w];
+                    if (point < 0 || static_cast<std::size_t>(point) >= controlWeights.size() ||
+                        weights[w] <= 0.0) {
+                        continue;
+                    }
+                    controlWeights[static_cast<std::size_t>(point)].push_back(
+                        ControlWeight{found->second, static_cast<float>(weights[w])});
+                }
+            }
+            // **Empat teratas, bukan empat pertama.** FBX menyimpan pengaruhnya
+            // per cluster tanpa urutan apa pun, jadi memotong di empat tanpa
+            // mengurutkan lebih dulu bisa membuang justru bone yang paling
+            // menentukan — dan yang terlihat adalah permukaan yang mengikuti
+            // tulang yang salah, bukan galat.
+            for (std::vector<ControlWeight>& list : controlWeights) {
+                std::sort(list.begin(), list.end(),
+                          [](const ControlWeight& a, const ControlWeight& b) {
+                              return a.weight > b.weight;
+                          });
             }
             anySkin = true;
         }
 
-        triangleIndices.resize(std::max<std::size_t>(source->max_face_triangles * 3, 3));
-
-        // Material node ini, dicatat sekali. `face_material` mengindeks daftar
+        // Material node ini, dicatat sekali. Elemen material mengindeks daftar
         // ini, bukan daftar material scene.
-        std::vector<int> nodeMaterial(node->materials.count, -1);
-        for (std::size_t m = 0; m < node->materials.count; ++m) {
-            const ufbx_material* source_material = node->materials.data[m];
-            if (source_material == nullptr) {
+        std::vector<int> nodeMaterial(static_cast<std::size_t>(node->GetMaterialCount()), -1);
+        for (int m = 0; m < node->GetMaterialCount(); ++m) {
+            const FbxSurfaceMaterial* sourceMaterial = node->GetMaterial(m);
+            if (sourceMaterial == nullptr) {
                 continue;
             }
-            const auto found = materialIndex.find(source_material);
+            const auto found = materialIndex.find(sourceMaterial);
             if (found != materialIndex.end()) {
-                nodeMaterial[m] = found->second;
+                nodeMaterial[static_cast<std::size_t>(m)] = found->second;
                 continue;
             }
             const auto index = static_cast<int>(mesh.materials.size());
-            mesh.materials.push_back(ReadMaterial(*source_material));
-            materialIndex.emplace(source_material, index);
-            nodeMaterial[m] = index;
+            mesh.materials.push_back(ReadMaterial(*sourceMaterial));
+            materialIndex.emplace(sourceMaterial, index);
+            nodeMaterial[static_cast<std::size_t>(m)] = index;
         }
+        const FbxGeometryElementMaterial* materialElement = source->GetElementMaterial();
 
-        for (std::size_t faceIndex = 0; faceIndex < source->faces.count; ++faceIndex) {
-            const ufbx_face face = source->faces.data[faceIndex];
-            // Segi banyak dipecah menjadi segitiga oleh ufbx. Memecahnya sendiri
-            // dengan kipas sederhana benar hanya untuk segi banyak cembung, dan
-            // muka cekung — yang ada di hampir setiap model sungguhan — menjadi
-            // segitiga yang saling menimpa.
-            const uint32_t triangles = ufbx_triangulate_face(
-                triangleIndices.data(), triangleIndices.size(), source, face);
+        for (int polygon = 0; polygon < source->GetPolygonCount(); ++polygon) {
+            // Sudah ditriangulasi di atas; apa pun yang bukan segitiga di sini
+            // adalah muka rusak, dan memakainya sebagian menghasilkan segitiga
+            // yang menghubungkan titik yang tidak bertetangga.
+            if (source->GetPolygonSize(polygon) != 3) {
+                continue;
+            }
+            int corners[3] = {source->GetPolygonVertex(polygon, 0),
+                              source->GetPolygonVertex(polygon, 1),
+                              source->GetPolygonVertex(polygon, 2)};
+            if (corners[0] < 0 || corners[1] < 0 || corners[2] < 0 ||
+                corners[0] >= controlPointCount || corners[1] >= controlPointCount ||
+                corners[2] >= controlPointCount) {
+                continue;
+            }
 
             int faceMaterial = -1;
-            if (faceIndex < source->face_material.count) {
-                const uint32_t slot = source->face_material.data[faceIndex];
-                if (slot < nodeMaterial.size()) {
-                    faceMaterial = nodeMaterial[slot];
+            if (materialElement != nullptr) {
+                const FbxLayerElement::EMappingMode mapping = materialElement->GetMappingMode();
+                int slot = -1;
+                if (mapping == FbxGeometryElement::eByPolygon &&
+                    polygon < materialElement->GetIndexArray().GetCount()) {
+                    slot = materialElement->GetIndexArray().GetAt(polygon);
+                } else if (mapping == FbxGeometryElement::eAllSame &&
+                           materialElement->GetIndexArray().GetCount() > 0) {
+                    slot = materialElement->GetIndexArray().GetAt(0);
+                }
+                if (slot >= 0 && static_cast<std::size_t>(slot) < nodeMaterial.size()) {
+                    faceMaterial = nodeMaterial[static_cast<std::size_t>(slot)];
                 }
             } else if (nodeMaterial.size() == 1) {
                 // Berkas yang tidak menyebut material per muka tapi punya satu
                 // material untuk seluruh node — bentuk yang lazim.
                 faceMaterial = nodeMaterial[0];
             }
-            triangleMaterial.insert(triangleMaterial.end(), triangles, faceMaterial);
+            triangleMaterial.push_back(faceMaterial);
 
-            for (uint32_t corner = 0; corner < triangles * 3; ++corner) {
-                const uint32_t index = triangleIndices[corner];
+            for (int corner = 0; corner < 3; ++corner) {
+                const int point = corners[corner];
                 MeshVertex vertex;
-                const ufbx_vec3 position = ufbx_get_vertex_vec3(&source->vertex_position, index);
-                vertex.position = ToVec3(ufbx_transform_position(&toWorld, position));
-                if (source->vertex_normal.exists) {
-                    const ufbx_vec3 normal = ufbx_get_vertex_vec3(&source->vertex_normal, index);
-                    const Vec3 transformed =
-                        ToVec3(ufbx_transform_direction(&normalMatrix, normal));
+                vertex.position =
+                    Vec3(toWorld * Vec4(ToVec3(controlPoints[point]), 1.0f)) * unitScale;
+
+                FbxVector4 normal;
+                if (source->GetPolygonVertexNormal(polygon, corner, normal)) {
+                    const Vec3 transformed = normalMatrix * ToVec3(normal);
                     const float length = glm::length(transformed);
                     vertex.normal =
                         length > 1e-8f ? transformed / length : Vec3(0.0f, 1.0f, 0.0f);
                 }
-                if (source->vertex_uv.exists) {
-                    const ufbx_vec2 uv = ufbx_get_vertex_vec2(&source->vertex_uv, index);
-                    vertex.uv = Vec2(static_cast<float>(uv.x), static_cast<float>(uv.y));
+                if (uvSet != nullptr) {
+                    FbxVector2 uv;
+                    bool unmapped = false;
+                    if (source->GetPolygonVertexUV(polygon, corner, uvSet, uv, unmapped) &&
+                        !unmapped) {
+                        vertex.uv =
+                            Vec2(static_cast<float>(uv[0]), static_cast<float>(uv[1]));
+                    }
                 }
                 soup.push_back(vertex);
 
                 SkinInfluence influence;
-                if (skin != nullptr && index < source->vertex_indices.count) {
-                    const uint32_t vertexIndex = source->vertex_indices.data[index];
-                    if (vertexIndex < skin->vertices.count) {
-                        const ufbx_skin_vertex& entry = skin->vertices.data[vertexIndex];
-                        // **Empat teratas, bukan empat pertama.** ufbx sudah
-                        // mengurutkan bobotnya menurun, jadi memotong di empat
-                        // membuang yang paling lemah — memotong tanpa urutan itu
-                        // bisa membuang justru bone yang paling menentukan.
-                        const uint32_t take =
-                            std::min<uint32_t>(entry.num_weights, kMaxInfluences);
-                        int written = 0;
-                        for (uint32_t w = 0; w < take; ++w) {
-                            const ufbx_skin_weight& weight =
-                                skin->weights.data[entry.weight_begin + w];
-                            if (weight.cluster_index >= clusterBone.size()) {
-                                continue;
-                            }
-                            const int bone = clusterBone[weight.cluster_index];
-                            if (bone < 0) {
-                                continue;
-                            }
-                            influence.bones[written] = static_cast<uint16_t>(bone);
-                            influence.weights[written] = static_cast<float>(weight.weight);
-                            ++written;
-                        }
+                if (skin != nullptr && static_cast<std::size_t>(point) < controlWeights.size()) {
+                    const std::vector<ControlWeight>& list =
+                        controlWeights[static_cast<std::size_t>(point)];
+                    const std::size_t take = std::min<std::size_t>(list.size(), kMaxInfluences);
+                    for (std::size_t w = 0; w < take; ++w) {
+                        influence.bones[w] = static_cast<uint16_t>(list[w].bone);
+                        influence.weights[w] = list[w].weight;
                     }
                 }
                 influence.Normalize();
@@ -628,8 +917,6 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
             }
         }
     }
-
-    ufbx_free_scene(scene);
 
     if (soup.empty()) {
         error = "no mesh geometry in file";
@@ -647,6 +934,7 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
         return mesh;
     }
     GroupByMaterial(mesh, triangleMaterial);
+    mesh.ComputeTangents();
     return mesh;
 }
 

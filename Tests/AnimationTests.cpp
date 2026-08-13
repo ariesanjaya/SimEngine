@@ -812,7 +812,7 @@ TEST_CASE("Klip FBX yang diimpor menjaga panjang tulang rignya") {
     }
     REQUIRE(skeleton.SetBones(bones));
 
-    const std::vector<Clip> clips = ImportClipsFromFbx(clipPath, error);
+    const std::vector<Clip> clips = ImportClips(clipPath, error);
     INFO("import error: " << error);
     REQUIRE(clips.size() == 1);
     const Clip& clip = clips.front();
@@ -854,7 +854,7 @@ TEST_CASE("Klip FBX yang diimpor menjaga panjang tulang rignya") {
     // **Panjang tulang adalah invarian yang tidak bergantung pose mana pun**,
     // jadi ia bisa membandingkan klip dengan rig tanpa tahu apa pun tentang
     // gerakan yang dibawanya. Ia juga yang menangkap kesalahan satuan: mode
-    // konversi ruang ufbx yang salah menghasilkan tulang seratus kali terlalu
+    // konversi ruang yang salah menghasilkan tulang seratus kali terlalu
     // panjang, atau rangka yang runtuh — dan keduanya tidak menghasilkan galat.
     const std::vector<BoneTransform>& bind = skeleton.GlobalBind();
     std::vector<BoneTransform> global;
@@ -1839,4 +1839,104 @@ TEST_CASE("akar yang tidak sah menghasilkan bind pose, bukan pose kosong") {
     CHECK(tasks.Execute(reference, result, 0.0f));
     CHECK(result.Local(1).translation.y == doctest::Approx(1.0f));
     CHECK(tasks.Pool().InUse() == 0);
+}
+
+// --- impor klip dari format selain FBX -----------------------------------------
+
+TEST_CASE("Klip terimpor dari USD dan glTF, bukan hanya FBX") {
+    // **Aturan bentuk klipnya satu, pembacanya tiga.** Yang diuji di sini bukan
+    // "USD bisa dibaca" melainkan bahwa ketiga pembaca menghasilkan bentuk yang
+    // sama: kanal tetap dibuang, rotasi tetap mengerut jadi satu kunci, dan
+    // waktunya mulai dari nol.
+
+    SUBCASE("USD SkelAnimation") {
+        const std::filesystem::path path =
+            std::filesystem::path(SIM_MESH_DIR) / "unitSpin.usda";
+        if (!std::filesystem::exists(path)) {
+            return;
+        }
+        std::string error;
+        const std::vector<Clip> clips = ImportClips(path, error);
+        if (clips.empty() && error.find("no USD support") != std::string::npos) {
+            return;  // build tanpa OpenUSD
+        }
+        INFO("galat impor: " << error);
+        REQUIRE(clips.size() == 1);
+        const Clip& clip = clips.front();
+
+        CHECK(clip.name == "unitSpin");
+        // 24 timeCode pada timeCodesPerSecond 24.
+        CHECK(clip.duration == doctest::Approx(1.0f));
+        CHECK(clip.frameRate == doctest::Approx(24.0f));
+
+        // Translasi kedua sendi tetap sepanjang klip, jadi tidak boleh ada satu
+        // pun kanal skalar — itu proporsi rig sumber yang tidak ikut terbawa.
+        CHECK(clip.TrackCount() == 0);
+        REQUIRE(clip.RotationTrackCount() == 2);
+
+        const RotationTrack* root = nullptr;
+        const RotationTrack* mid = nullptr;
+        for (int i = 0; i < clip.RotationTrackCount(); ++i) {
+            const RotationTrack& track = clip.RotationTrackAt(i);
+            if (track.bone == "Root") {
+                root = &track;
+            } else if (track.bone == "Mid") {
+                mid = &track;
+            }
+        }
+        // Nama sendi USD adalah jalur (`Root/Mid`); yang disimpan ruas
+        // terakhirnya, supaya cocok dengan rangka hasil impor mesh.
+        REQUIRE(root != nullptr);
+        REQUIRE(mid != nullptr);
+        // Rotasi tetap mengerut menjadi satu kunci, tapi tidak dibuang.
+        CHECK(root->keys.size() == 1);
+        REQUIRE(mid->keys.size() == 2);
+        // 90 derajat pada sumbu X: w dan x sama-sama sqrt(0,5).
+        CHECK(mid->keys.back().rotation.w == doctest::Approx(0.70710678f).epsilon(1e-4f));
+        CHECK(mid->keys.back().rotation.x == doctest::Approx(0.70710678f).epsilon(1e-4f));
+        CHECK(mid->keys.front().time == doctest::Approx(0.0f));
+        CHECK(mid->keys.back().time == doctest::Approx(1.0f));
+    }
+
+    SUBCASE("glTF animation") {
+        const std::filesystem::path path =
+            std::filesystem::path(SIM_MESH_DIR) / "unitSpin.gltf";
+        if (!std::filesystem::exists(path)) {
+            return;
+        }
+        std::string error;
+        const std::vector<Clip> clips = ImportClips(path, error);
+        INFO("galat impor: " << error);
+        REQUIRE(clips.size() == 1);
+        const Clip& clip = clips.front();
+
+        CHECK(clip.name == "unitSpin");
+        CHECK(clip.duration == doctest::Approx(1.0f));
+
+        // **Kunci glTF diimpor apa adanya, tidak dicuplik ulang.** Berkasnya
+        // menyimpan tiga kunci; mencuplik ulang pada laju tetap akan
+        // menghasilkan puluhan kunci yang tidak menambah satu pun informasi.
+        REQUIRE(clip.RotationTrackCount() == 1);
+        CHECK(clip.RotationTrackAt(0).bone == "Bone0");
+        CHECK(clip.RotationTrackAt(0).keys.size() == 3);
+        CHECK(clip.RotationTrackAt(0).keys.back().rotation.w ==
+              doctest::Approx(0.70710678f).epsilon(1e-4f));
+
+        // Hanya Y yang bergerak; X dan Z tetap nol dan karena itu dibuang.
+        REQUIRE(clip.TrackCount() == 1);
+        CHECK(clip.Tracks().front().bone == "Bone0");
+        CHECK(clip.Tracks().front().channel == Channel::TranslationY);
+        CHECK(clip.Tracks().front().curve.Keys().size() == 3);
+    }
+}
+
+TEST_CASE("Berkas tanpa animasi menjawab dengan alasan, bukan klip kosong") {
+    const std::filesystem::path path = std::filesystem::path(SIM_MESH_DIR) / "unitCube.usda";
+    if (!std::filesystem::exists(path)) {
+        return;
+    }
+    std::string error;
+    const std::vector<Clip> clips = ImportClips(path, error);
+    CHECK(clips.empty());
+    CHECK_FALSE(error.empty());
 }

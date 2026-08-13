@@ -6,6 +6,7 @@
 #include "Sim/Material/MaterialNodeCatalog.h"
 #include "Sim/Platform/FileDialog.h"
 #include "Sim/Editor/Notifications.h"
+#include "Sim/Editor/SourceImport.h"
 #include "Sim/Editor/Panel.h"
 #include "Sim/Editor/PanelIds.h"
 #include "Sim/Editor/PanelRegistry.h"
@@ -148,6 +149,7 @@ public:
 
         DrawPrompt(context, *db);
         DrawDeletePrompt(context, *db);
+        DrawImportOptions(context, *db);
         // Dijalankan setelah seluruh pohon digambar: memindahkan berkas memicu
         // pemindaian ulang yang mengganti daftar folder yang sedang ditelusuri.
         ResolvePendingMove(context, *db);
@@ -675,11 +677,12 @@ private:
         // sebenarnya bisa dipakai tampak tidak didukung.
         static const std::array<platform::FileDialogFilter, 5> kFilters{
             platform::FileDialogFilter{"All assets",
-                                       "fbx;obj;png;jpg;jpeg;tga;hdr;lua;simmat;simanim;simskel"},
-            platform::FileDialogFilter{"Mesh", "fbx;obj"},
-            platform::FileDialogFilter{"Tekstur", "png;jpg;jpeg;tga;hdr"},
-            platform::FileDialogFilter{"Skrip", "lua"},
-            platform::FileDialogFilter{"Semua berkas", "*"}};
+                                       "fbx;obj;gltf;glb;usd;usda;usdc;usdz;png;jpg;jpeg;tga;hdr;"
+                                       "lua;simmat;simanim;simskel"},
+            platform::FileDialogFilter{"Mesh", "fbx;obj;gltf;glb;usd;usda;usdc;usdz"},
+            platform::FileDialogFilter{"Texture", "png;jpg;jpeg;tga;hdr"},
+            platform::FileDialogFilter{"Script", "lua"},
+            platform::FileDialogFilter{"All files", "*"}};
 
         const std::filesystem::path target =
             folder.empty() ? db.Root() : db.Root() / std::filesystem::path(folder);
@@ -693,6 +696,16 @@ private:
                 }
                 int copied = 0;
                 for (const std::filesystem::path& source : result.paths) {
+                    // **Berkas mesh tidak disalin begitu saja.** Satu FBX membawa
+                    // geometri, rangka, take animasi, dan material sekaligus;
+                    // menyalinnya sebagai satu berkas menyerahkan pekerjaan
+                    // memecahnya kembali kepada yang mengimpornya. Yang ini
+                    // ditahan dulu, lalu dialog pilihan yang memutuskan bagian
+                    // mana yang menjadi aset.
+                    if (IsMeshSource(source)) {
+                        pendingImports_.push_back(source);
+                        continue;
+                    }
                     std::filesystem::path destination = target / source.filename();
                     std::error_code error;
                     // Yang sudah ada diberi akhiran, tidak ditimpa: menimpa aset
@@ -718,6 +731,11 @@ private:
                 if (copied > 0) {
                     db.ScanNow();
                     context.notifications->Success(std::to_string(copied) + " assets imported");
+                }
+                if (!pendingImports_.empty()) {
+                    importFolder_ = target;
+                    importOptions_ = editor::SourceImportOptions{};
+                    importContents_ = editor::InspectSource(pendingImports_.front());
                 }
             },
             /*allowMany=*/true);
@@ -1204,6 +1222,115 @@ private:
         }
     }
 
+
+    /// Benar untuk berkas yang bisa membawa lebih dari satu jenis aset.
+    static bool IsMeshSource(const std::filesystem::path& path) {
+        std::string extension = path.extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return extension == ".fbx" || extension == ".obj" || extension == ".gltf" ||
+               extension == ".glb" || extension == ".usd" || extension == ".usda" ||
+               extension == ".usdc" || extension == ".usdz";
+    }
+
+    /// Pilihan bagian mana dari berkas sumber yang menjadi aset.
+    ///
+    /// **Isinya dibaca lebih dulu, dan yang kosong diredupkan.** Kotak centang
+    /// "Animation" yang bisa dicentang pada berkas tanpa animasi menjanjikan
+    /// sesuatu yang tidak akan terjadi, dan yang mengimpornya baru tahu setelah
+    /// mencari aset yang tidak pernah ditulis.
+    void DrawImportOptions(EditorContext& context, assets::AssetDatabase& db) {
+        if (pendingImports_.empty()) {
+            return;
+        }
+        constexpr const char* kTitle = "Import options";
+        if (!ImGui::IsPopupOpen(kTitle)) {
+            ImGui::OpenPopup(kTitle);
+        }
+        const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+        ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+        if (!ImGui::BeginPopupModal(kTitle, nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+            return;
+        }
+
+        const editor::SourceContents& contents = importContents_;
+        if (pendingImports_.size() == 1) {
+            ImGui::Text("%s", pendingImports_.front().filename().string().c_str());
+        } else {
+            ImGui::Text("%zu files", pendingImports_.size());
+            ImGui::TextDisabled("Options apply to all of them; the counts below are for \"%s\".",
+                                pendingImports_.front().filename().string().c_str());
+        }
+        ImGui::Separator();
+
+        const auto option = [](const char* label, bool available, int count, bool* value,
+                               const char* empty) {
+            ImGui::BeginDisabled(!available);
+            if (!available) {
+                *value = false;
+            }
+            ImGui::Checkbox(label, value);
+            ImGui::EndDisabled();
+            ImGui::SameLine();
+            if (available) {
+                ImGui::TextDisabled("%d", count);
+            } else {
+                ImGui::TextDisabled("%s", empty);
+            }
+        };
+
+        option("Mesh", contents.hasMesh, 1, &importOptions_.mesh, "none");
+        option("Skeleton", contents.boneCount > 0, contents.boneCount, &importOptions_.skeleton,
+               "no bones");
+        option("Animation", contents.clipCount > 0, contents.clipCount, &importOptions_.animation,
+               "no clips");
+        option("Materials", contents.materialCount > 0, contents.materialCount,
+               &importOptions_.materials, "none");
+
+        if (!contents.error.empty()) {
+            ImGui::TextDisabled("%s", contents.error.c_str());
+        }
+
+        ImGui::Separator();
+        const bool nothing = !importOptions_.mesh && !importOptions_.skeleton &&
+                             !importOptions_.animation && !importOptions_.materials;
+        ImGui::BeginDisabled(nothing);
+        if (ImGui::Button("Import")) {
+            RunPendingImports(context, db);
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndDisabled();
+        ImGui::SameLine();
+        if (ImGui::Button("Cancel")) {
+            pendingImports_.clear();
+            ImGui::CloseCurrentPopup();
+        }
+        ImGui::EndPopup();
+    }
+
+    void RunPendingImports(EditorContext& context, assets::AssetDatabase& db) {
+        std::size_t written = 0;
+        std::size_t failed = 0;
+        for (const std::filesystem::path& source : pendingImports_) {
+            const editor::SourceImportResult result =
+                editor::ImportSource(source, importFolder_, importOptions_);
+            if (!result.ok) {
+                ++failed;
+                if (context.notifications != nullptr) {
+                    context.notifications->Error(source.filename().string() + ": " + result.error);
+                }
+                continue;
+            }
+            written += result.written.size();
+        }
+        pendingImports_.clear();
+        db.ScanNow();
+        if (written > 0 && context.notifications != nullptr) {
+            context.notifications->Success(std::to_string(written) + " assets imported");
+        }
+        (void)failed;
+    }
+
     void DrawDeletePrompt(EditorContext& context, assets::AssetDatabase& db) {
         if (!pendingDelete_.IsValid()) {
             return;
@@ -1380,6 +1507,11 @@ private:
     /// dialog yang keduanya menyalin ke folder yang sama akan selesai dalam
     /// urutan yang tidak bisa ditebak.
     bool dialogOpen_ = false;
+    /// Berkas mesh yang menunggu dialog pilihan impor.
+    std::vector<std::filesystem::path> pendingImports_;
+    std::filesystem::path importFolder_;
+    editor::SourceImportOptions importOptions_;
+    editor::SourceContents importContents_;
     bool justStartedRenaming_ = false;
 };
 

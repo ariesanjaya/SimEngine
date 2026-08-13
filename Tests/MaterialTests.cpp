@@ -1628,6 +1628,12 @@ TEST_CASE("Setiap material bawaan editor terbaca, sah, dan menghasilkan berkas y
     REQUIRE_MESSAGE(std::filesystem::is_directory(folder),
                     "folder material bawaan tidak ada di " SIM_BUILTIN_DIR);
 
+    // **Tidak menelusuri subfolder, dan itu disengaja.** `Materials/Sistem/`
+    // berisi induk bersama — `Material Impor.simmat`, tempat material hasil
+    // impor mengikat diri — dan induk semacam itu memang bercabang: satu node
+    // `param.get` per parameter yang bisa ditimpa instance. Ia bukan titik awal
+    // untuk disalin, jadi aturan "tepat satu node" di bawah tidak berlaku
+    // untuknya. Yang mengujinya ada di SimAssetTests, bersama konverternya.
     int checked = 0;
     for (const auto& entry : std::filesystem::directory_iterator(folder)) {
         if (!entry.is_regular_file() || entry.path().extension() != ".simmat") {

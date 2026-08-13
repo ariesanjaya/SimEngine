@@ -336,14 +336,224 @@ target_compile_options(stb_impl PRIVATE -w)
 add_library(Stb::Impl ALIAS stb_impl)
 
 # ---------------------------------------------------------------------------
+# tinyexr — OpenEXR untuk `Sim::ImageIO` (I2)
+#
+# **Opsional, dan satu header saja.** Yang dibutuhkan mesin ini dari EXR cuma
+# membacanya untuk IBL, dan tinyexr menangani ZIP, PIZ, dan RLE — yang benar-benar
+# dipakai berkas EXR di jalur kerja ini. Diambil seperti stb dan cgltf.
+#
+# Pustaka gambar yang lebih besar sempat ditimbang dan ditolak; ukurannya beserta
+# apa yang hilang karenanya ada di docs/DEPENDENCIES.md.
+#
+# SOURCE_SUBDIR diarahkan ke folder tanpa CMakeLists, trik yang sama seperti VMA
+# dan stb: CMakeLists bawaan tinyexr ikut membangun contoh dan test-nya.
+# ---------------------------------------------------------------------------
+if(SIM_WITH_EXR)
+    FetchContent_Declare(tinyexr
+        GIT_REPOSITORY https://github.com/syoyo/tinyexr.git
+        GIT_TAG        v3.2.0
+        GIT_SHALLOW    TRUE
+        SOURCE_SUBDIR  doc)
+    FetchContent_MakeAvailable(tinyexr)
+
+    # zlib dipakai, bukan miniz yang dibundel tinyexr: zlib sudah ada sebagai
+    # kebergantungan libpng dan libtiff, jadi miniz hanya akan menaruh
+    # implementasi deflate kedua di binary yang sama.
+    find_package(ZLIB QUIET)
+endif()
+if(SIM_WITH_EXR AND ZLIB_FOUND)
+    # Implementasinya dikompilasi tepat sekali, dengan alasan yang sama seperti
+    # stb — lihat catatannya di Third-Party/tinyexr/tinyexr_impl.cpp.
+    add_library(tinyexr_impl STATIC "${CMAKE_SOURCE_DIR}/Third-Party/tinyexr/tinyexr_impl.cpp")
+    target_include_directories(tinyexr_impl SYSTEM PUBLIC ${tinyexr_SOURCE_DIR})
+    target_link_libraries(tinyexr_impl PUBLIC ZLIB::ZLIB)
+    # Kode pihak ketiga sebelas ribu baris; peringatannya bukan urusan kita, dan
+    # -Werror proyek ini akan menggagalkan build karenanya.
+    target_compile_options(tinyexr_impl PRIVATE -w)
+    set_target_properties(tinyexr_impl PROPERTIES FOLDER "ThirdParty")
+    add_library(TinyExr::TinyExr ALIAS tinyexr_impl)
+    message(STATUS "tinyexr v3.2.0 dipakai — impor EXR aktif")
+elseif(NOT SIM_WITH_EXR)
+    message(STATUS "impor EXR dimatikan (-DSIM_WITH_EXR=OFF)")
+else()
+    message(STATUS "zlib tidak ditemukan — impor EXR dilewati "
+                   "(pasang zlib1g-dev untuk mengaktifkannya)")
+endif()
+
+# ---------------------------------------------------------------------------
+# OpenImageIO — backend gambar opsional yang **didahulukan** (I1)
+#
+# **Opsional dan didahulukan, bukan wajib.** stb, tinyexr, dan libtiff menangani
+# seluruh format yang dipakai jalur kerja di sini, jadi build bersih tidak
+# membutuhkan apa pun dari blok ini. Yang ditambahkan OIIO ketika ada: impor
+# DDS, PSD yang utuh (bukan composited view saja), metadata colorspace untuk PNG
+# dan JPEG, dan `ImageBufAlgo` untuk pembandingan gambar di I5.
+#
+# Alasan panjangnya — termasuk kenapa ia tidak dijadikan syarat — ada di
+# docs/DEPENDENCIES.md.
+#
+# **Root sendiri, bukan menumpang paket OpenUSD.** Distribusi OpenUSD kebetulan
+# membawa header OIIO, dan menaruhnya di sana berarti header itu masuk include
+# path setiap target yang menautkan `Usd::Usd` — termasuk target yang tidak
+# boleh melihatnya. Root terpisah menutup itu secara struktural: hanya
+# `Sim::ImageIO` yang melihat headernya.
+#
+# **Diperiksa dua sisi: header DAN pustaka.** Paket OpenUSD membawa headernya
+# tanpa pustakanya, dan kalau hanya header yang ada `#include
+# <OpenImageIO/imageio.h>` kompilasi dengan sukses lalu gagal saat link. Jadi
+# keduanya harus ada sebelum backend ini dinyalakan.
+# ---------------------------------------------------------------------------
+set(SIM_OIIO_DEFAULT_ROOT "${CMAKE_CURRENT_LIST_DIR}/../Third-Party/OpenImageIO")
+if(EXISTS "${SIM_OIIO_DEFAULT_ROOT}/include/OpenImageIO/imageio.h")
+    set(SIM_OIIO_ROOT "${SIM_OIIO_DEFAULT_ROOT}" CACHE PATH "Folder pemasangan OpenImageIO")
+else()
+    set(SIM_OIIO_ROOT "" CACHE PATH "Folder pemasangan OpenImageIO")
+endif()
+
+set(SIM_OIIO_READY FALSE)
+if(SIM_WITH_OIIO AND SIM_OIIO_ROOT AND EXISTS "${SIM_OIIO_ROOT}/include/OpenImageIO/imageio.h")
+    find_library(SIM_OIIO_LIB NAMES OpenImageIO PATHS "${SIM_OIIO_ROOT}/lib" NO_DEFAULT_PATH)
+    find_library(SIM_OIIO_UTIL_LIB NAMES OpenImageIO_Util PATHS "${SIM_OIIO_ROOT}/lib" NO_DEFAULT_PATH)
+    if(SIM_OIIO_LIB AND SIM_OIIO_UTIL_LIB)
+        set(SIM_OIIO_READY TRUE)
+    else()
+        message(STATUS
+            "Header OpenImageIO ada di ${SIM_OIIO_ROOT}/include tapi pustakanya tidak — "
+            "backend OIIO dilewati. Ini disengaja: header tanpa pustaka kompilasi "
+            "dengan sukses lalu gagal saat link. Langkahnya ada di docs/DEPENDENCIES.md.")
+    endif()
+endif()
+
+if(SIM_OIIO_READY)
+    # Daftar pendukung dibaca dari simbol yang belum terselesaikan di arsipnya,
+    # bukan ditebak. boost datang dari paket yang sama karena arsipnya dibangun
+    # terhadap boost 1.78 dan boost tidak menjanjikan ABI stabil antar-versi;
+    # sisanya dari sistem, sonamenya cocok dengan yang dipakai saat ia dibangun.
+    set(SIM_OIIO_SUPPORT_LIBS "")
+    set(SIM_OIIO_MISSING "")
+
+    foreach(boostLib filesystem thread atomic system)
+        find_library(SIM_OIIO_BOOST_${boostLib} NAMES boost_${boostLib}
+                     PATHS "${SIM_OIIO_ROOT}/lib" NO_DEFAULT_PATH)
+        if(SIM_OIIO_BOOST_${boostLib})
+            list(APPEND SIM_OIIO_SUPPORT_LIBS "${SIM_OIIO_BOOST_${boostLib}}")
+        else()
+            list(APPEND SIM_OIIO_MISSING "boost_${boostLib}")
+        endif()
+    endforeach()
+
+    # Soname disebut persis di samping nama biasanya: paket `-dev` OpenEXR dan
+    # Imath tidak selalu terpasang, dan `find_library` dengan nama biasa tidak
+    # akan menemukan `libImath-3_1.so.29` yang tanpa symlink `.so`.
+    set(SIM_OIIO_SONAME_OpenEXR-3_1     libOpenEXR-3_1.so.30)
+    set(SIM_OIIO_SONAME_OpenEXRCore-3_1 libOpenEXRCore-3_1.so.30)
+    set(SIM_OIIO_SONAME_Imath-3_1       libImath-3_1.so.29)
+    set(SIM_OIIO_SONAME_Iex-3_1         libIex-3_1.so.30)
+    set(SIM_OIIO_SONAME_IlmThread-3_1   libIlmThread-3_1.so.30)
+    set(SIM_OIIO_SONAME_pugixml         libpugixml.so.1)
+    set(SIM_OIIO_SONAME_tiff            libtiff.so.6)
+    set(SIM_OIIO_SONAME_jpeg            libjpeg.so.8)
+    set(SIM_OIIO_SONAME_png16           libpng16.so.16)
+    set(SIM_OIIO_SONAME_z               libz.so.1)
+
+    foreach(systemLib OpenEXR-3_1 OpenEXRCore-3_1 Imath-3_1 Iex-3_1 IlmThread-3_1
+                      pugixml tiff jpeg png16 z)
+        find_library(SIM_OIIO_SYS_${systemLib}
+                     NAMES ${systemLib} ${SIM_OIIO_SONAME_${systemLib}})
+        if(SIM_OIIO_SYS_${systemLib})
+            list(APPEND SIM_OIIO_SUPPORT_LIBS "${SIM_OIIO_SYS_${systemLib}}")
+        else()
+            list(APPEND SIM_OIIO_MISSING "${systemLib}")
+        endif()
+    endforeach()
+
+    if(SIM_OIIO_MISSING)
+        list(JOIN SIM_OIIO_MISSING ", " simOiioMissingText)
+        message(STATUS
+            "OpenImageIO ditemukan tapi pustaka pendukungnya tidak lengkap "
+            "(${simOiioMissingText}) — backend OIIO dilewati. "
+            "Langkahnya ada di docs/DEPENDENCIES.md.")
+        set(SIM_OIIO_READY FALSE)
+    endif()
+endif()
+
+if(SIM_OIIO_READY)
+    # **fmt diambil sendiri, dan versinya tidak bebas dipilih.** Paket OIIO ini
+    # memasang `detail/fmt/format.h` sebagai shim satu baris yang meneruskan ke
+    # `<fmt/format.h>`, jadi headernya tidak bisa dipakai tanpa fmt di luar.
+    # Dipatok 10.2.1 karena itu yang dipakai OIIO 2.5.x; fmt 12 yang dibawa
+    # spdlog membuang hal-hal yang masih dipakai header ini. Keduanya tidak
+    # pernah bertemu di satu TU — lihat catatan di Code/ImageIO/src/BackendOiio.cpp.
+    FetchContent_Declare(fmt
+        GIT_REPOSITORY https://github.com/fmtlib/fmt.git
+        GIT_TAG        10.2.1
+        GIT_SHALLOW    TRUE)
+    FetchContent_Populate(fmt)
+
+    add_library(sim_oiio INTERFACE)
+    target_link_libraries(sim_oiio INTERFACE
+        "${SIM_OIIO_LIB}" "${SIM_OIIO_UTIL_LIB}" ${SIM_OIIO_SUPPORT_LIBS})
+    # SYSTEM: header OIIO memancarkan peringatannya sendiri, dan -Werror proyek
+    # ini akan menggagalkan build karenanya.
+    target_include_directories(sim_oiio SYSTEM INTERFACE
+        "${SIM_OIIO_ROOT}/include" "${fmt_SOURCE_DIR}/include")
+    # Header-only: menautkan pustaka fmt kedua akan menaruh dua salinan simbol
+    # yang sama di satu binary.
+    target_compile_definitions(sim_oiio INTERFACE FMT_HEADER_ONLY=1)
+    add_library(Oiio::Oiio ALIAS sim_oiio)
+
+    file(STRINGS "${SIM_OIIO_ROOT}/include/OpenImageIO/oiioversion.h" simOiioVersionLines
+         REGEX "^#define OIIO_VERSION_(MAJOR|MINOR|PATCH) ")
+    string(REGEX MATCHALL "[0-9]+" simOiioVersionParts "${simOiioVersionLines}")
+    list(JOIN simOiioVersionParts "." SIM_OIIO_VERSION)
+    set(SIM_OIIO_VERSION "${SIM_OIIO_VERSION}" CACHE INTERNAL "Versi OpenImageIO yang aktif")
+    message(STATUS "OpenImageIO ${SIM_OIIO_VERSION} dipakai dari ${SIM_OIIO_ROOT} — DDS, PSD utuh, dan metadata colorspace aktif")
+elseif(NOT SIM_WITH_OIIO)
+    message(STATUS "backend OpenImageIO dimatikan (-DSIM_WITH_OIIO=OFF)")
+elseif(NOT SIM_OIIO_ROOT)
+    message(STATUS "OpenImageIO tidak ada — dilewati. Backend bawaan menangani "
+                   "seluruh format kecuali DDS; langkahnya ada di docs/DEPENDENCIES.md")
+endif()
+
+# ---------------------------------------------------------------------------
+# libtiff — TIFF untuk heightmap 16/32-bit (I3)
+#
+# **Dicari, tidak diunduh, dan sengaja bukan pembaca TIFF mini.** TIFF bukan satu
+# format melainkan sebuah wadah: LZW, deflate, dan PackBits; strip dan tile;
+# predictor; 8/16/32 bit; bilangan bulat dan IEEE float. Heightmap yang
+# benar-benar keluar dari World Machine, Gaea, dan sumber GIS memakai
+# kombinasi-kombinasi itu — pembaca yang menangani sebagiannya akan menolak
+# justru berkas yang paling sering dipakai.
+#
+# libtiff ada di setiap distro dan berukuran ratusan kilobyte, jadi tidak ada
+# yang dibeli dengan membangunnya sendiri.
+# ---------------------------------------------------------------------------
+if(SIM_WITH_TIFF)
+    find_package(TIFF QUIET)
+endif()
+if(SIM_WITH_TIFF AND TIFF_FOUND)
+    message(STATUS "libtiff ${TIFF_VERSION_STRING} dipakai dari ${TIFF_LIBRARIES} — impor TIFF aktif")
+elseif(NOT SIM_WITH_TIFF)
+    message(STATUS "impor TIFF dimatikan (-DSIM_WITH_TIFF=OFF)")
+else()
+    message(STATUS "libtiff tidak ditemukan — impor TIFF dilewati "
+                   "(pasang libtiff-dev untuk mengaktifkannya)")
+endif()
+
+# ---------------------------------------------------------------------------
 # cgltf — pembaca glTF/GLB untuk impor mesh (E8.4)
 #
 # Header-only tanpa build system, jadi SOURCE_SUBDIR diarahkan ke folder tanpa
-# CMakeLists — pola yang sama dengan stb, VMA, dan ufbx.
+# CMakeLists — pola yang sama dengan stb dan VMA.
 #
-# **Dikompilasi sebagai C, bukan C++**, dengan alasan yang sama seperti ufbx:
-# sumbernya C99 dan mengandalkan perilaku yang berbeda di kedua bahasa.
+# **Dikompilasi sebagai C, bukan C++**: sumbernya C99 dan mengandalkan perilaku
+# yang berbeda di kedua bahasa.
 # ---------------------------------------------------------------------------
+# Dicari sebelum yang memakainya, bukan sesudah. `find_library` menyimpan
+# hasilnya di cache, jadi urutan yang terbalik tetap bekerja pada konfigurasi
+# kedua dan seterusnya — dan gagal diam-diam hanya pada build dir yang bersih,
+# tempat yang paling jarang dicoba.
+find_library(SIM_MATH_LIBRARY m)
 FetchContent_Declare(cgltf
     GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
     GIT_TAG        v1.14
@@ -363,35 +573,262 @@ endif()
 add_library(Cgltf::Cgltf ALIAS cgltf)
 
 # ---------------------------------------------------------------------------
-# ufbx — pembaca FBX untuk impor mesh (E8.4)
+# Autodesk FBX SDK — pembaca FBX untuk impor mesh dan klip (E8.4)
 #
-# Satu pasang .c/.h tanpa build system, jadi SOURCE_SUBDIR diarahkan ke folder
-# tanpa CMakeLists — pola yang sama dengan stb dan VMA.
-#
-# **Dikompilasi sebagai C, bukan C++.** ufbx menulis C99 dan mengandalkan
-# perilaku yang berbeda di kedua bahasa; mengompilasinya sebagai C++ berhasil
-# di sebagian besar kompiler dan gagal dengan cara yang sulit dilacak di
-# sisanya.
+# **Dicari, tidak diunduh, dan tidak boleh ikut di repo.** Berbeda dengan
+# kebergantungan lain di berkas ini, FBX SDK berlisensi milik Autodesk: ia tidak
+# bisa diambil FetchContent, tidak bisa divendor ke dalam pohon ini, dan biner
+# yang menautnya tunduk pada perjanjian lisensi Autodesk. Yang memakainya harus
+# memasangnya sendiri lebih dulu — lihat docs/DEPENDENCIES.md.
 # ---------------------------------------------------------------------------
-FetchContent_Declare(ufbx
-    GIT_REPOSITORY https://github.com/ufbx/ufbx.git
-    GIT_TAG        v0.20.0
-    GIT_SHALLOW    TRUE
-    SOURCE_SUBDIR  misc)
-FetchContent_MakeAvailable(ufbx)
+find_package(Threads REQUIRED)
 
-add_library(ufbx STATIC "${ufbx_SOURCE_DIR}/ufbx.c")
-target_include_directories(ufbx SYSTEM PUBLIC ${ufbx_SOURCE_DIR})
-set_target_properties(ufbx PROPERTIES C_STANDARD 11 POSITION_INDEPENDENT_CODE ON)
-# Kode pihak ketiga: peringatannya bukan urusan kita, dan -Werror proyek ini
-# akan menggagalkan build karenanya.
-target_compile_options(ufbx PRIVATE -w)
-# libm untuk sqrt/pow yang dipakai penguraian geometrinya.
-find_library(SIM_MATH_LIBRARY m)
-if(SIM_MATH_LIBRARY)
-    target_link_libraries(ufbx PRIVATE ${SIM_MATH_LIBRARY})
+set(SIM_FBXSDK_DEFAULT_ROOT "$ENV{HOME}/SDK/fbxsdk")
+if(EXISTS "${SIM_FBXSDK_DEFAULT_ROOT}/include/fbxsdk.h")
+    set(SIM_FBXSDK_ROOT "${SIM_FBXSDK_DEFAULT_ROOT}" CACHE PATH "Folder pemasangan Autodesk FBX SDK")
+else()
+    set(SIM_FBXSDK_ROOT "" CACHE PATH "Folder pemasangan Autodesk FBX SDK")
 endif()
-add_library(Ufbx::Ufbx ALIAS ufbx)
+
+# **Yang statis lebih dulu.** Yang dinamis menuntut libfbxsdk.so ikut ditemukan
+# saat dijalankan, dan satu-satunya tempat ia tinggal adalah folder pemasangan
+# milik satu mesin — biner yang dipindah lalu berhenti bekerja dengan pesan dari
+# loader, bukan dari mesin ini. Yang statis menyeret libxml2 dan zlib, dan
+# keduanya memang ada di mana-mana.
+find_library(SIM_FBXSDK_LIBRARY
+             NAMES fbxsdk libfbxsdk.a
+             PATHS "${SIM_FBXSDK_ROOT}/lib/release" "${SIM_FBXSDK_ROOT}/lib"
+             NO_DEFAULT_PATH)
+find_path(SIM_FBXSDK_INCLUDE fbxsdk.h PATHS "${SIM_FBXSDK_ROOT}/include" NO_DEFAULT_PATH)
+
+if(SIM_FBXSDK_LIBRARY AND SIM_FBXSDK_INCLUDE)
+    find_package(LibXml2 QUIET)
+    find_package(ZLIB QUIET)
+
+    add_library(sim_fbxsdk INTERFACE)
+    target_include_directories(sim_fbxsdk SYSTEM INTERFACE "${SIM_FBXSDK_INCLUDE}")
+    target_link_libraries(sim_fbxsdk INTERFACE "${SIM_FBXSDK_LIBRARY}")
+    if(LibXml2_FOUND)
+        target_link_libraries(sim_fbxsdk INTERFACE LibXml2::LibXml2)
+    endif()
+    if(ZLIB_FOUND)
+        target_link_libraries(sim_fbxsdk INTERFACE ZLIB::ZLIB)
+    endif()
+    target_link_libraries(sim_fbxsdk INTERFACE ${CMAKE_DL_LIBS} Threads::Threads)
+    if(SIM_MATH_LIBRARY)
+        target_link_libraries(sim_fbxsdk INTERFACE ${SIM_MATH_LIBRARY})
+    endif()
+    add_library(Fbx::Fbx ALIAS sim_fbxsdk)
+    message(STATUS "Autodesk FBX SDK dipakai dari ${SIM_FBXSDK_ROOT} — impor FBX aktif")
+else()
+    message(FATAL_ERROR
+        "Autodesk FBX SDK tidak ditemukan. Impor FBX memakainya, dan tidak ada "
+        "jalur cadangan: pasang SDK-nya lalu setel -DSIM_FBXSDK_ROOT=<folder>. "
+        "Langkahnya ada di docs/DEPENDENCIES.md.")
+endif()
+
+# ---------------------------------------------------------------------------
+# OpenUSD — impor .usd/.usda/.usdc/.usdz (E8.4)
+#
+# **Dicari, tidak diunduh.** Semua kebergantungan lain di berkas ini diambil
+# lewat FetchContent karena masing-masing berbiaya detik sampai satu menit.
+# OpenUSD bukan salah satunya: ia menyeret oneTBB, dan membangun keduanya dari
+# nol memakan puluhan menit dan ratusan megabyte. Menjadikannya wajib berarti
+# setiap orang yang hanya ingin mengubah satu panel editor membayar biaya itu
+# pada build bersihnya yang pertama.
+#
+# Jadi USD dipakai kalau ada, dan dilewati kalau tidak. Yang melewatinya tetap
+# bisa membangun seluruh mesin; yang hilang hanya impor USD, dan berkas .usd
+# yang dibuka di sana ditolak dengan alasan yang menyebut mesinnya — bukan
+# dengan "format tidak dikenal" yang mengirim orang memeriksa berkasnya.
+#
+# Cara menyediakannya ada di docs/DEPENDENCIES.md.
+# **Bawaan menunjuk ke dalam pohon ini.** Salinan yang dipakai sebelumnya tinggal
+# di cache packman milik SDK lain; cache adalah tempat yang boleh dibersihkan
+# kapan saja oleh yang memilikinya, dan build yang bergantung padanya berhenti
+# bekerja tanpa ada yang mengubah apa pun di sini.
+set(SIM_USD_DEFAULT_ROOT "${CMAKE_CURRENT_LIST_DIR}/../Third-Party/OpenUSD")
+if(EXISTS "${SIM_USD_DEFAULT_ROOT}/include/pxr")
+    set(SIM_USD_ROOT "${SIM_USD_DEFAULT_ROOT}" CACHE PATH "Folder pemasangan OpenUSD")
+else()
+    set(SIM_USD_ROOT "" CACHE PATH "Folder pemasangan OpenUSD")
+endif()
+# Python-nya ikut tinggal di sebelah USD-nya: yang dibutuhkan hanya header dan
+# satu pustaka untuk memenuhi rujukan pxr_boost, dan menaruhnya di tempat lain
+# berarti satu jalur lagi yang harus benar di mesin orang lain.
+set(SIM_USD_PYTHON_ROOT "" CACHE PATH "Python yang dipakai paket USD siap pakai (header saja)")
+if(NOT SIM_USD_PYTHON_ROOT AND SIM_USD_ROOT)
+    set(SIM_USD_PYTHON_ROOT "${SIM_USD_ROOT}")
+endif()
+if(SIM_USD_ROOT)
+    # `pxr_DIR` disetel langsung, bukan lewat CMAKE_PREFIX_PATH. find_package
+    # menyimpan hasil pencariannya di cache dan memakai yang tersimpan itu pada
+    # konfigurasi berikutnya — jadi menunjuk SIM_USD_ROOT ke pemasangan USD yang
+    # lain pada build dir yang sudah ada tidak akan berpengaruh apa-apa, dan yang
+    # terbangun diam-diam tetap yang lama. pxrConfig.cmake ada di akar
+    # pemasangannya, jadi keduanya jalur yang sama.
+    set(pxr_DIR "${SIM_USD_ROOT}" CACHE PATH "Lokasi pxrConfig.cmake" FORCE)
+endif()
+# **Paket USD siap pakai tidak lewat find_package.** `pxrConfig.cmake` dari
+# paket biner — yang dari packman, yang dipakai usd-exchange — menuntut seluruh
+# kebergantungan yang dipakai saat ia dibangun: Python pada versi patch yang
+# persis, TBB, OpenSubdiv, dan seterusnya. Semuanya untuk bagian imaging yang
+# tidak pernah disentuh importir ini, dan tidak satu pun dari daftar itu yang
+# berhenti tumbuh sebelum semuanya disediakan.
+#
+# Yang dibutuhkan importir cuma pembaca panggungnya. Jadi paket yang sudah jadi
+# ditautkan langsung: satu folder header, dan pustaka yang memang dipanggil.
+# Yang dibangun sendiri tetap lewat find_package, karena config-nya menyebut apa
+# adanya apa yang benar-benar ada.
+# `usd_python` ikut walau importir ini tidak memanggil Python: header paket yang
+# dibangun dengan Python menyala memancarkan rujukan ke registry pxr_boost, dan
+# rujukan itu hidup di sana.
+set(SIM_USD_RUNTIME_LIBS usd_usdSkel usd_usdShade usd_usdGeom usd_usd usd_sdf usd_pcp
+                         usd_python
+                         usd_ar usd_kind usd_ndr usd_sdr usd_plug usd_work usd_trace
+                         usd_vt usd_gf usd_tf usd_js usd_arch)
+if(SIM_USD_ROOT AND EXISTS "${SIM_USD_ROOT}/include/pxr" AND NOT EXISTS "${SIM_USD_ROOT}/pxrConfig.cmake")
+    set(SIM_USD_PREBUILT TRUE)
+elseif(SIM_USD_ROOT AND EXISTS "${SIM_USD_ROOT}/include/tbb")
+    # Membawa TBB di dalam dirinya adalah tanda paket biner: yang dibangun dari
+    # sumber memakai TBB yang terpasang terpisah.
+    set(SIM_USD_PREBUILT TRUE)
+endif()
+
+if(SIM_USD_PREBUILT)
+    set(SIM_USD_FOUND_LIBS "")
+    foreach(usdLib IN LISTS SIM_USD_RUNTIME_LIBS)
+        find_library(SIM_USD_LIB_${usdLib} NAMES ${usdLib}
+                     PATHS "${SIM_USD_ROOT}/lib" NO_DEFAULT_PATH)
+        if(SIM_USD_LIB_${usdLib})
+            list(APPEND SIM_USD_FOUND_LIBS "${SIM_USD_LIB_${usdLib}}")
+        endif()
+    endforeach()
+    find_library(SIM_USD_TBB NAMES tbb PATHS "${SIM_USD_ROOT}/lib" NO_DEFAULT_PATH)
+    if(SIM_USD_TBB)
+        list(APPEND SIM_USD_FOUND_LIBS "${SIM_USD_TBB}")
+    endif()
+    find_library(SIM_USD_PYTHON_LIBRARY NAMES python3.10 python3.11 python3.12 python3
+                 PATHS "${SIM_USD_PYTHON_ROOT}/lib")
+    if(SIM_USD_PYTHON_LIBRARY)
+        list(APPEND SIM_USD_FOUND_LIBS "${SIM_USD_PYTHON_LIBRARY}")
+    endif()
+endif()
+
+if(SIM_USD_PREBUILT AND SIM_USD_FOUND_LIBS)
+    add_library(sim_usd INTERFACE)
+    target_link_libraries(sim_usd INTERFACE ${SIM_USD_FOUND_LIBS})
+    target_include_directories(sim_usd SYSTEM INTERFACE "${SIM_USD_ROOT}/include")
+    # Paket biner umumnya dibangun dengan dukungan Python menyala, dan header
+    # `pxr/pxr.h` yang menyalakannya menarik `wrap_python.hpp` — yang butuh
+    # `pyconfig.h` walau importir ini tidak pernah memanggil satu pun API Python.
+    # Yang dibutuhkan cuma headernya, jadi Python mana pun dengan versi minor
+    # yang sama sudah cukup untuk melewatinya.
+    find_path(SIM_USD_PYTHON_INCLUDE pyconfig.h
+              PATHS "${SIM_USD_PYTHON_ROOT}/include/python3.10"
+                    "${SIM_USD_PYTHON_ROOT}/include"
+                    /usr/include/python3.10 /usr/include/python3.11 /usr/include/python3.12)
+    if(SIM_USD_PYTHON_INCLUDE)
+        target_include_directories(sim_usd SYSTEM INTERFACE "${SIM_USD_PYTHON_INCLUDE}")
+    endif()
+    add_library(Usd::Usd ALIAS sim_usd)
+    message(STATUS "OpenUSD (paket siap pakai) dipakai dari ${SIM_USD_ROOT} — impor USD aktif")
+    set(pxr_FOUND TRUE)
+else()
+    find_package(pxr CONFIG QUIET)
+endif()
+if(pxr_FOUND AND NOT TARGET sim_usd)
+    add_library(sim_usd INTERFACE)
+    # Build monolitik menghasilkan satu pustaka; yang bukan monolitik
+    # menghasilkan puluhan, dan PXR_LIBRARIES menyebut keduanya dengan benar.
+    target_link_libraries(sim_usd INTERFACE ${PXR_LIBRARIES})
+    target_include_directories(sim_usd SYSTEM INTERFACE ${PXR_INCLUDE_DIRS})
+    add_library(Usd::Usd ALIAS sim_usd)
+    message(STATUS "OpenUSD ditemukan: ${pxr_DIR} — impor USD aktif")
+elseif(NOT TARGET Usd::Usd)
+    message(STATUS "OpenUSD tidak ditemukan — impor USD dilewati "
+                   "(setel SIM_USD_ROOT untuk mengaktifkannya)")
+endif()
+
+# ---------------------------------------------------------------------------
+# Cabang TfHashMap — harus sama di pustakanya dan di yang memanggilnya.
+#
+# **`TfHashMap` bukan satu tipe.** `pxr/base/tf/hashmap.h` memilih induknya lewat
+# `ARCH_HAS_GNU_STL_EXTENSIONS`, dan `pxr/base/arch/defines.h` menyalakan makro
+# itu hanya pada Linux **dengan GCC**. Dibangun GCC, `TfHashMap` mewarisi
+# `__gnu_cxx::hash_map` dan besarnya 40 bait; header yang sama dibaca Clang
+# mewarisi `std::unordered_map` dan besarnya 56. Setiap kelas USD yang menyimpan
+# `TfHashMap` karena itu punya offset anggota yang berbeda di kedua sisi —
+# `UsdGeomXformCache` menaruh `_time` di 40 menurut pustakanya, di 56 menurut
+# yang memanggilnya.
+#
+# **Yang tidak cocok tidak gagal saat ditautkan.** Konstruktornya berjalan di
+# dalam pustaka dan destruktornya inline di pemanggil, jadi yang dibongkar bukan
+# yang dibangun: `UsdGeomXformCache` yang keluar dari cakupan membaca peta
+# hash-nya pada alamat yang salah, membebaskan yang bukan miliknya, dan merusak
+# heap. Yang terlihat cuma segfault di `~UsdGeomXformCache` — jauh dari baris
+# mana pun yang keliru, dan tetap muncul pada berkas .usda sekecil satu kubus.
+#
+# Jadi cabangnya dibaca dari binernya, bukan ditebak dari kompiler yang sedang
+# dipakai: nama ter-mangle `__gnu_cxx::hash_map` ada di tabel simbol kalau USD
+# memakai cabang itu, dan tetap ada setelah binernya di-strip.
+if(TARGET sim_usd)
+    set(SIM_USD_ABI_PROBE "")
+    foreach(usdDir IN ITEMS "${SIM_USD_ROOT}" "${pxr_DIR}")
+        if(NOT "${usdDir}" STREQUAL "")
+            # TfHashMap tinggal di usd_tf; build monolitik menaruh semuanya di usd_ms.
+            file(GLOB usdProbe "${usdDir}/lib/libusd_tf.so*" "${usdDir}/lib/libusd_ms.so*")
+            list(APPEND SIM_USD_ABI_PROBE ${usdProbe})
+        endif()
+    endforeach()
+    list(APPEND SIM_USD_ABI_PROBE ${SIM_USD_FOUND_LIBS})
+    list(REMOVE_DUPLICATES SIM_USD_ABI_PROBE)
+
+    set(SIM_USD_GNU_HASH FALSE)
+    set(SIM_USD_ABI_KNOWN FALSE)
+    foreach(usdLib IN LISTS SIM_USD_ABI_PROBE)
+        if(EXISTS "${usdLib}" AND NOT IS_DIRECTORY "${usdLib}")
+            set(SIM_USD_ABI_KNOWN TRUE)
+            file(STRINGS "${usdLib}" usdHit REGEX "9__gnu_cxx8hash_map" LIMIT_COUNT 1)
+            if(usdHit)
+                set(SIM_USD_GNU_HASH TRUE)
+                break()
+            endif()
+        endif()
+    endforeach()
+
+    if(SIM_USD_GNU_HASH)
+        # `<ext/hash_set>` yang ditarik cabang ini memancarkan #warning usang, dan
+        # SIM_WERROR mengubahnya jadi kesalahan. Yang dimatikan hanya #warning-nya;
+        # `-Wno-deprecated` juga akan mematikan peringatan `[[deprecated]]` pada
+        # seluruh target yang menautnya, dan itu sinyal yang masih ingin dibaca.
+        if(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+            target_compile_options(sim_usd INTERFACE "-Wno-#warnings")
+        elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            target_compile_options(sim_usd INTERFACE -Wno-cpp)
+        endif()
+        if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+            target_compile_definitions(sim_usd INTERFACE ARCH_HAS_GNU_STL_EXTENSIONS)
+            message(STATUS "OpenUSD memakai cabang __gnu_cxx::hash_map — "
+                           "ARCH_HAS_GNU_STL_EXTENSIONS disetel supaya "
+                           "${CMAKE_CXX_COMPILER_ID} melihat tata letak yang sama")
+        endif()
+    elseif(NOT SIM_USD_ABI_KNOWN)
+        message(WARNING
+            "Tidak ada pustaka OpenUSD yang bisa diperiksa untuk cabang TfHashMap. "
+            "Kalau USD-nya dibangun dengan GCC dan mesin ini tidak, impor USD akan "
+            "merusak heap saat UsdGeomXformCache dibongkar.")
+    elseif(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # Kebalikannya, dan tidak ada tambalannya: makro itu disetel oleh header
+        # USD sendiri untuk GCC di Linux, dan baris perintah tidak bisa
+        # membatalkan `#define` yang ditulis header.
+        message(FATAL_ERROR
+            "OpenUSD ini dibangun tanpa cabang __gnu_cxx::hash_map, tapi SimEngine "
+            "sedang dibangun dengan GCC di Linux — yang menyalakan cabang itu lewat "
+            "header USD sendiri. Tata letak TfHashMap akan berbeda di kedua sisi. "
+            "Bangun SimEngine dengan Clang, atau bangun ulang OpenUSD dengan GCC.")
+    endif()
+endif()
 
 # ---------------------------------------------------------------------------
 # Ditambahkan pada milestone berikutnya (lihat docs/DEPENDENCIES.md):
