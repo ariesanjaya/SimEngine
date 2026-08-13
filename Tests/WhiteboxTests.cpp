@@ -2,6 +2,7 @@
 
 #include "Sim/Whitebox/HalfEdgeMesh.h"
 #include "Sim/Whitebox/Operations.h"
+#include "Sim/Whitebox/WhiteboxIo.h"
 #include "Sim/Whitebox/WhiteboxMesh.h"
 #include "Sim/Whitebox/Polygon.h"
 
@@ -9,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -686,4 +688,122 @@ TEST_CASE("material bertahan melewati ekstrusi") {
     CHECK(data.parts[0].material == kNoMaterial);
 
     CHECK(box.CheckInvariants().ok);
+}
+
+TEST_CASE("simpan-muat-simpan menghasilkan byte yang sama") {
+    // **Kriteria terima W4**, aturan yang sama dengan E3. Berkas yang isinya
+    // bergeser tanpa ada yang menyuntingnya menghasilkan diff palsu di kontrol
+    // versi, dan diff palsu membuat yang sungguhan tidak terbaca.
+    WhiteboxMesh box = WhiteboxMesh::MakeTriangulatedCube();
+    REQUIRE(box.MergeCoplanar() == 6);
+    const std::vector<PolygonHandle> sides = box.Polygons().Polygons();
+    REQUIRE(sides.size() == 6);
+    for (std::size_t i = 0; i < sides.size(); ++i) {
+        REQUIRE(box.SetPolygonMaterial(sides[i], static_cast<int>(i % 3)));
+    }
+    REQUIRE(box.Extrude(sides[0], 0.4f).ok);
+
+    const std::string first = SaveToString(box);
+
+    WhiteboxMesh loaded;
+    const WhiteboxIoResult result = LoadFromString(loaded, first);
+    INFO(result.error);
+    REQUIRE(result.ok);
+
+    const std::string second = SaveToString(loaded);
+    CHECK(first == second);
+
+    // Dan yang dimuat memang meshnya, bukan sekadar teks yang sama.
+    CHECK(loaded.Mesh().FaceCount() == box.Mesh().FaceCount());
+    CHECK(loaded.Mesh().VertexCount() == box.Mesh().VertexCount());
+    CHECK(loaded.Polygons().PolygonCount() == box.Polygons().PolygonCount());
+    CHECK(loaded.UsedMaterialCount() == box.UsedMaterialCount());
+    CHECK(loaded.CheckInvariants().ok);
+}
+
+TEST_CASE("yang dimuat bisa disunting lagi persis seperti sebelum disimpan") {
+    // **Kriteria terima W4, dan inilah gunanya menyimpan topologi.** Kalau yang
+    // tersimpan segitiga, blockout berhenti bisa diubah begitu disimpan — persis
+    // kebalikan dari gunanya whitebox.
+    WhiteboxMesh original = WhiteboxMesh::MakeCube();
+    const PolygonHandle top =
+        PolygonFacing(original.Mesh(), original.Polygons(), Vec3(0.0f, 1.0f, 0.0f));
+    REQUIRE(original.SetPolygonMaterial(top, 2));
+
+    WhiteboxMesh loaded;
+    REQUIRE(LoadFromString(loaded, SaveToString(original)).ok);
+
+    // Ekstrusi yang sama dijalankan pada keduanya.
+    const PolygonHandle originalTop =
+        PolygonFacing(original.Mesh(), original.Polygons(), Vec3(0.0f, 1.0f, 0.0f));
+    const PolygonHandle loadedTop =
+        PolygonFacing(loaded.Mesh(), loaded.Polygons(), Vec3(0.0f, 1.0f, 0.0f));
+    REQUIRE(original.Extrude(originalTop, 0.6f).ok);
+    REQUIRE(loaded.Extrude(loadedTop, 0.6f).ok);
+
+    // Hasilnya harus sama sampai ke berkasnya.
+    CHECK(SaveToString(original) == SaveToString(loaded));
+    CHECK(ClosedVolume(loaded.Mesh()) == doctest::Approx(ClosedVolume(original.Mesh())));
+    CHECK(loaded.CheckInvariants().ok);
+
+    // Termasuk materialnya, yang ikut melewati simpan-muat **dan** ekstrusi.
+    CHECK(loaded.PolygonMaterial(loadedTop) == 2);
+}
+
+TEST_CASE("berkas whitebox yang rusak ditolak beserta sebabnya") {
+    // Yang ditolak harus mengatakan apa yang salah. "Gagal memuat" pada berkas
+    // berisi ratusan simpul adalah laporan yang tidak bisa ditindaklanjuti.
+    WhiteboxMesh box;
+
+    SUBCASE("bukan JSON") {
+        const WhiteboxIoResult result = LoadFromString(box, "{ ini bukan json");
+        CHECK_FALSE(result.ok);
+        CHECK(result.error.find("JSON") != std::string::npos);
+    }
+    SUBCASE("versi dari masa depan") {
+        const WhiteboxIoResult result = LoadFromString(box, R"({"schemaVersion": 99})");
+        CHECK_FALSE(result.ok);
+        CHECK(result.error.find("99") != std::string::npos);
+    }
+    SUBCASE("face menunjuk simpul yang tidak ada") {
+        const WhiteboxIoResult result = LoadFromString(box, R"({
+            "schemaVersion": 1,
+            "vertices": [[0,0,0],[1,0,0],[0,1,0]],
+            "faces": [[0,1,9]]
+        })");
+        CHECK_FALSE(result.ok);
+        CHECK(result.error.find("simpul") != std::string::npos);
+    }
+    SUBCASE("rusuk tersembunyi yang simpulnya tidak bertetangga") {
+        const WhiteboxIoResult result = LoadFromString(box, R"({
+            "schemaVersion": 1,
+            "vertices": [[0,0,0],[1,0,0],[0,1,0],[5,5,5]],
+            "faces": [[0,1,2]],
+            "hiddenEdges": [[0,3]]
+        })");
+        CHECK_FALSE(result.ok);
+        CHECK(result.error.find("bertetangga") != std::string::npos);
+    }
+}
+
+TEST_CASE("berkas whitebox bolak-balik lewat disk") {
+    const std::filesystem::path directory =
+        std::filesystem::temp_directory_path() / "sim-whitebox-test";
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    const std::filesystem::path path = directory / "blok.simwhitebox";
+
+    WhiteboxMesh box = WhiteboxMesh::MakeCube();
+    const std::vector<PolygonHandle> sides = box.Polygons().Polygons();
+    REQUIRE(box.SetPolygonMaterial(sides.front(), 7));
+    REQUIRE(SaveToFile(box, path).ok);
+
+    WhiteboxMesh loaded;
+    const WhiteboxIoResult result = LoadFromFile(loaded, path);
+    INFO(result.error);
+    REQUIRE(result.ok);
+    CHECK(loaded.Mesh().FaceCount() == 6);
+    CHECK(loaded.UsedMaterialCount() == 2);  // slot 7 dan sisanya tanpa material
+
+    std::filesystem::remove_all(directory, ec);
 }

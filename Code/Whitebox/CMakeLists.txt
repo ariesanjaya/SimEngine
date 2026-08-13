@@ -3,6 +3,7 @@ sim_add_library(Whitebox
         src/HalfEdgeMesh.cpp
         src/Operations.cpp
         src/Polygon.cpp
+        src/WhiteboxIo.cpp
         src/WhiteboxMesh.cpp
     PUBLIC_DEPS
         # `Vec3` dan tidak lebih. **Yang tidak ada di daftar ini yang penting:**
@@ -13,4 +14,8 @@ sim_add_library(Whitebox
         # `BuildMeshData` menghasilkan `assets::MeshData` — tipe pertukaran mesh
         # milik mesin ini. Header publik Sim::Assets tidak membocorkan FBX, USD,
         # maupun stb, jadi yang ikut terseret hanya Sim::Core dan Sim::Material.
-        Sim::Assets)
+        Sim::Assets
+    # PRIVATE: `.simwhitebox` adalah JSON, tetapi header publik modul ini tidak
+    # menyebut nlohmann sama sekali — yang memakainya tidak ikut menyeretnya.
+    PRIVATE_DEPS
+        nlohmann_json::nlohmann_json)
