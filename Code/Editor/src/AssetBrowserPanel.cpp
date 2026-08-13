@@ -11,6 +11,7 @@
 #include "Sim/Editor/PanelIds.h"
 #include "Sim/Editor/PanelRegistry.h"
 #include "Sim/Editor/Widgets.h"
+#include "Sim/Whitebox/WhiteboxIo.h"
 
 #include <imgui.h>
 #include <imgui_stdlib.h>
@@ -160,7 +161,7 @@ public:
 
 private:
     /// Apa yang sedang dinamai. `None` berarti tidak ada prompt yang terbuka.
-    enum class PromptKind { None, NewFolder, NewMaterial, RenameFolder };
+    enum class PromptKind { None, NewFolder, NewMaterial, NewWhitebox, RenameFolder };
 
     /// Sakelar Project / Built-in. Digambar lebih dulu supaya ia tidak ikut
     /// menyusut bersama bilah alat di panel sempit: mengetahui pustaka mana yang
@@ -322,6 +323,9 @@ private:
         if (ImGui::MenuItem("New material")) {
             BeginPrompt(PromptKind::NewMaterial, folder);
         }
+        if (ImGui::MenuItem("New whitebox")) {
+            BeginPrompt(PromptKind::NewWhitebox, folder);
+        }
         if (ImGui::MenuItem("Import assets...")) {
             ImportAssets(context, db, folder);
         }
@@ -359,8 +363,9 @@ private:
     void BeginPrompt(PromptKind kind, const std::string& folder) {
         promptKind_ = kind;
         promptFolder_ = folder;
-        promptName_ = kind == PromptKind::NewFolder      ? "New Folder"
+        promptName_ = kind == PromptKind::NewFolder     ? "New Folder"
                       : kind == PromptKind::NewMaterial  ? "NewMaterial"
+                      : kind == PromptKind::NewWhitebox  ? "NewWhitebox"
                                                          : LeafName(folder);
         promptError_.clear();
         promptFocus_ = true;
@@ -525,8 +530,29 @@ private:
     /// gagasan "folder yang sedang dibuka"; panel ini punya, dan menaruh berkas
     /// di tempat lain daripada yang ditunjuk orang adalah cara tercepat membuat
     /// orang kehilangan berkasnya sendiri.
-    bool CreateMaterial(EditorContext& context, assets::AssetDatabase& db,
-                        const std::string& folder, const std::string& name) {
+    /// Akhiran berkas yang dijanjikan sebuah prompt, atau nullptr untuk yang
+    /// tidak membuat berkas.
+    static const char* PromptExtension(PromptKind kind) {
+        switch (kind) {
+            case PromptKind::NewMaterial: return ".simmat";
+            case PromptKind::NewWhitebox: return ".simwhitebox";
+            case PromptKind::NewFolder:
+            case PromptKind::RenameFolder:
+            case PromptKind::None: break;
+        }
+        return nullptr;
+    }
+
+    /// Jalur tujuan sebuah aset baru, atau false beserta sebabnya di
+    /// `promptError_`.
+    ///
+    /// Dipakai bersama oleh setiap jenis aset yang bisa dibuat dari sini.
+    /// Aturannya sama untuk semuanya, dan menyalinnya per jenis berarti jenis
+    /// keenam yang lupa memeriksa berkas yang sudah ada akan menimpanya
+    /// diam-diam.
+    bool PrepareAssetPath(assets::AssetDatabase& db, const std::string& folder,
+                          const std::string& name, const std::string& extension,
+                          std::filesystem::path& outPath, std::string& outFileName) {
         if (!ValidateName(name)) {
             return false;
         }
@@ -537,17 +563,62 @@ private:
 
         // Ekstensinya ditambahkan hanya kalau belum diketik: yang mengetik
         // "Batu.simmat" tidak sedang meminta "Batu.simmat.simmat".
-        const std::string extension = ".simmat";
-        std::string fileName = name;
-        if (fileName.size() < extension.size() ||
-            fileName.compare(fileName.size() - extension.size(), extension.size(), extension) !=
-                0) {
-            fileName += extension;
+        outFileName = name;
+        if (outFileName.size() < extension.size() ||
+            outFileName.compare(outFileName.size() - extension.size(), extension.size(),
+                                extension) != 0) {
+            outFileName += extension;
         }
 
-        const std::filesystem::path path = base / fileName;
-        if (std::filesystem::exists(path, error)) {
-            promptError_ = "\"" + fileName + "\" already exists here.";
+        outPath = base / outFileName;
+        if (std::filesystem::exists(outPath, error)) {
+            promptError_ = "\"" + outFileName + "\" already exists here.";
+            return false;
+        }
+        return true;
+    }
+
+    /// Memindai ulang, memilih yang baru, dan memberitahu. Sama untuk setiap
+    /// jenis: aset yang dibuat tetapi tidak terpilih membuat orang mencarinya di
+    /// daftar yang baru saja bertambah panjang.
+    void FinishCreatedAsset(EditorContext& context, assets::AssetDatabase& db,
+                            const std::string& folder, const std::string& fileName) {
+        db.ScanNow();
+        if (const assets::AssetRecord* record = db.FindByRelativePath(
+                folder.empty() ? fileName : folder + "/" + fileName)) {
+            selected_ = record->guid;
+        }
+        context.notifications->Success(fileName + " created");
+    }
+
+    /// Whitebox baru: kubus satuan.
+    ///
+    /// **Bukan berkas kosong.** Blockout dimulai dengan mendorong sisi, dan
+    /// tidak ada sisi yang bisa didorong pada mesh tanpa isi — yang membuatnya
+    /// akan mengira asetnya rusak.
+    bool CreateWhitebox(EditorContext& context, assets::AssetDatabase& db,
+                        const std::string& folder, const std::string& name) {
+        std::filesystem::path path;
+        std::string fileName;
+        if (!PrepareAssetPath(db, folder, name, ".simwhitebox", path, fileName)) {
+            return false;
+        }
+
+        const whitebox::WhiteboxMesh box = whitebox::WhiteboxMesh::MakeCube();
+        const whitebox::WhiteboxIoResult result = whitebox::SaveToFile(box, path);
+        if (!result.ok) {
+            promptError_ = result.error;
+            return false;
+        }
+        FinishCreatedAsset(context, db, folder, fileName);
+        return true;
+    }
+
+    bool CreateMaterial(EditorContext& context, assets::AssetDatabase& db,
+                        const std::string& folder, const std::string& name) {
+        std::filesystem::path path;
+        std::string fileName;
+        if (!PrepareAssetPath(db, folder, name, ".simmat", path, fileName)) {
             return false;
         }
 
@@ -565,12 +636,7 @@ private:
             promptError_ = "Cannot write " + fileName;
             return false;
         }
-        db.ScanNow();
-        if (const assets::AssetRecord* record = db.FindByRelativePath(
-                folder.empty() ? fileName : folder + "/" + fileName)) {
-            selected_ = record->guid;
-        }
-        context.notifications->Success(fileName + " created");
+        FinishCreatedAsset(context, db, folder, fileName);
         return true;
     }
 
@@ -582,10 +648,11 @@ private:
             return;
         }
         const bool renaming = promptKind_ == PromptKind::RenameFolder;
-        const bool materialMode = promptKind_ == PromptKind::NewMaterial;
-        const char* title = renaming      ? "Rename folder"
-                            : materialMode ? "New material"
-                                           : "New folder";
+        const char* const extension = PromptExtension(promptKind_);
+        const char* title = renaming                                  ? "Rename folder"
+                            : promptKind_ == PromptKind::NewMaterial  ? "New material"
+                            : promptKind_ == PromptKind::NewWhitebox  ? "New whitebox"
+                                                                      : "New folder";
         if (!ImGui::IsPopupOpen(title)) {
             ImGui::OpenPopup(title);
         }
@@ -612,9 +679,12 @@ private:
             ImGui::InputText("##createname", &promptName_,
                              ImGuiInputTextFlags_EnterReturnsTrue |
                                  ImGuiInputTextFlags_AutoSelectAll);
-        if (materialMode) {
+        // Ekstensinya diperlihatkan, bukan disembunyikan: nama yang diketik
+        // menjadi nama berkas, dan yang tidak tahu akhirannya akan mengetiknya
+        // sendiri lalu mendapat dua.
+        if (extension != nullptr) {
             ImGui::SameLine();
-            ImGui::TextDisabled(".simmat");
+            ImGui::TextDisabled("%s", extension);
         }
         if (!promptError_.empty()) {
             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.45f, 0.40f, 1.0f));
@@ -641,6 +711,9 @@ private:
                     break;
                 case PromptKind::NewMaterial:
                     created = CreateMaterial(context, db, promptFolder_, name);
+                    break;
+                case PromptKind::NewWhitebox:
+                    created = CreateWhitebox(context, db, promptFolder_, name);
                     break;
                 case PromptKind::RenameFolder:
                     created = RenameFolder(context, db, promptFolder_, name);
@@ -799,6 +872,9 @@ private:
         }
         if (ImGui::MenuItem("New material")) {
             BeginPrompt(PromptKind::NewMaterial, currentFolder_);
+        }
+        if (ImGui::MenuItem("New whitebox")) {
+            BeginPrompt(PromptKind::NewWhitebox, currentFolder_);
         }
         if (ImGui::MenuItem("Import assets...")) {
             ImportAssets(context, db, currentFolder_);

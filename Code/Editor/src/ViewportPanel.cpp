@@ -507,10 +507,11 @@ private:
         if (record == nullptr) {
             return;
         }
-        // Hanya mesh yang bisa dijatuhkan ke scene. Menjatuhkan tekstur di sini
-        // tidak punya arti yang jelas — tekstur dipasang ke field material,
-        // bukan berdiri sendiri sebagai objek.
-        if (record->type != assets::AssetType::Mesh) {
+        // Mesh dan whitebox yang bisa dijatuhkan ke scene. Menjatuhkan tekstur
+        // di sini tidak punya arti yang jelas — tekstur dipasang ke field
+        // material, bukan berdiri sendiri sebagai objek.
+        const bool isWhitebox = record->type == assets::AssetType::Whitebox;
+        if (record->type != assets::AssetType::Mesh && !isWhitebox) {
             context.notifications->Warning(std::string("Cannot place a ") +
                                            assets::ToString(record->type) + " in the scene");
             return;
@@ -525,14 +526,20 @@ private:
         const std::string name = record->name;
         context.history->Execute(std::make_unique<LambdaCommand>(
             "Place " + name,
-            [world = context.world, selection = context.selection, entityGuid, guid, position,
-             name]() {
+            [world = context.world, selection = context.selection, entityGuid, guid, position, name,
+             isWhitebox]() {
                 const scene::Entity entity = world->CreateWithGuid(entityGuid, name);
                 world->TryGet<scene::TransformComponent>(entity)->position = position;
                 world->MarkTransformDirty(entity);
-                scene::MeshRendererComponent renderer;
-                renderer.mesh.guid = guid;
-                world->Add<scene::MeshRendererComponent>(entity, renderer);
+                if (isWhitebox) {
+                    scene::WhiteboxComponent whitebox;
+                    whitebox.whitebox.guid = guid;
+                    world->Add<scene::WhiteboxComponent>(entity, whitebox);
+                } else {
+                    scene::MeshRendererComponent renderer;
+                    renderer.mesh.guid = guid;
+                    world->Add<scene::MeshRendererComponent>(entity, renderer);
+                }
                 selection->SelectOnly(ToSelectionId(entity));
             },
             [world = context.world, selection = context.selection, entityGuid]() {

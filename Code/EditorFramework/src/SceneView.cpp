@@ -116,7 +116,13 @@ void SceneView::Build(scene::World& world, const Selection& selection,
         // itu justru gunanya: latar yang terlihat tanpa terpilih tak sengaja.
         const bool pickable = visibility == nullptr || !visibility->locked;
 
-        if (world.Has<scene::MeshRendererComponent>(entity)) {
+        const auto* meshRenderer = world.TryGet<scene::MeshRendererComponent>(entity);
+        const auto* whiteboxComponent = world.TryGet<scene::WhiteboxComponent>(entity);
+        // **Salah satu saja sudah cukup.** Whitebox memberi bentuk dan
+        // `MeshRenderer` memberi material; menuntut keduanya berarti blok yang
+        // baru dijatuhkan tidak tergambar sama sekali sampai seseorang menebak
+        // bahwa ia perlu komponen kedua yang tidak menunjuk mesh apa pun.
+        if (meshRenderer != nullptr || whiteboxComponent != nullptr) {
             render::MeshInstance instance;
             instance.transform = matrix;
             // Kubus satuan adalah nilai mundur, bukan satu-satunya pilihan lagi:
@@ -127,12 +133,14 @@ void SceneView::Build(scene::World& world, const Selection& selection,
             instance.boundsMax = Vec3(0.5f);
             instance.color = kMeshColor;
             instance.selected = selected;
-            if (const auto* meshRenderer = world.TryGet<scene::MeshRendererComponent>(entity)) {
+            {
                 // Warna mundur untuk ruas yang tidak punya material di mana pun:
                 // material bawaan editor.
                 instance.color = BuiltinColor(builtinAssets);
-                instance.castShadows = meshRenderer->castShadows;
-                instance.receiveShadows = meshRenderer->receiveShadows;
+                if (meshRenderer != nullptr) {
+                    instance.castShadows = meshRenderer->castShadows;
+                    instance.receiveShadows = meshRenderer->receiveShadows;
+                }
 
                 // GUID → jalur → geometri. **Renderer yang menyimpan cache-nya**,
                 // bukan di sini: yang bisa memutuskan sebuah mesh sudah ada di
@@ -143,7 +151,6 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                 // memakai whitebox untuk bentuknya dan `MeshRenderer` untuk
                 // materialnya: bentuknya dirancang di sini, materialnya dipilih
                 // seperti mesh lain.
-                const auto* whiteboxComponent = world.TryGet<scene::WhiteboxComponent>(entity);
                 bool fromWhitebox = false;
                 if (whiteboxes != nullptr && renderer != nullptr && assets != nullptr &&
                     whiteboxComponent != nullptr && whiteboxComponent->whitebox.IsValid()) {
@@ -158,14 +165,16 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                             instance.mesh = mesh.handle;
                             instance.boundsMin = mesh.boundsMin;
                             instance.boundsMax = mesh.boundsMax;
-                            AppendPartColors(*meshRenderer, mesh.partCount, assets, instance);
+                            if (meshRenderer != nullptr) {
+                                AppendPartColors(*meshRenderer, mesh.partCount, assets, instance);
+                            }
                             fromWhitebox = true;
                         }
                     }
                 }
 
                 if (!fromWhitebox && assets != nullptr && renderer != nullptr &&
-                    meshRenderer->mesh.IsValid()) {
+                    meshRenderer != nullptr && meshRenderer->mesh.IsValid()) {
                     if (const assets::AssetRecord* record = assets->Find(meshRenderer->mesh.guid)) {
                         const render::MeshAsset mesh =
                             renderer->AcquireMesh(assets->AbsolutePath(*record).string());

@@ -328,6 +328,18 @@ Pilih sisi, dorong dengan gizmo, tetapkan material.
   menjawab x = 5/3, titik beratnya x = 2. Mengganti pembobotannya dengan
   rata-rata biasa membuat uji ini gagal.
 
+**Jalan masuknya.** Asset Browser membuat `.simwhitebox` baru lewat "New
+whitebox" — berisi kubus satuan, bukan berkas kosong: blockout dimulai dengan
+mendorong sisi, dan tidak ada sisi yang bisa didorong pada mesh tanpa isi.
+Menjatuhkannya ke viewport membuat entity yang membawanya.
+
+Entity berwhitebox tergambar tanpa `MeshRenderer`. Sebelumnya keduanya wajib —
+whitebox untuk bentuk, `MeshRenderer` untuk material — sehingga blok yang baru
+dijatuhkan tidak terlihat sama sekali sampai seseorang menebak bahwa ia butuh
+komponen kedua yang tidak menunjuk mesh apa pun. Yang tidak terlihat juga tidak
+bisa diklik, jadi tidak ada jalan memperbaikinya dari viewport. Diuji lewat
+`SceneView`: satu entity berwhitebox menghasilkan satu pickable.
+
 **Bentuk alatnya.** Tombol "Edit sides" (B) muncul di bilah viewport hanya
 ketika entity terpilih membawa whitebox — tombol yang selalu ada tetapi hampir
 selalu tidak melakukan apa-apa mengajari orang bahwa menekannya percuma. Selama

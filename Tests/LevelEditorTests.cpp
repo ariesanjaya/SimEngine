@@ -1325,6 +1325,30 @@ TEST_CASE("Play menjalankan fisika, Stop mengembalikan level seperti semula") {
     app.Shutdown();
 }
 
+TEST_CASE("entity berwhitebox tanpa MeshRenderer tetap tergambar dan bisa diklik") {
+    // Menjatuhkan whitebox ke viewport membuat entity dengan satu komponen.
+    // Menuntut komponen kedua yang tidak menunjuk mesh apa pun berarti blok
+    // yang baru dijatuhkan tidak terlihat sama sekali — dan yang tidak terlihat
+    // tidak bisa diklik, jadi tidak ada jalan untuk memperbaikinya dari
+    // viewport.
+    scene::World world;
+    Selection selection;
+
+    const scene::Entity entity = world.Create("Blok");
+    scene::WhiteboxComponent component;
+    component.whitebox.guid = Uuid::Generate();
+    world.Add<scene::WhiteboxComponent>(entity, component);
+
+    SceneView view;
+    view.Build(world, selection);
+    REQUIRE(view.Pickables().size() == 1);
+
+    // Tanpa renderer, batasnya jatuh ke kubus satuan — cukup untuk membuatnya
+    // terpilih, dan itu yang sedang diuji.
+    const Ray ray{Vec3(0.0f, 0.0f, 10.0f), Vec3(0.0f, 0.0f, -1.0f)};
+    CHECK(view.Raycast(ray) == entity);
+}
+
 TEST_CASE("satu seretan whitebox menghasilkan tepat satu entri undo") {
     // **Kriteria terima W5**, aturan yang sama dengan seretan gizmo transform:
     // seretan nyata menghasilkan satu perintah per frame, dan semuanya harus
