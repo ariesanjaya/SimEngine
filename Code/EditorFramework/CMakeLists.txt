@@ -18,6 +18,7 @@ sim_add_library(EditorFramework
         src/PanelRegistry.cpp
         src/ProjectLibrary.cpp
         src/Selection.cpp
+        src/TerrainStore.cpp
         src/Widgets.cpp
         src/WhiteboxCommands.cpp
         src/WhiteboxStore.cpp
@@ -36,6 +37,7 @@ sim_add_library(EditorFramework
         Sim::Render
         Sim::Physics
         Sim::Scene
+        Sim::Terrain
         Sim::Whitebox
         # Hanya inti ImGui: target ini tidak membawa header Vulkan maupun SDL,
         # sesuai aturan modul di docs/ARCHITECTURE.md.

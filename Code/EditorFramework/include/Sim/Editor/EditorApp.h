@@ -259,6 +259,7 @@ private:
     physics::PhysicsScene physics_;
     /// Whitebox yang sedang terbuka, dibagi panel dan viewport.
     WhiteboxStore whiteboxes_;
+    TerrainStore terrains_;
     bool playing_ = false;
     /// Play sedang tertahan sebuah breakpoint graph. Scene tetap tergambar,
     /// yang berhenti hanyalah OnUpdate.

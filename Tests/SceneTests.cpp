@@ -465,3 +465,37 @@ TEST_CASE("sourceRadius bolak-balik lewat berkas") {
     REQUIRE(loaded != nullptr);
     CHECK(loaded->sourceRadius == doctest::Approx(0.35f));
 }
+
+// ============================================================================
+// L0 — terrain sebagai benda di dunia
+// ============================================================================
+
+TEST_CASE("L0: TerrainComponent bertahan lewat simpan-muat level") {
+    // Rujukannya, bukan petanya. Sebuah terrain 4×4 km berukuran ratusan
+    // megabyte; menyimpannya di dalam komponen berarti setiap cuplikan undo
+    // dunia menyalin seluruh peta.
+    World world;
+    const Entity entity = world.Create("Lanskap");
+    auto& terrain = world.Add<TerrainComponent>(entity);
+    terrain.terrain.guid = Uuid::Generate();
+    terrain.showTiles = true;
+
+    const Uuid entityGuid = world.GuidOf(entity);
+    const Uuid assetGuid = terrain.terrain.guid;
+    const std::string text = SaveLevelToString(world);
+
+    World reloaded;
+    REQUIRE(LoadLevelFromString(reloaded, text).ok);
+
+    const Entity loaded = reloaded.FindByGuid(entityGuid);
+    REQUIRE(IsValid(loaded));
+    const auto* component = reloaded.TryGet<TerrainComponent>(loaded);
+    REQUIRE(component != nullptr);
+    CHECK(component->terrain.guid == assetGuid);
+    CHECK(component->showTiles);
+
+    // Dan menyimpannya lagi menghasilkan teks yang sama: medan yang hilang
+    // dalam perjalanan tidak akan terlihat oleh pemeriksaan di atas kalau ia
+    // kebetulan bernilai bawaan.
+    CHECK(SaveLevelToString(reloaded) == text);
+}

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Sim/Editor/TerrainStore.h"
 #include "Sim/Editor/WhiteboxStore.h"
 #include "Sim/Render/IMaterialPreview.h"
 #include "Sim/Render/IViewportRenderer.h"
@@ -69,6 +70,11 @@ struct EditorContext {
     /// keduanya harus melihat objek yang sama, kalau tidak yang tergambar adalah
     /// bentuk sebelum suntingan terakhir.
     WhiteboxStore* whiteboxes = nullptr;
+
+    /// Terrain yang sedang terbuka, dengan alasan yang sama persis — dan satu
+    /// alasan tambahan: sebuah terrain berukuran ratusan megabyte, jadi salinan
+    /// kedua bukan sekadar tidak sepakat, ia juga tidak muat.
+    TerrainStore* terrains = nullptr;
 
     /// Runtime Lua. Null bila editor dibangun tanpa Lua — panel yang
     /// memakainya wajib memeriksa.

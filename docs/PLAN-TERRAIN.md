@@ -48,7 +48,7 @@ kapan harus membangun ulang.
 
 ## Milestone
 
-### L0 — Terrain di dalam level · ⬜
+### L0 — Terrain di dalam level · ✅
 
 Terrain berhenti menjadi dokumen yang berdiri sendiri dan menjadi sesuatu yang
 dimiliki sebuah entity.
@@ -64,11 +64,35 @@ dimiliki sebuah entity.
 
 **Kriteria terima**
 - `TerrainComponent` bolak-balik lewat simpan/muat level tanpa kehilangan
-  rujukannya.
+  rujukannya. ✅ Diperiksa dua kali: medannya dibaca ulang, **dan** teks simpan
+  keduanya dibandingkan — medan yang hilang di perjalanan lolos dari pemeriksaan
+  pertama kalau ia kebetulan bernilai bawaan.
 - Dua pembaca yang meminta guid yang sama mendapat **objek yang sama**, bukan dua
-  salinan — diuji dengan menyunting lewat yang satu dan membaca lewat yang lain.
+  salinan. ✅ Diuji dengan menyunting lewat yang satu dan membaca lewat yang lain.
 - Goresan brush menaikkan versi store; membuka ulang tidak mengulang pembacaan
-  berkas.
+  berkas. ✅ Berkas yang gagal dibaca ikut dicatat, sehingga ia tidak diurai
+  ulang enam puluh kali per detik sambil membanjiri log dengan pesan yang sama.
+
+**Menyimpan tidak menaikkan versi.** Yang berubah adalah berkasnya, bukan
+bentuknya — dan menaikkannya berarti menyuruh viewport mengunggah ulang terrain
+empat kilometer setiap kali seseorang menekan Save.
+
+**Penunjuk dokumen disegarkan sekali per frame**, di awal `OnDraw` panel. Store
+bisa dikosongkan di antara dua frame — project berganti, terrain ditutup — dan
+penunjuk yang disimpan lintas frame akan menunjuk memori yang sudah dibebaskan
+tanpa satu pun tanda. Satu pemeriksaan di satu tempat menggantikan pemeriksaan di
+setiap jalur di bawahnya.
+
+**Dokumen yang terbuka ikut dibuang saat project ditutup**, dan itu berlaku juga
+untuk whitebox yang selama ini tidak dibuang. Bukan kerapian: sebuah terrain
+berukuran ratusan megabyte, dan membiarkannya berarti membuka project kedua
+sambil tetap membayar yang pertama sampai editor ditutup.
+
+**Terrain berdiri di titik asal saat dijatuhkan**, bukan di bawah kursor seperti
+mesh. Titik asal terrain adalah **sudut** petanya, bukan pusatnya, jadi
+menjatuhkannya di tempat kursor kebetulan berada menaruh peta empat kilometer di
+sembarang tempat — dan hampir setiap kali yang berikutnya dilakukan orang adalah
+menolkan transformnya kembali.
 
 ### L1 — Heightmap → mesh · ⬜
 

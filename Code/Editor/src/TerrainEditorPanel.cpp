@@ -123,9 +123,22 @@ public:
                 PanelCategory::Authoring) {}
 
     void OnDraw(EditorContext& context) override {
-        if (context.assets == nullptr) {
+        if (context.assets == nullptr || context.terrains == nullptr) {
             ImGui::TextDisabled("No asset database.");
             return;
+        }
+
+        // Penunjuk dokumen disegarkan sekali per frame, di sini. Store bisa
+        // dikosongkan di antara dua frame — project berganti, terrain ditutup —
+        // dan penunjuk yang disimpan lintas frame akan menunjuk memori yang
+        // sudah dibebaskan tanpa satu pun tanda.
+        store_ = context.terrains;
+        terrain_ = openGuid_.IsValid() ? store_->Find(openGuid_) : nullptr;
+        document_ = openGuid_.IsValid() ? store_->Document(openGuid_) : nullptr;
+        if (terrain_ == nullptr || document_ == nullptr) {
+            openGuid_ = Uuid{};
+            terrain_ = nullptr;
+            document_ = nullptr;
         }
 
         DrawToolbar(context);
@@ -173,7 +186,7 @@ private:
     // --- toolbar & daftar ----------------------------------------------------
 
     void DrawToolbar(EditorContext& context) {
-        ImGui::BeginDisabled(!dirty_ || !openGuid_.IsValid());
+        ImGui::BeginDisabled(!store_->Dirty(openGuid_) || !openGuid_.IsValid());
         if (ImGui::Button((std::string(icons::kSave) + "  Save").c_str())) {
             Save(context);
         }
@@ -184,25 +197,25 @@ private:
         }
 
         ImGui::SameLine();
-        ImGui::BeginDisabled(terrain_.UndoDepth() == 0);
+        ImGui::BeginDisabled(terrain_->UndoDepth() == 0);
         if (ImGui::Button(icons::kUndo)) {
-            terrain_.Undo();
-            dirty_ = true;
+            terrain_->Undo();
+            Touch();
         }
         ImGui::EndDisabled();
         widgets::Tooltip("Undo stroke (Ctrl+Z)");
 
         ImGui::SameLine();
-        ImGui::BeginDisabled(terrain_.RedoDepth() == 0);
+        ImGui::BeginDisabled(terrain_->RedoDepth() == 0);
         if (ImGui::Button(icons::kRedo)) {
-            terrain_.Redo();
-            dirty_ = true;
+            terrain_->Redo();
+            Touch();
         }
         ImGui::EndDisabled();
         widgets::Tooltip("Redo stroke (Ctrl+Shift+Z)");
 
         ImGui::SameLine();
-        ImGui::TextColored(kHintColor, "%s%s", openName_.c_str(), dirty_ ? " *" : "");
+        ImGui::TextColored(kHintColor, "%s%s", openName_.c_str(), store_->Dirty(openGuid_) ? " *" : "");
 
         // Pintasan hanya berlaku saat panel ini yang fokus. Ctrl+Z global milik
         // riwayat scene, dan dua pemilik untuk satu pintasan berarti satu di
@@ -211,11 +224,11 @@ private:
             ImGui::GetIO().KeyCtrl) {
             if (ImGui::IsKeyPressed(ImGuiKey_Z, false)) {
                 if (ImGui::GetIO().KeyShift) {
-                    terrain_.Redo();
+                    terrain_->Redo();
                 } else {
-                    terrain_.Undo();
+                    terrain_->Undo();
                 }
-                dirty_ = true;
+                Touch();
             }
         }
     }
@@ -323,8 +336,8 @@ private:
     }
 
     void FitView() {
-        viewX_ = terrain_.WorldWidth() * 0.5f;
-        viewZ_ = terrain_.WorldDepth() * 0.5f;
+        viewX_ = terrain_->WorldWidth() * 0.5f;
+        viewZ_ = terrain_->WorldDepth() * 0.5f;
         metersPerPixel_ = 0.0f;  // dihitung saat ukuran peta diketahui
     }
 
@@ -365,13 +378,13 @@ private:
     }
 
     int SampleIndexX(float worldX) const {
-        return std::clamp(static_cast<int>(std::lround(worldX / terrain_.Desc().sampleSpacing)), 0,
-                          terrain_.SamplesX() - 1);
+        return std::clamp(static_cast<int>(std::lround(worldX / terrain_->Desc().sampleSpacing)), 0,
+                          terrain_->SamplesX() - 1);
     }
 
     int SampleIndexZ(float worldZ) const {
-        return std::clamp(static_cast<int>(std::lround(worldZ / terrain_.Desc().sampleSpacing)), 0,
-                          terrain_.SamplesY() - 1);
+        return std::clamp(static_cast<int>(std::lround(worldZ / terrain_->Desc().sampleSpacing)), 0,
+                          terrain_->SamplesY() - 1);
     }
 
     /// Campuran warna layer pada satu titik, ditimbang bobotnya.
@@ -385,15 +398,15 @@ private:
         const int sy = SampleIndexZ(worldZ);
         Vec3 albedo(0.0f);
         int sum = 0;
-        for (int layer = 1; layer < terrain_.LayerCount(); ++layer) {
-            const int weight = terrain_.WeightAt(layer, sx, sy);
+        for (int layer = 1; layer < terrain_->LayerCount(); ++layer) {
+            const int weight = terrain_->WeightAt(layer, sx, sy);
             if (weight == 0) {
                 continue;
             }
-            albedo += terrain_.Layer(layer).color * static_cast<float>(weight);
+            albedo += terrain_->Layer(layer).color * static_cast<float>(weight);
             sum += weight;
         }
-        albedo += terrain_.Layer(0).color *
+        albedo += terrain_->Layer(0).color *
                   static_cast<float>(std::max(0, static_cast<int>(kWeightMax) - sum));
         return Tint(albedo / static_cast<float>(kWeightMax), shade);
     }
@@ -406,10 +419,10 @@ private:
     ImU32 ShadeWeight(float worldX, float worldZ, float shade) const {
         const int sx = SampleIndexX(worldX);
         const int sy = SampleIndexZ(worldZ);
-        const float weight = static_cast<float>(terrain_.WeightAt(paintLayer_, sx, sy)) /
+        const float weight = static_cast<float>(terrain_->WeightAt(paintLayer_, sx, sy)) /
                              static_cast<float>(kWeightMax);
         const Vec3 albedo =
-            Vec3(0.07f, 0.07f, 0.09f) + (terrain_.Layer(paintLayer_).color -
+            Vec3(0.07f, 0.07f, 0.09f) + (terrain_->Layer(paintLayer_).color -
                                          Vec3(0.07f, 0.07f, 0.09f)) *
                                             weight;
         return Tint(albedo, shade);
@@ -467,9 +480,9 @@ private:
                 const std::size_t at =
                     static_cast<std::size_t>(j) * static_cast<std::size_t>(cols + 1) +
                     static_cast<std::size_t>(i);
-                heights_[at] = terrain_.HeightAtWorld(wx, wz);
-                inside_[at] = (wx >= 0.0f && wz >= 0.0f && wx <= terrain_.WorldWidth() &&
-                               wz <= terrain_.WorldDepth())
+                heights_[at] = terrain_->HeightAtWorld(wx, wz);
+                inside_[at] = (wx >= 0.0f && wz >= 0.0f && wx <= terrain_->WorldWidth() &&
+                               wz <= terrain_->WorldDepth())
                                   ? 1
                                   : 0;
             }
@@ -488,13 +501,13 @@ private:
             visibleHigh_ = std::max(visibleHigh_, heights_[i]);
         }
         if (visibleLow_ > visibleHigh_) {
-            visibleLow_ = terrain_.Desc().minHeight;
-            visibleHigh_ = terrain_.Desc().maxHeight;
+            visibleLow_ = terrain_->Desc().minHeight;
+            visibleHigh_ = terrain_->Desc().maxHeight;
         }
         // Rentang minimum supaya terrain yang benar-benar rata tidak diperbesar
         // menjadi derau pembulatan sampel 16-bit.
         const float quantum =
-            (terrain_.Desc().maxHeight - terrain_.Desc().minHeight) / 65535.0f;
+            (terrain_->Desc().maxHeight - terrain_->Desc().minHeight) / 65535.0f;
         const float range = std::max(visibleHigh_ - visibleLow_, quantum * 8.0f);
 
         // Lereng dinyatakan dalam piksel layar, bukan meter: tinggi yang terlihat
@@ -539,7 +552,7 @@ private:
                                          (2.0f * pixelsPerCellX);
                     const float slopeZ = (heightAt(i, j + 1) - heightAt(i, j - 1)) * scale /
                                          (2.0f * pixelsPerCellZ);
-                    if (view_ == MapView::Relief || terrain_.LayerCount() < 2) {
+                    if (view_ == MapView::Relief || terrain_->LayerCount() < 2) {
                         color = Shade((heights_[at] - visibleLow_) / range, slopeX, slopeZ);
                     } else {
                         float wx = 0.0f;
@@ -576,8 +589,8 @@ private:
         mapOrigin_ = ImGui::GetCursorScreenPos();
         mapSize_ = ImVec2(ImGui::GetContentRegionAvail().x, height);
         if (metersPerPixel_ <= 0.0f) {
-            metersPerPixel_ = std::max(terrain_.WorldWidth() / std::max(mapSize_.x, 1.0f),
-                                       terrain_.WorldDepth() / std::max(mapSize_.y, 1.0f));
+            metersPerPixel_ = std::max(terrain_->WorldWidth() / std::max(mapSize_.x, 1.0f),
+                                       terrain_->WorldDepth() / std::max(mapSize_.y, 1.0f));
         }
 
         ImGui::InvisibleButton("##map", mapSize_,
@@ -609,10 +622,10 @@ private:
     /// zoom supaya ongkosnya tetap terbatas, dan sel-sel sebaris digabung menjadi
     /// satu persegi supaya jumlah perintah gambarnya tidak ikut melebar.
     void DrawHoles(ImDrawList* draw) {
-        if (terrain_.HoleCount() == 0) {
+        if (terrain_->HoleCount() == 0) {
             return;
         }
-        const float spacing = terrain_.Desc().sampleSpacing;
+        const float spacing = terrain_->Desc().sampleSpacing;
         float minX = 0.0f;
         float minZ = 0.0f;
         float maxX = 0.0f;
@@ -622,9 +635,9 @@ private:
 
         const int x0 = std::max(0, static_cast<int>(std::floor(minX / spacing)));
         const int y0 = std::max(0, static_cast<int>(std::floor(minZ / spacing)));
-        const int x1 = std::min(terrain_.SamplesX() - 1,
+        const int x1 = std::min(terrain_->SamplesX() - 1,
                                 static_cast<int>(std::ceil(maxX / spacing)) + 1);
-        const int y1 = std::min(terrain_.SamplesY() - 1,
+        const int y1 = std::min(terrain_->SamplesY() - 1,
                                 static_cast<int>(std::ceil(maxZ / spacing)) + 1);
         if (x1 <= x0 || y1 <= y0) {
             return;
@@ -638,7 +651,7 @@ private:
         for (int y = y0; y < y1; y += step) {
             int run = -1;
             for (int x = x0; x <= x1; x += step) {
-                const bool hole = x < x1 && terrain_.HoleAt(x, y);
+                const bool hole = x < x1 && terrain_->HoleAt(x, y);
                 if (hole && run < 0) {
                     run = x;
                 }
@@ -663,18 +676,18 @@ private:
         // dan apa yang diekspor per berkas — bukan karena ia terlihat pada
         // terrainnya sendiri. Justru sebaliknya: kalau ia terlihat di sana, ada
         // yang salah.
-        const TerrainDesc& desc = terrain_.Desc();
+        const TerrainDesc& desc = terrain_->Desc();
         const float tileMeters = static_cast<float>(desc.tileSamples) * desc.sampleSpacing;
         const ImU32 color = ImGui::GetColorU32(ImVec4(1.0f, 1.0f, 1.0f, 0.14f));
         for (int i = 0; i <= desc.tilesX; ++i) {
             const float x = WorldToScreen(static_cast<float>(i) * tileMeters, 0.0f).x;
             draw->AddLine(ImVec2(x, WorldToScreen(0.0f, 0.0f).y),
-                          ImVec2(x, WorldToScreen(0.0f, terrain_.WorldDepth()).y), color);
+                          ImVec2(x, WorldToScreen(0.0f, terrain_->WorldDepth()).y), color);
         }
         for (int j = 0; j <= desc.tilesY; ++j) {
             const float y = WorldToScreen(0.0f, static_cast<float>(j) * tileMeters).y;
             draw->AddLine(ImVec2(WorldToScreen(0.0f, 0.0f).x, y),
-                          ImVec2(WorldToScreen(terrain_.WorldWidth(), 0.0f).x, y), color);
+                          ImVec2(WorldToScreen(terrain_->WorldWidth(), 0.0f).x, y), color);
         }
     }
 
@@ -735,8 +748,8 @@ private:
             float beforeZ = 0.0f;
             ScreenToWorld(io.MousePos, beforeX, beforeZ);
             metersPerPixel_ = std::clamp(metersPerPixel_ * (1.0f - io.MouseWheel * 0.12f),
-                                         terrain_.Desc().sampleSpacing * 0.05f,
-                                         std::max(terrain_.WorldWidth(), 1.0f) / 64.0f);
+                                         terrain_->Desc().sampleSpacing * 0.05f,
+                                         std::max(terrain_->WorldWidth(), 1.0f) / 64.0f);
             float afterX = 0.0f;
             float afterZ = 0.0f;
             ScreenToWorld(io.MousePos, afterX, afterZ);
@@ -748,12 +761,12 @@ private:
             HandleRamp(hovered);
             return;
         }
-        if (mode_ == Mode::Paint && terrain_.LayerCount() < 2) {
+        if (mode_ == Mode::Paint && terrain_->LayerCount() < 2) {
             return;  // tanpa layer di atas dasar, tidak ada yang bisa dicat
         }
 
         if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
-            stroke_.Begin(terrain_, cursorX_, cursorZ_);
+            stroke_.Begin((*terrain_), cursorX_, cursorZ_);
         }
         if (!stroke_.Active()) {
             return;
@@ -762,7 +775,7 @@ private:
         const float dt = context.deltaSeconds > 0.0f ? context.deltaSeconds : 1.0f / 60.0f;
         switch (mode_) {
             case Mode::Sculpt:
-                stroke_.Advance(terrain_, EffectiveBrush(), cursorX_, cursorZ_, dt);
+                stroke_.Advance((*terrain_), EffectiveBrush(), cursorX_, cursorZ_, dt);
                 break;
             case Mode::Paint: {
                 // Shift menghapus, sama seperti Shift membalik Raise/Lower.
@@ -774,7 +787,7 @@ private:
                 const int layer = paintLayer_;
                 stroke_.Advance(brush.radius, cursorX_, cursorZ_, dt,
                                 [&](float x, float z, float step) {
-                                    ApplyLayerDab(terrain_, brush, layer, x, z, step);
+                                    ApplyLayerDab((*terrain_), brush, layer, x, z, step);
                                 });
                 break;
             }
@@ -782,14 +795,14 @@ private:
                 const bool cut = !ImGui::GetIO().KeyShift;
                 stroke_.Advance(paint_.radius, cursorX_, cursorZ_, dt,
                                 [&](float x, float z, float) {
-                                    ApplyHoleDab(terrain_, paint_, cut, x, z);
+                                    ApplyHoleDab((*terrain_), paint_, cut, x, z);
                                 });
                 break;
             }
         }
-        dirty_ = true;
+        Touch();
         if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
-            stroke_.End(terrain_);
+            stroke_.End((*terrain_));
         }
     }
 
@@ -802,16 +815,16 @@ private:
             // paling sering dibutuhkan adalah jalan antara dua ketinggian yang
             // sudah ada, dan mengetikkan keduanya berarti menebak angka yang
             // sudah ada di bawah kursor.
-            rampStart_ = Vec3(cursorX_, terrain_.HeightAtWorld(cursorX_, cursorZ_), cursorZ_);
+            rampStart_ = Vec3(cursorX_, terrain_->HeightAtWorld(cursorX_, cursorZ_), cursorZ_);
             rampAnchored_ = true;
             return;
         }
-        const Vec3 end(cursorX_, terrain_.HeightAtWorld(cursorX_, cursorZ_), cursorZ_);
-        terrain_.BeginStroke();
-        ApplyRamp(terrain_, brush_, rampStart_, end);
-        terrain_.EndStroke();
+        const Vec3 end(cursorX_, terrain_->HeightAtWorld(cursorX_, cursorZ_), cursorZ_);
+        terrain_->BeginStroke();
+        ApplyRamp((*terrain_), brush_, rampStart_, end);
+        terrain_->EndStroke();
         rampAnchored_ = false;
-        dirty_ = true;
+        Touch();
     }
 
     float CursorRadius() const { return mode_ == Mode::Sculpt ? brush_.radius : paint_.radius; }
@@ -845,13 +858,13 @@ private:
 
     void DrawStatus() {
         const bool inside = cursorX_ >= 0.0f && cursorZ_ >= 0.0f &&
-                            cursorX_ <= terrain_.WorldWidth() &&
-                            cursorZ_ <= terrain_.WorldDepth();
+                            cursorX_ <= terrain_->WorldWidth() &&
+                            cursorZ_ <= terrain_->WorldDepth();
         ImGui::TextColored(kHintColor, "%.1f, %.1f m   h=%.2f m%s", cursorX_, cursorZ_,
-                           terrain_.HeightAtWorld(cursorX_, cursorZ_),
+                           terrain_->HeightAtWorld(cursorX_, cursorZ_),
                            inside ? "" : "   (outside)");
         ImGui::SameLine();
-        if (mode_ == Mode::Sculpt || terrain_.LayerCount() < 2) {
+        if (mode_ == Mode::Sculpt || terrain_->LayerCount() < 2) {
             // Legenda: warna peta menyesuaikan rentang yang terlihat, jadi
             // artinya harus disebut angkanya — kalau tidak, "hijau" berarti
             // berbeda setiap kali digeser dan tidak ada yang bisa dibaca
@@ -863,18 +876,18 @@ private:
             // 200 atau 230, dan selisih itu yang menentukan apakah masih perlu
             // disapu sekali lagi.
             ImGui::TextColored(kHintColor, "|  %s %d/255  |",
-                               terrain_.Layer(paintLayer_).name.c_str(),
-                               terrain_.WeightAt(paintLayer_, SampleIndexX(cursorX_),
+                               terrain_->Layer(paintLayer_).name.c_str(),
+                               terrain_->WeightAt(paintLayer_, SampleIndexX(cursorX_),
                                                  SampleIndexZ(cursorZ_)));
         } else {
-            ImGui::TextColored(kHintColor, "|  %zu quads cut  |", terrain_.HoleCount());
+            ImGui::TextColored(kHintColor, "|  %zu quads cut  |", terrain_->HoleCount());
         }
         ImGui::SameLine();
         ImGui::TextColored(kHintColor, "%zu/%d tiles   %.1f MB   %zu undo",
-                           terrain_.TilesResident(),
-                           terrain_.Desc().tilesX * terrain_.Desc().tilesY,
-                           static_cast<double>(terrain_.BytesResident()) / (1024.0 * 1024.0),
-                           terrain_.UndoDepth());
+                           terrain_->TilesResident(),
+                           terrain_->Desc().tilesX * terrain_->Desc().tilesY,
+                           static_cast<double>(terrain_->BytesResident()) / (1024.0 * 1024.0),
+                           terrain_->UndoDepth());
     }
 
     // --- alat ----------------------------------------------------------------
@@ -914,7 +927,7 @@ private:
             return;
         }
         if (stroke_.Active()) {
-            stroke_.End(terrain_);
+            stroke_.End((*terrain_));
         }
         mode_ = mode;
         rampAnchored_ = false;
@@ -947,11 +960,11 @@ private:
 
         if (tool_ == Tool::Flatten) {
             ImGui::SetNextItemWidth(width);
-            ImGui::DragFloat("Target", &brush_.targetHeight, 0.25f, terrain_.Desc().minHeight,
-                             terrain_.Desc().maxHeight, "%.2f m");
+            ImGui::DragFloat("Target", &brush_.targetHeight, 0.25f, terrain_->Desc().minHeight,
+                             terrain_->Desc().maxHeight, "%.2f m");
             ImGui::SameLine();
             if (ImGui::SmallButton("Pick")) {
-                brush_.targetHeight = terrain_.HeightAtWorld(cursorX_, cursorZ_);
+                brush_.targetHeight = terrain_->HeightAtWorld(cursorX_, cursorZ_);
             }
             widgets::Tooltip("Take the height under the cursor");
         }
@@ -992,7 +1005,7 @@ private:
         DrawLayerList(context);
         ImGui::Separator();
 
-        if (terrain_.LayerCount() < 2) {
+        if (terrain_->LayerCount() < 2) {
             ImGui::TextColored(kHintColor,
                                "Add a layer to paint. The base layer\nshows wherever nothing else "
                                "is painted,\nso it has no weight map of its own.");
@@ -1014,12 +1027,12 @@ private:
     }
 
     void DrawLayerList(EditorContext& context) {
-        ImGui::BeginDisabled(terrain_.LayerCount() >= kMaxLayers);
+        ImGui::BeginDisabled(terrain_->LayerCount() >= kMaxLayers);
         if (ImGui::Button(icons::kAdd)) {
             AddLayer();
         }
         ImGui::EndDisabled();
-        widgets::Tooltip(terrain_.LayerCount() >= kMaxLayers ? "Layer limit reached"
+        widgets::Tooltip(terrain_->LayerCount() >= kMaxLayers ? "Layer limit reached"
                                                              : "Add a material layer");
 
         // Layer dasar tidak bisa dihapus maupun dipindah: bobotnya sisa dari yang
@@ -1027,29 +1040,29 @@ private:
         ImGui::SameLine();
         ImGui::BeginDisabled(paintLayer_ <= 0);
         if (ImGui::Button(icons::kDelete)) {
-            terrain_.RemoveLayer(paintLayer_);
-            paintLayer_ = std::min(paintLayer_, terrain_.LayerCount() - 1);
-            dirty_ = true;
+            terrain_->RemoveLayer(paintLayer_);
+            paintLayer_ = std::min(paintLayer_, terrain_->LayerCount() - 1);
+            Touch();
         }
         widgets::Tooltip("Remove the layer. Its weight returns to the base layer.");
         ImGui::SameLine();
-        if (ImGui::Button(icons::kChevronUp) && terrain_.MoveLayer(paintLayer_, paintLayer_ - 1)) {
+        if (ImGui::Button(icons::kChevronUp) && terrain_->MoveLayer(paintLayer_, paintLayer_ - 1)) {
             paintLayer_ = std::max(1, paintLayer_ - 1);
-            dirty_ = true;
+            Touch();
         }
         ImGui::SameLine();
-        if (ImGui::Button(icons::kChevronDown) && terrain_.MoveLayer(paintLayer_, paintLayer_ + 1)) {
-            paintLayer_ = std::min(terrain_.LayerCount() - 1, paintLayer_ + 1);
-            dirty_ = true;
+        if (ImGui::Button(icons::kChevronDown) && terrain_->MoveLayer(paintLayer_, paintLayer_ + 1)) {
+            paintLayer_ = std::min(terrain_->LayerCount() - 1, paintLayer_ + 1);
+            Touch();
         }
         ImGui::EndDisabled();
 
-        const float rows = std::clamp(static_cast<float>(terrain_.LayerCount()), 3.0f, 7.0f);
+        const float rows = std::clamp(static_cast<float>(terrain_->LayerCount()), 3.0f, 7.0f);
         if (ImGui::BeginChild("##layers", ImVec2(0.0f, ImGui::GetFrameHeight() * rows),
                               ImGuiChildFlags_Borders)) {
-            for (int index = 0; index < terrain_.LayerCount(); ++index) {
+            for (int index = 0; index < terrain_->LayerCount(); ++index) {
                 ImGui::PushID(index);
-                const TerrainLayer& layer = terrain_.Layer(index);
+                const TerrainLayer& layer = terrain_->Layer(index);
                 const ImVec2 origin = ImGui::GetCursorScreenPos();
                 if (ImGui::Selectable("##row", index == paintLayer_, 0,
                                       ImVec2(0.0f, ImGui::GetFrameHeight()))) {
@@ -1078,10 +1091,10 @@ private:
         }
         ImGui::EndChild();
 
-        TerrainLayer& layer = terrain_.Layer(paintLayer_);
+        TerrainLayer& layer = terrain_->Layer(paintLayer_);
         ImGui::SetNextItemWidth(-FLT_MIN);
         if (ImGui::InputText("##name", &layer.name)) {
-            dirty_ = true;
+            Touch();
         }
         widgets::Tooltip("Layer name");
 
@@ -1089,22 +1102,22 @@ private:
         DrawMaterialPicker(context, layer);
 
         if (ImGui::ColorEdit3("Colour", &layer.color.x, ImGuiColorEditFlags_NoInputs)) {
-            dirty_ = true;
+            Touch();
         }
         widgets::Tooltip("Stand-in colour for the map above, until the 3D viewport can draw the "
                          "material itself");
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.0f);
         if (ImGui::DragFloat("Tile size", &layer.tileSize, 0.05f, 0.05f, 512.0f, "%.2f m")) {
-            dirty_ = true;
+            Touch();
         }
         widgets::Tooltip("Metres per texture repeat");
 
-        ImGui::BeginDisabled(!terrain_.LayerPainted(paintLayer_));
+        ImGui::BeginDisabled(!terrain_->LayerPainted(paintLayer_));
         if (ImGui::Button("Clear painted weight")) {
-            terrain_.BeginStroke();
-            terrain_.ClearLayerWeights(paintLayer_);
-            terrain_.EndStroke();
-            dirty_ = true;
+            terrain_->BeginStroke();
+            terrain_->ClearLayerWeights(paintLayer_);
+            terrain_->EndStroke();
+            Touch();
         }
         ImGui::EndDisabled();
     }
@@ -1119,7 +1132,7 @@ private:
         }
         if (ImGui::Selectable("(none)", !layer.material.IsValid())) {
             layer.material.Clear();
-            dirty_ = true;
+            Touch();
         }
         for (const assets::AssetRecord& record : context.assets->All()) {
             if (record.type != assets::AssetType::Material) {
@@ -1127,7 +1140,7 @@ private:
             }
             if (ImGui::Selectable(record.name.c_str(), record.guid == layer.material.guid)) {
                 layer.material = AssetRef{record.guid};
-                dirty_ = true;
+                Touch();
             }
         }
         ImGui::EndCombo();
@@ -1149,16 +1162,16 @@ private:
         DrawBrushProfile();
 
         ImGui::Spacing();
-        ImGui::TextColored(kHintColor, "%zu quads cut", terrain_.HoleCount());
-        ImGui::BeginDisabled(terrain_.HoleCount() == 0);
+        ImGui::TextColored(kHintColor, "%zu quads cut", terrain_->HoleCount());
+        ImGui::BeginDisabled(terrain_->HoleCount() == 0);
         if (ImGui::Button("Fill every hole")) {
             // Dibungkus goresan supaya satu Ctrl+Z mengembalikannya. Menghapus
             // seluruh pekerjaan tanpa jalan pulang adalah tombol yang tidak berani
             // ditekan siapa pun.
-            terrain_.BeginStroke();
-            terrain_.ClearHoles();
-            terrain_.EndStroke();
-            dirty_ = true;
+            terrain_->BeginStroke();
+            terrain_->ClearHoles();
+            terrain_->EndStroke();
+            Touch();
         }
         ImGui::EndDisabled();
     }
@@ -1186,12 +1199,12 @@ private:
         static constexpr std::array<const char*, 3> kViews{"Relief", "Layers", "Weight"};
         int view = static_cast<int>(view_);
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.0f);
-        ImGui::BeginDisabled(terrain_.LayerCount() < 2);
+        ImGui::BeginDisabled(terrain_->LayerCount() < 2);
         if (ImGui::Combo("Map", &view, kViews.data(), static_cast<int>(kViews.size()))) {
             view_ = static_cast<MapView>(view);
         }
         ImGui::EndDisabled();
-        widgets::Tooltip(terrain_.LayerCount() < 2
+        widgets::Tooltip(terrain_->LayerCount() < 2
                              ? "Relief only, until there is a second layer to show"
                              : "Relief shading, blended layer colours, or the selected layer's "
                                "weight alone");
@@ -1204,17 +1217,17 @@ private:
 
     void AddLayer() {
         TerrainLayer layer;
-        const int index = terrain_.LayerCount();
+        const int index = terrain_->LayerCount();
         layer.name = "Layer " + std::to_string(index);
         const std::array<float, 3>& rgb =
             kLayerPalette[static_cast<std::size_t>(index - 1) % kLayerPalette.size()];
         layer.color = Vec3(rgb[0], rgb[1], rgb[2]);
-        const int added = terrain_.AddLayer(layer);
+        const int added = terrain_->AddLayer(layer);
         if (added < 0) {
             return;
         }
         paintLayer_ = added;
-        dirty_ = true;
+        Touch();
     }
 
     /// Profil brush, digambar dengan `BrushWeight` — fungsi yang sama persis
@@ -1260,9 +1273,9 @@ private:
     void ApplyErosion(bool whole) {
         SampleRect rect;
         if (whole) {
-            rect = SampleRect{0, 0, terrain_.SamplesX(), terrain_.SamplesY()};
+            rect = SampleRect{0, 0, terrain_->SamplesX(), terrain_->SamplesY()};
         } else {
-            rect = terrain_.RectForCircle(cursorX_, cursorZ_, brush_.radius);
+            rect = terrain_->RectForCircle(cursorX_, cursorZ_, brush_.radius);
         }
         if (rect.Empty()) {
             return;
@@ -1270,10 +1283,10 @@ private:
         // Dibungkus goresan supaya bisa dibatalkan seperti sapuan brush biasa.
         // Erosi yang tidak bisa dibatalkan berarti setiap percobaan menuntut
         // menyimpan lebih dulu.
-        terrain_.BeginStroke();
-        ApplyThermalErosion(terrain_, rect, erosionIterations_, erosionTalus_, erosionRate_);
-        terrain_.EndStroke();
-        dirty_ = true;
+        terrain_->BeginStroke();
+        ApplyThermalErosion((*terrain_), rect, erosionIterations_, erosionTalus_, erosionRate_);
+        terrain_->EndStroke();
+        Touch();
     }
 
     // --- berkas ---------------------------------------------------------------
@@ -1312,49 +1325,63 @@ private:
         if (record == nullptr) {
             return;
         }
-        Terrain loaded;
-        TerrainDocument document;
-        const TerrainIoResult result =
-            LoadTerrain(loaded, document, context.assets->AbsolutePath(*record));
-        if (!result.ok) {
+        const std::filesystem::path path = context.assets->AbsolutePath(*record);
+        // Lewat store, bukan dimuat sendiri: viewport menggambar terrain yang
+        // sama, dan dua salinan berarti yang tergambar adalah bentuk sebelum
+        // goresan terakhir — pada dokumen seukuran ini, juga dua kali memorinya.
+        terrain::Terrain* opened = context.terrains->Get(guid, path);
+        if (opened == nullptr) {
             if (context.notifications != nullptr) {
-                context.notifications->Error("Cannot open " + record->name + ": " + result.error);
+                context.notifications->Error("Cannot open " + record->name +
+                                             "; see the Console");
             }
             return;
         }
-        terrain_ = std::move(loaded);
-        document_ = std::move(document);
         openGuid_ = guid;
         openName_ = record->name;
         openPath_ = context.assets->AbsolutePath(*record);
         transferFile_ = openPath_.stem().string() + ".png";
-        dirty_ = false;
         rampAnchored_ = false;
-        brush_.targetHeight = terrain_.Desc().baseHeight;
+        // Yang baru dibuka dipegang di sini, bukan lewat `terrain_`: penunjuk
+        // itu disetel di awal frame, dan frame ini sudah lewat awalnya.
+        terrain_ = opened;
+        document_ = context.terrains->Document(guid);
+        brush_.targetHeight = terrain_->Desc().baseHeight;
         // Jari-jari bawaan mengikuti ukuran peta. Brush sepuluh meter di atas
         // terrain dua kilometer adalah titik jarum: goresan pertama tidak
         // terlihat, dan kesan pertamanya adalah alat yang rusak.
-        brush_.radius = std::clamp(terrain_.WorldWidth() * 0.02f, 1.0f, 500.0f);
-        brush_.strength = std::max((terrain_.Desc().maxHeight - terrain_.Desc().minHeight) * 0.02f,
+        brush_.radius = std::clamp(terrain_->WorldWidth() * 0.02f, 1.0f, 500.0f);
+        brush_.strength = std::max((terrain_->Desc().maxHeight - terrain_->Desc().minHeight) * 0.02f,
                                    0.5f);
         // Kuas cat mengikuti ukuran yang sama, dengan alasan yang sama. Ia tidak
         // ikut menyalin kekuatannya: kekuatan sculpt meter per detik, kekuatan
         // cat laju konvergensi, dan menyalin angka di antara dua satuan yang
         // berbeda adalah cara membuat sapuan pertama selalu salah.
         paint_.radius = brush_.radius;
-        paintLayer_ = terrain_.LayerCount() > 1 ? 1 : 0;
+        paintLayer_ = terrain_->LayerCount() > 1 ? 1 : 0;
         FitView();
     }
 
+    /// Menandai terrain yang terbuka berubah.
+    ///
+    /// Satu tempat, dipanggil dari mana-mana: goresan, impor, penyuntingan
+    /// layer. Yang menaikkan penanda versinya sendiri-sendiri akan melewatkan
+    /// satu jalur, dan yang terlewat adalah goresan yang tidak pernah tergambar
+    /// ulang di viewport.
+    void Touch() {
+        if (store_ != nullptr) {
+            store_->MarkDirty(openGuid_);
+        }
+    }
+
     void Save(EditorContext& context) {
-        const TerrainIoResult result = SaveTerrain(terrain_, document_, openPath_);
-        if (!result.ok) {
+        std::string error;
+        if (!context.terrains->Save(openGuid_, openPath_, error)) {
             if (context.notifications != nullptr) {
-                context.notifications->Error("Save failed: " + result.error);
+                context.notifications->Error("Save failed: " + error);
             }
             return;
         }
-        dirty_ = false;
         if (context.notifications != nullptr) {
             context.notifications->Success("Saved " + openName_);
         }
@@ -1372,9 +1399,9 @@ private:
 
         TerrainIoResult result;
         if (exporting) {
-            result = raw ? SaveHeightmapRaw(terrain_, path) : SaveHeightmapImage(terrain_, path);
+            result = raw ? SaveHeightmapRaw((*terrain_), path) : SaveHeightmapImage((*terrain_), path);
         } else {
-            result = raw ? LoadHeightmapRaw(terrain_, path) : LoadHeightmapImage(terrain_, path);
+            result = raw ? LoadHeightmapRaw((*terrain_), path) : LoadHeightmapImage((*terrain_), path);
         }
 
         if (context.notifications == nullptr) {
@@ -1388,22 +1415,26 @@ private:
             // Impor bukan goresan, jadi riwayat goresan tidak lagi cocok dengan
             // apa yang ada di peta. Membiarkannya berarti satu Ctrl+Z memasang
             // kembali potongan heightmap lama di atas yang baru diimpor.
-            terrain_.ClearHistory();
-            dirty_ = true;
+            terrain_->ClearHistory();
+            Touch();
         }
         context.notifications->Success((exporting ? "Exported " : "Imported ") +
                                        path.filename().string());
     }
 
-    Terrain terrain_;
-    TerrainDocument document_;
+    /// Dokumen yang sedang dibuka — **milik store, bukan milik panel**, dan
+    /// hanya berlaku selama satu frame. Disetel di awal `OnDraw`, tempat satu
+    /// pemeriksaan menggantikan pemeriksaan di setiap jalur di bawahnya.
+    Terrain* terrain_ = nullptr;
+    TerrainDocument* document_ = nullptr;
+    TerrainStore* store_ = nullptr;
+
     TerrainDesc newDesc_;
 
     Uuid openGuid_;
     std::string openName_;
     std::filesystem::path openPath_;
     std::string transferFile_;
-    bool dirty_ = false;
 
     Mode mode_ = Mode::Sculpt;
     MapView view_ = MapView::Relief;

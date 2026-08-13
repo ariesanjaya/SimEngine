@@ -469,6 +469,27 @@ struct WhiteboxComponent {
     bool showEdges = true;
 };
 
+/// Terrain: heightmap berubin yang dipahat di dalam editor.
+///
+/// **Hanya rujukan, dan itu bukan kebetulan.** Sebuah terrain 4×4 km berukuran
+/// ratusan megabyte; menyimpannya di dalam komponen berarti setiap salinan
+/// entity — setiap prefab yang dibuat, setiap undo yang mencuplik dunia —
+/// menyalin seluruh peta. Bentuknya tinggal di asetnya, dan yang ada di sini
+/// adalah nama untuk menemukannya.
+///
+/// Satu terrain per entity, dan biasanya satu entity per level. Terrain kedua
+/// yang tumpang tindih tidak dilarang di sini — ia hanya tidak berarti apa-apa,
+/// dan yang membuatnya akan melihat sendiri.
+struct TerrainComponent {
+    /// Aset `.simterrain` beserta berkas peta pendampingnya.
+    AssetRef terrain;
+
+    /// Menggambar batas ubin di viewport supaya pengubinan terbaca saat
+    /// memahat. Dimatikan saat memeriksa tampilan akhirnya — aturan yang sama
+    /// dengan `WhiteboxComponent::showEdges`.
+    bool showTiles = false;
+};
+
 struct CameraComponent {
     float fovYRadians = 1.047f;  // 60°
     float nearZ = 0.05f;

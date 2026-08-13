@@ -62,6 +62,7 @@ bool EditorApp::Initialize(const Config& config) {
     context_.history = &history_;
     context_.selection = &selection_;
     context_.whiteboxes = &whiteboxes_;
+    context_.terrains = &terrains_;
     context_.actions = &actions_;
     context_.notifications = &notifications_;
     context_.world = &world_;
@@ -562,6 +563,11 @@ void EditorApp::CloseProject() {
     history_.Clear();
     selection_.Clear();
     animation_.Clear();
+    // Dokumen yang terbuka ikut dibuang. Bukan kerapian: sebuah terrain
+    // berukuran ratusan megabyte, dan membiarkannya berarti membuka project
+    // kedua sambil tetap membayar yang pertama — sampai editor ditutup.
+    whiteboxes_.Clear();
+    terrains_.Clear();
     levelPath_.clear();
     context_.levelName.clear();
     project_ = scene::Project{};

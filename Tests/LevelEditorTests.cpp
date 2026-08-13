@@ -11,6 +11,7 @@
 #include "Sim/Editor/Selection.h"
 #include "Sim/Editor/SkinnedPreview.h"
 #include "Sim/Editor/WhiteboxCommands.h"
+#include "Sim/Editor/TerrainStore.h"
 #include "Sim/Editor/WhiteboxStore.h"
 #include "Sim/Physics/PhysicsScene.h"
 #include "Sim/Whitebox/WhiteboxIo.h"
@@ -1430,4 +1431,120 @@ TEST_CASE("menetapkan material sisi bisa dibatalkan, dan sisi berbeda tidak diga
 
     REQUIRE(history.Undo());
     CHECK(box.PolygonMaterial(sides[0]) == whitebox::kNoMaterial);
+}
+
+// ============================================================================
+// L0 — satu dokumen terrain, banyak pembaca
+// ============================================================================
+
+TEST_CASE("L0: dua pembaca terrain mendapat objek yang sama, bukan dua salinan") {
+    // **Inilah seluruh gunanya store.** Panel menyunting, viewport menggambar,
+    // fisika menabrak. Yang memuat sendiri-sendiri menggambar bentuk sebelum
+    // goresan terakhir dan menabrak bentuk sebelum itu lagi — dan pada dokumen
+    // seukuran terrain, juga membayar memorinya berkali-kali.
+    const std::filesystem::path directory =
+        std::filesystem::temp_directory_path() / "sim-terrain-store";
+    std::error_code ec;
+    std::filesystem::remove_all(directory, ec);
+    std::filesystem::create_directories(directory, ec);
+    const std::filesystem::path path = directory / "Bukit.simterrain";
+
+    terrain::TerrainDesc desc;
+    desc.tileSamples = 32;
+    desc.tilesX = 2;
+    desc.tilesY = 2;
+    desc.sampleSpacing = 1.0f;
+
+    {
+        terrain::Terrain fresh(desc);
+        terrain::TerrainDocument document;
+        document.name = "Bukit";
+        document.desc = desc;
+        REQUIRE(terrain::SaveTerrain(fresh, document, path).ok);
+    }
+
+    TerrainStore store;
+    const Uuid guid = Uuid::Generate();
+
+    terrain::Terrain* first = store.Get(guid, path);
+    REQUIRE(first != nullptr);
+    terrain::Terrain* second = store.Get(guid, path);
+    REQUIRE(second != nullptr);
+    CHECK(first == second);
+    CHECK(store.OpenCount() == 1);
+
+    // Disunting lewat yang satu, terbaca lewat yang lain.
+    first->SetHeightAt(5, 6, 12.5f);
+    CHECK(second->HeightAt(5, 6) == doctest::Approx(12.5f).epsilon(0.001));
+
+    // Versi naik hanya ketika ada yang menandainya. Menaikkannya sendiri tiap
+    // kali dokumennya disentuh berarti viewport mengunggah ulang terrain empat
+    // kilometer setiap frame yang kebetulan membacanya.
+    const uint64_t before = store.Version(guid);
+    CHECK(store.Version(guid) == before);
+    store.MarkDirty(guid);
+    CHECK(store.Version(guid) > before);
+    CHECK(store.Dirty(guid));
+
+    // Menyimpan membersihkan penanda "belum tersimpan" tanpa menaikkan versi:
+    // yang berubah adalah berkasnya, bukan bentuknya.
+    const uint64_t saved = store.Version(guid);
+    std::string error;
+    REQUIRE_MESSAGE(store.Save(guid, path, error), error);
+    CHECK_FALSE(store.Dirty(guid));
+    CHECK(store.Version(guid) == saved);
+
+    // Yang tersimpan memang isi yang disunting, bukan yang dimuat semula.
+    terrain::Terrain reloaded;
+    terrain::TerrainDocument reloadedDocument;
+    REQUIRE(terrain::LoadTerrain(reloaded, reloadedDocument, path).ok);
+    CHECK(reloaded.HeightAt(5, 6) == doctest::Approx(12.5f).epsilon(0.001));
+
+    std::filesystem::remove_all(directory, ec);
+}
+
+TEST_CASE("L0: terrain yang tidak bisa dibaca ditolak sekali, bukan tiap frame") {
+    // Berkas rusak yang diurai ulang enam puluh kali per detik membanjiri log
+    // dengan pesan yang sama sampai tidak ada pesan lain yang terbaca.
+    const std::filesystem::path directory =
+        std::filesystem::temp_directory_path() / "sim-terrain-store-bad";
+    std::error_code ec;
+    std::filesystem::create_directories(directory, ec);
+    const std::filesystem::path path = directory / "rusak.simterrain";
+    {
+        std::ofstream stream(path);
+        stream << "{ bukan terrain";
+    }
+
+    TerrainStore store;
+    const Uuid guid = Uuid::Generate();
+    CHECK(store.Get(guid, path) == nullptr);
+    CHECK(store.Get(guid, path) == nullptr);
+    CHECK(store.Find(guid) == nullptr);
+    CHECK(store.Document(guid) == nullptr);
+    // Tercatat, jadi percobaan kedua tidak membaca berkasnya lagi.
+    CHECK(store.OpenCount() == 1);
+
+    std::filesystem::remove_all(directory, ec);
+}
+
+TEST_CASE("L0: Clear membuang dokumen yang terbuka") {
+    // Sebuah terrain berukuran ratusan megabyte: membiarkannya berarti membuka
+    // project kedua sambil tetap membayar yang pertama, sampai editor ditutup.
+    TerrainStore store;
+    const Uuid guid = Uuid::Generate();
+    terrain::TerrainDesc desc;
+    desc.tileSamples = 16;
+    desc.tilesX = 1;
+    desc.tilesY = 1;
+    store.Adopt(guid, terrain::Terrain(desc), terrain::TerrainDocument{});
+    REQUIRE(store.Find(guid) != nullptr);
+    // Terrain yang lahir di editor belum punya berkas, jadi ia memang belum
+    // tersimpan — tombol Save yang mati padanya terlihat seperti editor yang
+    // menolak menyimpan.
+    CHECK(store.Dirty(guid));
+
+    store.Clear();
+    CHECK(store.Find(guid) == nullptr);
+    CHECK(store.OpenCount() == 0);
 }

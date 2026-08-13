@@ -511,15 +511,23 @@ private:
         // di sini tidak punya arti yang jelas — tekstur dipasang ke field
         // material, bukan berdiri sendiri sebagai objek.
         const bool isWhitebox = record->type == assets::AssetType::Whitebox;
-        if (record->type != assets::AssetType::Mesh && !isWhitebox) {
+        const bool isTerrain = record->type == assets::AssetType::Terrain;
+        if (record->type != assets::AssetType::Mesh && !isWhitebox && !isTerrain) {
             context.notifications->Warning(std::string("Cannot place a ") +
                                            assets::ToString(record->type) + " in the scene");
             return;
         }
 
         const ImVec2 mouse = ImGui::GetMousePos();
-        const Vec3 position = GroundPointUnderCursor(
-            camera, size, Vec2(mouse.x - imagePos.x, mouse.y - imagePos.y));
+        // Terrain berdiri di titik asal, bukan di bawah kursor. Titik asalnya
+        // adalah **sudut** petanya, bukan pusatnya, jadi menjatuhkannya di
+        // tempat kursor kebetulan berada menaruh peta empat kilometer di
+        // sembarang tempat — dan hampir setiap kali yang berikutnya dilakukan
+        // orang adalah menolkan transformnya kembali.
+        const Vec3 position =
+            isTerrain ? Vec3(0.0f)
+                      : GroundPointUnderCursor(
+                            camera, size, Vec2(mouse.x - imagePos.x, mouse.y - imagePos.y));
 
         context.history->CloseMergeGroup();
         const Uuid entityGuid = Uuid::Generate();
@@ -527,11 +535,15 @@ private:
         context.history->Execute(std::make_unique<LambdaCommand>(
             "Place " + name,
             [world = context.world, selection = context.selection, entityGuid, guid, position, name,
-             isWhitebox]() {
+             isWhitebox, isTerrain]() {
                 const scene::Entity entity = world->CreateWithGuid(entityGuid, name);
                 world->TryGet<scene::TransformComponent>(entity)->position = position;
                 world->MarkTransformDirty(entity);
-                if (isWhitebox) {
+                if (isTerrain) {
+                    scene::TerrainComponent terrain;
+                    terrain.terrain.guid = guid;
+                    world->Add<scene::TerrainComponent>(entity, terrain);
+                } else if (isWhitebox) {
                     scene::WhiteboxComponent whitebox;
                     whitebox.whitebox.guid = guid;
                     world->Add<scene::WhiteboxComponent>(entity, whitebox);

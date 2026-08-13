@@ -1,0 +1,76 @@
+#pragma once
+
+#include "Sim/Core/Uuid.h"
+#include "Sim/Terrain/Terrain.h"
+#include "Sim/Terrain/TerrainIo.h"
+
+#include <filesystem>
+#include <string>
+#include <unordered_map>
+
+/// Terrain yang sedang terbuka, dibagi panel, viewport, dan fisika.
+///
+/// **Satu dokumen, banyak pembaca.** Panel menyunting, viewport menggambar,
+/// fisika menabrak. Kalau ketiganya memuat sendiri-sendiri, yang tergambar
+/// adalah bentuk sebelum goresan terakhir dan yang ditabrak adalah bentuk
+/// sebelum itu lagi — dan tidak ada satu pun pesan yang menjelaskannya.
+///
+/// Bentuknya sengaja sama dengan `WhiteboxStore`: sebuah terrain jauh lebih
+/// besar, tetapi persoalannya persis sama, dan dua jawaban berbeda untuk satu
+/// persoalan adalah dua tempat yang harus dibetulkan setiap kali.
+namespace sim::editor {
+
+class TerrainStore {
+public:
+    /// Terrain milik sebuah aset, dimuat bila perlu.
+    ///
+    /// Mengembalikan null bila berkasnya tidak bisa dibaca — dan **mencatat
+    /// kegagalannya**, supaya berkas rusak tidak diurai ulang enam puluh kali
+    /// per detik sambil membanjiri log dengan pesan yang sama.
+    terrain::Terrain* Get(const Uuid& guid, const std::filesystem::path& path);
+
+    /// Yang sudah dimuat, tanpa mencoba memuat.
+    terrain::Terrain* Find(const Uuid& guid);
+
+    /// Dokumen pendamping sebuah terrain: layer, nama berkas peta, dan
+    /// pengaturan yang tersimpan di JSON-nya.
+    terrain::TerrainDocument* Document(const Uuid& guid);
+
+    /// Menaruh terrain yang sudah jadi di bawah sebuah guid.
+    ///
+    /// Bentuk mendahului berkas: terrain baru lahir di dalam editor, dan `Get`
+    /// tidak bisa memuatnya karena belum ada yang ditulis.
+    terrain::Terrain& Adopt(const Uuid& guid, terrain::Terrain value,
+                            terrain::TerrainDocument document);
+
+    /// Menandai sebuah terrain berubah: versinya naik dan ia menjadi belum
+    /// tersimpan. Viewport memakai versinya untuk tahu kapan mengunggah ulang.
+    void MarkDirty(const Uuid& guid);
+    uint64_t Version(const Uuid& guid) const;
+    /// True bila ada perubahan yang belum ditulis ke berkasnya.
+    bool Dirty(const Uuid& guid) const;
+
+    /// Menulis kembali ke berkasnya. False beserta sebabnya bila gagal.
+    bool Save(const Uuid& guid, const std::filesystem::path& path, std::string& error);
+
+    /// Membuang yang sudah dimuat. Dipakai saat project berganti.
+    void Clear();
+
+    std::size_t OpenCount() const { return entries_.size(); }
+
+private:
+    struct Entry {
+        terrain::Terrain terrain;
+        terrain::TerrainDocument document;
+        uint64_t version = 1;
+        bool failed = false;
+        bool dirty = false;
+    };
+
+    Entry* FindEntry(const Uuid& guid);
+    const Entry* FindEntry(const Uuid& guid) const;
+
+    std::unordered_map<Uuid, Entry> entries_;
+};
+
+}  // namespace sim::editor

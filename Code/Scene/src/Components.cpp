@@ -316,6 +316,14 @@ void RegisterCoreComponents() {
             .Label("Show Edges");
         components.Register<WhiteboxComponent>();
 
+        types.Type<TerrainComponent>("Terrain")
+            .Field<&TerrainComponent::terrain>("terrain")
+            .Label("Terrain Asset")
+            .Tooltip("Heightmap berubin beserta layer dan peta bobotnya")
+            .Field<&TerrainComponent::showTiles>("showTiles")
+            .Label("Show Tiles");
+        components.Register<TerrainComponent>();
+
         types.Type<CameraComponent>("Camera")
             .Field<&CameraComponent::fovYRadians>("fovY")
             .Label("Field of View")
