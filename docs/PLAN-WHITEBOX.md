@@ -133,7 +133,7 @@ blockout yang tidak bisa diubah setelah disimpan.
 
 ## Milestone
 
-### W0 — Half-edge dan invariannya · ⬜
+### W0 — Half-edge dan invariannya · ✅
 
 Struktur data saja. Belum ada poligon, belum ada UI.
 
@@ -143,8 +143,27 @@ Struktur data saja. Belum ada poligon, belum ada UI.
   yang pasangannya kembali ke dirinya, tiap face tertutup melingkar, tiap simpul
   mencapai seluruh half-edge keluarnya. Dipanggil di akhir **setiap** uji operasi,
   bukan sekali di awal.
-- Pemeriksa itu dibuktikan bisa gagal: satu pasangan yang sengaja diputus harus
-  membuatnya menolak.
+- Pemeriksa itu dibuktikan bisa gagal **per klausa**, bukan sekali. Pemeriksa yang
+  satu klausanya diam adalah pemeriksa yang menjaga sebagian, dan yang tidak
+  dijaganya justru bagian yang tak seorang pun tahu tidak dijaga.
+
+  Empat kerusakan diuji lewat pintu belakang khusus uji: pasangan diputus,
+  pasangan diarahkan salah, lingkaran face diputus, dan half-edge yang mengaku
+  milik face lain. Keempatnya ditolak beserta pesan yang menyebut letaknya.
+
+**Yang dikerjakan melebihi kriterianya**, karena keduanya murah dan tajam:
+rumus Euler V − E + F = 2 diperiksa pada kubus (8 − 12 + 6), dan **arah tiap
+normal sisi dihitung** terhadap vektor dari pusat kubus ke pusat sisinya — satu
+quad yang urutan simpulnya terbalik tidak terlihat sebagai galat melainkan
+sebagai lubang di dinding.
+
+Mesh terbuka ikut disahkan sejak awal, bukan ditunda: satu quad menghasilkan
+lingkaran batas sepanjang empat, dan blockout memang dimulai dari satu sisi
+sebelum diekstrusi.
+
+Normal memakai Newell, bukan hasil kali silang dua rusuk pertama — sesudah
+beberapa kali ekstrusi poligon jarang sebidang sempurna, dan dua rusuk pertama
+bisa hampir sejajar.
 
 ### W1 — Poligon · ⬜
 

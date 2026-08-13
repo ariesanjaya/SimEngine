@@ -75,6 +75,15 @@ sim_add_test(SimPhysicsSceneTests
 target_compile_definitions(SimPhysicsSceneTests
     PRIVATE SIM_BUILTIN_DIR="${CMAKE_SOURCE_DIR}/Resources")
 
+# Whitebox: topologi half-edge dan invariannya. Yang diuji di sini adalah
+# struktur, bukan tampilan — dan pemeriksa invariannya sendiri ikut diuji bisa
+# gagal, karena pemeriksa yang tidak bisa gagal tidak menjaga apa pun.
+sim_add_test(SimWhiteboxTests
+    SOURCES
+        WhiteboxTests.cpp
+    DEPS
+        Sim::Whitebox)
+
 sim_add_test(SimEditorTests
     SOURCES
         EditorTests.cpp
