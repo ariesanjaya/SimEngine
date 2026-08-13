@@ -426,6 +426,98 @@ mendarat menggelinding turun lalu jatuh dari tepi peta — yang terbaca sebagai
 pemeriksaan bahwa bolanya tidak bergeser: permukaan yang miring padahal datanya
 rata akan terlihat di situ.
 
+### L6 — Cat yang terlihat di viewport · ⬜
+
+Smoke test sesudah L5 menemukan celah yang tidak terlihat selama viewport 3D
+belum ada: **mengecat layer bekerja sempurna sebagai data dan berhenti di
+situ.**
+
+Yang sudah ada dan sehat — dikunci 66 uji, dan diperiksa ulang lewat smoke test
+dari kuas sampai berkas: bobot per layer, invarian total 255, undo per goresan,
+peta bobot PNG 8-bit per layer, alokasi malas, dan pratinjau di peta 2D panel.
+
+Yang tidak ada: **satu pun jalur dari bobot itu ke layar 3D.** Diverifikasi,
+bukan diduga:
+
+- Mesh ubin menghasilkan **satu ruas bermaterial −1**. Bobot layer tidak
+  memecahnya.
+- `WeightAt`/`ReadWeights` dipanggil di tiga tempat di luar `Sim::Terrain` —
+  panel (peta 2D dan status) dan `Sim::Vegetation` (aturan sebar). Nol di jalur
+  render.
+- `TerrainLayer::material` hanya pernah **ditulis** panel dan **diserialisasi**
+  `TerrainIo`. Tidak ada yang membacanya untuk menggambar.
+- Viewport menggambar terrain dengan satu warna rata.
+
+#### Kenapa ini bukan "texture splatting", dan kenapa itu benar
+
+Renderer ini belum menggambar tekstur pada mesh **sama sekali**. Atribut vertex
+yang sampai ke GPU hanya posisi dan normal; UV dan tangent ikut terunggah di
+dalam `MeshVertex` tetapi tidak pernah dideklarasikan sebagai atribut. Warna
+sebuah permukaan datang dari satu `float4` — per ruas lewat push constant, atau
+per instance.
+
+Splatting bertekstur karena itu menuntut, berurutan: UV sebagai atribut, jalur
+unggah tekstur dari editor, pengelolaan descriptor, dan varian shader yang
+menyampel N tekstur layer. Itu **milestone renderer**, bukan fitur terrain — dan
+ia prasyarat setiap mesh bertekstur, bukan hanya terrain. Menyelundupkannya ke
+dalam rencana terrain berarti mengerjakan E8 dengan nama yang salah.
+
+Yang dikerjakan L6 adalah lapisan di bawahnya, yang tetap berguna sesudah
+tekstur ada: **warna layer dipadukan per simpul menurut bobotnya.** Pada LOD 0
+resolusinya persis satu sampel heightmap — sama dengan resolusi catnya sendiri.
+Ia informasi yang sama dengan yang sudah ditampilkan peta 2D, kini di ruang tiga
+dimensi, dan ia tetap menjadi warna dasar ketika material bertekstur menyusul.
+
+Alternatif yang ditolak: memecah mesh menjadi satu ruas per layer dominan.
+Itu tidak menuntut satu baris pun perubahan renderer — tetapi batas antar layer
+menjadi tajam per segitiga, dan yang dilihat perancang adalah mosaik alih-alih
+peralihan. Cat yang tidak bisa dipadukan bukan cat.
+
+### L6a — Warna simpul dari bobot layer · ⬜
+
+- `MeshData` mendapat larik **sejajar** `colors`, kosong untuk mesh yang tidak
+  punya — bentuk yang sama persis dengan `influences` milik skinning, dan
+  karena alasan yang sama: menambahkannya ke `MeshVertex` membuat setiap mesh
+  di mesin ini membayar enam belas byte per simpul untuk sesuatu yang hanya
+  dipakai terrain.
+- `BuildTileMesh` mengisinya dengan `Σ bobot_i × warna_i`, dengan layer dasar
+  sebagai sisa — aturan yang sama dengan penyimpanannya.
+
+**Kriteria terima**
+- Sampel yang dicat penuh sebuah layer menghasilkan warna layer itu persis;
+  yang tidak tercat menghasilkan warna dasar.
+- Padanan setengah-setengah menghasilkan warna di tengah keduanya, bukan salah
+  satunya.
+- Terrain tanpa layer di atas dasar **tidak** menerbitkan larik warna sama
+  sekali: mesh yang membawa larik seragam adalah memori GPU untuk satu angka
+  yang sudah diketahui.
+- LOD kasar tetap berwarna, dan mengecat menaikkan revisi ubin sehingga
+  meshnya dibangun ulang.
+
+### L6b — Renderer menggambar warna simpul · ⬜
+
+- Buffer vertex kedua, dengan binding ber-stride nol untuk mesh yang tidak
+  punya — pola yang sudah dipakai atribut skin, dan dipakai karena alasan yang
+  sama: Slang mengunci daftar antarmuka entry point sebelum konstanta
+  spesialisasi dinilai.
+- Shader mengalikan warna instance dengan warna simpul.
+
+**Kriteria terima**
+- Mesh tanpa larik warna tergambar persis seperti sebelumnya — tidak ada
+  regresi pada satu pun mesh yang sudah ada.
+- Terrain yang dicat memperlihatkan peralihan yang halus, bukan mosaik.
+
+### L6c — Material layer terhitung terpakai · ⬜
+
+Ditemukan pada smoke test yang sama: `AssetUsage` tidak mengenal terrain, jadi
+material yang dirujuk sebuah layer **tidak terhitung terpakai** — ia bisa
+dilaporkan yatim lalu dihapus, dan yang menghapusnya tidak akan pernah tahu apa
+yang hilang sampai terrainnya dibuka lagi.
+
+**Kriteria terima**
+- Material yang dipakai sebuah layer terrain terhitung terpakai oleh entity yang
+  membawa terrain itu.
+
 ---
 
 ## Risiko
