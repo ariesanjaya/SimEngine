@@ -9,6 +9,7 @@
 #include "Sim/Editor/PropertyGrid.h"
 #include "Sim/Editor/SceneCommands.h"
 #include "Sim/Scene/AssetUsage.h"
+#include "Sim/Whitebox/Collision.h"
 #include "Sim/Scene/Serialization.h"
 
 #if SIM_WITH_LUA
@@ -1631,7 +1632,31 @@ void EditorApp::StartPhysics() {
         SIM_INFO("Editor", "Play without physics: {}", "this build has no PhysX");
         return;
     }
-    if (!physics_.Build(world_)) {
+    // Bentuk whitebox dipasok dari sini, bukan dicari sendiri oleh fisika:
+    // yang bisa mengubah GUID menjadi bentuk adalah yang memegang basis aset.
+    const auto whiteboxShape = [this](scene::Entity entity,
+                                      physics::ColliderGeometry& out) -> bool {
+        const auto* component = world_.TryGet<scene::WhiteboxComponent>(entity);
+        if (component == nullptr || !component->whitebox.IsValid()) {
+            return false;
+        }
+        const assets::AssetRecord* record = assets_.Find(component->whitebox.guid);
+        if (record == nullptr) {
+            return false;
+        }
+        whitebox::WhiteboxMesh* box =
+            whiteboxes_.Get(component->whitebox.guid, assets_.AbsolutePath(*record));
+        if (box == nullptr) {
+            return false;
+        }
+        whitebox::CollisionShape shape = whitebox::BuildCollisionShape(*box);
+        out.points = std::move(shape.points);
+        out.indices = std::move(shape.indices);
+        out.convex = shape.convex;
+        return true;
+    };
+
+    if (!physics_.Build(world_, {}, whiteboxShape)) {
         SIM_WARN("Editor", "Physics could not start: {}", physics_.Error());
         notifications_.Warning("Physics could not start: " + physics_.Error());
         return;
@@ -1647,6 +1672,17 @@ void EditorApp::StartPhysics() {
     if (stats.skippedWithoutCollider > 0) {
         notifications_.Warning(std::to_string(stats.skippedWithoutCollider) +
                                " rigid bodies have no collider and are not simulated");
+    }
+    if (stats.collidersWithoutGeometry > 0) {
+        notifications_.Warning(std::to_string(stats.collidersWithoutGeometry) +
+                               " whitebox colliders could not be read and fell back to a box");
+    }
+    if (stats.concaveDynamic > 0) {
+        // Bukan galat, tetapi bukan pula yang digambar: benda dinamis hanya
+        // boleh memakai selubung cembungnya, dan pada blok cekung selubung itu
+        // menutup lekukannya.
+        notifications_.Warning(std::to_string(stats.concaveDynamic) +
+                               " dynamic whiteboxes are concave, so their hollows are filled in");
     }
     SIM_INFO("Editor", "Physics: {} bodies", stats.bodies);
 }

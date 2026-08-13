@@ -14,7 +14,9 @@
 #include "Sim/Editor/Selection.h"
 #include "Sim/Editor/WhiteboxCommands.h"
 #include "Sim/Editor/WhiteboxStore.h"
+#include "Sim/Editor/Widgets.h"
 #include "Sim/Scene/Components.h"
+#include "Sim/Whitebox/WhiteboxExport.h"
 #include "Sim/Whitebox/WhiteboxIo.h"
 
 #include <imgui.h>
@@ -183,6 +185,40 @@ private:
                 context.notifications->Error("Whitebox not saved: " + error);
             }
         }
+        ImGui::SameLine();
+        if (ImGui::Button("Export as mesh")) {
+            ExportMesh(context, box, path);
+        }
+        widgets::Tooltip(
+            "Writes an .obj beside this asset, replacing the previous export.\n"
+            "Blockout is a starting point: this is how the work leaves the whitebox format.");
+    }
+
+    /// Menulis `.obj` di sebelah asetnya, **menimpa ekspor sebelumnya**.
+    ///
+    /// Menimpa dan bukan menolak: mengekspor ulang sesudah bloknya disunting
+    /// adalah alur yang biasa, bukan yang aneh — dan yang menolak menimpa
+    /// memaksa menghapus berkas lama setiap kali sebuah dinding digeser.
+    void ExportMesh(EditorContext& context, const whitebox::WhiteboxMesh& box,
+                    const std::filesystem::path& path) {
+        std::filesystem::path target = path;
+        target.replace_extension(".obj");
+        const bool existed = std::filesystem::exists(target);
+
+        const whitebox::ExportResult result = whitebox::ExportObj(box, target);
+        if (context.notifications == nullptr) {
+            return;
+        }
+        if (!result.ok) {
+            context.notifications->Error("Export failed: " + result.error);
+            return;
+        }
+        // Dipindai ulang supaya hasilnya langsung menjadi aset. Berkas yang ada
+        // di disk tetapi tidak ada di Asset Browser terlihat seperti ekspor yang
+        // gagal diam-diam.
+        context.assets->ScanNow();
+        context.notifications->Success(target.filename().string() +
+                                       (existed ? " updated" : " created"));
     }
 
     void Apply(EditorContext& context, whitebox::WhiteboxMesh& box, const Uuid& guid,

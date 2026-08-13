@@ -379,16 +379,79 @@ Penetapan material dipisahkan dari perubahan bentuk: menyimpan cuplikan mesh utu
 untuk mengganti satu bilangan bulat berarti riwayat yang penuh oleh salinan
 geometri yang tidak berubah.
 
-### W6 — Collider dan ekspor · ⬜
+### W6 — Collider dan ekspor · ✅
 
 Whitebox yang bisa ditabrak, dan jalur keluar menuju mesh sungguhan.
 
 **Kriteria terima**
-- Whitebox menghasilkan collider yang cocok dengan yang digambar — memakai
-  convex hull yang sudah ada dari `ShapeKind::Cylinder`, atau dipecah menjadi
-  beberapa convex bila cekung.
-- Blockout bisa diekspor menjadi aset mesh biasa, sehingga ia titik awal yang
-  bisa ditinggalkan — bukan format yang mengurung pekerjaan di dalamnya.
+- Whitebox menghasilkan collider yang cocok dengan yang digambar. ✅
+
+  `ColliderShape::Whitebox` mengambil bentuknya dari komponen Whitebox entity
+  itu. Diuji: kubus satuan berskala 4 × 3 × 4 menahan bola berjari-jari 0,25
+  pada y = 1,75, dan bola kedua di x = 1,5 ikut tertahan — dua angka yang
+  keduanya salah bila skalanya diabaikan. Mengabaikan skalanya menggugurkan uji
+  ini.
+- Blockout bisa diekspor menjadi aset mesh biasa. ✅
+
+  "Export as mesh" di panel Whitebox menulis `.obj` beserta `.mtl` di sebelah
+  asetnya. Diuji dengan memuatnya kembali lewat `LoadMesh` mesin ini sendiri:
+  bentuknya sampai, dan pembagian materialnya ikut sampai sebagai dua ruas
+  alih-alih runtuh menjadi satu.
+
+**Bukan convex decomposition, dan itu keputusan.** Kriteria semula menyebut
+"dipecah menjadi beberapa convex bila cekung". Yang dikerjakan bukan itu:
+
+- **Statis dan kinematik memakai segitiganya apa adanya** (`PxTriangleMesh`).
+  Untuk blockout — yang hampir seluruhnya geometri level yang diam — ini bukan
+  hampiran melainkan **persis**, dan cekungan sedalam apa pun terjaga. Convex
+  decomposition justru akan menukar bentuk yang persis dengan hampiran.
+- **Dinamis memakai selubung cembungnya**, karena PhysX menolak mesh segitiga
+  yang bergerak: mesh segitiga tidak punya bagian dalam, jadi tidak ada yang
+  bisa menjawab "seberapa dalam benda ini menembus" — pertanyaan yang harus
+  dijawab setiap kontak dinamis. Blok cekung yang dinamis **dilaporkan**, bukan
+  didiamkan: lekukannya terisi, dan yang tidak diberitahu akan mengira
+  solvernya rusak.
+
+Yang tersisa bagi blok cekung yang harus bergerak adalah memecahnya menjadi
+beberapa entity — atau mengekspornya, yang kini ada jalannya. V-HACD bisa
+menyusul kalau kebutuhannya muncul; menambahkannya sekarang berarti satu
+dependensi lagi untuk kasus yang belum pernah diminta.
+
+**Uji yang memisahkan kedua pilihan itu.** Seluruh uji lain memakai bentuk
+cembung, yang selubungnya sama persis dengan segitiganya — jadi tak satu pun
+membedakan `TriangleMesh` dari `ConvexHull`. Yang membedakannya sebuah palung:
+lantai di y = 1 dengan bibir di y = 2. Bola jatuh ke dasarnya (1,25) dengan
+segitiga, dan tertahan di bibirnya (2,25) dengan selubung. Memaksa yang statik
+memakai selubung menggugurkan uji itu.
+
+**Fisika tidak membuka berkas.** Bentuknya dipasok lewat `ColliderGeometrySource`
+— sebuah callback yang menjawab "bentuk entity ini apa?". Editor memasangnya di
+atas `WhiteboxStore`; pemuat level memasang miliknya sendiri. Menariknya ke
+dalam `Sim::Physics` berarti modul itu ikut bergantung pada `Sim::Assets`,
+`Sim::Whitebox`, dan setiap format yang menyusul — dan `SimHeadless` ikut
+membayarnya.
+
+Bentuk yang tidak bisa diambil **mundur ke kotak**, bukan menghilangkan
+bendanya: benda yang dilewatkan simulasi terlihat sebagai benda yang jatuh
+menembus lantai — gejala yang mengarahkan orang mencari bug solver — sementara
+kotak yang salah ukuran terlihat sebagai kotak yang salah ukuran. `Stats`
+menghitungnya, dan notifikasi menyebutkannya.
+
+Bentuk tabrakan dibangun **terpisah dari mesh yang digambar**. Yang digambar
+dipecah per material supaya renderer mengganti material sekali per ruas, dan
+pemecahan itu menggandakan simpul di setiap batas ruas — kubus menjadi 24 simpul
+alih-alih 8. Solver tidak peduli material sama sekali.
+
+Ekspornya memakai OBJ karena tiga alasan sekaligus: mesin ini sudah bisa
+membacanya kembali, setiap DCC bisa membukanya, dan ia teks — yang berarti
+hasilnya bisa diperiksa mata dan diuji tanpa memuat pustaka apa pun. `.mtl`-nya
+bukan hiasan: pembaca OBJ mengelompokkan segitiga menurut material yang
+**terdaftar**, jadi berkas tanpanya kembali sebagai satu ruas dan enam sisi
+bermaterial berbeda menjadi satu. Angkanya ditulis dengan `%.6g`, bukan
+`std::to_string`: yang kedua menghormati locale, dan locale berkoma menghasilkan
+`v 0,5 0,5 0,5` — berkas yang tampak wajar dan ditolak setiap pembaca OBJ di
+dunia, dengan kegagalan yang bergantung pada mesin yang mengekspor sehingga tak
+pernah muncul di mesin yang mengujinya.
 
 ---
 

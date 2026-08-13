@@ -308,6 +308,17 @@ enum class ColliderShape : uint8_t {
     /// 0,5% lebih rendah daripada jari-jari sesungguhnya — selisih yang tidak
     /// terlihat mata.
     Cylinder,
+    /// Bentuk diambil dari whitebox yang dibawa entity ini.
+    ///
+    /// **Bentuknya tersimpan di aset, bukan di komponen ini.** Menyalin ratusan
+    /// titik ke dalam level berarti dua salinan satu bentuk, dan yang kedua
+    /// tidak ikut berubah ketika bloknya disunting — collider yang cocok pada
+    /// hari ia dibuat dan meleset selamanya sesudahnya.
+    ///
+    /// Statis dan kinematik memakai segitiganya apa adanya, sehingga ruangan
+    /// yang cekung tetap bisa dimasuki. Dinamis memakai selubung cembungnya,
+    /// karena PhysX menolak mesh segitiga yang bergerak.
+    Whitebox,
 };
 
 /// Bentuk yang ditabrak, terpisah dari mesh yang digambar.

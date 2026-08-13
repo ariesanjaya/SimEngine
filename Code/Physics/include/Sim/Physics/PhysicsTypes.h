@@ -3,6 +3,7 @@
 #include "Sim/Core/Math.h"
 
 #include <cstdint>
+#include <vector>
 
 /// Simulasi fisika di atas PhysX 5.
 ///
@@ -62,6 +63,19 @@ enum class ShapeKind : uint8_t {
     /// rendah daripada jari-jari sesungguhnya. Itu selisih yang tidak terlihat
     /// mata dan tidak layak dibayar dengan lebih banyak sisi.
     Cylinder,
+    /// Selubung cembung dari sekumpulan titik di `ShapeDesc::points`.
+    ///
+    /// Bentuk yang sesungguhnya adalah **selubung** titik-titik itu, bukan
+    /// titik-titiknya: cekungan apa pun ikut terisi. Untuk blockout yang memang
+    /// cembung ia persis; untuk yang cekung, `TriangleMesh` yang benar.
+    ConvexHull,
+    /// Segitiga apa adanya: `points` sebagai simpul, `indices` bertiga-tiga.
+    ///
+    /// **Hanya untuk benda statis dan kinematik.** PhysX menolaknya pada benda
+    /// dinamis, dan alasannya bukan sewenang-wenang: mesh segitiga tidak punya
+    /// bagian dalam, jadi tidak ada yang bisa menjawab "seberapa dalam benda
+    /// ini menembus" — pertanyaan yang harus dijawab setiap kontak dinamis.
+    TriangleMesh,
 };
 
 /// Bentuk tabrakan beserta ukurannya.
@@ -82,6 +96,16 @@ struct ShapeDesc {
     /// Posisi dan putaran bentuk relatif terhadap benda yang memilikinya.
     Vec3 localPosition{0.0f};
     Quat localRotation{1.0f, 0.0f, 0.0f, 0.0f};
+
+    /// Titik untuk `ConvexHull`, simpul untuk `TriangleMesh`.
+    ///
+    /// Sudah dalam ruang lokal benda dan **sudah berskala**. Skalanya diterapkan
+    /// oleh yang menyusun bentuk ini, bukan di sini: geometri yang membawa
+    /// skalanya sendiri berarti dua tempat menyimpan ukuran satu benda, dan
+    /// keduanya akhirnya tidak sepakat.
+    std::vector<Vec3> points;
+    /// Segitiga untuk `TriangleMesh`: tiga indeks ke `points` per segitiga.
+    std::vector<uint32_t> indices;
 };
 
 /// Sifat permukaan.

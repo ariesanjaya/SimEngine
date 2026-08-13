@@ -106,6 +106,62 @@ physx::PxConvexMesh* CookCylinder(physx::PxPhysics& physics,
     return PxCreateConvexMesh(cooking, desc, physics.getPhysicsInsertionCallback());
 }
 
+/// Selubung cembung dari sekumpulan titik.
+///
+/// Titiknya diserahkan apa adanya dan PhysX yang menyusun sisinya
+/// (`eCOMPUTE_CONVEX`) — alasan yang sama dengan silinder di atas: menyusunnya
+/// sendiri adalah satu lagi tempat yang bisa salah untuk hasil yang sama persis.
+///
+/// Batas 255 simpul itu milik PhysX, bukan pilihan di sini. Blockout tidak
+/// mendekatinya, tetapi menyebutkannya membuat kegagalan pada mesh yang datang
+/// dari luar bisa dibaca.
+physx::PxConvexMesh* CookConvexHull(physx::PxPhysics& physics,
+                                    const physx::PxCookingParams& cooking,
+                                    const std::vector<Vec3>& points) {
+    if (points.size() < 4) {
+        return nullptr;
+    }
+    std::vector<physx::PxVec3> converted;
+    converted.reserve(points.size());
+    for (const Vec3& point : points) {
+        converted.push_back(ToPx(point));
+    }
+
+    physx::PxConvexMeshDesc desc;
+    desc.points.count = static_cast<physx::PxU32>(converted.size());
+    desc.points.stride = sizeof(physx::PxVec3);
+    desc.points.data = converted.data();
+    desc.flags = physx::PxConvexFlag::eCOMPUTE_CONVEX;
+    desc.vertexLimit = 255;
+
+    return PxCreateConvexMesh(cooking, desc, physics.getPhysicsInsertionCallback());
+}
+
+/// Mesh segitiga apa adanya, untuk benda statis.
+physx::PxTriangleMesh* CookTriangleMesh(physx::PxPhysics& physics,
+                                        const physx::PxCookingParams& cooking,
+                                        const std::vector<Vec3>& points,
+                                        const std::vector<uint32_t>& indices) {
+    if (points.size() < 3 || indices.size() < 3 || indices.size() % 3 != 0) {
+        return nullptr;
+    }
+    std::vector<physx::PxVec3> converted;
+    converted.reserve(points.size());
+    for (const Vec3& point : points) {
+        converted.push_back(ToPx(point));
+    }
+
+    physx::PxTriangleMeshDesc desc;
+    desc.points.count = static_cast<physx::PxU32>(converted.size());
+    desc.points.stride = sizeof(physx::PxVec3);
+    desc.points.data = converted.data();
+    desc.triangles.count = static_cast<physx::PxU32>(indices.size() / 3);
+    desc.triangles.stride = 3 * sizeof(uint32_t);
+    desc.triangles.data = indices.data();
+
+    return PxCreateTriangleMesh(cooking, desc, physics.getPhysicsInsertionCallback());
+}
+
 struct PhysicsWorld::Impl {
     physx::PxDefaultAllocator allocator;
     physx::PxFoundation* foundation = nullptr;
@@ -482,6 +538,42 @@ BodyHandle PhysicsWorld::AddBody(const BodyDesc& desc) {
             // Hull-nya dirujuk bentuknya; melepas rujukan kita di sini membuat
             // PhysX yang memiliki masa hidupnya.
             hull->release();
+            break;
+        }
+        case ShapeKind::ConvexHull: {
+            physx::PxCookingParams cooking(physics->getTolerancesScale());
+            physx::PxConvexMesh* hull = CookConvexHull(*physics, cooking, desc.shape.points);
+            if (hull == nullptr) {
+                impl_->error = "cooking the convex hull failed; it needs at least four points "
+                               "that do not all lie in one plane";
+                material->release();
+                return BodyHandle::Invalid;
+            }
+            shape = physics->createShape(physx::PxConvexMeshGeometry(hull), *material);
+            hull->release();
+            break;
+        }
+        case ShapeKind::TriangleMesh: {
+            // Ditolak di sini, bukan diserahkan ke PhysX. Yang mengembalikan
+            // nullptr beberapa lapis di dalam meninggalkan pemanggil dengan
+            // "createShape failed" — benar, dan sama sekali tidak menolong.
+            if (desc.kind == BodyKind::Dynamic) {
+                impl_->error = "a triangle mesh cannot be dynamic; make the body static or "
+                               "kinematic, or use a convex hull";
+                material->release();
+                return BodyHandle::Invalid;
+            }
+            physx::PxCookingParams cooking(physics->getTolerancesScale());
+            physx::PxTriangleMesh* mesh =
+                CookTriangleMesh(*physics, cooking, desc.shape.points, desc.shape.indices);
+            if (mesh == nullptr) {
+                impl_->error = "cooking the triangle mesh failed; it needs at least one triangle "
+                               "and an index count that is a multiple of three";
+                material->release();
+                return BodyHandle::Invalid;
+            }
+            shape = physics->createShape(physx::PxTriangleMeshGeometry(mesh), *material);
+            mesh->release();
             break;
         }
     }
@@ -921,6 +1013,29 @@ ArticulationHandle PhysicsWorld::AddArticulation(const ArticulationDesc& desc) {
                 hulls.push_back(hull);
                 break;
             }
+            case ShapeKind::ConvexHull: {
+                physx::PxCookingParams cooking(impl_->physics->getTolerancesScale());
+                physx::PxConvexMesh* hull =
+                    CookConvexHull(*impl_->physics, cooking, linkDesc.shape.points);
+                if (hull == nullptr) {
+                    impl_->error = "cooking an articulation link convex hull failed";
+                    material->release();
+                    articulation->release();
+                    return ArticulationHandle::Invalid;
+                }
+                geometry = physx::PxConvexMeshGeometry(hull);
+                hulls.push_back(hull);
+                break;
+            }
+            case ShapeKind::TriangleMesh:
+                // Link artikulasi selalu dinamis, dan mesh segitiga tidak bisa
+                // dinamis. Menolaknya di sini menyebut sebabnya; membiarkannya
+                // lewat menghasilkan galat PhysX yang menyebut nomor aktor.
+                impl_->error = "an articulation link cannot use a triangle mesh; it is always "
+                               "dynamic, and triangle meshes cannot be";
+                material->release();
+                articulation->release();
+                return ArticulationHandle::Invalid;
             case ShapeKind::Plane:
                 // Bidang tak hingga tidak bisa menjadi bagian tubuh yang
                 // bergerak; ditolak di sini alih-alih dibiarkan PhysX menegur.

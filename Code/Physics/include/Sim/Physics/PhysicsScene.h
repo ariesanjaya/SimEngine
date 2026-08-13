@@ -4,6 +4,7 @@
 #include "Sim/Scene/World.h"
 
 #include <cstddef>
+#include <functional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -39,6 +40,16 @@ struct PhysicsSceneStats {
     /// sama; yang dipakai adalah kendaraannya, dan yang lain dilaporkan.
     std::size_t vehiclesWithRigidBody = 0;
 
+    /// Collider ber-`Whitebox` yang bentuknya tidak bisa diambil — asetnya
+    /// hilang, atau tidak ada yang memasok bentuk pada build ini. Bentuknya
+    /// mundur ke kotak, dan angka ini yang menjelaskan mengapa yang ditabrak
+    /// tidak seperti yang digambar.
+    std::size_t collidersWithoutGeometry = 0;
+    /// Whitebox cekung yang dipasang pada benda dinamis. Cekungannya terisi oleh
+    /// selubung cembungnya — satu-satunya bentuk yang bisa bergerak menurut
+    /// PhysX — jadi ruangannya tertutup dan lubangnya rata.
+    std::size_t concaveDynamic = 0;
+
     std::size_t joints = 0;
     /// Sendi yang dilewati karena ujungnya tidak bisa dipakai — entity-nya
     /// sendiri bukan benda fisika, atau `connectedBody` menunjuk GUID yang tidak
@@ -53,13 +64,36 @@ struct PhysicsSceneStats {
 /// Stop. Menyunting scene selama simulasi berjalan tidak tercermin — itu
 /// disengaja, karena keadaan solver tidak bisa dibangun ulang di tengah jalan
 /// tanpa membuang momentum setiap benda.
+/// Geometri tabrakan yang datangnya dari aset, bukan dari komponen.
+struct ColliderGeometry {
+    std::vector<Vec3> points;
+    /// Tiga indeks per segitiga. Kosong berarti hanya selubung cembungnya yang
+    /// bisa dipakai.
+    std::vector<uint32_t> indices;
+    /// True bila bentuknya sudah cembung, sehingga selubungnya persis dan tidak
+    /// ada yang perlu diperingatkan.
+    bool convex = false;
+};
+
+/// Menjawab "bentuk tabrakan entity ini apa?" untuk collider yang bentuknya
+/// tersimpan di aset.
+///
+/// **Modul ini tidak membuka berkas apa pun.** Yang bisa mengubah GUID menjadi
+/// bentuk adalah yang memegang basis aset, dan itu editor atau pemuat level —
+/// bukan fisika. Menariknya ke sini berarti `Sim::Physics` ikut bergantung pada
+/// `Sim::Assets`, `Sim::Whitebox`, dan setiap format yang menyusul.
+///
+/// Mengembalikan false bila entity itu tidak punya bentuk untuk diberikan.
+using ColliderGeometrySource = std::function<bool(scene::Entity, ColliderGeometry&)>;
+
 class PhysicsScene {
 public:
     /// Membangun benda dari seluruh entity ber-`RigidBodyComponent`.
     ///
     /// False bila PhysX tidak ada di build ini; `Error()` menyebutnya. Scene-nya
     /// sendiri tidak diubah sama sekali.
-    bool Build(scene::World& world, const WorldDesc& desc = {});
+    bool Build(scene::World& world, const WorldDesc& desc = {},
+               const ColliderGeometrySource& geometry = {});
 
     void Clear();
     bool IsValid() const { return simulation_.IsValid(); }

@@ -204,8 +204,9 @@ void RegisterCoreComponents() {
 
         types.Type<ColliderComponent>("Collider")
             .Field<&ColliderComponent::shape>("shape")
-            .EnumNames({"Box", "Sphere", "Capsule", "Plane", "Cylinder"})
-            .Tooltip("Plane tak hingga, hanya masuk akal untuk benda Static")
+            .EnumNames({"Box", "Sphere", "Capsule", "Plane", "Cylinder", "Whitebox"})
+            .Tooltip("Plane tak hingga hanya untuk Static; Whitebox mengambil bentuknya "
+                     "dari komponen Whitebox entity ini")
             .Field<&ColliderComponent::halfExtents>("halfExtents")
             .Label("Half Extents")
             .Field<&ColliderComponent::radius>("radius")

@@ -1,9 +1,12 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 
+#include "Sim/Assets/Importer.h"
+#include "Sim/Whitebox/Collision.h"
 #include "Sim/Whitebox/HalfEdgeMesh.h"
 #include "Sim/Whitebox/Operations.h"
 #include "Sim/Whitebox/Picking.h"
 #include "Sim/Whitebox/PolygonOutline.h"
+#include "Sim/Whitebox/WhiteboxExport.h"
 #include "Sim/Whitebox/WhiteboxIo.h"
 #include "Sim/Whitebox/WhiteboxMesh.h"
 #include "Sim/Whitebox/Polygon.h"
@@ -958,4 +961,205 @@ TEST_CASE("sisi yang tidak ada tidak menghasilkan bentuk") {
     WhiteboxMesh box = WhiteboxMesh::MakeCube();
     CHECK(BuildPolygonOutline(box, PolygonHandle::Invalid).empty());
     CHECK(BuildPolygonOutline(box, static_cast<PolygonHandle>(999)).empty());
+}
+
+// ============================================================================
+// W6 — bentuk tabrakan
+// ============================================================================
+
+TEST_CASE("bentuk tabrakan kubus: delapan simpul, dua belas segitiga, cembung") {
+    const WhiteboxMesh box = WhiteboxMesh::MakeCube();
+    const CollisionShape shape = BuildCollisionShape(box);
+
+    // Simpulnya dipakai apa adanya — enam quad berbagi delapan simpul. Mesh
+    // gambar tidak bisa menjanjikan itu: ia dipecah per material, dan tiap
+    // pemecahan menggandakan simpul di batasnya.
+    CHECK(shape.points.size() == 8);
+    CHECK(shape.indices.size() == 36);  // 6 quad × 2 segitiga × 3 indeks
+    CHECK(shape.convex);
+
+    // Setiap indeks menunjuk simpul yang ada, dan tidak ada segitiga yang
+    // menyebut satu simpul dua kali.
+    for (std::size_t i = 0; i + 2 < shape.indices.size(); i += 3) {
+        const uint32_t a = shape.indices[i];
+        const uint32_t b = shape.indices[i + 1];
+        const uint32_t c = shape.indices[i + 2];
+        REQUIRE(a < shape.points.size());
+        REQUIRE(b < shape.points.size());
+        REQUIRE(c < shape.points.size());
+        CHECK(a != b);
+        CHECK(b != c);
+        CHECK(a != c);
+    }
+}
+
+TEST_CASE("mengekstrusi satu sisi kubus tetap menghasilkan bentuk cembung") {
+    WhiteboxMesh box = WhiteboxMesh::MakeCube();
+    const std::vector<PolygonHandle> sides = box.Polygons().Polygons();
+    REQUIRE(box.Extrude(sides.front(), 1.5f).ok);
+
+    // Balok tetap cembung. Kalau uji cembung menjawab "tidak" di sini, ia
+    // menolak bentuk paling biasa yang dihasilkan alat ini — dan setiap blok
+    // dinamis akan membawa peringatan yang tidak berdasar.
+    CHECK(IsConvex(box));
+    CHECK(BuildCollisionShape(box).convex);
+}
+
+TEST_CASE("blok berbentuk L dikenali cekung") {
+    // **Ini yang menentukan collider mana yang dipakai.** Bentuk cekung yang
+    // dikira cembung menghasilkan benda yang menabrak udara di lekukannya, dan
+    // tidak ada satu pun pesan yang menjelaskannya.
+    //
+    // Prisma L: alasnya enam simpul, ditinggikan menjadi balok.
+    const std::vector<Vec2> profile = {
+        Vec2(0.0f, 0.0f), Vec2(2.0f, 0.0f), Vec2(2.0f, 1.0f),
+        Vec2(1.0f, 1.0f), Vec2(1.0f, 2.0f), Vec2(0.0f, 2.0f),
+    };
+
+    WhiteboxData data;
+    const uint32_t count = static_cast<uint32_t>(profile.size());
+    for (const Vec2& p : profile) {
+        data.positions.push_back(Vec3(p.x, 0.0f, p.y));
+    }
+    for (const Vec2& p : profile) {
+        data.positions.push_back(Vec3(p.x, 1.0f, p.y));
+    }
+
+    // Alas menghadap ke bawah, tutup menghadap ke atas, dan dinding di antaranya.
+    std::vector<uint32_t> bottom;
+    for (uint32_t i = 0; i < count; ++i) {
+        bottom.push_back(i);
+    }
+    std::vector<uint32_t> top;
+    for (uint32_t i = count; i-- > 0;) {
+        top.push_back(count + i);
+    }
+    data.faces.push_back(bottom);
+    data.faces.push_back(top);
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t next = (i + 1) % count;
+        data.faces.push_back({next, i, count + i, count + next});
+    }
+    data.faceMaterials.assign(data.faces.size(), kNoMaterial);
+
+    WhiteboxMesh box;
+    std::string error;
+    REQUIRE_MESSAGE(WhiteboxMesh::Build(box, data, error), error);
+    REQUIRE(box.CheckInvariants().ok);
+
+    CHECK_FALSE(IsConvex(box));
+    CHECK_FALSE(BuildCollisionShape(box).convex);
+
+    // Dan kubus di sebelahnya tetap dijawab cembung, supaya yang gagal di atas
+    // adalah bentuknya, bukan pemeriksanya yang selalu menjawab "cekung".
+    CHECK(IsConvex(WhiteboxMesh::MakeCube()));
+}
+
+// ============================================================================
+// W6 — ekspor ke mesh biasa
+// ============================================================================
+
+namespace {
+
+std::size_t CountLines(const std::string& text, const std::string& prefix) {
+    std::size_t count = 0;
+    std::size_t at = 0;
+    while (at < text.size()) {
+        const std::size_t end = text.find('\n', at);
+        const std::string line = text.substr(at, end == std::string::npos ? end : end - at);
+        if (line.rfind(prefix, 0) == 0) {
+            ++count;
+        }
+        if (end == std::string::npos) {
+            break;
+        }
+        at = end + 1;
+    }
+    return count;
+}
+
+}  // namespace
+
+TEST_CASE("obj yang ditulis menyebut satu material per slot yang dipakai") {
+    WhiteboxMesh box = WhiteboxMesh::MakeCube();
+    const std::vector<PolygonHandle> sides = box.Polygons().Polygons();
+    REQUIRE(sides.size() == 6);
+    REQUIRE(box.SetPolygonMaterial(sides[0], 0));
+    REQUIRE(box.SetPolygonMaterial(sides[1], 0));
+    REQUIRE(box.SetPolygonMaterial(sides[2], 3));
+
+    const std::string obj = BuildObj(box, "blok.mtl");
+
+    // Enam quad, simpulnya tidak dibagi antar sisi supaya rusuknya tetap tajam:
+    // 24 simpul, 12 segitiga.
+    CHECK(CountLines(obj, "v ") == 24);
+    CHECK(CountLines(obj, "vn ") == 24);
+    CHECK(CountLines(obj, "vt ") == 24);
+    CHECK(CountLines(obj, "f ") == 12);
+
+    // Tiga slot dipakai — 0, 3, dan yang belum ditetapkan — jadi tiga `usemtl`,
+    // bukan enam. Satu per sisi berarti enam panggilan gambar untuk hasil yang
+    // sama, dan itu justru yang dihindari pengelompokan per material.
+    CHECK(CountLines(obj, "usemtl ") == 3);
+    CHECK(obj.find("usemtl whitebox_slot_0") != std::string::npos);
+    CHECK(obj.find("usemtl whitebox_slot_3") != std::string::npos);
+    CHECK(obj.find("usemtl whitebox_unassigned") != std::string::npos);
+    CHECK(obj.find("mtllib blok.mtl") != std::string::npos);
+
+    // Dan `.mtl`-nya menyebut nama yang sama persis. Nama yang berselisih
+    // membuat pembacanya jatuh ke satu ruas tunggal — enam sisi bermaterial
+    // berbeda kembali sebagai satu.
+    const std::string mtl = BuildMtl(box);
+    CHECK(CountLines(mtl, "newmtl ") == 3);
+    CHECK(mtl.find("newmtl whitebox_slot_0") != std::string::npos);
+    CHECK(mtl.find("newmtl whitebox_slot_3") != std::string::npos);
+    CHECK(mtl.find("newmtl whitebox_unassigned") != std::string::npos);
+
+    // Titik desimal, bukan koma: berkas ber-koma tampak wajar dan ditolak setiap
+    // pembaca OBJ — dan kegagalannya bergantung pada locale mesin yang
+    // mengekspor, jadi ia tidak pernah muncul di mesin yang mengujinya.
+    CHECK(obj.find(',') == std::string::npos);
+}
+
+TEST_CASE("blockout yang diekspor bisa dimuat kembali sebagai mesh biasa") {
+    // **Inilah kriteria terima W6 yang sesungguhnya**: bahwa pekerjaannya bisa
+    // meninggalkan format ini. Menguji teksnya saja membuktikan sesuatu tertulis;
+    // memuatnya kembali membuktikan sesuatu terbaca.
+    const std::filesystem::path directory =
+        std::filesystem::temp_directory_path() / "sim-whitebox-export";
+    std::error_code ec;
+    std::filesystem::remove_all(directory, ec);
+    std::filesystem::create_directories(directory, ec);
+    const std::filesystem::path path = directory / "Ruang.obj";
+
+    WhiteboxMesh box = WhiteboxMesh::MakeCube();
+    const std::vector<PolygonHandle> sides = box.Polygons().Polygons();
+    // Diekstrusi supaya yang diuji bukan kubus bawaan: bentuk yang lahir dari
+    // penyuntingan, seperti blockout sungguhan.
+    REQUIRE(box.Extrude(sides.front(), 1.0f).ok);
+    REQUIRE(box.SetPolygonMaterial(sides.back(), 2));
+
+    const ExportResult result = ExportObj(box, path);
+    INFO(result.error);
+    REQUIRE(result.ok);
+    CHECK(std::filesystem::exists(path));
+    CHECK(std::filesystem::exists(directory / "Ruang.mtl"));
+
+    std::string error;
+    const assets::MeshData mesh = assets::LoadMesh(path, error);
+    INFO(error);
+    REQUIRE(mesh.IsValid());
+
+    // Bentuknya sampai: kubus satuan yang satu sisinya didorong satu meter
+    // membentang 2 m pada sumbu itu dan 1 m pada dua lainnya.
+    const Vec3 size = mesh.boundsMax - mesh.boundsMin;
+    const float longest = std::max({size.x, size.y, size.z});
+    const float shortest = std::min({size.x, size.y, size.z});
+    CHECK(longest == doctest::Approx(2.0f).epsilon(0.01));
+    CHECK(shortest == doctest::Approx(1.0f).epsilon(0.01));
+
+    // Dan pembagian materialnya ikut sampai, bukan runtuh menjadi satu ruas.
+    CHECK(mesh.parts.size() == 2);
+
+    std::filesystem::remove_all(directory, ec);
 }

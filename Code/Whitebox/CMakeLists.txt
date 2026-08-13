@@ -1,10 +1,12 @@
 sim_add_library(Whitebox
     SOURCES
+        src/Collision.cpp
         src/HalfEdgeMesh.cpp
         src/Operations.cpp
         src/Picking.cpp
         src/PolygonOutline.cpp
         src/Polygon.cpp
+        src/WhiteboxExport.cpp
         src/WhiteboxIo.cpp
         src/WhiteboxMesh.cpp
     PUBLIC_DEPS

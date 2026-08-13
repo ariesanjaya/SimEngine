@@ -135,6 +135,10 @@ ShapeKind ToShapeKind(scene::ColliderShape shape) {
         case scene::ColliderShape::Capsule: return ShapeKind::Capsule;
         case scene::ColliderShape::Plane: return ShapeKind::Plane;
         case scene::ColliderShape::Cylinder: return ShapeKind::Cylinder;
+        // Whitebox tidak punya padanan langsung: bentuknya ditentukan oleh
+        // benda yang memakainya — segitiga bila diam, selubung bila bergerak —
+        // jadi yang memutuskannya adalah `Build`, bukan pemetaan ini.
+        case scene::ColliderShape::Whitebox: return ShapeKind::ConvexHull;
     }
     return ShapeKind::Box;
 }
@@ -165,9 +169,28 @@ ShapeDesc ToShapeDesc(const scene::ColliderComponent& collider, const Vec3& scal
             shape.halfExtents.x = collider.halfHeight * uniform;
             break;
         case ShapeKind::Plane:
+        case ShapeKind::ConvexHull:
+        case ShapeKind::TriangleMesh:
+            // Titik-titiknya diisi `Build`, yang punya sumber bentuknya.
             break;
     }
     return shape;
+}
+
+/// Menyalin bentuk dari aset ke dalam `ShapeDesc`, sudah berskala.
+///
+/// **Skalanya diterapkan pada titiknya, bukan disimpan di sebelahnya.** Itu yang
+/// membuat whitebox boleh diskalakan tidak seragam sementara bola dan kapsul
+/// tidak: sebuah titik bisa diregangkan ke satu arah, sebuah jari-jari tidak.
+void ApplyGeometry(ShapeDesc& shape, const ColliderGeometry& geometry, const Vec3& scale,
+                   bool asTriangleMesh) {
+    shape.kind = asTriangleMesh ? ShapeKind::TriangleMesh : ShapeKind::ConvexHull;
+    shape.points.clear();
+    shape.points.reserve(geometry.points.size());
+    for (const Vec3& point : geometry.points) {
+        shape.points.push_back(point * scale);
+    }
+    shape.indices = asTriangleMesh ? geometry.indices : std::vector<uint32_t>{};
 }
 
 /// Menelusuri hierarki dari akar, induk sebelum anak.
@@ -187,7 +210,8 @@ void CollectDepthFirst(const scene::World& world, scene::Entity entity,
 
 }  // namespace
 
-bool PhysicsScene::Build(scene::World& world, const WorldDesc& desc) {
+bool PhysicsScene::Build(scene::World& world, const WorldDesc& desc,
+                         const ColliderGeometrySource& geometry) {
     Clear();
 
     if (!simulation_.Create(desc)) {
@@ -232,6 +256,39 @@ bool PhysicsScene::Build(scene::World& world, const WorldDesc& desc) {
         BodyDesc bodyDesc;
         bodyDesc.kind = ToBodyKind(body->kind);
         bodyDesc.shape = ToShapeDesc(*collider, placement.scale);
+
+        if (collider->shape == scene::ColliderShape::Whitebox) {
+            ColliderGeometry shape;
+            if (geometry && geometry(entity, shape) && shape.points.size() >= 4) {
+                // Mesh segitiga hanya untuk yang tidak bergerak. Yang bergerak
+                // memakai selubungnya, dan bila bentuknya cekung selubung itu
+                // memang berbeda dari yang digambar — dikatakan, bukan
+                // didiamkan.
+                const bool movable = bodyDesc.kind == BodyKind::Dynamic;
+                const bool asTriangleMesh = !movable && !shape.indices.empty();
+                if (movable && !shape.convex) {
+                    ++stats_.concaveDynamic;
+                    SIM_WARN("Physics",
+                             "'{}' is a concave whitebox on a dynamic body, so its convex hull is "
+                             "used and the hollows are filled in",
+                             world.NameOf(entity));
+                }
+                ApplyGeometry(bodyDesc.shape, shape, placement.scale, asTriangleMesh);
+            } else {
+                // Mundur ke kotak, bukan melewatkan bendanya. Benda yang hilang
+                // dari simulasi terlihat sebagai benda yang jatuh menembus
+                // lantai; kotak yang salah ukuran terlihat sebagai kotak yang
+                // salah ukuran, dan itu bisa dilacak.
+                ++stats_.collidersWithoutGeometry;
+                SIM_WARN("Physics",
+                         "'{}' asks for a Whitebox collider but no shape could be read, so a box "
+                         "is used instead",
+                         world.NameOf(entity));
+                bodyDesc.shape.kind = ShapeKind::Box;
+                bodyDesc.shape.halfExtents = collider->halfExtents * glm::abs(placement.scale);
+            }
+        }
+
         bodyDesc.material.staticFriction = collider->staticFriction;
         bodyDesc.material.dynamicFriction = collider->dynamicFriction;
         bodyDesc.material.restitution = collider->restitution;

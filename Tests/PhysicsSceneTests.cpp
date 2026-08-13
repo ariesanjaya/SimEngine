@@ -690,3 +690,186 @@ TEST_CASE("prefab Physics Cylinder jatuh ke atas Ground") {
     CHECK(rest > 0.45f);
     CHECK(rest < 0.51f);
 }
+
+// ============================================================================
+// W6 — collider whitebox
+// ============================================================================
+
+namespace {
+
+/// Bentuk kubus satuan sebagai geometri collider, ditulis di sini alih-alih
+/// diambil dari `Sim::Whitebox`.
+///
+/// **Uji ini menguji jembatannya, bukan pembangun bentuknya.** Mengambilnya dari
+/// modul yang sama berarti satu bug pemetaan simpul lolos dari keduanya, karena
+/// keduanya salah dengan cara yang sama.
+ColliderGeometry UnitCubeGeometry() {
+    ColliderGeometry shape;
+    for (int i = 0; i < 8; ++i) {
+        shape.points.push_back(Vec3((i & 1) != 0 ? 0.5f : -0.5f, (i & 2) != 0 ? 0.5f : -0.5f,
+                                    (i & 4) != 0 ? 0.5f : -0.5f));
+    }
+    // Enam sisi, berlawanan arah jarum jam dilihat dari luar. Indeksnya:
+    // bit 0 = +x, bit 1 = +y, bit 2 = +z.
+    const uint32_t faces[6][4] = {
+        {0, 2, 3, 1},  // -z
+        {4, 5, 7, 6},  // +z
+        {0, 4, 6, 2},  // -x
+        {1, 3, 7, 5},  // +x
+        {0, 1, 5, 4},  // -y
+        {2, 6, 7, 3},  // +y
+    };
+    for (const auto& face : faces) {
+        shape.indices.insert(shape.indices.end(),
+                             {face[0], face[1], face[2], face[0], face[2], face[3]});
+    }
+    shape.convex = true;
+    return shape;
+}
+
+scene::Entity AddWhiteboxBody(scene::World& world, scene::RigidBodyKind kind,
+                              const Vec3& position, const Vec3& scale = Vec3(1.0f)) {
+    const scene::Entity entity = world.Create("Blok");
+    world.Add<scene::RigidBodyComponent>(entity).kind = kind;
+    world.Add<scene::ColliderComponent>(entity).shape = scene::ColliderShape::Whitebox;
+    auto& transform = *world.TryGet<scene::TransformComponent>(entity);
+    transform.position = position;
+    transform.scale = scale;
+    world.MarkTransformDirty(entity);
+    return entity;
+}
+
+}  // namespace
+
+TEST_CASE("W6: whitebox statik memakai segitiganya, sehingga palungnya tetap berlubang") {
+    if (!Available()) {
+        return;
+    }
+    // **Inilah yang membedakan mesh segitiga dari selubung cembung**, dan tanpa
+    // uji ini kedua pilihan itu tak terbedakan: seluruh uji lain memakai bentuk
+    // cembung, yang selubungnya sama persis dengan segitiganya.
+    //
+    // Sebuah palung: lantai di y = 1 selebar x ∈ [−1, 1], dengan bibir di y = 2
+    // di kedua sisinya. Selubung cembungnya menutup palung itu rata di y = 2.
+    const auto addQuad = [](ColliderGeometry& shape, const Vec3& a, const Vec3& b, const Vec3& c,
+                            const Vec3& d) {
+        const uint32_t base = static_cast<uint32_t>(shape.points.size());
+        shape.points.insert(shape.points.end(), {a, b, c, d});
+        shape.indices.insert(shape.indices.end(),
+                             {base, base + 1, base + 2, base, base + 2, base + 3});
+    };
+    ColliderGeometry trough;
+    // Lantai palung.
+    addQuad(trough, Vec3(-1.0f, 1.0f, 2.0f), Vec3(1.0f, 1.0f, 2.0f), Vec3(1.0f, 1.0f, -2.0f),
+            Vec3(-1.0f, 1.0f, -2.0f));
+    // Bibir kiri dan kanan.
+    addQuad(trough, Vec3(-2.0f, 2.0f, 2.0f), Vec3(-1.0f, 2.0f, 2.0f), Vec3(-1.0f, 2.0f, -2.0f),
+            Vec3(-2.0f, 2.0f, -2.0f));
+    addQuad(trough, Vec3(1.0f, 2.0f, 2.0f), Vec3(2.0f, 2.0f, 2.0f), Vec3(2.0f, 2.0f, -2.0f),
+            Vec3(1.0f, 2.0f, -2.0f));
+    // Dinding dalam.
+    addQuad(trough, Vec3(-1.0f, 1.0f, -2.0f), Vec3(-1.0f, 2.0f, -2.0f), Vec3(-1.0f, 2.0f, 2.0f),
+            Vec3(-1.0f, 1.0f, 2.0f));
+    addQuad(trough, Vec3(1.0f, 1.0f, 2.0f), Vec3(1.0f, 2.0f, 2.0f), Vec3(1.0f, 2.0f, -2.0f),
+            Vec3(1.0f, 1.0f, -2.0f));
+    trough.convex = false;
+
+    scene::World world;
+    AddWhiteboxBody(world, scene::RigidBodyKind::Static, Vec3(0.0f));
+    const scene::Entity ball = AddBall(world, Vec3(0.0f, 6.0f, 0.0f), 0.25f);
+
+    PhysicsScene physics;
+    REQUIRE(physics.Build(world, {}, [&](scene::Entity, ColliderGeometry& out) {
+        out = trough;
+        return true;
+    }));
+    // Yang statik tidak diperingatkan cekung: segitiganya dipakai apa adanya.
+    CHECK(physics.Stats().concaveDynamic == 0);
+
+    physics.Step(world, 400);
+
+    // Jatuh ke dasar palung: 1 + 0,25. Selubung cembung akan menahannya di
+    // 2 + 0,25, dan selisih satu meter itu yang membuat uji ini berarti.
+    INFO("berhenti di y = " << PositionOf(world, ball).y);
+    CHECK(PositionOf(world, ball).y == doctest::Approx(1.25f).epsilon(0.05));
+}
+
+TEST_CASE("W6: whitebox statik menahan benda pada tinggi yang dihitung") {
+    if (!Available()) {
+        return;
+    }
+    scene::World world;
+    // Kubus satuan diregangkan 4 × 3 × 4. **Ketiga sumbunya diuji**, dan itu
+    // disengaja: skala yang diabaikan meninggalkan permukaan di y = 0,5 alih-alih
+    // 1,5, dan pelat selebar satu meter alih-alih empat.
+    AddWhiteboxBody(world, scene::RigidBodyKind::Static, Vec3(0.0f), Vec3(4.0f, 3.0f, 4.0f));
+    // Di tengah: menguji tingginya.
+    const scene::Entity middle = AddBall(world, Vec3(0.0f, 5.0f, 0.0f), 0.25f);
+    // Di dekat tepinya: menguji lebarnya. x = 1,5 masih di atas pelat yang
+    // diregangkan (setengah-lebar 2), dan melayang di luar yang tidak (0,5).
+    const scene::Entity edge = AddBall(world, Vec3(1.5f, 5.0f, 1.5f), 0.25f);
+
+    PhysicsScene physics;
+    REQUIRE(physics.Build(world, {}, [](scene::Entity, ColliderGeometry& out) {
+        out = UnitCubeGeometry();
+        return true;
+    }));
+    CHECK(physics.Stats().bodies == 3);
+    CHECK(physics.Stats().collidersWithoutGeometry == 0);
+    CHECK(physics.Stats().concaveDynamic == 0);
+    // Skala tak seragam **tidak** dikeluhkan untuk whitebox: sebuah titik bisa
+    // diregangkan ke satu arah, sebuah jari-jari tidak.
+    CHECK(physics.Stats().nonUniformScale == 0);
+
+    physics.Step(world, 300);
+    INFO("tengah berhenti di y = " << PositionOf(world, middle).y);
+    CHECK(PositionOf(world, middle).y == doctest::Approx(1.75f).epsilon(0.05));
+    INFO("tepi berhenti di y = " << PositionOf(world, edge).y);
+    CHECK(PositionOf(world, edge).y == doctest::Approx(1.75f).epsilon(0.05));
+}
+
+TEST_CASE("W6: tanpa pemasok bentuk, collider whitebox mundur ke kotak dan dilaporkan") {
+    if (!Available()) {
+        return;
+    }
+    // **Mundur, bukan hilang.** Benda yang dilewatkan simulasi terlihat sebagai
+    // benda yang jatuh menembus lantai — gejala yang mengarahkan orang mencari
+    // bug solver. Kotak yang salah ukuran terlihat sebagai kotak yang salah
+    // ukuran, dan angka di Stats menyebut sebabnya.
+    scene::World world;
+    AddGround(world);
+    const scene::Entity block =
+        AddWhiteboxBody(world, scene::RigidBodyKind::Dynamic, Vec3(0.0f, 3.0f, 0.0f));
+
+    PhysicsScene physics;
+    REQUIRE(physics.Build(world));
+    CHECK(physics.Stats().bodies == 2);
+    CHECK(physics.Stats().collidersWithoutGeometry == 1);
+
+    physics.Step(world, 300);
+    // Kotak bawaan setengah-ukuran 0,5, jadi ia beristirahat di y = 0,5.
+    CHECK(PositionOf(world, block).y == doctest::Approx(0.5f).epsilon(0.05));
+}
+
+TEST_CASE("W6: whitebox cekung yang dinamis dilaporkan, bukan didiamkan") {
+    if (!Available()) {
+        return;
+    }
+    scene::World world;
+    AddGround(world);
+    AddWhiteboxBody(world, scene::RigidBodyKind::Dynamic, Vec3(0.0f, 3.0f, 0.0f));
+    AddWhiteboxBody(world, scene::RigidBodyKind::Static, Vec3(6.0f, 0.0f, 0.0f));
+
+    PhysicsScene physics;
+    REQUIRE(physics.Build(world, {}, [](scene::Entity, ColliderGeometry& out) {
+        out = UnitCubeGeometry();
+        out.convex = false;  // seolah bloknya berbentuk L
+        return true;
+    }));
+
+    // Yang dinamis dihitung, yang statik tidak: yang statik memakai segitiganya
+    // apa adanya, jadi cekungannya memang terjaga dan tidak ada yang perlu
+    // diperingatkan.
+    CHECK(physics.Stats().concaveDynamic == 1);
+    CHECK(physics.Stats().bodies == 3);
+}

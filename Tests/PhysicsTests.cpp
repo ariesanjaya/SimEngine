@@ -1874,3 +1874,124 @@ TEST_CASE("P6f: mesin membuat roda berhenti selip di laju tinggi") {
                                       << (engineSlip * 100.0f) << "%");
     CHECK(engineSlip < directSlip);
 }
+
+// ============================================================================
+// W6 — selubung cembung dan mesh segitiga
+// ============================================================================
+
+TEST_CASE("W6: selubung cembung menahan benda pada tinggi yang dihitung") {
+    if (!Available()) {
+        return;
+    }
+    PhysicsWorld world;
+    REQUIRE(world.Create(DefaultWorld()));
+
+    // Kotak 2×1×2 diberikan sebagai delapan titik sudutnya. Kalau selubungnya
+    // benar, permukaannya di y = 0,5 — dan bola berjari-jari 0,25 berhenti di
+    // y = 0,75. Angka itu yang membuat uji ini menguji bentuknya, bukan sekadar
+    // bahwa sesuatu terjadi.
+    BodyDesc platform;
+    platform.kind = BodyKind::Static;
+    platform.shape.kind = ShapeKind::ConvexHull;
+    for (int i = 0; i < 8; ++i) {
+        platform.shape.points.push_back(Vec3((i & 1) != 0 ? 1.0f : -1.0f,
+                                             (i & 2) != 0 ? 0.5f : -0.5f,
+                                             (i & 4) != 0 ? 1.0f : -1.0f));
+    }
+    REQUIRE(world.AddBody(platform) != BodyHandle::Invalid);
+
+    BodyDesc ball;
+    ball.kind = BodyKind::Dynamic;
+    ball.shape.kind = ShapeKind::Sphere;
+    ball.shape.radius = 0.25f;
+    ball.position = Vec3(0.0f, 3.0f, 0.0f);
+    const BodyHandle handle = world.AddBody(ball);
+    REQUIRE(handle != BodyHandle::Invalid);
+
+    for (int i = 0; i < 240; ++i) {
+        world.Advance(1.0f / 60.0f);
+    }
+    BodyState state;
+    REQUIRE(world.ReadState(handle, state));
+    INFO("berhenti di y = " << state.position.y);
+    CHECK(state.position.y == doctest::Approx(0.75f).epsilon(0.02));
+    // Dan tidak tergelincir: selubung yang salah orientasi akan menjatuhkannya
+    // ke samping alih-alih menahannya di tengah.
+    CHECK(std::abs(state.position.x) < 0.1f);
+    CHECK(std::abs(state.position.z) < 0.1f);
+}
+
+TEST_CASE("W6: mesh segitiga menahan benda, dan menolak jadi dinamis") {
+    if (!Available()) {
+        return;
+    }
+    PhysicsWorld world;
+    REQUIRE(world.Create(DefaultWorld()));
+
+    // Lantai satu quad, dua segitiga, pada y = 0.
+    const std::vector<Vec3> floor = {Vec3(-5.0f, 0.0f, -5.0f), Vec3(5.0f, 0.0f, -5.0f),
+                                     Vec3(5.0f, 0.0f, 5.0f), Vec3(-5.0f, 0.0f, 5.0f)};
+    const std::vector<uint32_t> triangles = {0, 2, 1, 0, 3, 2};
+
+    BodyDesc ground;
+    ground.kind = BodyKind::Static;
+    ground.shape.kind = ShapeKind::TriangleMesh;
+    ground.shape.points = floor;
+    ground.shape.indices = triangles;
+    REQUIRE(world.AddBody(ground) != BodyHandle::Invalid);
+
+    BodyDesc ball;
+    ball.kind = BodyKind::Dynamic;
+    ball.shape.kind = ShapeKind::Sphere;
+    ball.shape.radius = 0.3f;
+    ball.position = Vec3(0.0f, 4.0f, 0.0f);
+    const BodyHandle handle = world.AddBody(ball);
+    REQUIRE(handle != BodyHandle::Invalid);
+
+    for (int i = 0; i < 240; ++i) {
+        world.Advance(1.0f / 60.0f);
+    }
+    BodyState rest;
+    REQUIRE(world.ReadState(handle, rest));
+    CHECK(rest.position.y == doctest::Approx(0.3f).epsilon(0.05));
+
+    // **Ditolak beserta sebabnya, bukan diam-diam gagal.** Mesh segitiga tidak
+    // punya bagian dalam, jadi tidak ada yang bisa menjawab seberapa dalam
+    // sebuah benda menembusnya — dan "createShape failed" tidak menolong siapa
+    // pun menemukan itu.
+    BodyDesc moving = ground;
+    moving.kind = BodyKind::Dynamic;
+    CHECK(world.AddBody(moving) == BodyHandle::Invalid);
+    INFO(world.Error());
+    CHECK(world.Error().find("dynamic") != std::string::npos);
+
+    // Kinematik tetap diterima: ia digerakkan skrip, bukan oleh kontak.
+    BodyDesc kinematic = ground;
+    kinematic.kind = BodyKind::Kinematic;
+    CHECK(world.AddBody(kinematic) != BodyHandle::Invalid);
+}
+
+TEST_CASE("W6: geometri yang tidak masuk akal ditolak beserta sebabnya") {
+    if (!Available()) {
+        return;
+    }
+    PhysicsWorld world;
+    REQUIRE(world.Create(DefaultWorld()));
+
+    // Tiga titik tidak membentuk benda pejal, hanya sebuah bidang.
+    BodyDesc flat;
+    flat.kind = BodyKind::Static;
+    flat.shape.kind = ShapeKind::ConvexHull;
+    flat.shape.points = {Vec3(0.0f), Vec3(1.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, 1.0f)};
+    CHECK(world.AddBody(flat) == BodyHandle::Invalid);
+    CHECK(world.Error().find("four points") != std::string::npos);
+
+    // Jumlah indeks yang bukan kelipatan tiga bukan kumpulan segitiga.
+    BodyDesc ragged;
+    ragged.kind = BodyKind::Static;
+    ragged.shape.kind = ShapeKind::TriangleMesh;
+    ragged.shape.points = {Vec3(0.0f), Vec3(1.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, 1.0f)};
+    ragged.shape.indices = {0, 1, 2, 0};
+    CHECK(world.AddBody(ragged) == BodyHandle::Invalid);
+    CHECK(world.Error().find("multiple of three") != std::string::npos);
+}
