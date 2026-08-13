@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 /// Mesh half-edge: sisi yang tahu tetangganya.
@@ -119,6 +120,15 @@ public:
     /// Half-edge yang berpangkal di sebuah simpul.
     std::vector<HalfEdgeHandle> VertexOutgoing(VertexHandle vertex) const;
 
+    /// Rusuk yang dimiliki sebuah half-edge. Pasangan selalu berbagi rusuk yang
+    /// sama — itulah arti "pasangan", dan `CheckInvariants` menegakkannya.
+    EdgeHandle HalfEdgeEdge(HalfEdgeHandle halfEdge) const;
+    /// Kedua half-edge sebuah rusuk.
+    std::pair<HalfEdgeHandle, HalfEdgeHandle> EdgeHalfEdges(EdgeHandle edge) const;
+    /// Kedua face yang berbagi sebuah rusuk. Salah satunya `Invalid` bila rusuk
+    /// itu di batas mesh.
+    std::pair<FaceHandle, FaceHandle> EdgeFaces(EdgeHandle edge) const;
+
     /// Normal sebuah face, dari Newell — tahan terhadap poligon tak sebidang
     /// sempurna, yang justru keadaan biasa sesudah beberapa kali ekstrusi.
     Vec3 FaceNormal(FaceHandle face) const;
@@ -138,6 +148,8 @@ private:
     std::vector<HalfEdge> halfEdges_;
     std::vector<Edge> edges_;
     std::vector<Face> faces_;
+    /// Sejajar dengan `halfEdges_`: rusuk pemilik tiap half-edge.
+    std::vector<EdgeHandle> halfEdgeEdge_;
 };
 
 /// Kubus satuan berpusat di titik asal, enam quad menghadap keluar.
@@ -145,5 +157,13 @@ private:
 /// Ada di header karena ia titik awal setiap blockout, dan karena ia mesh
 /// tertutup terkecil yang menguji seluruh invarian sekaligus.
 HalfEdgeMesh MakeUnitCube();
+
+/// Kubus satuan yang tiap sisinya dua segitiga: 12 face, bukan 6.
+///
+/// **Bukan versi yang lebih rendah dari yang di atas** melainkan keadaan yang
+/// datang dari luar: mesh impor selalu tersegitigakan, dan whitebox harus bisa
+/// mengelompokkannya kembali menjadi sisi. Ia karena itu bahan uji utama lapisan
+/// poligon — di sinilah "12 face menjadi 6 sisi" punya arti.
+HalfEdgeMesh MakeUnitCubeTriangulated();
 
 }  // namespace sim::whitebox

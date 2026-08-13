@@ -165,16 +165,45 @@ Normal memakai Newell, bukan hasil kali silang dua rusuk pertama — sesudah
 beberapa kali ekstrusi poligon jarang sebidang sempurna, dan dua rusuk pertama
 bisa hampir sejajar.
 
-### W1 — Poligon · ⬜
+### W1 — Poligon · ✅
 
 Kelompok face sebidang, dan operasi gabung/pisah rusuk yang membentuknya.
 
 **Kriteria terima**
 - Kubus satuan punya **6 poligon**, bukan 12 face. Inilah yang membedakan alat
   rancang dari penyunting segitiga.
+
+  Kriteria ini semula tidak bisa diuji apa adanya: `MakeUnitCube` membangun enam
+  **quad**, bukan dua belas segitiga, jadi ia sudah enam face sejak awal. Yang
+  ditambahkan adalah `MakeUnitCubeTriangulated` — dan itu bukan versi yang lebih
+  rendah melainkan **keadaan yang datang dari luar**: mesh impor selalu
+  tersegitigakan, dan whitebox harus bisa mengelompokkannya kembali menjadi sisi.
+  Dua belas face → enam poligon, enam diagonal disembunyikan.
 - Menyembunyikan rusuk di antara dua face sebidang menggabungkan poligonnya;
-  memulihkannya memisahkannya kembali, dan mesh kembali ke keadaan semula
-  byte-per-byte.
+  memulihkannya memisahkannya kembali, dan pengelompokannya kembali **persis**
+  seperti semula — bukan sekadar berjumlah sama. Diuji lima putaran
+  gabung-pulihkan berturut-turut, karena pengelompokan yang bocor sedikit tiap
+  putaran hanya terlihat sesudah beberapa kali.
+- Yang menyudut menolak digabung, dan penolakan itu dibuktikan berasal dari
+  toleransinya: dengan toleransi 91° kubus yang sama menggabung semuanya.
+
+**Identitas poligon kanonik, bukan dialokasikan.** Sebuah poligon selalu dikenali
+oleh face bernomor terkecil di dalamnya. Percobaan pertama mengalokasikan nomor
+baru saat poligon terbelah, dan ujinya menangkapnya: memulihkan rusuk
+mengembalikan pengelompokan yang benar tetapi dengan nomor berbeda — yang berarti
+seleksi yang dipegang penyunting akan putus setiap kali undo ditekan. Perwakilan
+terkecil selalu sama berapa pun urutan penggabungannya.
+
+**Topologi meshnya tidak disentuh sama sekali.** Menyembunyikan rusuk hanya
+mengubah pengelompokan, dan itulah yang membuat pemulihannya persis. Rusuk yang
+benar-benar dihapus harus dibangun ulang dari ingatan tentang bentuknya dahulu,
+dan ingatan itu selalu kurang sesuatu.
+
+`PolygonSet::CheckInvariants` menyisir empat klausa, termasuk yang paling halus:
+**tiap poligon harus terhubung lewat rusuk tersembunyi**. Poligon yang terbelah
+menjadi dua kepingan terpisah adalah sisi yang separuhnya tidak ikut bergerak
+saat didorong — dan itu terlihat sebagai bug ekstrusi, bukan sebagai bug
+pengelompokan.
 
 ### W2 — Ekstrusi dan geser · ⬜
 

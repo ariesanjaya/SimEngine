@@ -26,6 +26,7 @@ void HalfEdgeMesh::Clear() {
     halfEdges_.clear();
     edges_.clear();
     faces_.clear();
+    halfEdgeEdge_.clear();
 }
 
 VertexHandle HalfEdgeMesh::AddVertex(const Vec3& position) {
@@ -100,6 +101,7 @@ FaceHandle HalfEdgeMesh::AddFace(const std::vector<VertexHandle>& vertices) {
         halfEdge.next =
             static_cast<HalfEdgeHandle>(first + static_cast<uint32_t>((i + 1) % count));
         halfEdges_.push_back(halfEdge);
+        halfEdgeEdge_.push_back(EdgeHandle::Invalid);
     }
 
     for (std::size_t i = 0; i < count; ++i) {
@@ -113,11 +115,15 @@ FaceHandle HalfEdgeMesh::AddFace(const std::vector<VertexHandle>& vertices) {
         if (found != directed.end()) {
             halfEdges_[Index(self)].twin = found->second;
             halfEdges_[Index(found->second)].twin = self;
+            // Berbagi rusuk dengan pasangannya: itulah arti berpasangan.
+            halfEdgeEdge_[Index(self)] = halfEdgeEdge_[Index(found->second)];
         } else {
             // Rusuk baru. Pasangannya menyusul di `FinalizeBoundaries`.
             Edge edge;
             edge.halfEdge = self;
             edges_.push_back(edge);
+            halfEdgeEdge_[Index(self)] =
+                static_cast<EdgeHandle>(static_cast<uint32_t>(edges_.size() - 1));
         }
 
         if (!IsValid(vertices_[Index(from)].outgoing)) {
@@ -148,6 +154,7 @@ void HalfEdgeMesh::FinalizeBoundaries() {
         boundary.face = FaceHandle::Invalid;
         boundary.twin = static_cast<HalfEdgeHandle>(i);
         halfEdges_.push_back(boundary);
+        halfEdgeEdge_.push_back(halfEdgeEdge_[i]);
 
         const HalfEdgeHandle handle =
             static_cast<HalfEdgeHandle>(static_cast<uint32_t>(halfEdges_.size() - 1));
@@ -220,6 +227,28 @@ std::vector<HalfEdgeHandle> HalfEdgeMesh::VertexOutgoing(VertexHandle vertex) co
         }
     }
     return result;
+}
+
+EdgeHandle HalfEdgeMesh::HalfEdgeEdge(HalfEdgeHandle halfEdge) const {
+    const uint32_t index = Index(halfEdge);
+    return index < halfEdgeEdge_.size() ? halfEdgeEdge_[index] : EdgeHandle::Invalid;
+}
+
+std::pair<HalfEdgeHandle, HalfEdgeHandle> HalfEdgeMesh::EdgeHalfEdges(EdgeHandle edge) const {
+    const uint32_t index = static_cast<uint32_t>(edge);
+    if (index >= edges_.size()) {
+        return {HalfEdgeHandle::Invalid, HalfEdgeHandle::Invalid};
+    }
+    const HalfEdgeHandle first = edges_[index].halfEdge;
+    return {first, halfEdges_[Index(first)].twin};
+}
+
+std::pair<FaceHandle, FaceHandle> HalfEdgeMesh::EdgeFaces(EdgeHandle edge) const {
+    const auto [a, b] = EdgeHalfEdges(edge);
+    if (!IsValid(a) || !IsValid(b)) {
+        return {FaceHandle::Invalid, FaceHandle::Invalid};
+    }
+    return {halfEdges_[Index(a)].face, halfEdges_[Index(b)].face};
 }
 
 Vec3 HalfEdgeMesh::FaceNormal(FaceHandle face) const {
@@ -327,6 +356,23 @@ MeshCheck HalfEdgeMesh::CheckInvariants() const {
         }
     }
 
+    // 5a. Pasangan berbagi rusuk yang sama. Tanpa ini, "rusuk" tidak punya arti
+    //     tunggal dan penyembunyian rusuk di lapisan poligon akan menggabungkan
+    //     sisi yang salah.
+    if (halfEdgeEdge_.size() != halfEdges_.size()) {
+        return fail("peta half-edge ke rusuk tidak sejajar dengan half-edge");
+    }
+    for (uint32_t i = 0; i < halfEdges_.size(); ++i) {
+        const EdgeHandle edge = halfEdgeEdge_[i];
+        if (!IsValid(edge) || static_cast<uint32_t>(edge) >= edges_.size()) {
+            return fail("half-edge " + std::to_string(i) + " tidak menunjuk rusuk yang sah");
+        }
+        if (halfEdgeEdge_[Index(halfEdges_[i].twin)] != edge) {
+            return fail("half-edge " + std::to_string(i) +
+                        " dan pasangannya menunjuk rusuk yang berbeda");
+        }
+    }
+
     // 5. Tiap rusuk menunjuk half-edge yang sah, dan tiap pasangan half-edge
     //    dihitung tepat sekali sebagai rusuk.
     if (edges_.size() * 2 != halfEdges_.size()) {
@@ -361,6 +407,30 @@ HalfEdgeMesh MakeUnitCube() {
     mesh.AddFace({v[0], v[4], v[7], v[3]});  // -X kiri
     mesh.AddFace({v[7], v[6], v[2], v[3]});  // +Y atas
     mesh.AddFace({v[0], v[1], v[5], v[4]});  // -Y bawah
+
+    mesh.FinalizeBoundaries();
+    return mesh;
+}
+
+HalfEdgeMesh MakeUnitCubeTriangulated() {
+    HalfEdgeMesh mesh;
+    const VertexHandle v[8] = {
+        mesh.AddVertex(Vec3(-0.5f, -0.5f, -0.5f)), mesh.AddVertex(Vec3(0.5f, -0.5f, -0.5f)),
+        mesh.AddVertex(Vec3(0.5f, 0.5f, -0.5f)),   mesh.AddVertex(Vec3(-0.5f, 0.5f, -0.5f)),
+        mesh.AddVertex(Vec3(-0.5f, -0.5f, 0.5f)),  mesh.AddVertex(Vec3(0.5f, -0.5f, 0.5f)),
+        mesh.AddVertex(Vec3(0.5f, 0.5f, 0.5f)),    mesh.AddVertex(Vec3(-0.5f, 0.5f, 0.5f)),
+    };
+
+    // Tiap quad dibelah pada diagonalnya. Urutannya dipertahankan sama dengan
+    // `MakeUnitCube` supaya kedua kubus menghadap arah yang sama.
+    const VertexHandle quads[6][4] = {
+        {v[4], v[5], v[6], v[7]}, {v[1], v[0], v[3], v[2]}, {v[5], v[1], v[2], v[6]},
+        {v[0], v[4], v[7], v[3]}, {v[7], v[6], v[2], v[3]}, {v[0], v[1], v[5], v[4]},
+    };
+    for (const auto& quad : quads) {
+        mesh.AddFace({quad[0], quad[1], quad[2]});
+        mesh.AddFace({quad[0], quad[2], quad[3]});
+    }
 
     mesh.FinalizeBoundaries();
     return mesh;

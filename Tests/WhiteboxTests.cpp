@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 
 #include "Sim/Whitebox/HalfEdgeMesh.h"
+#include "Sim/Whitebox/Polygon.h"
 
 #include <doctest/doctest.h>
 
@@ -242,4 +243,136 @@ TEST_CASE("tiap klausa pemeriksa invarian benar-benar menolak") {
         CHECK_FALSE(check.ok);
         CHECK(check.error.find("face") != std::string::npos);
     }
+}
+
+TEST_CASE("kubus tersegitigakan menjadi enam poligon, bukan dua belas face") {
+    // **Kriteria terima W1, dan inilah yang membedakan alat rancang dari
+    // penyunting segitiga.** Mesh yang datang dari luar selalu tersegitigakan;
+    // yang ingin disunting perancang adalah sisinya kembali.
+    const HalfEdgeMesh cube = MakeUnitCubeTriangulated();
+    REQUIRE(cube.FaceCount() == 12);
+    REQUIRE(cube.CheckInvariants().ok);
+
+    PolygonSet polygons;
+    polygons.Reset(cube);
+    CHECK(polygons.PolygonCount() == 12);  // sebelum digabung, satu per face
+
+    const std::size_t merged = polygons.MergeCoplanar(cube);
+    INFO(merged << " rusuk disembunyikan");
+    // Enam diagonal, satu per sisi.
+    CHECK(merged == 6);
+    CHECK(polygons.PolygonCount() == 6);
+    CHECK(polygons.HiddenEdgeCount() == 6);
+
+    const MeshCheck check = polygons.CheckInvariants(cube);
+    INFO(check.error);
+    CHECK(check.ok);
+
+    // Tiap poligon berisi tepat dua segitiga, dan normalnya menghadap keluar.
+    for (const PolygonHandle polygon : polygons.Polygons()) {
+        CHECK(polygons.PolygonFaces(polygon).size() == 2);
+
+        Vec3 centre(0.0f);
+        int samples = 0;
+        for (const FaceHandle face : polygons.PolygonFaces(polygon)) {
+            for (const VertexHandle vertex : cube.FaceVertices(face)) {
+                centre += cube.GetVertex(vertex).position;
+                ++samples;
+            }
+        }
+        centre /= static_cast<float>(samples);
+        const float outward = glm::dot(polygons.PolygonNormal(cube, polygon),
+                                       glm::normalize(centre));
+        INFO("poligon " << static_cast<uint32_t>(polygon) << ": normal·keluar = " << outward);
+        CHECK(outward > 0.99f);
+    }
+}
+
+TEST_CASE("memunculkan rusuk mengembalikan pengelompokan persis seperti semula") {
+    // Kriteria terima W1. Topologi meshnya memang tidak pernah disentuh —
+    // menyembunyikan rusuk hanya mengubah pengelompokan — dan itulah yang
+    // membuat pemulihannya persis, bukan mendekati.
+    const HalfEdgeMesh cube = MakeUnitCubeTriangulated();
+
+    PolygonSet polygons;
+    polygons.Reset(cube);
+
+    // Cuplikan keadaan awal: poligon tiap face.
+    std::vector<uint32_t> before;
+    for (uint32_t f = 0; f < cube.FaceCount(); ++f) {
+        before.push_back(
+            static_cast<uint32_t>(polygons.FacePolygon(static_cast<FaceHandle>(f))));
+    }
+
+    // Cari sebuah rusuk yang benar-benar menggabungkan sesuatu.
+    EdgeHandle diagonal = EdgeHandle::Invalid;
+    for (uint32_t e = 0; e < cube.EdgeCount(); ++e) {
+        if (polygons.HideEdge(cube, static_cast<EdgeHandle>(e))) {
+            diagonal = static_cast<EdgeHandle>(e);
+            break;
+        }
+    }
+    REQUIRE(IsValid(diagonal));
+    CHECK(polygons.PolygonCount() == 11);
+    REQUIRE(polygons.CheckInvariants(cube).ok);
+
+    REQUIRE(polygons.RestoreEdge(cube, diagonal));
+    CHECK(polygons.PolygonCount() == 12);
+    CHECK(polygons.HiddenEdgeCount() == 0);
+    REQUIRE(polygons.CheckInvariants(cube).ok);
+
+    // **Persis seperti semula**, bukan sekadar berjumlah sama: tiap face kembali
+    // ke poligon yang sama dengan sebelumnya.
+    for (uint32_t f = 0; f < cube.FaceCount(); ++f) {
+        INFO("face " << f);
+        CHECK(static_cast<uint32_t>(polygons.FacePolygon(static_cast<FaceHandle>(f))) ==
+              before[f]);
+    }
+}
+
+TEST_CASE("menggabungkan seluruh sisi lalu memulihkannya kembali berulang kali") {
+    // Gabung-pulihkan bolak-balik adalah persis yang dilakukan undo/redo, dan
+    // pengelompokan yang bocor sedikit tiap putaran hanya terlihat sesudah
+    // beberapa kali — bukan pada percobaan pertama.
+    const HalfEdgeMesh cube = MakeUnitCubeTriangulated();
+    PolygonSet polygons;
+    polygons.Reset(cube);
+
+    for (int round = 0; round < 5; ++round) {
+        const std::size_t merged = polygons.MergeCoplanar(cube);
+        INFO("putaran " << round << ": " << merged << " digabung");
+        CHECK(polygons.PolygonCount() == 6);
+        REQUIRE(polygons.CheckInvariants(cube).ok);
+
+        for (uint32_t e = 0; e < cube.EdgeCount(); ++e) {
+            polygons.RestoreEdge(cube, static_cast<EdgeHandle>(e));
+        }
+        CHECK(polygons.PolygonCount() == 12);
+        CHECK(polygons.HiddenEdgeCount() == 0);
+        REQUIRE(polygons.CheckInvariants(cube).ok);
+    }
+}
+
+TEST_CASE("rusuk yang menyudut menolak digabung") {
+    // **Sebidang, atau tidak digabung.** Menggabungkan dua bidang yang menyudut
+    // menghasilkan "sisi" yang tidak punya satu normal, dan seluruh gunanya
+    // poligon adalah bahwa ia punya.
+    const HalfEdgeMesh cube = MakeUnitCube();  // enam quad, tanpa diagonal
+    PolygonSet polygons;
+    polygons.Reset(cube);
+    CHECK(polygons.PolygonCount() == 6);
+
+    // Setiap rusuk kubus adalah sudut 90°: tidak satu pun boleh digabung.
+    const std::size_t merged = polygons.MergeCoplanar(cube);
+    INFO(merged << " rusuk digabung (seharusnya nol)");
+    CHECK(merged == 0);
+    CHECK(polygons.PolygonCount() == 6);
+
+    // Dan dengan toleransi yang cukup lebar untuk menelan 90°, ia menggabung
+    // semuanya — membuktikan bahwa yang menolak tadi memang toleransinya, bukan
+    // kode yang kebetulan tidak pernah menggabung apa pun.
+    PolygonSet loose;
+    loose.Reset(cube);
+    CHECK(loose.MergeCoplanar(cube, 91.0f) > 0);
+    REQUIRE(loose.CheckInvariants(cube).ok);
 }
