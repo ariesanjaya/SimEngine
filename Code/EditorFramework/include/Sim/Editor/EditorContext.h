@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Sim/Editor/WhiteboxStore.h"
 #include "Sim/Render/IMaterialPreview.h"
 #include "Sim/Render/IViewportRenderer.h"
 #include "Sim/Render/TimeOfDay.h"
@@ -63,6 +64,11 @@ struct EditorContext {
     /// Indeks aset. Dimiliki EditorApp. Referensinya hanya sah dalam satu
     /// frame: isinya ditukar utuh saat pemindaian latar selesai.
     assets::AssetDatabase* assets = nullptr;
+
+    /// Whitebox yang sedang terbuka. Panel menyunting, viewport menggambar —
+    /// keduanya harus melihat objek yang sama, kalau tidak yang tergambar adalah
+    /// bentuk sebelum suntingan terakhir.
+    WhiteboxStore* whiteboxes = nullptr;
 
     /// Runtime Lua. Null bila editor dibangun tanpa Lua — panel yang
     /// memakainya wajib memeriksa.

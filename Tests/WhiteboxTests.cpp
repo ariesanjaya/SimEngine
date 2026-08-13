@@ -3,6 +3,7 @@
 #include "Sim/Whitebox/HalfEdgeMesh.h"
 #include "Sim/Whitebox/Operations.h"
 #include "Sim/Whitebox/Picking.h"
+#include "Sim/Whitebox/PolygonOutline.h"
 #include "Sim/Whitebox/WhiteboxIo.h"
 #include "Sim/Whitebox/WhiteboxMesh.h"
 #include "Sim/Whitebox/Polygon.h"
@@ -10,6 +11,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <filesystem>
 #include <string>
@@ -865,4 +867,95 @@ TEST_CASE("sinar yang meleset dan yang menembus dari dalam") {
         PickPolygon(box, Vec3(0.0f, 0.0f, 3.0f), Vec3(0.0f, 0.0f, -1.0f));
     REQUIRE(outside.hit);
     CHECK(outside.position.z == doctest::Approx(0.5f).epsilon(0.01));
+}
+
+// ============================================================================
+// W5 — bentuk sisi untuk penyunting
+// ============================================================================
+
+TEST_CASE("batas sisi tidak memperlihatkan diagonal yang membelahnya") {
+    // **Kriteria terima W5.** Seluruh lapisan poligon ada supaya perancang
+    // melihat sisi, bukan segitiga. Sorotan yang menggambar seluruh rusuk face
+    // membocorkan diagonal itu kembali ke layar — dan begitu terlihat, orang
+    // akan mencoba mengkliknya.
+    WhiteboxMesh box = WhiteboxMesh::MakeTriangulatedCube();
+    REQUIRE(box.Mesh().FaceCount() == 12);
+    REQUIRE(box.MergeCoplanar() == 6);
+
+    const std::vector<PolygonHandle> sides = box.Polygons().Polygons();
+    REQUIRE(sides.size() == 6);
+
+    for (const PolygonHandle side : sides) {
+        const PolygonOutline outline = BuildPolygonOutline(box, side);
+        INFO("sisi " << static_cast<uint32_t>(side));
+        // Dua segitiga isi, tetapi hanya empat rusuk batas: diagonalnya di
+        // dalam poligon yang sama, jadi ia bukan batas.
+        CHECK(outline.triangles.size() == 2);
+        CHECK(outline.edges.size() == 4);
+        CHECK(outline.area == doctest::Approx(1.0f).epsilon(0.001));
+
+        // Titik beratnya di tengah sisi kubus satuan: satu koordinat ±0.5,
+        // dua lainnya nol.
+        const Vec3 c = outline.centroid;
+        const float away = std::max({std::abs(c.x), std::abs(c.y), std::abs(c.z)});
+        CHECK(away == doctest::Approx(0.5f).epsilon(0.001));
+        CHECK(std::abs(c.x) + std::abs(c.y) + std::abs(c.z) ==
+              doctest::Approx(0.5f).epsilon(0.001));
+
+        // Normalnya sejajar salah satu sumbu dan bernorma satu.
+        CHECK(glm::length(outline.normal) == doctest::Approx(1.0f).epsilon(0.001));
+        CHECK(std::abs(glm::dot(outline.normal, glm::normalize(c))) ==
+              doctest::Approx(1.0f).epsilon(0.001));
+    }
+}
+
+TEST_CASE("titik berat sisi berbobot luas, bukan rata-rata simpul") {
+    // Sebuah persegi panjang 4x1 yang terbelah tidak rata: petak 1x1 di kiri
+    // dan petak 3x1 di kanan. Rata-rata keenam simpulnya jatuh di x = 5/3;
+    // titik berat sebenarnya di x = 2. Gizmo berdiri di titik ini, dan yang
+    // berdiri di 5/3 terlihat seperti ia memegang sisi yang lain.
+    WhiteboxData data;
+    data.positions = {
+        Vec3(0.0f, 0.0f, 0.0f), Vec3(1.0f, 0.0f, 0.0f), Vec3(4.0f, 0.0f, 0.0f),
+        Vec3(4.0f, 0.0f, 1.0f), Vec3(1.0f, 0.0f, 1.0f), Vec3(0.0f, 0.0f, 1.0f),
+    };
+    data.faces = {{0, 1, 4, 5}, {1, 2, 3, 4}};
+    data.faceMaterials = {kNoMaterial, kNoMaterial};
+
+    WhiteboxMesh box;
+    std::string error;
+    REQUIRE_MESSAGE(WhiteboxMesh::Build(box, data, error), error);
+    REQUIRE(box.MergeCoplanar() == 1);
+
+    const std::vector<PolygonHandle> sides = box.Polygons().Polygons();
+    REQUIRE(sides.size() == 1);
+
+    const PolygonOutline outline = BuildPolygonOutline(box, sides.front());
+    CHECK(outline.area == doctest::Approx(4.0f).epsilon(0.001));
+    CHECK(outline.centroid.x == doctest::Approx(2.0f).epsilon(0.001));
+    CHECK(outline.centroid.z == doctest::Approx(0.5f).epsilon(0.001));
+    // Bukan rata-rata simpul, yang akan menjawab 5/3.
+    CHECK(outline.centroid.x != doctest::Approx(5.0f / 3.0f).epsilon(0.001));
+
+    // Enam ruas batas, bukan delapan: rusuk yang dipakai bersama kedua petak
+    // tidak ikut. Bukan empat, karena dua sisi panjangnya memang terbagi dua
+    // oleh simpul di tengah — dan menggambarnya sebagai satu garis lurus berarti
+    // menyembunyikan simpul yang sungguh ada di sana.
+    CHECK(outline.edges.size() == 6);
+
+    float perimeter = 0.0f;
+    for (const auto& [from, to] : outline.edges) {
+        perimeter += glm::length(to - from);
+    }
+    CHECK(perimeter == doctest::Approx(10.0f).epsilon(0.001));
+}
+
+TEST_CASE("sisi yang tidak ada tidak menghasilkan bentuk") {
+    // Penyunting menanyakan bentuk sisi tiap frame, termasuk pada frame ketika
+    // belum ada yang terpilih. Menjawabnya dengan bentuk kosong jauh lebih baik
+    // daripada memaksa setiap pemanggil memeriksa dulu — yang lupa memeriksa
+    // akan menggambar sampah alih-alih tidak menggambar apa-apa.
+    WhiteboxMesh box = WhiteboxMesh::MakeCube();
+    CHECK(BuildPolygonOutline(box, PolygonHandle::Invalid).empty());
+    CHECK(BuildPolygonOutline(box, static_cast<PolygonHandle>(999)).empty());
 }

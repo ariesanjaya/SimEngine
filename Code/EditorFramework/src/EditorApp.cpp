@@ -60,6 +60,7 @@ bool EditorApp::Initialize(const Config& config) {
 
     context_.history = &history_;
     context_.selection = &selection_;
+    context_.whiteboxes = &whiteboxes_;
     context_.actions = &actions_;
     context_.notifications = &notifications_;
     context_.world = &world_;

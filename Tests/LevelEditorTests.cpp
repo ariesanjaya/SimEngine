@@ -11,6 +11,7 @@
 #include "Sim/Editor/Selection.h"
 #include "Sim/Editor/SkinnedPreview.h"
 #include "Sim/Editor/WhiteboxCommands.h"
+#include "Sim/Editor/WhiteboxStore.h"
 #include "Sim/Physics/PhysicsScene.h"
 #include "Sim/Whitebox/WhiteboxIo.h"
 #include "Sim/Scene/Components.h"
@@ -1329,8 +1330,13 @@ TEST_CASE("satu seretan whitebox menghasilkan tepat satu entri undo") {
     // seretan nyata menghasilkan satu perintah per frame, dan semuanya harus
     // menyatu. Kalau tidak, membatalkannya butuh puluhan Ctrl+Z — dan itu yang
     // dirasakan pengguna sebagai undo yang rusak.
-    whitebox::WhiteboxMesh box = whitebox::WhiteboxMesh::MakeCube();
+    // Lewat store, karena itulah yang dipegang perintahnya sekarang: yang
+    // membatalkan bentuk juga harus menaikkan versi yang dipakai viewport.
+    WhiteboxStore store;
+    const Uuid guid = Uuid::Generate();
+    whitebox::WhiteboxMesh& box = store.Adopt(guid, whitebox::WhiteboxMesh::MakeCube());
     const whitebox::WhiteboxData start = box.ToData();
+    const uint64_t versionAtStart = store.Version(guid);
 
     CommandHistory history;
     const std::vector<whitebox::PolygonHandle> sides = box.Polygons().Polygons();
@@ -1347,8 +1353,8 @@ TEST_CASE("satu seretan whitebox menghasilkan tepat satu entri undo") {
         const whitebox::WhiteboxData before = box.ToData();
         REQUIRE(preview.Extrude(top, static_cast<float>(frame) * 0.05f).ok);
 
-        history.Execute(std::make_unique<WhiteboxEditCommand>(&box, before, preview.ToData(),
-                                                              "Extrude"));
+        history.Execute(std::make_unique<WhiteboxEditCommand>(&store, guid, before,
+                                                              preview.ToData(), "Extrude"));
     }
     history.CloseMergeGroup();
 
@@ -1357,6 +1363,10 @@ TEST_CASE("satu seretan whitebox menghasilkan tepat satu entri undo") {
 
     // Membatalkannya sekali mengembalikan bentuk semula **persis**.
     REQUIRE(history.Undo());
+    // Dan menandainya berubah, supaya yang tergambar ikut kembali. Undo yang
+    // membetulkan data tetapi meninggalkan layar adalah undo yang tidak
+    // dipercaya orang.
+    CHECK(store.Version(guid) > versionAtStart);
     CHECK(whitebox::SaveToString(box) ==
           [&] {
               whitebox::WhiteboxMesh original;
@@ -1372,20 +1382,22 @@ TEST_CASE("satu seretan whitebox menghasilkan tepat satu entri undo") {
 }
 
 TEST_CASE("menetapkan material sisi bisa dibatalkan, dan sisi berbeda tidak digabung") {
-    whitebox::WhiteboxMesh box = whitebox::WhiteboxMesh::MakeCube();
+    WhiteboxStore store;
+    const Uuid guid = Uuid::Generate();
+    whitebox::WhiteboxMesh& box = store.Adopt(guid, whitebox::WhiteboxMesh::MakeCube());
     const std::vector<whitebox::PolygonHandle> sides = box.Polygons().Polygons();
     REQUIRE(sides.size() == 6);
 
     CommandHistory history;
-    history.Execute(std::make_unique<SetPolygonMaterialCommand>(&box, sides[0], 2));
-    history.Execute(std::make_unique<SetPolygonMaterialCommand>(&box, sides[0], 5));
+    history.Execute(std::make_unique<SetPolygonMaterialCommand>(&store, guid, sides[0], 2));
+    history.Execute(std::make_unique<SetPolygonMaterialCommand>(&store, guid, sides[0], 5));
     // Sisi yang sama, satu gerakan: menyatu.
     CHECK(history.Entries().size() == 1);
     CHECK(box.PolygonMaterial(sides[0]) == 5);
 
     // **Sisi berbeda adalah keputusan baru pengguna.** Menggabungkannya berarti
     // satu Ctrl+Z membatalkan dua penetapan yang tidak berhubungan.
-    history.Execute(std::make_unique<SetPolygonMaterialCommand>(&box, sides[1], 3));
+    history.Execute(std::make_unique<SetPolygonMaterialCommand>(&store, guid, sides[1], 3));
     CHECK(history.Entries().size() == 2);
 
     REQUIRE(history.Undo());

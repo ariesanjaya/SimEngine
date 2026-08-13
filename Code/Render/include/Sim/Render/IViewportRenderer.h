@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Sim/Render/TraceBackend.h"
+#include "Sim/Assets/MeshData.h"
 #include "Sim/Render/Types.h"
 
 #include <cstdint>
@@ -50,6 +51,29 @@ public:
     /// mencoba ulang tiap frame berarti membaca berkas rusak enam puluh kali per
     /// detik sambil membanjiri log.
     virtual MeshAsset AcquireMesh(std::string_view path) = 0;
+
+    /// Mesh yang datang sebagai data, bukan sebagai berkas.
+    ///
+    /// **Dibutuhkan geometri yang dikarang mesin, bukan diimpor** — whitebox
+    /// lebih dulu, dan nanti kain serta apa pun yang bentuknya berubah saat
+    /// dijalankan. `AcquireMesh` di atas hanya menerima path, jadi geometri yang
+    /// tidak punya berkas harus menulis berkas sementara hanya untuk dibaca
+    /// kembali sedetik kemudian.
+    ///
+    /// `key` mengenali mesh ini di dalam cache; `version` naik setiap kali
+    /// isinya berubah, dan yang berubah diunggah ulang. Tanpa versi, satu-satunya
+    /// pilihan adalah mengunggah ulang tiap frame atau tidak pernah — dan
+    /// keduanya salah.
+    ///
+    /// Bawaannya mengembalikan aset kosong: renderer yang tidak menggambar
+    /// apa pun tidak perlu tahu soal ini.
+    virtual MeshAsset AcquireMeshData(std::string_view key, const assets::MeshData& data,
+                                      uint64_t version) {
+        (void)key;
+        (void)data;
+        (void)version;
+        return {};
+    }
 
     virtual void Render(const ViewportDesc& desc, const ViewportScene& scene) = 0;
 

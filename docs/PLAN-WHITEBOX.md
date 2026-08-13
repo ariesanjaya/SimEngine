@@ -295,7 +295,7 @@ bersama: yang satu menyimpan rujukan ke topologi yang bisa disunting, yang lain
 menggambar segitiga hasilnya beserta material per ruasnya. Menyatukannya berarti
 setiap mesh impor ikut membawa medan whitebox yang tidak pernah dipakainya.
 
-### W5 — Penyuntingan di viewport · 🔶 inti selesai, panel belum
+### W5 — Penyuntingan di viewport · ✅
 
 Pilih sisi, dorong dengan gizmo, tetapkan material.
 
@@ -316,10 +316,46 @@ Pilih sisi, dorong dengan gizmo, tetapkan material.
   aset. ✅ untuk perintahnya — penetapan bisa dibatalkan, dan **sisi berbeda
   tidak digabung** karena berpindah sisi adalah keputusan baru pengguna.
 
-**Yang belum: panel dan gizmo-nya sendiri.** Yang sudah ada adalah seluruh yang
-bisa diuji tanpa ImGui — picking, perintah, dan penggabungan undo. Menyambungkan
-keduanya ke viewport menuntut verifikasi visual, dan itu tidak bisa dibuktikan
-uji headless.
+- Sorotan sisi menggambar **batas poligon**, bukan batas face. ✅
+
+  Diuji pada kubus tersegitigakan yang sudah digabung: dua segitiga isi, tetapi
+  empat rusuk batas — diagonalnya tidak muncul. Membalik uji "seberangnya
+  poligon yang sama" membuat delapan pernyataan gagal, jadi uji ini benar-benar
+  memegang aturannya alih-alih kebetulan lolos.
+- Gizmo berdiri di **titik berat berbobot luas** sisi itu. ✅
+
+  Diuji pada persegi panjang 4×1 yang terbelah tidak rata: rata-rata simpulnya
+  menjawab x = 5/3, titik beratnya x = 2. Mengganti pembobotannya dengan
+  rata-rata biasa membuat uji ini gagal.
+
+**Bentuk alatnya.** Tombol "Edit sides" (B) muncul di bilah viewport hanya
+ketika entity terpilih membawa whitebox — tombol yang selalu ada tetapi hampir
+selalu tidak melakukan apa-apa mengajari orang bahwa menekannya percuma. Selama
+mode itu menyala, klik memilih sisi dan gizmo berpindah dari entity ke sisinya.
+
+Sumbu gizmonya **mengikuti sisi, bukan dunia**: sumbu ketiganya menghadap keluar,
+sehingga mendorong sisi selalu memakai pegangan yang sama betapapun bloknya
+diputar. Menahan **Shift** saat seretan dimulai menumbuhkan sisi baru
+(ekstrusi); tanpanya sisi yang ada bergeser. Shift dibaca sekali di awal — yang
+dibaca tiap frame berarti arti sebuah gerakan bisa berubah di tengah jalan.
+
+Tiap frame seretan **membangun ulang dari keadaan awal seretan**, bukan dari
+frame sebelumnya. Menumpuknya menghasilkan satu lapis dinding per frame:
+seretan sepanjang satu meter meninggalkan puluhan dinding tersembunyi di dalam
+bloknya, dan tak satu pun terlihat sampai bloknya dipotong.
+
+Seleksi sisi disimpan di `WhiteboxStore`, bukan di panel maupun di dalam
+meshnya. Panel memilih lewat daftar dan viewport memilih lewat sinar; dua
+salinan berarti dua sorotan berbeda, dan yang digerakkan gizmo bukan yang
+tersorot di daftar. Di dalam mesh pun salah — seleksi bukan bagian bentuk, dan
+akan ikut tersimpan ke berkas.
+
+Perintahnya menyebut sasaran lewat **store dan guid**, bukan lewat pointer mesh.
+Bukan kerapian: store yang memegang penanda versi, dan versi itulah yang membuat
+viewport mengunggah ulang geometrinya. Perintah yang memegang mesh langsung
+membatalkan bentuknya dengan benar sambil meninggalkan layar menggambarkan
+bentuk yang sudah tidak ada — bug yang tampak seperti "undo tidak bekerja"
+padahal datanya sudah benar. Diuji: `Undo()` menaikkan versi store.
 
 Cuplikan undo-nya **utuh, bukan tambalan**: operasi whitebox membangun ulang
 meshnya (keputusan W2), jadi tidak ada tambalan kecil yang bisa disimpan. Mesh

@@ -47,6 +47,7 @@ const char* IconFor(AssetType type) {
         case AssetType::AnimationGraph: return icons::kNodeGraph;
         case AssetType::Level: return icons::kAssetLevel;
         case AssetType::Prefab: return icons::kPrefab;
+        case AssetType::Whitebox: return icons::kWhitebox;
         case AssetType::Json:
         case AssetType::Text: return icons::kScript;
         case AssetType::Unknown: break;

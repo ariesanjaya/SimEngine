@@ -14,12 +14,17 @@
 #include "Sim/Editor/SceneView.h"
 #include "Sim/Editor/Selection.h"
 #include "Sim/Editor/Widgets.h"
+#include "Sim/Editor/WhiteboxCommands.h"
+#include "Sim/Editor/WhiteboxStore.h"
 #include "Sim/Render/IViewportRenderer.h"
 #include "Sim/Scene/Components.h"
+#include "Sim/Whitebox/Picking.h"
+#include "Sim/Whitebox/PolygonOutline.h"
 
 #include <imgui.h>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdio>
 #include <vector>
@@ -105,6 +110,13 @@ constexpr float kIconScale = 1.6f;
 
 /// Warna entity terpilih, sama dengan yang dipakai renderer untuk wireframe.
 constexpr Vec4 kSelectionColor{1.0f, 0.62f, 0.20f, 1.0f};
+
+/// Dorongan terkecil (meter) yang masih dianggap ekstrusi.
+///
+/// Di bawahnya sisi barunya berupa dinding setipis itu — geometri yang tidak
+/// bisa dipilih lagi karena tidak ada piksel yang mengenainya, dan yang tetap
+/// ikut tersimpan ke berkas selamanya.
+constexpr float kWhiteboxExtrudeMin = 1e-3f;
 
 /// Kamera editor bergaya orbit + fly.
 ///
@@ -206,7 +218,7 @@ public:
         renderer->Resize(width, height);
 
         sceneView_.Build(*context.world, *context.selection, context.assets, renderer,
-                         context.animation, context.builtinAssets);
+                         context.animation, context.builtinAssets, context.whiteboxes);
         HandleCameraInput();
 
         render::ViewportDesc desc;
@@ -297,7 +309,9 @@ public:
         // sebuah item juga. Begitu kursor masuk ke viewport — persis keadaan
         // ketika gizmo dipakai — jawabannya selalu "ya", gizmo diberi
         // `interactive = false`, dan menyeretnya tidak menggerakkan apa pun.
-        const bool overlayHovered = DrawOverlays(context, imagePos, size, *renderer);
+        const WhiteboxTarget whiteboxTarget = FindWhiteboxTarget(context);
+        const bool overlayHovered =
+            DrawOverlays(context, imagePos, size, *renderer, whiteboxTarget);
 
         // Permukaan viewport sebagai item sungguhan, bukan status mouse mentah:
         // dengan begitu ImGui sendiri yang memutuskan klik ini milik siapa.
@@ -332,15 +346,40 @@ public:
         // Ikon digambar sebelum gizmo supaya gizmo selalu di atasnya.
         DrawEntityIcons(projection * view, imagePos, size);
 
+        // Sorotan sisi: yang di bawah kursor dicari ulang tiap frame. Sinar
+        // terhadap mesh blockout berbiaya beberapa puluh segitiga — jauh lebih
+        // murah daripada menebak lewat cache yang harus dibatalkan tiap kali
+        // bentuknya berubah, dan bentuknya berubah persis saat sedang diseret.
+        if (EditingSides(whiteboxTarget)) {
+            whitebox::PolygonHandle hovered = whitebox::PolygonHandle::Invalid;
+            const bool pointing = !flying_ && !overlayHovered && !gizmoOwnsPointer_ &&
+                                  ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
+            if (pointing) {
+                hovered = PickWhiteboxSide(whiteboxTarget, view, projection, imagePos, size,
+                                           ImGui::GetMousePos())
+                              .polygon;
+            }
+            DrawWhiteboxOverlay(context, whiteboxTarget, projection * view, imagePos, size,
+                                hovered);
+        }
+
         // Gizmo tetap tergambar walau kursor sedang di atas tombol overlay, tapi
         // tidak boleh ikut merespons kliknya: ia membaca mouse langsung dan tidak
         // tahu apa pun tentang item ImGui.
+        //
+        // Sisi yang terpilih mengambil alih gizmo dari entity-nya. Keduanya
+        // tidak bisa tampil sekaligus: dua gizmo bertumpuk di tempat yang
+        // berdekatan berarti separuh seretan mengenai yang bukan dimaksud.
         const bool gizmoBusy =
-            DrawGizmoAndApply(context, imagePos, size, view, projection, !overlayHovered);
+            EditingSides(whiteboxTarget) &&
+                    whitebox::IsValid(SelectedSide(context, whiteboxTarget))
+                ? DrawWhiteboxGizmo(context, whiteboxTarget, imagePos, size, view, projection,
+                                    !overlayHovered)
+                : DrawGizmoAndApply(context, imagePos, size, view, projection, !overlayHovered);
         gizmoOwnsPointer_ = gizmoBusy;
-        HandleSelectionInput(context, imagePos, size, view, projection, gizmoBusy, surfacePressed,
-                             surfaceHeld);
-        HandleShortcuts(context);
+        HandleSelectionInput(context, whiteboxTarget, imagePos, size, view, projection, gizmoBusy,
+                             surfacePressed, surfaceHeld);
+        HandleShortcuts(context, whiteboxTarget);
     }
 
 private:
@@ -705,11 +744,260 @@ private:
         return "Transform";
     }
 
+    // --- whitebox -----------------------------------------------------------
+
+    /// Sasaran penyuntingan sisi: entity terpilih yang membawa whitebox.
+    ///
+    /// Dicari sekali per frame dan diedarkan, bukan dicari ulang oleh tiap
+    /// bagian: pemilihan, sorotan, dan gizmo harus berbicara tentang whitebox
+    /// yang sama persis, dan tiga pencarian terpisah bisa menjawab beda ketika
+    /// seleksi berubah di tengah frame.
+    struct WhiteboxTarget {
+        whitebox::WhiteboxMesh* box = nullptr;
+        Uuid guid;
+        Mat4 world{1.0f};
+        Mat4 worldInverse{1.0f};
+
+        explicit operator bool() const { return box != nullptr; }
+    };
+
+    WhiteboxTarget FindWhiteboxTarget(EditorContext& context) const {
+        WhiteboxTarget target;
+        if (context.whiteboxes == nullptr || context.assets == nullptr) {
+            return target;
+        }
+        const scene::Entity primary = ToEntity(context.selection->Primary());
+        if (!context.world->IsAlive(primary)) {
+            return target;
+        }
+        const auto* component = context.world->TryGet<scene::WhiteboxComponent>(primary);
+        if (component == nullptr || !component->whitebox.IsValid()) {
+            return target;
+        }
+        const assets::AssetRecord* record = context.assets->Find(component->whitebox.guid);
+        if (record == nullptr) {
+            return target;
+        }
+        whitebox::WhiteboxMesh* box =
+            context.whiteboxes->Get(component->whitebox.guid, context.assets->AbsolutePath(*record));
+        if (box == nullptr) {
+            return target;
+        }
+        target.box = box;
+        target.guid = component->whitebox.guid;
+        target.world = context.world->WorldMatrix(primary);
+        target.worldInverse = glm::inverse(target.world);
+        return target;
+    }
+
+    static whitebox::PolygonHandle SelectedSide(const EditorContext& context,
+                                                const WhiteboxTarget& target) {
+        const SideSelection& side = context.whiteboxes->Selected();
+        return side.asset == target.guid ? side.polygon : whitebox::PolygonHandle::Invalid;
+    }
+
+    /// True bila klik di viewport berarti "pilih sisi", bukan "pilih entity".
+    bool EditingSides(const WhiteboxTarget& target) const {
+        return whiteboxMode_ && static_cast<bool>(target);
+    }
+
+    /// Sisi yang tertembus sinar layar.
+    ///
+    /// **Sinarnya yang dipindahkan ke ruang lokal, bukan meshnya ke ruang
+    /// dunia:** satu matriks dikalikan dua vektor, bukan sekali per simpul.
+    whitebox::PolygonHit PickWhiteboxSide(const WhiteboxTarget& target, const Mat4& view,
+                                          const Mat4& projection, const ImVec2& imagePos,
+                                          const ImVec2& size, const ImVec2& point) const {
+        const Ray ray = ScreenPointToRay(view, projection, Vec2(size.x, size.y),
+                                         Vec2(point.x - imagePos.x, point.y - imagePos.y));
+        const Vec3 origin = Vec3(target.worldInverse * Vec4(ray.origin, 1.0f));
+        const Vec3 direction = Vec3(target.worldInverse * Vec4(ray.direction, 0.0f));
+        return whitebox::PickPolygon(*target.box, origin, direction);
+    }
+
+    void DrawWhiteboxOverlay(const EditorContext& context, const WhiteboxTarget& target,
+                             const Mat4& viewProjection, const ImVec2& imagePos,
+                             const ImVec2& size, whitebox::PolygonHandle hovered) {
+        const whitebox::PolygonHandle selected = SelectedSide(context, target);
+        // Yang tersorot digambar belakangan supaya ia menang bila keduanya sisi
+        // yang sama — dan tidak digambar dua kali dengan warna bertumpuk.
+        if (whitebox::IsValid(hovered) && hovered != selected) {
+            DrawSideOverlay(target, viewProjection, imagePos, size, hovered,
+                            IM_COL32(255, 255, 255, 26), IM_COL32(255, 255, 255, 140), 1.5f);
+        }
+        if (whitebox::IsValid(selected)) {
+            DrawSideOverlay(target, viewProjection, imagePos, size, selected,
+                            IM_COL32(255, 158, 51, 55), IM_COL32(255, 158, 51, 235), 2.5f);
+        }
+    }
+
+    void DrawSideOverlay(const WhiteboxTarget& target, const Mat4& viewProjection,
+                         const ImVec2& imagePos, const ImVec2& size,
+                         whitebox::PolygonHandle polygon, ImU32 fill, ImU32 line,
+                         float thickness) {
+        const whitebox::PolygonOutline outline =
+            whitebox::BuildPolygonOutline(*target.box, polygon);
+        if (outline.empty()) {
+            return;
+        }
+        const Mat4 clip = viewProjection * target.world;
+        const Vec2 origin(imagePos.x, imagePos.y);
+        const Vec2 extent(size.x, size.y);
+
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        draw->PushClipRect(imagePos, ImVec2(imagePos.x + size.x, imagePos.y + size.y), true);
+        for (const std::array<Vec3, 3>& triangle : outline.triangles) {
+            ImVec2 corners[3];
+            bool visible = true;
+            for (int i = 0; i < 3 && visible; ++i) {
+                Vec2 screen;
+                visible = WorldToScreen(clip, origin, extent, triangle[static_cast<std::size_t>(i)],
+                                        screen);
+                corners[i] = ImVec2(screen.x, screen.y);
+            }
+            if (visible) {
+                draw->AddTriangleFilled(corners[0], corners[1], corners[2], fill);
+            }
+        }
+        for (const auto& [from, to] : outline.edges) {
+            Vec2 a;
+            Vec2 b;
+            if (WorldToScreen(clip, origin, extent, from, a) &&
+                WorldToScreen(clip, origin, extent, to, b)) {
+                draw->AddLine(ImVec2(a.x, a.y), ImVec2(b.x, b.y), line, thickness);
+            }
+        }
+        draw->PopClipRect();
+    }
+
+    /// Kerangka gizmo untuk sebuah sisi: titik beratnya, dengan sumbu ketiga
+    /// menghadap keluar.
+    ///
+    /// **Sumbu mengikuti sisinya, bukan dunia.** Yang ingin dilakukan perancang
+    /// adalah mendorong sisi keluar-masuk, dan dengan sumbu dunia arah itu
+    /// berganti pegangan setiap kali bloknya diputar — pada sisi yang menyerong
+    /// tidak ada satu pun pegangan yang benar.
+    Mat4 SideFrame(const WhiteboxTarget& target, const whitebox::PolygonOutline& outline) const {
+        // Inverse-transpose, karena normal bukan arah biasa: skala tak seragam
+        // memiringkannya ke arah yang salah bila diperlakukan seperti vektor.
+        Vec3 normal = Vec3(glm::transpose(target.worldInverse) * Vec4(outline.normal, 0.0f));
+        if (glm::length(normal) < 1e-6f) {
+            normal = Vec3(0.0f, 1.0f, 0.0f);
+        }
+        normal = glm::normalize(normal);
+
+        const Vec3 reference =
+            std::abs(normal.y) > 0.9f ? Vec3(1.0f, 0.0f, 0.0f) : Vec3(0.0f, 1.0f, 0.0f);
+        const Vec3 tangent = glm::normalize(glm::cross(reference, normal));
+        const Vec3 bitangent = glm::cross(normal, tangent);
+
+        Mat4 frame(1.0f);
+        frame[0] = Vec4(tangent, 0.0f);
+        frame[1] = Vec4(bitangent, 0.0f);
+        frame[2] = Vec4(normal, 0.0f);
+        frame[3] = Vec4(Vec3(target.world * Vec4(outline.centroid, 1.0f)), 1.0f);
+        return frame;
+    }
+
+    bool DrawWhiteboxGizmo(EditorContext& context, const WhiteboxTarget& target,
+                           const ImVec2& imagePos, const ImVec2& size, const Mat4& view,
+                           const Mat4& projection, bool interactive) {
+        const whitebox::PolygonHandle side = SelectedSide(context, target);
+        const whitebox::PolygonOutline outline = whitebox::BuildPolygonOutline(*target.box, side);
+        if (outline.empty()) {
+            return false;
+        }
+        const Mat4 frame = SideFrame(target, outline);
+
+        // Selalu Translate: sisi tidak punya rotasi maupun skala yang berarti
+        // bagi pengguna — memutar satu sisi dari sebuah blok tertutup akan
+        // merobek blok itu.
+        const GizmoResult result =
+            DrawGizmo(Vec2(imagePos.x, imagePos.y), Vec2(size.x, size.y), view, projection,
+                      GizmoOperation::Translate, GizmoSpace::Local, snap_, frame, interactive);
+
+        if (result.active && !whiteboxDrag_.active) {
+            BeginWhiteboxDrag(target, side, outline, Vec3(frame[3]));
+        }
+        if (result.changed && whiteboxDrag_.active) {
+            ApplyWhiteboxDrag(context, target, result.transform);
+        }
+        if (!result.active && whiteboxDrag_.active) {
+            whiteboxDrag_.active = false;
+            context.history->CloseMergeGroup();
+        }
+        return result.active || result.hovered;
+    }
+
+    void BeginWhiteboxDrag(const WhiteboxTarget& target, whitebox::PolygonHandle side,
+                           const whitebox::PolygonOutline& outline, const Vec3& pivot) {
+        whiteboxDrag_ = WhiteboxDrag{};
+        whiteboxDrag_.active = true;
+        // Shift diputuskan sekali, di awal. Membacanya tiap frame berarti
+        // menahannya di tengah seretan mengubah arti gerakan yang sedang
+        // berlangsung — dan gerakan yang berubah arti di tengah jalan adalah
+        // gerakan yang tidak bisa diarahkan.
+        whiteboxDrag_.extruding = ImGui::GetIO().KeyShift;
+        whiteboxDrag_.guid = target.guid;
+        whiteboxDrag_.polygon = side;
+        whiteboxDrag_.before = target.box->ToData();
+        whiteboxDrag_.normal = outline.normal;
+        whiteboxDrag_.pivot = pivot;
+    }
+
+    void ApplyWhiteboxDrag(EditorContext& context, const WhiteboxTarget& target,
+                           const Mat4& transform) {
+        // **Tiap frame dimulai dari keadaan awal seretan**, bukan dari frame
+        // sebelumnya. Ekstrusi yang ditumpuk menghasilkan satu lapis dinding
+        // per frame: seretan sepanjang satu meter akan meninggalkan puluhan
+        // dinding tersembunyi di dalam bloknya, dan tak satu pun terlihat
+        // sampai bloknya dipotong.
+        std::string error;
+        if (!whitebox::WhiteboxMesh::Build(*target.box, whiteboxDrag_.before, error)) {
+            SIM_ERROR("Whitebox", "seretan tidak bisa membangun ulang mesh: {}", error);
+            whiteboxDrag_.active = false;
+            return;
+        }
+
+        const Vec3 deltaWorld = Vec3(transform[3]) - whiteboxDrag_.pivot;
+        const Vec3 delta = Vec3(target.worldInverse * Vec4(deltaWorld, 0.0f));
+        const float along = glm::dot(delta, whiteboxDrag_.normal);
+
+        whitebox::PolygonHandle polygon = whiteboxDrag_.polygon;
+        Vec3 displacement = delta;
+        if (whiteboxDrag_.extruding) {
+            // Di bawah ambang, sisi baru belum ditumbuhkan sama sekali — dinding
+            // setebal seperseribu meter adalah geometri yang tidak bisa dipilih
+            // lagi, dan menggesernya menyamping alih-alih menumbuhkannya berarti
+            // Shift diam-diam berubah arti untuk gerakan kecil.
+            if (std::abs(along) <= kWhiteboxExtrudeMin) {
+                return;
+            }
+            const whitebox::EditResult grown = target.box->Extrude(polygon, along);
+            if (!grown.ok) {
+                return;
+            }
+            polygon = grown.polygon;
+            displacement = delta - whiteboxDrag_.normal * along;
+        }
+
+        const whitebox::EditResult moved = target.box->Translate(polygon, displacement);
+        if (moved.ok) {
+            polygon = moved.polygon;
+        }
+
+        context.history->Execute(std::make_unique<WhiteboxEditCommand>(
+            context.whiteboxes, whiteboxDrag_.guid, whiteboxDrag_.before, target.box->ToData(),
+            whiteboxDrag_.extruding ? "Extrude Side" : "Move Side"));
+        context.whiteboxes->Select(whiteboxDrag_.guid, polygon);
+    }
+
     // --- seleksi ------------------------------------------------------------
 
-    void HandleSelectionInput(EditorContext& context, const ImVec2& imagePos, const ImVec2& size,
-                              const Mat4& view, const Mat4& projection, bool gizmoBusy,
-                              bool surfacePressed, bool surfaceHeld) {
+    void HandleSelectionInput(EditorContext& context, const WhiteboxTarget& whiteboxTarget,
+                              const ImVec2& imagePos, const ImVec2& size, const Mat4& view,
+                              const Mat4& projection, bool gizmoBusy, bool surfacePressed,
+                              bool surfaceHeld) {
         if (flying_ || ImGui::GetIO().KeyAlt) {
             return;  // tombol kiri sedang milik kamera
         }
@@ -722,7 +1010,7 @@ private:
             return;
         }
         if (!surfaceHeld) {
-            FinishSelection(context, imagePos, size, view, projection);
+            FinishSelection(context, whiteboxTarget, imagePos, size, view, projection);
             boxSelecting_ = false;
             return;
         }
@@ -739,12 +1027,28 @@ private:
         }
     }
 
-    void FinishSelection(EditorContext& context, const ImVec2& imagePos, const ImVec2& size,
-                         const Mat4& view, const Mat4& projection) {
+    void FinishSelection(EditorContext& context, const WhiteboxTarget& whiteboxTarget,
+                         const ImVec2& imagePos, const ImVec2& size, const Mat4& view,
+                         const Mat4& projection) {
         ImGuiIO& io = ImGui::GetIO();
         const ImVec2 release = ImGui::GetMousePos();
         const float dragged =
             std::max(std::abs(release.x - boxStart_.x), std::abs(release.y - boxStart_.y));
+
+        // Sisi diuji lebih dulu, dan **sebelum seleksi entity disentuh**: klik
+        // yang mengenai sebuah sisi tidak boleh ikut melepaskan entity yang
+        // sisi itu miliknya. Yang meleset jatuh ke jalur biasa, sehingga
+        // mengklik benda lain tetap berpindah ke benda itu alih-alih terkunci
+        // di dalam mode.
+        if (dragged <= kDragThreshold && EditingSides(whiteboxTarget)) {
+            const whitebox::PolygonHit hit =
+                PickWhiteboxSide(whiteboxTarget, view, projection, imagePos, size, release);
+            if (hit) {
+                context.whiteboxes->Select(whiteboxTarget.guid, hit.polygon);
+                return;
+            }
+            context.whiteboxes->ClearSelection();
+        }
 
         const bool additive = io.KeyCtrl || io.KeyShift;
         if (!additive) {
@@ -788,7 +1092,7 @@ private:
 
     // --- pintasan -----------------------------------------------------------
 
-    void HandleShortcuts(EditorContext& context) {
+    void HandleShortcuts(EditorContext& context, const WhiteboxTarget& whiteboxTarget) {
         if (flying_ || ImGui::GetIO().WantTextInput) {
             return;
         }
@@ -816,6 +1120,25 @@ private:
         }
         if (ImGui::IsKeyPressed(ImGuiKey_F, false)) {
             FocusSelection(context);
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_B, false) && whiteboxTarget) {
+            ToggleWhiteboxMode(context);
+        }
+    }
+
+    void ToggleWhiteboxMode(EditorContext& context) {
+        whiteboxMode_ = !whiteboxMode_;
+        if (whiteboxDrag_.active) {
+            // Seretan yang ditinggalkan tanpa penutup membuat suntingan
+            // berikutnya menyatu dengannya, dan satu Ctrl+Z membatalkan dua
+            // gerakan yang dipisahkan oleh keluar-masuk mode.
+            whiteboxDrag_.active = false;
+            context.history->CloseMergeGroup();
+        }
+        if (!whiteboxMode_ && context.whiteboxes != nullptr) {
+            // Keluar dari mode juga melepas sisinya. Sorotan yang tertinggal di
+            // panel setelah alatnya dimatikan menjanjikan gizmo yang tidak ada.
+            context.whiteboxes->ClearSelection();
         }
     }
 
@@ -854,8 +1177,9 @@ private:
     /// yang boleh dijawab di sini adalah "kursor di atas overlay?", dan cara
     /// mana pun yang menanyakannya ke keadaan global ImGui akan ikut menghitung
     /// item lain — termasuk permukaan viewport itu sendiri.
-    bool DrawOverlays(const EditorContext& context, const ImVec2& imagePos, const ImVec2& size,
-                      const render::IViewportRenderer& renderer) {
+    bool DrawOverlays(EditorContext& context, const ImVec2& imagePos, const ImVec2& size,
+                      const render::IViewportRenderer& renderer,
+                      const WhiteboxTarget& whiteboxTarget) {
         const float pad = 10.0f;
         const float button = ImGui::GetFrameHeight() * widgets::kViewportButtonScale;
 
@@ -882,6 +1206,20 @@ private:
         }
         track();
         hovered = DrawSnapControl() || hovered;
+
+        // Hanya muncul ketika ada yang bisa disunting. Tombol yang selalu ada
+        // tetapi hampir selalu tidak melakukan apa-apa mengajari orang bahwa
+        // menekannya percuma, dan mereka berhenti menekannya justru ketika ia
+        // berguna.
+        if (whiteboxTarget) {
+            ImGui::Spacing();
+            if (widgets::ViewportButton(icons::kWhitebox,
+                                        whiteboxMode_ ? "Editing sides (B)" : "Edit sides (B)",
+                                        whiteboxMode_)) {
+                ToggleWhiteboxMode(context);
+            }
+            track();
+        }
         ImGui::EndGroup();
 
         // (D2) mode tampilan di kanan-atas.
@@ -971,6 +1309,18 @@ private:
         Mat4 worldAtDragStart{1.0f};
     };
 
+    /// Keadaan satu seretan sisi whitebox.
+    struct WhiteboxDrag {
+        bool active = false;
+        bool extruding = false;
+        Uuid guid;
+        whitebox::PolygonHandle polygon = whitebox::PolygonHandle::Invalid;
+        /// Bentuk sebelum seretan dimulai; setiap frame membangun ulang darinya.
+        whitebox::WhiteboxData before;
+        Vec3 normal{0.0f};
+        Vec3 pivot{0.0f};
+    };
+
     OrbitCamera camera_;
     SceneView sceneView_;
     render::DrawMode drawMode_ = render::DrawMode::Lit;
@@ -989,6 +1339,10 @@ private:
     bool gizmoOwnsPointer_ = false;
     bool orthographic_ = false;
     bool showGrid_ = true;
+    /// Klik memilih sisi, bukan entity. Menempel pada viewport, bukan pada
+    /// whitebox-nya: ini alat yang sedang dipegang pengguna.
+    bool whiteboxMode_ = false;
+    WhiteboxDrag whiteboxDrag_;
 };
 
 }  // namespace

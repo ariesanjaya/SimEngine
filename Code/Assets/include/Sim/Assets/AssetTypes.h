@@ -37,6 +37,8 @@ enum class AssetType : uint8_t {
     /// Graph state machine animasi (`.simanimgraph`).
     AnimationGraph,
     Level,
+    /// Blok whitebox: topologi yang bisa disunting, bukan segitiga.
+    Whitebox,
     Prefab,
     Text,
     Json,

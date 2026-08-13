@@ -4,6 +4,7 @@
 #include "Sim/Render/IViewportRenderer.h"
 #include "Sim/Render/Types.h"
 #include "Sim/Editor/SkinnedPreview.h"
+#include "Sim/Editor/WhiteboxStore.h"
 #include "Sim/Scene/World.h"
 
 #include <span>
@@ -83,7 +84,8 @@ public:
                const assets::AssetDatabase* assets = nullptr,
                render::IViewportRenderer* renderer = nullptr,
                const SkinnedPreview* animation = nullptr,
-               const assets::AssetDatabase* builtinAssets = nullptr);
+               const assets::AssetDatabase* builtinAssets = nullptr,
+               WhiteboxStore* whiteboxes = nullptr);
 
     /// Menambahkan kotak wireframe sejajar sumbu, sesudah `Build`.
     ///

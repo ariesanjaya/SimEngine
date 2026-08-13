@@ -257,6 +257,8 @@ private:
     /// menolak dengan pesan, dan itu jauh lebih berguna daripada pointer null
     /// yang harus diperiksa di setiap titik panggil.
     physics::PhysicsScene physics_;
+    /// Whitebox yang sedang terbuka, dibagi panel dan viewport.
+    WhiteboxStore whiteboxes_;
     bool playing_ = false;
     /// Play sedang tertahan sebuah breakpoint graph. Scene tetap tergambar,
     /// yang berhenti hanyalah OnUpdate.

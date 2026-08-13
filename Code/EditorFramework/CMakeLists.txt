@@ -20,6 +20,7 @@ sim_add_library(EditorFramework
         src/Selection.cpp
         src/Widgets.cpp
         src/WhiteboxCommands.cpp
+        src/WhiteboxStore.cpp
     PUBLIC_DEPS
         Sim::Animation
         Sim::Assets

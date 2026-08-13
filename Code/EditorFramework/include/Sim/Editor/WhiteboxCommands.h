@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Sim/Core/Uuid.h"
 #include "Sim/Editor/Command.h"
 #include "Sim/Whitebox/WhiteboxMesh.h"
 
@@ -8,6 +9,8 @@
 /// Menyunting whitebox lewat riwayat undo yang sama dengan operasi scene
 /// lainnya.
 namespace sim::editor {
+
+class WhiteboxStore;
 
 /// Satu perubahan bentuk whitebox, disimpan sebagai keadaan sebelum dan
 /// sesudah.
@@ -20,9 +23,16 @@ namespace sim::editor {
 ///
 /// `MemoryCost` melaporkan ukuran sebenarnya supaya batas memori riwayat tetap
 /// berarti.
+///
+/// Sasarannya disebut lewat store dan guid, bukan lewat pointer mesh.
+/// **Bukan kerapian:** store yang menandai versi, dan versi itulah yang membuat
+/// viewport mengunggah ulang geometrinya. Perintah yang memegang mesh langsung
+/// akan membatalkan bentuknya dengan benar sambil meninggalkan layar
+/// menggambarkan bentuk yang sudah tidak ada — bug yang tampak seperti "undo
+/// tidak bekerja" padahal datanya sudah benar.
 class WhiteboxEditCommand final : public ICommand {
 public:
-    WhiteboxEditCommand(whitebox::WhiteboxMesh* target, whitebox::WhiteboxData before,
+    WhiteboxEditCommand(WhiteboxStore* store, Uuid guid, whitebox::WhiteboxData before,
                         whitebox::WhiteboxData after, std::string label);
 
     void Do() override;
@@ -39,7 +49,8 @@ public:
 private:
     void Apply(const whitebox::WhiteboxData& data);
 
-    whitebox::WhiteboxMesh* target_;
+    WhiteboxStore* store_;
+    Uuid guid_;
     whitebox::WhiteboxData before_;
     whitebox::WhiteboxData after_;
     std::string label_;
@@ -52,7 +63,7 @@ private:
 /// berarti riwayat yang penuh oleh salinan geometri yang tidak berubah.
 class SetPolygonMaterialCommand final : public ICommand {
 public:
-    SetPolygonMaterialCommand(whitebox::WhiteboxMesh* target, whitebox::PolygonHandle polygon,
+    SetPolygonMaterialCommand(WhiteboxStore* store, Uuid guid, whitebox::PolygonHandle polygon,
                               int material);
 
     void Do() override;
@@ -61,7 +72,10 @@ public:
     bool MergeWith(const ICommand& next) override;
 
 private:
-    whitebox::WhiteboxMesh* target_;
+    void Apply(int material);
+
+    WhiteboxStore* store_;
+    Uuid guid_;
     whitebox::PolygonHandle polygon_;
     int before_ = whitebox::kNoMaterial;
     int after_ = whitebox::kNoMaterial;

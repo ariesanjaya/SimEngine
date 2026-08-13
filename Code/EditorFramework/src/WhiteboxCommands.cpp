@@ -1,28 +1,37 @@
 #include "Sim/Editor/WhiteboxCommands.h"
 
 #include "Sim/Core/Log.h"
+#include "Sim/Editor/WhiteboxStore.h"
 
 namespace sim::editor {
 
-WhiteboxEditCommand::WhiteboxEditCommand(whitebox::WhiteboxMesh* target,
+WhiteboxEditCommand::WhiteboxEditCommand(WhiteboxStore* store, Uuid guid,
                                          whitebox::WhiteboxData before,
                                          whitebox::WhiteboxData after, std::string label)
-    : target_(target),
+    : store_(store),
+      guid_(guid),
       before_(std::move(before)),
       after_(std::move(after)),
       label_(std::move(label)) {}
 
 void WhiteboxEditCommand::Apply(const whitebox::WhiteboxData& data) {
-    if (target_ == nullptr) {
+    whitebox::WhiteboxMesh* target = store_ == nullptr ? nullptr : store_->Find(guid_);
+    if (target == nullptr) {
         return;
     }
     std::string error;
-    if (!whitebox::WhiteboxMesh::Build(*target_, data, error)) {
+    if (!whitebox::WhiteboxMesh::Build(*target, data, error)) {
         // Cuplikan yang tidak bisa dibangun berarti sesuatu merusaknya sesudah
         // ia diambil. Terdengar keras: undo yang diam-diam tidak melakukan apa
         // pun jauh lebih membingungkan daripada undo yang mengeluh.
         SIM_ERROR("Whitebox", "undo/redo tidak bisa membangun ulang mesh: {}", error);
+        return;
     }
+    // Bentuknya sudah kembali; yang tergambar belum. Store yang memegang
+    // penanda versinya, dan tanpa langkah ini viewport tetap menampilkan
+    // geometri sebelum undo sampai ada suntingan lain yang kebetulan
+    // menaikkannya.
+    store_->MarkDirty(guid_);
 }
 
 void WhiteboxEditCommand::Do() { Apply(after_); }
@@ -30,7 +39,7 @@ void WhiteboxEditCommand::Undo() { Apply(before_); }
 
 bool WhiteboxEditCommand::MergeWith(const ICommand& next) {
     const auto* other = dynamic_cast<const WhiteboxEditCommand*>(&next);
-    if (other == nullptr || other->target_ != target_) {
+    if (other == nullptr || other->store_ != store_ || other->guid_ != guid_) {
         return false;
     }
     // Keadaan "sebelum" milik yang pertama dipertahankan, dan "sesudah" diambil
@@ -52,33 +61,38 @@ std::size_t WhiteboxEditCommand::MemoryCost() const {
     return sizeof(WhiteboxEditCommand) + sizeOf(before_) + sizeOf(after_);
 }
 
-SetPolygonMaterialCommand::SetPolygonMaterialCommand(whitebox::WhiteboxMesh* target,
+SetPolygonMaterialCommand::SetPolygonMaterialCommand(WhiteboxStore* store, Uuid guid,
                                                      whitebox::PolygonHandle polygon,
                                                      int material)
-    : target_(target), polygon_(polygon), after_(material) {
-    if (target_ != nullptr) {
-        before_ = target_->PolygonMaterial(polygon);
+    : store_(store), guid_(guid), polygon_(polygon), after_(material) {
+    whitebox::WhiteboxMesh* target = store_ == nullptr ? nullptr : store_->Find(guid_);
+    if (target != nullptr) {
+        before_ = target->PolygonMaterial(polygon);
     }
 }
 
-void SetPolygonMaterialCommand::Do() {
-    if (target_ != nullptr) {
-        target_->SetPolygonMaterial(polygon_, after_);
+void SetPolygonMaterialCommand::Apply(int material) {
+    whitebox::WhiteboxMesh* target = store_ == nullptr ? nullptr : store_->Find(guid_);
+    if (target == nullptr) {
+        return;
     }
+    target->SetPolygonMaterial(polygon_, material);
+    // Material menentukan pembagian ruas mesh yang digambar, jadi ia sama
+    // perlunya diberi tanda seperti perubahan bentuk.
+    store_->MarkDirty(guid_);
 }
 
-void SetPolygonMaterialCommand::Undo() {
-    if (target_ != nullptr) {
-        target_->SetPolygonMaterial(polygon_, before_);
-    }
-}
+void SetPolygonMaterialCommand::Do() { Apply(after_); }
+
+void SetPolygonMaterialCommand::Undo() { Apply(before_); }
 
 bool SetPolygonMaterialCommand::MergeWith(const ICommand& next) {
     const auto* other = dynamic_cast<const SetPolygonMaterialCommand*>(&next);
     // Hanya sisi yang sama pada whitebox yang sama: berpindah sisi adalah
     // keputusan baru pengguna, dan menggabungkannya berarti satu Ctrl+Z
     // membatalkan dua penetapan yang tidak berhubungan.
-    if (other == nullptr || other->target_ != target_ || other->polygon_ != polygon_) {
+    if (other == nullptr || other->store_ != store_ || other->guid_ != guid_ ||
+        other->polygon_ != polygon_) {
         return false;
     }
     after_ = other->after_;

@@ -90,7 +90,8 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                       const assets::AssetDatabase* assets,
                       render::IViewportRenderer* renderer,
                       const SkinnedPreview* animation,
-                      const assets::AssetDatabase* builtinAssets) {
+                      const assets::AssetDatabase* builtinAssets,
+                      WhiteboxStore* whiteboxes) {
     meshes_.clear();
     skinMatrices_.clear();
     partColors_.clear();
@@ -138,7 +139,33 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                 // GPU hanyalah yang memegang buffer-nya, dan cache kedua di
                 // editor adalah cache yang suatu saat tidak sepakat dengan yang
                 // pertama.
-                if (assets != nullptr && renderer != nullptr && meshRenderer->mesh.IsValid()) {
+                // **Whitebox mendahului aset mesh.** Entity yang membawa keduanya
+                // memakai whitebox untuk bentuknya dan `MeshRenderer` untuk
+                // materialnya: bentuknya dirancang di sini, materialnya dipilih
+                // seperti mesh lain.
+                const auto* whiteboxComponent = world.TryGet<scene::WhiteboxComponent>(entity);
+                bool fromWhitebox = false;
+                if (whiteboxes != nullptr && renderer != nullptr && assets != nullptr &&
+                    whiteboxComponent != nullptr && whiteboxComponent->whitebox.IsValid()) {
+                    const Uuid guid = whiteboxComponent->whitebox.guid;
+                    if (const assets::AssetRecord* record = assets->Find(guid)) {
+                        whiteboxes->Get(guid, assets->AbsolutePath(*record));
+                    }
+                    if (const assets::MeshData* built = whiteboxes->BuiltMesh(guid)) {
+                        const render::MeshAsset mesh = renderer->AcquireMeshData(
+                            guid.ToString(), *built, whiteboxes->Version(guid));
+                        if (mesh.loaded) {
+                            instance.mesh = mesh.handle;
+                            instance.boundsMin = mesh.boundsMin;
+                            instance.boundsMax = mesh.boundsMax;
+                            AppendPartColors(*meshRenderer, mesh.partCount, assets, instance);
+                            fromWhitebox = true;
+                        }
+                    }
+                }
+
+                if (!fromWhitebox && assets != nullptr && renderer != nullptr &&
+                    meshRenderer->mesh.IsValid()) {
                     if (const assets::AssetRecord* record = assets->Find(meshRenderer->mesh.guid)) {
                         const render::MeshAsset mesh =
                             renderer->AcquireMesh(assets->AbsolutePath(*record).string());

@@ -1010,6 +1010,36 @@ public:
         drawnTransparent_ = transparentCount;
     }
 
+    MeshAsset AcquireMeshData(std::string_view key, const assets::MeshData& data,
+                              uint64_t version) override {
+        MeshAsset asset;
+        if (key.empty() || !data.IsValid()) {
+            return asset;
+        }
+        const std::string name(key);
+        const auto found = meshDataVersion_.find(name);
+        if (found != meshDataVersion_.end() && found->second.version == version) {
+            const GpuMesh& mesh = *meshes_[static_cast<std::size_t>(found->second.handle)];
+            return MeshAsset{found->second.handle, mesh.boundsMin, mesh.boundsMax, true,
+                             static_cast<uint32_t>(mesh.parts.size()), mesh.boneCount};
+        }
+
+        // Versinya berubah: yang lama sudah bukan bentuk yang sama lagi. Ia
+        // dibiarkan tetap ada alih-alih dilepas di sini — frame yang sedang
+        // digambar masih boleh memakainya, dan melepasnya sekarang berarti GPU
+        // membaca memori yang sudah kembali ke alokator.
+        const MeshHandle handle = UploadMesh(data);
+        if (handle == kUnitCubeMesh) {
+            SIM_ERROR("Render", "cannot upload generated mesh {}", name);
+            return asset;
+        }
+        meshDataVersion_[name] = GeneratedMesh{handle, version};
+
+        const GpuMesh& mesh = *meshes_[static_cast<std::size_t>(handle)];
+        return MeshAsset{handle, mesh.boundsMin, mesh.boundsMax, true,
+                         static_cast<uint32_t>(mesh.parts.size()), mesh.boneCount};
+    }
+
     MeshAsset AcquireMesh(std::string_view path) override {
         MeshAsset asset;
         if (path.empty()) {
@@ -3489,6 +3519,13 @@ private:
     /// Jalur → handle. Jalur yang gagal dimuat dipetakan ke kubus satuan supaya
     /// ia tidak dicoba lagi setiap frame.
     std::unordered_map<std::string, MeshHandle> meshByPath_;
+    /// Mesh yang datang sebagai data. Versinya disimpan supaya yang tidak
+    /// berubah tidak diunggah ulang tiap frame.
+    struct GeneratedMesh {
+        MeshHandle handle = 0;
+        uint64_t version = 0;
+    };
+    std::unordered_map<std::string, GeneratedMesh> meshDataVersion_;
     uint32_t drawnOpaque_ = 0;
     uint32_t drawnTransparent_ = 0;
 };

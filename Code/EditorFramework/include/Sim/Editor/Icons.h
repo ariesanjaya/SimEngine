@@ -56,6 +56,7 @@ inline constexpr const char* kEntity = ICON_LC_BOX;
 inline constexpr const char* kEntityGroup = ICON_LC_BLOCKS;
 inline constexpr const char* kPrefab = ICON_LC_PACKAGE;
 inline constexpr const char* kMesh = ICON_LC_SHAPES;
+inline constexpr const char* kWhitebox = ICON_LC_BOXES;
 inline constexpr const char* kLight = ICON_LC_LIGHTBULB;
 inline constexpr const char* kSunLight = ICON_LC_SUN;
 inline constexpr const char* kCamera = ICON_LC_VIDEO;

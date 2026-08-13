@@ -27,6 +27,7 @@ const char* ToString(AssetType type) {
         case AssetType::AnimationGraph: return "Animation Graph";
         case AssetType::Level: return "Level";
         case AssetType::Prefab: return "Prefab";
+        case AssetType::Whitebox: return "Whitebox";
         case AssetType::Text: return "Text";
         case AssetType::Json: return "JSON";
         case AssetType::Unknown: break;
@@ -60,7 +61,7 @@ AssetType TypeFromExtension(std::string_view extension) {
         return AssetType::Volume;
     }
 
-    static const std::array<std::pair<const char*, AssetType>, 22> kTable{{
+    static const std::array<std::pair<const char*, AssetType>, 23> kTable{{
         {".obj", AssetType::Mesh},
         {".fbx", AssetType::Mesh},
         {".gltf", AssetType::Mesh},
@@ -84,6 +85,7 @@ AssetType TypeFromExtension(std::string_view extension) {
         {".simanimgraph", AssetType::AnimationGraph},
         {".simlevel", AssetType::Level},
         {".simprefab", AssetType::Prefab},
+        {".simwhitebox", AssetType::Whitebox},
         {".json", AssetType::Json},
         {".txt", AssetType::Text},
     }};
