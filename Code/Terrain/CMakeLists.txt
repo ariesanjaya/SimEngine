@@ -4,6 +4,7 @@ sim_add_library(Terrain
         src/TerrainBrush.cpp
         src/TerrainIo.cpp
         src/TerrainMesh.cpp
+        src/TerrainPicking.cpp
     PUBLIC_DEPS
         # `MeshData` muncul di header `TerrainMesh.h`: yang meminta mesh sebuah
         # ubin menerima tipe itu, jadi ia tidak bisa privat. Arahnya sekali

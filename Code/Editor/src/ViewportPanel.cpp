@@ -16,6 +16,8 @@
 #include "Sim/Editor/Widgets.h"
 #include "Sim/Editor/WhiteboxCommands.h"
 #include "Sim/Editor/WhiteboxStore.h"
+#include "Sim/Terrain/TerrainBrush.h"
+#include "Sim/Terrain/TerrainPicking.h"
 #include "Sim/Render/IViewportRenderer.h"
 #include "Sim/Scene/Components.h"
 #include "Sim/Whitebox/Picking.h"
@@ -314,8 +316,9 @@ public:
         // ketika gizmo dipakai — jawabannya selalu "ya", gizmo diberi
         // `interactive = false`, dan menyeretnya tidak menggerakkan apa pun.
         const WhiteboxTarget whiteboxTarget = FindWhiteboxTarget(context);
+        const TerrainTarget terrainTarget = FindTerrainTarget(context);
         const bool overlayHovered =
-            DrawOverlays(context, imagePos, size, *renderer, whiteboxTarget);
+            DrawOverlays(context, imagePos, size, *renderer, whiteboxTarget, terrainTarget);
 
         // Permukaan viewport sebagai item sungguhan, bukan status mouse mentah:
         // dengan begitu ImGui sendiri yang memutuskan klik ini milik siapa.
@@ -374,6 +377,18 @@ public:
         // Sisi yang terpilih mengambil alih gizmo dari entity-nya. Keduanya
         // tidak bisa tampil sekaligus: dua gizmo bertumpuk di tempat yang
         // berdekatan berarti separuh seretan mengenai yang bukan dimaksud.
+        // Memahat mengambil alih tombol kiri sepenuhnya: gizmo tidak digambar,
+        // dan klik tidak memilih apa pun. Alat yang menyeret tanah sambil
+        // sesekali memindahkan objek yang kebetulan di bawah kursor adalah alat
+        // yang tidak bisa dipercaya.
+        if (SculptingTerrain(terrainTarget)) {
+            HandleTerrainSculpt(context, terrainTarget, imagePos, size, view, projection,
+                                !overlayHovered);
+            gizmoOwnsPointer_ = false;
+            HandleShortcuts(context, whiteboxTarget, terrainTarget);
+            return;
+        }
+
         const bool gizmoBusy =
             EditingSides(whiteboxTarget) &&
                     whitebox::IsValid(SelectedSide(context, whiteboxTarget))
@@ -383,7 +398,7 @@ public:
         gizmoOwnsPointer_ = gizmoBusy;
         HandleSelectionInput(context, whiteboxTarget, imagePos, size, view, projection, gizmoBusy,
                              surfacePressed, surfaceHeld);
-        HandleShortcuts(context, whiteboxTarget);
+        HandleShortcuts(context, whiteboxTarget, terrainTarget);
     }
 
 private:
@@ -1015,6 +1030,177 @@ private:
         context.whiteboxes->Select(whiteboxDrag_.guid, polygon);
     }
 
+    // --- terrain ------------------------------------------------------------
+
+    /// Sasaran pahatan: entity terpilih yang membawa terrain.
+    struct TerrainTarget {
+        terrain::Terrain* map = nullptr;
+        Uuid guid;
+        Mat4 world{1.0f};
+        Mat4 worldInverse{1.0f};
+
+        explicit operator bool() const { return map != nullptr; }
+    };
+
+    TerrainTarget FindTerrainTarget(EditorContext& context) const {
+        TerrainTarget target;
+        if (context.terrains == nullptr || context.assets == nullptr) {
+            return target;
+        }
+        const scene::Entity primary = ToEntity(context.selection->Primary());
+        if (!context.world->IsAlive(primary)) {
+            return target;
+        }
+        const auto* component = context.world->TryGet<scene::TerrainComponent>(primary);
+        if (component == nullptr || !component->terrain.IsValid()) {
+            return target;
+        }
+        const assets::AssetRecord* record = context.assets->Find(component->terrain.guid);
+        if (record == nullptr) {
+            return target;
+        }
+        terrain::Terrain* map =
+            context.terrains->Get(component->terrain.guid, context.assets->AbsolutePath(*record));
+        if (map == nullptr) {
+            return target;
+        }
+        target.map = map;
+        target.guid = component->terrain.guid;
+        target.world = context.world->WorldMatrix(primary);
+        target.worldInverse = glm::inverse(target.world);
+        return target;
+    }
+
+    bool SculptingTerrain(const TerrainTarget& target) const {
+        return terrainMode_ && static_cast<bool>(target);
+    }
+
+    /// Titik di permukaan terrain yang ditunjuk kursor, di ruang lokalnya.
+    terrain::TerrainHit PickTerrain(const TerrainTarget& target, const Mat4& view,
+                                    const Mat4& projection, const ImVec2& imagePos,
+                                    const ImVec2& size, const ImVec2& point) const {
+        const Ray ray = ScreenPointToRay(view, projection, Vec2(size.x, size.y),
+                                         Vec2(point.x - imagePos.x, point.y - imagePos.y));
+        const Vec3 origin = Vec3(target.worldInverse * Vec4(ray.origin, 1.0f));
+        const Vec3 direction = Vec3(target.worldInverse * Vec4(ray.direction, 0.0f));
+        return terrain::RaycastTerrain(*target.map, origin, direction);
+    }
+
+    /// Lingkaran kuas, digambar **mengikuti permukaan** alih-alih sebagai
+    /// lingkaran datar.
+    ///
+    /// Lingkaran datar berbohong justru di tempat ia paling dibutuhkan: di
+    /// lereng, jangkauan kuas yang sebenarnya membentang jauh lebih panjang
+    /// menuruni bukit daripada yang digambar — dan yang memahat tepi jurang
+    /// akan terus-menerus mengenai lebih banyak daripada yang dimaksudnya.
+    void DrawTerrainCursor(const TerrainTarget& target, const Mat4& viewProjection,
+                           const ImVec2& imagePos, const ImVec2& size, const Vec3& center,
+                           float radius) {
+        constexpr int kSegments = 48;
+        const Mat4 clip = viewProjection * target.world;
+        const Vec2 origin(imagePos.x, imagePos.y);
+        const Vec2 extent(size.x, size.y);
+
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        draw->PushClipRect(imagePos, ImVec2(imagePos.x + size.x, imagePos.y + size.y), true);
+
+        // Dua lingkaran: jangkauan penuh, dan tempat falloff mulai melembut.
+        // Yang kedua bukan hiasan — tanpanya "seberapa lembut" hanya bisa
+        // diketahui dengan mencoba lalu membatalkan.
+        const float inner = radius * (1.0f - std::clamp(target.map == nullptr
+                                                            ? 0.0f
+                                                            : falloffPreview_,
+                                                        0.0f, 1.0f));
+        for (int pass = 0; pass < 2; ++pass) {
+            const float ringRadius = pass == 0 ? radius : inner;
+            if (ringRadius <= 0.01f) {
+                continue;
+            }
+            ImVec2 previous{};
+            bool havePrevious = false;
+            for (int i = 0; i <= kSegments; ++i) {
+                const float angle = 6.2831853f * static_cast<float>(i) / kSegments;
+                const float x = center.x + std::cos(angle) * ringRadius;
+                const float z = center.z + std::sin(angle) * ringRadius;
+                const Vec3 point(x, target.map->HeightAtWorld(x, z), z);
+                Vec2 screen;
+                if (!WorldToScreen(clip, origin, extent, point, screen)) {
+                    havePrevious = false;
+                    continue;
+                }
+                const ImVec2 at(screen.x, screen.y);
+                if (havePrevious) {
+                    draw->AddLine(previous, at,
+                                  pass == 0 ? IM_COL32(255, 200, 90, 230)
+                                            : IM_COL32(255, 200, 90, 110),
+                                  pass == 0 ? 2.0f : 1.0f);
+                }
+                previous = at;
+                havePrevious = true;
+            }
+        }
+        draw->PopClipRect();
+    }
+
+    /// Satu frame pahatan. Mengembalikan true bila goresan sedang berlangsung,
+    /// sehingga klik tidak boleh dianggap seleksi.
+    bool HandleTerrainSculpt(EditorContext& context, const TerrainTarget& target,
+                             const ImVec2& imagePos, const ImVec2& size, const Mat4& view,
+                             const Mat4& projection, bool allowed) {
+        const bool hovered =
+            allowed && ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows) && !flying_;
+
+        terrain::TerrainHit hit;
+        if (hovered || terrainStroke_.Active()) {
+            hit = PickTerrain(target, view, projection, imagePos, size, ImGui::GetMousePos());
+        }
+
+        const terrain::Brush brush = EffectiveSculptBrush(
+            context.terrains->SculptBrush(), ImGui::GetIO().KeyCtrl, ImGui::GetIO().KeyShift);
+        falloffPreview_ = brush.falloff;
+
+        if (hit) {
+            DrawTerrainCursor(target, projection * view, imagePos, size, hit.position,
+                              brush.radius);
+        }
+
+        if (hovered && hit && ImGui::IsMouseClicked(ImGuiMouseButton_Left)) {
+            terrainStroke_.Begin(*target.map, hit.position.x, hit.position.z);
+            lastSculpt_ = Vec2(hit.position.x, hit.position.z);
+        }
+        if (!terrainStroke_.Active()) {
+            return false;
+        }
+
+        // Yang lepas dari permukaan — kursor keluar peta di tengah seretan —
+        // menyentuh di tempat terakhir yang sah, bukan berhenti diam-diam.
+        // Goresan yang putus di tengah menghasilkan dua entri undo untuk satu
+        // sapuan tangan.
+        const Vec2 at = hit ? Vec2(hit.position.x, hit.position.z) : lastSculpt_;
+        lastSculpt_ = at;
+
+        const float dt = context.deltaSeconds > 0.0f ? context.deltaSeconds : 1.0f / 60.0f;
+        // **Jalur yang sama persis dengan panel**: `BrushStroke` milik
+        // `Sim::Terrain`, bukan penerapan kedua yang kebetulan mirip. Jalur
+        // kedua adalah dua perilaku yang berselisih di kasus tepi, dan yang
+        // berselisih di kasus tepi tidak terlihat sampai seseorang mengeluh
+        // bahwa undo-nya aneh.
+        terrainStroke_.Advance(*target.map, brush, at.x, at.y, dt);
+        context.terrains->MarkDirty(target.guid);
+
+        if (ImGui::IsMouseReleased(ImGuiMouseButton_Left)) {
+            terrainStroke_.End(*target.map);
+        }
+        return true;
+    }
+
+    void ToggleTerrainMode(const TerrainTarget& target) {
+        terrainMode_ = !terrainMode_;
+        if (terrainStroke_.Active() && target) {
+            terrainStroke_.End(*target.map);
+        }
+    }
+
     // --- seleksi ------------------------------------------------------------
 
     void HandleSelectionInput(EditorContext& context, const WhiteboxTarget& whiteboxTarget,
@@ -1115,7 +1301,8 @@ private:
 
     // --- pintasan -----------------------------------------------------------
 
-    void HandleShortcuts(EditorContext& context, const WhiteboxTarget& whiteboxTarget) {
+    void HandleShortcuts(EditorContext& context, const WhiteboxTarget& whiteboxTarget,
+                         const TerrainTarget& terrainTarget) {
         if (flying_ || ImGui::GetIO().WantTextInput) {
             return;
         }
@@ -1146,6 +1333,9 @@ private:
         }
         if (ImGui::IsKeyPressed(ImGuiKey_B, false) && whiteboxTarget) {
             ToggleWhiteboxMode(context);
+        }
+        if (ImGui::IsKeyPressed(ImGuiKey_T, false) && terrainTarget) {
+            ToggleTerrainMode(terrainTarget);
         }
     }
 
@@ -1202,7 +1392,7 @@ private:
     /// item lain — termasuk permukaan viewport itu sendiri.
     bool DrawOverlays(EditorContext& context, const ImVec2& imagePos, const ImVec2& size,
                       const render::IViewportRenderer& renderer,
-                      const WhiteboxTarget& whiteboxTarget) {
+                      const WhiteboxTarget& whiteboxTarget, const TerrainTarget& terrainTarget) {
         const float pad = 10.0f;
         const float button = ImGui::GetFrameHeight() * widgets::kViewportButtonScale;
 
@@ -1243,7 +1433,20 @@ private:
             }
             track();
         }
+        if (terrainTarget) {
+            ImGui::Spacing();
+            if (widgets::ViewportButton(icons::kTerrainEditor,
+                                        terrainMode_ ? "Sculpting terrain (T)" : "Sculpt terrain (T)",
+                                        terrainMode_)) {
+                ToggleTerrainMode(terrainTarget);
+            }
+            track();
+        }
         ImGui::EndGroup();
+
+        if (SculptingTerrain(terrainTarget)) {
+            hovered = DrawSculptControls(context, imagePos, size) || hovered;
+        }
 
         // (D2) mode tampilan di kanan-atas.
         ImGui::SetCursorScreenPos(ImVec2(imagePos.x + size.x - button - pad, imagePos.y + pad));
@@ -1282,6 +1485,37 @@ private:
         ImGui::SetCursorScreenPos(
             ImVec2(imagePos.x + pad, imagePos.y + size.y - infoSize.y - pad));
         ImGui::TextDisabled("%s", info);
+        return hovered;
+    }
+
+    /// Setelan kuas, hanya saat memahat. Ditaruh di viewport dan bukan hanya di
+    /// panel karena yang sedang memahat sedang menatap viewport — dan alat yang
+    /// menuntut pindah jendela untuk mengubah jari-jari adalah alat yang
+    /// jari-jarinya jarang diubah.
+    bool DrawSculptControls(EditorContext& context, const ImVec2& imagePos, const ImVec2& size) {
+        terrain::Brush& brush = context.terrains->SculptBrush();
+        const float width = ImGui::GetFontSize() * 9.0f;
+        ImGui::SetCursorScreenPos(ImVec2(imagePos.x + 10.0f, imagePos.y + size.y * 0.5f));
+        ImGui::BeginGroup();
+
+        static const char* const kKinds[] = {"Raise", "Lower", "Flatten", "Smooth", "Noise"};
+        int kind = static_cast<int>(brush.kind);
+        ImGui::SetNextItemWidth(width);
+        if (ImGui::Combo("##terraintool", &kind, kKinds, IM_ARRAYSIZE(kKinds))) {
+            brush.kind = static_cast<terrain::BrushKind>(kind);
+        }
+        bool hovered = ImGui::IsItemHovered();
+        ImGui::SetNextItemWidth(width);
+        ImGui::DragFloat("##radius", &brush.radius, 0.25f, 0.5f, 500.0f, "radius %.1f m");
+        hovered = hovered || ImGui::IsItemHovered();
+        ImGui::SetNextItemWidth(width);
+        ImGui::DragFloat("##strength", &brush.strength, 0.1f, 0.01f, 200.0f, "strength %.2f");
+        hovered = hovered || ImGui::IsItemHovered();
+        ImGui::SetNextItemWidth(width);
+        ImGui::SliderFloat("##falloff", &brush.falloff, 0.0f, 1.0f, "falloff %.2f");
+        hovered = hovered || ImGui::IsItemHovered();
+        ImGui::TextDisabled("Ctrl smooth   Shift invert");
+        ImGui::EndGroup();
         return hovered;
     }
 
@@ -1366,6 +1600,15 @@ private:
     /// whitebox-nya: ini alat yang sedang dipegang pengguna.
     bool whiteboxMode_ = false;
     WhiteboxDrag whiteboxDrag_;
+    /// Klik memahat tanah, bukan memilih. Menempel pada viewport, bukan pada
+    /// terrainnya: ini alat yang sedang dipegang pengguna.
+    bool terrainMode_ = false;
+    terrain::BrushStroke terrainStroke_;
+    /// Tempat sentuhan terakhir yang sah, untuk seretan yang keluar peta di
+    /// tengah jalan.
+    Vec2 lastSculpt_{0.0f};
+    /// Falloff yang sedang berlaku, dipakai menggambar lingkaran dalam kursor.
+    float falloffPreview_ = 0.5f;
 };
 
 }  // namespace

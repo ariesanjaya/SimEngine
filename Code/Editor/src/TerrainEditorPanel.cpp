@@ -821,18 +821,18 @@ private:
         }
         const Vec3 end(cursorX_, terrain_->HeightAtWorld(cursorX_, cursorZ_), cursorZ_);
         terrain_->BeginStroke();
-        ApplyRamp((*terrain_), brush_, rampStart_, end);
+        ApplyRamp((*terrain_), Sculpt(), rampStart_, end);
         terrain_->EndStroke();
         rampAnchored_ = false;
         Touch();
     }
 
-    float CursorRadius() const { return mode_ == Mode::Sculpt ? brush_.radius : paint_.radius; }
-    float CursorFalloff() const { return mode_ == Mode::Sculpt ? brush_.falloff : paint_.falloff; }
+    float CursorRadius() const { return mode_ == Mode::Sculpt ? Sculpt().radius : paint_.radius; }
+    float CursorFalloff() const { return mode_ == Mode::Sculpt ? Sculpt().falloff : paint_.falloff; }
 
     /// Brush yang benar-benar dipakai, setelah pengubah papan ketik.
     Brush EffectiveBrush() const {
-        Brush brush = brush_;
+        Brush brush = Sculpt();
         switch (tool_) {
             case Tool::Raise: brush.kind = BrushKind::Raise; break;
             case Tool::Lower: brush.kind = BrushKind::Lower; break;
@@ -841,19 +841,10 @@ private:
             case Tool::Noise: brush.kind = BrushKind::Noise; break;
             case Tool::Ramp: break;
         }
-        // Ctrl melembutkan dan Shift membalik, apa pun alat yang terpilih.
-        // Keduanya konvensi yang sama di setiap alat terrain, dan berpindah alat
-        // untuk satu sapuan pelembut memutus alur memahat.
-        if (ImGui::GetIO().KeyCtrl) {
-            brush.kind = BrushKind::Smooth;
-        } else if (ImGui::GetIO().KeyShift) {
-            if (brush.kind == BrushKind::Raise) {
-                brush.kind = BrushKind::Lower;
-            } else if (brush.kind == BrushKind::Lower) {
-                brush.kind = BrushKind::Raise;
-            }
-        }
-        return brush;
+        // Pengubah papan ketiknya dipakai bersama viewport. Ctrl melembutkan
+        // dan Shift membalik di keduanya, dan menuliskannya dua kali adalah dua
+        // tempat yang suatu saat tidak sepakat tentang apa arti Shift.
+        return EffectiveSculptBrush(brush, ImGui::GetIO().KeyCtrl, ImGui::GetIO().KeyShift);
     }
 
     void DrawStatus() {
@@ -952,29 +943,29 @@ private:
         ImGui::Separator();
 
         ImGui::SetNextItemWidth(width);
-        ImGui::DragFloat("Radius", &brush_.radius, 0.25f, 0.5f, 2000.0f, "%.1f m");
+        ImGui::DragFloat("Radius", &Sculpt().radius, 0.25f, 0.5f, 2000.0f, "%.1f m");
         ImGui::SetNextItemWidth(width);
-        ImGui::DragFloat("Strength", &brush_.strength, 0.1f, 0.0f, 500.0f, "%.1f m/s");
+        ImGui::DragFloat("Strength", &Sculpt().strength, 0.1f, 0.0f, 500.0f, "%.1f m/s");
         ImGui::SetNextItemWidth(width);
-        ImGui::SliderFloat("Falloff", &brush_.falloff, 0.0f, 1.0f);
+        ImGui::SliderFloat("Falloff", &Sculpt().falloff, 0.0f, 1.0f);
 
         if (tool_ == Tool::Flatten) {
             ImGui::SetNextItemWidth(width);
-            ImGui::DragFloat("Target", &brush_.targetHeight, 0.25f, terrain_->Desc().minHeight,
+            ImGui::DragFloat("Target", &Sculpt().targetHeight, 0.25f, terrain_->Desc().minHeight,
                              terrain_->Desc().maxHeight, "%.2f m");
             ImGui::SameLine();
             if (ImGui::SmallButton("Pick")) {
-                brush_.targetHeight = terrain_->HeightAtWorld(cursorX_, cursorZ_);
+                Sculpt().targetHeight = terrain_->HeightAtWorld(cursorX_, cursorZ_);
             }
             widgets::Tooltip("Take the height under the cursor");
         }
         if (tool_ == Tool::Noise) {
             ImGui::SetNextItemWidth(width);
-            ImGui::DragFloat("Frequency", &brush_.noiseFrequency, 0.001f, 0.001f, 2.0f, "%.3f /m");
+            ImGui::DragFloat("Frequency", &Sculpt().noiseFrequency, 0.001f, 0.001f, 2.0f, "%.3f /m");
             ImGui::SetNextItemWidth(width);
-            int seed = static_cast<int>(brush_.seed);
+            int seed = static_cast<int>(Sculpt().seed);
             if (ImGui::InputInt("Seed", &seed, 0)) {
-                brush_.seed = static_cast<uint32_t>(std::max(0, seed));
+                Sculpt().seed = static_cast<uint32_t>(std::max(0, seed));
             }
         }
 
@@ -1257,7 +1248,7 @@ private:
             const float t = static_cast<float>(i) / static_cast<float>(kSteps);
             const float unit = std::abs(t * 2.0f - 1.0f);
             const float weight = mode_ == Mode::Sculpt
-                                     ? BrushWeight(brush_, unit * brush_.radius)
+                                     ? BrushWeight(Sculpt(), unit * Sculpt().radius)
                                      : BrushWeight(paint_, unit * paint_.radius);
             const ImVec2 point(origin.x + size.x * t, origin.y + size.y * (1.0f - weight));
             if (i > 0) {
@@ -1275,7 +1266,7 @@ private:
         if (whole) {
             rect = SampleRect{0, 0, terrain_->SamplesX(), terrain_->SamplesY()};
         } else {
-            rect = terrain_->RectForCircle(cursorX_, cursorZ_, brush_.radius);
+            rect = terrain_->RectForCircle(cursorX_, cursorZ_, Sculpt().radius);
         }
         if (rect.Empty()) {
             return;
@@ -1346,21 +1337,25 @@ private:
         // itu disetel di awal frame, dan frame ini sudah lewat awalnya.
         terrain_ = opened;
         document_ = context.terrains->Document(guid);
-        brush_.targetHeight = terrain_->Desc().baseHeight;
+        Sculpt().targetHeight = terrain_->Desc().baseHeight;
         // Jari-jari bawaan mengikuti ukuran peta. Brush sepuluh meter di atas
         // terrain dua kilometer adalah titik jarum: goresan pertama tidak
         // terlihat, dan kesan pertamanya adalah alat yang rusak.
-        brush_.radius = std::clamp(terrain_->WorldWidth() * 0.02f, 1.0f, 500.0f);
-        brush_.strength = std::max((terrain_->Desc().maxHeight - terrain_->Desc().minHeight) * 0.02f,
+        Sculpt().radius = std::clamp(terrain_->WorldWidth() * 0.02f, 1.0f, 500.0f);
+        Sculpt().strength = std::max((terrain_->Desc().maxHeight - terrain_->Desc().minHeight) * 0.02f,
                                    0.5f);
         // Kuas cat mengikuti ukuran yang sama, dengan alasan yang sama. Ia tidak
         // ikut menyalin kekuatannya: kekuatan sculpt meter per detik, kekuatan
         // cat laju konvergensi, dan menyalin angka di antara dua satuan yang
         // berbeda adalah cara membuat sapuan pertama selalu salah.
-        paint_.radius = brush_.radius;
+        paint_.radius = Sculpt().radius;
         paintLayer_ = terrain_->LayerCount() > 1 ? 1 : 0;
         FitView();
     }
+
+    /// Kuas sculpt milik store, bukan milik panel: viewport memakai yang sama.
+    Brush& Sculpt() { return store_->SculptBrush(); }
+    const Brush& Sculpt() const { return store_->SculptBrush(); }
 
     /// Menandai terrain yang terbuka berubah.
     ///
@@ -1439,7 +1434,6 @@ private:
     Mode mode_ = Mode::Sculpt;
     MapView view_ = MapView::Relief;
     Tool tool_ = Tool::Raise;
-    Brush brush_;
     PaintBrush paint_;
     int paintLayer_ = 0;
     BrushStroke stroke_;

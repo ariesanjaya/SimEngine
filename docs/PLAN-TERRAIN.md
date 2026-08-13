@@ -273,23 +273,80 @@ Tiga mutasi membuktikan pembatalan cache-nya memegang: membandingkan revisi ubin
 saja tanpa tetangga, membiarkan bobot layer menaikkan revisi, dan menghilangkan
 kenaikan revisi pada undo — ketiganya menggugurkan uji.
 
-### L4 — Sculpt di viewport 3D · ⬜
+### L4 — Sculpt di viewport 3D · ✅
 
 Menutup satu-satunya kriteria E7.3 yang tersisa selain LOD.
 
-- `RaycastTerrain(terrain, origin, direction)` — ditelusuri terhadap heightmap,
-  bukan terhadap segitiga yang kebetulan tergambar.
-- Kursor brush digambar mengikuti permukaan.
-- Goresan di viewport memakai jalur brush dan undo yang sama persis dengan panel;
-  tidak ada jalur kedua.
-
 **Kriteria terima**
-- Sinar dari atas mengenai tinggi yang sama dengan `HeightAtWorld` dalam
-  toleransi yang ditulis; sinar yang meleset menjawab "tidak kena".
-- Sinar yang datang mendatar mengenai lereng di sisi yang benar, bukan menembus
-  bukit.
-- Goresan lewat viewport dan goresan lewat panel dengan parameter sama
-  menghasilkan heightmap yang sama byte-per-byte.
+- Sinar dari atas mengenai tinggi yang sama dengan `HeightAtWorld`; sinar yang
+  meleset menjawab "tidak kena". ✅ Diperiksa di 81 titik, bukan satu: satu
+  titik bisa kebetulan benar pada implementasi yang menjawab tinggi rata-rata
+  seluruh peta.
+- Sinar mendatar mengenai lereng di sisi depan, bukan menembus bukit. ✅ Titik
+  tembusnya **diketahui sebelum uji dijalankan** — lereng linear dari 0 di
+  x = 27 ke 20 di x = 28 memotong ketinggian 9 tepat di x = 27,45.
+- Goresan lewat viewport dan lewat panel menghasilkan heightmap yang sama
+  byte-per-byte. ✅ dengan catatan di bawah.
+
+**Ditelusuri terhadap heightmap, bukan terhadap segitiga yang tergambar.** Dua
+alasan, keduanya menentukan. Segitiga yang tergambar bergantung pada LOD, dan
+LOD bergantung pada jarak kamera — jadi menembak segitiga membuat titik yang
+dipahat berpindah ketika kamera maju-mundur, tanpa satu pun yang berubah di
+terrainnya. Dan segitiganya tidak ada di sisi engine yang bisa ditanya: mereka
+penghuni memori GPU, dan menyalinnya kembali untuk sebuah klik jauh lebih mahal
+daripada menelusuri heightmap yang sudah di tangan.
+
+Langkahnya setengah jarak sampel, lalu perpotongannya dipersempit dengan bagi
+dua. Heightmap tidak bisa menyatakan fitur yang lebih sempit daripada satu
+sampel, jadi langkah setengahnya tidak melewatkan apa pun yang benar-benar ada
+di dalam datanya — sementara langkah sebesar satu sampel bisa menyeberangi
+punggungan secara diagonal.
+
+**Uji ketelitiannya semula tidak menguji apa pun.** Ini ketahuan lewat mutasi:
+membuang seluruh bagi dua tetap lolos. Sebabnya dua — tinggi hasilnya dibaca
+ulang dari `HeightAtWorld` sehingga selalu tepat di permukaan apa pun yang
+terjadi pada x/z-nya, dan pemeriksaan x-nya memakai `epsilon` doctest, yang
+mengalikan toleransi dengan (1 + nilai) sehingga "epsilon 0,002" pada x ≈ 27
+berarti 0,057 m — lebih longgar daripada satu langkah penuh. Diganti dengan
+toleransi mutlak terhadap titik tembus yang dihitung tangan, dan mutasi yang
+sama kini menggugurkannya.
+
+**Sinar yang berpangkal di bawah permukaan menjawab "tidak kena."** Yang di
+bawah tanah tidak bisa melihat apa yang dipahatnya, dan mengembalikan titik
+tembus dari sisi bawah berarti kursor melompat ke tempat yang tidak ditunjuk
+siapa pun.
+
+**Kursornya mengikuti permukaan, bukan lingkaran datar.** Lingkaran datar
+berbohong justru di tempat ia paling dibutuhkan: di lereng, jangkauan kuas yang
+sebenarnya membentang jauh lebih panjang menuruni bukit daripada yang digambar,
+dan yang memahat tepi jurang terus-menerus mengenai lebih banyak daripada yang
+dimaksudnya. Lingkaran keduanya menandai tempat falloff mulai melembut — tanpa
+itu, "seberapa lembut" hanya bisa diketahui dengan mencoba lalu membatalkan.
+
+**Kuasnya milik store, bukan milik panel.** Jari-jari yang disetel di panel lalu
+tidak berlaku di viewport adalah dua alat yang kebetulan bernama sama.
+Pengubah papan ketiknya — Ctrl melembutkan, Shift membalik — dipisah menjadi
+fungsi murni `EffectiveSculptBrush` yang dipanggil keduanya; menuliskannya dua
+kali adalah dua tempat yang suatu saat tidak sepakat tentang apa arti Shift, dan
+yang membaca ImGui langsung tidak bisa diuji tanpa menjalankan ImGui.
+
+**Catatan tentang kriteria ketiga.** "Tidak ada jalur kedua" di sini dijamin
+**oleh konstruksi**, bukan oleh perbandingan: viewport memanggil
+`terrain::BrushStroke` yang sama persis dengan yang dipanggil panel, jadi
+membandingkan hasil keduanya berarti membandingkan sebuah fungsi dengan dirinya
+sendiri. Yang benar-benar bisa berbeda adalah **dari mana koordinat dunianya
+datang**, dan itulah yang diuji: goresan yang titiknya ditemukan lewat sinar
+menghasilkan heightmap yang sama byte-per-byte dengan goresan yang titiknya
+diberikan langsung — dengan pemeriksaan tambahan bahwa goresannya memang
+mengubah sesuatu, karena dua peta yang sama-sama kosong juga akan lulus
+perbandingan itu.
+
+Memahat mengambil alih tombol kiri sepenuhnya: gizmo tidak digambar dan klik
+tidak memilih apa pun. Alat yang menyeret tanah sambil sesekali memindahkan
+objek yang kebetulan di bawah kursor adalah alat yang tidak bisa dipercaya.
+Seretan yang kursornya keluar peta di tengah jalan menyentuh di tempat terakhir
+yang sah alih-alih berhenti diam-diam — goresan yang putus di tengah
+menghasilkan dua entri undo untuk satu sapuan tangan.
 
 ### L5 — Collider heightfield (P4) · ⬜
 

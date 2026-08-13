@@ -4,6 +4,7 @@
 #include "Sim/Terrain/Terrain.h"
 #include "Sim/Assets/MeshData.h"
 #include "Sim/Terrain/TerrainIo.h"
+#include "Sim/Terrain/TerrainBrush.h"
 #include "Sim/Terrain/TerrainMesh.h"
 
 #include <filesystem>
@@ -21,6 +22,14 @@
 /// besar, tetapi persoalannya persis sama, dan dua jawaban berbeda untuk satu
 /// persoalan adalah dua tempat yang harus dibetulkan setiap kali.
 namespace sim::editor {
+
+/// Kuas yang berlaku sekarang: kuas bersama, ditambah pengubah papan ketik.
+///
+/// **Fungsi murni, bukan pembacaan keadaan ImGui.** Ctrl melembutkan dan Shift
+/// membalik di panel maupun di viewport; menuliskannya dua kali adalah dua
+/// tempat yang suatu saat tidak sepakat tentang apa arti Shift. Dan yang
+/// membaca ImGui langsung tidak bisa diuji tanpa menjalankan ImGui.
+terrain::Brush EffectiveSculptBrush(const terrain::Brush& brush, bool smooth, bool invert);
 
 class TerrainStore {
 public:
@@ -77,6 +86,18 @@ public:
     /// puluh empat ubinnya.
     uint64_t TileUpload(const Uuid& guid, int tileX, int tileY) const;
 
+    /// Kuas sculpt yang dibagi panel dan viewport.
+    ///
+    /// **Satu kuas, bukan satu per pemakai.** Jari-jari yang disetel di panel
+    /// lalu tidak berlaku di viewport adalah dua alat yang kebetulan bernama
+    /// sama — dan yang menyetelnya di tempat yang salah akan menyalahkan
+    /// slidernya.
+    ///
+    /// Di store, bukan di dalam `Terrain`: kuas adalah keadaan penyunting, dan
+    /// menaruhnya di dalam dokumen berarti ia ikut tersimpan ke berkas.
+    terrain::Brush& SculptBrush() { return sculptBrush_; }
+    const terrain::Brush& SculptBrush() const { return sculptBrush_; }
+
     /// Membuang yang sudah dimuat. Dipakai saat project berganti.
     void Clear();
 
@@ -110,6 +131,7 @@ private:
     const Entry* FindEntry(const Uuid& guid) const;
 
     std::unordered_map<Uuid, Entry> entries_;
+    terrain::Brush sculptBrush_;
 };
 
 }  // namespace sim::editor

@@ -6,6 +6,23 @@
 
 namespace sim::editor {
 
+terrain::Brush EffectiveSculptBrush(const terrain::Brush& brush, bool smooth, bool invert) {
+    terrain::Brush result = brush;
+    // Melembutkan menang atas membalik ketika keduanya ditahan: Smooth tidak
+    // punya lawan, jadi "Smooth terbalik" tidak berarti apa-apa dan yang
+    // menekan keduanya hampir pasti memaksudkan yang pertama.
+    if (smooth) {
+        result.kind = terrain::BrushKind::Smooth;
+    } else if (invert) {
+        switch (result.kind) {
+            case terrain::BrushKind::Raise: result.kind = terrain::BrushKind::Lower; break;
+            case terrain::BrushKind::Lower: result.kind = terrain::BrushKind::Raise; break;
+            default: break;
+        }
+    }
+    return result;
+}
+
 TerrainStore::Entry* TerrainStore::FindEntry(const Uuid& guid) {
     const auto found = entries_.find(guid);
     return found == entries_.end() ? nullptr : &found->second;

@@ -12,6 +12,8 @@
 #include "Sim/Editor/SkinnedPreview.h"
 #include "Sim/Editor/WhiteboxCommands.h"
 #include "Sim/Editor/TerrainStore.h"
+#include "Sim/Terrain/TerrainBrush.h"
+#include "Sim/Terrain/TerrainPicking.h"
 #include "Sim/Editor/WhiteboxStore.h"
 #include "Sim/Physics/PhysicsScene.h"
 #include "Sim/Whitebox/WhiteboxIo.h"
@@ -1731,4 +1733,122 @@ TEST_CASE("L3: SceneView mengajukan satu instance per ubin terrain") {
     terrainView.store = &store;
     view.Build(world, selection, nullptr, nullptr, nullptr, nullptr, nullptr, terrainView);
     CHECK(view.Pickables().empty());
+}
+
+// ============================================================================
+// L4 — memahat lewat viewport
+// ============================================================================
+
+TEST_CASE("L4: pengubah papan ketik kuas sama artinya di panel dan di viewport") {
+    // Ctrl melembutkan dan Shift membalik. Dipakai bersama lewat satu fungsi,
+    // bukan ditulis dua kali: dua tempat adalah dua yang suatu saat tidak
+    // sepakat tentang apa arti Shift — dan yang tidak sepakat baru ketahuan
+    // ketika seseorang memahat di viewport lalu heran hasilnya berbeda.
+    terrain::Brush raise;
+    raise.kind = terrain::BrushKind::Raise;
+
+    CHECK(EffectiveSculptBrush(raise, false, false).kind == terrain::BrushKind::Raise);
+    CHECK(EffectiveSculptBrush(raise, true, false).kind == terrain::BrushKind::Smooth);
+    CHECK(EffectiveSculptBrush(raise, false, true).kind == terrain::BrushKind::Lower);
+
+    terrain::Brush lower = raise;
+    lower.kind = terrain::BrushKind::Lower;
+    CHECK(EffectiveSculptBrush(lower, false, true).kind == terrain::BrushKind::Raise);
+
+    // Yang tidak punya lawan tidak berubah oleh Shift: "Flatten terbalik" tidak
+    // berarti apa-apa, dan menebaknya berarti sebuah tombol yang diam-diam
+    // mengganti alat.
+    terrain::Brush flatten = raise;
+    flatten.kind = terrain::BrushKind::Flatten;
+    CHECK(EffectiveSculptBrush(flatten, false, true).kind == terrain::BrushKind::Flatten);
+
+    // Keduanya ditahan: melembutkan menang. Smooth tidak punya lawan, jadi
+    // yang menekan keduanya hampir pasti memaksudkan yang pertama.
+    CHECK(EffectiveSculptBrush(raise, true, true).kind == terrain::BrushKind::Smooth);
+
+    // Dan sisanya diteruskan apa adanya — pengubah mengganti *alat*, bukan
+    // ukuran maupun kekuatannya.
+    raise.radius = 12.5f;
+    raise.strength = 3.25f;
+    raise.falloff = 0.75f;
+    const terrain::Brush smoothed = EffectiveSculptBrush(raise, true, false);
+    CHECK(smoothed.radius == raise.radius);
+    CHECK(smoothed.strength == raise.strength);
+    CHECK(smoothed.falloff == raise.falloff);
+}
+
+TEST_CASE("L4: goresan lewat sinar sama byte-per-byte dengan goresan langsung") {
+    // **Kriteria terima L4.** Tidak ada jalur penyuntingan kedua: viewport
+    // memanggil `BrushStroke` milik `Sim::Terrain` yang sama persis dengan yang
+    // dipanggil panel, dan yang membedakan keduanya hanya dari mana koordinat
+    // dunianya datang. Uji ini mengunci bahwa "dari mana" itu tidak menggeser
+    // apa pun.
+    terrain::TerrainDesc desc;
+    desc.tileSamples = 32;
+    desc.tilesX = 2;
+    desc.tilesY = 2;
+    desc.sampleSpacing = 1.0f;
+    desc.minHeight = 0.0f;
+    desc.maxHeight = 200.0f;
+
+    terrain::Brush brush;
+    brush.kind = terrain::BrushKind::Raise;
+    brush.radius = 6.0f;
+    brush.strength = 20.0f;
+    brush.falloff = 0.6f;
+
+    // Lintasan yang sama, dijalankan dua kali dengan langkah waktu yang sama.
+    const std::vector<Vec2> path = {Vec2(12.0f, 14.0f), Vec2(18.5f, 16.25f),
+                                    Vec2(25.0f, 21.75f), Vec2(31.5f, 24.0f)};
+
+    const auto strokeDirect = [&]() {
+        terrain::Terrain map(desc);
+        terrain::BrushStroke stroke;
+        stroke.Begin(map, path.front().x, path.front().y);
+        for (const Vec2& at : path) {
+            stroke.Advance(map, brush, at.x, at.y, 1.0f / 60.0f);
+        }
+        stroke.End(map);
+        std::vector<terrain::Sample> samples;
+        map.ReadAll(samples);
+        return samples;
+    };
+
+    const auto strokeThroughRay = [&]() {
+        terrain::Terrain map(desc);
+        terrain::BrushStroke stroke;
+        // Titik yang sama, tetapi ditemukan lewat sinar dari atas — jalur yang
+        // dipakai viewport.
+        const auto pick = [&](const Vec2& at) {
+            const terrain::TerrainHit hit = terrain::RaycastTerrain(
+                map, Vec3(at.x, 500.0f, at.y), Vec3(0.0f, -1.0f, 0.0f));
+            REQUIRE(hit.hit);
+            return Vec2(hit.position.x, hit.position.z);
+        };
+        const Vec2 first = pick(path.front());
+        stroke.Begin(map, first.x, first.y);
+        for (const Vec2& at : path) {
+            const Vec2 found = pick(at);
+            stroke.Advance(map, brush, found.x, found.y, 1.0f / 60.0f);
+        }
+        stroke.End(map);
+        std::vector<terrain::Sample> samples;
+        map.ReadAll(samples);
+        return samples;
+    };
+
+    const std::vector<terrain::Sample> direct = strokeDirect();
+    const std::vector<terrain::Sample> viaRay = strokeThroughRay();
+    REQUIRE(direct.size() == viaRay.size());
+    CHECK(direct == viaRay);
+
+    // Dan goresannya memang mengubah sesuatu — kalau tidak, dua peta yang
+    // sama-sama kosong juga akan lulus perbandingan di atas.
+    const std::vector<terrain::Sample> untouched = [&] {
+        terrain::Terrain map(desc);
+        std::vector<terrain::Sample> samples;
+        map.ReadAll(samples);
+        return samples;
+    }();
+    CHECK(direct != untouched);
 }

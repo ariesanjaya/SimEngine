@@ -4,6 +4,7 @@
 #include "Sim/Terrain/TerrainBrush.h"
 #include "Sim/Terrain/TerrainIo.h"
 #include "Sim/Terrain/TerrainMesh.h"
+#include "Sim/Terrain/TerrainPicking.h"
 
 // Diminta sendiri: Terrain memakai Sim::ImageIO secara PRIVATE. Kriteria terima
 // I3 berbunyi berbeda tergantung ada tidaknya libtiff, dan uji yang tidak bisa
@@ -1872,4 +1873,125 @@ TEST_CASE("L2: pemilih LOD monoton dan tidak melompat dua tingkat") {
     CHECK(SelectLod(std::numeric_limits<float>::quiet_NaN(), tileSize, kMaxLod) == 0);
     CHECK(SelectLod(1000.0f, 0.0f, kMaxLod) == 0);
     CHECK(SelectLod(1000.0f, tileSize, 0) == 0);
+}
+
+// ============================================================================
+// L4 — menunjuk terrain dengan sinar
+// ============================================================================
+
+TEST_CASE("L4: sinar dari atas mengenai tinggi yang dilaporkan HeightAtWorld") {
+    TerrainDesc desc = SmallDesc();
+    desc.tileSamples = 32;
+    desc.tilesX = 2;
+    desc.tilesY = 2;
+    desc.maxHeight = 200.0f;
+    Terrain terrain(desc);
+    SculptHills(terrain);
+
+    // Diperiksa di banyak titik, bukan satu: satu titik bisa kebetulan benar
+    // pada implementasi yang menjawab tinggi rata-rata seluruh peta.
+    for (float z = 2.0f; z < 60.0f; z += 7.0f) {
+        for (float x = 2.0f; x < 60.0f; x += 7.0f) {
+            const Vec3 origin(x, 500.0f, z);
+            const TerrainHit hit = RaycastTerrain(terrain, origin, Vec3(0.0f, -1.0f, 0.0f));
+            INFO("di (" << x << ", " << z << ")");
+            REQUIRE(hit.hit);
+            CHECK(hit.position.x == doctest::Approx(x).epsilon(0.001));
+            CHECK(hit.position.z == doctest::Approx(z).epsilon(0.001));
+            CHECK(hit.position.y ==
+                  doctest::Approx(terrain.HeightAtWorld(x, z)).epsilon(0.0005));
+        }
+    }
+}
+
+TEST_CASE("L4: sinar yang meleset menjawab tidak kena") {
+    TerrainDesc desc = SmallDesc();
+    desc.maxHeight = 100.0f;
+    Terrain terrain(desc);
+    SculptHills(terrain);
+
+    // Di luar peta, menembak lurus ke bawah.
+    CHECK_FALSE(RaycastTerrain(terrain, Vec3(-50.0f, 200.0f, 5.0f), Vec3(0.0f, -1.0f, 0.0f)).hit);
+    CHECK_FALSE(RaycastTerrain(terrain, Vec3(5.0f, 200.0f, -50.0f), Vec3(0.0f, -1.0f, 0.0f)).hit);
+    // Di atas peta, menembak lurus ke atas.
+    CHECK_FALSE(RaycastTerrain(terrain, Vec3(5.0f, 200.0f, 5.0f), Vec3(0.0f, 1.0f, 0.0f)).hit);
+    // Arah bernorma nol ditolak alih-alih ditebak.
+    CHECK_FALSE(RaycastTerrain(terrain, Vec3(5.0f, 200.0f, 5.0f), Vec3(0.0f)).hit);
+    // Jangkauan yang lebih pendek daripada sasarannya tidak menjangkaunya.
+    CHECK_FALSE(RaycastTerrain(terrain, Vec3(5.0f, 200.0f, 5.0f), Vec3(0.0f, -1.0f, 0.0f), 10.0f)
+                    .hit);
+    // Dari bawah tanah: yang tidak bisa melihat apa yang dipahatnya tidak
+    // memahat.
+    CHECK_FALSE(RaycastTerrain(terrain, Vec3(5.0f, -50.0f, 5.0f), Vec3(0.0f, 1.0f, 0.0f)).hit);
+}
+
+TEST_CASE("L4: sinar mendatar mengenai lereng di sisi depan, bukan menembusnya") {
+    // **Kriteria terima L4.** Sinar yang menyusuri permukaan adalah yang paling
+    // mudah salah: implementasi yang hanya membandingkan tinggi di titik akhir
+    // akan menembus bukit dan mendarat di lembah di baliknya — dan yang terlihat
+    // adalah kursor yang melompat ke seberang gunung.
+    TerrainDesc desc;
+    desc.tileSamples = 64;
+    desc.tilesX = 1;
+    desc.tilesY = 1;
+    desc.sampleSpacing = 1.0f;
+    desc.minHeight = 0.0f;
+    desc.maxHeight = 100.0f;
+    desc.baseHeight = 0.0f;
+    Terrain terrain(desc);
+
+    // Sebuah punggungan setinggi 20 m di x ∈ [28, 36], dan tanah datar di
+    // kedua sisinya.
+    for (int y = 0; y < terrain.SamplesY(); ++y) {
+        for (int x = 28; x <= 36; ++x) {
+            terrain.SetHeightAt(x, y, 20.0f);
+        }
+    }
+
+    // Ditembakkan mendatar dari x = 0 pada ketinggian 9 m: ia harus mengenai
+    // lereng punggungan, bukan lolos ke x = 63.
+    //
+    // **Titik tembusnya diketahui sebelum uji dijalankan.** Lerengnya linear
+    // dari 0 di x = 27 ke 20 di x = 28, jadi ia memotong ketinggian 9 tepat di
+    // x = 27,45. Angka yang bukan kelipatan langkah pencariannya — sengaja:
+    // pemeriksaan yang jatuh persis di kelipatan langkah akan lolos walaupun
+    // penyempitannya dibuang seluruhnya.
+    const TerrainHit hit =
+        RaycastTerrain(terrain, Vec3(0.0f, 9.0f, 20.0f), Vec3(1.0f, 0.0f, 0.0f));
+    REQUIRE(hit.hit);
+    INFO("kena di x = " << hit.position.x);
+    // Toleransi mutlak, bukan relatif: `epsilon` doctest mengalikan toleransi
+    // dengan (1 + nilai), sehingga pada x ≈ 27 sebuah "epsilon 0,002" berarti
+    // 0,057 m — lebih longgar daripada satu langkah penuh, dan karena itu tidak
+    // menguji ketelitian sama sekali.
+    CHECK(std::abs(hit.position.x - 27.45f) < 0.01f);
+
+    // Dan yang ditembakkan di atas puncaknya memang lolos.
+    CHECK_FALSE(
+        RaycastTerrain(terrain, Vec3(0.0f, 25.0f, 20.0f), Vec3(1.0f, 0.0f, 0.0f)).hit);
+}
+
+TEST_CASE("L4: sinar miring mendarat di permukaan, bukan di dekatnya") {
+    TerrainDesc desc = SmallDesc();
+    desc.tileSamples = 32;
+    desc.maxHeight = 200.0f;
+    Terrain terrain(desc);
+    SculptHills(terrain);
+
+    // Arahnya tidak bernorma satu — sengaja, karena `distance` harus tetap
+    // diukur dalam meter dan bukan dalam kelipatan panjang vektor yang
+    // kebetulan diberikan pemanggil.
+    const Vec3 origin(1.0f, 120.0f, 3.0f);
+    const Vec3 direction(6.0f, -8.0f, 4.0f);
+    const TerrainHit hit = RaycastTerrain(terrain, origin, direction);
+    REQUIRE(hit.hit);
+
+    // Titik yang dilaporkan berada di permukaan.
+    CHECK(hit.position.y ==
+          doctest::Approx(terrain.HeightAtWorld(hit.position.x, hit.position.z)).epsilon(0.001));
+    // Dan ia benar-benar berjarak `distance` dari pangkalnya, di sepanjang arah
+    // yang sudah dinormalkan.
+    const Vec3 walked = origin + glm::normalize(direction) * hit.distance;
+    CHECK(walked.x == doctest::Approx(hit.position.x).epsilon(0.001));
+    CHECK(walked.z == doctest::Approx(hit.position.z).epsilon(0.001));
 }
