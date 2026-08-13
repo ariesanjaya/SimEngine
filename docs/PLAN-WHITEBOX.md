@@ -239,7 +239,7 @@ Konsekuensi yang menopang W5: **nomor face dipertahankan**, jadi poligon dan
 seleksi bertahan melewati operasi. Face baru selalu ditambahkan di belakang,
 tidak pernah disisipkan.
 
-### W3 — Material per-sisi · ⬜
+### W3 — Material per-sisi · ✅
 
 Slot material per poligon, dan pembangunan `MeshData` yang mengelompokkannya.
 
@@ -249,7 +249,25 @@ Slot material per poligon, dan pembangunan `MeshData` yang mengelompokkannya.
 - Jumlah indeks seluruh `SubMesh` sama dengan tiga kali jumlah segitiga. Tidak
   ada segitiga yang hilang maupun terhitung dua kali.
 - Poligon tanpa material menghasilkan ruas ber-`material` -1, mengikuti aturan
-  yang sudah dipakai mesh impor.
+  yang sudah dipakai mesh impor. Nol bukan penggantinya — nol adalah slot pertama
+  yang sah.
+- **Material bertahan melewati ekstrusi.** Sisi yang kehilangan materialnya
+  sesudah didorong adalah kejutan yang menyalahkan operasi dorongnya.
+
+**`WhiteboxMesh` memediasi setiap perubahan, dan itu ditemukan lewat uji yang
+gagal.** Percobaan pertama mengekspos mesh dan pengelompokannya sebagai referensi
+yang bisa diubah, sehingga topologi berubah di belakang punggung pemiliknya dan
+daftar materialnya menjadi basi. Sekarang keduanya hanya bisa dibaca, dan
+ekstrusi, geser, sembunyikan-rusuk, serta gabung-sebidang semuanya lewat kelas
+itu — yang memindahkan materialnya mengikuti poligon sesudahnya.
+
+Simpul **tidak dibagi antar sisi**: whitebox digambar rata, dan dua sisi yang
+bertemu di sebuah rusuk punya normal berbeda. Simpul yang dibagi hanya bisa
+membawa satu di antaranya, dan hasilnya rusuk yang membulat — yang justru
+menghapus tampilan blockout.
+
+Ruas kosong tidak diterbitkan: ia satu panggilan gambar yang tidak menggambar apa
+pun, dan satu slot material yang menyesatkan.
 
 ### W4 — Aset `.simwhitebox` dan komponen · ⬜
 

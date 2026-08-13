@@ -2,6 +2,7 @@
 
 #include "Sim/Whitebox/HalfEdgeMesh.h"
 #include "Sim/Whitebox/Operations.h"
+#include "Sim/Whitebox/WhiteboxMesh.h"
 #include "Sim/Whitebox/Polygon.h"
 
 #include <doctest/doctest.h>
@@ -553,4 +554,136 @@ TEST_CASE("ekstrusi mempertahankan pengelompokan poligon yang sudah ada") {
     CHECK(ClosedVolume(mesh) == doctest::Approx(1.5f).epsilon(0.002));
     CHECK(mesh.CheckInvariants().ok);
     CHECK(polygons.CheckInvariants(mesh).ok);
+}
+
+TEST_CASE("tiga sisi material A dan tiga material B menghasilkan tepat dua ruas") {
+    // **Kriteria terima W3, dan inilah yang diminta sejak awal:** tiap sisi
+    // whitebox bisa dipasang material berbeda. Satu ruas per material, bukan
+    // satu per sisi — satu panggilan gambar per material adalah yang diminta
+    // renderer; satu per sisi adalah enam kali kerja untuk hasil yang sama.
+    WhiteboxMesh box = WhiteboxMesh::MakeCube();
+    const std::vector<PolygonHandle> sides = box.Polygons().Polygons();
+    REQUIRE(sides.size() == 6);
+
+    for (std::size_t i = 0; i < sides.size(); ++i) {
+        REQUIRE(box.SetPolygonMaterial(sides[i], i < 3 ? 0 : 1));
+    }
+    CHECK(box.UsedMaterialCount() == 2);
+
+    const sim::assets::MeshData data = box.BuildMeshData();
+    INFO(data.parts.size() << " ruas");
+    CHECK(data.parts.size() == 2);
+    CHECK(data.parts[0].material == 0);
+    CHECK(data.parts[1].material == 1);
+
+    // Enam quad menjadi dua belas segitiga; tidak ada yang hilang maupun
+    // terhitung dua kali.
+    std::size_t indices = 0;
+    for (const sim::assets::SubMesh& part : data.parts) {
+        indices += part.indexCount;
+    }
+    INFO(indices << " indeks");
+    CHECK(indices == 12 * 3);
+    CHECK(indices == data.indices.size());
+
+    // Ruasnya bersambung tanpa celah maupun tumpang tindih.
+    uint32_t expected = 0;
+    for (const sim::assets::SubMesh& part : data.parts) {
+        CHECK(part.firstIndex == expected);
+        expected += part.indexCount;
+    }
+
+    // Tiap ruas memuat tiga sisi, jadi keduanya berukuran sama.
+    CHECK(data.parts[0].indexCount == data.parts[1].indexCount);
+
+    const MeshCheck check = box.CheckInvariants();
+    INFO(check.error);
+    CHECK(check.ok);
+}
+
+TEST_CASE("sisi tanpa material menghasilkan ruas ber-material -1") {
+    // Mengikuti aturan yang sudah dipakai mesh impor: -1 berarti "tidak
+    // disebutkan", dan penyunting mengisinya dengan material bawaan. Nol bukan
+    // penggantinya — nol adalah slot pertama yang sah.
+    WhiteboxMesh box = WhiteboxMesh::MakeCube();
+    const std::vector<PolygonHandle> sides = box.Polygons().Polygons();
+    REQUIRE(box.SetPolygonMaterial(sides[0], 0));
+
+    const sim::assets::MeshData data = box.BuildMeshData();
+    REQUIRE(data.parts.size() == 2);
+    // `std::map` mengurutkan, jadi -1 mendahului 0.
+    CHECK(data.parts[0].material == kNoMaterial);
+    CHECK(data.parts[1].material == 0);
+    // Lima sisi tanpa material, satu dengan.
+    CHECK(data.parts[0].indexCount == 5 * 2 * 3);
+    CHECK(data.parts[1].indexCount == 1 * 2 * 3);
+}
+
+TEST_CASE("seluruh sisi bermaterial sama menghasilkan satu ruas") {
+    WhiteboxMesh box = WhiteboxMesh::MakeCube();
+    for (const PolygonHandle side : box.Polygons().Polygons()) {
+        REQUIRE(box.SetPolygonMaterial(side, 3));
+    }
+    CHECK(box.UsedMaterialCount() == 1);
+
+    const sim::assets::MeshData data = box.BuildMeshData();
+    CHECK(data.parts.size() == 1);
+    CHECK(data.parts[0].material == 3);
+    CHECK(data.parts[0].indexCount == 12 * 3);
+}
+
+TEST_CASE("mesh yang dibangun punya normal rata dan batas yang benar") {
+    WhiteboxMesh box = WhiteboxMesh::MakeCube();
+    const sim::assets::MeshData data = box.BuildMeshData();
+
+    // Simpul tidak dibagi antar sisi: enam quad, empat simpul masing-masing.
+    // Simpul yang dibagi hanya bisa membawa satu normal, dan hasilnya rusuk yang
+    // membulat — yang justru menghapus tampilan blockout.
+    CHECK(data.vertices.size() == 6 * 4);
+
+    // Kubus satuan berpusat di titik asal.
+    CHECK(data.boundsMin.x == doctest::Approx(-0.5f));
+    CHECK(data.boundsMax.y == doctest::Approx(0.5f));
+
+    // Tiap normal adalah sumbu satuan: kubus tidak punya sisi miring.
+    for (const sim::assets::MeshVertex& vertex : data.vertices) {
+        const float length = glm::length(vertex.normal);
+        CHECK(length == doctest::Approx(1.0f).epsilon(0.001));
+        const float axis = std::max({std::abs(vertex.normal.x), std::abs(vertex.normal.y),
+                                     std::abs(vertex.normal.z)});
+        CHECK(axis == doctest::Approx(1.0f).epsilon(0.001));
+    }
+}
+
+TEST_CASE("material bertahan melewati ekstrusi") {
+    // **Sisi yang kehilangan materialnya sesudah didorong adalah kejutan yang
+    // menyalahkan operasi dorongnya.** Poligon dikenali face terkecilnya, jadi
+    // nomornya bisa bergeser saat topologinya berubah — materialnya harus ikut
+    // dipindahkan, bukan ditinggalkan di nomor lama.
+    WhiteboxMesh box = WhiteboxMesh::MakeCube();
+    const std::vector<PolygonHandle> sides = box.Polygons().Polygons();
+    for (std::size_t i = 0; i < sides.size(); ++i) {
+        REQUIRE(box.SetPolygonMaterial(sides[i], static_cast<int>(i)));
+    }
+    CHECK(box.UsedMaterialCount() == 6);
+
+    const PolygonHandle top =
+        PolygonFacing(box.Mesh(), box.Polygons(), Vec3(0.0f, 1.0f, 0.0f));
+    REQUIRE(IsValid(top));
+    const int topMaterial = box.PolygonMaterial(top);
+
+    const EditResult extruded = box.Extrude(top, 0.5f);
+    INFO(extruded.error);
+    REQUIRE(extruded.ok);
+
+    // Enam sisi lama mempertahankan materialnya; empat dinding baru belum punya.
+    CHECK(box.PolygonMaterial(extruded.polygon) == topMaterial);
+
+    const sim::assets::MeshData data = box.BuildMeshData();
+    // Enam material lama ditambah satu ruas -1 untuk dinding baru.
+    INFO(data.parts.size() << " ruas");
+    CHECK(data.parts.size() == 7);
+    CHECK(data.parts[0].material == kNoMaterial);
+
+    CHECK(box.CheckInvariants().ok);
 }
