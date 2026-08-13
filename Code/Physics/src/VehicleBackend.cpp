@@ -231,6 +231,85 @@ bool VehicleInstance::Create(const VehicleDesc& desc, PxPhysics& physics,
     transmissionState_.setToDefault();
     transmissionState_.gear = PxVehicleDirectDriveTransmissionCommandState::eFORWARD;
 
+    driveModel_ = desc.driveModel;
+    if (driveModel_ == VehicleDriveModel::EngineDrive) {
+        const VehicleEngineDesc& engine = desc.engine;
+
+        // Kurva torsi ternormalkan terhadap putaran ternormalkan. Bentuk khas
+        // mesin bensin: torsi naik dari idle, puncak di pertengahan, lalu turun
+        // menjelang redline. **Penurunan itulah yang membedakan mesin dari
+        // direct drive** — ia yang menghentikan roda selip terus di laju tinggi.
+        engineParams_.torqueCurve.clear();
+        engineParams_.torqueCurve.addPair(0.0f, 0.8f);
+        engineParams_.torqueCurve.addPair(0.33f, 1.0f);
+        engineParams_.torqueCurve.addPair(0.66f, 0.95f);
+        engineParams_.torqueCurve.addPair(1.0f, 0.7f);
+        engineParams_.peakTorque = engine.peakTorque;
+        engineParams_.moi = engine.momentOfInertia;
+        engineParams_.idleOmega = engine.idleSpeed;
+        engineParams_.maxOmega = engine.maxSpeed;
+        engineParams_.dampingRateFullThrottle = 0.15f;
+        engineParams_.dampingRateZeroThrottleClutchEngaged = 2.0f;
+        engineParams_.dampingRateZeroThrottleClutchDisengaged = 0.35f;
+
+        clutchParams_.accuracyMode = PxVehicleClutchAccuracyMode::eESTIMATE;
+        clutchParams_.estimateIterations = 5;
+        clutchResponseParams_.maxResponse = engine.clutchStrength;
+
+        gearboxParams_.neutralGear = static_cast<PxU32>(engine.neutralGear);
+        gearboxParams_.nbRatios = static_cast<PxU32>(engine.gearRatios.size());
+        for (std::size_t i = 0; i < engine.gearRatios.size(); ++i) {
+            gearboxParams_.ratios[i] = engine.gearRatios[i];
+        }
+        gearboxParams_.finalRatio = engine.finalRatio;
+        gearboxParams_.switchTime = engine.gearSwitchTime;
+
+        autoboxParams_.latency = engine.autoboxLatency;
+        for (PxU32 i = 0; i < gearboxParams_.nbRatios; ++i) {
+            autoboxParams_.upRatios[i] = engine.upshiftFraction;
+            autoboxParams_.downRatios[i] = engine.downshiftFraction;
+        }
+        // Gigi tertinggi tidak punya ke mana naik lagi, dan gigi terendah tidak
+        // punya ke mana turun. Disebut eksplisit karena PhysX memakainya sebagai
+        // ambang, bukan sebagai penanda.
+        autoboxParams_.upRatios[gearboxParams_.neutralGear] = 0.0f;
+        autoboxParams_.downRatios[gearboxParams_.neutralGear] = 0.0f;
+
+        // Torsi dibagi rata ke roda penggerak. Differential yang lebih pintar —
+        // limited slip, bias depan-belakang — adalah lapisan di atas ini.
+        differentialParams_.setToDefault();
+        std::size_t drivenCount = 0;
+        for (PxU32 i = 0; i < wheelCount_; ++i) {
+            if (desc.wheels[i].driven) {
+                ++drivenCount;
+            }
+        }
+        for (PxU32 i = 0; i < wheelCount_; ++i) {
+            differentialParams_.torqueRatios[i] =
+                desc.wheels[i].driven && drivenCount > 0
+                    ? 1.0f / static_cast<float>(drivenCount)
+                    : 0.0f;
+            differentialParams_.aveWheelSpeedRatios[i] =
+                desc.wheels[i].driven && drivenCount > 0
+                    ? 1.0f / static_cast<float>(drivenCount)
+                    : 0.0f;
+        }
+
+        engineState_.setToDefault();
+        gearboxState_.setToDefault();
+        clutchResponseState_.setToDefault();
+        autoboxState_.setToDefault();
+        differentialState_.setToDefault();
+        clutchSlipState_.setToDefault();
+        engineThrottleState_.setToDefault();
+        engineTransmission_.setToDefault();
+        // Mulai di gigi maju pertama, bukan netral: mobil yang harus dipindah
+        // giginya sendiri sebelum bisa bergerak adalah kejutan, bukan fitur.
+        engineTransmission_.targetGear = gearboxParams_.neutralGear + 1;
+        gearboxState_.currentGear = gearboxParams_.neutralGear + 1;
+        gearboxState_.targetGear = gearboxParams_.neutralGear + 1;
+    }
+
     // Aktor PhysX beserta bentuk chassis dan rodanya.
     const PxVehiclePhysXRigidActorParams actorParams(rigidBodyParams_, nullptr);
     const PxBoxGeometry chassisGeometry(ToPxV(desc.chassisHalfExtents));
@@ -271,9 +350,17 @@ bool VehicleInstance::Create(const VehicleDesc& desc, PxPhysics& physics,
 }
 
 void VehicleInstance::BuildComponentSequence() {
+    const bool engineDrive = driveModel_ == VehicleDriveModel::EngineDrive;
+
     sequence_.add(static_cast<PxVehiclePhysXActorBeginComponent*>(this));
-    sequence_.add(static_cast<PxVehicleDirectDriveCommandResponseComponent*>(this));
-    sequence_.add(static_cast<PxVehicleDirectDriveActuationStateComponent*>(this));
+    if (engineDrive) {
+        sequence_.add(static_cast<PxVehicleEngineDriveCommandResponseComponent*>(this));
+        sequence_.add(static_cast<PxVehicleMultiWheelDriveDifferentialStateComponent*>(this));
+        sequence_.add(static_cast<PxVehicleEngineDriveActuationStateComponent*>(this));
+    } else {
+        sequence_.add(static_cast<PxVehicleDirectDriveCommandResponseComponent*>(this));
+        sequence_.add(static_cast<PxVehicleDirectDriveActuationStateComponent*>(this));
+    }
     sequence_.add(static_cast<PxVehiclePhysXRoadGeometrySceneQueryComponent*>(this));
 
     // Suspensi, ban, dan roda dijalankan tiga kali per langkah tanpa menghitung
@@ -284,7 +371,11 @@ void VehicleInstance::BuildComponentSequence() {
     sequence_.add(static_cast<PxVehicleSuspensionComponent*>(this));
     sequence_.add(static_cast<PxVehicleTireComponent*>(this));
     sequence_.add(static_cast<PxVehiclePhysXConstraintComponent*>(this));
-    sequence_.add(static_cast<PxVehicleDirectDrivetrainComponent*>(this));
+    if (engineDrive) {
+        sequence_.add(static_cast<PxVehicleEngineDrivetrainComponent*>(this));
+    } else {
+        sequence_.add(static_cast<PxVehicleDirectDrivetrainComponent*>(this));
+    }
     sequence_.add(static_cast<PxVehicleWheelComponent*>(this));
     sequence_.add(static_cast<PxVehicleRigidBodyComponent*>(this));
     sequence_.endSubstepGroup();
@@ -321,6 +412,19 @@ void VehicleInstance::SetInput(const VehicleInput& input) {
     transmissionState_.gear = input.reverse
                                   ? PxVehicleDirectDriveTransmissionCommandState::eREVERSE
                                   : PxVehicleDirectDriveTransmissionCommandState::eFORWARD;
+
+    if (driveModel_ == VehicleDriveModel::EngineDrive) {
+        // Kopling dilepas penuh; girboks otomatis yang memilih gigi. Mundur
+        // memakai gigi khusus di bawah netral, sesuai daftar `gearRatios`.
+        commandState_.nbBrakes = 2;
+        // Maju berarti serahkan ke girboks otomatis; mundur berarti sebutkan
+        // gigi mundurnya, yaitu yang di bawah netral pada daftar `gearRatios`.
+        engineTransmission_.targetGear =
+            input.reverse ? static_cast<PxU32>(gearboxParams_.neutralGear - 1)
+                          : static_cast<PxU32>(
+                                PxVehicleEngineDriveTransmissionCommandState::eAUTOMATIC_GEAR);
+        engineTransmission_.clutch = 0.0f;
+    }
 }
 
 void VehicleInstance::Step(float dt, const PxVehicleSimulationContext& context) {
@@ -338,6 +442,10 @@ void VehicleInstance::ReadState(VehicleState& out) const {
     out.rotation = FromPxQ(pose.q);
     out.linearVelocity = FromPxV(physxActor_.rigidBody->getLinearVelocity());
     out.forwardSpeed = rigidBodyState_.getLongitudinalSpeed(frame_);
+    if (driveModel_ == VehicleDriveModel::EngineDrive) {
+        out.engineSpeed = engineState_.rotationSpeed;
+        out.gear = gearboxState_.currentGear;
+    }
 
     // **Pose roda relatif terhadap kerangka pusat massa, bukan kerangka aktor.**
     // Menyusunnya langsung dengan pose aktor menggeser seluruh roda sejauh
@@ -613,6 +721,106 @@ void VehicleInstance::getDataForDirectDrivetrainComponent(
     actuationStates.setData(actuationStates_);
     tireForces.setData(tireForces_);
     wheelRigidBody1dStates.setData(wheel1dStates_);
+}
+
+void VehicleInstance::getDataForEngineDriveCommandResponseComponent(
+    const PxVehicleAxleDescription*& axleDescription,
+    PxVehicleSizedArrayData<const PxVehicleBrakeCommandResponseParams>& brakeResponseParams,
+    const PxVehicleSteerCommandResponseParams*& steerResponseParams,
+    PxVehicleSizedArrayData<const PxVehicleAckermannParams>& ackermannParams,
+    const PxVehicleGearboxParams*& gearboxParams,
+    const PxVehicleClutchCommandResponseParams*& clutchResponseParams,
+    const PxVehicleEngineParams*& engineParams, const PxVehicleRigidBodyState*& rigidBodyState,
+    const PxVehicleEngineState*& engineState, const PxVehicleAutoboxParams*& autoboxParams,
+    const PxVehicleCommandState*& commands,
+    const PxVehicleEngineDriveTransmissionCommandState*& transmissionCommands,
+    PxVehicleArrayData<PxReal>& brakeResponseStates,
+    PxVehicleEngineDriveThrottleCommandResponseState*& throttleResponseState,
+    PxVehicleArrayData<PxReal>& steerResponseStates,
+    PxVehicleGearboxState*& gearboxResponseState,
+    PxVehicleClutchCommandResponseState*& clutchResponseState,
+    PxVehicleAutoboxState*& autoboxState) {
+    axleDescription = &axleDescription_;
+    brakeResponseParams.setDataAndCount(brakeParams_, 2);
+    steerResponseParams = &steerParams_;
+    ackermannParams.setEmpty();
+    gearboxParams = &gearboxParams_;
+    clutchResponseParams = &clutchResponseParams_;
+    engineParams = &engineParams_;
+    rigidBodyState = &rigidBodyState_;
+    engineState = &engineState_;
+    autoboxParams = &autoboxParams_;
+    commands = &commandState_;
+    transmissionCommands = &engineTransmission_;
+    brakeResponseStates.setData(brakeResponseStates_);
+    throttleResponseState = &engineThrottleState_;
+    steerResponseStates.setData(steerResponseStates_);
+    gearboxResponseState = &gearboxState_;
+    clutchResponseState = &clutchResponseState_;
+    autoboxState = &autoboxState_;
+}
+
+void VehicleInstance::getDataForMultiWheelDriveDifferentialStateComponent(
+    const PxVehicleAxleDescription*& axleDescription,
+    const PxVehicleMultiWheelDriveDifferentialParams*& differentialParams,
+    PxVehicleDifferentialState*& differentialState) {
+    axleDescription = &axleDescription_;
+    differentialParams = &differentialParams_;
+    differentialState = &differentialState_;
+}
+
+void VehicleInstance::getDataForEngineDriveActuationStateComponent(
+    const PxVehicleAxleDescription*& axleDescription,
+    const PxVehicleGearboxParams*& gearboxParams,
+    PxVehicleArrayData<const PxReal>& brakeResponseStates,
+    const PxVehicleEngineDriveThrottleCommandResponseState*& throttleResponseState,
+    const PxVehicleGearboxState*& gearboxState,
+    const PxVehicleDifferentialState*& differentialState,
+    const PxVehicleClutchCommandResponseState*& clutchResponseState,
+    PxVehicleArrayData<PxVehicleWheelActuationState>& actuationStates) {
+    axleDescription = &axleDescription_;
+    gearboxParams = &gearboxParams_;
+    brakeResponseStates.setData(brakeResponseStates_);
+    throttleResponseState = &engineThrottleState_;
+    gearboxState = &gearboxState_;
+    differentialState = &differentialState_;
+    clutchResponseState = &clutchResponseState_;
+    actuationStates.setData(actuationStates_);
+}
+
+void VehicleInstance::getDataForEngineDrivetrainComponent(
+    const PxVehicleAxleDescription*& axleDescription,
+    PxVehicleArrayData<const PxVehicleWheelParams>& wheelParams,
+    const PxVehicleEngineParams*& engineParams, const PxVehicleClutchParams*& clutchParams,
+    const PxVehicleGearboxParams*& gearboxParams,
+    PxVehicleArrayData<const PxReal>& brakeResponseStates,
+    PxVehicleArrayData<const PxVehicleWheelActuationState>& actuationStates,
+    PxVehicleArrayData<const PxVehicleTireForce>& tireForces,
+    const PxVehicleEngineDriveThrottleCommandResponseState*& throttleResponseState,
+    const PxVehicleClutchCommandResponseState*& clutchResponseState,
+    const PxVehicleDifferentialState*& differentialState,
+    const PxVehicleWheelConstraintGroupState*& constraintGroupState,
+    PxVehicleArrayData<PxVehicleWheelRigidBody1dState>& wheelRigidBody1dStates,
+    PxVehicleEngineState*& engineState, PxVehicleGearboxState*& gearboxState,
+    PxVehicleClutchSlipState*& clutchState) {
+    axleDescription = &axleDescription_;
+    wheelParams.setData(wheelParams_);
+    engineParams = &engineParams_;
+    clutchParams = &clutchParams_;
+    gearboxParams = &gearboxParams_;
+    brakeResponseStates.setData(brakeResponseStates_);
+    actuationStates.setData(actuationStates_);
+    tireForces.setData(tireForces_);
+    throttleResponseState = &engineThrottleState_;
+    clutchResponseState = &clutchResponseState_;
+    differentialState = &differentialState_;
+    // Tidak ada kelompok kendala roda: itu milik kendaraan tank, yang
+    // menyamakan putaran roda satu sisi. Null berarti tiap roda berdiri sendiri.
+    constraintGroupState = nullptr;
+    wheelRigidBody1dStates.setData(wheel1dStates_);
+    engineState = &engineState_;
+    gearboxState = &gearboxState_;
+    clutchState = &clutchSlipState_;
 }
 
 }  // namespace sim::physics

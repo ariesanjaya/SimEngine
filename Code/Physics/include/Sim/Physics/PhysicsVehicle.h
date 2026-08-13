@@ -2,6 +2,7 @@
 
 #include "Sim/Physics/PhysicsTypes.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <vector>
 
@@ -23,6 +24,57 @@ namespace sim::physics {
 
 /// Rujukan ke sebuah kendaraan. Angka, bukan pointer.
 enum class VehicleHandle : uint64_t { Invalid = 0 };
+
+/// Bagaimana torsi sampai ke roda.
+enum class VehicleDriveModel : uint8_t {
+    /// Torsi masuk langsung ke roda, tetap berapa pun laju rodanya.
+    ///
+    /// **Cukup untuk banyak permainan, dan tidak cukup untuk mobil.** Torsi yang
+    /// tidak pernah turun di putaran tinggi membuat roda penggerak selip terus —
+    /// terukur 39% pada 53 m/s — dan mobil terasa seperti didorong tangan
+    /// raksasa alih-alih dikendarai.
+    DirectDrive,
+    /// Mesin dengan kurva torsi, kopling, dan girboks bergigi.
+    ///
+    /// Torsinya turun di putaran tinggi dan naik lagi setiap kali gigi berpindah,
+    /// yang justru itulah yang membuat mobil terasa punya mesin.
+    EngineDrive,
+};
+
+/// Mesin, kopling, dan girboks. Dipakai hanya pada `EngineDrive`.
+struct VehicleEngineDesc {
+    /// Torsi puncak mesin, N·m — bukan torsi di roda: girboks mengalikannya.
+    float peakTorque = 500.0f;
+    /// Putaran mesin, rad/s. Idle ~1000 rpm, redline ~6000 rpm.
+    float idleSpeed = 105.0f;
+    float maxSpeed = 630.0f;
+    /// Momen inersia poros engkol, kg·m². Kecil berarti mesin melonjak; besar
+    /// berarti ia berat dan lamban.
+    float momentOfInertia = 1.0f;
+
+    /// Perbandingan gigi, dari mundur ke gigi tertinggi. **Netral disebutkan
+    /// eksplisit** sebagai indeks di dalam daftar, karena PhysX menuntutnya dan
+    /// menebaknya berarti girboks yang tidak pernah bisa dinetralkan.
+    std::vector<float> gearRatios{-4.0f, 0.0f, 4.0f, 2.5f, 1.6f, 1.15f, 1.0f};
+    std::size_t neutralGear = 1;
+    /// Dikalikan ke setiap gigi. Ini yang menerjemahkan putaran mesin menjadi
+    /// putaran roda.
+    float finalRatio = 4.0f;
+    /// Lama perpindahan gigi, detik. Selama itu tidak ada torsi yang lewat.
+    float gearSwitchTime = 0.5f;
+
+    /// Girboks otomatis berpindah naik di atas pecahan putaran maksimum ini, dan
+    /// turun di bawahnya.
+    float upshiftFraction = 0.65f;
+    float downshiftFraction = 0.5f;
+    /// Jeda minimum antar perpindahan, detik. Tanpa ini girboks berpindah
+    /// bolak-balik di ambang batasnya.
+    float autoboxLatency = 2.0f;
+
+    /// Kekuatan kopling. Terlalu kecil membuat mesin meraung tanpa mobil
+    /// bergerak; terlalu besar membuatnya mati saat berhenti.
+    float clutchStrength = 10.0f;
+};
 
 /// Satu roda beserta suspensinya.
 struct VehicleWheelDesc {
@@ -83,6 +135,10 @@ struct VehicleDesc {
     /// Gesekan ban terhadap permukaan. Satu berarti aspal kering.
     float tireFriction = 1.0f;
 
+    VehicleDriveModel driveModel = VehicleDriveModel::DirectDrive;
+    /// Diabaikan pada `DirectDrive`.
+    VehicleEngineDesc engine;
+
     Vec3 position{0.0f};
     Quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
 };
@@ -115,6 +171,14 @@ struct VehicleState {
     Vec3 linearVelocity{0.0f};
     /// Laju sepanjang arah hadap kendaraan, m/s. Negatif berarti mundur.
     float forwardSpeed = 0.0f;
+
+    /// Putaran mesin, rad/s. Nol pada `DirectDrive` — di sana tidak ada mesin
+    /// untuk dilaporkan, dan angka yang dikarang lebih buruk daripada nol yang
+    /// jujur.
+    float engineSpeed = 0.0f;
+    /// Gigi yang sedang dipakai, indeks di `VehicleEngineDesc::gearRatios`.
+    std::size_t gear = 0;
+
     std::vector<VehicleWheelState> wheels;
 };
 

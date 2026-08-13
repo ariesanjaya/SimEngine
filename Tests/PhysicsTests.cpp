@@ -1768,3 +1768,109 @@ TEST_CASE("P6d: radius belok sepadan dengan sudut kemudi") {
     INFO("sumbu atas y = " << up.y);
     CHECK(up.y > 0.9f);
 }
+
+TEST_CASE("P6f: mesin berputar dalam batasnya dan girboks berpindah naik") {
+    if (!Available()) {
+        return;
+    }
+    PhysicsWorld world;
+    REQUIRE(world.Create(DefaultWorld()));
+    REQUIRE(AddFloor(world, 0.0f) != BodyHandle::Invalid);
+
+    VehicleDesc desc = MakeCar();
+    desc.driveModel = VehicleDriveModel::EngineDrive;
+    const VehicleHandle car = world.AddVehicle(desc);
+    INFO("AddVehicle berkata: " << world.Error());
+    REQUIRE(car != VehicleHandle::Invalid);
+
+    world.Step(120);
+
+    VehicleInput input;
+    input.throttle = 1.0f;
+    REQUIRE(world.SetVehicleInput(car, input));
+
+    // Putaran mesin dan gigi dicuplik sepanjang akselerasi penuh.
+    float lowestEngine = 1e9f;
+    float highestEngine = -1e9f;
+    std::size_t lowestGear = 999;
+    std::size_t highestGear = 0;
+    VehicleState state;
+    for (int i = 0; i < 900; ++i) {
+        world.Step(1);
+        REQUIRE(world.ReadVehicleState(car, state));
+        lowestEngine = std::min(lowestEngine, state.engineSpeed);
+        highestEngine = std::max(highestEngine, state.engineSpeed);
+        lowestGear = std::min(lowestGear, state.gear);
+        highestGear = std::max(highestGear, state.gear);
+    }
+
+    // **Mesin tetap di dalam batasnya.** Yang berputar mundur atau melewati
+    // redline bukan mesin melainkan angka yang lepas kendali, dan gejalanya
+    // muncul jauh kemudian sebagai torsi yang tidak masuk akal.
+    INFO("putaran mesin " << lowestEngine << " .. " << highestEngine << " rad/s (redline "
+                          << desc.engine.maxSpeed << ")");
+    CHECK(lowestEngine >= 0.0f);
+    CHECK(highestEngine <= desc.engine.maxSpeed * 1.05f);
+    // Dan ia benar-benar berputar, bukan mati.
+    CHECK(highestEngine > desc.engine.idleSpeed);
+
+    // **Girboks otomatis naik.** Mulai di gigi maju pertama (indeks netral + 1)
+    // dan berpindah naik saat putaran mesin mendekati redline.
+    INFO("gigi " << lowestGear << " .. " << highestGear);
+    CHECK(lowestGear >= desc.engine.neutralGear);
+    CHECK(highestGear > lowestGear);
+
+    CHECK(state.forwardSpeed > 10.0f);
+}
+
+TEST_CASE("P6f: mesin membuat roda berhenti selip di laju tinggi") {
+    if (!Available()) {
+        return;
+    }
+    // **Inilah yang tidak bisa dilakukan direct drive, dan alasan P6f ada.**
+    // Torsi direct drive tetap berapa pun laju rodanya, jadi ban tetap jenuh
+    // selama gas ditahan — terukur 39% selip di P6b. Mesin punya kurva torsi
+    // yang turun menjelang redline, jadi roda berhenti memaksa dan mulai
+    // menggelinding. Keduanya diukur berdampingan supaya bedanya berupa angka,
+    // bukan pendapat.
+    const auto slipAtSpeed = [](VehicleDriveModel model) {
+        PhysicsWorld world;
+        world.Create(DefaultWorld());
+        AddFloor(world, 0.0f);
+
+        VehicleDesc desc = MakeCar();
+        desc.driveModel = model;
+        const VehicleHandle car = world.AddVehicle(desc);
+        world.Step(120);
+
+        VehicleInput input;
+        input.throttle = 1.0f;
+        world.SetVehicleInput(car, input);
+
+        VehicleState state;
+        // Digas sampai 25 m/s, lalu selipnya dibaca sambil gas tetap ditahan.
+        for (int i = 0; i < 3600; ++i) {
+            world.Step(1);
+            world.ReadVehicleState(car, state);
+            if (state.forwardSpeed >= 25.0f) {
+                break;
+            }
+        }
+
+        // Roda belakang adalah yang digerakkan pada `MakeCar`.
+        float worst = 0.0f;
+        for (std::size_t i = 2; i < state.wheels.size(); ++i) {
+            const float surface = std::abs(state.wheels[i].rotationSpeed) * 0.35f;
+            const float speed = std::max(std::abs(state.forwardSpeed), 0.1f);
+            worst = std::max(worst, (surface - speed) / speed);
+        }
+        return worst;
+    };
+
+    const float directSlip = slipAtSpeed(VehicleDriveModel::DirectDrive);
+    const float engineSlip = slipAtSpeed(VehicleDriveModel::EngineDrive);
+
+    INFO("selip pada 25 m/s: direct " << (directSlip * 100.0f) << "%, mesin "
+                                      << (engineSlip * 100.0f) << "%");
+    CHECK(engineSlip < directSlip);
+}

@@ -50,7 +50,11 @@ class VehicleInstance final
       public physx::vehicle2::PxVehicleWheelComponent,
       public physx::vehicle2::PxVehicleDirectDriveCommandResponseComponent,
       public physx::vehicle2::PxVehicleDirectDriveActuationStateComponent,
-      public physx::vehicle2::PxVehicleDirectDrivetrainComponent {
+      public physx::vehicle2::PxVehicleDirectDrivetrainComponent,
+      public physx::vehicle2::PxVehicleEngineDriveCommandResponseComponent,
+      public physx::vehicle2::PxVehicleMultiWheelDriveDifferentialStateComponent,
+      public physx::vehicle2::PxVehicleEngineDriveActuationStateComponent,
+      public physx::vehicle2::PxVehicleEngineDrivetrainComponent {
 public:
     /// Membangun dari deskriptor. False bila deskriptornya tidak masuk akal;
     /// `error` menyebut yang mana.
@@ -263,6 +267,67 @@ public:
         physx::vehicle2::PxVehicleArrayData<physx::vehicle2::PxVehicleWheelRigidBody1dState>&
             wheelRigidBody1dStates) override;
 
+    void getDataForEngineDriveCommandResponseComponent(
+        const physx::vehicle2::PxVehicleAxleDescription*& axleDescription,
+        physx::vehicle2::PxVehicleSizedArrayData<
+            const physx::vehicle2::PxVehicleBrakeCommandResponseParams>& brakeResponseParams,
+        const physx::vehicle2::PxVehicleSteerCommandResponseParams*& steerResponseParams,
+        physx::vehicle2::PxVehicleSizedArrayData<const physx::vehicle2::PxVehicleAckermannParams>&
+            ackermannParams,
+        const physx::vehicle2::PxVehicleGearboxParams*& gearboxParams,
+        const physx::vehicle2::PxVehicleClutchCommandResponseParams*& clutchResponseParams,
+        const physx::vehicle2::PxVehicleEngineParams*& engineParams,
+        const physx::vehicle2::PxVehicleRigidBodyState*& rigidBodyState,
+        const physx::vehicle2::PxVehicleEngineState*& engineState,
+        const physx::vehicle2::PxVehicleAutoboxParams*& autoboxParams,
+        const physx::vehicle2::PxVehicleCommandState*& commands,
+        const physx::vehicle2::PxVehicleEngineDriveTransmissionCommandState*& transmissionCommands,
+        physx::vehicle2::PxVehicleArrayData<physx::PxReal>& brakeResponseStates,
+        physx::vehicle2::PxVehicleEngineDriveThrottleCommandResponseState*& throttleResponseState,
+        physx::vehicle2::PxVehicleArrayData<physx::PxReal>& steerResponseStates,
+        physx::vehicle2::PxVehicleGearboxState*& gearboxResponseState,
+        physx::vehicle2::PxVehicleClutchCommandResponseState*& clutchResponseState,
+        physx::vehicle2::PxVehicleAutoboxState*& autoboxState) override;
+
+    void getDataForMultiWheelDriveDifferentialStateComponent(
+        const physx::vehicle2::PxVehicleAxleDescription*& axleDescription,
+        const physx::vehicle2::PxVehicleMultiWheelDriveDifferentialParams*& differentialParams,
+        physx::vehicle2::PxVehicleDifferentialState*& differentialState) override;
+
+    void getDataForEngineDriveActuationStateComponent(
+        const physx::vehicle2::PxVehicleAxleDescription*& axleDescription,
+        const physx::vehicle2::PxVehicleGearboxParams*& gearboxParams,
+        physx::vehicle2::PxVehicleArrayData<const physx::PxReal>& brakeResponseStates,
+        const physx::vehicle2::PxVehicleEngineDriveThrottleCommandResponseState*&
+            throttleResponseState,
+        const physx::vehicle2::PxVehicleGearboxState*& gearboxState,
+        const physx::vehicle2::PxVehicleDifferentialState*& differentialState,
+        const physx::vehicle2::PxVehicleClutchCommandResponseState*& clutchResponseState,
+        physx::vehicle2::PxVehicleArrayData<physx::vehicle2::PxVehicleWheelActuationState>&
+            actuationStates) override;
+
+    void getDataForEngineDrivetrainComponent(
+        const physx::vehicle2::PxVehicleAxleDescription*& axleDescription,
+        physx::vehicle2::PxVehicleArrayData<const physx::vehicle2::PxVehicleWheelParams>&
+            wheelParams,
+        const physx::vehicle2::PxVehicleEngineParams*& engineParams,
+        const physx::vehicle2::PxVehicleClutchParams*& clutchParams,
+        const physx::vehicle2::PxVehicleGearboxParams*& gearboxParams,
+        physx::vehicle2::PxVehicleArrayData<const physx::PxReal>& brakeResponseStates,
+        physx::vehicle2::PxVehicleArrayData<const physx::vehicle2::PxVehicleWheelActuationState>&
+            actuationStates,
+        physx::vehicle2::PxVehicleArrayData<const physx::vehicle2::PxVehicleTireForce>& tireForces,
+        const physx::vehicle2::PxVehicleEngineDriveThrottleCommandResponseState*&
+            throttleResponseState,
+        const physx::vehicle2::PxVehicleClutchCommandResponseState*& clutchResponseState,
+        const physx::vehicle2::PxVehicleDifferentialState*& differentialState,
+        const physx::vehicle2::PxVehicleWheelConstraintGroupState*& constraintGroupState,
+        physx::vehicle2::PxVehicleArrayData<physx::vehicle2::PxVehicleWheelRigidBody1dState>&
+            wheelRigidBody1dStates,
+        physx::vehicle2::PxVehicleEngineState*& engineState,
+        physx::vehicle2::PxVehicleGearboxState*& gearboxState,
+        physx::vehicle2::PxVehicleClutchSlipState*& clutchState) override;
+
 private:
     void BuildComponentSequence();
 
@@ -312,6 +377,24 @@ private:
 
     physx::vehicle2::PxVehicleCommandState commandState_;
     physx::vehicle2::PxVehicleDirectDriveTransmissionCommandState transmissionState_;
+
+    // --- mesin, kopling, girboks: dipakai hanya pada EngineDrive ---
+    VehicleDriveModel driveModel_ = VehicleDriveModel::DirectDrive;
+    physx::vehicle2::PxVehicleEngineParams engineParams_;
+    physx::vehicle2::PxVehicleClutchParams clutchParams_;
+    physx::vehicle2::PxVehicleClutchCommandResponseParams clutchResponseParams_;
+    physx::vehicle2::PxVehicleGearboxParams gearboxParams_;
+    physx::vehicle2::PxVehicleAutoboxParams autoboxParams_;
+    physx::vehicle2::PxVehicleMultiWheelDriveDifferentialParams differentialParams_;
+
+    physx::vehicle2::PxVehicleEngineState engineState_;
+    physx::vehicle2::PxVehicleGearboxState gearboxState_;
+    physx::vehicle2::PxVehicleClutchCommandResponseState clutchResponseState_;
+    physx::vehicle2::PxVehicleAutoboxState autoboxState_;
+    physx::vehicle2::PxVehicleDifferentialState differentialState_;
+    physx::vehicle2::PxVehicleClutchSlipState clutchSlipState_;
+    physx::vehicle2::PxVehicleEngineDriveThrottleCommandResponseState engineThrottleState_;
+    physx::vehicle2::PxVehicleEngineDriveTransmissionCommandState engineTransmission_;
 
     physx::vehicle2::PxVehiclePhysXActor physxActor_;
     physx::vehicle2::PxVehiclePhysXSteerState physxSteerState_;
