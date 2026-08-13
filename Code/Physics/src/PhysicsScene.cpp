@@ -74,6 +74,17 @@ bool IsNonUniform(const Vec3& scale) {
     return largest > 1e-6f && (largest - smallest) / largest > 1e-3f;
 }
 
+JointKind ToJointKind(scene::JointType type) {
+    switch (type) {
+        case scene::JointType::Fixed: return JointKind::Fixed;
+        case scene::JointType::Revolute: return JointKind::Revolute;
+        case scene::JointType::Prismatic: return JointKind::Prismatic;
+        case scene::JointType::Spherical: return JointKind::Spherical;
+        case scene::JointType::D6: return JointKind::D6;
+    }
+    return JointKind::Fixed;
+}
+
 BodyKind ToBodyKind(scene::RigidBodyKind kind) {
     switch (kind) {
         case scene::RigidBodyKind::Static: return BodyKind::Static;
@@ -208,6 +219,85 @@ bool PhysicsScene::Build(scene::World& world, const WorldDesc& desc) {
         tracked_.push_back(entry);
         byEntity_.emplace(static_cast<uint32_t>(entity), handle);
         ++stats_.bodies;
+    }
+
+    // **Sendi dibangun sesudah seluruh benda ada**, dalam sapuan kedua. Sendi
+    // bisa menunjuk entity mana pun di level, termasuk yang tersusun di bawahnya
+    // dalam hierarki — membangunnya di sapuan yang sama akan membuat sendi
+    // berhasil atau gagal tergantung urutan entity di berkas, yang bukan sesuatu
+    // yang pernah dipikirkan orang saat menyusun levelnya.
+    for (const scene::Entity entity : order) {
+        const auto* joint = world.TryGet<scene::JointComponent>(entity);
+        if (joint == nullptr) {
+            continue;
+        }
+
+        const BodyHandle self = BodyOf(entity);
+        if (self == BodyHandle::Invalid) {
+            ++stats_.skippedJoints;
+            SIM_WARN("Physics", "'{}' has a Joint but is not a physics body itself",
+                     world.NameOf(entity));
+            continue;
+        }
+
+        // GUID kosong berarti dunia — sah, dan itulah cara pintu dan bandul
+        // dipasang. GUID yang terisi tapi tidak ditemukan adalah hal lain: sendi
+        // yang menunjuk entity yang sudah dihapus, dan itu harus terdengar.
+        BodyHandle other = BodyHandle::Invalid;
+        if (joint->connectedBody != Uuid{}) {
+            const scene::Entity target = world.FindByGuid(joint->connectedBody);
+            other = target == scene::kNullEntity ? BodyHandle::Invalid : BodyOf(target);
+            if (other == BodyHandle::Invalid) {
+                ++stats_.skippedJoints;
+                SIM_WARN("Physics",
+                         "the Joint on '{}' points at a body that is not in this level",
+                         world.NameOf(entity));
+                continue;
+            }
+        }
+
+        // Bukan `desc`: nama itu sudah dipakai `WorldDesc` parameter fungsi ini,
+        // dan bayangan nama seperti itu adalah cara paling mudah menyunting
+        // struct yang salah tanpa satu pun pesan.
+        JointDesc jointDesc;
+        jointDesc.kind = ToJointKind(joint->type);
+        // `bodyB` adalah entity yang membawa komponennya — yang bergerak — dan
+        // `bodyA` yang ditunjuknya. Urutan itu yang membuat sudut revolute
+        // bertambah ke arah yang sama dengan putaran entity-nya sendiri.
+        jointDesc.bodyA = other;
+        jointDesc.bodyB = self;
+        jointDesc.localAnchorB = joint->anchor;
+        jointDesc.localRotationB = joint->frame;
+        jointDesc.localRotationA = joint->frame;
+
+        // Bingkai pada ujung satunya harus menunjuk titik dunia yang sama, kalau
+        // tidak sendinya lahir dalam keadaan tertarik dan menyentak pada langkah
+        // pertama.
+        const Mat4 selfWorld = world.WorldMatrix(entity);
+        const Vec3 worldAnchor = Vec3(selfWorld * Vec4(joint->anchor, 1.0f));
+        if (other == BodyHandle::Invalid) {
+            jointDesc.localAnchorA = worldAnchor;
+        } else {
+            const scene::Entity target = world.FindByGuid(joint->connectedBody);
+            const Mat4 otherWorld = world.WorldMatrix(target);
+            jointDesc.localAnchorA = Vec3(glm::affineInverse(otherWorld) * Vec4(worldAnchor, 1.0f));
+        }
+
+        jointDesc.limit.enabled = joint->limitEnabled;
+        jointDesc.limit.lower = joint->lowerLimit;
+        jointDesc.limit.upper = joint->upperLimit;
+        jointDesc.collisionEnabled = joint->collisionEnabled;
+        jointDesc.breakForce = joint->breakForce;
+        jointDesc.breakTorque = joint->breakTorque;
+
+        const JointHandle handle = simulation_.AddJoint(jointDesc);
+        if (handle == JointHandle::Invalid) {
+            ++stats_.skippedJoints;
+            SIM_WARN("Physics", "the Joint on '{}' could not be created: {}",
+                     world.NameOf(entity), simulation_.Error());
+            continue;
+        }
+        ++stats_.joints;
     }
 
     return true;

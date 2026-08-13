@@ -229,6 +229,35 @@ void RegisterCoreComponents() {
             .Range(0.0f, 1.0f);
         components.Register<ColliderComponent>();
 
+        types.Type<JointComponent>("Joint")
+            .Field<&JointComponent::type>("type")
+            .EnumNames({"Fixed", "Revolute", "Prismatic", "Spherical", "D6"})
+            .Tooltip("Revolute engsel, Prismatic geseran, Spherical sendi bola")
+            .Field<&JointComponent::connectedBody>("connectedBody")
+            .Label("Connected Body")
+            .Tooltip("Kosong berarti tersendi ke dunia, pada titik tetap di ruang")
+            .Field<&JointComponent::anchor>("anchor")
+            .Label("Anchor")
+            .Field<&JointComponent::frame>("frame")
+            .Label("Frame")
+            .Degrees()
+            .Tooltip("Sumbu sendi adalah +X bingkai ini")
+            .Field<&JointComponent::limitEnabled>("limitEnabled")
+            .Label("Limit")
+            .Field<&JointComponent::lowerLimit>("lowerLimit")
+            .Label("Lower")
+            .Field<&JointComponent::upperLimit>("upperLimit")
+            .Label("Upper")
+            .Field<&JointComponent::collisionEnabled>("collisionEnabled")
+            .Label("Collision")
+            .Tooltip("Membiarkan kedua benda saling menabrak; biasanya membuatnya bergetar")
+            .Field<&JointComponent::breakForce>("breakForce")
+            .Label("Break Force")
+            .Tooltip("Nol berarti tidak pernah patah")
+            .Field<&JointComponent::breakTorque>("breakTorque")
+            .Label("Break Torque");
+        components.Register<JointComponent>();
+
         types.Type<CameraComponent>("Camera")
             .Field<&CameraComponent::fovYRadians>("fovY")
             .Label("Field of View")

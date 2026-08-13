@@ -15,6 +15,7 @@
 #include <algorithm>
 #include <atomic>
 #include <unordered_map>
+#include <vector>
 
 #if SIM_WITH_PHYSX
 
@@ -87,6 +88,26 @@ struct PhysicsWorld::Impl {
     /// pada adegan yang besar.
     std::unordered_map<const physx::PxRigidActor*, uint64_t> handlesByActor;
 
+    /// Handle → sendi.
+    ///
+    /// **Dilacak terpisah, bukan dibiarkan ikut mati bersama aktornya.** PhysX
+    /// menuntut sendi dilepas sebelum benda yang dipegangnya; melepas aktor
+    /// lebih dulu meninggalkan sendi yang menunjuk memori yang sudah bebas, dan
+    /// itu tidak crash di tempat kejadian melainkan pada langkah simulasi
+    /// berikutnya yang kebetulan menyentuhnya.
+    std::unordered_map<uint64_t, physx::PxJoint*> joints;
+    uint64_t nextJointHandle = 1;
+
+    /// Handle → articulation, dan link-nya menurut urutan `ArticulationDesc`.
+    ///
+    /// Daftar link disimpan sendiri alih-alih dibaca ulang lewat `getLinks`:
+    /// PhysX tidak menjanjikan urutan yang dikembalikannya sama dengan urutan
+    /// pembuatan, sedangkan `ReadLinkState` menjanjikan indeks yang sama dengan
+    /// yang ditulis pemanggil di `desc.links`.
+    std::unordered_map<uint64_t, physx::PxArticulationReducedCoordinate*> articulations;
+    std::unordered_map<uint64_t, std::vector<physx::PxArticulationLink*>> articulationLinks;
+    uint64_t nextArticulationHandle = 1;
+
     /// Sedang di dalam `simulate`/`fetchResults`.
     ///
     /// **Atomic karena justru dibaca dari thread lain.** PhysX melarang scene
@@ -119,7 +140,51 @@ struct PhysicsWorld::Impl {
 
     ~Impl() { Shutdown(); }
 
+    /// Melepas setiap sendi yang memegang `actor`, dan mengembalikan berapa
+    /// banyak. Dipanggil sebelum aktornya dilepas — urutan itu wajib.
+    std::size_t ReleaseJointsTouching(const physx::PxRigidActor* actor) {
+        std::size_t released = 0;
+        for (auto it = joints.begin(); it != joints.end();) {
+            physx::PxJoint* joint = it->second;
+            if (joint == nullptr) {
+                it = joints.erase(it);
+                continue;
+            }
+            physx::PxRigidActor* a = nullptr;
+            physx::PxRigidActor* b = nullptr;
+            joint->getActors(a, b);
+            if (a == actor || b == actor) {
+                joint->release();
+                it = joints.erase(it);
+                ++released;
+            } else {
+                ++it;
+            }
+        }
+        return released;
+    }
+
     void Shutdown() {
+        // Articulation memiliki link-nya sendiri; melepasnya melepas semuanya.
+        for (auto& [handle, articulation] : articulations) {
+            if (articulation != nullptr) {
+                if (scene != nullptr) {
+                    scene->removeArticulation(*articulation);
+                }
+                articulation->release();
+            }
+        }
+        articulations.clear();
+        articulationLinks.clear();
+
+        // Sendi lebih dulu, seluruhnya, sebelum satu aktor pun dilepas.
+        for (auto& [handle, joint] : joints) {
+            if (joint != nullptr) {
+                joint->release();
+            }
+        }
+        joints.clear();
+
         for (auto& [handle, actor] : bodies) {
             if (actor != nullptr && scene != nullptr) {
                 scene->removeActor(*actor);
@@ -354,6 +419,16 @@ void PhysicsWorld::RemoveBody(BodyHandle body) {
         return;
     }
     if (found->second != nullptr) {
+        // **Sendinya dulu.** Sendi yang masih memegang aktor yang sudah dilepas
+        // adalah pointer menggantung yang tidak crash di sini melainkan di
+        // langkah simulasi berikutnya — sejauh mungkin dari sebabnya. Ini pula
+        // kriteria terima P3 yang diuji dengan benar-benar menghapus entity,
+        // bukan dengan membaca kode.
+        const std::size_t releasedJoints = impl_->ReleaseJointsTouching(found->second);
+        if (releasedJoints > 0) {
+            SIM_INFO("Physics", "removing a body released {} joint(s) that held it",
+                     releasedJoints);
+        }
         impl_->handlesByActor.erase(found->second);
         impl_->scene->removeActor(*found->second);
         found->second->release();
@@ -486,6 +561,415 @@ float PhysicsWorld::Alpha() const {
 }
 
 uint64_t PhysicsWorld::StepCount() const { return impl_ != nullptr ? impl_->stepCount : 0; }
+
+// --- articulation ------------------------------------------------------------
+
+namespace {
+
+physx::PxArticulationJointType::Enum ToPxJointType(ArticulationJointKind kind) {
+    switch (kind) {
+        case ArticulationJointKind::Fixed: return physx::PxArticulationJointType::eFIX;
+        case ArticulationJointKind::Revolute: return physx::PxArticulationJointType::eREVOLUTE;
+        case ArticulationJointKind::Prismatic: return physx::PxArticulationJointType::ePRISMATIC;
+        case ArticulationJointKind::Spherical: return physx::PxArticulationJointType::eSPHERICAL;
+    }
+    return physx::PxArticulationJointType::eSPHERICAL;
+}
+
+}  // namespace
+
+ArticulationHandle PhysicsWorld::AddArticulation(const ArticulationDesc& desc) {
+    if (!IsValid()) {
+        return ArticulationHandle::Invalid;
+    }
+    if (desc.links.empty()) {
+        impl_->error = "an articulation needs at least a root link";
+        return ArticulationHandle::Invalid;
+    }
+    if (desc.links.front().parent != kArticulationRootParent) {
+        impl_->error = "the first link of an articulation must be the root";
+        return ArticulationHandle::Invalid;
+    }
+    for (std::size_t i = 1; i < desc.links.size(); ++i) {
+        const int parent = desc.links[i].parent;
+        // Induk yang tidak mendahului anaknya berarti siklus atau rujukan ke
+        // link yang belum ada. PhysX menjawab keduanya dengan crash, bukan
+        // dengan pesan — jadi diperiksa di sini.
+        if (parent < 0 || parent >= static_cast<int>(i)) {
+            impl_->error = "articulation links must list their parent before themselves";
+            return ArticulationHandle::Invalid;
+        }
+    }
+
+    physx::PxArticulationReducedCoordinate* articulation =
+        impl_->physics->createArticulationReducedCoordinate();
+    if (articulation == nullptr) {
+        impl_->error = "createArticulationReducedCoordinate failed";
+        return ArticulationHandle::Invalid;
+    }
+
+    articulation->setSolverIterationCounts(desc.solverPositionIterations,
+                                           desc.solverVelocityIterations);
+    articulation->setArticulationFlag(physx::PxArticulationFlag::eFIX_BASE, desc.fixBase);
+    articulation->setArticulationFlag(physx::PxArticulationFlag::eDISABLE_SELF_COLLISION,
+                                      !desc.selfCollision);
+    if (!desc.allowSleeping) {
+        articulation->setSleepThreshold(0.0f);
+    }
+
+    std::vector<physx::PxArticulationLink*> links;
+    links.reserve(desc.links.size());
+
+    for (const ArticulationLinkDesc& linkDesc : desc.links) {
+        physx::PxArticulationLink* parentLink =
+            linkDesc.parent == kArticulationRootParent
+                ? nullptr
+                : links[static_cast<std::size_t>(linkDesc.parent)];
+
+        physx::PxArticulationLink* link = articulation->createLink(
+            parentLink, ToPx(linkDesc.position, linkDesc.rotation));
+        if (link == nullptr) {
+            impl_->error = "creating an articulation link failed";
+            articulation->release();
+            return ArticulationHandle::Invalid;
+        }
+
+        physx::PxMaterial* material = impl_->physics->createMaterial(
+            linkDesc.material.staticFriction, linkDesc.material.dynamicFriction,
+            linkDesc.material.restitution);
+        physx::PxGeometryHolder geometry;
+        switch (linkDesc.shape.kind) {
+            case ShapeKind::Box:
+                geometry = physx::PxBoxGeometry(
+                    ToPx(glm::max(linkDesc.shape.halfExtents, Vec3(1e-4f))));
+                break;
+            case ShapeKind::Sphere:
+                geometry = physx::PxSphereGeometry(std::max(linkDesc.shape.radius, 1e-4f));
+                break;
+            case ShapeKind::Capsule:
+                geometry = physx::PxCapsuleGeometry(
+                    std::max(linkDesc.shape.radius, 1e-4f),
+                    std::max(linkDesc.shape.halfExtents.x, 1e-4f));
+                break;
+            case ShapeKind::Plane:
+                // Bidang tak hingga tidak bisa menjadi bagian tubuh yang
+                // bergerak; ditolak di sini alih-alih dibiarkan PhysX menegur.
+                impl_->error = "an articulation link cannot be an infinite plane";
+                material->release();
+                articulation->release();
+                return ArticulationHandle::Invalid;
+        }
+
+        physx::PxShape* shape =
+            physx::PxRigidActorExt::createExclusiveShape(*link, geometry.any(), *material);
+        material->release();
+        if (shape == nullptr) {
+            impl_->error = "attaching a shape to an articulation link failed";
+            articulation->release();
+            return ArticulationHandle::Invalid;
+        }
+        shape->setLocalPose(ToPx(linkDesc.shape.localPosition, linkDesc.shape.localRotation));
+
+        if (linkDesc.mass > 0.0f) {
+            physx::PxRigidBodyExt::setMassAndUpdateInertia(*link, linkDesc.mass);
+        } else {
+            physx::PxRigidBodyExt::updateMassAndInertia(*link, linkDesc.density);
+        }
+
+        if (parentLink != nullptr) {
+            physx::PxArticulationJointReducedCoordinate* joint = link->getInboundJoint();
+            if (joint == nullptr) {
+                impl_->error = "an articulation link has no inbound joint";
+                articulation->release();
+                return ArticulationHandle::Invalid;
+            }
+            joint->setJointType(ToPxJointType(linkDesc.joint));
+            joint->setParentPose(ToPx(linkDesc.parentAnchor, linkDesc.parentFrame));
+            joint->setChildPose(ToPx(linkDesc.childAnchor, linkDesc.childFrame));
+
+            // Sumbu yang tidak disebut jenis sendinya tetap terkunci — itu
+            // bawaan PhysX, dan yang membuat sendi revolute benar-benar hanya
+            // satu derajat kebebasan.
+            const auto axisMotion = [&](physx::PxArticulationAxis::Enum axis, float lower,
+                                        float upper) {
+                if (!linkDesc.limitEnabled) {
+                    joint->setMotion(axis, physx::PxArticulationMotion::eFREE);
+                    return;
+                }
+                joint->setMotion(axis, physx::PxArticulationMotion::eLIMITED);
+                joint->setLimitParams(axis, physx::PxArticulationLimit(lower, upper));
+            };
+
+            switch (linkDesc.joint) {
+                case ArticulationJointKind::Fixed:
+                    break;
+                case ArticulationJointKind::Revolute:
+                    axisMotion(physx::PxArticulationAxis::eTWIST, linkDesc.lowerLimit,
+                               linkDesc.upperLimit);
+                    break;
+                case ArticulationJointKind::Prismatic:
+                    axisMotion(physx::PxArticulationAxis::eX, linkDesc.lowerLimit,
+                               linkDesc.upperLimit);
+                    break;
+                case ArticulationJointKind::Spherical:
+                    axisMotion(physx::PxArticulationAxis::eSWING1, linkDesc.lowerLimit,
+                               linkDesc.upperLimit);
+                    axisMotion(physx::PxArticulationAxis::eSWING2, -linkDesc.swing2Limit,
+                               linkDesc.swing2Limit);
+                    break;
+            }
+
+            if (desc.jointFriction > 0.0f) {
+                joint->setFrictionCoefficient(desc.jointFriction);
+            }
+        }
+
+        links.push_back(link);
+    }
+
+    // **Seluruh link dibuat sebelum articulation masuk ke scene.** PhysX tidak
+    // mengizinkan strukturnya berubah sesudahnya, dan menambah link ke
+    // articulation yang sudah masuk gagal secara diam-diam.
+    impl_->scene->addArticulation(*articulation);
+
+    const uint64_t handle = impl_->nextArticulationHandle++;
+    impl_->articulations.emplace(handle, articulation);
+    impl_->articulationLinks.emplace(handle, std::move(links));
+    return static_cast<ArticulationHandle>(handle);
+}
+
+void PhysicsWorld::RemoveArticulation(ArticulationHandle articulation) {
+    if (!IsValid()) {
+        return;
+    }
+    const auto found = impl_->articulations.find(static_cast<uint64_t>(articulation));
+    if (found == impl_->articulations.end()) {
+        return;
+    }
+    if (found->second != nullptr) {
+        impl_->scene->removeArticulation(*found->second);
+        found->second->release();
+    }
+    impl_->articulations.erase(found);
+    impl_->articulationLinks.erase(static_cast<uint64_t>(articulation));
+}
+
+bool PhysicsWorld::IsArticulationAlive(ArticulationHandle articulation) const {
+    return impl_ != nullptr &&
+           impl_->articulations.count(static_cast<uint64_t>(articulation)) != 0;
+}
+
+std::size_t PhysicsWorld::ArticulationCount() const {
+    return impl_ != nullptr ? impl_->articulations.size() : 0;
+}
+
+std::size_t PhysicsWorld::ArticulationLinkCount(ArticulationHandle articulation) const {
+    if (impl_ == nullptr) {
+        return 0;
+    }
+    const auto found = impl_->articulationLinks.find(static_cast<uint64_t>(articulation));
+    return found == impl_->articulationLinks.end() ? 0 : found->second.size();
+}
+
+bool PhysicsWorld::ReadLinkState(ArticulationHandle articulation, std::size_t link,
+                                 BodyState& out) const {
+    out = BodyState{};
+    if (impl_ == nullptr) {
+        return false;
+    }
+    const auto found = impl_->articulationLinks.find(static_cast<uint64_t>(articulation));
+    if (found == impl_->articulationLinks.end() || link >= found->second.size()) {
+        return false;
+    }
+    physx::PxArticulationLink* actor = found->second[link];
+    if (actor == nullptr) {
+        return false;
+    }
+    const physx::PxTransform pose = actor->getGlobalPose();
+    out.position = FromPx(pose.p);
+    out.rotation = FromPx(pose.q);
+    out.linearVelocity = FromPx(actor->getLinearVelocity());
+    out.angularVelocity = FromPx(actor->getAngularVelocity());
+    return true;
+}
+
+// --- sendi -------------------------------------------------------------------
+
+JointHandle PhysicsWorld::AddJoint(const JointDesc& desc) {
+    if (!IsValid()) {
+        return JointHandle::Invalid;
+    }
+
+    // Ujung yang `Invalid` berarti dunia, dan PhysX menyatakannya sebagai aktor
+    // null. Yang bukan `Invalid` tapi tidak dikenal adalah kesalahan, bukan
+    // dunia — membiarkannya lolos menjadikan handle yang salah ketik sebagai
+    // sendi yang diam-diam menggantung ke ruang kosong.
+    const auto resolve = [this](BodyHandle body, physx::PxRigidActor*& out) {
+        if (body == BodyHandle::Invalid) {
+            out = nullptr;
+            return true;
+        }
+        const auto found = impl_->bodies.find(static_cast<uint64_t>(body));
+        if (found == impl_->bodies.end()) {
+            return false;
+        }
+        out = found->second;
+        return true;
+    };
+
+    physx::PxRigidActor* actorA = nullptr;
+    physx::PxRigidActor* actorB = nullptr;
+    if (!resolve(desc.bodyA, actorA) || !resolve(desc.bodyB, actorB)) {
+        impl_->error = "a joint referenced a body that does not exist";
+        return JointHandle::Invalid;
+    }
+    if (actorA == nullptr && actorB == nullptr) {
+        impl_->error = "a joint needs at least one real body; both ends were the world";
+        return JointHandle::Invalid;
+    }
+
+    const physx::PxTransform frameA = ToPx(desc.localAnchorA, desc.localRotationA);
+    const physx::PxTransform frameB = ToPx(desc.localAnchorB, desc.localRotationB);
+
+    physx::PxJoint* joint = nullptr;
+    switch (desc.kind) {
+        case JointKind::Fixed:
+            joint = physx::PxFixedJointCreate(*impl_->physics, actorA, frameA, actorB, frameB);
+            break;
+
+        case JointKind::Revolute: {
+            physx::PxRevoluteJoint* revolute =
+                physx::PxRevoluteJointCreate(*impl_->physics, actorA, frameA, actorB, frameB);
+            if (revolute != nullptr && desc.limit.enabled) {
+                physx::PxJointAngularLimitPair limit(desc.limit.lower, desc.limit.upper);
+                if (desc.limit.stiffness > 0.0f) {
+                    limit = physx::PxJointAngularLimitPair(
+                        desc.limit.lower, desc.limit.upper,
+                        physx::PxSpring(desc.limit.stiffness, desc.limit.damping));
+                }
+                revolute->setLimit(limit);
+                revolute->setRevoluteJointFlag(physx::PxRevoluteJointFlag::eLIMIT_ENABLED, true);
+            }
+            joint = revolute;
+            break;
+        }
+
+        case JointKind::Prismatic: {
+            physx::PxPrismaticJoint* prismatic =
+                physx::PxPrismaticJointCreate(*impl_->physics, actorA, frameA, actorB, frameB);
+            if (prismatic != nullptr && desc.limit.enabled) {
+                physx::PxJointLinearLimitPair limit(impl_->physics->getTolerancesScale(),
+                                                    desc.limit.lower, desc.limit.upper);
+                if (desc.limit.stiffness > 0.0f) {
+                    limit = physx::PxJointLinearLimitPair(
+                        desc.limit.lower, desc.limit.upper,
+                        physx::PxSpring(desc.limit.stiffness, desc.limit.damping));
+                }
+                prismatic->setLimit(limit);
+                prismatic->setPrismaticJointFlag(physx::PxPrismaticJointFlag::eLIMIT_ENABLED,
+                                                 true);
+            }
+            joint = prismatic;
+            break;
+        }
+
+        case JointKind::Spherical: {
+            physx::PxSphericalJoint* spherical =
+                physx::PxSphericalJointCreate(*impl_->physics, actorA, frameA, actorB, frameB);
+            if (spherical != nullptr && desc.limit.enabled) {
+                // Kerucutnya simetris di sini: `upper` adalah setengah-sudut
+                // bukaannya pada kedua sumbu. Kerucut elips yang dimiliki PhysX
+                // menuntut dua sudut, dan `JointLimit` tidak punya tempat untuk
+                // menyebutkan keduanya tanpa berarti hal lain untuk jenis sendi
+                // yang lain.
+                const float half = std::max(desc.limit.upper, 1e-3f);
+                spherical->setLimitCone(physx::PxJointLimitCone(half, half));
+                spherical->setSphericalJointFlag(physx::PxSphericalJointFlag::eLIMIT_ENABLED,
+                                                 true);
+            }
+            joint = spherical;
+            break;
+        }
+
+        case JointKind::D6: {
+            physx::PxD6Joint* d6 =
+                physx::PxD6JointCreate(*impl_->physics, actorA, frameA, actorB, frameB);
+            if (d6 != nullptr) {
+                const auto motion = [](bool free) {
+                    return free ? physx::PxD6Motion::eFREE : physx::PxD6Motion::eLOCKED;
+                };
+                d6->setMotion(physx::PxD6Axis::eX, motion(desc.d6.freeLinearX));
+                d6->setMotion(physx::PxD6Axis::eY, motion(desc.d6.freeLinearY));
+                d6->setMotion(physx::PxD6Axis::eZ, motion(desc.d6.freeLinearZ));
+                d6->setMotion(physx::PxD6Axis::eTWIST, motion(desc.d6.freeAngularX));
+                d6->setMotion(physx::PxD6Axis::eSWING1, motion(desc.d6.freeAngularY));
+                d6->setMotion(physx::PxD6Axis::eSWING2, motion(desc.d6.freeAngularZ));
+            }
+            joint = d6;
+            break;
+        }
+    }
+
+    if (joint == nullptr) {
+        impl_->error = "creating the joint failed";
+        return JointHandle::Invalid;
+    }
+
+    joint->setConstraintFlag(physx::PxConstraintFlag::eCOLLISION_ENABLED,
+                             desc.collisionEnabled);
+    if (desc.breakForce > 0.0f || desc.breakTorque > 0.0f) {
+        // Nol pada salah satunya berarti "tidak patah karena yang ini", bukan
+        // "patah seketika" — jadi yang tidak disetel dibuat tak hingga.
+        joint->setBreakForce(desc.breakForce > 0.0f ? desc.breakForce : PX_MAX_F32,
+                             desc.breakTorque > 0.0f ? desc.breakTorque : PX_MAX_F32);
+    }
+
+    const uint64_t handle = impl_->nextJointHandle++;
+    impl_->joints.emplace(handle, joint);
+    return static_cast<JointHandle>(handle);
+}
+
+void PhysicsWorld::RemoveJoint(JointHandle joint) {
+    if (!IsValid()) {
+        return;
+    }
+    const auto found = impl_->joints.find(static_cast<uint64_t>(joint));
+    if (found == impl_->joints.end()) {
+        return;
+    }
+    if (found->second != nullptr) {
+        found->second->release();
+    }
+    impl_->joints.erase(found);
+}
+
+bool PhysicsWorld::IsJointAlive(JointHandle joint) const {
+    return impl_ != nullptr && impl_->joints.count(static_cast<uint64_t>(joint)) != 0;
+}
+
+std::size_t PhysicsWorld::JointCount() const {
+    return impl_ != nullptr ? impl_->joints.size() : 0;
+}
+
+bool PhysicsWorld::ReadJointState(JointHandle joint, JointState& out) const {
+    out = JointState{};
+    if (!IsValid()) {
+        return false;
+    }
+    const auto found = impl_->joints.find(static_cast<uint64_t>(joint));
+    if (found == impl_->joints.end() || found->second == nullptr) {
+        return false;
+    }
+
+    physx::PxJoint* handle = found->second;
+    out.alive = !handle->getConstraintFlags().isSet(physx::PxConstraintFlag::eBROKEN);
+    if (auto* revolute = handle->is<physx::PxRevoluteJoint>(); revolute != nullptr) {
+        out.position = revolute->getAngle();
+    } else if (auto* prismatic = handle->is<physx::PxPrismaticJoint>(); prismatic != nullptr) {
+        out.position = prismatic->getPosition();
+    }
+    return true;
+}
 
 // --- scene query ------------------------------------------------------------
 
@@ -761,6 +1245,29 @@ uint32_t PhysicsWorld::Advance(float /*deltaSeconds*/) { return 0; }
 void PhysicsWorld::Step(uint32_t /*steps*/) {}
 float PhysicsWorld::Alpha() const { return 0.0f; }
 uint64_t PhysicsWorld::StepCount() const { return 0; }
+
+ArticulationHandle PhysicsWorld::AddArticulation(const ArticulationDesc&) {
+    return ArticulationHandle::Invalid;
+}
+void PhysicsWorld::RemoveArticulation(ArticulationHandle) {}
+bool PhysicsWorld::IsArticulationAlive(ArticulationHandle) const { return false; }
+std::size_t PhysicsWorld::ArticulationCount() const { return 0; }
+std::size_t PhysicsWorld::ArticulationLinkCount(ArticulationHandle) const { return 0; }
+
+bool PhysicsWorld::ReadLinkState(ArticulationHandle, std::size_t, BodyState& out) const {
+    out = BodyState{};
+    return false;
+}
+
+JointHandle PhysicsWorld::AddJoint(const JointDesc&) { return JointHandle::Invalid; }
+void PhysicsWorld::RemoveJoint(JointHandle) {}
+bool PhysicsWorld::IsJointAlive(JointHandle) const { return false; }
+std::size_t PhysicsWorld::JointCount() const { return 0; }
+
+bool PhysicsWorld::ReadJointState(JointHandle, JointState& out) const {
+    out = JointState{};
+    return false;
+}
 
 // Query menjawab "tidak kena", bukan menolak dengan galat: adegan tanpa satu
 // pun benda memang tidak punya yang bisa kena, dan itulah keadaan build ini.

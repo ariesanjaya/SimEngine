@@ -32,6 +32,13 @@ struct PhysicsSceneStats {
     /// Entity yang bentuknya diskalakan tidak seragam padahal bentuknya tidak
     /// mendukungnya (bola, kapsul).
     std::size_t nonUniformScale = 0;
+
+    std::size_t joints = 0;
+    /// Sendi yang dilewati karena ujungnya tidak bisa dipakai — entity-nya
+    /// sendiri bukan benda fisika, atau `connectedBody` menunjuk GUID yang tidak
+    /// ada di level ini. Dihitung, bukan diabaikan: sendi yang hilang terlihat
+    /// sebagai benda yang jatuh padahal seharusnya tergantung.
+    std::size_t skippedJoints = 0;
 };
 
 /// Satu simulasi yang dibangun dari sebuah `scene::World`.

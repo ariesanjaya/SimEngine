@@ -45,7 +45,15 @@ sim_add_test(SimPhysicsTests
     SOURCES
         PhysicsTests.cpp
     DEPS
-        Sim::Physics)
+        Sim::Physics
+        # **Uji-nya yang butuh keduanya, bukan Sim::Physics.** Ragdoll dibangun
+        # dari daftar tulang generik; mengubah `animation::Skeleton` menjadi
+        # daftar itu adalah lintasan sepuluh baris yang dimiliki pemanggil, dan
+        # di sinilah lintasan itu dijalankan. Kalau `Sim::Physics` sendiri yang
+        # menautkan Animation, setiap server dedicated ikut membawa importir FBX
+        # dan USD di baliknya.
+        Sim::Animation
+        Sim::Assets)
 
 # SIM_CODE_DIR dipakai uji yang menyisir `Code/` untuk memastikan tidak ada tipe
 # PhysX yang lolos ke luar TU backend-nya.

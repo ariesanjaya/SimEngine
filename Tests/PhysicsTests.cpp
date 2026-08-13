@@ -1,5 +1,8 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 
+#include "Sim/Animation/AnimationIo.h"
+#include "Sim/Animation/Skeleton.h"
+#include "Sim/Assets/MeshData.h"
 #include "Sim/Core/TaskPool.h"
 #include "Sim/Physics/PhysicsWorld.h"
 
@@ -9,6 +12,7 @@
 #include <atomic>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -651,4 +655,760 @@ TEST_CASE("query yang menabrak langkah simulasi ditolak, bukan dijawab separuh")
     RayHit after;
     REQUIRE(world.Raycast(Vec3(0.0f, 5.0f, 0.0f), Vec3(0.0f, -1.0f, 0.0f), 10.0f, after));
     CHECK(after.distance == doctest::Approx(4.0f).epsilon(0.001));
+}
+
+namespace {
+
+/// Beban bandul: bola dinamis di ujung lengan sepanjang `armLength` pada +X.
+BodyHandle AddPendulumBob(PhysicsWorld& world, float armLength) {
+    BodyDesc bob;
+    bob.kind = BodyKind::Dynamic;
+    bob.shape.kind = ShapeKind::Sphere;
+    bob.shape.radius = 0.2f;
+    bob.position = Vec3(armLength, 0.0f, 0.0f);
+    // Tidak boleh tertidur: bandul yang melambat sesaat lalu dianggap diam
+    // berhenti berayun, dan itu terbaca sebagai sendi yang macet.
+    bob.allowSleeping = false;
+    return world.AddBody(bob);
+}
+
+}  // namespace
+
+TEST_CASE("bandul revolute tetap di bidangnya setelah 10.000 langkah") {
+    if (!Available()) {
+        return;
+    }
+    // Kriteria terima P3, dan angkanya besar dengan sengaja: penyimpangan sendi
+    // menumpuk perlahan. Seribu langkah masih terlihat rapi pada sendi yang
+    // sumbunya salah; sepuluh ribu tidak.
+    PhysicsWorld world;
+    REQUIRE(world.Create(DefaultWorld()));
+
+    const float arm = 2.0f;
+    const BodyHandle bob = AddPendulumBob(world, arm);
+    REQUIRE(bob != BodyHandle::Invalid);
+
+    JointDesc hinge;
+    hinge.kind = JointKind::Revolute;
+    // Ujung pertama dunia: bandul menggantung pada titik tetap di ruang, tanpa
+    // benda statis pura-pura hanya untuk digantungi.
+    hinge.bodyA = BodyHandle::Invalid;
+    hinge.bodyB = bob;
+    hinge.localAnchorA = Vec3(0.0f);
+    hinge.localAnchorB = Vec3(-arm, 0.0f, 0.0f);
+    // Sumbu sendi adalah +X bingkainya; diputar +90° terhadap Y supaya sumbunya
+    // menjadi Z dunia, sehingga bandul berayun di bidang XY.
+    const float halfAngle = 0.25f * 3.14159265f;
+    hinge.localRotationA = Quat(std::cos(halfAngle), 0.0f, std::sin(halfAngle), 0.0f);
+    hinge.localRotationB = hinge.localRotationA;
+
+    const JointHandle joint = world.AddJoint(hinge);
+    INFO("AddJoint berkata: " << world.Error());
+    REQUIRE(joint != JointHandle::Invalid);
+    CHECK(world.JointCount() == 1);
+
+    float worstOutOfPlane = 0.0f;
+    float worstRadius = 0.0f;
+    for (int i = 0; i < 10000; ++i) {
+        world.Step(1);
+        BodyState state;
+        REQUIRE(world.ReadState(bob, state));
+        // Bidang ayunannya z = 0. Keluar dari bidang berarti sumbunya bocor.
+        worstOutOfPlane = std::max(worstOutOfPlane, std::abs(state.position.z));
+        // Dan lengannya tidak boleh memanjang: jarak ke poros tetap `arm`.
+        const float radius = std::sqrt(state.position.x * state.position.x +
+                                       state.position.y * state.position.y);
+        worstRadius = std::max(worstRadius, std::abs(radius - arm));
+    }
+
+    INFO("keluar bidang terjauh " << worstOutOfPlane << " m, lengan meleset "
+                                  << worstRadius << " m");
+    CHECK(worstOutOfPlane < 0.01f);
+    CHECK(worstRadius < 0.02f);
+
+    // Dan ia memang berayun, bukan menggantung diam — uji yang lulus karena
+    // bandulnya tidak pernah bergerak tidak menguji apa pun.
+    BodyState finalState;
+    REQUIRE(world.ReadState(bob, finalState));
+    CHECK(finalState.position.y < -0.1f);
+}
+
+TEST_CASE("limit sendi tidak pernah dilewati") {
+    if (!Available()) {
+        return;
+    }
+    PhysicsWorld world;
+    REQUIRE(world.Create(DefaultWorld()));
+
+    const float arm = 1.0f;
+    const BodyHandle bob = AddPendulumBob(world, arm);
+
+    JointDesc hinge;
+    hinge.kind = JointKind::Revolute;
+    hinge.bodyB = bob;
+    hinge.localAnchorB = Vec3(-arm, 0.0f, 0.0f);
+    const float halfAngle = 0.25f * 3.14159265f;
+    hinge.localRotationA = Quat(std::cos(halfAngle), 0.0f, std::sin(halfAngle), 0.0f);
+    hinge.localRotationB = hinge.localRotationA;
+    // Berayun turun dibiarkan hanya sampai 30°, jadi bandul tidak boleh sampai
+    // menggantung lurus ke bawah.
+    hinge.limit.enabled = true;
+    hinge.limit.lower = -30.0f * 3.14159265f / 180.0f;
+    hinge.limit.upper = 0.0f;
+
+    const JointHandle joint = world.AddJoint(hinge);
+    REQUIRE(joint != JointHandle::Invalid);
+
+    float worstOvershoot = 0.0f;
+    float lowestY = 0.0f;
+    for (int i = 0; i < 2000; ++i) {
+        world.Step(1);
+        JointState state;
+        REQUIRE(world.ReadJointState(joint, state));
+        // Sedikit kelebihan adalah sifat solver berbasis impuls; yang diuji
+        // adalah bahwa ia terbatas, bukan bahwa ia nol.
+        worstOvershoot = std::max(worstOvershoot, hinge.limit.lower - state.position);
+        BodyState body;
+        world.ReadState(bob, body);
+        lowestY = std::min(lowestY, body.position.y);
+    }
+
+    INFO("melewati batas sejauh " << (worstOvershoot * 180.0f / 3.14159265f) << " derajat");
+    CHECK(worstOvershoot < 0.05f);  // di bawah ~3°
+
+    // Diperiksa juga lewat posisinya, bukan hanya lewat angka yang dilaporkan
+    // sendi itu sendiri: pada 30°, beban sepanjang 1 m tidak turun lebih dari
+    // sin(30°) = 0,5 m. Tanpa limit ia akan mencapai -1 m.
+    INFO("turun sampai y = " << lowestY);
+    CHECK(lowestY > -0.6f);
+}
+
+TEST_CASE("menghapus salah satu ujung melepas sendinya") {
+    if (!Available()) {
+        return;
+    }
+    // Kriteria terima P3, diuji dengan benar-benar menghapus benda — bukan
+    // dengan membaca kode. Sendi yang masih memegang aktor yang sudah dilepas
+    // tidak crash di tempat kejadian melainkan di langkah berikutnya yang
+    // kebetulan menyentuhnya, jadi uji ini melangkah sesudahnya.
+    PhysicsWorld world;
+    REQUIRE(world.Create(DefaultWorld()));
+
+    BodyDesc anchorDesc;
+    anchorDesc.kind = BodyKind::Static;
+    const BodyHandle anchor = world.AddBody(anchorDesc);
+    const BodyHandle bob = AddPendulumBob(world, 1.0f);
+
+    JointDesc link;
+    link.kind = JointKind::Fixed;
+    link.bodyA = anchor;
+    link.bodyB = bob;
+    link.localAnchorB = Vec3(-1.0f, 0.0f, 0.0f);
+    const JointHandle joint = world.AddJoint(link);
+    REQUIRE(joint != JointHandle::Invalid);
+    REQUIRE(world.JointCount() == 1);
+
+    world.Step(10);
+
+    world.RemoveBody(bob);
+    CHECK_FALSE(world.IsAlive(bob));
+    // Sendinya ikut hilang, tanpa perlu dilepas sendiri oleh pemanggil.
+    CHECK(world.JointCount() == 0);
+    CHECK_FALSE(world.IsJointAlive(joint));
+
+    JointState state;
+    CHECK_FALSE(world.ReadJointState(joint, state));
+
+    // Melangkah sesudahnya: di sinilah aktor menggantung akan terlihat.
+    world.Step(120);
+    CHECK(world.BodyCount() == 1);
+
+    // Melepas sendi yang sudah hilang tidak merusak apa pun.
+    world.RemoveJoint(joint);
+    CHECK(world.JointCount() == 0);
+}
+
+TEST_CASE("sendi menolak benda yang tidak dikenal, dan dunia di kedua ujung") {
+    if (!Available()) {
+        return;
+    }
+    PhysicsWorld world;
+    REQUIRE(world.Create(DefaultWorld()));
+    const BodyHandle bob = AddPendulumBob(world, 1.0f);
+
+    JointDesc bad;
+    bad.kind = JointKind::Fixed;
+    bad.bodyA = static_cast<BodyHandle>(9999);
+    bad.bodyB = bob;
+    CHECK(world.AddJoint(bad) == JointHandle::Invalid);
+    CHECK(world.Error().find("does not exist") != std::string::npos);
+
+    // Dua ujung yang keduanya dunia bukan sendi melainkan salah ketik: tidak ada
+    // yang bisa digerakkannya.
+    JointDesc floating;
+    floating.kind = JointKind::Fixed;
+    CHECK(world.AddJoint(floating) == JointHandle::Invalid);
+    CHECK(world.Error().find("at least one real body") != std::string::npos);
+    CHECK(world.JointCount() == 0);
+}
+
+TEST_CASE("prismatic bergeser pada satu sumbu dan berhenti di batasnya") {
+    if (!Available()) {
+        return;
+    }
+    PhysicsWorld world;
+    WorldDesc desc = DefaultWorld();
+    // Gravitasi ke -X supaya ia menarik laci sepanjang sumbu geserannya.
+    desc.gravity = Vec3(-9.81f, 0.0f, 0.0f);
+    REQUIRE(world.Create(desc));
+
+    BodyDesc drawer;
+    drawer.kind = BodyKind::Dynamic;
+    drawer.shape.halfExtents = Vec3(0.25f);
+    drawer.allowSleeping = false;
+    const BodyHandle body = world.AddBody(drawer);
+
+    JointDesc slide;
+    slide.kind = JointKind::Prismatic;
+    slide.bodyB = body;
+    slide.limit.enabled = true;
+    slide.limit.lower = -0.5f;
+    slide.limit.upper = 0.5f;
+    const JointHandle joint = world.AddJoint(slide);
+    REQUIRE(joint != JointHandle::Invalid);
+
+    float worstOffAxis = 0.0f;
+    for (int i = 0; i < 600; ++i) {
+        world.Step(1);
+        BodyState state;
+        world.ReadState(body, state);
+        // Hanya X yang boleh bergerak.
+        worstOffAxis = std::max({worstOffAxis, std::abs(state.position.y),
+                                 std::abs(state.position.z)});
+    }
+
+    BodyState state;
+    REQUIRE(world.ReadState(body, state));
+    INFO("berhenti di x = " << state.position.x << ", meleset sumbu " << worstOffAxis);
+    CHECK(worstOffAxis < 0.01f);
+    // Ditarik ke -X dan tertahan batas bawahnya.
+    CHECK(state.position.x == doctest::Approx(-0.5f).epsilon(0.05));
+}
+
+namespace {
+
+/// Rantai menggantung dari langit-langit: `count` tautan sepanjang `linkLength`
+/// menghadap ke bawah, tautan terakhir diberati.
+constexpr float kLinkLength = 0.5f;
+constexpr float kLinkRadius = 0.05f;
+
+/// Titik tengah tautan ke-i pada rantai yang tergantung lurus dari titik asal.
+Vec3 ChainLinkCenter(int index) {
+    return Vec3(0.0f, -(static_cast<float>(index) + 0.5f) * kLinkLength, 0.0f);
+}
+
+/// Panjang nominal rantai dari poros sampai ujung bawah tautan terakhir.
+float ChainRestLength(int count) {
+    return static_cast<float>(count) * kLinkLength;
+}
+
+}  // namespace
+
+TEST_CASE("rantai 20 tautan articulation tidak melar di bawah beban") {
+    if (!Available()) {
+        return;
+    }
+    // **Kriteria terima P5, dan inilah yang membedakan articulation dari rantai
+    // sendi biasa.** Koordinat tereduksi menyimpan sudut sendi, bukan posisi
+    // tiap benda, jadi rantainya tidak punya derajat kebebasan untuk melar sama
+    // sekali — bukan sekadar melar lebih sedikit.
+    constexpr int kLinks = 20;
+
+    PhysicsWorld world;
+    REQUIRE(world.Create(DefaultWorld()));
+
+    ArticulationDesc chain;
+    chain.fixBase = true;
+    chain.allowSleeping = false;
+    for (int i = 0; i < kLinks; ++i) {
+        ArticulationLinkDesc link;
+        link.parent = i == 0 ? kArticulationRootParent : i - 1;
+        link.name = "Link" + std::to_string(i);
+        link.shape.kind = ShapeKind::Capsule;
+        link.shape.radius = kLinkRadius;
+        link.shape.halfExtents.x = kLinkLength * 0.5f - kLinkRadius;
+        link.position = ChainLinkCenter(i);
+        // Kapsul berbaring di +X; diputar -90° terhadap Z supaya +X lokalnya
+        // menunjuk ke BAWAH. Tandanya penting: dengan +90° ia menunjuk ke atas,
+        // sehingga `parentAnchor = +X` menjadi ujung atas induk dan rantainya
+        // terlipat naik alih-alih menggantung.
+        const float halfAngle = -0.25f * 3.14159265f;
+        link.rotation = Quat(std::cos(halfAngle), 0.0f, 0.0f, std::sin(halfAngle));
+        // Tautan terakhir jauh lebih berat: itulah bebannya.
+        link.mass = i == kLinks - 1 ? 200.0f : 1.0f;
+
+        if (i > 0) {
+            link.joint = ArticulationJointKind::Revolute;
+            // Sendi di pangkal tautan ini, yaitu ujung atas kapsulnya, dan ujung
+            // bawah kapsul induknya. Dinyatakan di ruang lokal masing-masing —
+            // sumbu kapsulnya X lokal, jadi setengah panjang ada di X.
+            link.parentAnchor = Vec3(kLinkLength * 0.5f, 0.0f, 0.0f);
+            link.childAnchor = Vec3(-kLinkLength * 0.5f, 0.0f, 0.0f);
+            // Sumbu putar sendi adalah X bingkainya; diputar supaya menjadi Z
+            // dunia sehingga rantai berayun di bidang XY.
+            const float half = 0.25f * 3.14159265f;
+            link.parentFrame = Quat(std::cos(half), 0.0f, std::sin(half), 0.0f);
+            link.childFrame = link.parentFrame;
+            link.limitEnabled = true;
+            link.lowerLimit = -1.2f;
+            link.upperLimit = 1.2f;
+        }
+        chain.links.push_back(link);
+    }
+
+    const ArticulationHandle handle = world.AddArticulation(chain);
+    INFO("AddArticulation berkata: " << world.Error());
+    REQUIRE(handle != ArticulationHandle::Invalid);
+    CHECK(world.ArticulationLinkCount(handle) == kLinks);
+    CHECK(world.ArticulationCount() == 1);
+
+    // Dibiarkan menggantung sampai tenang.
+    world.Step(600);
+
+    BodyState tip;
+    REQUIRE(world.ReadLinkState(handle, kLinks - 1, tip));
+    // Ujung bawah tautan terakhir, bukan titik tengahnya.
+    const float reach = -(tip.position.y - kLinkLength * 0.5f);
+    const float rest = ChainRestLength(kLinks);
+    const float stretch = reach - rest;
+
+    INFO("panjang " << reach << " m terhadap " << rest << " m, melar " << (stretch * 1000.0f)
+                    << " mm");
+    // Melar di bawah satu milimeter pada rantai 10 m yang digantungi 200 kg.
+    CHECK(std::abs(stretch) < 0.001f);
+
+    // Dan ia benar-benar menggantung lurus, bukan runtuh ke samping.
+    CHECK(std::abs(tip.position.x) < 0.05f);
+    CHECK(std::abs(tip.position.z) < 0.05f);
+}
+
+TEST_CASE("rantai sendi biasa dengan beban yang sama melar jauh lebih banyak") {
+    if (!Available()) {
+        return;
+    }
+    // Pembandingnya, dibangun dengan cara paling lurus — benda dinamis yang
+    // dirangkai sendi revolute, dengan pengaturan solver scene apa adanya.
+    // **Bukan untuk membuktikan sendi biasa buruk**, melainkan untuk menunjukkan
+    // bahwa angka satu milimeter di atas bukan sesuatu yang didapat gratis dari
+    // solver mana pun: inilah yang terjadi tanpa koordinat tereduksi.
+    constexpr int kLinks = 20;
+
+    PhysicsWorld world;
+    REQUIRE(world.Create(DefaultWorld()));
+
+    std::vector<BodyHandle> links;
+    for (int i = 0; i < kLinks; ++i) {
+        BodyDesc body;
+        body.kind = BodyKind::Dynamic;
+        body.shape.kind = ShapeKind::Capsule;
+        body.shape.radius = kLinkRadius;
+        body.shape.halfExtents.x = kLinkLength * 0.5f - kLinkRadius;
+        body.position = ChainLinkCenter(i);
+        const float halfAngle = -0.25f * 3.14159265f;
+        body.rotation = Quat(std::cos(halfAngle), 0.0f, 0.0f, std::sin(halfAngle));
+        body.mass = i == kLinks - 1 ? 200.0f : 1.0f;
+        body.allowSleeping = false;
+        links.push_back(world.AddBody(body));
+        REQUIRE(links.back() != BodyHandle::Invalid);
+    }
+
+    for (int i = 0; i < kLinks; ++i) {
+        JointDesc joint;
+        joint.kind = JointKind::Revolute;
+        joint.bodyA = i == 0 ? BodyHandle::Invalid : links[static_cast<std::size_t>(i - 1)];
+        joint.bodyB = links[static_cast<std::size_t>(i)];
+        joint.localAnchorA = i == 0 ? Vec3(0.0f) : Vec3(kLinkLength * 0.5f, 0.0f, 0.0f);
+        joint.localAnchorB = Vec3(-kLinkLength * 0.5f, 0.0f, 0.0f);
+        const float half = 0.25f * 3.14159265f;
+        joint.localRotationA = Quat(std::cos(half), 0.0f, std::sin(half), 0.0f);
+        joint.localRotationB = joint.localRotationA;
+        REQUIRE(world.AddJoint(joint) != JointHandle::Invalid);
+    }
+
+    world.Step(600);
+
+    BodyState tip;
+    REQUIRE(world.ReadState(links.back(), tip));
+    const float reach = -(tip.position.y - kLinkLength * 0.5f);
+    const float stretch = reach - ChainRestLength(kLinks);
+
+    INFO("rantai sendi melar " << (stretch * 1000.0f) << " mm");
+    // Tidak menuntut angka tertentu — yang diuji adalah bahwa ia **terukur**,
+    // sementara articulation di atas dituntut di bawah satu milimeter.
+    CHECK(stretch > 0.01f);
+}
+
+TEST_CASE("articulation menolak susunan link yang tidak sah") {
+    if (!Available()) {
+        return;
+    }
+    PhysicsWorld world;
+    REQUIRE(world.Create(DefaultWorld()));
+
+    SUBCASE("kosong") {
+        CHECK(world.AddArticulation(ArticulationDesc{}) == ArticulationHandle::Invalid);
+        CHECK(world.Error().find("root link") != std::string::npos);
+    }
+
+    SUBCASE("link pertama bukan akar") {
+        ArticulationDesc desc;
+        ArticulationLinkDesc link;
+        link.parent = 0;
+        desc.links.push_back(link);
+        CHECK(world.AddArticulation(desc) == ArticulationHandle::Invalid);
+        CHECK(world.Error().find("must be the root") != std::string::npos);
+    }
+
+    SUBCASE("induk menyusul anaknya") {
+        ArticulationDesc desc;
+        ArticulationLinkDesc root;
+        desc.links.push_back(root);
+        ArticulationLinkDesc child;
+        child.parent = 2;  // belum ada
+        desc.links.push_back(child);
+        CHECK(world.AddArticulation(desc) == ArticulationHandle::Invalid);
+        CHECK(world.Error().find("before themselves") != std::string::npos);
+    }
+}
+
+namespace {
+
+/// Rangka humanoid kecil yang dibuat di sini, lengkap dengan tulang bantu
+/// sepanjang nol seperti yang ada di rig sungguhan.
+///
+/// Ada supaya uji ragdoll tetap berjalan di mesin yang tidak punya rig Mixamo —
+/// uji yang hanya jalan di satu mesin adalah uji yang tidak pernah jalan di CI.
+animation::Skeleton MakeHumanoid() {
+    struct Entry {
+        const char* name;
+        int parent;
+        Vec3 offset;
+    };
+    // Offset terhadap induk, meter. Proporsinya kasar tapi masuk akal.
+    const Entry kEntries[] = {
+        {"Hips", -1, {0.0f, 1.0f, 0.0f}},
+        {"Spine", 0, {0.0f, 0.20f, 0.0f}},
+        {"Chest", 1, {0.0f, 0.22f, 0.0f}},
+        // Tulang bantu sepanjang nol, persis seperti yang dipasang DCC.
+        {"Chest_Helper", 2, {0.0f, 0.0f, 0.0f}},
+        {"Neck", 2, {0.0f, 0.15f, 0.0f}},
+        {"Head", 4, {0.0f, 0.12f, 0.0f}},
+        {"LeftArm", 2, {0.18f, 0.10f, 0.0f}},
+        {"LeftForeArm", 6, {0.26f, 0.0f, 0.0f}},
+        {"LeftHand", 7, {0.24f, 0.0f, 0.0f}},
+        {"RightArm", 2, {-0.18f, 0.10f, 0.0f}},
+        {"RightForeArm", 9, {-0.26f, 0.0f, 0.0f}},
+        {"RightHand", 10, {-0.24f, 0.0f, 0.0f}},
+        {"LeftUpLeg", 0, {0.10f, -0.05f, 0.0f}},
+        {"LeftLeg", 12, {0.0f, -0.42f, 0.0f}},
+        {"LeftFoot", 13, {0.0f, -0.40f, 0.0f}},
+        {"RightUpLeg", 0, {-0.10f, -0.05f, 0.0f}},
+        {"RightLeg", 15, {0.0f, -0.42f, 0.0f}},
+        {"RightFoot", 16, {0.0f, -0.40f, 0.0f}},
+    };
+
+    std::vector<animation::Bone> bones;
+    for (const Entry& entry : kEntries) {
+        animation::Bone bone;
+        bone.name = entry.name;
+        bone.parent = entry.parent;
+        bone.bind.translation = entry.offset;
+        bones.push_back(std::move(bone));
+    }
+    animation::Skeleton skeleton;
+    skeleton.SetBones(bones);
+    return skeleton;
+}
+
+/// Menerjemahkan rangka animasi menjadi masukan pembangun ragdoll.
+///
+/// **Lintasan ini milik pemanggil, dan itulah bukti seam-nya utuh:**
+/// `Sim::Physics` tidak melihat `Sim::Animation` sama sekali, sehingga server
+/// dedicated yang menautkan fisika tidak ikut membawa importir FBX dan USD.
+/// Harganya sepuluh baris di sini.
+std::vector<RagdollBone> ToRagdollBones(const animation::Skeleton& skeleton) {
+    const std::vector<animation::BoneTransform>& global = skeleton.GlobalBind();
+    std::vector<RagdollBone> bones;
+    bones.reserve(global.size());
+    for (int i = 0; i < skeleton.BoneCount(); ++i) {
+        RagdollBone bone;
+        bone.name = skeleton.Bone(i).name;
+        bone.parent = skeleton.Bone(i).parent;
+        bone.position = global[static_cast<std::size_t>(i)].translation;
+        bone.rotation = global[static_cast<std::size_t>(i)].rotation;
+        bones.push_back(std::move(bone));
+    }
+    return bones;
+}
+
+/// Apakah tubuhnya masih menyatu.
+///
+/// **Diukur terhadap link akarnya sekarang, bukan terhadap tempat ia bermula.**
+/// Ragdoll yang tidak dipaku memang jatuh, dan jarak dari titik awal karena itu
+/// mengukur gravitasi alih-alih keutuhan. Yang menandai "meledak" adalah
+/// bagian-bagiannya berpencar **satu sama lain** — atau koordinat yang bukan
+/// angka lagi.
+bool RagdollIsIntact(const PhysicsWorld& world, ArticulationHandle handle, std::size_t links,
+                     float maxSpread, std::string& why) {
+    BodyState root;
+    if (!world.ReadLinkState(handle, 0, root)) {
+        why = "link akar tidak terbaca";
+        return false;
+    }
+    for (std::size_t i = 0; i < links; ++i) {
+        BodyState state;
+        if (!world.ReadLinkState(handle, i, state)) {
+            why = "link " + std::to_string(i) + " tidak terbaca";
+            return false;
+        }
+        if (!std::isfinite(state.position.x) || !std::isfinite(state.position.y) ||
+            !std::isfinite(state.position.z)) {
+            why = "link " + std::to_string(i) + " berkoordinat bukan angka";
+            return false;
+        }
+        const float spread = glm::length(state.position - root.position);
+        if (spread > maxSpread) {
+            why = "link " + std::to_string(i) + " berjarak " + std::to_string(spread) +
+                  " m dari akarnya";
+            return false;
+        }
+    }
+    return true;
+}
+
+/// Seberapa jauh link paling banyak bergerak dalam satu langkah.
+///
+/// Inilah pendeteksi ledakan yang sesungguhnya: pada 60 Hz sebuah benda yang
+/// jatuh bebas bergerak 2,7 mm per langkah, sedangkan pose awal yang saling
+/// menembus melempar bagian-bagiannya beberapa meter sekaligus.
+float LargestStepMovement(const PhysicsWorld& world, ArticulationHandle handle,
+                          const std::vector<Vec3>& before, std::size_t* outWorst = nullptr) {
+    float worst = 0.0f;
+    if (outWorst != nullptr) {
+        *outWorst = 0;
+    }
+    for (std::size_t i = 0; i < before.size(); ++i) {
+        BodyState state;
+        if (!world.ReadLinkState(handle, i, state)) {
+            continue;
+        }
+        const float moved = glm::length(state.position - before[i]);
+        if (moved > worst) {
+            worst = moved;
+            if (outWorst != nullptr) {
+                *outWorst = i;
+            }
+        }
+    }
+    return worst;
+}
+
+/// Lantai statik pada ketinggian tertentu, supaya ragdoll punya tempat mendarat.
+///
+/// **Ketinggiannya parameter, bukan nol**, karena kaki ragdoll yang dibangun
+/// otomatis menjulur jauh di bawah pinggulnya: menaruh lantai di titik asal
+/// membuat tubuhnya lahir setengah terbenam, dan impuls yang mendorongnya keluar
+/// terbaca persis seperti ragdoll yang meledak — padahal yang salah adalah
+/// tempat lantainya.
+BodyHandle AddFloor(PhysicsWorld& world, float height) {
+    BodyDesc ground;
+    ground.kind = BodyKind::Static;
+    ground.shape.kind = ShapeKind::Plane;
+    ground.position = Vec3(0.0f, height, 0.0f);
+    const float halfAngle = 0.25f * 3.14159265f;
+    ground.rotation = Quat(std::cos(halfAngle), 0.0f, 0.0f, std::sin(halfAngle));
+    return world.AddBody(ground);
+}
+
+/// Titik terendah yang disentuh sebuah ragdoll pada pose awalnya.
+float LowestPoint(const ArticulationDesc& desc) {
+    float lowest = 0.0f;
+    bool first = true;
+    for (const ArticulationLinkDesc& link : desc.links) {
+        const float reach = link.shape.halfExtents.x + link.shape.radius;
+        const float bottom = link.position.y - reach;
+        if (first || bottom < lowest) {
+            lowest = bottom;
+            first = false;
+        }
+    }
+    return lowest;
+}
+
+}  // namespace
+
+TEST_CASE("ragdoll dari rangka .simskel tidak meledak pada langkah pertama") {
+    if (!Available()) {
+        return;
+    }
+    // Kriteria terima P5. Rangkanya ditulis ke `.simskel` lalu dibaca kembali,
+    // supaya yang diuji benar-benar jalur berkas seperti yang disebut rencana —
+    // bukan objek yang kebetulan masih ada di memori.
+    const std::filesystem::path scratch =
+        std::filesystem::temp_directory_path() / "sim-ragdoll-test";
+    std::error_code ec;
+    std::filesystem::create_directories(scratch, ec);
+    const std::filesystem::path path = scratch / "humanoid.simskel";
+
+    {
+        const animation::Skeleton authored = MakeHumanoid();
+        animation::SkeletonDocument document;
+        REQUIRE(animation::SaveSkeleton(authored, document, path).ok);
+    }
+
+    animation::Skeleton skeleton;
+    animation::SkeletonDocument document;
+    const animation::AnimationIoResult loaded = animation::LoadSkeleton(skeleton, document, path);
+    INFO("muat .simskel: " << loaded.error);
+    REQUIRE(loaded.ok);
+    REQUIRE(skeleton.BoneCount() == 18);
+
+    std::vector<std::string> skipped;
+    const ArticulationDesc ragdoll = BuildRagdoll(ToRagdollBones(skeleton), {}, &skipped);
+    REQUIRE_FALSE(ragdoll.links.empty());
+    // Tulang bantu sepanjang nol dilipat ke induknya, dan itu dilaporkan.
+    INFO("dilewati: " << (skipped.empty() ? std::string("(tidak ada)") : skipped.front()));
+    CHECK(skipped.size() == 1);
+    CHECK(skipped.front() == "Chest_Helper");
+    CHECK(ragdoll.links.size() == 17);
+    CHECK_FALSE(ragdoll.fixBase);
+
+    PhysicsWorld world;
+    REQUIRE(world.Create(DefaultWorld()));
+    const float floorY = LowestPoint(ragdoll) - 0.5f;
+    REQUIRE(AddFloor(world, floorY) != BodyHandle::Invalid);
+    const ArticulationHandle handle = world.AddArticulation(ragdoll);
+    INFO("AddArticulation berkata: " << world.Error());
+    REQUIRE(handle != ArticulationHandle::Invalid);
+    const std::size_t links = world.ArticulationLinkCount(handle);
+    CHECK(links == ragdoll.links.size());
+
+    std::vector<Vec3> before;
+    for (const ArticulationLinkDesc& link : ragdoll.links) {
+        before.push_back(link.position);
+    }
+
+    // **Langkah pertama diperiksa tersendiri.** Ragdoll yang meledak hampir
+    // selalu meledak di sana — pose awal yang saling menembus atau bingkai sendi
+    // yang tidak konsisten menghasilkan impuls raksasa pada langkah satu, dan
+    // sesudahnya bagian-bagiannya sudah terlalu jauh untuk menunjukkan sebabnya.
+    // Diperiksa sebelum satu langkah pun: PhysX menurunkan pose tiap link dari
+    // akar dan sudut sendinya, jadi selisih di sini berarti bingkai sendinya
+    // tidak cocok dengan pose yang diminta — bukan impuls.
+    std::size_t worstPlacement = 0;
+    const float placement = LargestStepMovement(world, handle, before, &worstPlacement);
+    INFO("selisih penempatan sebelum melangkah: " << (placement * 1000.0f) << " mm, di link "
+         << worstPlacement << " (" << ragdoll.links[worstPlacement].name << ")");
+    CHECK(placement < 0.001f);
+
+    world.Step(1);
+    std::size_t worstLink = 0;
+    const float firstStep = LargestStepMovement(world, handle, before, &worstLink);
+    INFO("gerakan terbesar pada langkah pertama: " << (firstStep * 1000.0f) << " mm, di link "
+         << worstLink << " (" << ragdoll.links[worstLink].name << ")");
+    // Jatuh bebas menempuh 2,7 mm per langkah; satu sentimeter sudah longgar.
+    CHECK(firstStep < 0.01f);
+
+    // Lalu dibiarkan mendarat: tetap satu tubuh, bukan berhamburan.
+    world.Step(300);
+    std::string why;
+    const bool intact = RagdollIsIntact(world, handle, links, 1.5f, why);
+    INFO("sesudah 300 langkah: " << why);
+    CHECK(intact);
+
+    // Dan ia benar-benar mendarat alih-alih menembus lantai.
+    BodyState root;
+    REQUIRE(world.ReadLinkState(handle, 0, root));
+    INFO("akar berhenti di y = " << root.position.y << ", lantai di " << floorY);
+    CHECK(root.position.y > floorY);
+    CHECK(root.position.y < ragdoll.links.front().position.y + 0.01f);
+
+    std::filesystem::remove_all(scratch, ec);
+}
+
+TEST_CASE("ragdoll dari rig Mixamo yang sesungguhnya tetap utuh") {
+    if (!Available()) {
+        return;
+    }
+    // Rig tidak ikut di repo. Dijalankan dengan:
+    //   SIM_RIG_FBX="/path/Y Bot.fbx" ctest --test-dir build/linux-clang-release
+    //
+    // **Rig sungguhan yang menguji pembangunnya, bukan rangka karangan.** Y Bot
+    // punya 65 tulang termasuk jari dan twist bone — banyak di antaranya lebih
+    // pendek daripada `minBoneLength`, dan justru merekalah yang membuat ragdoll
+    // naif berisi puluhan kapsul saling menembus.
+    const char* rigPath = std::getenv("SIM_RIG_FBX");
+    if (rigPath == nullptr || !std::filesystem::exists(rigPath)) {
+        return;
+    }
+
+    std::string error;
+    const assets::MeshData rig = assets::LoadMesh(rigPath, error);
+    INFO("impor rig: " << error);
+    REQUIRE(rig.skeleton.IsValid());
+
+    std::vector<animation::Bone> bones;
+    bones.reserve(rig.skeleton.bones.size());
+    for (const assets::SkeletonBone& source : rig.skeleton.bones) {
+        animation::Bone bone;
+        bone.name = source.name;
+        bone.parent = source.parent;
+        bone.bind.translation = source.translation;
+        bone.bind.rotation = source.rotation;
+        bone.bind.scale = source.scale;
+        bones.push_back(std::move(bone));
+    }
+    animation::Skeleton skeleton;
+    REQUIRE(skeleton.SetBones(bones));
+    INFO("rig punya " << skeleton.BoneCount() << " tulang");
+
+    std::vector<std::string> skipped;
+    const ArticulationDesc ragdoll = BuildRagdoll(ToRagdollBones(skeleton), {}, &skipped);
+    REQUIRE_FALSE(ragdoll.links.empty());
+    // Jauh lebih sedikit link daripada tulang: itulah gunanya penyaringan.
+    INFO(ragdoll.links.size() << " link dari " << skeleton.BoneCount() << " tulang, "
+                              << skipped.size() << " dilewati");
+    CHECK(ragdoll.links.size() < static_cast<std::size_t>(skeleton.BoneCount()));
+
+    PhysicsWorld world;
+    REQUIRE(world.Create(DefaultWorld()));
+    const float floorY = LowestPoint(ragdoll) - 0.5f;
+    REQUIRE(AddFloor(world, floorY) != BodyHandle::Invalid);
+    const ArticulationHandle handle = world.AddArticulation(ragdoll);
+    INFO("AddArticulation berkata: " << world.Error());
+    REQUIRE(handle != ArticulationHandle::Invalid);
+    const std::size_t links = world.ArticulationLinkCount(handle);
+
+    std::vector<Vec3> before;
+    for (const ArticulationLinkDesc& link : ragdoll.links) {
+        before.push_back(link.position);
+    }
+
+    world.Step(1);
+    const float firstStep = LargestStepMovement(world, handle, before);
+    INFO("gerakan terbesar pada langkah pertama: " << (firstStep * 1000.0f) << " mm");
+    CHECK(firstStep < 0.01f);
+
+    // Dilangkahkan satu per satu supaya langkah pertama yang rusak bisa disebut,
+    // bukan hanya kenyataan bahwa ia rusak di suatu tempat.
+    std::string why;
+    int brokeAt = -1;
+    for (int step = 0; step < 300 && brokeAt < 0; ++step) {
+        world.Step(1);
+        if (!RagdollIsIntact(world, handle, links, 2.0f, why)) {
+            brokeAt = step;
+        }
+    }
+    INFO("rusak di langkah " << brokeAt << ": " << why);
+    CHECK(brokeAt < 0);
 }
