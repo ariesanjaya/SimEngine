@@ -426,7 +426,7 @@ mendarat menggelinding turun lalu jatuh dari tepi peta — yang terbaca sebagai
 pemeriksaan bahwa bolanya tidak bergeser: permukaan yang miring padahal datanya
 rata akan terlihat di situ.
 
-### L6 — Cat yang terlihat di viewport · ⬜
+### L6 — Cat yang terlihat di viewport · ✅
 
 Smoke test sesudah L5 menemukan celah yang tidak terlihat selama viewport 3D
 belum ada: **mengecat layer bekerja sempurna sebagai data dan berhenti di
@@ -473,50 +473,78 @@ Itu tidak menuntut satu baris pun perubahan renderer — tetapi batas antar laye
 menjadi tajam per segitiga, dan yang dilihat perancang adalah mosaik alih-alih
 peralihan. Cat yang tidak bisa dipadukan bukan cat.
 
-### L6a — Warna simpul dari bobot layer · ⬜
+### L6a — Warna simpul dari bobot layer · ✅
 
-- `MeshData` mendapat larik **sejajar** `colors`, kosong untuk mesh yang tidak
-  punya — bentuk yang sama persis dengan `influences` milik skinning, dan
-  karena alasan yang sama: menambahkannya ke `MeshVertex` membuat setiap mesh
-  di mesin ini membayar enam belas byte per simpul untuk sesuatu yang hanya
-  dipakai terrain.
-- `BuildTileMesh` mengisinya dengan `Σ bobot_i × warna_i`, dengan layer dasar
-  sebagai sisa — aturan yang sama dengan penyimpanannya.
+**Rencananya menyebut larik sejajar `MeshData::colors`; yang dikerjakan sebuah
+medan di dalam `MeshVertex`.** Alasan yang ditulis di rencana ternyata tidak
+berlaku: larik sejajar menghemat memori **CPU** milik importir, sementara yang
+mahal adalah memori GPU — dan di sana strukturnya seragam untuk seluruh mesh
+betapapun ia disimpan di sisi CPU. Binding vertex terpisah menuntut stride yang
+berbeda untuk mesh yang punya warna dan yang tidak, dan stride adalah sifat
+**pipeline**: ia akan melipatgandakan varian pipeline yang sudah ada demi
+penghematan yang tidak pernah terjadi. Medan di dalam vertex membuat perubahan
+renderernya tiga baris.
 
-**Kriteria terima**
-- Sampel yang dicat penuh sebuah layer menghasilkan warna layer itu persis;
-  yang tidak tercat menghasilkan warna dasar.
-- Padanan setengah-setengah menghasilkan warna di tengah keduanya, bukan salah
-  satunya.
-- Terrain tanpa layer di atas dasar **tidak** menerbitkan larik warna sama
-  sekali: mesh yang membawa larik seragam adalah memori GPU untuk satu angka
-  yang sudah diketahui.
-- LOD kasar tetap berwarna, dan mengecat menaikkan revisi ubin sehingga
-  meshnya dibangun ulang.
-
-### L6b — Renderer menggambar warna simpul · ⬜
-
-- Buffer vertex kedua, dengan binding ber-stride nol untuk mesh yang tidak
-  punya — pola yang sudah dipakai atribut skin, dan dipakai karena alasan yang
-  sama: Slang mengunci daftar antarmuka entry point sebelum konstanta
-  spesialisasi dinilai.
-- Shader mengalikan warna instance dengan warna simpul.
+Putih adalah nilai satuannya, bukan "belum diisi": importir yang tidak
+menyentuhnya menghasilkan mesh yang tergambar persis seperti sebelum medan ini
+ada.
 
 **Kriteria terima**
-- Mesh tanpa larik warna tergambar persis seperti sebelumnya — tidak ada
-  regresi pada satu pun mesh yang sudah ada.
-- Terrain yang dicat memperlihatkan peralihan yang halus, bukan mosaik.
+- Sampel yang dicat penuh berwarna layer itu persis; yang tidak tercat berwarna
+  **layer dasar** — bukan putih, dan bukan warna yang dikarang renderer. ✅
+- Padanan setengah-setengah jatuh di tengah keduanya. ✅ Inilah yang membedakan
+  cat yang bisa dipadukan dari mosaik; mengabaikan bobotnya menggugurkan enam
+  pernyataan.
+- Seperempat cat menyisakan tiga perempat dasar — layer dasar adalah **sisa**,
+  bukan angka tersimpan. ✅
+- LOD kasar tetap berwarna. ✅
 
-### L6c — Material layer terhitung terpakai · ⬜
+**Aturan L3 dibalik, dan itu temuan dari uji sendiri.** L3 menetapkan bahwa
+bobot layer bukan bentuk, sehingga mengecat tidak membangun ulang mesh. Sesudah
+warna dipanggang ke simpul, kalimat itu tidak lagi benar — dan membiarkannya
+berarti setiap sapuan kuas cat tidak pernah tergambar. Yang sebenarnya ingin
+dijaga aturan lama tetap dijaga: cat tidak boleh membangun ulang collider empat
+kilometer.
+
+Jawabannya **dua revisi terpisah** per ubin. `TileRevision` untuk bentuk —
+tinggi dan lubang — yang dibaca fisika dan mesh. `TilePaintRevision` untuk bobot
+layer, yang dibaca mesh saja. Menyatukannya berarti salah satu dari dua
+kesalahan: cat yang membangun ulang collider, atau cat yang tidak pernah
+terlihat.
+
+### L6b — Renderer menggambar warna simpul · ✅
+
+Satu atribut baru di binding 0, bersama posisi dan normal — bukan binding
+sendiri, karena alasan stride di atas. Shader **mengalikan**, tidak
+menggantikan: yang menggantikan akan membuat setiap mesh tanpa warna simpul
+menjadi hitam pekat pada hari atribut ini ditambahkan.
+
+Alpha-nya ikut dikalikan supaya sisi yang sengaja tembus pandang tetap tembus
+pandang. Sorotan seleksi memakai jalur `forceInstanceColor` yang sudah ada, jadi
+ia tidak ikut teredam warna simpul — objek terpilih tetap berubah warna
+seluruhnya.
+
+**Kriteria terima**
+- Mesh tanpa warna simpul tergambar persis seperti sebelumnya. ✅ Putih adalah
+  nilai satuan perkalian, dan kubus satuan bawaan renderer ikut diisi putih.
+- Terrain yang dicat memperlihatkan peralihan halus. 🔶 belum dinilai mata —
+  menunggu Anda menjalankan editornya, seperti W5 dan L3.
+
+### L6c — Material layer terhitung terpakai · ✅
 
 Ditemukan pada smoke test yang sama: `AssetUsage` tidak mengenal terrain, jadi
 material yang dirujuk sebuah layer **tidak terhitung terpakai** — ia bisa
 dilaporkan yatim lalu dihapus, dan yang menghapusnya tidak akan pernah tahu apa
 yang hilang sampai terrainnya dibuka lagi.
 
+Sebabnya ternyata bukan `AssetUsage` melainkan **importir**: `DocumentImporter`
+mengumpulkan GUID dari Level, Prefab, Material, Graph, dan Json — dan tidak dari
+Terrain. `.simterrain` karena itu jatuh ke importir pass-through dan menyatakan
+nol dependensi, sehingga `UsersOf()` tidak pernah menyebutnya. Satu baris.
+
 **Kriteria terima**
-- Material yang dipakai sebuah layer terrain terhitung terpakai oleh entity yang
-  membawa terrain itu.
+- Material yang dipakai sebuah layer terrain terhitung terpakai. ✅ Mengeluarkan
+  Terrain dari daftar itu lagi menggugurkan ujinya.
 
 ---
 

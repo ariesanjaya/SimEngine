@@ -1691,9 +1691,16 @@ TEST_CASE("L3: undo membangun ulang meshnya, bukan hanya datanya") {
     CHECK(store.TileUpload(guid, 0, 0) > afterStroke);
 }
 
-TEST_CASE("L3: mengecat layer tidak membangun ulang meshnya") {
-    // Bobot layer mengganti warna, bukan simpul. Menaikkan revisinya di sana
-    // berarti terrain empat kilometer dibangun ulang setiap sapuan kuas cat.
+TEST_CASE("L3: mengecat layer tidak menyentuh bentuknya") {
+    // **Aturan ini berubah di L6a, dan ini bentuk barunya.** Semula: mengecat
+    // tidak membangun ulang mesh sama sekali, karena bobot layer mengganti
+    // warna dan bukan simpul. Sesudah warna layer dipanggang ke simpul, kalimat
+    // itu tidak lagi benar — dan membiarkannya berarti setiap sapuan kuas cat
+    // tidak pernah tergambar.
+    //
+    // Yang tetap berlaku, dan yang sebenarnya ingin dijaga aturan lama: cat
+    // **tidak mengubah bentuk**, jadi ia tidak membangun ulang collider empat
+    // kilometer. Bentuk dan cat karena itu punya revisi sendiri-sendiri.
     const Uuid guid = Uuid::Generate();
     TerrainStore store = MakeStoreWithTerrain(guid);
     const terrain::TileNeighborLods flat;
@@ -1705,15 +1712,22 @@ TEST_CASE("L3: mengecat layer tidak membangun ulang meshnya") {
 
     REQUIRE(store.TileMesh(guid, 0, 0, 0, flat) != nullptr);
     const uint64_t before = store.TileUpload(guid, 0, 0);
+    const uint32_t shapeBefore = map->TileRevision(0, 0);
 
     map->SetWeightAt(1, 4, 4, 255);
     REQUIRE(store.TileMesh(guid, 0, 0, 0, flat) != nullptr);
-    CHECK(store.TileUpload(guid, 0, 0) == before);
+    // Meshnya dibangun ulang — warnanya berubah…
+    CHECK(store.TileUpload(guid, 0, 0) > before);
+    // …tetapi bentuknya tidak, jadi fisika tidak perlu tahu apa-apa.
+    CHECK(map->TileRevision(0, 0) == shapeBefore);
+
+    const uint64_t afterPaint = store.TileUpload(guid, 0, 0);
 
     // Sedangkan lubang **memang** mengubah bentuk: ia membuang quad.
     map->SetHoleAt(4, 4, true);
     REQUIRE(store.TileMesh(guid, 0, 0, 0, flat) != nullptr);
-    CHECK(store.TileUpload(guid, 0, 0) > before);
+    CHECK(store.TileUpload(guid, 0, 0) > afterPaint);
+    CHECK(map->TileRevision(0, 0) > shapeBefore);
 }
 
 TEST_CASE("L3: SceneView mengajukan satu instance per ubin terrain") {
@@ -1851,4 +1865,46 @@ TEST_CASE("L4: goresan lewat sinar sama byte-per-byte dengan goresan langsung") 
         return samples;
     }();
     CHECK(direct != untouched);
+}
+
+TEST_CASE("L6a: mengecat membangun ulang mesh ubin, tanpa menyentuh yang lain") {
+    // **Cat harus terlihat.** Cache L3 mengunci pembangunan ulang pada revisi
+    // bentuk; sesudah warna layer masuk ke simpul mesh, aturan itu diam-diam
+    // membuat setiap sapuan kuas cat tidak pernah tergambar ulang.
+    const Uuid guid = Uuid::Generate();
+    TerrainStore store = MakeStoreWithTerrain(guid);
+    const terrain::TileNeighborLods flat;
+    terrain::Terrain* map = store.Find(guid);
+
+    terrain::TerrainLayer grass;
+    grass.name = "Rumput";
+    grass.color = Vec3(0.2f, 0.7f, 0.3f);
+    REQUIRE(map->AddLayer(grass) == 1);
+
+    REQUIRE(store.TileMesh(guid, 0, 0, 0, flat) != nullptr);
+    REQUIRE(store.TileMesh(guid, 2, 2, 0, flat) != nullptr);
+    const uint64_t nearBefore = store.TileUpload(guid, 0, 0);
+    const uint64_t farBefore = store.TileUpload(guid, 2, 2);
+
+    map->SetWeightAt(1, 4, 4, 255);
+    const assets::MeshData* mesh = store.TileMesh(guid, 0, 0, 0, flat);
+    REQUIRE(mesh != nullptr);
+    CHECK(store.TileUpload(guid, 0, 0) > nearBefore);
+
+    // Simpul di sampel yang dicat, bukan simpul pertama: yang memeriksa (0,0)
+    // sedang memeriksa tempat yang memang tidak dicat, dan akan lolos untuk
+    // implementasi yang mewarnai seluruh ubin sekaligus.
+    const std::size_t stride = 17;  // ubin 16 sampel + satu baris tetangga
+    const assets::MeshVertex& at = mesh->vertices[4 * stride + 4];
+    REQUIRE(at.position.x == doctest::Approx(4.0f).epsilon(0.001));
+    REQUIRE(at.position.z == doctest::Approx(4.0f).epsilon(0.001));
+    CHECK(at.color.y == doctest::Approx(grass.color.y).epsilon(0.01));
+    // Dan simpul yang tidak dicat tetap berwarna dasar.
+    CHECK(mesh->vertices.front().color.y ==
+          doctest::Approx(map->Layer(0).color.y).epsilon(0.01));
+
+    // Ubin yang jauh tidak ikut: cat tidak dijahit ke tepi, jadi mengecat di
+    // satu sudut peta tidak menggeser satu simpul pun di sudut yang lain.
+    REQUIRE(store.TileMesh(guid, 2, 2, 0, flat) != nullptr);
+    CHECK(store.TileUpload(guid, 2, 2) == farBefore);
 }

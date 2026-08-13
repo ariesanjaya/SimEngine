@@ -1384,3 +1384,39 @@ TEST_CASE("unitCylinder.obj cocok dengan collider Cylinder yang dipasangkan pada
     CHECK((mesh.boundsMin.x + mesh.boundsMax.x) == doctest::Approx(0.0f).epsilon(0.02));
     CHECK((mesh.boundsMin.y + mesh.boundsMax.y) == doctest::Approx(0.0f).epsilon(0.02));
 }
+
+TEST_CASE("L6c: material yang dipakai layer terrain terhitung terpakai") {
+    using namespace sim::assets;
+
+    // **Ditemukan lewat smoke test, bukan lewat membaca kode.** `.simterrain`
+    // menyebut material tiap layernya sebagai GUID, tetapi importir dokumen
+    // tidak mengenal jenis aset itu — jadi materialnya tidak punya satu pun
+    // pemakai yang tercatat, dan menghapusnya tidak memicu peringatan apa pun.
+    TempDir temp;
+    WriteFile(temp.Path() / "Batu.simmat", R"({"nodes":[]})");
+
+    AssetDatabase db;
+    REQUIRE(db.Initialize({temp.Path(), nullptr, 1.0f}));
+    const AssetRecord* material = db.FindByRelativePath("Batu.simmat");
+    REQUIRE(material != nullptr);
+    const Uuid materialGuid = material->guid;
+
+    // Terrain yang salah satu layernya memakai material itu.
+    const std::string terrain = R"({"version":2,"name":"Padang","tileSamples":16,)"
+                                R"("tilesX":1,"tilesY":1,"sampleSpacing":1.0,)"
+                                R"("minHeight":0.0,"maxHeight":100.0,"baseHeight":0.0,)"
+                                R"("heightmap":"Padang_height.png","layers":[)"
+                                R"({"name":"Base","material":")" +
+                                materialGuid.ToString() + R"("}]})";
+    WriteFile(temp.Path() / "Padang.simterrain", terrain);
+    db.ScanNow();
+
+    const AssetRecord* record = db.FindByRelativePath("Padang.simterrain");
+    REQUIRE(record != nullptr);
+    CHECK(record->type == AssetType::Terrain);
+
+    const std::vector<Uuid> users = db.UsersOf(materialGuid);
+    INFO(users.size() << " pemakai");
+    REQUIRE(users.size() == 1);
+    CHECK(users.front() == record->guid);
+}

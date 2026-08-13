@@ -301,6 +301,19 @@ public:
     /// sebanyak apa pun, tanpa saling meniadakan.
     uint32_t TileRevision(int tileX, int tileY) const;
 
+    /// Nomor revisi **cat** sebuah ubin, naik setiap kali bobot layernya
+    /// berubah.
+    ///
+    /// **Terpisah dari `TileRevision`, dan itu bukan kerapian.** Keduanya
+    /// menjawab pertanyaan yang berbeda, dan dua pembaca yang berbeda
+    /// menanyakannya: fisika hanya peduli bentuk — kisi tingginya tidak
+    /// berubah sedikit pun oleh sapuan kuas cat — sementara mesh yang digambar
+    /// membawa warna layer di simpulnya, jadi ia peduli keduanya.
+    ///
+    /// Menyatukannya berarti salah satu dari dua kesalahan: cat yang membangun
+    /// ulang collider empat kilometer, atau cat yang tidak pernah terlihat.
+    uint32_t TilePaintRevision(int tileX, int tileY) const;
+
     /// Apakah sebuah ubin sudah pernah ditulis.
     ///
     /// Dipakai yang menggambar dan yang menabrak: ubin yang belum pernah
@@ -385,11 +398,14 @@ private:
     TerrainDesc desc_;
     Sample base_ = 0;
     void BumpTile(int tileIndex);
+    void BumpTilePaint(int tileIndex);
+    void BumpAllPaint();
 
     std::vector<std::unique_ptr<Tile>> tiles_;
     /// Sejajar dengan `tiles_`. Ada walaupun ubinnya belum diwujudkan, karena
     /// yang bertanya adalah yang menggambar — dan ia bertanya lebih dulu.
     std::vector<uint32_t> tileRevision_;
+    std::vector<uint32_t> tilePaintRevision_;
     std::vector<LayerData> layers_;
     std::vector<std::unique_ptr<ByteTile>> holes_;
     /// Dijaga bertahap, bukan dihitung saat ditanya: panel menampilkannya tiap

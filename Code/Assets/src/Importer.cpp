@@ -51,9 +51,15 @@ class DocumentImporter final : public IImporter {
 public:
     const char* Name() const override { return "Document"; }
     bool Handles(AssetType type) const override {
+        // Terrain ikut, dan itu bukan kelengkapan demi kelengkapan:
+        // `.simterrain` menyebut material tiap layernya sebagai GUID, dan tanpa
+        // baris ini material yang hanya dipakai sebuah layer terrain tidak
+        // punya satu pun pemakai yang tercatat. Yang menghapusnya tidak akan
+        // diperingatkan apa-apa, dan yang hilang baru ketahuan saat terrainnya
+        // dibuka lagi.
         return type == AssetType::Level || type == AssetType::Prefab ||
                type == AssetType::Material || type == AssetType::Graph ||
-               type == AssetType::Json;
+               type == AssetType::Terrain || type == AssetType::Json;
     }
 
     ImportResult Import(const std::filesystem::path& path) const override {

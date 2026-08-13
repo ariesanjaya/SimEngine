@@ -42,8 +42,17 @@ BoxVarying main(BoxVertex vertex) {
     // berubah warna seluruhnya, dan material berkasnya justru yang paling tidak
     // boleh menutupinya.
     bool forceInstanceColor = (vertex.flags & kFlagForceInstanceColor) != 0u;
-    output.color = (push.partColor.w > 0.0 && !forceInstanceColor) ? push.partColor
-                                                                   : vertex.color;
+    float4 tint = (push.partColor.w > 0.0 && !forceInstanceColor) ? push.partColor
+                                                                  : vertex.color;
+    // **Dikalikan, bukan menggantikan.** Warna simpul adalah pemodulasi: mesh
+    // yang tidak mengisinya membawa putih, dan putih tidak mengubah apa pun.
+    // Yang menggantikan akan membuat setiap mesh tanpa warna simpul menjadi
+    // hitam pekat pada hari atribut ini ditambahkan.
+    //
+    // Alpha-nya ikut dikalikan supaya sisi yang sengaja tembus pandang tetap
+    // tembus pandang; sorotan seleksi memakai jalur `forceInstanceColor` di
+    // atas dan karena itu tidak ikut teredam warna simpul.
+    output.color = tint * vertex.vertexColor;
     output.worldPosition = world.xyz;
     output.flags = vertex.flags;
     output.position = mul(push.viewProj, world);

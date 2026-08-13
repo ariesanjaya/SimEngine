@@ -29,6 +29,7 @@ Terrain::Terrain(const TerrainDesc& desc) : desc_(desc) {
     base_ = ToSample(desc_.baseHeight);
     tiles_.resize(static_cast<std::size_t>(TileCount()));
     tileRevision_.assign(static_cast<std::size_t>(TileCount()), 1u);
+    tilePaintRevision_.assign(static_cast<std::size_t>(TileCount()), 1u);
     holes_.resize(static_cast<std::size_t>(TileCount()));
 
     // Layer dasar selalu ada. Terrain tanpa satu pun layer adalah terrain yang
@@ -141,6 +142,19 @@ void Terrain::BumpTile(int tileIndex) {
     if (tileIndex >= 0 && tileIndex < static_cast<int>(tileRevision_.size())) {
         ++tileRevision_[static_cast<std::size_t>(tileIndex)];
     }
+}
+
+void Terrain::BumpTilePaint(int tileIndex) {
+    if (tileIndex >= 0 && tileIndex < static_cast<int>(tilePaintRevision_.size())) {
+        ++tilePaintRevision_[static_cast<std::size_t>(tileIndex)];
+    }
+}
+
+uint32_t Terrain::TilePaintRevision(int tileX, int tileY) const {
+    if (tileX < 0 || tileY < 0 || tileX >= desc_.tilesX || tileY >= desc_.tilesY) {
+        return 0;
+    }
+    return tilePaintRevision_[static_cast<std::size_t>(tileY * desc_.tilesX + tileX)];
 }
 
 uint32_t Terrain::TileRevision(int tileX, int tileY) const {
@@ -366,8 +380,13 @@ void Terrain::SetByteAt(int layer, int x, int y, uint8_t value) {
     // **Hanya lubang, bukan bobot layer.** Lubang membuang quad, jadi ia bagian
     // bentuk; bobot layer hanya mengganti warnanya. Menaikkan revisi untuk cat
     // berarti terrain empat kilometer dibangun ulang setiap sapuan kuas.
-    if (changed && layer == kHoleChannel) {
+    if (!changed) {
+        return;
+    }
+    if (layer == kHoleChannel) {
         BumpTile(tileIndex);
+    } else {
+        BumpTilePaint(tileIndex);
     }
 }
 
@@ -445,7 +464,18 @@ TerrainLayer& Terrain::Layer(int index) {
     return layers_[static_cast<std::size_t>(std::clamp(index, 0, LayerCount() - 1))].desc;
 }
 
+void Terrain::BumpAllPaint() {
+    // Seluruh ubin, karena operasi-operasi ini menggeser **pemetaan** layer ke
+    // peta bobotnya — bukan satu nilai di satu tempat. Memindai untuk tahu ubin
+    // mana yang benar-benar berubah berarti memindai seluruh peta demi jawaban
+    // yang sudah pasti "semuanya".
+    for (int index = 0; index < TileCount(); ++index) {
+        BumpTilePaint(index);
+    }
+}
+
 int Terrain::AddLayer(const TerrainLayer& layer) {
+    BumpAllPaint();
     if (LayerCount() >= kMaxLayers) {
         return -1;
     }
@@ -457,6 +487,7 @@ int Terrain::AddLayer(const TerrainLayer& layer) {
 }
 
 bool Terrain::RemoveLayer(int index) {
+    BumpAllPaint();
     if (index <= 0 || index >= LayerCount()) {
         return false;
     }
@@ -470,6 +501,7 @@ bool Terrain::RemoveLayer(int index) {
 }
 
 bool Terrain::MoveLayer(int from, int to) {
+    BumpAllPaint();
     if (from <= 0 || to <= 0 || from >= LayerCount() || to >= LayerCount() || from == to) {
         return false;
     }
@@ -481,6 +513,7 @@ bool Terrain::MoveLayer(int from, int to) {
 }
 
 void Terrain::SetLayers(const std::vector<TerrainLayer>& layers) {
+    BumpAllPaint();
     layers_.clear();
     for (const TerrainLayer& layer : layers) {
         LayerData data;
@@ -571,6 +604,7 @@ bool Terrain::LayerPainted(int layer) const {
 }
 
 void Terrain::ClearLayerWeights(int layer) {
+    BumpAllPaint();
     if (layer <= 0 || layer >= LayerCount()) {
         return;
     }
@@ -602,6 +636,7 @@ void Terrain::ReadWeights(int layer, std::vector<Weight>& out) const {
 }
 
 void Terrain::WriteWeights(int layer, const Weight* weights) {
+    BumpAllPaint();
     if (layer <= 0 || layer >= LayerCount() || weights == nullptr) {
         return;
     }
@@ -609,6 +644,7 @@ void Terrain::WriteWeights(int layer, const Weight* weights) {
 }
 
 void Terrain::NormalizeWeights() {
+    BumpAllPaint();
     // Dengan satu layer eksplisit, totalnya tidak mungkin melebihi 255: sebuah
     // byte tidak bisa.
     if (LayerCount() <= 2) {
@@ -783,6 +819,8 @@ void Terrain::SwapStroke(Stroke& stroke) {
     for (ByteBlockImage& record : stroke.byteBlocks) {
         if (record.layer == kHoleChannel) {
             BumpTile(record.tile);
+        } else {
+            BumpTilePaint(record.tile);
         }
         ByteTile& tile = MaterializeByteTile(record.layer, record.tile);
         const int perSide = BlocksPerSide();

@@ -37,6 +37,12 @@ struct BoxVertex {
     // bukan push constant**: satu ruas draw memuat seluruh instance yang memakai
     // mesh yang sama, dan dua karakter bermesh sama tetap berpose sendiri-sendiri.
     [[vk::location(10)]] uint skinBase;
+    // Warna per **vertex**, bukan per instance seperti `color` di atas.
+    //
+    // Putih adalah nilai satuannya: mesh yang tidak mengisinya tergambar persis
+    // seperti sebelum atribut ini ada. Yang memakainya hari ini terrain, yang
+    // memadukan warna layernya menurut bobot cat dan memanggangnya ke simpul.
+    [[vk::location(11)]] float4 vertexColor;
 };
 
 float4x4 instanceModel(BoxVertex vertex) {

@@ -61,12 +61,26 @@ int SelectLod(float distanceMeters, float tileSizeMeters, int maxLod, float qual
 /// Mesh kosong (tanpa segitiga) bila seluruh ubin berlubang, atau bila
 /// `tileX`/`tileY` di luar peta.
 ///
+/// Setiap simpul membawa warna layer-layernya yang sudah dipadukan. Terrain
+/// yang belum dicat sama sekali karena itu berwarna layer dasarnya — bukan
+/// putih, dan bukan warna yang dikarang renderer.
+///
 /// **Tidak mewujudkan ubin mana pun.** Ia hanya membaca lewat `RawAt`, yang
 /// menjawab tinggi dasar untuk ubin yang belum pernah ditulis — jadi membangun
 /// mesh tidak membatalkan alokasi malas yang menjadi seluruh alasan terrain
 /// sebesar ini muat di memori.
 assets::MeshData BuildTileMesh(const Terrain& terrain, int tileX, int tileY, int lod = 0,
                                const TileNeighborLods& neighbors = {});
+
+/// Warna sebuah sampel: warna layer-layernya, dipadukan menurut bobotnya.
+///
+/// **Layer dasar adalah sisa**, seperti di penyimpanannya: bobotnya
+/// `255 − Σ(bobot layer lain)`, bukan angka tersimpan. Itu yang membuat
+/// "totalnya selalu penuh" menjadi sifat bentuknya alih-alih kewajiban yang
+/// harus diingat di sini juga.
+///
+/// Terrain tanpa layer di atas dasar menjawab warna layer dasar apa adanya.
+Vec3 SampleColor(const Terrain& terrain, int x, int y);
 
 /// Normal permukaan pada sebuah **sampel**, dari beda tengah heightmap-nya.
 ///

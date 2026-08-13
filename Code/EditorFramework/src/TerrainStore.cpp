@@ -156,7 +156,18 @@ const assets::MeshData* TerrainStore::TileMesh(const Uuid& guid, int tileX, int 
 
     const int index = tileY * desc.tilesX + tileX;
     CachedTile& cached = entry->tiles[index];
-    const uint64_t revision = NeighborhoodRevision(entry->terrain, tileX, tileY);
+    // Bentuk **dan** cat. Warna layer ada di simpul meshnya sejak L6a, jadi
+    // sapuan kuas cat mengubah mesh yang digambar sama nyatanya dengan sapuan
+    // kuas sculpt — sementara collider-nya tidak berubah sedikit pun, dan
+    // karena itu keduanya dihitung terpisah.
+    //
+    // Catnya tidak menanyakan tetangga: warna tidak dijahit ke tepi ubin
+    // sebelah, jadi mengecat di ubin lain tidak menggeser satu simpul pun di
+    // sini.
+    const uint64_t revision = NeighborhoodRevision(entry->terrain, tileX, tileY) +
+                              (static_cast<uint64_t>(entry->terrain.TilePaintRevision(
+                                   tileX, tileY))
+                               << 32);
     if (cached.builtLod == lod && cached.builtRevision == revision &&
         SameLods(cached.builtNeighbors, neighbors)) {
         return &cached.mesh;

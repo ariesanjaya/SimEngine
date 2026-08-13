@@ -32,6 +32,18 @@ struct MeshVertex {
     /// normal pada bagian yang bercermin tanpa tanda itu tampak cekung di tempat
     /// yang seharusnya cembung.
     Vec4 tangent{1.0f, 0.0f, 0.0f, 1.0f};
+    /// Warna per simpul, dikalikan dengan warna material saat menggambar.
+    ///
+    /// **Putih berarti "tidak menyumbang apa-apa"**, bukan "belum diisi": ia
+    /// nilai satuan perkalian, jadi importir yang tidak menyentuhnya
+    /// menghasilkan mesh yang tergambar persis seperti sebelum medan ini ada.
+    ///
+    /// Yang memakainya hari ini terrain, untuk memadukan warna layer menurut
+    /// bobot catnya. Ia di dalam vertex dan bukan larik sejajar seperti
+    /// `influences` — larik sejajar menghemat memori **CPU** milik importir,
+    /// sementara yang mahal adalah memori GPU, dan di sana strukturnya seragam
+    /// untuk seluruh mesh betapapun ia disimpan di sisi ini.
+    Vec4 color{1.0f, 1.0f, 1.0f, 1.0f};
 };
 
 /// Paling banyak empat bone memengaruhi satu vertex.

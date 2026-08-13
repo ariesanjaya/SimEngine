@@ -113,6 +113,31 @@ Vec3 SampleNormal(const Terrain& terrain, int x, int y) {
     return glm::normalize(Vec3(-dx, 1.0f, -dz));
 }
 
+Vec3 SampleColor(const Terrain& terrain, int x, int y) {
+    const int layers = terrain.LayerCount();
+    if (layers <= 0) {
+        return Vec3(0.5f);
+    }
+
+    Vec3 blended(0.0f);
+    int used = 0;
+    // Layer dasar dilewati di sini dan dibayar dengan sisanya di bawah: bobotnya
+    // memang tidak tersimpan, dan membacanya lewat `WeightAt(0, ...)` berarti
+    // meminta angka yang harus dihitung ulang tiap kali.
+    for (int layer = 1; layer < layers; ++layer) {
+        const int weight = terrain.WeightAt(layer, x, y);
+        if (weight == 0) {
+            continue;
+        }
+        blended += terrain.Layer(layer).color * (static_cast<float>(weight) / 255.0f);
+        used += weight;
+    }
+
+    const float base =
+        static_cast<float>(kWeightMax - std::min(used, static_cast<int>(kWeightMax))) / 255.0f;
+    return blended + terrain.Layer(0).color * base;
+}
+
 assets::MeshData BuildTileMesh(const Terrain& terrain, int tileX, int tileY, int lod,
                                const TileNeighborLods& neighbors) {
     assets::MeshData mesh;
@@ -209,6 +234,12 @@ assets::MeshData BuildTileMesh(const Terrain& terrain, int tileX, int tileY, int
             const Vec3 tangent = glm::normalize(Vec3(1.0f, 0.0f, 0.0f) -
                                                 normal * normal.x);
             vertex.tangent = Vec4(tangent, 1.0f);
+            // Warnanya diambil dari sampelnya sendiri, bukan dijahit ke
+            // tetangga seperti tinggi dan normal. Cat tidak menghasilkan
+            // retakan — yang berselisih di tepi hanya rona, dan menjahitnya
+            // berarti membaca peta bobot tetangga di setiap simpul tepi untuk
+            // selisih yang tidak terlihat.
+            vertex.color = Vec4(SampleColor(terrain, x, y), 1.0f);
             mesh.vertices.push_back(vertex);
 
             boundsMin = glm::min(boundsMin, position);

@@ -1995,3 +1995,173 @@ TEST_CASE("L4: sinar miring mendarat di permukaan, bukan di dekatnya") {
     CHECK(walked.x == doctest::Approx(hit.position.x).epsilon(0.001));
     CHECK(walked.z == doctest::Approx(hit.position.z).epsilon(0.001));
 }
+
+// ============================================================================
+// L6a — warna simpul dari bobot layer
+// ============================================================================
+
+namespace {
+
+/// Mengecat sebuah persegi penuh, tanpa lewat kuas: uji ini tentang warnanya,
+/// bukan tentang profil kuasnya — dan yang mencampur keduanya akan gagal karena
+/// falloff pada hari seseorang menyetel falloff.
+void PaintFull(Terrain& terrain, int layer, int x0, int y0, int x1, int y1) {
+    for (int y = y0; y <= y1; ++y) {
+        for (int x = x0; x <= x1; ++x) {
+            terrain.SetWeightAt(layer, x, y, kWeightMax);
+        }
+    }
+}
+
+}  // namespace
+
+TEST_CASE("L6a: terrain yang belum dicat berwarna layer dasarnya, bukan putih") {
+    // Putih adalah nilai satuan perkalian — artinya "tidak menyumbang apa-apa".
+    // Terrain yang belum dicat **punya** warna: warna layer dasarnya, yang sama
+    // dengan yang diperlihatkan peta 2D panel. Menjawab putih di sini berarti
+    // renderer yang mengarang warnanya sendiri.
+    Terrain terrain(SmallDesc());
+    const Vec3 baseColor = terrain.Layer(0).color;
+    const assets::MeshData plain = BuildTileMesh(terrain, 0, 0);
+    REQUIRE(plain.IsValid());
+    CHECK(plain.vertices.front().color.x == doctest::Approx(baseColor.x).epsilon(0.005));
+    CHECK(plain.vertices.front().color.y == doctest::Approx(baseColor.y).epsilon(0.005));
+    CHECK(plain.vertices.front().color.w == doctest::Approx(1.0f).epsilon(0.001));
+
+    // Dan mesh yang bukan terrain tetap putih — importir tidak menyentuh medan
+    // ini, jadi setiap mesh yang sudah ada tergambar persis seperti sebelumnya.
+    CHECK(assets::MeshVertex{}.color.x == doctest::Approx(1.0f));
+    CHECK(assets::MeshVertex{}.color.w == doctest::Approx(1.0f));
+}
+
+TEST_CASE("L6a: sampel yang tercat penuh berwarna layernya, yang tidak berwarna dasar") {
+    Terrain terrain(SmallDesc());
+    const Vec3 baseColor = terrain.Layer(0).color;
+
+    TerrainLayer grass;
+    grass.name = "Rumput";
+    grass.color = Vec3(0.2f, 0.7f, 0.3f);
+    REQUIRE(terrain.AddLayer(grass) == 1);
+    PaintFull(terrain, 1, 2, 2, 4, 4);
+
+    const Vec3 inside = SampleColor(terrain, 3, 3);
+    INFO("di dalam: " << inside.x << ", " << inside.y << ", " << inside.z);
+    CHECK(inside.x == doctest::Approx(grass.color.x).epsilon(0.005));
+    CHECK(inside.y == doctest::Approx(grass.color.y).epsilon(0.005));
+    CHECK(inside.z == doctest::Approx(grass.color.z).epsilon(0.005));
+
+    const Vec3 outside = SampleColor(terrain, 7, 7);
+    CHECK(outside.x == doctest::Approx(baseColor.x).epsilon(0.005));
+    CHECK(outside.y == doctest::Approx(baseColor.y).epsilon(0.005));
+
+    // Dan meshnya membawa warna itu apa adanya ke simpulnya.
+    const assets::MeshData mesh = BuildTileMesh(terrain, 0, 0);
+    const std::size_t at = 3 * 9 + 3;  // baris 3, kolom 3 dari kisi 9×9
+    REQUIRE(mesh.vertices[at].position.x == doctest::Approx(3.0f).epsilon(0.001));
+    REQUIRE(mesh.vertices[at].position.z == doctest::Approx(3.0f).epsilon(0.001));
+    CHECK(mesh.vertices[at].color.x == doctest::Approx(grass.color.x).epsilon(0.005));
+    CHECK(mesh.vertices[at].color.w == doctest::Approx(1.0f).epsilon(0.001));
+}
+
+TEST_CASE("L6a: padanan setengah-setengah jatuh di tengah, bukan di salah satunya") {
+    // **Inilah yang membedakan cat yang bisa dipadukan dari mosaik.** Yang
+    // memilih layer dominan akan menjawab salah satu warna penuh di sini, dan
+    // batas antar layer menjadi tajam per segitiga.
+    Terrain terrain(SmallDesc());
+    TerrainLayer red;
+    red.name = "Merah";
+    red.color = Vec3(1.0f, 0.0f, 0.0f);
+    TerrainLayer blue;
+    blue.name = "Biru";
+    blue.color = Vec3(0.0f, 0.0f, 1.0f);
+    REQUIRE(terrain.AddLayer(red) == 1);
+    REQUIRE(terrain.AddLayer(blue) == 2);
+
+    // Setengah merah, setengah biru: dasarnya habis.
+    terrain.SetWeightAt(1, 5, 5, 128);
+    terrain.SetWeightAt(2, 5, 5, 127);
+    REQUIRE(terrain.WeightAt(0, 5, 5) == 0);
+
+    const Vec3 mixed = SampleColor(terrain, 5, 5);
+    INFO("padanan: " << mixed.x << ", " << mixed.y << ", " << mixed.z);
+    CHECK(mixed.x == doctest::Approx(128.0f / 255.0f).epsilon(0.01));
+    CHECK(mixed.z == doctest::Approx(127.0f / 255.0f).epsilon(0.01));
+    CHECK(mixed.y == doctest::Approx(0.0f).epsilon(0.01));
+    // Bukan salah satunya, dan bukan warna dasar.
+    CHECK(mixed.x < 0.9f);
+    CHECK(mixed.z < 0.9f);
+}
+
+TEST_CASE("L6a: seperempat cat menyisakan tiga perempat dasar") {
+    // Layer dasar adalah **sisa**, bukan angka tersimpan. Yang membacanya
+    // sebagai angka tersimpan menjawab nol di sini, dan seluruh terrain yang
+    // dicat tipis menjadi gelap.
+    Terrain terrain(SmallDesc());
+    TerrainLayer white;
+    white.name = "Putih";
+    white.color = Vec3(1.0f, 1.0f, 1.0f);
+    REQUIRE(terrain.AddLayer(white) == 1);
+
+    const Vec3 baseColor = terrain.Layer(0).color;
+    terrain.SetWeightAt(1, 5, 5, 64);  // seperempat
+
+    const Vec3 mixed = SampleColor(terrain, 5, 5);
+    const float share = 64.0f / 255.0f;
+    CHECK(mixed.x == doctest::Approx(share + baseColor.x * (1.0f - share)).epsilon(0.01));
+    CHECK(mixed.y == doctest::Approx(share + baseColor.y * (1.0f - share)).epsilon(0.01));
+}
+
+TEST_CASE("L6a: LOD kasar tetap berwarna, dan mengecat membangun ulang meshnya") {
+    TerrainDesc desc = SmallDesc();
+    desc.tileSamples = 16;
+    Terrain terrain(desc);
+    TerrainLayer grass;
+    grass.name = "Rumput";
+    grass.color = Vec3(0.2f, 0.7f, 0.3f);
+    REQUIRE(terrain.AddLayer(grass) == 1);
+    PaintFull(terrain, 1, 0, 0, 15, 15);
+
+    for (int lod = 0; lod <= 2; ++lod) {
+        const assets::MeshData mesh = BuildTileMesh(terrain, 0, 0, lod);
+        INFO("LOD " << lod);
+        REQUIRE(mesh.IsValid());
+        CHECK(mesh.vertices.front().color.y == doctest::Approx(grass.color.y).epsilon(0.005));
+    }
+
+    // **Cat dan bentuk dihitung terpisah.** Sapuan kuas cat mengubah mesh yang
+    // digambar — warnanya ada di simpul — tetapi tidak mengubah kisi tinggi
+    // sedikit pun. Menyatukan keduanya berarti salah satu dari dua kesalahan:
+    // cat yang membangun ulang collider empat kilometer, atau cat yang tidak
+    // pernah terlihat.
+    //
+    // Uji ini lahir dari kesalahan kedua: aturan L3 menyatakan bobot layer
+    // bukan bentuk, dan sesudah warna masuk ke mesh aturan itu diam-diam
+    // membuat cat tak pernah tergambar ulang.
+    const uint32_t shapeBefore = terrain.TileRevision(0, 0);
+    const uint32_t paintBefore = terrain.TilePaintRevision(0, 0);
+    terrain.SetWeightAt(1, 2, 2, 200);
+    CHECK(terrain.TileRevision(0, 0) == shapeBefore);
+    CHECK(terrain.TilePaintRevision(0, 0) > paintBefore);
+
+    // Dan sebaliknya: memahat menaikkan bentuk, bukan cat.
+    const uint32_t paintAfterPaint = terrain.TilePaintRevision(0, 0);
+    terrain.SetHeightAt(2, 2, 12.0f);
+    CHECK(terrain.TileRevision(0, 0) > shapeBefore);
+    CHECK(terrain.TilePaintRevision(0, 0) == paintAfterPaint);
+}
+
+TEST_CASE("L6a: ubin yang seluruhnya berlubang tidak menyisakan warna menggantung") {
+    Terrain terrain(SmallDesc());
+    TerrainLayer grass;
+    grass.name = "Rumput";
+    REQUIRE(terrain.AddLayer(grass) == 1);
+    PaintFull(terrain, 1, 0, 0, 7, 7);
+    for (int y = 0; y < 8; ++y) {
+        for (int x = 0; x < 8; ++x) {
+            terrain.SetHoleAt(x, y, true);
+        }
+    }
+    const assets::MeshData mesh = BuildTileMesh(terrain, 0, 0);
+    CHECK_FALSE(mesh.IsValid());
+    CHECK(mesh.vertices.empty());
+}

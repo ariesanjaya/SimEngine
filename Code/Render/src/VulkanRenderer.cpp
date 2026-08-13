@@ -190,12 +190,19 @@ struct LineVertex {
 /// `uv` belum dibaca shader mana pun; ia ada karena mesh yang diimpor membawanya
 /// dan membuang atribut yang sudah ada di berkasnya berarti mengimpornya lagi
 /// begitu material bertekstur mendarat.
+/// Nilai satuan warna simpul: putih pekat.
+constexpr Vec4 kWhite{1.0f, 1.0f, 1.0f, 1.0f};
+
 struct BoxVertex {
     Vec3 position;
     Vec3 normal;
     Vec2 uv;
     /// Tangent ruang dunia, arah tangan di `w`. Lihat `assets::MeshVertex`.
     Vec4 tangent;
+    /// Warna per simpul, dikalikan dengan warna ruas/instance. Putih adalah
+    /// nilai satuannya, jadi mesh yang tidak mengisinya tergambar persis seperti
+    /// sebelum atribut ini ada.
+    Vec4 color;
 };
 
 static_assert(sizeof(BoxVertex) == sizeof(assets::MeshVertex),
@@ -353,12 +360,12 @@ std::vector<BoxVertex> BuildUnitCube() {
         // Tangent kubus sudah diketahui per muka, jadi ia ditulis langsung
         // alih-alih diturunkan dari UV: kubus ini tidak pernah lewat importir.
         const Vec4 tangent(t, 1.0f);
-        vertices.push_back({a0, n, Vec2(0.0f, 0.0f), tangent});
-        vertices.push_back({a1, n, Vec2(1.0f, 0.0f), tangent});
-        vertices.push_back({a2, n, Vec2(1.0f, 1.0f), tangent});
-        vertices.push_back({a0, n, Vec2(0.0f, 0.0f), tangent});
-        vertices.push_back({a2, n, Vec2(1.0f, 1.0f), tangent});
-        vertices.push_back({a3, n, Vec2(0.0f, 1.0f), tangent});
+        vertices.push_back({a0, n, Vec2(0.0f, 0.0f), tangent, kWhite});
+        vertices.push_back({a1, n, Vec2(1.0f, 0.0f), tangent, kWhite});
+        vertices.push_back({a2, n, Vec2(1.0f, 1.0f), tangent, kWhite});
+        vertices.push_back({a0, n, Vec2(0.0f, 0.0f), tangent, kWhite});
+        vertices.push_back({a2, n, Vec2(1.0f, 1.0f), tangent, kWhite});
+        vertices.push_back({a3, n, Vec2(0.0f, 1.0f), tangent, kWhite});
     }
     return vertices;
 }
@@ -2086,7 +2093,7 @@ private:
                              bool skinned = false, VkPipelineLayout layout = VK_NULL_HANDLE,
                              VkFormat depthFormat = VK_FORMAT_UNDEFINED,
                              VkFormat colorAttachment = VK_FORMAT_UNDEFINED,
-                             uint32_t attributeMask = 0x7FFu) {
+                             uint32_t attributeMask = 0xFFFu) {
         // `kSkinned`, konstanta spesialisasi 0 di `Shaders/skin_common.slang`.
         // Ukurannya empat byte walaupun tipenya bool: Vulkan menyatakan
         // konstanta spesialisasi boolean berukuran `VkBool32`, dan ukuran yang
@@ -2131,7 +2138,7 @@ private:
                 2, skinned ? static_cast<uint32_t>(sizeof(assets::SkinInfluence)) : 0u,
                 VK_VERTEX_INPUT_RATE_VERTEX},
         };
-        const std::array<VkVertexInputAttributeDescription, 11> attributes{
+        const std::array<VkVertexInputAttributeDescription, 12> attributes{
             VkVertexInputAttributeDescription{0, 0, VK_FORMAT_R32G32B32_SFLOAT,
                                               offsetof(BoxVertex, position)},
             VkVertexInputAttributeDescription{1, 0, VK_FORMAT_R32G32B32_SFLOAT,
@@ -2154,6 +2161,14 @@ private:
                                               offsetof(assets::SkinInfluence, weights)},
             VkVertexInputAttributeDescription{10, 1, VK_FORMAT_R32_UINT,
                                               offsetof(BoxInstance, skinBase)},
+            // Warna simpul, di binding 0 bersama posisi dan normal — bukan
+            // binding sendiri. Binding terpisah menuntut stride yang berbeda
+            // untuk mesh yang punya dan yang tidak, dan stride adalah sifat
+            // pipeline: ia akan melipatgandakan varian pipeline yang sudah ada
+            // demi menghemat memori GPU yang tetap dibayar karena strukturnya
+            // seragam.
+            VkVertexInputAttributeDescription{11, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
+                                              offsetof(BoxVertex, color)},
         };
         // Tiap pipeline menyebutkan atribut mana yang benar-benar dibacanya.
         // Buffer-nya sama dan stride-nya sama; yang berbeda hanya atribut yang
@@ -2167,7 +2182,7 @@ private:
         // adalah peringatan validasi di setiap pembuatan pipeline. Menyaringnya
         // di sini bukan sekadar meredam peringatan: atribut yang tidak diambil
         // memang tidak perlu diambil.
-        std::array<VkVertexInputAttributeDescription, 11> used{};
+        std::array<VkVertexInputAttributeDescription, 12> used{};
         uint32_t usedCount = 0;
         for (const VkVertexInputAttributeDescription& attribute : attributes) {
             if ((attributeMask & (1u << attribute.location)) != 0u) {
