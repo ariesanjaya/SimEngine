@@ -2,7 +2,9 @@
 
 #include "Sim/Core/Uuid.h"
 #include "Sim/Terrain/Terrain.h"
+#include "Sim/Assets/MeshData.h"
 #include "Sim/Terrain/TerrainIo.h"
+#include "Sim/Terrain/TerrainMesh.h"
 
 #include <filesystem>
 #include <string>
@@ -53,18 +55,55 @@ public:
     /// Menulis kembali ke berkasnya. False beserta sebabnya bila gagal.
     bool Save(const Uuid& guid, const std::filesystem::path& path, std::string& error);
 
+    /// Mesh sebuah ubin, dibangun ulang **hanya** ketika bentuknya berubah atau
+    /// perinciannya berganti.
+    ///
+    /// Bukan kemewahan: `SceneView::Build` berjalan tiap frame, dan membangun
+    /// ulang ubin 512² per frame adalah ratusan ribu simpul yang dihitung untuk
+    /// hasil yang sama persis. Yang menentukan "berubah" adalah revisi ubin itu
+    /// **beserta kedelapan tetangganya** — meshnya membaca satu baris dari
+    /// tetangga dan normalnya membaca satu sampel lagi ke luar, jadi menyunting
+    /// ubin sebelah menggeser tepi ubin ini.
+    ///
+    /// Mengembalikan null bila terrainnya tidak ada.
+    const assets::MeshData* TileMesh(const Uuid& guid, int tileX, int tileY, int lod,
+                                     const terrain::TileNeighborLods& neighbors);
+
+    /// Nomor yang naik setiap kali mesh sebuah ubin benar-benar dibangun ulang.
+    ///
+    /// Inilah yang diserahkan ke `IViewportRenderer::AcquireMeshData` sebagai
+    /// kunci unggahan. Versi dokumen tidak bisa dipakai: ia naik untuk seluruh
+    /// terrain, jadi menggores satu sudut peta akan mengunggah ulang keenam
+    /// puluh empat ubinnya.
+    uint64_t TileUpload(const Uuid& guid, int tileX, int tileY) const;
+
     /// Membuang yang sudah dimuat. Dipakai saat project berganti.
     void Clear();
 
     std::size_t OpenCount() const { return entries_.size(); }
 
 private:
+    /// Mesh sebuah ubin beserta keadaan yang menghasilkannya.
+    ///
+    /// Keadaan itu ikut disimpan, bukan hanya hasilnya: yang membandingkan
+    /// hasil dengan hasil harus membangun dulu untuk tahu ia tidak perlu
+    /// membangun.
+    struct CachedTile {
+        assets::MeshData mesh;
+        uint64_t builtRevision = 0;
+        int builtLod = -1;
+        terrain::TileNeighborLods builtNeighbors;
+        uint64_t upload = 1;
+    };
+
     struct Entry {
         terrain::Terrain terrain;
         terrain::TerrainDocument document;
         uint64_t version = 1;
         bool failed = false;
         bool dirty = false;
+        /// Diindeks `tileY * tilesX + tileX`.
+        std::unordered_map<int, CachedTile> tiles;
     };
 
     Entry* FindEntry(const Uuid& guid);

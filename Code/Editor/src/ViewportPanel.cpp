@@ -217,8 +217,12 @@ public:
         const auto height = static_cast<uint32_t>(size.y);
         renderer->Resize(width, height);
 
+        TerrainView terrainView;
+        terrainView.store = context.terrains;
+        terrainView.cameraPosition = camera_.focus + camera_.Offset() * camera_.distance;
         sceneView_.Build(*context.world, *context.selection, context.assets, renderer,
-                         context.animation, context.builtinAssets, context.whiteboxes);
+                         context.animation, context.builtinAssets, context.whiteboxes,
+                         terrainView);
         HandleCameraInput();
 
         render::ViewportDesc desc;

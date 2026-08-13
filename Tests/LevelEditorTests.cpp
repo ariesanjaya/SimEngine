@@ -1548,3 +1548,187 @@ TEST_CASE("L0: Clear membuang dokumen yang terbuka") {
     CHECK(store.Find(guid) == nullptr);
     CHECK(store.OpenCount() == 0);
 }
+
+// ============================================================================
+// L3 — terrain di viewport
+// ============================================================================
+
+namespace {
+
+TerrainStore MakeStoreWithTerrain(const Uuid& guid, int tilesPerSide = 3) {
+    terrain::TerrainDesc desc;
+    desc.tileSamples = 16;
+    desc.tilesX = tilesPerSide;
+    desc.tilesY = tilesPerSide;
+    desc.sampleSpacing = 1.0f;
+    desc.maxHeight = 200.0f;
+
+    TerrainStore store;
+    store.Adopt(guid, terrain::Terrain(desc), terrain::TerrainDocument{});
+    return store;
+}
+
+}  // namespace
+
+TEST_CASE("L3: mesh ubin dibangun ulang hanya ketika bentuknya berubah") {
+    // **`SceneView::Build` berjalan tiap frame.** Membangun ulang ubin 512² per
+    // frame adalah ratusan ribu simpul yang dihitung untuk hasil yang sama
+    // persis, dan itu bukan pemborosan yang bisa dibiarkan sampai nanti — pada
+    // peta sungguhan ia adalah editor yang tidak bisa dipakai.
+    const Uuid guid = Uuid::Generate();
+    TerrainStore store = MakeStoreWithTerrain(guid);
+    const terrain::TileNeighborLods flat;
+
+    REQUIRE(store.TileMesh(guid, 0, 0, 0, flat) != nullptr);
+    const uint64_t first = store.TileUpload(guid, 0, 0);
+    REQUIRE(first > 0);
+
+    // Diminta lagi tanpa apa pun berubah: tidak ada yang dibangun.
+    for (int i = 0; i < 10; ++i) {
+        REQUIRE(store.TileMesh(guid, 0, 0, 0, flat) != nullptr);
+    }
+    CHECK(store.TileUpload(guid, 0, 0) == first);
+
+    // Menyunting ubin itu membangunnya ulang.
+    store.Find(guid)->SetHeightAt(4, 4, 30.0f);
+    REQUIRE(store.TileMesh(guid, 0, 0, 0, flat) != nullptr);
+    const uint64_t second = store.TileUpload(guid, 0, 0);
+    CHECK(second > first);
+
+    // Menulis nilai yang sama **tidak** membangunnya ulang: brush berkekuatan
+    // nol tidak boleh menyibukkan GPU.
+    store.Find(guid)->SetHeightAt(4, 4, 30.0f);
+    REQUIRE(store.TileMesh(guid, 0, 0, 0, flat) != nullptr);
+    CHECK(store.TileUpload(guid, 0, 0) == second);
+
+    // Berganti perincian membangunnya ulang, walaupun bentuknya tidak berubah.
+    REQUIRE(store.TileMesh(guid, 0, 0, 1, flat) != nullptr);
+    CHECK(store.TileUpload(guid, 0, 0) > second);
+}
+
+TEST_CASE("L3: menyunting satu ubin tidak membangun ulang ubin yang jauh") {
+    // Kalau seluruh peta dibangun ulang tiap goresan, menggores satu sudut
+    // terrain 4×4 km berarti enam puluh empat ubin diunggah ulang — tiap frame
+    // selama tombol ditahan.
+    const Uuid guid = Uuid::Generate();
+    TerrainStore store = MakeStoreWithTerrain(guid);
+    const terrain::TileNeighborLods flat;
+
+    for (int ty = 0; ty < 3; ++ty) {
+        for (int tx = 0; tx < 3; ++tx) {
+            REQUIRE(store.TileMesh(guid, tx, ty, 0, flat) != nullptr);
+        }
+    }
+    const uint64_t farBefore = store.TileUpload(guid, 2, 2);
+    const uint64_t nearBefore = store.TileUpload(guid, 0, 0);
+
+    // Di tengah ubin (0,0), jauh dari tepi mana pun.
+    store.Find(guid)->SetHeightAt(8, 8, 40.0f);
+    for (int ty = 0; ty < 3; ++ty) {
+        for (int tx = 0; tx < 3; ++tx) {
+            REQUIRE(store.TileMesh(guid, tx, ty, 0, flat) != nullptr);
+        }
+    }
+    CHECK(store.TileUpload(guid, 0, 0) > nearBefore);
+    CHECK(store.TileUpload(guid, 2, 2) == farBefore);
+}
+
+TEST_CASE("L3: menyunting tepi ubin ikut membangun ulang tetangganya") {
+    // **Ini yang membuat penghematan di atas boleh dilakukan.** Mesh sebuah
+    // ubin membaca satu baris dari tetangganya, dan normal beda tengah membaca
+    // satu sampel lagi ke luar — jadi menyunting tepi ubin sebelah menggeser
+    // tepi ubin ini. Yang menghemat tanpa memperhitungkan itu meninggalkan
+    // retakan yang hanya muncul di dekat batas ubin, dan hanya kadang-kadang.
+    const Uuid guid = Uuid::Generate();
+    TerrainStore store = MakeStoreWithTerrain(guid);
+    const terrain::TileNeighborLods flat;
+
+    REQUIRE(store.TileMesh(guid, 0, 0, 0, flat) != nullptr);
+    REQUIRE(store.TileMesh(guid, 1, 0, 0, flat) != nullptr);
+    const uint64_t leftBefore = store.TileUpload(guid, 0, 0);
+
+    // Kolom pertama ubin (1,0) adalah kolom terakhir mesh ubin (0,0).
+    store.Find(guid)->SetHeightAt(16, 5, 25.0f);
+    REQUIRE(store.TileMesh(guid, 0, 0, 0, flat) != nullptr);
+    CHECK(store.TileUpload(guid, 0, 0) > leftBefore);
+
+    // Dan tepinya memang menyatu sesudahnya.
+    const assets::MeshData* left = store.TileMesh(guid, 0, 0, 0, flat);
+    const assets::MeshData* right = store.TileMesh(guid, 1, 0, 0, flat);
+    REQUIRE(left != nullptr);
+    REQUIRE(right != nullptr);
+    const auto heightAt = [](const assets::MeshData& mesh, float x, float z) {
+        for (const assets::MeshVertex& vertex : mesh.vertices) {
+            if (std::abs(vertex.position.x - x) < 1e-4f &&
+                std::abs(vertex.position.z - z) < 1e-4f) {
+                return vertex.position.y;
+            }
+        }
+        return -1e30f;
+    };
+    CHECK(heightAt(*left, 16.0f, 5.0f) == heightAt(*right, 16.0f, 5.0f));
+    CHECK(heightAt(*left, 16.0f, 5.0f) == doctest::Approx(25.0f).epsilon(0.01));
+}
+
+TEST_CASE("L3: undo membangun ulang meshnya, bukan hanya datanya") {
+    // Undo yang membetulkan data sambil meninggalkan layar menggambar bentuk
+    // yang sudah tidak ada adalah bug yang tampak seperti "undo tidak bekerja".
+    const Uuid guid = Uuid::Generate();
+    TerrainStore store = MakeStoreWithTerrain(guid);
+    const terrain::TileNeighborLods flat;
+    terrain::Terrain* map = store.Find(guid);
+
+    map->BeginStroke();
+    map->SetHeightAt(4, 4, 50.0f);
+    map->EndStroke();
+    REQUIRE(store.TileMesh(guid, 0, 0, 0, flat) != nullptr);
+    const uint64_t afterStroke = store.TileUpload(guid, 0, 0);
+
+    REQUIRE(map->Undo());
+    REQUIRE(store.TileMesh(guid, 0, 0, 0, flat) != nullptr);
+    CHECK(store.TileUpload(guid, 0, 0) > afterStroke);
+}
+
+TEST_CASE("L3: mengecat layer tidak membangun ulang meshnya") {
+    // Bobot layer mengganti warna, bukan simpul. Menaikkan revisinya di sana
+    // berarti terrain empat kilometer dibangun ulang setiap sapuan kuas cat.
+    const Uuid guid = Uuid::Generate();
+    TerrainStore store = MakeStoreWithTerrain(guid);
+    const terrain::TileNeighborLods flat;
+    terrain::Terrain* map = store.Find(guid);
+
+    terrain::TerrainLayer layer;
+    layer.name = "Rumput";
+    REQUIRE(map->AddLayer(layer) == 1);
+
+    REQUIRE(store.TileMesh(guid, 0, 0, 0, flat) != nullptr);
+    const uint64_t before = store.TileUpload(guid, 0, 0);
+
+    map->SetWeightAt(1, 4, 4, 255);
+    REQUIRE(store.TileMesh(guid, 0, 0, 0, flat) != nullptr);
+    CHECK(store.TileUpload(guid, 0, 0) == before);
+
+    // Sedangkan lubang **memang** mengubah bentuk: ia membuang quad.
+    map->SetHoleAt(4, 4, true);
+    REQUIRE(store.TileMesh(guid, 0, 0, 0, flat) != nullptr);
+    CHECK(store.TileUpload(guid, 0, 0) > before);
+}
+
+TEST_CASE("L3: SceneView mengajukan satu instance per ubin terrain") {
+    const Uuid guid = Uuid::Generate();
+    TerrainStore store = MakeStoreWithTerrain(guid, /*tilesPerSide=*/3);
+
+    scene::World world;
+    Selection selection;
+    const scene::Entity entity = world.Create("Lanskap");
+    world.Add<scene::TerrainComponent>(entity).terrain.guid = guid;
+
+    // Tanpa basis aset maupun renderer, terrain tidak bisa dicari berkasnya —
+    // dan itu harus berakhir sebagai "tidak menggambar apa pun", bukan sebagai
+    // crash.
+    SceneView view;
+    TerrainView terrainView;
+    terrainView.store = &store;
+    view.Build(world, selection, nullptr, nullptr, nullptr, nullptr, nullptr, terrainView);
+    CHECK(view.Pickables().empty());
+}

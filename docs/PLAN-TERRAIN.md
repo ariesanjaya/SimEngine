@@ -208,19 +208,70 @@ Masukan yang tidak masuk akal — jarak NaN, ukuran ubin nol — menjawab perinc
 dan bukan `d <= ambang`: ubin di depan hidung yang tiba-tiba menjadi empat
 segitiga jauh lebih terlihat daripada ubin jauh yang terlalu halus.
 
-### L3 — Terrain di viewport · ⬜
+### L3 — Terrain di viewport · ✅
 
 Yang dipahat akhirnya terlihat dari sudut pandang mana pun.
 
-- `SceneView` mengajukan ubin terrain yang penghuni memori, satu instance per
-  ubin, lewat `AcquireMeshData` yang sudah ada sejak W5.
-- LOD dipilih dari jarak kamera; ubin yang berubah diunggah ulang lewat penanda
-  versi store.
+**Kriteria terimanya diubah, dan itu keputusan.** Rencananya semula berbunyi
+"ubin yang belum pernah disentuh tidak menghasilkan apa pun". Itu salah:
+terrain baru **tidak punya satu pun ubin penghuni**, jadi aturan itu membuatnya
+tak terlihat sama sekali — dan yang tak terlihat tidak bisa diklik, sehingga L4
+tidak punya apa pun untuk dipahat. Ubin yang datar setinggi `baseHeight` tetap
+tanah yang harus terlihat.
+
+Alokasi malas yang sebenarnya perlu dijaga bukan "jangan gambar ubin kosong"
+melainkan "**menggambar tidak boleh mewujudkan ubin**", dan itu sudah dikunci
+uji di L1. Ubin jauh murah karena LOD, bukan karena tidak digambar.
 
 **Kriteria terima**
-- Terrain dengan N ubin penghuni menghasilkan N instance, dan ubin yang belum
-  pernah disentuh tidak menghasilkan apa pun.
-- Goresan brush menaikkan versi, dan versi itu sampai ke kunci unggahan.
+- Satu instance per ubin, lewat `AcquireMeshData` yang sudah ada sejak W5. ✅
+  Kuncinya menyebut ubinnya (`guid#tx,ty`), bukan terrainnya: satu kunci untuk
+  seluruh peta berarti keenam puluh empat ubin saling menimpa di cache renderer,
+  dan yang tergambar adalah ubin mana pun yang kebetulan terakhir diunggah.
+- Goresan menaikkan penanda unggahan, dan penanda itu sampai ke kunci
+  unggahan. ✅ Termasuk lewat undo: undo yang membetulkan data sambil
+  meninggalkan layar menggambar bentuk yang sudah tidak ada adalah bug yang
+  tampak seperti "undo tidak bekerja".
+
+**Meshnya di-cache, dan itu syarat bukan kemewahan.** `SceneView::Build`
+berjalan tiap frame; membangun ulang ubin 512² per frame adalah ratusan ribu
+simpul yang dihitung untuk hasil yang sama persis. Pada peta sungguhan itu bukan
+pemborosan melainkan editor yang tidak bisa dipakai.
+
+**Yang menentukan "berubah" adalah revisi per ubin, bukan versi dokumen.** Versi
+dokumen naik untuk seluruh terrain, jadi menggores satu sudut peta akan
+mengunggah ulang keenam puluh empat ubinnya — tiap frame selama tombol ditahan.
+`Terrain::TileRevision` naik hanya pada ubin yang benar-benar berubah bentuknya.
+
+Revisinya angka yang **hanya naik**, bukan penanda "kotor" yang harus dibersihkan
+seseorang. Penanda begitu menuntut satu pemilik yang menghapusnya, dan pembaca
+kedua yang datang belakangan menemukannya sudah bersih padahal ia belum
+membangun apa-apa. Angka yang hanya naik bisa dibandingkan siapa pun, sebanyak
+apa pun, tanpa saling meniadakan.
+
+Bentuk saja yang menaikkannya: tinggi dan lubang, **bukan bobot layer**.
+Mengecat tidak mengubah satu pun simpul, dan menaikkannya di sana berarti terrain
+empat kilometer dibangun ulang setiap sapuan kuas. Menulis nilai yang sama juga
+tidak menaikkannya — brush berkekuatan nol tidak boleh menyibukkan GPU.
+
+**Yang dibandingkan adalah revisi ubin beserta kedelapan tetangganya.** Meshnya
+membaca satu baris dari tetangga sisi, dan normal beda tengah di simpul pojok
+membaca satu sampel lagi secara diagonal — jadi menyunting ubin sebelah menggeser
+tepi ubin ini. Yang menghemat tanpa memperhitungkan itu meninggalkan retakan
+yang hanya muncul di dekat batas ubin, dan hanya kadang-kadang. Dijumlah, bukan
+diambil maksimumnya: maksimum tidak berubah ketika sebuah tetangga naik dari 3 ke
+4 sementara yang lain sudah 7.
+
+**LOD dihitung dua lintasan**: seluruh ubin dulu, baru meshnya. Menjahit tepi
+menuntut LOD tetangga, dan yang menghitungnya sambil jalan hanya tahu LOD ubin
+yang sudah lewat — separuh jahitannya akan memakai angka yang belum ada.
+
+Posisi kamera dipindahkan ke ruang terrain sekali, bukan tiap ubin dipindahkan ke
+ruang dunia: satu matriks kali satu titik, bukan sekali per ubin.
+
+Tiga mutasi membuktikan pembatalan cache-nya memegang: membandingkan revisi ubin
+saja tanpa tetangga, membiarkan bobot layer menaikkan revisi, dan menghilangkan
+kenaikan revisi pada undo — ketiganya menggugurkan uji.
 
 ### L4 — Sculpt di viewport 3D · ⬜
 

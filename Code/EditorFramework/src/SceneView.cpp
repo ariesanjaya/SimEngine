@@ -17,6 +17,14 @@ namespace sim::editor {
 namespace {
 
 constexpr Vec4 kMeshColor{0.62f, 0.65f, 0.70f, 1.0f};
+
+/// Warna terrain sampai materialnya sungguh digambar.
+///
+/// Sengaja lebih hijau daripada mesh biasa, dan sengaja **bukan** abu-abu:
+/// terrain yang sewarna dengan setiap kubus di scene membuat "apakah ini
+/// tanahnya atau sebuah blok" jadi pertanyaan yang harus dijawab dengan
+/// mengklik.
+constexpr Vec4 kTerrainColor{0.45f, 0.52f, 0.38f, 1.0f};
 constexpr Vec4 kLightColor{1.00f, 0.86f, 0.42f, 1.0f};
 constexpr Vec4 kCameraColor{0.48f, 0.78f, 0.95f, 1.0f};
 constexpr Vec4 kEmptyColor{0.45f, 0.47f, 0.52f, 0.85f};
@@ -91,7 +99,7 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                       render::IViewportRenderer* renderer,
                       const SkinnedPreview* animation,
                       const assets::AssetDatabase* builtinAssets,
-                      WhiteboxStore* whiteboxes) {
+                      WhiteboxStore* whiteboxes, const TerrainView& terrainView) {
     meshes_.clear();
     skinMatrices_.clear();
     partColors_.clear();
@@ -115,6 +123,12 @@ void SceneView::Build(scene::World& world, const Selection& selection,
         // Entity terkunci tetap digambar tapi tidak masuk daftar pickable —
         // itu justru gunanya: latar yang terlihat tanpa terpilih tak sengaja.
         const bool pickable = visibility == nullptr || !visibility->locked;
+
+        if (const auto* terrainComponent = world.TryGet<scene::TerrainComponent>(entity)) {
+            AppendTerrain(*terrainComponent, entity, matrix, selected, pickable, assets, renderer,
+                          terrainView);
+            continue;
+        }
 
         const auto* meshRenderer = world.TryGet<scene::MeshRendererComponent>(entity);
         const auto* whiteboxComponent = world.TryGet<scene::WhiteboxComponent>(entity);
@@ -331,6 +345,100 @@ void SceneView::AppendSkinPalette(uint32_t boneCount, std::span<const Mat4> pale
 /// — itu seam #1 di docs/ARCHITECTURE.md — dan yang paling mudah bocor lewat
 /// batas itu justru penerjemahan seperti ini: bagaimana rotasi entity menjadi
 /// arah pancar, dan bagaimana sudut kerucut menjadi kosinus.
+void SceneView::AppendTerrain(const scene::TerrainComponent& component, scene::Entity entity,
+                              const Mat4& matrix, bool selected, bool pickable,
+                              const assets::AssetDatabase* assets,
+                              render::IViewportRenderer* renderer,
+                              const TerrainView& view) {
+    if (view.store == nullptr || assets == nullptr || renderer == nullptr ||
+        !component.terrain.IsValid()) {
+        return;
+    }
+    const assets::AssetRecord* record = assets->Find(component.terrain.guid);
+    if (record == nullptr) {
+        return;
+    }
+    const terrain::Terrain* loaded =
+        view.store->Get(component.terrain.guid, assets->AbsolutePath(*record));
+    if (loaded == nullptr) {
+        return;
+    }
+
+    const terrain::TerrainDesc& desc = loaded->Desc();
+    const float tileSize = static_cast<float>(desc.tileSamples) * desc.sampleSpacing;
+
+    // Posisi kamera dipindahkan ke ruang terrain sekali, bukan tiap ubin
+    // dipindahkan ke ruang dunia. Satu matriks kali satu titik, bukan sekali
+    // per ubin — dan jaraknya sama karena keduanya diukur di ruang yang sama.
+    const Mat4 inverse = glm::inverse(matrix);
+    const Vec3 eye = Vec3(inverse * Vec4(view.cameraPosition, 1.0f));
+
+    // Dua lintasan: LOD seluruh ubin dulu, baru meshnya. Menjahit tepi menuntut
+    // LOD tetangga, dan yang menghitungnya sambil jalan hanya tahu LOD ubin
+    // yang sudah lewat — separuh jahitannya akan memakai angka yang belum ada.
+    std::vector<int> lods(static_cast<std::size_t>(desc.tilesX * desc.tilesY), 0);
+    for (int ty = 0; ty < desc.tilesY; ++ty) {
+        for (int tx = 0; tx < desc.tilesX; ++tx) {
+            const Vec3 center((static_cast<float>(tx) + 0.5f) * tileSize,
+                              loaded->Desc().baseHeight,
+                              (static_cast<float>(ty) + 0.5f) * tileSize);
+            const float distance = glm::length(Vec3(center.x - eye.x, 0.0f, center.z - eye.z));
+            lods[static_cast<std::size_t>(ty * desc.tilesX + tx)] =
+                terrain::SelectLod(distance, tileSize, view.maxLod, view.quality);
+        }
+    }
+
+    const auto lodAt = [&](int tx, int ty) {
+        if (tx < 0 || ty < 0 || tx >= desc.tilesX || ty >= desc.tilesY) {
+            // Di luar peta tidak ada yang perlu dijahit: tepi peta memang tepi.
+            return -1;
+        }
+        return lods[static_cast<std::size_t>(ty * desc.tilesX + tx)];
+    };
+
+    for (int ty = 0; ty < desc.tilesY; ++ty) {
+        for (int tx = 0; tx < desc.tilesX; ++tx) {
+            const int lod = lodAt(tx, ty);
+            terrain::TileNeighborLods neighbors;
+            neighbors.negativeX = lodAt(tx - 1, ty);
+            neighbors.positiveX = lodAt(tx + 1, ty);
+            neighbors.negativeY = lodAt(tx, ty - 1);
+            neighbors.positiveY = lodAt(tx, ty + 1);
+
+            const assets::MeshData* data =
+                view.store->TileMesh(component.terrain.guid, tx, ty, lod, neighbors);
+            if (data == nullptr || !data->IsValid()) {
+                continue;  // ubin yang seluruhnya berlubang
+            }
+
+            // Kuncinya menyebut ubinnya, bukan terrainnya: satu kunci untuk
+            // seluruh peta berarti keenam puluh empat ubin saling menimpa di
+            // cache renderer, dan yang tergambar adalah ubin mana pun yang
+            // kebetulan terakhir diunggah.
+            const std::string key = component.terrain.guid.ToString() + "#" +
+                                    std::to_string(tx) + "," + std::to_string(ty);
+            const render::MeshAsset mesh = renderer->AcquireMeshData(
+                key, *data, view.store->TileUpload(component.terrain.guid, tx, ty));
+            if (!mesh.loaded) {
+                continue;
+            }
+
+            render::MeshInstance instance;
+            instance.transform = matrix;
+            instance.mesh = mesh.handle;
+            instance.boundsMin = mesh.boundsMin;
+            instance.boundsMax = mesh.boundsMax;
+            instance.color = kTerrainColor;
+            instance.selected = selected;
+            meshes_.push_back(instance);
+
+            if (pickable) {
+                pickables_.push_back(Pickable{entity, matrix, mesh.boundsMin, mesh.boundsMax});
+            }
+        }
+    }
+}
+
 void SceneView::AppendLight(const scene::LightComponent& light, const Mat4& matrix) {
     render::LightInstance instance;
     instance.position = Vec3(matrix[3]);

@@ -4,6 +4,7 @@
 #include "Sim/Render/IViewportRenderer.h"
 #include "Sim/Render/Types.h"
 #include "Sim/Editor/SkinnedPreview.h"
+#include "Sim/Editor/TerrainStore.h"
 #include "Sim/Editor/WhiteboxStore.h"
 #include "Sim/Scene/World.h"
 
@@ -18,6 +19,26 @@ class AssetDatabase;
 namespace sim::editor {
 
 class Selection;
+class TerrainStore;
+
+/// Apa yang dibutuhkan untuk menggambar terrain: dokumennya, dan dari mana ia
+/// dilihat.
+///
+/// **Digabung menjadi satu, bukan dua parameter lagi.** Keduanya hanya berarti
+/// bersama — store tanpa posisi kamera tidak bisa memilih perincian, dan posisi
+/// kamera tanpa store tidak menggambar apa pun — dan daftar parameter yang
+/// tumbuh satu per satu setiap fitur adalah daftar yang suatu saat dipanggil
+/// dengan urutan yang salah.
+struct TerrainView {
+    TerrainStore* store = nullptr;
+    /// Posisi kamera di ruang **dunia**. Jarak ke tiap ubin diukur darinya.
+    Vec3 cameraPosition{0.0f};
+    /// Perincian terkasar yang boleh dipilih.
+    int maxLod = 4;
+    /// Pengali ambang jarak; dua kali lipat berarti perincian penuh bertahan
+    /// dua kali lebih jauh.
+    float quality = 1.0f;
+};
 
 /// Sinar dalam ruang dunia.
 struct Ray {
@@ -85,7 +106,7 @@ public:
                render::IViewportRenderer* renderer = nullptr,
                const SkinnedPreview* animation = nullptr,
                const assets::AssetDatabase* builtinAssets = nullptr,
-               WhiteboxStore* whiteboxes = nullptr);
+               WhiteboxStore* whiteboxes = nullptr, const TerrainView& terrain = {});
 
     /// Menambahkan kotak wireframe sejajar sumbu, sesudah `Build`.
     ///
@@ -97,6 +118,10 @@ public:
     void AddWireBox(const Vec3& boxMin, const Vec3& boxMax, const Vec4& color);
 
 private:
+    void AppendTerrain(const scene::TerrainComponent& component, scene::Entity entity,
+                       const Mat4& matrix, bool selected, bool pickable,
+                       const assets::AssetDatabase* assets, render::IViewportRenderer* renderer,
+                       const TerrainView& view);
     void AppendLight(const scene::LightComponent& light, const Mat4& matrix);
     void AppendSkinPalette(uint32_t boneCount, std::span<const Mat4> palette,
                            render::MeshInstance& instance);

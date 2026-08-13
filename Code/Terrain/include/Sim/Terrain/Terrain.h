@@ -287,6 +287,20 @@ public:
     /// jurnal undo. Dipakai test anggaran memori dan panel.
     std::size_t BytesResident() const;
     std::size_t TilesResident() const;
+    /// Nomor revisi sebuah ubin, naik setiap kali **bentuknya** berubah.
+    ///
+    /// Bentuk saja: tinggi dan lubang, bukan bobot layer. Yang menggambar
+    /// membangun ulang meshnya ketika angka ini naik, dan mengecat sebuah layer
+    /// tidak mengubah satu pun simpul — menaikkannya di sana berarti terrain
+    /// empat kilometer dibangun ulang setiap sapuan kuas cat.
+    ///
+    /// **Bukan penanda "kotor" yang harus dibersihkan seseorang.** Penanda
+    /// begitu menuntut satu pemilik yang menghapusnya, dan pembaca kedua yang
+    /// datang belakangan akan menemukannya sudah bersih padahal ia belum
+    /// membangun apa-apa. Angka yang hanya naik bisa dibandingkan siapa pun,
+    /// sebanyak apa pun, tanpa saling meniadakan.
+    uint32_t TileRevision(int tileX, int tileY) const;
+
     /// Apakah sebuah ubin sudah pernah ditulis.
     ///
     /// Dipakai yang menggambar dan yang menabrak: ubin yang belum pernah
@@ -370,7 +384,12 @@ private:
 
     TerrainDesc desc_;
     Sample base_ = 0;
+    void BumpTile(int tileIndex);
+
     std::vector<std::unique_ptr<Tile>> tiles_;
+    /// Sejajar dengan `tiles_`. Ada walaupun ubinnya belum diwujudkan, karena
+    /// yang bertanya adalah yang menggambar — dan ia bertanya lebih dulu.
+    std::vector<uint32_t> tileRevision_;
     std::vector<LayerData> layers_;
     std::vector<std::unique_ptr<ByteTile>> holes_;
     /// Dijaga bertahap, bukan dihitung saat ditanya: panel menampilkannya tiap

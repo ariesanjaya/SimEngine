@@ -96,6 +96,76 @@ bool TerrainStore::Save(const Uuid& guid, const std::filesystem::path& path, std
     return true;
 }
 
+namespace {
+
+/// Jumlah revisi ubin beserta kedelapan tetangganya.
+///
+/// **Kedelapan, bukan keempat.** Meshnya membaca satu baris dari tetangga sisi,
+/// dan normal beda tengah di simpul pojok membaca satu sampel lagi secara
+/// diagonal. Menyunting ubin diagonal karena itu memang bisa menggeser satu
+/// simpul di pojok ubin ini — satu simpul, tetapi retakan satu simpul tetap
+/// retakan.
+///
+/// Dijumlah, bukan diambil maksimumnya: maksimum tidak berubah ketika sebuah
+/// tetangga naik dari 3 ke 4 sementara yang lain sudah 7, dan yang tidak
+/// berubah tidak membangun ulang.
+uint64_t NeighborhoodRevision(const terrain::Terrain& terrain, int tileX, int tileY) {
+    uint64_t sum = 0;
+    for (int dy = -1; dy <= 1; ++dy) {
+        for (int dx = -1; dx <= 1; ++dx) {
+            sum += terrain.TileRevision(tileX + dx, tileY + dy);
+        }
+    }
+    return sum;
+}
+
+bool SameLods(const terrain::TileNeighborLods& a, const terrain::TileNeighborLods& b) {
+    return a.negativeX == b.negativeX && a.positiveX == b.positiveX &&
+           a.negativeY == b.negativeY && a.positiveY == b.positiveY;
+}
+
+}  // namespace
+
+const assets::MeshData* TerrainStore::TileMesh(const Uuid& guid, int tileX, int tileY, int lod,
+                                               const terrain::TileNeighborLods& neighbors) {
+    Entry* entry = FindEntry(guid);
+    if (entry == nullptr || entry->failed) {
+        return nullptr;
+    }
+    const terrain::TerrainDesc& desc = entry->terrain.Desc();
+    if (tileX < 0 || tileY < 0 || tileX >= desc.tilesX || tileY >= desc.tilesY) {
+        return nullptr;
+    }
+
+    const int index = tileY * desc.tilesX + tileX;
+    CachedTile& cached = entry->tiles[index];
+    const uint64_t revision = NeighborhoodRevision(entry->terrain, tileX, tileY);
+    if (cached.builtLod == lod && cached.builtRevision == revision &&
+        SameLods(cached.builtNeighbors, neighbors)) {
+        return &cached.mesh;
+    }
+
+    cached.mesh = terrain::BuildTileMesh(entry->terrain, tileX, tileY, lod, neighbors);
+    cached.builtLod = lod;
+    cached.builtRevision = revision;
+    cached.builtNeighbors = neighbors;
+    ++cached.upload;
+    return &cached.mesh;
+}
+
+uint64_t TerrainStore::TileUpload(const Uuid& guid, int tileX, int tileY) const {
+    const Entry* entry = FindEntry(guid);
+    if (entry == nullptr || entry->failed) {
+        return 0;
+    }
+    const terrain::TerrainDesc& desc = entry->terrain.Desc();
+    if (tileX < 0 || tileY < 0 || tileX >= desc.tilesX || tileY >= desc.tilesY) {
+        return 0;
+    }
+    const auto found = entry->tiles.find(tileY * desc.tilesX + tileX);
+    return found == entry->tiles.end() ? 0 : found->second.upload;
+}
+
 void TerrainStore::Clear() { entries_.clear(); }
 
 }  // namespace sim::editor

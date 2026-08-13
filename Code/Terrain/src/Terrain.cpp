@@ -28,6 +28,7 @@ Terrain::Terrain(const TerrainDesc& desc) : desc_(desc) {
     }
     base_ = ToSample(desc_.baseHeight);
     tiles_.resize(static_cast<std::size_t>(TileCount()));
+    tileRevision_.assign(static_cast<std::size_t>(TileCount()), 1u);
     holes_.resize(static_cast<std::size_t>(TileCount()));
 
     // Layer dasar selalu ada. Terrain tanpa satu pun layer adalah terrain yang
@@ -124,7 +125,29 @@ void Terrain::SetRawAt(int x, int y, Sample value) {
         const int perSide = BlocksPerSide();
         CaptureBlock(tileIndex, (ly / kBlockSize) * perSide + (lx / kBlockSize));
     }
-    tile.samples[static_cast<std::size_t>(ly * desc_.tileSamples + lx)] = value;
+    Sample& slot = tile.samples[static_cast<std::size_t>(ly * desc_.tileSamples + lx)];
+    if (slot == value) {
+        // Menaikkan revisi untuk tulisan yang tidak mengubah apa pun berarti
+        // brush berkekuatan nol — atau sapuan yang melewati batas peta —
+        // membangun ulang mesh yang sama persis, tiap frame selama tombol
+        // ditahan.
+        return;
+    }
+    slot = value;
+    BumpTile(tileIndex);
+}
+
+void Terrain::BumpTile(int tileIndex) {
+    if (tileIndex >= 0 && tileIndex < static_cast<int>(tileRevision_.size())) {
+        ++tileRevision_[static_cast<std::size_t>(tileIndex)];
+    }
+}
+
+uint32_t Terrain::TileRevision(int tileX, int tileY) const {
+    if (tileX < 0 || tileY < 0 || tileX >= desc_.tilesX || tileY >= desc_.tilesY) {
+        return 0;
+    }
+    return tileRevision_[static_cast<std::size_t>(tileY * desc_.tilesX + tileX)];
 }
 
 float Terrain::HeightAtWorld(float worldX, float worldZ) const {
@@ -198,6 +221,12 @@ void Terrain::ReadAll(std::vector<Sample>& out) const {
 }
 
 void Terrain::WriteAll(const Sample* samples) {
+    // Seluruh peta berganti isi, jadi seluruh ubin berganti bentuk. Menandai
+    // per ubin di sini berarti memindai apa yang baru saja ditulis untuk tahu
+    // apa yang berubah — memindai dua kali untuk jawaban yang sudah pasti.
+    for (int index = 0; index < TileCount(); ++index) {
+        BumpTile(index);
+    }
     const int w = SamplesX();
     for (int ty = 0; ty < desc_.tilesY; ++ty) {
         for (int tx = 0; tx < desc_.tilesX; ++tx) {
@@ -331,7 +360,15 @@ void Terrain::SetByteAt(int layer, int x, int y, uint8_t value) {
         const int perSide = BlocksPerSide();
         CaptureByteBlock(layer, tileIndex, (ly / kBlockSize) * perSide + (lx / kBlockSize));
     }
-    tile.bytes[static_cast<std::size_t>(ly * desc_.tileSamples + lx)] = value;
+    uint8_t& slot = tile.bytes[static_cast<std::size_t>(ly * desc_.tileSamples + lx)];
+    const bool changed = slot != value;
+    slot = value;
+    // **Hanya lubang, bukan bobot layer.** Lubang membuang quad, jadi ia bagian
+    // bentuk; bobot layer hanya mengganti warnanya. Menaikkan revisi untuk cat
+    // berarti terrain empat kilometer dibangun ulang setiap sapuan kuas.
+    if (changed && layer == kHoleChannel) {
+        BumpTile(tileIndex);
+    }
 }
 
 void Terrain::ReadBytes(int layer, std::vector<uint8_t>& out) const {
@@ -628,6 +665,7 @@ void Terrain::ClearHoles() {
         if (holes_[static_cast<std::size_t>(index)] == nullptr) {
             continue;
         }
+        BumpTile(index);
         const int tx = (index % desc_.tilesX) * desc_.tileSamples;
         const int ty = (index / desc_.tilesX) * desc_.tileSamples;
         for (int row = 0; row < desc_.tileSamples; ++row) {
@@ -656,6 +694,9 @@ void Terrain::ReadHoles(std::vector<uint8_t>& out) const {
 }
 
 void Terrain::WriteHoles(const uint8_t* holes) {
+    for (int index = 0; index < TileCount(); ++index) {
+        BumpTile(index);
+    }
     if (holes == nullptr) {
         return;
     }
@@ -721,6 +762,11 @@ void Terrain::EndStroke() {
 
 void Terrain::SwapStroke(Stroke& stroke) {
     for (BlockImage& record : stroke.blocks) {
+        // Undo mengubah bentuk sama nyatanya dengan goresan yang dibatalkannya.
+        // Yang lupa menaikkannya di sini menghasilkan Ctrl+Z yang membetulkan
+        // datanya sambil meninggalkan layar menggambar bentuk yang sudah tidak
+        // ada — bug yang tampak seperti "undo tidak bekerja".
+        BumpTile(record.tile);
         Tile& tile = MaterializeTile(record.tile);
         const int perSide = BlocksPerSide();
         const int bx = (record.block % perSide) * kBlockSize;
@@ -735,6 +781,9 @@ void Terrain::SwapStroke(Stroke& stroke) {
     }
 
     for (ByteBlockImage& record : stroke.byteBlocks) {
+        if (record.layer == kHoleChannel) {
+            BumpTile(record.tile);
+        }
         ByteTile& tile = MaterializeByteTile(record.layer, record.tile);
         const int perSide = BlocksPerSide();
         const int bx = (record.block % perSide) * kBlockSize;
