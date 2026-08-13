@@ -31,6 +31,9 @@ sim_add_library(Render
         src/StubRenderer.cpp
         src/VulkanMaterialPreview.cpp
         src/ThumbnailCache.cpp
+        src/VolumeTexture.cpp
+        src/VolumeResource.cpp
+        src/VolumePass.cpp
     PUBLIC_DEPS
         Sim::Core
     # PRIVATE: header publik Render (IViewportRenderer, Types) sengaja bebas
@@ -75,7 +78,10 @@ sim_compile_shaders(SimShadersGrid
         ${CMAKE_SOURCE_DIR}/Shaders/sky_aerial.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/sky_aerial_apply.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/sky_clouds.frag.slang
-        ${CMAKE_SOURCE_DIR}/Shaders/sky_hdri.frag.slang)
+        ${CMAKE_SOURCE_DIR}/Shaders/sky_hdri.frag.slang
+        # Raymarch volume .vdb. Acuan CPU-nya di Code/Volume/src/VolumeRaymarch.cpp,
+        # dan rumus keduanya harus sama persis.
+        ${CMAKE_SOURCE_DIR}/Shaders/volume_raymarch.frag.slang)
 # openpbr.slang sengaja tidak ada di daftar ini. Ia modul pustaka tanpa entry
 # point — yang mengompilasinya adalah `AssembleMaterialModule`, yang menanamnya
 # ke dalam modul material lalu menyerahkannya ke ShaderCache. Menambahkannya di

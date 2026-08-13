@@ -20,6 +20,9 @@ sim_add_library(Assets
     # `stb_image_resize2` untuk menskala thumbnail, yang bukan urusan I/O.
     PRIVATE_DEPS
         Sim::ImageIO
+        # Kapabilitas volume dibaca dari sini, dengan alasan yang sama seperti
+        # kapabilitas gambar: daftar formatnya dibangkitkan, bukan dipatok.
+        Sim::Volume
         Stb::Impl
         Fbx::Fbx
         Cgltf::Cgltf

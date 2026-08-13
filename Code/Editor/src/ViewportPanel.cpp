@@ -1,3 +1,4 @@
+#include "Sim/Volume/SdfBake.h"
 #include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Core/Log.h"
 #include "Sim/Core/Math.h"
@@ -25,6 +26,70 @@
 
 namespace sim::editor {
 namespace {
+/// Langit pertama yang ditemukan di dunia, atau nullptr.
+///
+/// **Yang pertama, bukan yang digabung.** Dua entity langit di satu level adalah
+/// kesalahan penyusunan, dan menggabungkan keduanya menghasilkan langit yang
+/// bukan salah satu dari yang diminta — lebih baik satu yang menang dan yang
+/// lain terlihat tidak berpengaruh, karena itu yang mengarahkan orang mencari
+/// duplikatnya.
+const scene::SkyComponent* FindSky(const scene::World& world) {
+    for (const auto raw : world.Registry().view<scene::SkyComponent>()) {
+        return world.TryGet<scene::SkyComponent>(static_cast<scene::Entity>(raw));
+    }
+    return nullptr;
+}
+
+/// Warna kotak batas volume. Sengaja beda dari warna seleksi dan grid: yang
+/// digambar di sini bukan sesuatu yang bisa dipilih, melainkan jangkauan sebuah
+/// efek — dan menyamakan warnanya membuat orang mencoba mengkliknya.
+constexpr Vec4 kVolumeBoundsColor{0.35f, 0.75f, 1.0f, 0.55f};
+
+/// Memuat volume `.vdb` ketika jalur atau nama gridnya berubah.
+///
+/// **Tidak melakukan apa-apa bila keduanya tidak berubah.** Berkas volume
+/// berukuran puluhan megabyte dan pemadatannya berjalan di thread ini; memuatnya
+/// ulang tiap frame akan menghentikan editor sepenuhnya.
+///
+/// Revisi dinaikkan setiap muat berhasil. Renderer memakainya untuk memutuskan
+/// unggahan ulang — membandingkan pointer saja tidak cukup, karena grid kedua
+/// bisa mendarat di alamat yang baru saja dibebaskan grid pertama.
+void LoadVolumeIfChanged(EditorContext& context) {
+    static std::string loadedPath;
+    static std::string loadedGrid;
+    auto& volume = context.volume;
+
+    if (volume.path == loadedPath && volume.gridName == loadedGrid) {
+        return;
+    }
+    loadedPath = volume.path;
+    loadedGrid = volume.gridName;
+
+    volume.grid.reset();
+    if (volume.path.empty()) {
+        volume.status.clear();
+        return;
+    }
+
+    auto grid = std::make_shared<VolumeGrid>();
+    sim::volume::VdbLoadSettings settings;
+    settings.gridName = volume.gridName;
+    const sim::volume::SdfBakeResult result =
+        sim::volume::LoadVdb(std::filesystem::path(volume.path), settings, *grid);
+    if (!result.ok) {
+        volume.status = result.error;
+        SIM_WARN("Editor", "volume: {}", result.error);
+        return;
+    }
+
+    volume.grid = std::move(grid);
+    ++volume.revision;
+    volume.status = "grid '" + volume.grid->name + "', " + std::to_string(volume.grid->sizeX) +
+                    "x" + std::to_string(volume.grid->sizeY) + "x" +
+                    std::to_string(volume.grid->sizeZ);
+    SIM_INFO("Editor", "volume loaded from {}: {}", volume.path, volume.status);
+}
+
 
 constexpr float kLookSensitivity = 0.005f;
 constexpr float kFlySpeedMin = 0.05f;
@@ -151,15 +216,50 @@ public:
         desc.showGrid = showGrid_;
         desc.gi = context.gi;
         desc.post = context.post;
-        desc.skyEnabled = context.sky.enabled;
-        desc.skySource = context.sky.source;
-        desc.hdriPath = context.sky.hdriPath;
-        desc.hdriRotation = context.sky.hdriRotation;
-        desc.hdriIntensity = context.sky.hdriIntensity;
-        desc.skyIntensity = context.sky.intensity;
-        desc.cameraHeightKm = context.sky.cameraHeightKm;
-        desc.aerialPerspective = context.sky.aerialPerspective;
-        desc.aerialHaze = context.sky.aerialHaze;
+        // **Langit datang dari scene, bukan dari sakelar viewport.** Level tanpa
+        // entity ber-SkyComponent tidak menggambar langit sama sekali — itu yang
+        // membuat adegan interior berhenti membayar empat pass LUT untuk sesuatu
+        // yang tidak pernah terlihat. Prefab "Sky Dome" yang menyalakannya.
+        const scene::SkyComponent* sky = FindSky(*context.world);
+        desc.skyEnabled = sky != nullptr;
+        if (sky != nullptr) {
+            desc.skySource = sky->source == scene::SkySourceKind::HdrMap
+                                 ? render::SkySource::HdrMap
+                                 : render::SkySource::Atmosphere;
+            desc.skyIntensity = sky->intensity;
+            desc.cameraHeightKm = sky->cameraHeightKm;
+            desc.aerialPerspective = sky->aerialPerspective;
+            desc.aerialHaze = sky->aerialHaze;
+            desc.hdriPath = sky->hdriPath;
+            desc.hdriRotation = sky->hdriRotation;
+            desc.hdriIntensity = sky->hdriIntensity;
+        }
+
+        // Volume dimuat di sini, bukan di renderer: OpenVDB adalah pengondisi
+        // aset. `LoadVolumeIfChanged` tidak melakukan apa-apa bila jalur dan
+        // nama gridnya tidak berubah — memuat ulang berkas puluhan megabyte
+        // tiap frame akan menghentikan editor.
+        LoadVolumeIfChanged(context);
+        if (context.volume.grid != nullptr) {
+            // Batas volume digambar sebagai wireframe. Kotaknya dihitung
+            // `VolumeGrid::WorldBounds` — definisi yang sama persis yang dipakai
+            // raymarch-nya, jadi kotak ini tidak bisa berbohong tentang di mana
+            // asapnya berhenti.
+            Vec3 boxMin;
+            Vec3 boxMax;
+            context.volume.grid->WorldBounds(context.volume.position, context.volume.scale,
+                                             boxMin, boxMax);
+            sceneView_.AddWireBox(boxMin, boxMax, kVolumeBoundsColor);
+
+            desc.volume.grid = context.volume.grid.get();
+            desc.volume.revision = context.volume.revision;
+            desc.volume.position = context.volume.position;
+            desc.volume.scale = context.volume.scale;
+            desc.volume.extinction = context.volume.extinction;
+            desc.volume.stepSize = context.volume.stepSize;
+            desc.volume.scatterAlbedo = context.volume.albedo;
+            desc.volume.incomingLight = Vec3(context.volume.lightIntensity);
+        }
         desc.clouds = context.clouds;
         camera_.ApplyTo(desc.camera);
         desc.camera.orthographic = orthographic_;

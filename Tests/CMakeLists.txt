@@ -26,6 +26,19 @@ target_compile_definitions(SimImageIOTests
     PRIVATE SIM_IMAGE_DIR="${CMAKE_SOURCE_DIR}/Resources/Images"
     PRIVATE SIM_CODE_DIR="${CMAKE_SOURCE_DIR}/Code")
 
+# Volume: bake mesh menjadi SDF. Nilainya diadu dengan jarak analitik, bukan
+# sekadar "menghasilkan volume" — grid yang dimensinya benar tapi jaraknya
+# meleset menghasilkan sphere tracing yang menembus dinding.
+sim_add_test(SimVolumeTests
+    SOURCES
+        VolumeTests.cpp
+    DEPS
+        Sim::Volume)
+
+# Fixture .vdb dibaca dari folder sumber, alasan yang sama dengan SIM_MESH_DIR.
+target_compile_definitions(SimVolumeTests
+    PRIVATE SIM_VOLUME_DIR="${CMAKE_SOURCE_DIR}/Resources/Volumes")
+
 sim_add_test(SimEditorTests
     SOURCES
         EditorTests.cpp

@@ -85,6 +85,15 @@ public:
                const SkinnedPreview* animation = nullptr,
                const assets::AssetDatabase* builtinAssets = nullptr);
 
+    /// Menambahkan kotak wireframe sejajar sumbu, sesudah `Build`.
+    ///
+    /// Terbuka karena tidak semua yang perlu digambar berasal dari dunia:
+    /// batas volume `.vdb` datang dari pengaturan viewport, bukan dari sebuah
+    /// entity. `Build` mengosongkan daftarnya, jadi ini dipanggil setelahnya —
+    /// dan `Scene()` menyusun span-nya saat itu juga, jadi menambah di antara
+    /// keduanya aman.
+    void AddWireBox(const Vec3& boxMin, const Vec3& boxMax, const Vec4& color);
+
 private:
     void AppendLight(const scene::LightComponent& light, const Mat4& matrix);
     void AppendSkinPalette(uint32_t boneCount, std::span<const Mat4> palette,

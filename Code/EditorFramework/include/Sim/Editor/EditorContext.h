@@ -7,6 +7,7 @@
 #include "Sim/Scene/World.h"
 
 #include <functional>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -133,6 +134,32 @@ struct EditorContext {
     /// Awan volumetrik. Terpisah dari `sky` karena biayanya berbeda satu orde,
     /// dan karena itu sakelarnya perlu berdiri sendiri.
     render::CloudSettings clouds;
+
+    /// Volume `.vdb` — asap, api, awan yang datang sebagai berkas.
+    ///
+    /// **Gridnya dimuat di sisi editor, bukan di renderer.** OpenVDB adalah
+    /// pengondisi aset; renderer hanya menerima float yang sudah jadi. Aturan
+    /// yang sama yang menjaga OpenImageIO di luar jalur runtime.
+    struct Volume {
+        /// Berkas yang dimuat. Kosong berarti tidak ada volume yang digambar.
+        std::string path;
+        /// Grid di dalam berkas. Kosong berarti grid float pertama.
+        std::string gridName;
+
+        /// Isi yang sudah dimuat, dan revisinya. Renderer mengunggah ulang
+        /// hanya ketika revisinya berubah.
+        std::shared_ptr<VolumeGrid> grid;
+        uint64_t revision = 0;
+        /// Pesan dari pemuatan terakhir; ditampilkan panel apa adanya.
+        std::string status;
+
+        Vec3 position{0.0f, 1.0f, 0.0f};
+        float scale = 1.0f;
+        float extinction = 4.0f;
+        float stepSize = 0.05f;
+        Vec3 albedo{0.8f, 0.8f, 0.85f};
+        float lightIntensity = 3.0f;
+    } volume;
 
     /// Waktu-hari: preset kurva, jam siklus, dan tempat mataharinya.
     ///

@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 3,
+  "entities": [
+    {
+      "guid": "00000000-0000-4000-8000-000000000006",
+      "components": {
+        "Name": {
+          "name": "Spot Light"
+        },
+        "Transform": {
+          "position": [
+            0,
+            4,
+            0
+          ],
+          "rotation": [
+            0.707,
+            -0.707,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "Light": {
+          "type": "Spot",
+          "color": [
+            1.0,
+            0.95,
+            0.85
+          ],
+          "intensity": 40.0,
+          "range": 20.0,
+          "sourceRadius": 0.05,
+          "innerAngle": 0.35,
+          "outerAngle": 0.6,
+          "castShadows": true
+        }
+      }
+    }
+  ]
+}

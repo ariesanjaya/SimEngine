@@ -37,6 +37,9 @@ option(SIM_WITH_TIFF        "Impor TIFF lewat libtiff"                  ON)
 # OIIO opsional dan didahulukan: bila ada ia menang untuk setiap format yang
 # diklaimnya. Yang tidak menyediakannya tidak kehilangan apa pun kecuali DDS.
 option(SIM_WITH_OIIO        "Backend OpenImageIO bila tersedia"          ON)
+# OpenVDB: bake mesh menjadi SDF untuk clipmap GI, dan nanti impor .vdb.
+# **Pengondisi aset, bukan pustaka runtime** — aturan yang sama dengan OIIO.
+option(SIM_WITH_OPENVDB     "Bake SDF dan impor volume lewat OpenVDB"   ON)
 option(SIM_WERROR           "Perlakukan warning sebagai error"          OFF)
 option(SIM_STRICT_WARNINGS  "Aktifkan -Wconversion dan kawan-kawannya"  OFF)
 
@@ -58,6 +61,10 @@ add_subdirectory(Code/Core)
 # sebelum Assets, Render, Terrain, dan Vegetation karena keempatnya memakainya —
 # alias `Sim::ImageIO` harus sudah ada saat mereka menyebutnya.
 add_subdirectory(Code/ImageIO)
+# Volume: bake mesh menjadi SDF dan impor .vdb lewat OpenVDB (V1, V2).
+# Pengondisi aset — Render dan Assets memakai hasilnya, bukan pustakanya, jadi
+# ia didaftarkan sebelum keduanya.
+add_subdirectory(Code/Volume)
 add_subdirectory(Code/Reflect)
 add_subdirectory(Code/Scene)
 add_subdirectory(Code/Assets)

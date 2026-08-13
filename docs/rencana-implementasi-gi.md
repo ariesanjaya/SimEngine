@@ -69,7 +69,7 @@ Tiap milestone punya kriteria selesai yang bisa diuji. Jangan lanjut sebelum kri
 **Selesai kalau:** bisa menampilkan heatmap jumlah langkah SDF per pixel. Ini alat diagnostik yang paling sering kamu pakai selama 3 bulan ke depan.
 
 ### M1 — Global SDF clipmap (±3 minggu)
-- Bake SDF per-mesh offline → brick sparse (dipakai saat komposit, bukan saat trace)
+- ✅ Bake SDF per-mesh offline lewat OpenVDB → `sim::SdfGrid` padat per mesh, dikomposit lewat `BakedSceneField`. Opsional: tanpa OpenVDB, clipmap mundur ke `BoxSceneField`. Lihat [DEPENDENCIES.md](DEPENDENCIES.md)
 - 3 kaskade 128³ R8_UNORM, voxel 10 cm / 40 cm / 1,6 m → jangkauan ±102 m
 - Toroidal scroll: hanya irisan tepi yang ditulis ulang saat kamera bergerak
 - Komposit objek statis + dinamis ke kaskade

@@ -3,6 +3,7 @@
 #include "DepthPyramid.h"
 #include "PostProcess.h"
 #include "SkyAtmosphere.h"
+#include "VolumePass.h"
 #include "FrameGraphExecutor.h"
 #include "ProbeField.h"
 #include "SdfClipmapResource.h"
@@ -500,6 +501,9 @@ public:
             // menuliskannya lagi tiap frame.
             sky_.CreateClouds(shaderDirectory_, PostProcess::kSceneFormat);
         }
+        // Pass volume. Pipeline-nya dibuat sekali; volumenya sendiri diunggah
+        // belakangan, ketika ada `ViewportDesc::volume` yang membawanya.
+        volumePass_.Create(device_, shaderDirectory_, PostProcess::kSceneFormat);
         CreateRadianceCache();
         if (probes_.Create(device_, shaderDirectory_, shadowSetLayout_)) {
             probes_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(), kNormalFormat);
@@ -754,6 +758,24 @@ public:
             sky_.SetHdri(std::filesystem::path(desc.hdriPath));
         }
 
+        // Volume diunggah hanya ketika revisinya berubah. Ia berharga puluhan
+        // megabyte dan menyubmit sendiri lalu menunggu queue idle — jalur yang
+        // benar untuk sekali muat dan salah untuk apa pun yang berulang tiap
+        // frame. Membandingkan pointer saja tidak cukup: volume kedua bisa
+        // mendarat di alamat yang baru saja dibebaskan volume pertama.
+        if (volumePass_.IsValid()) {
+            if (desc.volume.grid == nullptr) {
+                if (volumeUploaded_) {
+                    volumePass_.ClearVolume();
+                    volumeUploaded_ = false;
+                }
+            } else if (!volumeUploaded_ || desc.volume.revision != uploadedVolumeRevision_) {
+                volumeUploaded_ = volumePass_.SetVolume(*desc.volume.grid,
+                                                        VolumeTextureFormat::R8Unorm);
+                uploadedVolumeRevision_ = desc.volume.revision;
+            }
+        }
+
         UpdateClusters(desc, scene, aspect, slot);
         UpdateShadowUniforms(desc, viewProj, slot);
         BuildGraph(desc);
@@ -923,6 +945,15 @@ public:
                 sky_.RecordClouds(command, invViewProj, desc.camera.position,
                                   desc.cameraHeightKm, sunDirection_, sunRadiance_,
                                   desc.skyIntensity, desc.clouds, cloudTimeSeconds_);
+                vkCmdEndRendering(command);
+            };
+        }
+
+        if (volumeId_ != kInvalidPass) {
+            recorders[volumeId_] = [&](VkCommandBuffer command) {
+                BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/false,
+                               /*writeColor=*/true, /*useDepth=*/false);
+                volumePass_.RecordDraw(command, invViewProj, desc.camera.position, desc.volume);
                 vkCmdEndRendering(command);
             };
         }
@@ -1178,6 +1209,20 @@ private:
             cloudId_ = graph_.AddPass("clouds");
             graph_.Read(cloudId_, depthId_, Access::ShaderRead);
             graph_.Write(cloudId_, sceneId_, Access::ColorWrite);
+        }
+
+        // Volume `.vdb`, sesudah seluruh geometri dengan alasan yang sama seperti
+        // awan: raymarch-nya berhenti di permukaan terdekat, dan permukaan itu
+        // baru diketahui setelah depth selesai ditulis. Sebelum kabut aerial,
+        // karena asapnya berada **di dalam** udara yang membiru di kejauhan —
+        // bukan di depannya.
+        volumeId_ = kInvalidPass;
+        if (desc.volume.grid != nullptr && volumePass_.IsValid() && volumePass_.HasVolume()) {
+            volumeId_ = graph_.AddPass("volume");
+            graph_.Read(volumeId_, depthId_, Access::ShaderRead);
+            graph_.Write(volumeId_, sceneId_, Access::ColorWrite);
+            // Teksturnya diurus `VolumePass` sendiri, bukan dilacak graph.
+            graph_.SetSideEffect(volumeId_);
         }
 
         // Kabut atmosferik, sesudah seluruh geometri dan sebelum bloom.
@@ -3222,6 +3267,11 @@ private:
     DepthPyramid hiz_;
     PostProcess post_;
     SkyAtmosphere sky_;
+    VolumePass volumePass_;
+    /// Revisi volume yang sedang terunggah. Unggahannya berharga puluhan
+    /// megabyte, jadi ia hanya diulang ketika angka ini tidak lagi cocok.
+    uint64_t uploadedVolumeRevision_ = 0;
+    bool volumeUploaded_ = false;
     /// Langkah waktu frame ini, dipakai adaptasi eksposur.
     float deltaSeconds_ = 0.0f;
     /// Jam angin awan. Berakumulasi dari langkah waktu, bukan dibaca dari jam
@@ -3272,6 +3322,7 @@ private:
     PassId skyId_ = kInvalidPass;
     PassId cloudId_ = kInvalidPass;
     PassId aerialId_ = kInvalidPass;
+    PassId volumeId_ = kInvalidPass;
     PassId bloomId_ = kInvalidPass;
     PassId meterId_ = kInvalidPass;
     PassId tonemapId_ = kInvalidPass;

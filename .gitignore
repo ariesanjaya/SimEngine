@@ -60,3 +60,4 @@ Testing/
 # mesin. Cara menyediakannya ada di docs/DEPENDENCIES.md.
 Third-Party/OpenUSD/
 Third-Party/OpenImageIO/
+Third-Party/OpenVDB/

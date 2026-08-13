@@ -128,6 +128,27 @@ private:
 
     void InstallCrashHandler();
     void DrawProjectManager();
+    /// Layar pemilih level, digambar sesudah project dipilih dan sebelum shell.
+    void DrawLevelPicker();
+    /// Membuat level baru bernama `name`, langsung menuliskannya ke folder
+    /// Levels. **Ditulis, bukan hanya dibangun di memori** — level yang hanya
+    /// hidup di RAM sampai seseorang menekan Save adalah level yang hilang
+    /// begitu editor ditutup.
+    /// Menempatkan satu template prefab bawaan ke dalam dunia.
+    ///
+    /// Mengembalikan entity akarnya, atau `kNullEntity` bila templatenya tidak
+    /// ada — level contoh yang kehilangan satu bagian lebih baik daripada
+    /// editor yang menolak membuka project karena sebuah berkas Resources
+    /// hilang.
+    scene::Entity PlaceTemplate(const char* group, const char* name, scene::Entity parent,
+                                const char* renameTo = nullptr);
+
+    bool CreateLevelFile(const std::string& name);
+    /// Mencatat level yang barusan dibuka ke berkas project.
+    ///
+    /// Dipakai layar pemilih sebagai sorotan "terakhir dibuka" — **bukan** untuk
+    /// memuatnya otomatis di sesi berikutnya.
+    void RememberStartupLevel(const std::filesystem::path& path);
     void PickFolder(const std::filesystem::path& start,
                     std::function<void(const std::filesystem::path&)> accept);
     /// Folder isi project yang sedang dibuka. Kosong bila belum ada project.
@@ -169,6 +190,16 @@ private:
     std::vector<std::string> clipboard_;
 
     enum class Dialog { None, SaveAs, Open };
+
+    /// True antara "project terpilih" dan "level terpilih".
+    ///
+    /// **Levelnya dipilih tiap kali editor dibuka**, bukan dimuat diam-diam dari
+    /// `startupLevel`. Project yang berisi banyak level tidak punya satu level
+    /// yang "benar", dan editor yang selalu membuka yang terakhir memaksa orang
+    /// menutup lalu membuka lagi hanya untuk berpindah.
+    bool awaitingLevelChoice_ = false;
+    /// Nama untuk level baru, dipegang layar pemilih.
+    std::string newLevelName_;
 
     void ApplyTimeOfDay(float deltaSeconds);
     void DrawLevelDialogs();

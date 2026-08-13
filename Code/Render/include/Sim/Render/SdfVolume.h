@@ -4,6 +4,8 @@
 #include "Sim/Render/TraceBackend.h"
 #include "Sim/Render/Types.h"
 
+#include "Sim/Core/SdfGrid.h"
+
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -87,6 +89,75 @@ private:
     float boxBand_ = 0.0f;
 };
 
+/// Medan jarak yang memakai SDF hasil bake bila ada, dan mundur ke kotak
+/// berorientasi bila tidak.
+///
+/// **Inilah yang dituntut M1 di docs/rencana-implementasi-gi.md** — "bake SDF
+/// per-mesh offline" — dan bedanya dengan `BoxSceneField` bukan kerapian.
+/// Untuk bola berjari-jari 1, jarak ke kotak pembungkusnya di arah diagonal
+/// menyebut 0 padahal permukaannya 0,73 jauhnya; sphere tracing yang percaya
+/// angka nol berhenti melangkah dan menggambar dinding yang tidak ada.
+///
+/// **Campuran, bukan penggantian.** Adegan nyata berisi mesh yang sudah dibake
+/// dan mesh yang belum — kubus satuan bawaan, mesh yang gagal dibake, mesh yang
+/// terlalu besar untuk dibake pada voxel sehalus itu. Yang punya grid memakai
+/// grid; sisanya tetap memakai kotak, lewat `BoxSceneField` yang sama persis.
+/// Yang dilaporkan tetap satu medan jarak.
+class BakedSceneField {
+public:
+    /// `grids[i]` boleh nullptr — instance itu jatuh ke jalur kotak. Panjang
+    /// `grids` boleh lebih pendek daripada `meshes`; sisanya dianggap nullptr.
+    ///
+    /// Grid diacu, tidak disalin: ia dibake sekali dan dipakai ribuan kali,
+    /// dan menyalinnya per frame akan menghapus seluruh untung bake-nya.
+    /// Pemanggil menjaga grid tetap hidup selama medan ini dipakai.
+    void Build(std::span<const MeshInstance> meshes, std::span<const SdfGrid* const> grids);
+
+    /// Jarak pada satu titik. Bentuk yang mudah dibaca, dipakai test.
+    float Distance(const Vec3& world) const;
+
+    void BeginBox(const Vec3& origin, const Vec3& rowStep, const Vec3& outerStep,
+                  const Vec3& planeStep, uint32_t count, float band);
+    void Row(uint32_t outer, uint32_t plane, float* out) const;
+
+    bool Empty() const { return boxes_.Empty() && entries_.empty(); }
+    /// Berapa instance yang benar-benar memakai SDF hasil bake. Dipakai test dan
+    /// log: "1 dari 40 mesh ter-bake" adalah keadaan yang layak diketahui.
+    std::size_t BakedCount() const { return entries_.size(); }
+
+private:
+    struct Entry {
+        /// Dunia → ruang lokal mesh. **Bukan ruang kubus satuan** seperti
+        /// `BoxSceneField`: grid dibake dari vertex apa adanya, jadi ruangnya
+        /// ruang vertex itu.
+        Mat4 inverse{1.0f};
+        float scale = 1.0f;
+        float anisotropy = 1.0f;
+        Vec3 boundsMin{0.0f};
+        Vec3 boundsMax{0.0f};
+        const SdfGrid* grid = nullptr;
+    };
+
+    struct Local {
+        Vec3 origin{0.0f};
+        Vec3 rowStep{0.0f};
+        Vec3 outerStep{0.0f};
+        Vec3 planeStep{0.0f};
+    };
+
+    /// Instance tanpa grid. Bukan disalin ulang logikanya — `Row` memanggil
+    /// medan ini lebih dulu, lalu menyisipkan sumbangan grid dengan `min`.
+    BoxSceneField boxes_;
+    std::vector<Entry> entries_;
+    std::vector<Local> locals_;
+    Vec3 boxOrigin_{0.0f};
+    Vec3 boxRowStep_{0.0f};
+    Vec3 boxOuterStep_{0.0f};
+    Vec3 boxPlaneStep_{0.0f};
+    uint32_t boxCount_ = 0;
+    float boxBand_ = 0.0f;
+};
+
 /// Isi clipmap SDF di sisi CPU.
 ///
 /// **Ini acuan kebenaran, bukan yang dipakai saat menggambar.** Yang menggambar
@@ -110,9 +181,11 @@ public:
     /// Hanya wilayah itu — bukan seluruh volume. Itulah yang membuat penghematan
     /// toroidal benar-benar terwujud alih-alih hanya tercatat di komentar.
     void Fill(const SdfScrollResult& scroll, BoxSceneField& field);
+    void Fill(const SdfScrollResult& scroll, BakedSceneField& field);
     void Fill(const SdfScrollResult& scroll, const DistanceField& field);
     /// Mengisi seluruh isi setiap kaskade. Dipakai saat pertama kali dan di test.
     void FillAll(BoxSceneField& field);
+    void FillAll(BakedSceneField& field);
     void FillAll(const DistanceField& field);
 
     /// Nilai texel mentah 0..255.

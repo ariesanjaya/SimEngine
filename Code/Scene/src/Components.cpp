@@ -155,6 +155,32 @@ void RegisterCoreComponents() {
             .Label("Cast Shadows");
         components.Register<LightComponent>();
 
+        types.Type<SkyComponent>("Sky")
+            .Field<&SkyComponent::source>("source")
+            .EnumNames({"Atmosphere", "HDR Map"})
+            .Tooltip("Atmosfer dihitung dari fisika; HDR Map satu cuplikan tekstur")
+            .Field<&SkyComponent::intensity>("intensity")
+            .Label("Sky Gain")
+            .Range(0.0f, 100.0f)
+            .Field<&SkyComponent::cameraHeightKm>("cameraHeightKm")
+            .Label("Camera Height (km)")
+            .Range(0.0f, 60.0f)
+            .Field<&SkyComponent::aerialPerspective>("aerialPerspective")
+            .Label("Aerial Perspective")
+            .Field<&SkyComponent::aerialHaze>("aerialHaze")
+            .Label("Haze")
+            .Range(0.0f, 40.0f)
+            .Field<&SkyComponent::hdriPath>("hdriPath")
+            .Label("HDR File")
+            .Field<&SkyComponent::hdriRotation>("hdriRotation")
+            .Label("HDR Rotation")
+            .Degrees()
+            .Range(-kPi, kPi)
+            .Field<&SkyComponent::hdriIntensity>("hdriIntensity")
+            .Label("HDR Gain")
+            .Range(0.0f, 10.0f);
+        components.Register<SkyComponent>();
+
         types.Type<CameraComponent>("Camera")
             .Field<&CameraComponent::fovYRadians>("fovY")
             .Label("Field of View")

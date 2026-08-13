@@ -12,6 +12,8 @@
 #include "Sim/Editor/Selection.h"
 #include "Sim/Editor/Widgets.h"
 
+#include "Sim/Scene/World.h"
+
 #include <imgui.h>
 
 #include <algorithm>
@@ -22,6 +24,17 @@
 
 namespace sim::editor {
 namespace {
+/// Langit pertama di dunia, atau nullptr. Salinan sengaja dari yang ada di
+/// ViewportPanel: keduanya cuma menjawab "apakah level ini punya langit", dan
+/// menaruhnya di header bersama hanya untuk dua baris ini akan menambah
+/// permukaan publik untuk hal yang tidak dipakai siapa pun di luar keduanya.
+const scene::SkyComponent* FindSkyComponent(const scene::World& world) {
+    for (const auto raw : world.Registry().view<scene::SkyComponent>()) {
+        return world.TryGet<scene::SkyComponent>(static_cast<scene::Entity>(raw));
+    }
+    return nullptr;
+}
+
 
 class StatisticsPanel final : public Panel {
 public:
@@ -83,53 +96,76 @@ public:
 
         // --- Langit (E8.8) ---
         ImGui::Separator();
-        ImGui::Checkbox("Sky", &context.sky.enabled);
-        if (context.sky.enabled) {
-            // Pemilih sumber lebih dulu: sisa pengaturan di bawahnya berbeda
-            // untuk keduanya, dan menampilkan slider yang tidak berpengaruh apa
-            // pun adalah cara tercepat membuat orang menyimpulkan yang salah
-            // tentang apa yang dikendalikannya.
-            const char* sources[] = {"Atmosphere", "HDRI map"};
-            int source = static_cast<int>(context.sky.source);
+        // Langit tidak lagi punya sakelar di sini: yang menyalakannya adalah
+        // entity ber-komponen Sky di dalam level, dan yang menyuntingnya adalah
+        // Inspector lewat refleksi seperti komponen lain. Panel ini hanya
+        // mengatakan keadaannya — dua tempat menyunting satu hal adalah dua
+        // tempat yang suatu saat tidak sepakat.
+        {
+            const scene::SkyComponent* sky =
+                context.world != nullptr ? FindSkyComponent(*context.world) : nullptr;
+            if (sky == nullptr) {
+                ImGui::TextDisabled("No sky in this level.");
+                ImGui::TextDisabled("Place a Sky Dome prefab to add one.");
+            } else {
+                ImGui::Text("Sky: %s", sky->source == scene::SkySourceKind::HdrMap
+                                           ? "HDR map"
+                                           : "atmosphere");
+                ImGui::TextDisabled("Select the Sky Dome entity to edit it.");
+            }
+        }
+
+        static bool volumeEnabled = false;
+        volumeEnabled = volumeEnabled || !context.volume.path.empty();
+
+        // --- Volume .vdb (V2) ---
+        //
+        // Di panel yang sama dengan langit karena ia pass adegan yang sama
+        // sifatnya: biayanya muncul sebagai barisnya sendiri di tabel GPU di
+        // atas, dan yang tidak bisa dimatikan tidak bisa diukur.
+        ImGui::Separator();
+        if (ImGui::Checkbox("Volume (.vdb)", &volumeEnabled)) {
+            if (!volumeEnabled) {
+                context.volume.path.clear();
+            }
+        }
+        if (volumeEnabled) {
+            context.volume.path.resize(512);
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 22.0f);
+            ImGui::InputText("VDB file", context.volume.path.data(), context.volume.path.size());
+            context.volume.path.resize(std::strlen(context.volume.path.c_str()));
+
+            context.volume.gridName.resize(128);
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
+            ImGui::InputText("Grid", context.volume.gridName.data(),
+                             context.volume.gridName.size());
+            context.volume.gridName.resize(std::strlen(context.volume.gridName.c_str()));
+            ImGui::SameLine();
+            ImGui::TextDisabled("(empty = first float grid)");
+
+            // Status pemuatan ditampilkan apa adanya. Berkas volume gagal dimuat
+            // karena banyak sebab yang bisa diperbaiki — nama grid yang salah,
+            // voxel tak seragam, terlalu besar — dan pesan yang disembunyikan
+            // membuat semuanya terlihat sama: "tidak muncul apa-apa".
+            if (!context.volume.status.empty()) {
+                ImGui::TextWrapped("%s", context.volume.status.c_str());
+            }
+
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
+            ImGui::DragFloat3("Position", &context.volume.position.x, 0.05f);
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
-            if (ImGui::Combo("Source", &source, sources, IM_ARRAYSIZE(sources))) {
-                context.sky.source = static_cast<render::SkySource>(source);
-            }
-
-            if (context.sky.source == render::SkySource::Atmosphere) {
-                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
-                ImGui::SliderFloat("Sky gain", &context.sky.intensity, 0.0f, 100.0f, "%.0f");
-            }
-
-            if (context.sky.source == render::SkySource::HdrMap) {
-                context.sky.hdriPath.resize(512);
-                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 22.0f);
-                if (ImGui::InputText("HDR file", context.sky.hdriPath.data(),
-                                     context.sky.hdriPath.size())) {
-                }
-                context.sky.hdriPath.resize(std::strlen(context.sky.hdriPath.c_str()));
-                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
-                ImGui::SliderAngle("Rotation", &context.sky.hdriRotation, -180.0f, 180.0f);
-                // Pengalinya sendiri, bukan "Sky gain": berkas HDR sudah berisi
-                // radiansi, jadi rentang yang bergunanya di sekitar satu — dua
-                // puluh kali lipat dari yang berguna untuk atmosfer Bruneton.
-                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
-                ImGui::SliderFloat("HDR gain", &context.sky.hdriIntensity, 0.0f, 10.0f, "%.2f");
-                // Yang dimatikan HDRI dikatakan, bukan disembunyikan diam-diam:
-                // sakelar yang hilang tanpa penjelasan terbaca sebagai editor
-                // yang rusak.
-                ImGui::TextDisabled("Aerial perspective and clouds are off in HDRI mode.");
-                ImGui::TextDisabled("Time-of-Day still drives shadows, not the sky.");
-            }
-
-            // Kabut atmosferik. Sakelarnya terpisah dari langit karena biayanya
-            // muncul sebagai pass tersendiri di tabel di atas — dan angka yang
-            // tidak bisa dimatikan adalah angka yang tidak bisa diukur.
-            ImGui::Checkbox("Aerial perspective", &context.sky.aerialPerspective);
-            if (context.sky.aerialPerspective) {
-                ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
-                ImGui::SliderFloat("Haze", &context.sky.aerialHaze, 0.0f, 40.0f, "%.1f×");
-            }
+            ImGui::SliderFloat("Size", &context.volume.scale, 0.1f, 20.0f, "%.2f×");
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+            ImGui::SliderFloat("Density", &context.volume.extinction, 0.0f, 40.0f, "%.1f");
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+            ImGui::SliderFloat("Light", &context.volume.lightIntensity, 0.0f, 20.0f, "%.1f");
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 14.0f);
+            ImGui::ColorEdit3("Scatter", &context.volume.albedo.x);
+            // Langkah lebih kecil = lebih halus dan lebih mahal. **Kecerahannya
+            // tidak ikut berubah** — integrasinya analitik di dalam langkah, dan
+            // itu yang diuji `SimVolumeTests`.
+            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+            ImGui::SliderFloat("Step", &context.volume.stepSize, 0.01f, 0.5f, "%.3f m");
         }
 
         // --- Post-process (E8.8) ---

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Sim/Core/Math.h"
+#include "Sim/Core/VolumeGrid.h"
 #include "Sim/Render/Bloom.h"
 #include "Sim/Render/TraceBackend.h"
 
@@ -196,6 +197,53 @@ struct Camera {
     }
 };
 
+/// Sebuah volume `.vdb` yang digambar di viewport.
+///
+/// **Gridnya sudah dimuat, bukan sebuah jalur berkas.** Yang membacanya dari
+/// disk adalah pemanggil lewat `Sim::Volume`; renderer tidak pernah menautkan
+/// OpenVDB, dengan aturan yang sama yang menjaga OpenImageIO di luar jalur
+/// runtime. Nullptr berarti tidak ada volume yang digambar.
+struct ViewportVolume {
+    const VolumeGrid* grid = nullptr;
+
+    /// Naik setiap kali isi `grid` berubah.
+    ///
+    /// **Pointer saja tidak cukup**: memuat volume kedua ke alamat yang baru
+    /// saja dibebaskan volume pertama menghasilkan pointer yang sama dengan isi
+    /// yang berbeda, dan yang tergambar adalah asap yang lama. Unggahannya
+    /// berharga puluhan megabyte, jadi ia hanya terjadi ketika angka ini
+    /// berubah.
+    uint64_t revision = 0;
+
+    /// Di mana titik asal grid berada di ruang dunia.
+    ///
+    /// **Tanpa rotasi.** Kotaknya sejajar sumbu — itu bentuk yang dibawa berkas
+    /// VDB sendiri, dan yang membuat raymarch bisa memakai satu uji slab.
+    /// Memutarnya menuntut ray dipindahkan ke ruang lokal lebih dulu, dan itu
+    /// belum ada.
+    Vec3 position{0.0f};
+    /// Pengali ukuran. Kerapatannya tidak ikut diskala: volume yang dibesarkan
+    /// dua kali punya jalur dua kali lebih panjang, jadi ia memang lebih pekat.
+    float scale = 1.0f;
+
+    /// Kepunahan per satuan kerapatan per meter.
+    float extinction = 1.0f;
+    /// Berapa bagian dari yang punah kembali sebagai cahaya.
+    Vec3 scatterAlbedo{0.8f};
+    /// Cahaya yang datang, sudah termasuk fase dan bayangannya.
+    ///
+    /// **Tetapan, bukan hasil hitungan.** Bayangan sendiri di dalam asap
+    /// menuntut raymarch kedua ke arah matahari; sampai itu ada, ini yang
+    /// dipakai — dan asap yang dihasilkannya rata, bukan berlekuk.
+    Vec3 incomingLight{1.0f};
+
+    /// Panjang satu langkah, meter.
+    float stepSize = 0.05f;
+    uint32_t maxSteps = 256;
+    /// Transmitansi di mana penjejakan berhenti.
+    float minTransmittance = 0.003f;
+};
+
 /// Pengaturan sekali-gambar untuk sebuah viewport.
 struct ViewportDesc {
     uint32_t width = 0;
@@ -244,6 +292,10 @@ struct ViewportDesc {
     /// Jalur berkas `.hdr` saat `skySource` adalah `HdrMap`. Hanya sah selama
     /// panggilan `Render` — renderer menyalin apa yang perlu disimpannya.
     std::string_view hdriPath;
+    /// Volume `.vdb` yang digambar di viewport ini. `grid` nullptr berarti tidak
+    /// ada — dan pass-nya tidak ikut didaftarkan sama sekali.
+    ViewportVolume volume;
+
     /// Putaran mendatar peta HDR, radian. Yang dipakai menyelaraskan matahari di
     /// dalam petanya dengan matahari yang menyinari adegan.
     float hdriRotation = 0.0f;

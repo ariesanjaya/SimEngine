@@ -106,6 +106,7 @@ Ditambahkan saat dibutuhkan, dicatat di sini supaya keputusannya tidak diulang:
 | **OpenUSD** | impor `.usd/.usda/.usdc/.usdz`. **Opsional dan dicari, tidak diunduh** — lihat di bawah |
 | **tinyexr** | impor OpenEXR untuk IBL (I2). **Opsional** (`SIM_WITH_EXR`), satu header lewat FetchContent |
 | **libtiff** | impor/ekspor heightmap TIFF 16/32-bit (I3). **Opsional** (`SIM_WITH_TIFF`), dicari di sistem |
+| **OpenVDB** | bake mesh → SDF untuk clipmap GI (V1), dan nanti impor `.vdb`. **Opsional** (`SIM_WITH_OPENVDB`), dicari, tidak dibangun — lihat di bawah |
 | **OpenImageIO** | backend gambar yang **didahulukan bila ada** — DDS, PSD utuh, metadata colorspace. **Opsional** (`SIM_WITH_OIIO`), dicari, tidak diunduh — lihat di bawah |
 | **PhysX 5** | fisika — sumber lokal di `/home/arie/SDK/PhysX-main` |
 | **OpenAL Soft** | audio — sumber lokal di `/home/arie/SDK/openal-soft-1.25.2` |
@@ -294,6 +295,56 @@ fixture dibaca lewat **setiap** backend yang mengaku bisa, lalu dituntut identik
 bit per bit. Itulah yang mengadu penyusunan ulang kanal EXR dan pembacaan strip
 TIFF yang ditulis di sini dengan implementasi yang sudah dipakai seluruh
 industri.
+
+### OpenVDB — dicari, tidak dibangun
+
+Dua kegunaan:
+
+1. **Bake mesh → SDF** untuk clipmap GI, melengkapi M1 di
+   [rencana-implementasi-gi.md](rencana-implementasi-gi.md) yang menyebut "bake
+   SDF per-mesh offline" tapi belum pernah ada.
+2. **Impor `.vdb`** — asap, api, dan awan dari Houdini atau EmberGen — menjadi
+   grid padat yang bisa diunggah sebagai tekstur 3D.
+
+**Opsional.** Yang melewatinya tetap membangun seluruh mesin; clipmap GI mundur
+ke `BoxSceneField` — jarak ke kotak berorientasi per mesh, yang memang sudah
+dipakai sampai sekarang. Bedanya nyata: untuk bola berjari-jari 1, kotak
+pembungkusnya menyebut titik di arah diagonal berjarak **negatif** padahal ia
+jelas di luar bolanya.
+
+**Pengondisi aset, bukan pustaka runtime** — aturan yang sama dengan
+OpenImageIO. Yang keluar dari `Sim::Volume` adalah `sim::SdfGrid`: float biasa
+di `Sim::Core`, tanpa satu pun tipe OpenVDB. `Sim::Render` memakai hasilnya dan
+tidak pernah menautkan pustakanya.
+
+Membangunnya sekali per mesin, lalu menyalin hasilnya ke dalam pohon:
+
+```bash
+sudo apt install libtbb-dev libblosc-dev libboost-iostreams-dev zlib1g-dev
+
+git clone --depth 1 --branch v13.0.0 https://github.com/AcademySoftwareFoundation/openvdb.git
+cmake -S openvdb -B vdb-build -DCMAKE_BUILD_TYPE=Release \
+      -DOPENVDB_BUILD_BINARIES=OFF -DOPENVDB_BUILD_PYTHON_MODULE=OFF \
+      -DOPENVDB_BUILD_UNITTESTS=OFF
+cmake --build vdb-build -j
+
+# Header sumber, lalu version.h hasil generate ditaruh **di sebelahnya**.
+D=Third-Party/OpenVDB
+mkdir -p "$D/include" "$D/lib"
+cp -a openvdb/openvdb/openvdb "$D/include/openvdb"
+cp -a vdb-build/openvdb/openvdb/openvdb/version.h "$D/include/openvdb/"
+find "$D/include" \( -name "*.cc" -o -name "CMakeLists.txt" \) -delete
+cp -a vdb-build/openvdb/openvdb/libopenvdb.so* "$D/lib/"
+```
+
+**`version.h` tidak ada di pohon sumber** — ia dihasilkan saat OpenVDB dibangun,
+dan `Types.h` meng-include-nya dengan tanda kutip. Salinan header dari pohon
+sumber saja karena itu gagal dikompilasi dengan pesan yang tidak menyebut
+sebabnya, jadi SimDeps memeriksa keberadaannya sendiri dan mengatakan apa yang
+kurang.
+
+Baris `OpenVDB 13.0.0 dipakai dari ...` pada keluaran CMake menandakan bake ikut
+terbangun.
 
 ## Yang sengaja tidak dipakai
 

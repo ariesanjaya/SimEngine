@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 3,
+  "entities": [
+    {
+      "guid": "00000000-0000-4000-8000-000000000008",
+      "components": {
+        "Name": {
+          "name": "Sky Dome"
+        },
+        "Transform": {
+          "position": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "rotation": [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "scale": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        "Sky": {
+          "source": "Atmosphere",
+          "intensity": 20.0,
+          "cameraHeightKm": 0.5,
+          "aerialPerspective": true,
+          "aerialHaze": 1.0,
+          "hdriPath": "",
+          "hdriRotation": 0.0,
+          "hdriIntensity": 1.0
+        }
+      }
+    }
+  ]
+}

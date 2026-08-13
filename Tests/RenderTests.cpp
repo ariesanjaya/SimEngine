@@ -10,6 +10,7 @@
 #include "Sim/Render/ScreenTrace.h"
 #include "Sim/Render/SdfClipmap.h"
 #include "Sim/Render/SdfVolume.h"
+#include "Sim/Render/VolumeTexture.h"
 #include "Sim/Render/ShadowAtlas.h"
 #include "Sim/Render/TimeOfDay.h"
 #include "Sim/Render/ToneMap.h"
@@ -4397,4 +4398,304 @@ TEST_CASE("fungsi fase berintegral satu atas bola") {
     // Rayleigh simetris ke depan dan ke belakang; Mie tidak.
     CHECK(RayleighPhase(1.0f) == doctest::Approx(RayleighPhase(-1.0f)));
     CHECK(MiePhase(1.0f, 0.8f) > MiePhase(-1.0f, 0.8f) * 100.0f);
+}
+
+// --- V1: SDF hasil bake mengisi clipmap --------------------------------------
+
+namespace {
+
+/// Grid SDF bola, diisi dari rumus analitik alih-alih dibake.
+///
+/// **Sengaja tanpa OpenVDB.** Yang diuji di sini adalah `BakedSceneField` —
+/// transformasi, pembuangan, dan penggabungan batas bawahnya — bukan bakernya.
+/// Memisahkan keduanya membuat uji ini berjalan di setiap konfigurasi, dan
+/// membuat kegagalannya menunjuk satu tersangka.
+sim::SdfGrid MakeSphereGrid(float radius, float voxelSize, float bandVoxels) {
+    sim::SdfGrid grid;
+    grid.voxelSize = voxelSize;
+    grid.band = bandVoxels * voxelSize;
+    const float reach = radius + grid.band + voxelSize;
+    const auto side = static_cast<uint32_t>(std::ceil(2.0f * reach / voxelSize)) + 1;
+    grid.sizeX = side;
+    grid.sizeY = side;
+    grid.sizeZ = side;
+    grid.origin = Vec3(-static_cast<float>(side - 1) * 0.5f * voxelSize);
+    grid.distances.resize(grid.VoxelCount());
+    for (uint32_t z = 0; z < side; ++z) {
+        for (uint32_t y = 0; y < side; ++y) {
+            for (uint32_t x = 0; x < side; ++x) {
+                const Vec3 p = grid.origin + Vec3(static_cast<float>(x), static_cast<float>(y),
+                                                  static_cast<float>(z)) *
+                                                 voxelSize;
+                const float d = glm::length(p) - radius;
+                grid.distances[(static_cast<std::size_t>(z) * side + y) * side + x] =
+                    std::clamp(d, -grid.band, grid.band);
+            }
+        }
+    }
+    return grid;
+}
+
+}  // namespace
+
+TEST_CASE("SDF hasil bake mengalahkan hampiran kotak di arah diagonal") {
+    using namespace sim::render;
+
+    // **Inilah alasan bake itu ada.** Bola berjari-jari 1 di dalam kotak
+    // pembungkus 2x2x2: di arah diagonal, jarak ke kotaknya nol tepat di titik
+    // yang permukaan bolanya masih 0,73 jauhnya. Sphere tracing yang percaya
+    // angka nol berhenti melangkah dan menggambar dinding yang tidak ada.
+    MeshInstance instance;
+    instance.transform = Mat4(1.0f);
+    instance.boundsMin = Vec3(-1.0f);
+    instance.boundsMax = Vec3(1.0f);
+
+    const sim::SdfGrid grid = MakeSphereGrid(1.0f, 0.05f, 6.0f);
+    const sim::SdfGrid* grids[]{&grid};
+
+    BakedSceneField baked;
+    baked.Build(std::span<const MeshInstance>(&instance, 1),
+                std::span<const sim::SdfGrid* const>(grids, 1));
+    REQUIRE(baked.BakedCount() == 1);
+
+    BoxSceneField boxes;
+    boxes.Build(std::span<const MeshInstance>(&instance, 1));
+
+    const Vec3 corner = glm::normalize(Vec3(1.0f, 1.0f, 1.0f)) * 1.2f;
+    const float trueDistance = glm::length(corner) - 1.0f;  // 0,2
+    const float fromBaked = baked.Distance(corner);
+    const float fromBoxes = boxes.Distance(corner);
+
+    INFO("sejati " << trueDistance << ", bake " << fromBaked << ", kotak " << fromBoxes);
+    CHECK(fromBaked == doctest::Approx(trueDistance).epsilon(0.05));
+    // Kotaknya menyebut titik itu **di dalam** — nilainya negatif — padahal ia
+    // jelas di luar bolanya. Itu bukan sekadar kurang teliti; tandanya salah.
+    CHECK(fromBoxes < fromBaked);
+    CHECK(std::abs(fromBoxes - trueDistance) > std::abs(fromBaked - trueDistance));
+}
+
+TEST_CASE("medan bake mencampur mesh ter-bake dan yang belum") {
+    using namespace sim::render;
+
+    // Adegan nyata selalu campuran: kubus satuan bawaan, mesh yang gagal
+    // dibake, mesh yang terlalu besar untuk voxel sehalus itu. Yang punya grid
+    // memakai grid; sisanya tetap memakai kotak, dan yang keluar tetap satu
+    // medan jarak.
+    MeshInstance sphere;
+    sphere.boundsMin = Vec3(-1.0f);
+    sphere.boundsMax = Vec3(1.0f);
+
+    MeshInstance box;
+    box.transform = glm::translate(Mat4(1.0f), Vec3(6.0f, 0.0f, 0.0f));
+    box.boundsMin = Vec3(-1.0f);
+    box.boundsMax = Vec3(1.0f);
+
+    const std::array<MeshInstance, 2> meshes{sphere, box};
+    const sim::SdfGrid grid = MakeSphereGrid(1.0f, 0.05f, 6.0f);
+    const sim::SdfGrid* grids[]{&grid, nullptr};
+
+    BakedSceneField field;
+    field.Build(meshes, std::span<const sim::SdfGrid* const>(grids, 2));
+    // Satu ter-bake, satu tidak — dan keduanya tetap ikut menyumbang.
+    CHECK(field.BakedCount() == 1);
+
+    // Dekat bola: jawaban bola, dari grid.
+    CHECK(field.Distance(Vec3(1.2f, 0.0f, 0.0f)) == doctest::Approx(0.2f).epsilon(0.05));
+    // Dekat kotak: jawaban kotak, dari jalur lama.
+    CHECK(field.Distance(Vec3(4.8f, 0.0f, 0.0f)) == doctest::Approx(0.2f).epsilon(0.05));
+    // Di dalam bola tandanya negatif.
+    CHECK(field.Distance(Vec3(0.0f)) < 0.0f);
+}
+
+TEST_CASE("grid yang jenuh tidak menciptakan dinding hantu") {
+    using namespace sim::render;
+
+    // **Jebakan yang paling mudah terlewat.** Level set hanya menyimpan jarak
+    // yang tepat di dekat permukaan; di luar pita nilainya jenuh. Dipakai apa
+    // adanya, sebuah titik lima meter dari mesh akan dilaporkan berjarak
+    // selebar pita — dan karena `Row` mengambil `min`, angka kecil palsu itu
+    // menjadi dinding di seluruh kotak bake.
+    MeshInstance instance;
+    instance.boundsMin = Vec3(-1.0f);
+    instance.boundsMax = Vec3(1.0f);
+
+    const sim::SdfGrid grid = MakeSphereGrid(1.0f, 0.05f, 4.0f);
+    const sim::SdfGrid* grids[]{&grid};
+
+    BakedSceneField field;
+    field.Build(std::span<const MeshInstance>(&instance, 1),
+                std::span<const sim::SdfGrid* const>(grids, 1));
+
+    // Pitanya cuma 0,2 — jauh lebih sempit daripada jarak ini.
+    CHECK(grid.band == doctest::Approx(0.2f));
+    for (const float distance : {3.0f, 6.0f, 12.0f}) {
+        const float reported = field.Distance(Vec3(distance, 0.0f, 0.0f));
+        INFO("pada jarak " << distance << " m dilaporkan " << reported);
+        // Tidak pernah melebih-lebihkan — itu arah yang menembus dinding...
+        CHECK(reported <= distance - 1.0f + 0.05f);
+        // ...tapi juga tidak jatuh ke lebar pita, yang akan jadi dinding hantu.
+        CHECK(reported > grid.band);
+    }
+}
+
+TEST_CASE("clipmap terisi dari SDF hasil bake cocok dengan jarak analitik") {
+    using namespace sim::render;
+
+    MeshInstance instance;
+    instance.boundsMin = Vec3(-1.0f);
+    instance.boundsMax = Vec3(1.0f);
+
+    const sim::SdfGrid grid = MakeSphereGrid(1.0f, 0.05f, 8.0f);
+    const sim::SdfGrid* grids[]{&grid};
+
+    BakedSceneField field;
+    field.Build(std::span<const MeshInstance>(&instance, 1),
+                std::span<const sim::SdfGrid* const>(grids, 1));
+
+    SdfClipmapSettings settings;
+    settings.resolution = 64;
+    settings.cascadeCount = 1;
+    settings.finestVoxelSize = 0.05f;
+
+    SdfVolume volume;
+    volume.Configure(settings);
+    // Memusatkan kaskade di titik asal. Tanpa ini kaskadenya belum punya posisi
+    // dan `Sample` menolak hampir setiap titik — persis yang terjadi saat uji
+    // ini pertama ditulis.
+    volume.Clipmap().Scroll(Vec3(0.0f));
+    volume.FillAll(field);
+
+    // Yang diuji: nilai yang benar-benar tersimpan di clipmap — lewat
+    // penyandian 8-bit dan pembacaan trilinearnya — bukan medannya saja.
+    int checked = 0;
+    for (const float radius : {0.85f, 0.95f, 1.05f, 1.15f}) {
+        for (const Vec3& direction : {Vec3(1.0f, 0.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f),
+                                      glm::normalize(Vec3(1.0f, 1.0f, 1.0f))}) {
+            const Vec3 p = direction * radius;
+            float sampled = 0.0f;
+            if (!volume.Sample(p, sampled)) {
+                continue;
+            }
+            const float expected = radius - 1.0f;
+            INFO("jari-jari " << radius);
+            // Penyandian 8-bit di atas pita 4 voxel (0,2 m) berlangkah sekitar
+            // 1,6 mm, jadi toleransinya didominasi voxel grid-nya, bukan
+            // penyandiannya.
+            CHECK(std::abs(sampled - expected) <= 0.03f);
+            ++checked;
+        }
+    }
+    CHECK(checked >= 8);
+}
+
+// --- V2b: penyandian volume untuk tekstur 3D ---------------------------------
+
+namespace {
+
+/// Grid dengan gradien yang diketahui, untuk memeriksa round-trip penyandian.
+sim::VolumeGrid MakeRampVolume(float low, float high, uint32_t side) {
+    sim::VolumeGrid grid;
+    grid.name = "ramp";
+    grid.voxelSize = 0.1f;
+    grid.origin = Vec3(0.0f);
+    grid.sizeX = side;
+    grid.sizeY = side;
+    grid.sizeZ = side;
+    grid.values.resize(static_cast<std::size_t>(side) * side * side);
+    const auto last = static_cast<float>(grid.values.size() - 1);
+    for (std::size_t i = 0; i < grid.values.size(); ++i) {
+        grid.values[i] = low + (high - low) * (static_cast<float>(i) / last);
+    }
+    grid.minValue = low;
+    grid.maxValue = high;
+    return grid;
+}
+
+}  // namespace
+
+TEST_CASE("penyandian volume memakai rentang gridnya sendiri") {
+    using namespace sim::render;
+
+    // **Grid asap tipis yang tidak pernah melewati 0,05.** Dinormalkan dengan
+    // 0..1 yang diandaikan, seluruhnya akan jatuh ke texel 0 sampai 13 — asap
+    // yang praktis menghilang. Dinormalkan dengan rentangnya sendiri, seluruh
+    // 256 tingkat terpakai.
+    const sim::VolumeGrid grid = MakeRampVolume(0.0f, 0.05f, 8);
+
+    std::vector<std::byte> bytes;
+    VolumeTextureDesc desc;
+    REQUIRE(EncodeVolume(grid, VolumeTextureFormat::R8Unorm, bytes, desc));
+
+    CHECK(desc.sizeX == 8);
+    CHECK(desc.scale == doctest::Approx(0.05f));
+    CHECK(desc.bias == doctest::Approx(0.0f));
+    CHECK(bytes.size() == 8u * 8u * 8u);
+
+    // Ujung bawah dan ujung atas benar-benar menyentuh kedua ujung rentang
+    // texel — itulah tanda normalisasinya memakai rentang yang tepat.
+    CHECK(static_cast<uint32_t>(bytes.front()) == 0);
+    CHECK(static_cast<uint32_t>(bytes.back()) == 255);
+}
+
+TEST_CASE("round-trip penyandian volume tetap di dalam kuantisasinya") {
+    using namespace sim::render;
+
+    const sim::VolumeGrid grid = MakeRampVolume(-40.0f, 120.0f, 12);  // gaya grid suhu
+
+    for (const auto format : {VolumeTextureFormat::R8Unorm, VolumeTextureFormat::R16Unorm}) {
+        std::vector<std::byte> bytes;
+        VolumeTextureDesc desc;
+        REQUIRE(EncodeVolume(grid, format, bytes, desc));
+        CHECK(bytes.size() == desc.ByteCount());
+
+        const float levels = format == VolumeTextureFormat::R16Unorm ? 65535.0f : 255.0f;
+        const float tolerance = (grid.maxValue - grid.minValue) / levels;
+
+        for (uint32_t z = 0; z < grid.sizeZ; z += 3) {
+            for (uint32_t y = 0; y < grid.sizeY; y += 3) {
+                for (uint32_t x = 0; x < grid.sizeX; x += 3) {
+                    const float expected = grid.At(static_cast<int32_t>(x), static_cast<int32_t>(y),
+                                                   static_cast<int32_t>(z));
+                    const float decoded = DecodeTexel(desc, bytes, x, y, z);
+                    INFO("format " << (format == VolumeTextureFormat::R16Unorm ? "R16" : "R8")
+                                   << " voxel (" << x << "," << y << "," << z << ")");
+                    // Setengah tingkat, karena kuantisasinya membulatkan alih-alih
+                    // memotong. Pemotongan akan menggeser seluruh volume ke bawah.
+                    CHECK(std::abs(decoded - expected) <= tolerance * 0.5f + 1e-4f);
+                }
+            }
+        }
+    }
+}
+
+TEST_CASE("volume yang seluruhnya bernilai sama tidak menghasilkan bukan-angka") {
+    using namespace sim::render;
+
+    // Rentang nol. Dibagi apa adanya, setiap texel menjadi bukan-angka — dan
+    // bukan-angka di tekstur 3D menyebar ke seluruh gambar lewat interpolasi.
+    sim::VolumeGrid grid = MakeRampVolume(0.7f, 0.7f, 4);
+    grid.minValue = 0.7f;
+    grid.maxValue = 0.7f;
+
+    std::vector<std::byte> bytes;
+    VolumeTextureDesc desc;
+    REQUIRE(EncodeVolume(grid, VolumeTextureFormat::R8Unorm, bytes, desc));
+
+    CHECK(desc.scale == doctest::Approx(0.0f));
+    CHECK(desc.bias == doctest::Approx(0.7f));
+    for (uint32_t i = 0; i < 4; ++i) {
+        const float decoded = DecodeTexel(desc, bytes, i, i, i);
+        CHECK(std::isfinite(decoded));
+        CHECK(decoded == doctest::Approx(0.7f));
+    }
+}
+
+TEST_CASE("grid kosong ditolak, bukan menghasilkan tekstur nol") {
+    using namespace sim::render;
+    sim::VolumeGrid empty;
+    std::vector<std::byte> bytes;
+    VolumeTextureDesc desc;
+    CHECK_FALSE(EncodeVolume(empty, VolumeTextureFormat::R8Unorm, bytes, desc));
+    CHECK(bytes.empty());
+    CHECK(desc.ByteCount() == 0);
 }

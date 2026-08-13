@@ -339,6 +339,29 @@ void SceneView::AppendLight(const scene::LightComponent& light, const Mat4& matr
     lights_.push_back(instance);
 }
 
+void SceneView::AddWireBox(const Vec3& boxMin, const Vec3& boxMax, const Vec4& color) {
+    // Dua belas rusuk, disusun dari delapan pojok. Pojoknya diindeks lewat bit
+    // supaya ketiga sumbunya diperlakukan sama — daftar rusuk yang ditulis
+    // tangan adalah tempat satu rusuk hilang tanpa ada yang menyadarinya.
+    const auto corner = [&](int index) {
+        return Vec3((index & 1) != 0 ? boxMax.x : boxMin.x,
+                    (index & 2) != 0 ? boxMax.y : boxMin.y,
+                    (index & 4) != 0 ? boxMax.z : boxMin.z);
+    };
+    for (int index = 0; index < 8; ++index) {
+        for (int axis = 0; axis < 3; ++axis) {
+            const int bit = 1 << axis;
+            // Hanya arah naik, supaya tiap rusuk digambar sekali dan bukan dua
+            // kali — rusuk ganda menggandakan biaya dan menebalkan garisnya di
+            // tempat yang tidak beraturan.
+            if ((index & bit) != 0) {
+                continue;
+            }
+            lines_.push_back(render::LineSegment{corner(index), corner(index | bit), color});
+        }
+    }
+}
+
 render::ViewportScene SceneView::Scene() const {
     render::ViewportScene scene;
     scene.meshes = meshes_;
