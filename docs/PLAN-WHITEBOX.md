@@ -1,0 +1,240 @@
+# Plan Whitebox (W0 → W6)
+
+Blok yang bisa disunting langsung di viewport untuk merancang level — dorong
+sebuah sisi dan ruangan bertambah panjang, bukan kembali ke DCC untuk mengekspor
+kubus lagi.
+
+**Dengan material berbeda per sisi**, yang justru tidak dimiliki WhiteBox O3DE
+yang mengilhaminya.
+
+Penomoran **W** supaya tidak bertabrakan dengan E (editor/render), P (fisika),
+C (kain), A (agentic AI), R (Embree), I (gambar), T (tekstur), dan M (GI) di
+[ROADMAP.md](ROADMAP.md).
+
+---
+
+## Yang membuatnya bukan sekadar "mesh kubus"
+
+Whitebox terasa seperti alat rancang, bukan penyunting segitiga, karena satu
+gagasan: **poligon, bukan face.**
+
+Sebuah kubus punya 12 segitiga tetapi 6 sisi. Yang didorong perancang adalah
+sisinya. Jadi struktur datanya harus bisa mengatakan "enam segitiga ini satu
+bidang" dan memperlakukannya sebagai satu benda — itulah yang dilakukan
+`HideEdge` di O3DE: menyembunyikan rusuk di antara dua segitiga sebidang
+menggabungkan keduanya menjadi satu poligon.
+
+Tanpa lapisan itu, yang didapat pengguna adalah penyunting segitiga, dan
+mendorong "sisi" berarti memilih dua segitiga dan berharap keduanya bergerak
+bersama.
+
+**Dan poligon itu pula yang menjadi satuan material.** Satu sisi = satu poligon =
+satu slot material. Itu yang membuat permintaan "tiap face bisa dipasang material
+berbeda" punya satuan yang masuk akal — bukan per segitiga, yang tak seorang pun
+ingin menyetelnya satu per satu.
+
+---
+
+## Yang sudah ada di mesin ini, dan itu menentukan bentuknya
+
+**Material per-ruas sudah terpasang di seluruh jalur.** `MeshData::parts` adalah
+daftar `SubMesh { firstIndex, indexCount, material }`, dan
+`MeshRendererComponent::materials` adalah daftar `AssetRef` per slot. Keduanya
+sudah dipakai mesh impor sejak E8.
+
+Konsekuensinya: **material per-sisi tidak menuntut satu pun perubahan renderer.**
+Poligon dikelompokkan menurut slot materialnya, tiap kelompok menjadi satu
+`SubMesh`, dan jalur gambar yang sudah ada mengerjakan sisanya.
+
+Ini kebalikan dari keadaan di O3DE, yang `WhiteBoxRenderData`-nya memegang satu
+`WhiteBoxMaterial` untuk seluruh benda — di sana material per-sisi berarti
+membongkar jalur rendernya. Di sini ia justru jalur yang sudah ada.
+
+---
+
+## Keputusan yang harus diambil: struktur half-edge
+
+Penyuntingan topologi — ekstrusi, belah rusuk, gabung sisi — menuntut adjacency
+dua arah. Array segitiga tidak cukup: menjawab "siapa tetangga sisi ini" dengan
+menyisir seluruh segitiga membuat tiap operasi kuadratik dan tiap bug topologi
+diam-diam.
+
+Dua jalan, dan ini perlu Anda putuskan sebelum W1:
+
+### Opsi 1 — vendor OpenMesh
+
+Yang dipakai O3DE. **BSD-3-Clause** sejak versi 4.0 — sudah diperiksa, aman untuk
+ditautkan statis dan dipakai komersial dengan atribusi.
+
+Matang, teruji bertahun-tahun, dan menyelesaikan seluruh kasus tepi topologi yang
+memang di situlah bug hidup.
+
+Harganya: pustaka template besar untuk mengambil sekitar sepersepuluh isinya, dan
+waktu kompilasi yang ikut naik di setiap TU yang menyentuhnya.
+
+### Opsi 2 — half-edge ringkas, ditulis sendiri
+
+Sekitar 800–1.500 baris untuk yang benar-benar dibutuhkan: simpul, half-edge,
+rusuk, face, adjacency, tambah/hapus face, dan penjagaan invarian.
+
+**Yang membenarkannya: ukurannya.** Mesh whitebox adalah blockout level — puluhan
+sampai ratusan sisi, bukan jutaan. Struktur yang tidak perlu cepat pada satu juta
+segitiga boleh jauh lebih sederhana.
+
+**Yang menentangnya: kasus tepi topologi.** Menggabungkan dan membelah face
+dengan benar pada geometri non-manifold adalah tempat bug bersembunyi, dan
+OpenMesh sudah membayarnya.
+
+### Rekomendasi
+
+**Opsi 2, dengan syarat.** Lapisan poligon — yang membuat whitebox terasa seperti
+whitebox — harus ditulis sendiri betapapun pilihannya, karena ia bukan bagian
+OpenMesh. Dan mesh sekecil blockout tidak menuntut struktur data seukuran itu.
+
+Syaratnya: **invariannya diuji, bukan diasumsikan.** Setiap operasi topologi
+berakhir dengan pemeriksaan menyeluruh — tiap half-edge punya pasangan, tiap face
+tertutup, tiap simpul mencapai seluruh tetangganya. Itu yang menggantikan
+kematangan OpenMesh, dan itu yang membuat opsi 2 bukan penghematan palsu.
+
+Kalau pemeriksaan itu ternyata terus gagal di W1, jalur mundurnya jelas dan
+murah: ganti isi `HalfEdgeMesh` dengan OpenMesh, karena lapisan poligon di atasnya
+tidak berubah.
+
+---
+
+## Arsitektur
+
+```
+Code/Whitebox/
+  include/Sim/Whitebox/
+      HalfEdgeMesh.h    simpul, half-edge, face — adjacency dua arah
+      Polygon.h         kelompok face sebidang, satuan yang disunting pengguna
+      WhiteboxMesh.h    mesh + poligon + slot material; ini yang disimpan aset
+      Operations.h      ekstrusi, belah, gabung, geser
+  src/
+      HalfEdgeMesh.cpp
+      Polygon.cpp
+      Operations.cpp
+      MeshBuild.cpp     whitebox → MeshData ber-SubMesh per slot material
+Code/Editor/src/
+      WhiteboxTool.cpp  pemilihan sisi, gizmo dorong, penetapan material
+```
+
+**`Sim::Whitebox` tidak bergantung pada `Sim::Render` maupun `Sim::Editor`.** Ia
+menghasilkan `MeshData`; yang menggambarnya dan yang menyuntingnya adalah
+pemanggilnya. Aturan yang sama dengan `Sim::Physics` dan `Sim::Cloth`.
+
+**Asetnya menyimpan topologi, bukan segitiga.** `.simwhitebox` berisi simpul,
+rusuk, poligon, dan slot material — bukan mesh hasilnya. Yang tersimpan harus
+yang bisa disunting lagi; segitiga adalah keluaran, dan menyimpannya berarti
+blockout yang tidak bisa diubah setelah disimpan.
+
+---
+
+## Milestone
+
+### W0 — Half-edge dan invariannya · ⬜
+
+Struktur data saja. Belum ada poligon, belum ada UI.
+
+**Kriteria terima**
+- Kubus satuan dibangun dari enam quad: 8 simpul, 12 rusuk, 6 face.
+- **Pemeriksa invarian menyisir seluruh mesh** — tiap half-edge punya pasangan
+  yang pasangannya kembali ke dirinya, tiap face tertutup melingkar, tiap simpul
+  mencapai seluruh half-edge keluarnya. Dipanggil di akhir **setiap** uji operasi,
+  bukan sekali di awal.
+- Pemeriksa itu dibuktikan bisa gagal: satu pasangan yang sengaja diputus harus
+  membuatnya menolak.
+
+### W1 — Poligon · ⬜
+
+Kelompok face sebidang, dan operasi gabung/pisah rusuk yang membentuknya.
+
+**Kriteria terima**
+- Kubus satuan punya **6 poligon**, bukan 12 face. Inilah yang membedakan alat
+  rancang dari penyunting segitiga.
+- Menyembunyikan rusuk di antara dua face sebidang menggabungkan poligonnya;
+  memulihkannya memisahkannya kembali, dan mesh kembali ke keadaan semula
+  byte-per-byte.
+
+### W2 — Ekstrusi dan geser · ⬜
+
+Operasi yang membuatnya berguna: dorong sebuah sisi keluar dan mesh bertambah.
+
+**Kriteria terima**
+- Mengekstrusi satu sisi kubus sejauh d menghasilkan volume yang **dihitung**:
+  balok 1×1×(1+d). Diperiksa terhadap rumus, bukan terhadap tangkapan layar.
+- Invarian W0 tetap berlaku sesudah setiap operasi.
+- Ekstrusi nol tidak mengubah apa pun — bukan menghasilkan face berluas nol yang
+  merusak normal di kemudian hari.
+
+### W3 — Material per-sisi · ⬜
+
+Slot material per poligon, dan pembangunan `MeshData` yang mengelompokkannya.
+
+**Kriteria terima**
+- Kubus dengan tiga sisi bermaterial A dan tiga bermaterial B menghasilkan
+  **tepat dua** `SubMesh`, bukan enam — poligon sematerial digabung.
+- Jumlah indeks seluruh `SubMesh` sama dengan tiga kali jumlah segitiga. Tidak
+  ada segitiga yang hilang maupun terhitung dua kali.
+- Poligon tanpa material menghasilkan ruas ber-`material` -1, mengikuti aturan
+  yang sudah dipakai mesh impor.
+
+### W4 — Aset `.simwhitebox` dan komponen · ⬜
+
+Topologi tersimpan, `WhiteboxComponent` lewat refleksi.
+
+**Kriteria terima**
+- Simpan-muat-simpan menghasilkan byte yang sama, aturan yang sama dengan E3.
+- Yang dimuat bisa disunting lagi: ekstrusi sesudah muat ulang bekerja sama
+  persis seperti sebelum disimpan.
+
+### W5 — Penyuntingan di viewport · ⬜
+
+Pilih sisi, dorong dengan gizmo, tetapkan material.
+
+**Kriteria terima**
+- Memilih sisi memilih **poligon**, bukan segitiga di bawah kursor.
+- Satu seretan gizmo menghasilkan **satu** entri undo, aturan yang sama dengan
+  seretan transform yang sudah ada.
+- Menetapkan material ke sisi terpilih terlihat seketika, tanpa memuat ulang
+  aset.
+
+### W6 — Collider dan ekspor · ⬜
+
+Whitebox yang bisa ditabrak, dan jalur keluar menuju mesh sungguhan.
+
+**Kriteria terima**
+- Whitebox menghasilkan collider yang cocok dengan yang digambar — memakai
+  convex hull yang sudah ada dari `ShapeKind::Cylinder`, atau dipecah menjadi
+  beberapa convex bila cekung.
+- Blockout bisa diekspor menjadi aset mesh biasa, sehingga ia titik awal yang
+  bisa ditinggalkan — bukan format yang mengurung pekerjaan di dalamnya.
+
+---
+
+## Risiko
+
+**Kasus tepi topologi.** Ini alasan utama opsi 1 masih layak dipertimbangkan.
+Mitigasinya bukan kehati-hatian melainkan pemeriksa invarian yang dijalankan
+setiap uji.
+
+**Cekung dan collider.** Whitebox yang dicekungkan tidak bisa menjadi satu convex
+hull. W6 memecahnya, dan kalau pemecahan itu meleset, jalur mundurnya adalah
+triangle mesh statis — sah untuk level, tidak untuk benda bergerak.
+
+**Godaan menjadikannya modeler.** Whitebox berguna justru karena terbatas. Setiap
+operasi yang ditambahkan di luar daftar W2 harus membenarkan dirinya terhadap
+"kembali ke DCC" — dan kebanyakan tidak bisa.
+
+---
+
+## Yang sengaja tidak dikerjakan
+
+**CSG (boolean).** O3DE memakainya lewat Manifold. Ia berguna, tetapi ia
+pekerjaan tersendiri dengan kasus tepinya sendiri, dan blockout bisa berjalan
+jauh tanpanya.
+
+**UV mapping yang bisa disunting.** Whitebox memakai proyeksi planar per poligon —
+cukup untuk melihat skala tekstur benar saat merancang. UV yang digarap adalah
+pekerjaan DCC, dan W6 menyediakan jalan keluarnya.
