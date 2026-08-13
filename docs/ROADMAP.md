@@ -13,6 +13,7 @@ Dokumen ini adalah peta besar. Detail per milestone ada di:
 - [PLAN-RENDER.md](PLAN-RENDER.md) — E8..E9, fase rendering & runtime
 - [PLAN-PHYSICS.md](PLAN-PHYSICS.md) — P0..P8, PhysX 5 untuk E9 (CPU dulu, CUDA opsional)
 - [PLAN-WHITEBOX.md](PLAN-WHITEBOX.md) — W0..W6, blok yang disunting di viewport untuk merancang level (selesai)
+- [PLAN-TERRAIN.md](PLAN-TERRAIN.md) — L0..L5, terrain sebagai benda di dunia: mesh, LOD, sculpt 3D, collider
 - [ARCHITECTURE.md](ARCHITECTURE.md) — modul, aturan dependensi, seam
 - [EDITOR-PANELS.md](EDITOR-PANELS.md) — spesifikasi tiap panel
 - [DEPENDENCIES.md](DEPENDENCIES.md) — daftar dependensi + versi terkunci

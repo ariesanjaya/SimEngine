@@ -1082,6 +1082,10 @@ keduanya menunggu sesuatu yang bisa menggambarnya.
 
 ### E7.3 — Terrain Editor · ~5 sesi · 🔨 semuanya kecuali LOD dan sculpt di viewport 3D
 
+> Sisanya — terrain sebagai benda di dunia: mesh berubin, LOD, sculpt di
+> viewport 3D, dan collider heightfield — dipecah menjadi L0..L5 di
+> [PLAN-TERRAIN.md](PLAN-TERRAIN.md).
+
 - Data terrain: heightmap ubin (tile) + layer material + peta bobot (splat) + peta
   hole, disimpan sebagai `.simterrain` + tekstur pendamping.
 - Alat sculpt: raise/lower, flatten, smooth, noise, ramp, erosion sederhana; parameter
