@@ -278,18 +278,53 @@ tidak menuntut jumlah tertentu tertolak — yang bergantung pada penjadwalan buk
 uji — melainkan menuntut tidak ada jawaban yang salah, dan memeriksa dari main
 thread bahwa penjagaannya terbuka lagi sesudah langkah terakhir.
 
-### P3 — Joints · ⬜
+### P3 — Joints · ✅
 
 Fixed, revolute, prismatic, spherical, D6. `JointComponent` merujuk dua entity.
+
+Rujukannya **GUID, bukan `Entity`**: indeks entity dipakai ulang setelah entity
+dihapus, jadi sendi yang menyimpannya akan menunjuk benda yang salah begitu level
+dimuat ulang. GUID kosong berarti dunia — pintu dan bandul memang tergantung pada
+titik tetap di ruang, dan tanpa itu setiap adegan harus menyediakan benda statis
+pura-pura untuk digantungi.
+
+Sendinya **milik entity yang bergerak, bukan yang menahan**. Keduanya sama masuk
+akal dilihat dari luar; yang terbalik membuat menghapus bandul meninggalkan poros
+dengan sendi ke sesuatu yang tidak ada.
+
+Sendi dibangun di **sapuan kedua**, sesudah seluruh benda ada. Membangunnya
+bersamaan membuat sendi berhasil atau gagal tergantung urutan entity di berkas —
+sesuatu yang tidak pernah dipikirkan orang saat menyusun levelnya.
 
 **Kriteria terima**
 - Bandul revolute berayun pada bidang yang benar dan tidak menyimpang keluar
   bidang itu setelah 10.000 langkah.
+
+  Terukur **2,4 × 10⁻¹⁴ m** keluar bidang — derau `float`, bukan penyimpangan —
+  dan lengannya meleset paling jauh 2,6 mm. Uji itu juga menuntut bandulnya
+  benar-benar berayun: yang lulus karena bandulnya tidak pernah bergerak tidak
+  menguji apa pun.
 - Limit ditegakkan: sendi berlimit tidak pernah melewati batasnya.
+
+  Diperiksa dua kali dengan cara yang berbeda — lewat sudut yang dilaporkan
+  sendinya, dan lewat posisi bebannya, karena yang pertama saja hanya menguji
+  sendi itu melaporkan dirinya sendiri secara konsisten.
 - Joint yang salah satu ujungnya dihapus tidak meninggalkan dangling actor —
   diuji dengan menghapus entity, bukan dengan membaca kode.
 
-### P4 — Custom Geometries · ⬜
+  PhysX menuntut sendi dilepas **sebelum** benda yang dipegangnya; melepas aktor
+  lebih dulu meninggalkan sendi yang menunjuk memori bebas, dan itu tidak crash
+  di tempat kejadian melainkan pada langkah berikutnya yang kebetulan
+  menyentuhnya. `RemoveBody` karena itu menyapu sendi yang memegang aktornya
+  lebih dulu. Uji dibuktikan bisa gagal dengan melumpuhkan penyapuan itu.
+
+### P4 — Custom Geometries · ⏸ ditunda
+
+**Ditunda sampai Terrain Editor dikerjakan.** Seluruh nilai P4 ada pada
+heightfield yang membaca `Sim::Terrain` apa adanya, dan menyambungkan fisika
+ke terrain yang belum bisa disunting berarti menguji integrasi terhadap data
+yang belum berbentuk. P5 dikerjakan lebih dulu; keduanya tidak saling
+bergantung.
 
 `PxCustomGeometry` untuk bentuk yang tidak ada di daftar bawaan — yang paling
 berguna di sini: heightfield terrain yang membaca `Sim::Terrain` apa adanya,
@@ -301,16 +336,58 @@ tanpa menyalin heightmap ke bentuk PhysX kedua.
 - Mengubah heightmap saat runtime terlihat oleh fisika tanpa membangun ulang
   seluruh scene.
 
-### P5 — Reduced Coordinate Articulations · ⬜
+### P5 — Reduced Coordinate Articulations · ✅
 
 Rantai sendi untuk ragdoll dan robot. Dibangun **setelah** joint, karena
 articulation adalah jawaban untuk kasus di mana rantai joint biasa terlalu
 lembek.
 
+Pembangun ragdoll menerima **daftar tulang generik**, bukan `animation::Skeleton`.
+Membuat `Sim::Physics` melihat `Sim::Animation` berarti setiap yang menautkan
+fisika ikut menautkan importir FBX dan USD di baliknya, dan server dedicated tidak
+punya alasan membawa keduanya. Lintasan pengubahnya sepuluh baris dan dimiliki
+pemanggil — di pohon ini, dijalankan oleh uji.
+
 **Kriteria terima**
 - Ragdoll dari rangka `.simskel` berdiri tanpa meledak pada langkah pertama.
+
+  Terukur: link bergerak **2,72 mm** pada langkah pertama, yaitu tepat jarak
+  jatuh bebas satu langkah 60 Hz (g·dt² = 2,725 mm). Bukan "cukup kecil"
+  melainkan angka yang sudah diketahui sebelum simulasinya dijalankan.
+
+  Diuji juga dengan rig Mixamo sungguhan (65 tulang → 25 link, 40 dilipat), yang
+  menemukan dua cacat yang tidak muncul pada rangka karangan — lihat di bawah.
 - Rantai 20 tautan tidak melar di bawah beban — inilah yang membedakannya dari
   rantai joint biasa, dan karena itu inilah yang diuji.
+
+  Rantai 10 m yang digantungi 200 kg melar **0,00095 mm**. Rantai sendi biasa
+  dengan beban dan bentuk yang sama, dibangun dengan cara paling lurus, melar
+  **13.727 mm** — ia praktis terurai. Keduanya diuji berdampingan supaya angka
+  yang pertama tidak terbaca sebagai sesuatu yang diberikan solver secara cuma-
+  cuma.
+
+#### Dua cacat yang hanya ditemukan rig sungguhan
+
+**Massa turunan volume merusak articulation.** Kerapatan terdengar lebih fisis
+daripada massa total, tetapi ia menyerahkan massa tiap bagian kepada bentuk yang
+disusun otomatis — dan bentuk itu tidak tahu apa-apa tentang anatomi. Pada Y Bot,
+tulang pinggul yang pendek menghasilkan kapsul berjari-jari 2,8 cm sementara paha
+menghasilkan 10,2 cm, sehingga **akar tubuh menjadi 50 kali lebih ringan daripada
+anaknya**. Hasilnya bukan goyangan melainkan koordinat NaN pada langkah ke-55.
+Sekarang massa dibagikan dari `totalMass` menurut volume, lalu perbandingannya
+dibatasi pada 0,5×–2,5× rata-rata.
+
+**Tulang ujung tidak boleh mewarisi panjang induknya.** Aturan itu menyelamatkan
+tangan dan kepala, tetapi ikut menyelamatkan tulang bantu sepanjang nol — yang
+letaknya persis di induknya — sehingga ia mendapat kapsul kembar di ruang yang
+sama. Dua bentuk yang saling menembus sejak langkah nol adalah bentuk paling umum
+dari ragdoll yang meledak. Yang dipakai sekarang adalah jarak tulang itu sendiri
+dari induknya, yang nol untuk tulang bantu dan karena itu melipatnya.
+
+Tabrakan antar-link **mati secara bawaan**, dan itu bukan jalan pintas: bentuk
+yang disusun otomatis pasti bertumpuk di percabangan — dua paha berjarak 20 cm
+dengan jari-jari 10,5 cm sudah saling menembus sebelum langkah pertama.
+Menyalakannya menuntut bentuk yang disetel tangan.
 
 ### P6 — Vehicle Dynamics · ⬜
 

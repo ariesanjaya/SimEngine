@@ -2,6 +2,7 @@ sim_add_library(Physics
     SOURCES
         src/PhysicsScene.cpp
         src/PhysicsWorld.cpp
+        src/Ragdoll.cpp
     PUBLIC_DEPS
         # **Yang tidak ada di daftar ini justru yang penting: Sim::Render.**
         # Modul ini menghasilkan transform; yang menggambarnya adalah

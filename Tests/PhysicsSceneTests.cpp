@@ -354,3 +354,156 @@ TEST_CASE("prefab Box dan Sphere memang jatuh ke atas prefab Ground") {
     CHECK(PositionOf(world, box).y == doctest::Approx(0.5f).epsilon(0.06));
     CHECK(PositionOf(world, sphere).y == doctest::Approx(0.5f).epsilon(0.06));
 }
+
+namespace {
+
+/// Bola dinamis yang tidak boleh tertidur — bandul yang dianggap diam berhenti
+/// berayun, dan itu terbaca sebagai sendi yang macet.
+scene::Entity AddBob(scene::World& world, const char* name, const Vec3& position) {
+    const scene::Entity entity = world.Create(name);
+    auto& body = world.Add<scene::RigidBodyComponent>(entity);
+    body.allowSleeping = false;
+    auto& collider = world.Add<scene::ColliderComponent>(entity);
+    collider.shape = scene::ColliderShape::Sphere;
+    collider.radius = 0.2f;
+    world.TryGet<scene::TransformComponent>(entity)->position = position;
+    world.MarkTransformDirty(entity);
+    return entity;
+}
+
+}  // namespace
+
+TEST_CASE("JointComponent menggantungkan entity ke dunia") {
+    if (!Available()) {
+        return;
+    }
+    scene::World world;
+    const scene::Entity bob = AddBob(world, "Bob", Vec3(2.0f, 0.0f, 0.0f));
+
+    auto& joint = world.Add<scene::JointComponent>(bob);
+    joint.type = scene::JointType::Revolute;
+    // connectedBody dibiarkan kosong: tergantung pada dunia.
+    joint.anchor = Vec3(-2.0f, 0.0f, 0.0f);
+    const float halfAngle = 0.25f * 3.14159265f;
+    joint.frame = Quat(std::cos(halfAngle), 0.0f, std::sin(halfAngle), 0.0f);
+
+    PhysicsScene physics;
+    REQUIRE(physics.Build(world));
+    CHECK(physics.Stats().joints == 1);
+    CHECK(physics.Stats().skippedJoints == 0);
+
+    physics.Step(world, 400);
+
+    // Berayun turun, tetapi tetap sejauh 2 m dari porosnya di titik asal — itu
+    // yang membedakan tergantung dari sekadar jatuh.
+    const Vec3& position = PositionOf(world, bob);
+    const float radius = std::sqrt(position.x * position.x + position.y * position.y);
+    INFO("di (" << position.x << ", " << position.y << ", " << position.z << ")");
+    CHECK(radius == doctest::Approx(2.0f).epsilon(0.02));
+    CHECK(position.y < -0.5f);
+    CHECK(std::abs(position.z) < 0.01f);
+}
+
+TEST_CASE("JointComponent menyendikan dua entity lewat GUID") {
+    if (!Available()) {
+        return;
+    }
+    scene::World world;
+    const scene::Entity anchor = world.Create("Anchor");
+    {
+        auto& body = world.Add<scene::RigidBodyComponent>(anchor);
+        body.kind = scene::RigidBodyKind::Static;
+        world.Add<scene::ColliderComponent>(anchor);
+        world.TryGet<scene::TransformComponent>(anchor)->position = Vec3(0.0f, 5.0f, 0.0f);
+        world.MarkTransformDirty(anchor);
+    }
+
+    const scene::Entity bob = AddBob(world, "Bob", Vec3(0.0f, 3.0f, 0.0f));
+    auto& joint = world.Add<scene::JointComponent>(bob);
+    joint.type = scene::JointType::Fixed;
+    joint.connectedBody = world.GuidOf(anchor);
+
+    PhysicsScene physics;
+    REQUIRE(physics.Build(world));
+    CHECK(physics.Stats().joints == 1);
+
+    physics.Step(world, 300);
+
+    // Dipaku ke benda statis: gravitasi tidak boleh memindahkannya sama sekali.
+    const Vec3& position = PositionOf(world, bob);
+    INFO("di y = " << position.y);
+    CHECK(position.y == doctest::Approx(3.0f).epsilon(0.01));
+}
+
+TEST_CASE("sendi yang ujungnya tidak bisa dipakai dihitung, bukan diabaikan") {
+    if (!Available()) {
+        return;
+    }
+    scene::World world;
+
+    SUBCASE("menunjuk GUID yang tidak ada di level ini") {
+        const scene::Entity bob = AddBob(world, "Bob", Vec3(0.0f, 3.0f, 0.0f));
+        auto& joint = world.Add<scene::JointComponent>(bob);
+        joint.connectedBody = Uuid::Generate();
+
+        PhysicsScene physics;
+        REQUIRE(physics.Build(world));
+        CHECK(physics.Stats().joints == 0);
+        CHECK(physics.Stats().skippedJoints == 1);
+
+        // Dan bendanya tetap jatuh bebas, bukan diam-diam tergantung ke dunia —
+        // menebak "mungkin maksudnya dunia" akan menyembunyikan salah rujuk.
+        physics.Step(world, 120);
+        CHECK(PositionOf(world, bob).y < 2.0f);
+    }
+
+    SUBCASE("entity-nya sendiri bukan benda fisika") {
+        const scene::Entity marker = world.Create("Marker");
+        world.Add<scene::JointComponent>(marker);
+
+        PhysicsScene physics;
+        REQUIRE(physics.Build(world));
+        CHECK(physics.Stats().joints == 0);
+        CHECK(physics.Stats().skippedJoints == 1);
+    }
+}
+
+TEST_CASE("menghapus entity yang dipegang sendi tidak meninggalkan aktor menggantung") {
+    if (!Available()) {
+        return;
+    }
+    // Kriteria terima P3 lewat jalur scene, diuji dengan benar-benar menghapus
+    // entity. Kerusakannya tidak muncul saat penghapusan melainkan di langkah
+    // berikutnya, jadi uji ini melangkah panjang sesudahnya.
+    scene::World world;
+    const scene::Entity anchor = world.Create("Anchor");
+    {
+        auto& body = world.Add<scene::RigidBodyComponent>(anchor);
+        body.kind = scene::RigidBodyKind::Static;
+        world.Add<scene::ColliderComponent>(anchor);
+        world.TryGet<scene::TransformComponent>(anchor)->position = Vec3(0.0f, 5.0f, 0.0f);
+        world.MarkTransformDirty(anchor);
+    }
+    const scene::Entity bob = AddBob(world, "Bob", Vec3(0.0f, 3.0f, 0.0f));
+    auto& joint = world.Add<scene::JointComponent>(bob);
+    joint.connectedBody = world.GuidOf(anchor);
+
+    PhysicsScene physics;
+    REQUIRE(physics.Build(world));
+    REQUIRE(physics.Stats().joints == 1);
+    physics.Step(world, 30);
+
+    // Poros dihapus dari simulasi, seperti yang dilakukan skrip saat sesuatu
+    // dihancurkan di tengah permainan.
+    const BodyHandle anchorBody = physics.BodyOf(anchor);
+    REQUIRE(anchorBody != BodyHandle::Invalid);
+    physics.Simulation().RemoveBody(anchorBody);
+    CHECK(physics.Simulation().JointCount() == 0);
+
+    // Melangkah panjang: di sinilah aktor menggantung akan terlihat.
+    physics.Step(world, 300);
+
+    // Dan bebannya kini jatuh, karena yang menahannya sudah tidak ada.
+    INFO("beban di y = " << PositionOf(world, bob).y);
+    CHECK(PositionOf(world, bob).y < 0.0f);
+}

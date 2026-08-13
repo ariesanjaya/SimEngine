@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Sim/Physics/PhysicsArticulation.h"
+#include "Sim/Physics/PhysicsJoint.h"
 #include "Sim/Physics/PhysicsQuery.h"
 #include "Sim/Physics/PhysicsTypes.h"
 
@@ -95,6 +97,36 @@ public:
 
     /// Total langkah sejak `Create`. Dipakai uji determinisme.
     uint64_t StepCount() const;
+
+    // --- sendi --------------------------------------------------------------
+
+    /// Menambahkan sendi. `JointHandle::Invalid` bila gagal; `Error()` menyebut
+    /// sebabnya.
+    JointHandle AddJoint(const JointDesc& desc);
+
+    /// Melepas sendi. Kedua bendanya tetap ada dan kembali bergerak bebas.
+    void RemoveJoint(JointHandle joint);
+
+    bool IsJointAlive(JointHandle joint) const;
+    std::size_t JointCount() const;
+
+    /// Keadaan sebuah sendi. False bila handle-nya tidak dikenal.
+    bool ReadJointState(JointHandle joint, JointState& out) const;
+
+    // --- articulation --------------------------------------------------------
+
+    /// Membangun articulation. `ArticulationHandle::Invalid` bila gagal;
+    /// `Error()` menyebut sebabnya.
+    ArticulationHandle AddArticulation(const ArticulationDesc& desc);
+    void RemoveArticulation(ArticulationHandle articulation);
+    bool IsArticulationAlive(ArticulationHandle articulation) const;
+    std::size_t ArticulationCount() const;
+
+    /// Banyaknya link, atau nol bila handle-nya tidak dikenal.
+    std::size_t ArticulationLinkCount(ArticulationHandle articulation) const;
+
+    /// Keadaan sebuah link, menurut indeks di `ArticulationDesc::links`.
+    bool ReadLinkState(ArticulationHandle articulation, std::size_t link, BodyState& out) const;
 
     // --- scene query --------------------------------------------------------
     //

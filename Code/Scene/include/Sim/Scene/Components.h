@@ -331,6 +331,58 @@ struct ColliderComponent {
     float restitution = 0.0f;
 };
 
+/// Derajat kebebasan yang disisakan sebuah sendi. Cerminan `physics::JointKind`.
+enum class JointType : uint8_t {
+    Fixed,
+    Revolute,
+    Prismatic,
+    Spherical,
+    D6,
+};
+
+/// Menyendikan entity ini dengan entity lain — atau dengan dunia.
+///
+/// **Rujukannya GUID, bukan `Entity`.** Indeks entity dipakai ulang setelah
+/// entity dihapus, jadi sendi yang menyimpannya akan menunjuk benda yang salah
+/// begitu level dimuat ulang. GUID justru yang tertulis di berkas level.
+///
+/// **Sendinya milik entity yang bergerak, bukan yang menahan.** Bandul membawa
+/// komponen ini dan menunjuk porosnya, bukan sebaliknya. Aturan itu perlu
+/// disebutkan karena keduanya sama masuk akal dilihat dari luar, sedangkan yang
+/// terbalik membuat menghapus bandul meninggalkan poros dengan sendi ke sesuatu
+/// yang tidak ada.
+struct JointComponent {
+    JointType type = JointType::Fixed;
+
+    /// Entity di ujung satunya. **Kosong berarti dunia**, dan itu bukan galat:
+    /// pintu dan bandul memang tergantung pada titik tetap di ruang, dan tanpa
+    /// ini setiap adegan harus menyediakan benda statis pura-pura untuk
+    /// digantungi.
+    Uuid connectedBody;
+
+    /// Titik sendi pada entity ini, ruang lokalnya.
+    Vec3 anchor{0.0f, 0.0f, 0.0f};
+    /// Putaran bingkai sendi. **Sumbunya adalah +X bingkai ini** — engsel
+    /// berputar mengelilingi X lokalnya, prismatic bergeser sepanjang X
+    /// lokalnya. Yang menginginkan sumbu lain memutar bingkainya.
+    Quat frame{1.0f, 0.0f, 0.0f, 0.0f};
+
+    bool limitEnabled = false;
+    /// Radian untuk Revolute, meter untuk Prismatic, setengah-sudut kerucut
+    /// untuk Spherical.
+    float lowerLimit = 0.0f;
+    float upperLimit = 0.0f;
+
+    /// Kedua benda saling menabrak. Bawaannya tidak: benda yang disendi hampir
+    /// selalu bersinggungan di sendinya, dan membiarkannya bertabrakan membuat
+    /// solver mendorongnya menjauh sementara sendinya menarik kembali.
+    bool collisionEnabled = false;
+
+    /// Nol berarti tidak pernah patah.
+    float breakForce = 0.0f;
+    float breakTorque = 0.0f;
+};
+
 struct CameraComponent {
     float fovYRadians = 1.047f;  // 60°
     float nearZ = 0.05f;
