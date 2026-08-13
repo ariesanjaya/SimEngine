@@ -100,6 +100,14 @@ sebagai modul `Sim::Cloth`, lengkap dengan pengukuran di RTX 2060. PBD PhysX jug
 mensimulasikan kain, juga di GPU, juga hanya dengan CUDA. **Dua solver kain
 adalah dua tempat yang harus dipelihara** untuk satu fitur.
 
+**Sudah dianalisa: [ANALISA-KAIN.md](ANALISA-KAIN.md).** Hasilnya membalik premis
+pertanyaannya — PBD kain **sudah usang** di PhysX 5.6.1 yang kita pakai, jadi ia
+gugur sebelum dibandingkan. Perbandingan yang tersisa adalah
+`PxDeformableSurface` melawan XRTailor, dan keduanya sama-sama menuntut CUDA
+sehingga sama-sama absen di RX 5600 XT — separuh baseline yang tertulis di
+rencana GI. Rekomendasinya: ukur `PxDeformableSurface` di P8 sebelum
+mengekstraksi 17 ribu baris XRTailor.
+
 **Diputuskan sesudah P7, bukan sekarang.** Alasannya bertahan diperiksa: tidak
 satu pun milestone CPU menyentuh kain, dan kain PBD hidup di P8 yang menuntut
 CUDA — jadi menunda keputusannya tidak menghalangi apa pun dan tidak membuat
