@@ -82,7 +82,8 @@ sim_add_test(SimWhiteboxTests
     SOURCES
         WhiteboxTests.cpp
     DEPS
-        Sim::Whitebox)
+        Sim::Whitebox
+        Sim::Assets)
 
 sim_add_test(SimEditorTests
     SOURCES
