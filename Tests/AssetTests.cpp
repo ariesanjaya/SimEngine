@@ -1329,3 +1329,32 @@ TEST_CASE("thumbnail dibuat dari berkas gambar dan di-cache") {
         CHECK_FALSE(MakeThumbnail(text, cache.Path(), 4).IsValid());
     }
 }
+
+TEST_CASE("unitSphere.obj cocok dengan collider Sphere yang dipasangkan padanya") {
+    using namespace sim::assets;
+
+    // **Aset yang dikirim, dan sebuah prefab bergantung padanya.** "Physics
+    // Sphere" menggambar mesh ini sambil menabrak dengan `ColliderComponent`
+    // berjari-jari 0,5 — dan bentuk yang digambar tidak cocok dengan yang
+    // ditabrak tidak pernah tampak sebagai galat, hanya sebagai benda yang
+    // berhenti melayang atau setengah tenggelam.
+    const std::filesystem::path path = std::filesystem::path(SIM_MESH_DIR) / "unitSphere.obj";
+    REQUIRE(std::filesystem::exists(path));
+
+    std::string error;
+    const MeshData mesh = LoadMesh(path, error);
+    REQUIRE(mesh.IsValid());
+    CHECK(error.empty());
+    CHECK(mesh.TriangleCount() > 500);
+
+    // Diameter satu meter di ketiga sumbu: bola, bukan telur.
+    const Vec3 size = mesh.boundsMax - mesh.boundsMin;
+    CHECK(size.x == doctest::Approx(1.0f).epsilon(0.02));
+    CHECK(size.y == doctest::Approx(1.0f).epsilon(0.02));
+    CHECK(size.z == doctest::Approx(1.0f).epsilon(0.02));
+
+    // Berpusat di titik asal, karena `ColliderComponent::offset` bawaannya nol.
+    // Mesh yang berdiri di atas nol akan tampak tertanam separuh di lantai.
+    CHECK((mesh.boundsMin.y + mesh.boundsMax.y) == doctest::Approx(0.0f).epsilon(0.02));
+    CHECK((mesh.boundsMin.x + mesh.boundsMax.x) == doctest::Approx(0.0f).epsilon(0.02));
+}

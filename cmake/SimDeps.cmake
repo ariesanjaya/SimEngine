@@ -912,6 +912,89 @@ elseif(NOT SIM_OPENVDB_ROOT)
 endif()
 
 # ---------------------------------------------------------------------------
+# PhysX 5 — simulasi fisika (E9, lihat docs/PLAN-PHYSICS.md)
+#
+# **Opsional dan dicari, tidak dibangun**, dengan alasan yang sama seperti
+# OpenUSD dan OpenVDB: membangunnya dari nol memakan puluhan menit, dan
+# menjadikannya syarat berarti setiap orang yang hanya ingin mengubah satu panel
+# editor membayar itu pada build bersih pertamanya. Yang melewatinya tetap bisa
+# membangun seluruh mesin; yang hilang adalah simulasi, dan `PhysicsWorld`
+# mengatakannya di log alih-alih membiarkan benda diam tanpa penjelasan.
+#
+# **CPU dulu, dan itu bukan sekadar urutan.** Tiga fitur PhysX — PBD, soft body
+# FEM, dan deformable surface — menerima `PxCudaContextManager&` **sebagai
+# referensi**, jadi CUDA-nya wajib, bukan opsional. Ketiganya tidak pernah ada
+# di perangkat non-NVIDIA. `SIM_WITH_PHYSX_GPU` karena itu memilih pemasangan
+# PhysX yang mana yang ditautkan, bukan menyalakan cabang kode kedua.
+#
+# Cara menyediakannya ada di docs/DEPENDENCIES.md.
+# ---------------------------------------------------------------------------
+set(SIM_PHYSX_DEFAULT_ROOT "${CMAKE_CURRENT_LIST_DIR}/../Third-Party/PhysX")
+if(EXISTS "${SIM_PHYSX_DEFAULT_ROOT}/include/PxPhysicsAPI.h")
+    set(SIM_PHYSX_ROOT "${SIM_PHYSX_DEFAULT_ROOT}" CACHE PATH "Folder pemasangan PhysX 5")
+else()
+    set(SIM_PHYSX_ROOT "" CACHE PATH "Folder pemasangan PhysX 5")
+endif()
+
+set(SIM_PHYSX_READY FALSE)
+if(SIM_WITH_PHYSX AND SIM_PHYSX_ROOT AND EXISTS "${SIM_PHYSX_ROOT}/include/PxPhysicsAPI.h")
+    # Diperiksa dua sisi — header **dan** pustaka — dengan alasan yang sama
+    # seperti OIIO dan OpenVDB: header tanpa pustaka kompilasi dengan sukses lalu
+    # gagal saat link, dan galatnya tidak menyebut sebabnya.
+    set(SIM_PHYSX_LIBS "")
+    set(SIM_PHYSX_MISSING "")
+    # Urutannya penting: penaut GNU memproses arsip sekali, dari kiri ke kanan,
+    # jadi yang bergantung harus mendahului yang dibergantungi. PhysX → Common →
+    # Foundation adalah rantainya.
+    foreach(physxLib PhysXExtensions PhysXVehicle2 PhysXCharacterKinematic PhysXCooking
+                     PhysX PhysXPvdSDK PhysXCommon PhysXFoundation)
+        find_library(SIM_PHYSX_LIB_${physxLib} NAMES ${physxLib}_static_64 ${physxLib}
+                     PATHS "${SIM_PHYSX_ROOT}/lib" NO_DEFAULT_PATH)
+        if(SIM_PHYSX_LIB_${physxLib})
+            list(APPEND SIM_PHYSX_LIBS "${SIM_PHYSX_LIB_${physxLib}}")
+        else()
+            list(APPEND SIM_PHYSX_MISSING "${physxLib}")
+        endif()
+    endforeach()
+
+    if(SIM_PHYSX_MISSING)
+        list(JOIN SIM_PHYSX_MISSING ", " simPhysxMissingText)
+        message(STATUS
+            "Header PhysX ada di ${SIM_PHYSX_ROOT}/include tapi pustakanya tidak lengkap "
+            "(${simPhysxMissingText}) — simulasi dilewati. "
+            "Langkahnya ada di docs/DEPENDENCIES.md.")
+    else()
+        set(SIM_PHYSX_READY TRUE)
+    endif()
+endif()
+
+if(SIM_PHYSX_READY)
+    add_library(sim_physx INTERFACE)
+    target_link_libraries(sim_physx INTERFACE ${SIM_PHYSX_LIBS} Threads::Threads ${CMAKE_DL_LIBS})
+    # SYSTEM: header PhysX memancarkan peringatannya sendiri, dan -Werror proyek
+    # ini akan menggagalkan build karenanya.
+    target_include_directories(sim_physx SYSTEM INTERFACE "${SIM_PHYSX_ROOT}/include")
+    add_library(PhysX::PhysX ALIAS sim_physx)
+
+    file(STRINGS "${SIM_PHYSX_ROOT}/include/foundation/PxPhysicsVersion.h" simPhysxVersionLines
+         REGEX "^#define PX_PHYSICS_VERSION_(MAJOR|MINOR|BUGFIX) ")
+    string(REGEX MATCHALL "[0-9]+" simPhysxVersionParts "${simPhysxVersionLines}")
+    list(JOIN simPhysxVersionParts "." SIM_PHYSX_VERSION)
+    set(SIM_PHYSX_VERSION "${SIM_PHYSX_VERSION}" CACHE INTERNAL "Versi PhysX yang aktif")
+
+    if(SIM_WITH_PHYSX_GPU)
+        message(STATUS "PhysX ${SIM_PHYSX_VERSION} dipakai dari ${SIM_PHYSX_ROOT} — simulasi aktif, jalur GPU diminta")
+    else()
+        message(STATUS "PhysX ${SIM_PHYSX_VERSION} dipakai dari ${SIM_PHYSX_ROOT} — simulasi aktif (CPU)")
+    endif()
+elseif(NOT SIM_WITH_PHYSX)
+    message(STATUS "PhysX dimatikan (-DSIM_WITH_PHYSX=OFF) — tidak ada yang disimulasikan")
+elseif(NOT SIM_PHYSX_ROOT)
+    message(STATUS "PhysX tidak ada — simulasi dilewati "
+                   "(setel SIM_PHYSX_ROOT untuk mengaktifkannya)")
+endif()
+
+# ---------------------------------------------------------------------------
 # Ditambahkan pada milestone berikutnya (lihat docs/DEPENDENCIES.md):
 #   A0   cpp-httplib              transport HTTP untuk MCP server
 #   E8   cgltf, meshoptimizer

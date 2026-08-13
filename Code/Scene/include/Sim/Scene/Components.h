@@ -253,6 +253,84 @@ struct SkyComponent {
     float hdriIntensity = 1.0f;
 };
 
+/// Bagaimana sebuah entity ikut disimulasikan. Cerminan `physics::BodyKind`.
+///
+/// **Disalin alih-alih dipakai bersama**, dengan alasan yang persis sama dengan
+/// `SkySourceKind` di atas: yang di sini adalah maksud yang ditulis pengguna dan
+/// disimpan ke berkas level, yang di sana adalah masukan solver. Keduanya
+/// kebetulan mirip sekarang dan tidak akan selamanya — `physics::ShapeDesc`
+/// nanti menerima convex hull yang sudah dimasak, sementara yang ditulis di
+/// Inspector tetap sebuah rujukan aset. Pemetaannya terjadi sekali, di
+/// `PhysicsScene`.
+enum class RigidBodyKind : uint8_t {
+    Static,
+    Kinematic,
+    Dynamic,
+};
+
+/// Menjadikan entity benda tegar dalam simulasi.
+///
+/// **Tidak berguna sendirian.** Tanpa `ColliderComponent` di entity yang sama,
+/// benda ini tidak punya bentuk — ia akan jatuh menembus segalanya. `PhysicsScene`
+/// melewatinya dan mengatakan alasannya di log, alih-alih membuat benda tak
+/// kasatmata yang perilakunya tidak bisa dijelaskan.
+struct RigidBodyComponent {
+    RigidBodyKind kind = RigidBodyKind::Dynamic;
+
+    /// Massa dalam kilogram. **Nol berarti dihitung dari bentuk dan `density`**,
+    /// dan itu bawaannya karena hampir selalu yang benar: massa yang diketik
+    /// tangan mudah tidak cocok dengan ukuran bendanya, dan peti sebesar lemari
+    /// yang beratnya dua kilogram bergerak dengan cara yang salah tanpa satu pun
+    /// pesan yang menyebutkannya.
+    float mass = 0.0f;
+    /// Kerapatan kg/m³ saat massa dihitung. Bawaannya air; kayu ~700, baja ~7800.
+    float density = 1000.0f;
+
+    float linearDamping = 0.0f;
+    float angularDamping = 0.05f;
+
+    /// Benda yang boleh tertidur berhenti dihitung saat diam. Dimatikan untuk
+    /// yang harus bereaksi pada sentuhan sekecil apa pun.
+    bool allowSleeping = true;
+};
+
+/// Bentuk tabrakan. Cerminan `physics::ShapeKind`.
+enum class ColliderShape : uint8_t {
+    Box,
+    Sphere,
+    Capsule,
+    /// Bidang tak hingga; hanya masuk akal untuk benda statis.
+    Plane,
+};
+
+/// Bentuk yang ditabrak, terpisah dari mesh yang digambar.
+///
+/// **Terpisah, dan itu gunanya.** Yang dipijak karakter dan yang ditembus peluru
+/// tidak perlu setiap segitiga hiasan; memakai mesh render sebagai bentuk
+/// tabrakan adalah cara termahal untuk mendapatkan jawaban yang sama.
+struct ColliderComponent {
+    ColliderShape shape = ColliderShape::Box;
+
+    /// Setengah-ukuran untuk `Box`.
+    Vec3 halfExtents{0.5f, 0.5f, 0.5f};
+    /// Jari-jari untuk `Sphere` dan `Capsule`.
+    float radius = 0.5f;
+    /// Setengah-tinggi **bagian silinder** kapsul, tidak termasuk kedua
+    /// tudungnya. Kapsul setinggi 2 m berjari-jari 0,3 m karena itu bernilai
+    /// 0,7 — konvensi PhysX, disebutkan di sini supaya tidak perlu ditebak.
+    float halfHeight = 0.5f;
+
+    /// Geseran bentuk terhadap titik asal entity. Berguna untuk kapsul karakter
+    /// yang asalnya di telapak kaki, bukan di pinggang.
+    Vec3 offset{0.0f, 0.0f, 0.0f};
+
+    float staticFriction = 0.5f;
+    float dynamicFriction = 0.5f;
+    /// Nol tidak memantul; satu memantul setinggi asalnya. Di atas satu energinya
+    /// bertambah tiap pantulan — sah menurut PhysX, dan hampir selalu salah ketik.
+    float restitution = 0.0f;
+};
+
 struct CameraComponent {
     float fovYRadians = 1.047f;  // 60°
     float nearZ = 0.05f;

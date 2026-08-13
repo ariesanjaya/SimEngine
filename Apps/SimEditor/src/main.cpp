@@ -11,6 +11,7 @@
 #include "Sim/Editor/Icons.h"
 #include "Sim/ImGuiIntegration/ImGuiLayer.h"
 #include "Sim/ImageIO/ImageIO.h"
+#include "Sim/Physics/PhysicsWorld.h"
 #include "Sim/Platform/Display.h"
 #include "Sim/Platform/FileDialog.h"
 #include "Sim/Platform/Window.h"
@@ -145,6 +146,16 @@ int main(int argc, char** argv) {
     // mesin dan ditolak di mesin lain hampir selalu berarti backendnya berbeda,
     // dan tanpa baris ini satu-satunya cara mengetahuinya adalah membangun ulang.
     SIM_INFO("Editor", "ImageIO backend: {}", imageio::BackendSummary());
+    // Fisika dicatat dengan cara yang sama, dan ketiadaannya sama pentingnya
+    // untuk dicatat: benda yang diam padahal seharusnya jatuh terbaca sebagai
+    // bug simulasi, bukan sebagai build tanpa PhysX. Baris ini yang membedakan
+    // keduanya tanpa perlu membangun ulang.
+    if (physics::Available()) {
+        SIM_INFO("Editor", "Physics: PhysX {} (CPU{})", physics::BackendVersion(),
+                 physics::GpuAvailable() ? ", GPU tersedia" : "");
+    } else {
+        SIM_WARN("Editor", "Physics: PhysX tidak ada di build ini — simulasi mati");
+    }
 
     if (!platform::InitPlatform()) {
         return 1;

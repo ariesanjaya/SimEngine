@@ -2,15 +2,15 @@
   "schemaVersion": 3,
   "entities": [
     {
-      "guid": "00000000-0000-4000-8000-000000000009",
+      "guid": "00000000-0000-4000-8000-000000000011",
       "components": {
         "Name": {
-          "name": "Ground"
+          "name": "Physics Sphere"
         },
         "Transform": {
           "position": [
             0.0,
-            -0.05,
+            1.0,
             0.0
           ],
           "rotation": [
@@ -20,23 +20,20 @@
             0.0
           ],
           "scale": [
-            20.0,
-            0.1,
-            20.0
+            1.0,
+            1.0,
+            1.0
           ]
         },
         "MeshRenderer": {
-          "mesh": "00000000-0000-0000-0000-000000000000",
+          "mesh": "5c6d7e8f-1a2b-4c3d-8e4f-9a0b1c2d3e4f",
           "materials": [],
-          "castShadows": false,
+          "castShadows": true,
           "receiveShadows": true,
           "lodBias": 0.0
         },
-        "Static": {
-          "isStatic": true
-        },
         "RigidBody": {
-          "kind": "Static",
+          "kind": "Dynamic",
           "mass": 0.0,
           "density": 1000.0,
           "linearDamping": 0.0,
@@ -44,7 +41,7 @@
           "allowSleeping": true
         },
         "Collider": {
-          "shape": "Box",
+          "shape": "Sphere",
           "halfExtents": [
             0.5,
             0.5,
@@ -57,9 +54,9 @@
             0.0,
             0.0
           ],
-          "staticFriction": 0.6,
-          "dynamicFriction": 0.6,
-          "restitution": 0.0
+          "staticFriction": 0.5,
+          "dynamicFriction": 0.5,
+          "restitution": 0.2
         }
       }
     }

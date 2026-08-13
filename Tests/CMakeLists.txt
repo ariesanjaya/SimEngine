@@ -39,6 +39,34 @@ sim_add_test(SimVolumeTests
 target_compile_definitions(SimVolumeTests
     PRIVATE SIM_VOLUME_DIR="${CMAKE_SOURCE_DIR}/Resources/Volumes")
 
+# Physics: lifecycle dunia, rigid body, langkah tetap, dan determinisme.
+# Bebas GPU dan bebas editor — yang diuji adalah angka yang keluar dari solver.
+sim_add_test(SimPhysicsTests
+    SOURCES
+        PhysicsTests.cpp
+    DEPS
+        Sim::Physics)
+
+# SIM_CODE_DIR dipakai uji yang menyisir `Code/` untuk memastikan tidak ada tipe
+# PhysX yang lolos ke luar TU backend-nya.
+target_compile_definitions(SimPhysicsTests
+    PRIVATE SIM_CODE_DIR="${CMAKE_SOURCE_DIR}/Code")
+
+# Jembatan scene ↔ simulasi: komponen, sinkronisasi transform dua arah, dan
+# entity berinduk. Terpisah dari SimPhysicsTests karena yang diuji berbeda —
+# yang itu solver, yang ini terjemahannya.
+sim_add_test(SimPhysicsSceneTests
+    SOURCES
+        PhysicsSceneTests.cpp
+    DEPS
+        Sim::Physics
+        Sim::Scene)
+
+# Prefab bawaan ikut diuji dari berkasnya: template fisika yang tidak bisa
+# dijatuhkan bukan template fisika.
+target_compile_definitions(SimPhysicsSceneTests
+    PRIVATE SIM_BUILTIN_DIR="${CMAKE_SOURCE_DIR}/Resources")
+
 sim_add_test(SimEditorTests
     SOURCES
         EditorTests.cpp
