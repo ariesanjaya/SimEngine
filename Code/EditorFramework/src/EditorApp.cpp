@@ -513,14 +513,19 @@ bool EditorApp::OpenProject(const std::filesystem::path& path) {
         scriptingReady_ = false;
     }
 
-    const std::filesystem::path startup = project_.StartupLevelPath();
-    if (!startup.empty() && std::filesystem::exists(startup) && LoadLevel(startup)) {
-        SIM_INFO("Editor", "Project '{}' open, startup level {}", project_.name,
-                 startup.string());
-    } else {
-        CreateStarterLevel();
-        SIM_INFO("Editor", "Project '{}' open at {}", project_.name, project_.root.string());
-    }
+    // **Levelnya dipilih, tidak dimuat diam-diam.** `startupLevel` tetap dicatat
+    // dan dipakai sebagai sorotan di layar pemilih, tapi yang menentukan tetap
+    // orangnya: project berisi banyak level tidak punya satu level yang "benar",
+    // dan editor yang selalu membuka yang terakhir memaksa tutup-buka hanya
+    // untuk berpindah.
+    world_.Clear();
+    history_.Clear();
+    levelPath_.clear();
+    context_.levelName = "untitled";
+    awaitingLevelChoice_ = true;
+    newLevelName_.clear();
+    SIM_INFO("Editor", "Project '{}' open at {} — waiting for a level", project_.name,
+             project_.root.string());
 
     const auto now = std::chrono::duration_cast<std::chrono::seconds>(
                          std::chrono::system_clock::now().time_since_epoch())
@@ -593,6 +598,144 @@ void EditorApp::PickFolder(const std::filesystem::path& start,
 }
 
 /// Layar pemilih project, digambar sebagai ganti seluruh shell editor.
+void EditorApp::RememberStartupLevel(const std::filesystem::path& path) {
+    std::error_code code;
+    const std::filesystem::path relative = std::filesystem::relative(path, project_.root, code);
+    if (code || relative.empty()) {
+        return;
+    }
+    project_.startupLevel = relative.generic_string();
+    scene::SaveProject(project_, project_.root / "project.simproj");
+}
+
+bool EditorApp::CreateLevelFile(const std::string& name) {
+    const std::filesystem::path directory = LevelsDirectory();
+    std::error_code code;
+    std::filesystem::create_directories(directory, code);
+
+    std::string safe;
+    for (const char c : name) {
+        // Nama berkas datang dari kotak teks; yang tidak sah disaring di sini
+        // alih-alih dibiarkan gagal saat menulis dengan pesan dari OS.
+        safe += (std::isalnum(static_cast<unsigned char>(c)) != 0 || c == ' ' || c == '-' ||
+                 c == '_')
+                    ? c
+                    : '_';
+    }
+    while (!safe.empty() && safe.back() == ' ') {
+        safe.pop_back();
+    }
+    if (safe.empty()) {
+        safe = "untitled";
+    }
+
+    const std::filesystem::path path = directory / (safe + ".simlevel");
+    if (std::filesystem::exists(path)) {
+        notifications_.Error("A level named '" + safe + "' already exists");
+        return false;
+    }
+
+    CreateStarterLevel();
+    // Ditulis sekarang, bukan saat Save pertama: level yang hanya hidup di
+    // memori tidak bisa dimuat ulang, dan itu persis yang membuat pekerjaan
+    // hilang saat editor ditutup tanpa sadar.
+    if (!SaveLevel(path)) {
+        return false;
+    }
+    awaitingLevelChoice_ = false;
+    return true;
+}
+
+void EditorApp::DrawLevelPicker() {
+    const ImGuiViewport* viewport = ImGui::GetMainViewport();
+    ImGui::SetNextWindowPos(viewport->WorkPos);
+    ImGui::SetNextWindowSize(viewport->WorkSize);
+    ImGui::PushStyleVar(ImGuiStyleVar_WindowPadding, ImVec2(0.0f, 0.0f));
+    ImGui::Begin("##LevelPicker", nullptr,
+                 ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
+                     ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
+    ImGui::PopStyleVar();
+
+    // Gaya yang sama dengan layar project: keduanya dibaca sekali, dari jarak
+    // yang sama, sebelum ada yang bisa dikerjakan.
+    const float baseFont = ImGui::GetFontSize();
+    ImGui::PushFont(nullptr, baseFont * 1.25f);
+    const float em = ImGui::GetFontSize();
+    const ImVec2 origin = viewport->WorkPos;
+    const ImVec2 size = viewport->WorkSize;
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    draw->AddRectFilledMultiColor(origin, ImVec2(origin.x + size.x, origin.y + size.y),
+                                  IM_COL32(22, 24, 62, 255), IM_COL32(38, 22, 78, 255),
+                                  IM_COL32(96, 32, 98, 255), IM_COL32(152, 86, 46, 255));
+
+    ImGui::SetCursorPos(ImVec2(em * 3.0f, em * 2.0f));
+    ImGui::BeginGroup();
+    ImGui::Text("%s", project_.name.c_str());
+    ImGui::TextDisabled("Choose a level to open");
+    ImGui::Spacing();
+
+    const std::filesystem::path directory = LevelsDirectory();
+    std::vector<std::filesystem::path> levels;
+    std::error_code code;
+    for (const auto& entry : std::filesystem::directory_iterator(directory, code)) {
+        if (entry.is_regular_file() && entry.path().extension() == ".simlevel") {
+            levels.push_back(entry.path());
+        }
+    }
+    std::sort(levels.begin(), levels.end());
+
+    ImGui::BeginChild("##levels", ImVec2(em * 24.0f, em * 14.0f), ImGuiChildFlags_Borders);
+    if (levels.empty()) {
+        ImGui::TextDisabled("No levels in this project yet.");
+        ImGui::TextDisabled("Create one below to get started.");
+    }
+    for (const std::filesystem::path& level : levels) {
+        const std::string name = level.stem().string();
+        // Sorotan pada level terakhir yang dipakai. Ia petunjuk, bukan pilihan
+        // otomatis — yang menentukan tetap kliknya.
+        const bool wasStartup = !project_.startupLevel.empty() &&
+                                project_.root / project_.startupLevel == level;
+        if (ImGui::Selectable(name.c_str(), wasStartup) ||
+            (wasStartup && ImGui::IsKeyPressed(ImGuiKey_Enter, false))) {
+            if (LoadLevel(level)) {
+                RememberStartupLevel(level);
+                awaitingLevelChoice_ = false;
+            }
+        }
+        if (wasStartup) {
+            ImGui::SameLine();
+            ImGui::TextDisabled("last opened");
+        }
+    }
+    ImGui::EndChild();
+
+    ImGui::Spacing();
+    ImGui::SetNextItemWidth(em * 16.0f);
+    newLevelName_.resize(128);
+    ImGui::InputTextWithHint("##new-level", "New level name...", newLevelName_.data(),
+                             newLevelName_.size());
+    newLevelName_.resize(std::strlen(newLevelName_.c_str()));
+    ImGui::SameLine();
+    ImGui::BeginDisabled(newLevelName_.empty());
+    if (ImGui::Button("Create")) {
+        CreateLevelFile(newLevelName_);
+    }
+    ImGui::EndDisabled();
+
+    ImGui::Spacing();
+    if (ImGui::Button("Back to Projects")) {
+        // Menutup projectnya, bukan hanya menyembunyikan layar ini: kembali ke
+        // daftar project sambil masih memegang project lama adalah keadaan yang
+        // tidak bisa dijelaskan ke siapa pun.
+        project_ = scene::Project{};
+        awaitingLevelChoice_ = false;
+    }
+
+    ImGui::EndGroup();
+    ImGui::PopFont();
+    ImGui::End();
+}
+
 void EditorApp::DrawProjectManager() {
     const ImGuiViewport* viewport = ImGui::GetMainViewport();
     const ImVec2 origin = viewport->WorkPos;
@@ -899,54 +1042,56 @@ void EditorApp::DrawProjectManager() {
     ImGui::End();
 }
 
+scene::Entity EditorApp::PlaceTemplate(const char* group, const char* name,
+                                       scene::Entity parent, const char* renameTo) {
+    if (context_.builtinDir.empty()) {
+        return scene::kNullEntity;
+    }
+    const std::filesystem::path path = std::filesystem::path(context_.builtinDir) / "Prefabs" /
+                                       group / (std::string(name) + ".simprefab");
+    std::ifstream stream(path);
+    if (!stream) {
+        SIM_WARN("Editor", "starter level: template {} is missing", path.string());
+        return scene::kNullEntity;
+    }
+    const std::string text((std::istreambuf_iterator<char>(stream)),
+                           std::istreambuf_iterator<char>());
+
+    std::string rootGuid;
+    const std::string remapped = scene::RemapGuids(text, &rootGuid);
+    if (remapped.empty() ||
+        !scene::RestoreSubtree(world_, remapped, parent == scene::kNullEntity
+                                                     ? Uuid{}
+                                                     : world_.GuidOf(parent))) {
+        SIM_WARN("Editor", "starter level: template {} could not be placed", path.string());
+        return scene::kNullEntity;
+    }
+
+    const scene::Entity entity = world_.FindByGuid(Uuid::Parse(rootGuid));
+    if (entity != scene::kNullEntity && renameTo != nullptr) {
+        world_.SetName(entity, renameTo);
+    }
+    return entity;
+}
+
 void EditorApp::CreateStarterLevel() {
-    // Level contoh, bukan level kosong. Editor yang dibuka dengan layar hampa
-    // tidak memberi tahu apa pun tentang cara memakainya; beberapa objek dengan
-    // komponen berbeda langsung memperlihatkan Outliner, Inspector, dan undo
-    // bekerja.
+    // **Disusun dari prefab bawaan, bukan ditulis di sini.** Sebelumnya level
+    // contoh ini membangun entitynya sendiri satu per satu — jadi ada dua
+    // definisi tentang seperti apa sebuah "Shader Ball" atau "Directional
+    // Light", dan menyunting templatenya tidak mengubah level baru sama sekali.
+    //
+    // Sekarang templatenya yang menjadi satu-satunya definisi: memperbaiki
+    // prefab memperbaiki setiap level yang dibuat setelahnya.
     world_.Clear();
     const scene::Entity environment = world_.Create("Environment");
 
-    const scene::Entity ground = world_.Create("Ground", environment);
-    scene::MeshRendererComponent groundMesh;
-    groundMesh.castShadows = false;
-    world_.Add<scene::MeshRendererComponent>(ground, groundMesh);
-    world_.Add<scene::StaticFlagComponent>(ground, scene::StaticFlagComponent{true});
-
-    const scene::Entity ball = world_.Create("Shader Ball", environment);
-    world_.TryGet<scene::TransformComponent>(ball)->position = Vec3(0.0f, 1.0f, 0.0f);
-    scene::MeshRendererComponent ballMesh;
-    // Model shader ball bawaan, kalau proyeknya punya. Dicari lewat jalur, bukan
-    // GUID tetap: GUID lahir dari berkas `.meta` di samping asetnya, jadi
-    // menuliskannya di sini akan mengikat kode ke satu salinan berkas tertentu.
-    //
-    // Tidak ditemukan berarti rujukannya kosong, persis seperti sebelum ada
-    // baris ini — bukan kesalahan. Enginenya belum bisa menggambar mesh apa pun
-    // (renderer sungguhan baru datang di E8), jadi yang berubah di viewport
-    // memang belum ada; yang ada sekarang adalah rujukan yang benar, tersimpan
-    // di berkas level, dan siap dipakai begitu renderer-nya ada.
-    if (const assets::AssetRecord* record = assets_.FindByRelativePath(kStarterMeshPath)) {
-        ballMesh.mesh = AssetRef{record->guid};
-    }
-    world_.Add<scene::MeshRendererComponent>(ball, ballMesh);
-
-    const scene::Entity sun = world_.Create("Sun", environment);
-    auto& sunLight = world_.Add<scene::LightComponent>(sun);
-    sunLight.type = scene::LightType::Directional;
-    sunLight.color = Vec3(1.0f, 0.96f, 0.88f);
-    sunLight.intensity = 3.0f;
-    world_.TryGet<scene::TransformComponent>(sun)->rotation =
-        Quat(Vec3(-0.9f, 0.6f, 0.0f));
-
-    const scene::Entity fill = world_.Create("Fill Light", environment);
-    world_.TryGet<scene::TransformComponent>(fill)->position = Vec3(-3.0f, 2.5f, 2.0f);
-    auto& fillLight = world_.Add<scene::LightComponent>(fill);
-    fillLight.color = Vec3(0.55f, 0.65f, 1.0f);
-    fillLight.intensity = 1.5f;
-
-    const scene::Entity camera = world_.Create("Camera");
-    world_.TryGet<scene::TransformComponent>(camera)->position = Vec3(0.0f, 2.0f, 8.0f);
-    world_.Add<scene::CameraComponent>(camera);
+    PlaceTemplate("Environment", "Ground", environment);
+    PlaceTemplate("Environment", "Sky Dome", environment);
+    // Lampu matahari: template directional yang sama, dinamai sesuai perannya.
+    // Nama "Sun" itulah yang dicari Time-of-Day saat menggerakkan matahari.
+    PlaceTemplate("Lights", "Directional Light", environment, "Sun");
+    PlaceTemplate("Actors", "Shader Ball", environment);
+    PlaceTemplate("Cameras", "Camera", scene::kNullEntity);
 
     history_.Clear();
     context_.levelName = "untitled";
@@ -1000,6 +1145,15 @@ void EditorApp::DrawFrame(float deltaSeconds) {
     // menulis ke folder yang tidak ada.
     if (!HasProject()) {
         DrawProjectManager();
+        return;
+    }
+
+    // Alasan yang sama dengan gerbang project di atas: sebelum ada level,
+    // Outliner, Inspector, dan viewport semuanya menggambar dunia kosong — dan
+    // panel yang harus punya jalur "belum ada level" sendiri-sendiri adalah
+    // panel yang salah satunya akan lupa memilikinya.
+    if (awaitingLevelChoice_) {
+        DrawLevelPicker();
         return;
     }
 

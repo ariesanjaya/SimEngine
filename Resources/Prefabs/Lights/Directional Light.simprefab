@@ -1,0 +1,45 @@
+{
+  "schemaVersion": 3,
+  "entities": [
+    {
+      "guid": "00000000-0000-4000-8000-000000000004",
+      "components": {
+        "Name": {
+          "name": "Directional Light"
+        },
+        "Transform": {
+          "position": [
+            0,
+            6,
+            0
+          ],
+          "rotation": [
+            0.888,
+            -0.325,
+            0.286,
+            0.126
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "Light": {
+          "type": "Directional",
+          "color": [
+            1.0,
+            0.96,
+            0.9
+          ],
+          "intensity": 4.0,
+          "range": 0.0,
+          "sourceRadius": 0.05,
+          "innerAngle": 0.0,
+          "outerAngle": 0.7,
+          "castShadows": true
+        }
+      }
+    }
+  ]
+}

@@ -8,6 +8,7 @@ namespace sim::editor::panel_id {
 inline constexpr const char* kOutliner = "outliner";
 inline constexpr const char* kInspector = "inspector";
 inline constexpr const char* kAssetBrowser = "assetbrowser";
+inline constexpr const char* kPrefabs = "prefabs";
 inline constexpr const char* kViewport = "viewport";
 inline constexpr const char* kConsole = "console";
 inline constexpr const char* kLuaConsole = "luaconsole";

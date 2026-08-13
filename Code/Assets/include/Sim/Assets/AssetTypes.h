@@ -28,6 +28,8 @@ enum class AssetType : uint8_t {
     Terrain,
     /// Vegetasi (`.simveg`) — aturan sebaran; instance-nya dihitung ulang.
     Vegetation,
+    /// Volume (`.vdb`) — asap, api, awan. Grid jarang dari Houdini/EmberGen.
+    Volume,
     /// Rangka animasi (`.simskel`).
     Skeleton,
     /// Klip animasi (`.simanim`).

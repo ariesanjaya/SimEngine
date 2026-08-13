@@ -62,6 +62,8 @@ inline constexpr const char* kCamera = ICON_LC_VIDEO;
 inline constexpr const char* kSky = ICON_LC_CLOUD_SUN;
 inline constexpr const char* kTerrain = ICON_LC_MOUNTAIN_SNOW;
 inline constexpr const char* kVegetation = ICON_LC_TREES;
+/// Volume `.vdb` — asap, api, awan.
+inline constexpr const char* kVolume = ICON_LC_CLOUD;
 inline constexpr const char* kParticle = ICON_LC_SPARKLES;
 inline constexpr const char* kWater = ICON_LC_WAVES;
 inline constexpr const char* kTransform = ICON_LC_MOVE_3D;

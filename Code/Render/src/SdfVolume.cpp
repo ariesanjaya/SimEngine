@@ -327,7 +327,178 @@ struct PointField {
 
 }  // namespace
 
+// --- BakedSceneField ---------------------------------------------------------
+
+void BakedSceneField::Build(std::span<const MeshInstance> meshes,
+                            std::span<const SdfGrid* const> grids) {
+    entries_.clear();
+    locals_.clear();
+
+    // Instance tanpa grid dikumpulkan dan diserahkan ke `BoxSceneField` apa
+    // adanya, supaya seluruh urusan kubus-satuan, anisotropi, dan pembuangan
+    // kotak batas tetap dijawab satu tempat.
+    std::vector<MeshInstance> unbaked;
+    unbaked.reserve(meshes.size());
+
+    for (std::size_t i = 0; i < meshes.size(); ++i) {
+        const SdfGrid* grid = i < grids.size() ? grids[i] : nullptr;
+        if (grid == nullptr || grid->Empty() || grid->voxelSize <= 0.0f) {
+            unbaked.push_back(meshes[i]);
+            continue;
+        }
+
+        // **Matriks model apa adanya, tanpa pemetaan ke kubus satuan.** Grid
+        // dibake dari vertex mesh, jadi ruangnya ruang vertex itu — memetakannya
+        // lewat kotak batas seperti yang harus dilakukan kubus akan menskalakan
+        // mesh dua kali. Ini aturan yang sama yang ditulis `MeshInstance`.
+        const Mat4& model = meshes[i].transform;
+        const Vec3 scale(glm::length(Vec3(model[0])), glm::length(Vec3(model[1])),
+                         glm::length(Vec3(model[2])));
+        const float smallest = std::max(std::min({scale.x, scale.y, scale.z}), 1e-4f);
+        const float largest = std::max({scale.x, scale.y, scale.z, 1e-4f});
+
+        Entry entry;
+        entry.inverse = glm::inverse(model);
+        entry.scale = smallest;
+        entry.anisotropy = smallest / largest;
+        entry.grid = grid;
+
+        // Kotak batas dunia dari kotak grid, bukan dari kotak batas mesh: yang
+        // menentukan sampai mana grid punya jawaban adalah luas grid itu.
+        const Vec3 gridMin = grid->origin;
+        const Vec3 gridMax = grid->origin + Vec3(static_cast<float>(grid->sizeX - 1),
+                                                 static_cast<float>(grid->sizeY - 1),
+                                                 static_cast<float>(grid->sizeZ - 1)) *
+                                                grid->voxelSize;
+        entry.boundsMin = Vec3(std::numeric_limits<float>::max());
+        entry.boundsMax = Vec3(std::numeric_limits<float>::lowest());
+        for (int corner = 0; corner < 8; ++corner) {
+            const Vec3 local(corner & 1 ? gridMax.x : gridMin.x, corner & 2 ? gridMax.y : gridMin.y,
+                             corner & 4 ? gridMax.z : gridMin.z);
+            const Vec3 world = Vec3(model * Vec4(local, 1.0f));
+            entry.boundsMin = glm::min(entry.boundsMin, world);
+            entry.boundsMax = glm::max(entry.boundsMax, world);
+        }
+        entries_.push_back(entry);
+    }
+
+    boxes_.Build(unbaked);
+}
+
+namespace {
+
+/// Sumbangan satu grid pada sebuah titik dunia, sebagai **batas bawah** jarak
+/// sejati.
+///
+/// Dua batas bawah digabung dengan `max`, dan itu bukan kelebihan melainkan
+/// syarat kebenaran:
+///
+/// - `SampleLocal * scale` tepat di dekat permukaan, tapi **jenuh** di luar pita
+///   grid. Dipakai sendirian, sebuah titik lima meter dari mesh akan dilaporkan
+///   berjarak selebar pita — dan `Row` mengambil `min`, jadi angka kecil palsu
+///   itu menjadi dinding hantu di seluruh kotak bake.
+/// - Jarak ke kotak batas grid tidak pernah melebih-lebihkan (kotaknya memuat
+///   meshnya), dan justru akurat di kejauhan — persis di mana yang pertama
+///   menyerah.
+///
+/// Keduanya batas bawah, jadi yang lebih besar tetap batas bawah — dan lebih
+/// rapat. Melebih-lebihkan adalah satu-satunya arah yang berbahaya: sphere
+/// tracing yang melangkah terlalu jauh menembus dinding.
+float GridLowerBound(const Vec3& world, const Vec3& local, const SdfGrid& grid, float scale,
+                     const Vec3& boundsMin, const Vec3& boundsMax) {
+    const float sampled = grid.SampleLocal(local) * scale;
+    if (sampled < 0.0f) {
+        // **Di dalam geometri, gridlah satu-satunya yang tahu.** Jarak ke kotak
+        // batas bernilai nol untuk setiap titik di dalamnya, jadi `max` dengannya
+        // akan menghapus tandanya — dan titik di dalam benda yang dilaporkan
+        // berjarak nol membuat sphere tracing yang bermula di sana mengira ia
+        // menyentuh permukaan, lalu melangkah keluar menembus dinding.
+        return sampled;
+    }
+    const float toBox = AabbDistance(world, world, boundsMin, boundsMax);
+    return std::max(sampled, toBox);
+}
+
+}  // namespace
+
+float BakedSceneField::Distance(const Vec3& world) const {
+    float nearest = boxes_.Empty() ? std::numeric_limits<float>::max() : boxes_.Distance(world);
+    for (const Entry& entry : entries_) {
+        const Vec3 local = Vec3(entry.inverse * Vec4(world, 1.0f));
+        nearest = std::min(nearest, GridLowerBound(world, local, *entry.grid, entry.scale,
+                                                   entry.boundsMin, entry.boundsMax));
+    }
+    return nearest;
+}
+
+void BakedSceneField::BeginBox(const Vec3& origin, const Vec3& rowStep, const Vec3& outerStep,
+                               const Vec3& planeStep, uint32_t count, float band) {
+    boxOrigin_ = origin;
+    boxRowStep_ = rowStep;
+    boxOuterStep_ = outerStep;
+    boxPlaneStep_ = planeStep;
+    boxCount_ = count;
+    boxBand_ = band;
+    boxes_.BeginBox(origin, rowStep, outerStep, planeStep, count, band);
+
+    // Alasan yang sama seperti di `BoxSceneField`: transformasinya affine, jadi
+    // seluruh isi kotak dijangkau dari satu titik asal dan tiga vektor langkah.
+    locals_.resize(entries_.size());
+    for (std::size_t i = 0; i < entries_.size(); ++i) {
+        const Mat4& inverse = entries_[i].inverse;
+        locals_[i].origin = Vec3(inverse * Vec4(origin, 1.0f));
+        locals_[i].rowStep = Vec3(inverse * Vec4(rowStep, 0.0f));
+        locals_[i].outerStep = Vec3(inverse * Vec4(outerStep, 0.0f));
+        locals_[i].planeStep = Vec3(inverse * Vec4(planeStep, 0.0f));
+    }
+}
+
+void BakedSceneField::Row(uint32_t outer, uint32_t plane, float* out) const {
+    // Jalur kotak lebih dulu; ia yang mengisi `out` dengan nilai awal dan
+    // menyumbangkan setiap mesh yang belum dibake.
+    boxes_.Row(outer, plane, out);
+    if (boxCount_ == 0 || entries_.empty()) {
+        return;
+    }
+
+    const Vec3 start = boxOrigin_ + boxOuterStep_ * static_cast<float>(outer) +
+                       boxPlaneStep_ * static_cast<float>(plane);
+    const Vec3 last = start + boxRowStep_ * static_cast<float>(boxCount_ - 1);
+    const Vec3 rowMin = glm::min(start, last);
+    const Vec3 rowMax = glm::max(start, last);
+
+    for (std::size_t i = 0; i < entries_.size(); ++i) {
+        const Entry& entry = entries_[i];
+        // Pembuangan yang sama persis dengan jalur kotak: kalau batas bawah
+        // jaraknya saja sudah di luar pita, seluruh baris akan dijepit ke nilai
+        // jenuh dan mesh ini tidak punya apa pun untuk disumbangkan.
+        if (AabbDistance(rowMin, rowMax, entry.boundsMin, entry.boundsMax) * entry.anisotropy >=
+            boxBand_) {
+            continue;
+        }
+
+        const Local& local = locals_[i];
+        const Vec3 base = local.origin + local.outerStep * static_cast<float>(outer) +
+                          local.planeStep * static_cast<float>(plane);
+        for (uint32_t x = 0; x < boxCount_; ++x) {
+            const Vec3 world = start + boxRowStep_ * static_cast<float>(x);
+            const Vec3 point = base + local.rowStep * static_cast<float>(x);
+            out[x] = std::min(out[x], GridLowerBound(world, point, *entry.grid, entry.scale,
+                                                     entry.boundsMin, entry.boundsMax));
+        }
+    }
+}
+
 void SdfVolume::Fill(const SdfScrollResult& scroll, BoxSceneField& field) {
+    for (const SdfScrollRegion& region : scroll.regions) {
+        clipmap_.SplitWrapped(region, boxes_);
+        for (const SdfClipmap::TexelBox& box : boxes_) {
+            WriteBoxRows(region.cascade, box, field);
+        }
+    }
+}
+
+void SdfVolume::Fill(const SdfScrollResult& scroll, BakedSceneField& field) {
     for (const SdfScrollRegion& region : scroll.regions) {
         clipmap_.SplitWrapped(region, boxes_);
         for (const SdfClipmap::TexelBox& box : boxes_) {
@@ -347,6 +518,12 @@ void SdfVolume::Fill(const SdfScrollResult& scroll, const DistanceField& field) 
 }
 
 void SdfVolume::FillAll(BoxSceneField& field) {
+    ForEachCascadeBox([&](uint32_t cascade, const SdfClipmap::TexelBox& box) {
+        WriteBoxRows(cascade, box, field);
+    });
+}
+
+void SdfVolume::FillAll(BakedSceneField& field) {
     ForEachCascadeBox([&](uint32_t cascade, const SdfClipmap::TexelBox& box) {
         WriteBoxRows(cascade, box, field);
     });

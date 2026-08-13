@@ -5,6 +5,8 @@ sim_add_library(Core
         src/FrameLimiter.cpp
         src/Log.cpp
         src/MainThreadQueue.cpp
+        src/SdfGrid.cpp
+        src/VolumeGrid.cpp
         src/TaskPool.cpp
         src/Uuid.cpp
     PUBLIC_DEPS

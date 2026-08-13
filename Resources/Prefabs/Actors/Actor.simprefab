@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 3,
+  "entities": [
+    {
+      "guid": "00000000-0000-4000-8000-000000000002",
+      "components": {
+        "Name": {
+          "name": "Actor"
+        },
+        "Transform": {
+          "position": [
+            0,
+            0,
+            0
+          ],
+          "rotation": [
+            1,
+            0,
+            0,
+            0
+          ],
+          "scale": [
+            1,
+            1,
+            1
+          ]
+        },
+        "MeshRenderer": {
+          "mesh": "00000000-0000-0000-0000-000000000000",
+          "materials": [],
+          "castShadows": true,
+          "receiveShadows": true,
+          "lodBias": 0.0
+        }
+      }
+    }
+  ]
+}

@@ -831,6 +831,87 @@ if(TARGET sim_usd)
 endif()
 
 # ---------------------------------------------------------------------------
+# OpenVDB — bake mesh menjadi SDF, dan impor volume (.vdb)
+#
+# **Opsional dan dicari, tidak dibangun.** Membangunnya dari nol menyeret TBB,
+# Blosc, dan boost, dan memakan puluhan menit — biaya yang sama yang membuat
+# OpenUSD tidak dijadikan syarat. Yang melewatinya tetap bisa membangun seluruh
+# mesin; yang hilang adalah SDF mesh yang tepat, dan clipmap GI mundur ke
+# hampiran kotak berorientasi yang memang sudah ada.
+#
+# **Pengondisi aset, bukan pustaka runtime.** Aturan yang sama dengan
+# OpenImageIO: ia boleh dipakai importir, baker, dan editor; tidak boleh oleh
+# jalur yang dikirim ke pemain. Yang sampai ke renderer adalah grid float yang
+# sudah dibake — tipe biasa, tanpa satu pun tipe OpenVDB di header publik.
+#
+# Cara menyediakannya ada di docs/DEPENDENCIES.md.
+# ---------------------------------------------------------------------------
+set(SIM_OPENVDB_DEFAULT_ROOT "${CMAKE_CURRENT_LIST_DIR}/../Third-Party/OpenVDB")
+if(EXISTS "${SIM_OPENVDB_DEFAULT_ROOT}/include/openvdb/openvdb.h")
+    set(SIM_OPENVDB_ROOT "${SIM_OPENVDB_DEFAULT_ROOT}" CACHE PATH "Folder pemasangan OpenVDB")
+else()
+    set(SIM_OPENVDB_ROOT "" CACHE PATH "Folder pemasangan OpenVDB")
+endif()
+
+set(SIM_OPENVDB_READY FALSE)
+if(SIM_WITH_OPENVDB AND SIM_OPENVDB_ROOT
+   AND EXISTS "${SIM_OPENVDB_ROOT}/include/openvdb/openvdb.h")
+    # Diperiksa dua sisi, dengan alasan yang sama seperti OIIO: header tanpa
+    # pustaka kompilasi dengan sukses lalu gagal saat link.
+    find_library(SIM_OPENVDB_LIB NAMES openvdb
+                 PATHS "${SIM_OPENVDB_ROOT}/lib" NO_DEFAULT_PATH)
+    # `version.h` dihasilkan saat OpenVDB dibangun, bukan bagian dari sumbernya,
+    # dan `Types.h` meng-include-nya dengan tanda kutip — jadi ia harus duduk di
+    # sebelah header lain, bukan di folder build yang terpisah. Pemeriksaan ini
+    # menangkap salinan header yang diambil dari pohon sumber saja.
+    if(SIM_OPENVDB_LIB AND EXISTS "${SIM_OPENVDB_ROOT}/include/openvdb/version.h")
+        set(SIM_OPENVDB_READY TRUE)
+    elseif(NOT SIM_OPENVDB_LIB)
+        message(STATUS
+            "Header OpenVDB ada di ${SIM_OPENVDB_ROOT}/include tapi pustakanya tidak — "
+            "bake SDF dilewati. Langkahnya ada di docs/DEPENDENCIES.md.")
+    else()
+        message(STATUS
+            "OpenVDB di ${SIM_OPENVDB_ROOT} tidak punya version.h — ia dihasilkan saat "
+            "OpenVDB dibangun, jadi salinan dari pohon sumber saja tidak cukup. "
+            "Langkahnya ada di docs/DEPENDENCIES.md.")
+    endif()
+endif()
+
+if(SIM_OPENVDB_READY)
+    # TBB dipakai OpenVDB untuk paralelisasi bake-nya. Ia sudah ada di sistem
+    # sebagai kebergantungan pustaka lain; yang dibawa paket OpenUSD sengaja
+    # tidak dipakai supaya tidak ada dua TBB di satu binary.
+    find_library(SIM_OPENVDB_TBB NAMES tbb libtbb.so.12)
+    if(NOT SIM_OPENVDB_TBB)
+        message(STATUS "libtbb tidak ditemukan — bake SDF dilewati "
+                       "(pasang libtbb-dev untuk mengaktifkannya)")
+        set(SIM_OPENVDB_READY FALSE)
+    endif()
+endif()
+
+if(SIM_OPENVDB_READY)
+    add_library(sim_openvdb INTERFACE)
+    target_link_libraries(sim_openvdb INTERFACE "${SIM_OPENVDB_LIB}" "${SIM_OPENVDB_TBB}")
+    # SYSTEM: header OpenVDB memancarkan peringatannya sendiri, dan -Werror
+    # proyek ini akan menggagalkan build karenanya.
+    target_include_directories(sim_openvdb SYSTEM INTERFACE "${SIM_OPENVDB_ROOT}/include")
+    add_library(OpenVdb::OpenVdb ALIAS sim_openvdb)
+
+    file(STRINGS "${SIM_OPENVDB_ROOT}/include/openvdb/version.h" simVdbVersionLines
+         REGEX "^#define OPENVDB_LIBRARY_(MAJOR|MINOR|PATCH)_VERSION_NUMBER ")
+    string(REGEX MATCHALL "[0-9]+" simVdbVersionParts "${simVdbVersionLines}")
+    list(JOIN simVdbVersionParts "." SIM_OPENVDB_VERSION)
+    set(SIM_OPENVDB_VERSION "${SIM_OPENVDB_VERSION}" CACHE INTERNAL "Versi OpenVDB yang aktif")
+    message(STATUS "OpenVDB ${SIM_OPENVDB_VERSION} dipakai dari ${SIM_OPENVDB_ROOT} — bake SDF mesh aktif")
+elseif(NOT SIM_WITH_OPENVDB)
+    message(STATUS "OpenVDB dimatikan (-DSIM_WITH_OPENVDB=OFF)")
+elseif(NOT SIM_OPENVDB_ROOT)
+    message(STATUS "OpenVDB tidak ada — bake SDF mesh dilewati, clipmap GI memakai "
+                   "hampiran kotak (setel SIM_OPENVDB_ROOT untuk mengaktifkannya)")
+endif()
+
+# ---------------------------------------------------------------------------
 # Ditambahkan pada milestone berikutnya (lihat docs/DEPENDENCIES.md):
 #   A0   cpp-httplib              transport HTTP untuk MCP server
 #   E8   cgltf, meshoptimizer

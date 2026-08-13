@@ -1,6 +1,7 @@
 #include "Sim/Assets/AssetTypes.h"
 
 #include "Sim/ImageIO/ImageIO.h"
+#include "Sim/Volume/SdfBake.h"
 
 #include <algorithm>
 #include <array>
@@ -20,6 +21,7 @@ const char* ToString(AssetType type) {
         case AssetType::Graph: return "Graph";
         case AssetType::Terrain: return "Terrain";
         case AssetType::Vegetation: return "Vegetation";
+        case AssetType::Volume: return "Volume";
         case AssetType::Skeleton: return "Skeleton";
         case AssetType::AnimationClip: return "Animation Clip";
         case AssetType::AnimationGraph: return "Animation Graph";
@@ -49,6 +51,13 @@ AssetType TypeFromExtension(std::string_view extension) {
     // itu aset, dan modul yang menghasilkan piksel tidak perlu tahu itu.
     if (imageio::CanRead(lower)) {
         return AssetType::Texture;
+    }
+
+    // Volume ditanyakan dengan alasan yang sama persis seperti tekstur: build
+    // tanpa OpenVDB tidak bisa membaca `.vdb`, dan menawarkan impor untuk
+    // berkas yang akan ditolak lebih buruk daripada tidak menawarkannya.
+    if (volume::CanRead(lower)) {
+        return AssetType::Volume;
     }
 
     static const std::array<std::pair<const char*, AssetType>, 22> kTable{{

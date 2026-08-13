@@ -24,6 +24,7 @@ sim_add_library(EditorPanels
     SOURCES
         ${_sim_panel_sources}
     PUBLIC_DEPS
+        Sim::Volume
         Sim::EditorFramework
         # Panel Material Editor menyunting model graph `.simmat` dan menampilkan
         # hasil kompilasinya. Publik karena tipenya muncul di header panel.

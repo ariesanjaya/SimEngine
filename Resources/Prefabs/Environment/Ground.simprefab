@@ -1,0 +1,41 @@
+{
+  "schemaVersion": 3,
+  "entities": [
+    {
+      "guid": "00000000-0000-4000-8000-000000000009",
+      "components": {
+        "Name": {
+          "name": "Ground"
+        },
+        "Transform": {
+          "position": [
+            0.0,
+            -0.05,
+            0.0
+          ],
+          "rotation": [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "scale": [
+            20.0,
+            0.1,
+            20.0
+          ]
+        },
+        "MeshRenderer": {
+          "mesh": "00000000-0000-0000-0000-000000000000",
+          "materials": [],
+          "castShadows": false,
+          "receiveShadows": true,
+          "lodBias": 0.0
+        },
+        "Static": {
+          "isStatic": true
+        }
+      }
+    }
+  ]
+}

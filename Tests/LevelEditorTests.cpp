@@ -14,7 +14,9 @@
 #include "Sim/Scene/Serialization.h"
 #include "Sim/Scene/World.h"
 
+#include "Sim/Scene/Project.h"
 #include <doctest/doctest.h>
+#include <array>
 
 #include <atomic>
 #include <chrono>
@@ -1004,4 +1006,204 @@ TEST_CASE("Warna instance datang dari material, bukan lagi dari komponen") {
     bare.Build(world, selection);
     REQUIRE(bare.Scene().meshes.size() == 1);
     CHECK(bare.Scene().meshes[0].color.a > 0.0f);
+}
+
+// --- Panel Prefab: template bawaan -------------------------------------------
+
+TEST_CASE("setiap template prefab bawaan bisa dimuat dan berisi yang dijanjikannya") {
+    // **Template yang rusak tidak terlihat sebagai galat.** Ia muncul di panel,
+    // bisa diklik, dan yang mendarat di scene adalah entity kosong — yang
+    // terbaca sebagai "prefabnya tidak bekerja" alih-alih "berkasnya salah".
+    // Uji ini membaca berkas yang benar-benar dikirim, bukan salinannya.
+    const std::filesystem::path root =
+        std::filesystem::path(SIM_BUILTIN_DIR) / "Prefabs";
+    REQUIRE(std::filesystem::is_directory(root));
+
+    struct Expected {
+        const char* group;
+        const char* file;
+        const char* name;
+        const char* component;
+    };
+    const std::array<Expected, 8> kTemplates{{
+        {"Actors", "Actor", "Actor", "MeshRenderer"},
+        {"Actors", "Shader Ball", "Shader Ball", "MeshRenderer"},
+        {"Lights", "Directional Light", "Directional Light", "Light"},
+        {"Lights", "Point Light", "Point Light", "Light"},
+        {"Lights", "Spot Light", "Spot Light", "Light"},
+        {"Cameras", "Camera", "Camera", "Camera"},
+        {"Environment", "Sky Dome", "Sky Dome", "Sky"},
+        {"Environment", "Ground", "Ground", "MeshRenderer"},
+    }};
+
+    for (const Expected& expected : kTemplates) {
+        const std::filesystem::path path =
+            root / expected.group / (std::string(expected.file) + ".simprefab");
+        INFO("template " << path.string());
+        REQUIRE(std::filesystem::exists(path));
+
+        // Dimuat lewat jalur yang sama persis dengan yang dipakai panel:
+        // teksnya di-remap GUID-nya lalu dipulihkan sebagai sub-pohon.
+        std::ifstream stream(path);
+        REQUIRE(stream);
+        const std::string text((std::istreambuf_iterator<char>(stream)),
+                               std::istreambuf_iterator<char>());
+        REQUIRE_FALSE(text.empty());
+
+        scene::World world;
+        std::string rootGuid;
+        const std::string remapped = scene::RemapGuids(text, &rootGuid);
+        INFO("remap menghasilkan " << remapped.size() << " byte");
+        REQUIRE_FALSE(remapped.empty());
+        REQUIRE(scene::RestoreSubtree(world, remapped, Uuid{}));
+
+        const scene::Entity entity = world.FindByGuid(Uuid::Parse(rootGuid));
+        REQUIRE(entity != scene::kNullEntity);
+        CHECK(world.NameOf(entity) == expected.name);
+
+        // Komponen yang menjadi alasan template ini ada. Sebuah "Directional
+        // Light" tanpa LightComponent adalah entity kosong bernama lampu.
+        const std::string component = expected.component;
+        if (component == "MeshRenderer") {
+            CHECK(world.Has<scene::MeshRendererComponent>(entity));
+        } else if (component == "Light") {
+            REQUIRE(world.Has<scene::LightComponent>(entity));
+            const auto* light = world.TryGet<scene::LightComponent>(entity);
+            REQUIRE(light != nullptr);
+            CHECK(light->intensity > 0.0f);
+        } else if (component == "Camera") {
+            REQUIRE(world.Has<scene::CameraComponent>(entity));
+            const auto* camera = world.TryGet<scene::CameraComponent>(entity);
+            REQUIRE(camera != nullptr);
+            CHECK(camera->farZ > camera->nearZ);
+        } else if (component == "Sky") {
+            // **Sky Dome bukan mesh.** Ia yang menyalakan langit: level tanpa
+            // entity ini tidak menggambar langit sama sekali, dan itu yang
+            // membuat adegan interior berhenti membayar pass yang tidak
+            // terlihat. Sebuah kubus raksasa di sini akan terlihat benar di
+            // panel dan salah di setiap level yang memakainya.
+            REQUIRE(world.Has<scene::SkyComponent>(entity));
+            const auto* sky = world.TryGet<scene::SkyComponent>(entity);
+            REQUIRE(sky != nullptr);
+            CHECK(sky->intensity > 0.0f);
+            CHECK(sky->source == scene::SkySourceKind::Atmosphere);
+            CHECK_FALSE(world.Has<scene::MeshRendererComponent>(entity));
+        }
+        // Transform selalu ada; tanpanya prefab tidak bisa ditempatkan.
+        CHECK(world.Has<scene::TransformComponent>(entity));
+    }
+}
+
+TEST_CASE("jenis lampu di template benar-benar berbeda") {
+    // Ketiga lampu memakai komponen yang sama; yang membedakannya cuma field
+    // `type`. Salah menuliskannya menghasilkan tiga template yang kelihatan
+    // berbeda di panel dan berperilaku sama di scene.
+    const std::filesystem::path root =
+        std::filesystem::path(SIM_BUILTIN_DIR) / "Prefabs" / "Lights";
+
+    const std::array<std::pair<const char*, scene::LightType>, 3> kExpected{{
+        {"Directional Light", scene::LightType::Directional},
+        {"Point Light", scene::LightType::Point},
+        {"Spot Light", scene::LightType::Spot},
+    }};
+
+    for (const auto& [file, type] : kExpected) {
+        const std::filesystem::path path = root / (std::string(file) + ".simprefab");
+        std::ifstream stream(path);
+        REQUIRE(stream);
+        const std::string text((std::istreambuf_iterator<char>(stream)),
+                               std::istreambuf_iterator<char>());
+
+        scene::World world;
+        std::string rootGuid;
+        REQUIRE(scene::RestoreSubtree(world, scene::RemapGuids(text, &rootGuid), Uuid{}));
+        const auto* light =
+            world.TryGet<scene::LightComponent>(world.FindByGuid(Uuid::Parse(rootGuid)));
+        INFO("template " << file);
+        REQUIRE(light != nullptr);
+        CHECK(light->type == type);
+    }
+}
+
+TEST_CASE("level bawaan disusun dari template, bukan ditulis ulang di kode") {
+    // **Yang dijaga di sini adalah satu definisi, bukan dua.** Sebelumnya level
+    // contoh membangun entitynya sendiri, jadi menyunting prefab "Shader Ball"
+    // tidak mengubah level baru sama sekali — dan dua definisi yang bergeser
+    // sendiri-sendiri baru ketahuan ketika seseorang membandingkannya.
+    //
+    // Diuji lewat berkasnya, karena itulah yang benar-benar dibaca
+    // `CreateStarterLevel`: setiap bagian level bawaan harus punya template
+    // yang bisa menghasilkannya.
+    const std::filesystem::path prefabs =
+        std::filesystem::path(SIM_BUILTIN_DIR) / "Prefabs";
+
+    struct Piece {
+        const char* group;
+        const char* file;
+    };
+    const std::array<Piece, 5> kStarter{{
+        {"Environment", "Ground"},
+        {"Environment", "Sky Dome"},
+        {"Lights", "Directional Light"},
+        {"Actors", "Shader Ball"},
+        {"Cameras", "Camera"},
+    }};
+
+    scene::World world;
+    for (const Piece& piece : kStarter) {
+        const std::filesystem::path path =
+            prefabs / piece.group / (std::string(piece.file) + ".simprefab");
+        INFO("bagian " << path.string());
+        REQUIRE(std::filesystem::exists(path));
+
+        std::ifstream stream(path);
+        REQUIRE(stream);
+        const std::string text((std::istreambuf_iterator<char>(stream)),
+                               std::istreambuf_iterator<char>());
+        std::string rootGuid;
+        REQUIRE(scene::RestoreSubtree(world, scene::RemapGuids(text, &rootGuid), Uuid{}));
+    }
+
+    // Kelimanya berdampingan di satu dunia, seperti di level bawaan.
+    CHECK(world.Registry().view<scene::SkyComponent>().size() == 1);
+    CHECK(world.Registry().view<scene::CameraComponent>().size() == 1);
+    CHECK(world.Registry().view<scene::LightComponent>().size() == 1);
+    // Ground dan Shader Ball: dua mesh.
+    std::size_t meshes = 0;
+    for (const auto raw : world.Registry().view<scene::MeshRendererComponent>()) {
+        (void)raw;
+        ++meshes;
+    }
+    CHECK(meshes == 2);
+}
+
+TEST_CASE("Ground adalah kotak yang dipipihkan, bukan kubus") {
+    // Tebalnya yang membuatnya lantai. Kubus 20x20x20 akan menelan seluruh
+    // adegan contoh, dan itu terbaca sebagai "kameranya di dalam sesuatu"
+    // alih-alih sebagai prefab yang salah skala.
+    const std::filesystem::path path =
+        std::filesystem::path(SIM_BUILTIN_DIR) / "Prefabs" / "Environment" / "Ground.simprefab";
+    std::ifstream stream(path);
+    REQUIRE(stream);
+    const std::string text((std::istreambuf_iterator<char>(stream)),
+                           std::istreambuf_iterator<char>());
+
+    scene::World world;
+    std::string rootGuid;
+    REQUIRE(scene::RestoreSubtree(world, scene::RemapGuids(text, &rootGuid), Uuid{}));
+    const scene::Entity ground = world.FindByGuid(Uuid::Parse(rootGuid));
+    REQUIRE(ground != scene::kNullEntity);
+
+    const auto* transform = world.TryGet<scene::TransformComponent>(ground);
+    REQUIRE(transform != nullptr);
+    CHECK(transform->scale.x > 10.0f);
+    CHECK(transform->scale.z > 10.0f);
+    CHECK(transform->scale.y < 1.0f);
+
+    // Tidak menjatuhkan bayangan: permukaan tanah yang membayangi dirinya
+    // sendiri membayar satu pass untuk bayangan yang tak pernah terlihat.
+    const auto* mesh = world.TryGet<scene::MeshRendererComponent>(ground);
+    REQUIRE(mesh != nullptr);
+    CHECK_FALSE(mesh->castShadows);
+    CHECK(mesh->receiveShadows);
 }

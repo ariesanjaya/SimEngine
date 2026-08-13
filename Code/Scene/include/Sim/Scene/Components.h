@@ -212,6 +212,47 @@ struct LightComponent {
     bool castShadows = true;
 };
 
+/// Dari mana langit datang. Cerminan `render::SkySource`, di sisi scene.
+///
+/// **Disalin alih-alih dipakai bersama** karena `Sim::Scene` tidak boleh melihat
+/// `Sim::Render` — itu batas modul yang sama yang menjaga scene bisa dimuat
+/// tanpa satu pun perangkat grafis. Pemetaannya terjadi sekali, di editor.
+enum class SkySourceKind : uint8_t {
+    Atmosphere,
+    HdrMap,
+};
+
+/// Langit sebuah level.
+///
+/// **Keberadaannya yang menyalakan langit.** Level tanpa entity ber-komponen ini
+/// tidak menggambar langit sama sekali — dan itu bukan kekurangan melainkan
+/// yang diminta: tidak semua permainan punya langit. Yang di bawah tanah, yang
+/// di dalam kapal, yang seluruhnya interior, semuanya membayar empat pass LUT
+/// untuk sesuatu yang tak pernah terlihat kalau langit selalu menyala.
+///
+/// **Pengaturannya ikut di dalam level**, bukan di viewport. Langit adalah
+/// bagian dari adegan seperti lampu matahari: memindahkannya ke pengaturan
+/// editor berarti level yang sama terlihat berbeda di dua mesin, dan tidak ada
+/// yang tercatat di berkasnya tentang mana yang benar.
+struct SkyComponent {
+    SkySourceKind source = SkySourceKind::Atmosphere;
+    /// Pengali radiansi langit atmosferik.
+    float intensity = 20.0f;
+    /// Ketinggian kamera di atas permukaan planet, kilometer. Menentukan warna
+    /// cakrawala dan seberapa tebal udara yang dilihat.
+    float cameraHeightKm = 0.5f;
+    /// Kabut jarak jauh. Terpisah dari langit karena biayanya pass tersendiri.
+    bool aerialPerspective = true;
+    float aerialHaze = 1.0f;
+
+    /// Berkas HDR, dipakai saat `source` adalah `HdrMap`.
+    std::string hdriPath;
+    float hdriRotation = 0.0f;
+    /// Pengalinya sendiri, bukan `intensity`: berkas HDR sudah berisi radiansi,
+    /// jadi rentang yang bergunanya di sekitar satu.
+    float hdriIntensity = 1.0f;
+};
+
 struct CameraComponent {
     float fovYRadians = 1.047f;  // 60°
     float nearZ = 0.05f;
