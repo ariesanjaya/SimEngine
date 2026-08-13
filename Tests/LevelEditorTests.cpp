@@ -10,7 +10,10 @@
 #include "Sim/Editor/ProjectLibrary.h"
 #include "Sim/Editor/Selection.h"
 #include "Sim/Editor/SkinnedPreview.h"
+#include "Sim/Physics/PhysicsScene.h"
 #include "Sim/Scene/Components.h"
+
+#include <cmath>
 #include "Sim/Scene/Serialization.h"
 #include "Sim/Scene/World.h"
 
@@ -1206,4 +1209,115 @@ TEST_CASE("Ground adalah kotak yang dipipihkan, bukan kubus") {
     REQUIRE(mesh != nullptr);
     CHECK_FALSE(mesh->castShadows);
     CHECK(mesh->receiveShadows);
+
+    // **Dan ia bisa dipijak.** Tanpa collider, menekan Play di level bawaan
+    // menjatuhkan segalanya menembus lantai — cacat pertama yang akan ditemui
+    // siapa pun yang mencoba fisika untuk pertama kali.
+    //
+    // Bentuknya kotak, bukan mesh: lantainya memang kubus yang dipipihkan, jadi
+    // kotak menggambarkannya persis. Triangle mesh akan lebih mahal untuk
+    // jawaban yang sama, dan bentuk itu baru ada sesudah cooking di P4.
+    const auto* body = world.TryGet<scene::RigidBodyComponent>(ground);
+    REQUIRE(body != nullptr);
+    CHECK(body->kind == scene::RigidBodyKind::Static);
+    const auto* collider = world.TryGet<scene::ColliderComponent>(ground);
+    REQUIRE(collider != nullptr);
+    CHECK(collider->shape == scene::ColliderShape::Box);
+
+    // Permukaan atasnya harus tepat di y = 0, kalau tidak benda berhenti
+    // melayang atau setengah tenggelam. Setengah-ukuran collider ikut diskalakan
+    // transform, jadi angkanya: -0,05 + (0,5 × 0,1) = 0.
+    const float topY = transform->position.y + collider->halfExtents.y * transform->scale.y;
+    INFO("permukaan atas di y = " << topY);
+    CHECK(topY == doctest::Approx(0.0f).epsilon(0.001));
+}
+
+TEST_CASE("Play menjalankan fisika, Stop mengembalikan level seperti semula") {
+    // **Play dulu tidak berjalan sama sekali tanpa skrip** — seluruh fungsinya
+    // dipagari `#if SIM_WITH_LUA` dan langsung kembali bila `scripts` null. Uji
+    // ini menjaga perbaikannya: fisika dan Lua adalah dua fitur opsional yang
+    // tidak boleh saling mengunci, dan `config.scripts` di bawah memang tidak
+    // pernah diisi.
+    ScratchDir scratch;
+    EditorApp app;
+    EditorApp::Config config;
+    config.configDir = scratch.path / "config";
+    config.projectsRoot = scratch.path / "Documents" / "SimEngine";
+    REQUIRE(app.Initialize(config));
+
+    scene::World& world = app.GetWorld();
+    const scene::Entity ground = world.Create("Ground");
+    {
+        auto& body = world.Add<scene::RigidBodyComponent>(ground);
+        body.kind = scene::RigidBodyKind::Static;
+        auto& collider = world.Add<scene::ColliderComponent>(ground);
+        collider.shape = scene::ColliderShape::Plane;
+        const float halfAngle = 0.25f * 3.14159265f;
+        world.TryGet<scene::TransformComponent>(ground)->rotation =
+            Quat(std::cos(halfAngle), 0.0f, 0.0f, std::sin(halfAngle));
+        world.MarkTransformDirty(ground);
+    }
+
+    const scene::Entity ball = world.Create("Ball");
+    {
+        world.Add<scene::RigidBodyComponent>(ball);
+        auto& collider = world.Add<scene::ColliderComponent>(ball);
+        collider.shape = scene::ColliderShape::Sphere;
+        collider.radius = 0.5f;
+        world.TryGet<scene::TransformComponent>(ball)->position = Vec3(0.0f, 4.0f, 0.0f);
+        world.MarkTransformDirty(ball);
+    }
+    const Uuid ballGuid = world.GuidOf(ball);
+    const Uuid groundGuid = world.GuidOf(ground);
+
+    app.Play();
+    CHECK(app.IsPlaying());
+
+    if (physics::Available()) {
+        REQUIRE(app.GetPhysics().IsValid());
+        CHECK(app.GetPhysics().Stats().bodies == 2);
+
+        // Langkah yang sama dengan yang dijalankan `DrawFrame`, tanpa ImGui.
+        app.GetPhysics().Step(app.GetWorld(), 180);
+        const scene::Entity playBall = app.GetWorld().FindByGuid(ballGuid);
+        REQUIRE(playBall != scene::kNullEntity);
+        const float restY =
+            app.GetWorld().TryGet<scene::TransformComponent>(playBall)->position.y;
+        INFO("berhenti di y = " << restY);
+        CHECK(restY == doctest::Approx(0.5f).epsilon(0.05));
+    }
+
+    app.Stop();
+    CHECK_FALSE(app.IsPlaying());
+    CHECK_FALSE(app.GetPhysics().IsValid());
+
+    // **Yang dijatuhkan fisika ikut dikembalikan.** Cuplikan sebelum Play sudah
+    // ada sebelum fisika ada; yang diuji di sini adalah bahwa ia tetap menutupi
+    // perubahan yang kali ini datang dari solver, bukan dari skrip.
+    const scene::Entity restoredBall = app.GetWorld().FindByGuid(ballGuid);
+    REQUIRE(restoredBall != scene::kNullEntity);
+    CHECK(app.GetWorld().TryGet<scene::TransformComponent>(restoredBall)->position.y ==
+          doctest::Approx(4.0f));
+
+    // Dan komponennya ikut kembali utuh. Ini menguji serialisasi keduanya
+    // sekaligus: cuplikan Play menempuh jalur simpan-muat yang sama dengan
+    // berkas level, jadi field yang tidak terpantul akan hilang di sini —
+    // termasuk enum `shape` dan `Vec3 offset`, dua bentuk yang paling mudah
+    // luput dari serialisasi yang digerakkan refleksi.
+    const auto* restoredBody = app.GetWorld().TryGet<scene::RigidBodyComponent>(restoredBall);
+    REQUIRE(restoredBody != nullptr);
+    CHECK(restoredBody->kind == scene::RigidBodyKind::Dynamic);
+    const auto* restoredCollider =
+        app.GetWorld().TryGet<scene::ColliderComponent>(restoredBall);
+    REQUIRE(restoredCollider != nullptr);
+    CHECK(restoredCollider->shape == scene::ColliderShape::Sphere);
+    CHECK(restoredCollider->radius == doctest::Approx(0.5f));
+
+    const scene::Entity restoredGround = app.GetWorld().FindByGuid(groundGuid);
+    REQUIRE(restoredGround != scene::kNullEntity);
+    const auto* groundBody = app.GetWorld().TryGet<scene::RigidBodyComponent>(restoredGround);
+    REQUIRE(groundBody != nullptr);
+    CHECK(groundBody->kind == scene::RigidBodyKind::Static);
+
+    app.Shutdown();
 }

@@ -82,6 +82,9 @@ const char* IconForGroup(std::string_view group) {
     if (group == "Environment") {
         return icons::kVolume;
     }
+    if (group == "Physics") {
+        return icons::kPhysics;
+    }
     return icons::kPrefab;
 }
 

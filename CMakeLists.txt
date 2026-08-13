@@ -40,6 +40,12 @@ option(SIM_WITH_OIIO        "Backend OpenImageIO bila tersedia"          ON)
 # OpenVDB: bake mesh menjadi SDF untuk clipmap GI, dan nanti impor .vdb.
 # **Pengondisi aset, bukan pustaka runtime** — aturan yang sama dengan OIIO.
 option(SIM_WITH_OPENVDB     "Bake SDF dan impor volume lewat OpenVDB"   ON)
+# PhysX: simulasi E9. **CPU dulu** — tiga fitur PhysX (PBD, soft body FEM,
+# deformable surface) menuntut CUDA lewat tanda tangan API-nya dan tidak punya
+# jalur CPU sama sekali, jadi jalur GPU adalah lapisan tambahan yang absen di
+# perangkat non-NVIDIA. Lihat docs/PLAN-PHYSICS.md.
+option(SIM_WITH_PHYSX       "Simulasi fisika lewat PhysX 5"             ON)
+option(SIM_WITH_PHYSX_GPU   "Fitur PhysX yang menuntut CUDA"            OFF)
 option(SIM_WERROR           "Perlakukan warning sebagai error"          OFF)
 option(SIM_STRICT_WARNINGS  "Aktifkan -Wconversion dan kawan-kawannya"  OFF)
 
@@ -65,6 +71,9 @@ add_subdirectory(Code/ImageIO)
 # Pengondisi aset — Render dan Assets memakai hasilnya, bukan pustakanya, jadi
 # ia didaftarkan sebelum keduanya.
 add_subdirectory(Code/Volume)
+# Physics: simulasi PhysX 5 (E9). Pengondisi maupun runtime, tapi tidak pernah
+# bergantung pada Render — lihat docs/PLAN-PHYSICS.md.
+add_subdirectory(Code/Physics)
 add_subdirectory(Code/Reflect)
 add_subdirectory(Code/Scene)
 add_subdirectory(Code/Assets)

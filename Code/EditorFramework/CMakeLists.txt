@@ -32,6 +32,7 @@ sim_add_library(EditorFramework
         # tidak membocorkan satu pun tipe SDL.
         Sim::Platform
         Sim::Render
+        Sim::Physics
         Sim::Scene
         # Hanya inti ImGui: target ini tidak membawa header Vulkan maupun SDL,
         # sesuai aturan modul di docs/ARCHITECTURE.md.

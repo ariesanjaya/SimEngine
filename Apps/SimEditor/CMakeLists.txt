@@ -9,6 +9,10 @@ set(_sim_editor_deps
     # memakainya secara PRIVATE, jadi headernya tidak sampai ke sini. Yang
     # dipakai main.cpp cuma satu baris ringkasan backend untuk log startup.
     Sim::ImageIO
+    # Sama alasannya: satu baris di log startup. Ditaut tanpa syarat karena
+    # modulnya selalu ada — yang bisa tidak ada adalah PhysX di dalamnya, dan
+    # justru keadaan itulah yang harus terbaca di log.
+    Sim::Physics
     # WHOLE_ARCHIVE: panel mendaftarkan dirinya lewat inisialisasi statik
     # (SIM_REGISTER_PANEL). Tanpa ini linker membuang berkas objek yang
     # simbolnya tidak pernah dirujuk secara eksplisit, dan panel-panelnya hilang

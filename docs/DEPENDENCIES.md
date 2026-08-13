@@ -346,6 +346,60 @@ kurang.
 Baris `OpenVDB 13.0.0 dipakai dari ...` pada keluaran CMake menandakan bake ikut
 terbangun.
 
+### PhysX 5 — dicari, tidak dibangun
+
+Simulasi rigid body, scene query, joint, artikulasi, dan kendaraan untuk E9.
+Rencananya di [PLAN-PHYSICS.md](PLAN-PHYSICS.md).
+
+**Opsional, dan ketiadaannya terbaca.** Yang melewatinya tetap membangun seluruh
+mesin, tetapi tidak ada yang jatuh: `PhysicsWorld::Create` menolak dan
+`Error()`-nya menyebut PhysX. Itu disengaja — **benda diam yang seharusnya
+bergerak adalah gejala paling mahal untuk didiagnosis**, karena ia terlihat persis
+seperti bug simulasi. Log startup editor karena itu selalu menyebutkan status
+fisika, ada maupun tidak.
+
+**Pustaka runtime, bukan pengondisi aset** — dan di situ ia berbeda dari
+OpenImageIO dan OpenVDB, yang keduanya berhenti sesudah aset selesai diolah.
+Aturan seam-nya tetap sama dan diuji, bukan sekadar disepakati: tidak satu pun
+tipe `Px*` boleh keluar dari `Code/Physics/src/PhysicsWorld.cpp`, dan
+`SimPhysicsTests` menyisir seluruh `Code/` untuk membuktikannya — bentuk yang
+sama dengan uji `stbi_` di `SimImageIOTests`.
+
+**Dibangun CPU-only.** PBD, soft body FEM, dan deformable surface menuntut CUDA
+lewat tanda tangan API-nya sendiri (`PxCudaContextManager&`, bukan pointer), jadi
+ketiganya tidak punya jalur CPU untuk dimundurkan. Preset `linux-clang-cpu-only`
+menghasilkan pustaka statis tanpa satu pun ketergantungan CUDA, dan itu yang
+disalin ke dalam pohon:
+
+```bash
+git clone --depth 1 --branch 106.6-physx-5.6.1 https://github.com/NVIDIA-Omniverse/PhysX.git
+cd PhysX/physx
+./generate_projects.sh linux-clang-cpu-only
+cmake --build compiler/linux-clang-cpu-only-release -j
+
+# Header lengkap — termasuk PxConfig.h yang baru ada sesudah generate — lalu
+# delapan pustaka statis CPU. Yang GPU sengaja tidak ikut.
+D=Third-Party/PhysX
+mkdir -p "$D/include" "$D/lib"
+cp -a include/. "$D/include/"
+cp -a compiler/linux-clang-cpu-only-release/sdk_source_bin/PxConfig.h "$D/include/"
+for lib in PhysX PhysXCommon PhysXFoundation PhysXExtensions PhysXCooking \
+           PhysXCharacterKinematic PhysXPvdSDK PhysXVehicle2; do
+    cp -a bin/linux.x86_64/release/lib${lib}_static_64.a "$D/lib/"
+done
+```
+
+**Urutan taut penting.** Linker GNU membaca arsip statis kiri ke kanan dan hanya
+sekali, jadi `PhysXExtensions` harus mendahului `PhysX`, yang mendahului
+`PhysXFoundation`. Urutan yang salah tidak muncul sebagai peringatan melainkan
+sebagai simbol yang tidak ditemukan padahal berkasnya jelas ada di daftar taut;
+`SimDeps.cmake` sudah menyusunnya dan tidak perlu diubah.
+
+Baris `PhysX 5.6.1 dipakai dari ... — simulasi aktif (CPU)` pada keluaran CMake
+menandakan simulasinya ikut terbangun. `-DSIM_WITH_PHYSX=OFF` mematikannya;
+`-DSIM_WITH_PHYSX_GPU=ON` menuntut pustaka GPU yang tidak ikut disalin di atas,
+dan baru relevan pada P8.
+
 ## Yang sengaja tidak dipakai
 
 Dicatat supaya keputusannya tidak ditimbang ulang tiap kali namanya muncul.

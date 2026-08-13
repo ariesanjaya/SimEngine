@@ -1,0 +1,384 @@
+# Plan Fisika PhysX 5 (P0 → P8)
+
+Menjadikan PhysX 5 tulang punggung simulasi E9: rigid body, scene query, joint,
+articulation, dan kendaraan — semuanya di CPU lebih dulu, dengan CUDA sebagai
+lapisan tambahan yang bisa dimatikan.
+
+Penomoran **P** supaya tidak bertabrakan dengan E (editor/render), A (agentic
+AI), C (kain), R (Embree), I (gambar), dan M (GI) di [ROADMAP.md](ROADMAP.md).
+
+---
+
+## Yang harus diketahui sebelum apa pun direncanakan
+
+**Tiga dari sepuluh fitur di daftar PhysX tidak punya jalur CPU sama sekali.**
+Ini bukan pendapat tentang performa; ia terbaca di tanda tangan API-nya:
+
+```cpp
+createPBDParticleSystem(PxCudaContextManager& ...)   // referensi, bukan pointer
+createDeformableVolume  (PxCudaContextManager&)      // soft body FEM
+createDeformableSurface (PxCudaContextManager&)      // kain deformable
+```
+
+Sebuah `&` tidak bisa bernilai null. Ketiganya **menuntut** CUDA — bukan
+memakainya bila ada. `README_LINUX.md` menegaskan sisi sebaliknya: *"CUDA
+Toolkit 12.8 (Not required for CPU only builds)"* — build CPU-only memang ada,
+ia hanya tidak memuat fitur-fitur itu.
+
+| Fitur | Mode CPU | Tinggal di mana |
+| --- | --- | --- |
+| Rigid Body Dynamics | ✅ | PhysX core |
+| Scene Queries | ✅ | PhysX core |
+| Joints | ✅ | PhysX core |
+| Custom Geometries | ✅ | PhysX core |
+| Reduced Coordinate Articulations | ✅ | PhysX core |
+| Vehicle Dynamics | ✅ | PhysX core (di atas rigid body) |
+| Character Controller | ✅ | PhysX core (ekstensi) |
+| Fracture — **Blast** | ✅ | **SDK terpisah** (`/blast`) |
+| PBD (liquid/cloth/inflatable) | ❌ **CUDA wajib** | PhysX core, solver GPU |
+| Soft Body FEM | ❌ **CUDA wajib** | PhysX core, solver GPU |
+| Smoke & Fire — **Flow** | ❌ **GPU** | **SDK terpisah** (`/flow`) |
+
+**Dan CUDA bukan sekadar "belum dipasang" bagi sebagian target.**
+[rencana-implementasi-gi.md](rencana-implementasi-gi.md) menyebut **RDNA1**
+sebagai baseline — itu AMD, dan tidak ada versi driver yang membuatnya
+menjalankan CUDA. Di mesin itu ketiga fitur tersebut tidak pernah ada, bukan
+"mati sementara". Jadi mereka tidak bisa direncanakan sebagai sakelar yang
+sebagian orang nyalakan; mereka fitur yang **hilang untuk satu kelas perangkat
+keras**, dan setiap permainan yang bergantung padanya kehilangan kelas itu.
+
+Konsekuensi yang menentukan seluruh urutan di bawah: **P0–P7 adalah rencana yang
+sesungguhnya**, dan P8 adalah lapisan yang bagusnya-ada.
+
+---
+
+## Keputusan pokok
+
+**PhysX opsional, dicari, tidak dibangun.** Pola yang sudah dipakai OpenUSD,
+OpenImageIO, dan OpenVDB di `cmake/SimDeps.cmake`. Membangunnya dari nol
+memakan puluhan menit; menjadikannya syarat berarti setiap orang yang hanya
+ingin mengubah satu panel editor membayar itu pada build bersih pertamanya.
+Yang melewatinya tetap bisa membangun seluruh mesin — yang hilang adalah
+simulasi, dan entity berfisika jatuh ke perilaku statis yang **dikatakan di
+log**, bukan diam-diam.
+
+**Sakelar CPU/GPU-nya satu flag, di sisi PhysX.** Preset
+`linux-clang-cpu-only` sudah ada dan memakai toolchain yang sama dengan proyek
+ini; satu-satunya beda dengan preset penuh adalah
+`PX_GENERATE_GPU_PROJECTS=True`. Jadi `SIM_WITH_PHYSX_GPU` tidak menambah jalur
+kode kedua — ia memilih pemasangan PhysX yang mana yang ditautkan, dan menyalakan
+fitur yang memang cuma ada di sana.
+
+**Tipe PhysX tidak pernah muncul di header publik `Sim::Physics`.** Aturan yang
+sama yang menjaga OpenImageIO dan OpenVDB di luar jalur runtime, dan yang sudah
+terbukti tiga kali: backend gambar berganti pustaka dua kali tanpa satu pun
+titik panggil berubah. Yang menyeberang batas modul adalah `Vec3`, `Quat`, dan
+handle — bukan `PxRigidActor*`.
+
+**Simulasi berlangkah tetap, terpisah dari frame render.** Fisika yang berlangkah
+mengikuti waktu frame menghasilkan simulasi yang berbeda di mesin yang lebih
+cepat — dan "menara balok saya runtuh di laptop tapi tidak di desktop" adalah
+laporan bug yang tidak bisa ditindaklanjuti. Render menginterpolasi di antara dua
+langkah; itu yang membuat 60 Hz fisika terlihat mulus di 144 Hz layar.
+
+**Determinisme yang dijanjikan dibatasi dan ditulis.** PhysX CPU deterministik
+untuk masukan yang sama pada build, platform, dan jumlah thread yang sama. Ia
+**tidak** deterministik lintas-platform, dan tidak lintas jumlah thread. Janji
+yang lebih besar dari itu akan runtuh tepat ketika seseorang mengandalkannya
+untuk replay atau lockstep multiplayer.
+
+---
+
+## Dua tabrakan dengan rencana yang sudah ada
+
+Keduanya nyata, dan keduanya harus diputuskan — bukan dibiarkan menumpuk sampai
+ada dua sistem yang mengerjakan satu pekerjaan.
+
+**1. Kain: PBD PhysX melawan `Sim::Cloth`.**
+[PLAN-CLOTH.md](PLAN-CLOTH.md) sudah merencanakan solver kain GPU dari XRTailor
+sebagai modul `Sim::Cloth`, lengkap dengan pengukuran di RTX 2060. PBD PhysX juga
+mensimulasikan kain, juga di GPU, juga hanya dengan CUDA. **Dua solver kain
+adalah dua tempat yang harus dipelihara** untuk satu fitur.
+
+**Diputuskan sesudah P7, bukan sekarang.** Alasannya bertahan diperiksa: tidak
+satu pun milestone CPU menyentuh kain, dan kain PBD hidup di P8 yang menuntut
+CUDA — jadi menunda keputusannya tidak menghalangi apa pun dan tidak membuat
+siapa pun mengerjakan yang salah. Yang berbahaya adalah menundanya sampai
+**sesudah** salah satunya dibangun; sampai P7 selesai, itu tidak mungkin terjadi.
+
+Bahan untuk keputusan itu sudah lengkap sekarang, dan dicatat di sini supaya
+tidak perlu digali ulang: rencana C sudah punya angka terukur di RTX 2060, jalur
+bake Alembic, dan rancangan untuk bereaksi terhadap karakter ber-skin. Keduanya
+menuntut CUDA, jadi keduanya sama-sama absen di RDNA1. Yang tersisa dari PBD —
+cairan, inflatable, shape matching — tidak dikerjakan rencana mana pun, jadi
+tidak ikut bertabrakan apa pun yang diputuskan.
+
+**2. Scene query: PhysX melawan Embree.**
+[PLAN-EMBREE.md](PLAN-EMBREE.md) R2 merencanakan picking presisi segitiga lewat
+Embree, R3 merencanakan query authoring. PhysX juga menyediakan raycast, sweep,
+dan overlap.
+
+Usulan: **keduanya ada, dan batasnya jelas.** Embree melayani *authoring dan
+offline* — picking di editor, path tracer acuan, bake. Ia bekerja pada geometri
+render yang sebenarnya, termasuk mesh yang tidak punya collider sama sekali.
+PhysX melayani *gameplay runtime* — apa yang dilihat peluru, apa yang dipijak
+karakter. Ia bekerja pada bentuk tabrakan, yang memang sengaja lebih sederhana
+daripada mesh yang digambar. Menyatukan keduanya berarti picking editor
+berhenti bekerja untuk objek tanpa collider, atau peluru menabrak segitiga
+dekoratif.
+
+---
+
+## Arsitektur
+
+```
+Code/Physics/
+  include/Sim/Physics/
+      PhysicsTypes.h      handle, deskriptor bentuk, hasil query — tanpa tipe PhysX
+      PhysicsWorld.h      lifecycle scene, langkah tetap, sinkronisasi transform
+      PhysicsQuery.h      raycast/sweep/overlap untuk gameplay
+  src/
+      PhysicsWorld.cpp    satu-satunya TU yang melihat PxPhysics
+      ShapeCook.cpp       cooking convex & triangle mesh dari MeshData
+      Backend*.cpp        dikompilasi hanya bila SIM_WITH_PHYSX
+```
+
+**`Sim::Physics` tidak bergantung pada `Sim::Render`.** Ia menghasilkan
+transform; yang menggambarnya adalah pemanggilnya. Aturan yang sama menjaga
+`SimHeadless` — dan karena itu server dedicated — tetap bisa mensimulasikan
+tanpa satu pun perangkat grafis.
+
+**Komponen scene**, mengikuti pola `LightComponent` dan `SkyComponent` yang sudah
+ada: `RigidBodyComponent` (statik/kinematik/dinamis, massa, damping),
+`ColliderComponent` (box/sphere/capsule/convex/mesh + material), dan nanti
+`JointComponent`, `VehicleComponent`, `CharacterControllerComponent`. Semuanya
+lewat refleksi, jadi Inspector menyuntingnya tanpa kode panel tambahan.
+
+**Cooking adalah pengondisian aset, bukan pekerjaan runtime.** Convex hull dan
+triangle mesh PhysX dimasak sekali dan disimpan di samping asetnya — memasaknya
+saat level dimuat menambah detik ke waktu muat untuk hasil yang selalu sama.
+Aturan yang sama dengan bake SDF di [PLAN-IMAGEIO.md](PLAN-IMAGEIO.md) dan
+`Sim::Volume`.
+
+### Model thread
+
+Simulasi berjalan di `TaskPool` lewat `PxCpuDispatcher`, tapi `fetchResults` dan
+penulisan transform ke `World` terjadi di main thread. Alasannya sama dengan
+seluruh editor: `World` tidak dilindungi mutex, dan menambahkannya sekarang
+berarti membayar penguncian di setiap pembacaan komponen demi satu penulis.
+
+---
+
+## Milestone
+
+### P0 — Build CPU-only, dependensi opsional, kerangka modul · ✅
+
+PhysX dibangun dengan preset `linux-clang-cpu-only`, hasilnya disalin ke
+`Third-Party/PhysX/` seperti OpenVDB. `SIM_WITH_PHYSX` mendeteksinya dua sisi —
+header **dan** pustaka — karena header tanpa pustaka kompilasi dengan sukses lalu
+gagal saat link. Modul `Sim::Physics` berdiri dengan `PhysicsWorld` yang bisa
+dibuat dan dihancurkan, belum mensimulasikan apa pun.
+
+**Kriteria terima**
+- Build tanpa PhysX sukses dan seluruh test lulus; `PhysicsWorld` melaporkan
+  dirinya tidak tersedia dengan pesan yang menyebut apa yang kurang.
+- Build dengan PhysX sukses, versi SDK tercatat di log startup.
+- Tidak ada satu pun tipe `Px*` di header publik — diuji dengan menyisir
+  `Code/`, seperti uji `stbi_` di `SimImageIOTests`.
+
+### P1 — Rigid Body Dynamics · ✅
+
+Komponen rigid body dan collider, langkah tetap, sinkronisasi transform dua arah.
+Bentuk primitif lebih dulu: box, sphere, capsule, plane.
+
+Jembatannya, `physics::PhysicsScene`, tinggal di `Sim::Physics` dan bukan di
+`Sim::EditorFramework`. Ia terlihat seperti kode editor — membaca komponen,
+menulis transform — tetapi `Sim::EditorFramework` menarik `Sim::Render`, dan
+menaruhnya di sana berarti tidak ada yang bisa mensimulasikan tanpa perangkat
+grafis. Arahnya juga disengaja: `Sim::Physics` yang melihat `Sim::Scene`, bukan
+sebaliknya, supaya importir aset dan tool yang tidak pernah mensimulasikan apa
+pun tidak ikut menautkan PhysX.
+
+`PhysicsScene.cpp` tidak memuat satu pun `#if SIM_WITH_PHYSX`: ia hanya memakai
+API publik `PhysicsWorld`, yang sudah menolak secara terbuka. Berkasnya karena
+itu dikompilasi **dan diuji** sama persis di kedua build, sehingga jalur yang
+hanya pernah dikompilasi di satu konfigurasi — kelas cacat yang paling sering
+lolos dari dependensi opsional — tidak punya tempat bersembunyi.
+
+**Play tidak lagi menuntut Lua.** Seluruh `EditorApp::Play` dulu dipagari
+`#if SIM_WITH_LUA` dan langsung kembali bila runtime skrip null, jadi build tanpa
+Lua tidak akan pernah menjalankan simulasinya — dua fitur opsional yang saling
+mengunci tanpa alasan. Sekarang cuplikan level, fisika, dan skrip masing-masing
+berdiri sendiri.
+
+**Kriteria terima**
+- Benda jatuh dan berhenti di lantai pada ketinggian yang **dihitung**, bukan
+  yang "kelihatan benar" — bola berjari-jari r berhenti di y = r.
+- Simulasi dengan seed dan urutan yang sama menghasilkan posisi yang sama
+  bit-per-bit pada dua kali jalan di mesin yang sama.
+- Langkah tetap terbukti tetap, dengan batas yang benar: rentang waktu yang sama
+  yang dipecah menjadi frame berbeda-beda menghasilkan jumlah langkah yang
+  berselisih **paling banyak satu**, selisih itu tidak menumpuk sepanjang
+  simulasi, dan keadaan yang sudah mengendap sama persis.
+
+  Kriteria ini semula ditulis sebagai "hasil yang sama" tanpa syarat, dan itu
+  **tidak bisa dipenuhi siapa pun** — P0 mengukurnya: satu detik sebagai 20 frame
+  @50 ms panjangnya 59,999998 langkah sementara sebagai 60 frame @16,67 ms tepat
+  60, karena `3 × float(1/60)` benar-benar lebih besar daripada `float(0.05)`.
+  Sebabnya masukan, bukan akumulator, jadi tidak ada implementasi yang
+  menghilangkannya. Yang penting bagi pemain tetap terjaga: selisihnya terbatas,
+  tidak tumbuh, dan hilang begitu adegannya diam.
+- Entity kinematik digerakkan transform-nya, bukan gaya; entity statis tidak
+  pernah dibangunkan.
+- Entity berinduk ditulis balik di ruang induknya, bukan ruang dunia. Ditambahkan
+  saat P1 dikerjakan karena ia cacat yang hanya muncul di level sungguhan — di
+  sana entity fisika hampir selalu berada di dalam grup — sementara setiap uji
+  yang menaruh benda di akar akan lulus tanpa menyentuhnya.
+- Skala entity ikut menentukan ukuran bentuk tabrakan. Bentuk yang mengabaikannya
+  tidak pernah tampak sebagai galat: bendanya digambar besar, berhenti seolah
+  kecil, dan yang terlihat hanya benda yang tenggelam ke dalam lantai.
+
+### P2 — Scene Queries · ✅
+
+Raycast, sweep, dan overlap untuk gameplay, dengan filter layer.
+
+#### Batasnya terhadap Embree
+
+Ditulis di sini dan di `PhysicsQuery.h`, bukan hanya dipahami — keduanya
+menembakkan ray, dan itu satu-satunya kemiripannya.
+
+| | PhysX scene query | Embree ([PLAN-EMBREE.md](PLAN-EMBREE.md)) |
+|---|---|---|
+| Menjawab tentang | bentuk tabrakan, keadaan simulasi frame ini | setiap segitiga yang digambar |
+| Umur jawabannya | kedaluwarsa satu langkah kemudian | tetap, selama geometrinya tidak berubah |
+| Dipanggil | ratusan kali per frame | sekali, saat bake |
+
+Memakai yang satu untuk pekerjaan yang lain **gagal secara diam-diam**, dan itu
+yang membuat batas ini perlu tertulis: raycast fisika terhadap dunia yang penuh
+hiasan tanpa collider menembusnya seolah tidak ada, sementara bake yang memakai
+bentuk tabrakan membakar bayangan kotak untuk pohon.
+
+**Kriteria terima**
+- Raycast terhadap bentuk analitik menjawab jarak dan normal yang benar.
+- Filter layer benar-benar menyaring: ray yang diberi mask kosong tidak pernah
+  mengembalikan hit.
+- Query dari beberapa thread `TaskPool` tidak merusak apa pun — PhysX
+  mengizinkannya selama simulasi tidak sedang berjalan, dan batas itu ditegakkan
+  dengan assert, bukan dengan harapan.
+
+Penegakannya berupa bendera atomic yang menyala sepanjang `Step`, dan query yang
+menabraknya dijawab penolakan beserta satu baris log alih-alih keadaan setengah
+diperbarui. **Lebih ketat daripada yang dituntut PhysX** — sela di antara dua
+langkah sebenarnya sah — karena selanya berdurasi mikrodetik sementara salah
+menempatkan batasnya berakibat kerusakan senyap.
+
+Diuji dengan thread pembaca yang menembak terus-menerus sementara main thread
+melangkah 200 kali: 98 query tertolak, **nol dijawab salah**. Uji itu sengaja
+tidak menuntut jumlah tertentu tertolak — yang bergantung pada penjadwalan bukan
+uji — melainkan menuntut tidak ada jawaban yang salah, dan memeriksa dari main
+thread bahwa penjagaannya terbuka lagi sesudah langkah terakhir.
+
+### P3 — Joints · ⬜
+
+Fixed, revolute, prismatic, spherical, D6. `JointComponent` merujuk dua entity.
+
+**Kriteria terima**
+- Bandul revolute berayun pada bidang yang benar dan tidak menyimpang keluar
+  bidang itu setelah 10.000 langkah.
+- Limit ditegakkan: sendi berlimit tidak pernah melewati batasnya.
+- Joint yang salah satu ujungnya dihapus tidak meninggalkan dangling actor —
+  diuji dengan menghapus entity, bukan dengan membaca kode.
+
+### P4 — Custom Geometries · ⬜
+
+`PxCustomGeometry` untuk bentuk yang tidak ada di daftar bawaan — yang paling
+berguna di sini: heightfield terrain yang membaca `Sim::Terrain` apa adanya,
+tanpa menyalin heightmap ke bentuk PhysX kedua.
+
+**Kriteria terima**
+- Benda menggelinding di atas terrain dan mengikuti ketinggian yang sama dengan
+  yang dilaporkan `Terrain::HeightAtWorld`, dalam toleransi yang ditulis.
+- Mengubah heightmap saat runtime terlihat oleh fisika tanpa membangun ulang
+  seluruh scene.
+
+### P5 — Reduced Coordinate Articulations · ⬜
+
+Rantai sendi untuk ragdoll dan robot. Dibangun **setelah** joint, karena
+articulation adalah jawaban untuk kasus di mana rantai joint biasa terlalu
+lembek.
+
+**Kriteria terima**
+- Ragdoll dari rangka `.simskel` berdiri tanpa meledak pada langkah pertama.
+- Rantai 20 tautan tidak melar di bawah beban — inilah yang membedakannya dari
+  rantai joint biasa, dan karena itu inilah yang diuji.
+
+### P6 — Vehicle Dynamics · ⬜
+
+`PxVehicle` di atas rigid body. Roda, suspensi, mesin, transmisi.
+
+**Kriteria terima**
+- Kendaraan berhenti dari 100 km/jam dalam jarak yang masuk akal dan tercatat.
+- Suspensi tidak berosilasi tak berhingga di atas permukaan datar.
+
+### P7 — Fracture: Blast · ⬜
+
+SDK terpisah, dibangun terpisah, opsional terpisah. Aset retak dimasak offline —
+ia pengondisian aset, sama dengan cooking convex.
+
+**Kriteria terima**
+- Sebuah bongkahan pecah menjadi pecahan yang jumlah dan massanya kekal.
+- Tanpa Blast, aset yang merujuknya ditolak dengan pesan yang menyebut SDK yang
+  dibutuhkan.
+
+### P8 — Jalur GPU: PBD, Soft Body, Flow · ⬜
+
+**Hanya bila `SIM_WITH_PHYSX_GPU` dan perangkat kerasnya CUDA.** Tiga fitur yang
+tidak punya jalur CPU, ditambah Flow yang SDK-nya sendiri.
+
+**Ini lapisan tambahan, bukan bagian dari rencana inti.** Permainan yang
+bergantung padanya tidak berjalan di RDNA1 sama sekali, dan itu harus menjadi
+keputusan sadar yang tercatat di project — bukan akibat sampingan dari sebuah
+sakelar build.
+
+**Kriteria terima**
+- Tanpa CUDA, seluruhnya tidak muncul di UI mana pun — bukan muncul lalu gagal.
+- Dengan CUDA, level yang memakainya berjalan; tanpa, level yang sama memuat
+  dengan peringatan yang menyebut fitur mana yang hilang.
+- Kain PBD **tidak** dikerjakan — lihat tabrakan #1 di atas.
+
+---
+
+## Risiko
+
+| Risiko | Tanda awal | Mundur ke |
+| --- | --- | --- |
+| Fisika dan render memakai transform yang berbeda | Objek bergetar saat diam | Satu sumber kebenaran: `World` transform ditulis sesudah `fetchResults`, dan render menginterpolasi — tidak pernah dua arah di frame yang sama |
+| Cooking mesh dilakukan saat muat | Waktu muat level bertambah detik | Dimasak offline dan disimpan di samping aset, seperti bake SDF |
+| Determinisme dijanjikan lebih dari yang bisa ditepati | Replay menyimpang di mesin lain | Janjinya dibatasi sejak awal ke build+platform+thread yang sama, dan ditulis di dokumentasi |
+| Skala unit tidak cocok | Benda jatuh seperti di bulan, atau bergetar | `PxTolerancesScale` disetel dari ukuran adegan sekali, di satu tempat, dan diuji |
+| Dua solver kain hidup berdampingan | Dua panel yang mengatur hal yang sama | Diputuskan di P8: kain PBD tidak dikerjakan |
+| Build PhysX menua terhadap toolchain | Galat kompilasi di header PhysX | Ia dicari, tidak dibangun — versi yang dipakai tercatat, dan menggantinya adalah menyalin folder |
+
+---
+
+## Yang tidak boleh ditunda
+
+- **Batas modul sejak P0.** Tipe PhysX yang bocor ke header publik akan menyebar
+  ke setiap pemanggil, dan menariknya kembali setelah lima modul memakainya jauh
+  lebih mahal daripada menjaganya sejak awal.
+- **Langkah tetap sejak P1.** Fisika yang berlangkah mengikuti frame terasa benar
+  di mesin pengembang dan salah di mana pun selainnya; memperbaikinya kemudian
+  berarti menyetel ulang setiap nilai yang sudah terlanjur disetel.
+Keputusan soal kain **tidak** ada di daftar ini, dan itu disengaja — lihat di
+bawah.
+
+## Yang sengaja tidak dikerjakan
+
+- **Kain PBD PhysX** — `Sim::Cloth` sudah memilikinya.
+- **Fisika deterministik lintas-platform** — PhysX tidak menjanjikannya, dan
+  membangunnya di atas yang tidak dijanjikan adalah membangun di atas pasir.
+- **Menggantikan picking Embree** — batasnya ditulis di atas; keduanya melayani
+  konsumen yang berbeda.
+- **Physics authoring lengkap di editor** — panel khusus menunggu sampai ada yang
+  benar-benar menyetel fisika setiap hari. Sampai itu, Inspector lewat refleksi
+  sudah cukup.

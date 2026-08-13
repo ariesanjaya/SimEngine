@@ -1,0 +1,312 @@
+#include "Sim/Physics/PhysicsScene.h"
+
+#include "Sim/Core/Log.h"
+#include "Sim/Scene/Components.h"
+
+#include <glm/gtc/matrix_inverse.hpp>
+#include <glm/gtc/quaternion.hpp>
+
+#include <algorithm>
+#include <cmath>
+
+// **Tidak ada satu pun `#if SIM_WITH_PHYSX` di berkas ini, dan itu bukan
+// kelalaian.** Jembatannya hanya memakai API publik `PhysicsWorld`, yang sudah
+// menangani ketiadaan PhysX dengan menolak secara terbuka. Hasilnya berkas ini
+// dikompilasi dan diuji sama persis di kedua build — dan kelas cacat yang paling
+// sering lolos dari dependensi opsional, yaitu jalur yang hanya pernah
+// dikompilasi di satu konfigurasi, tidak punya tempat untuk bersembunyi.
+
+namespace sim::physics {
+namespace {
+
+/// Memisahkan matriks dunia menjadi posisi, putaran, dan skala.
+///
+/// Ditulis tangan alih-alih memakai `glm::decompose`: yang terakhir juga
+/// mengembalikan skew dan perspektif yang tidak pernah dipakai di sini, dan
+/// gagal secara diam-diam untuk matriks yang skalanya nol pada satu sumbu.
+struct Decomposed {
+    Vec3 position{0.0f};
+    Quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
+    Vec3 scale{1.0f};
+};
+
+Decomposed Decompose(const Mat4& matrix) {
+    Decomposed out;
+    out.position = Vec3(matrix[3]);
+
+    Vec3 axes[3] = {Vec3(matrix[0]), Vec3(matrix[1]), Vec3(matrix[2])};
+    for (int i = 0; i < 3; ++i) {
+        const float length = glm::length(axes[i]);
+        out.scale[i] = length;
+        // Sumbu berskala nol tidak bisa dinormalkan. Diganti sumbu satuan supaya
+        // yang keluar tetap putaran yang sah: entity berskala nol tidak terlihat,
+        // tetapi ia tidak boleh menghasilkan quaternion NaN yang lalu menyebar
+        // ke seluruh solver.
+        axes[i] = length > 1e-8f ? axes[i] / length : Vec3(i == 0, i == 1, i == 2);
+    }
+
+    // Skala negatif (mirror) terbaca sebagai basis kidal. Quaternion tidak bisa
+    // menyatakannya, jadi tandanya dipindahkan ke skala dan putarannya dibuat
+    // kanan — bentuk tabrakan yang dicerminkan memang tidak ada di PhysX.
+    if (glm::dot(glm::cross(axes[0], axes[1]), axes[2]) < 0.0f) {
+        axes[0] = -axes[0];
+        out.scale.x = -out.scale.x;
+    }
+
+    out.rotation = glm::quat_cast(Mat3(axes[0], axes[1], axes[2]));
+    return out;
+}
+
+/// Skala seragam yang dipakai bentuk yang tidak bisa diskalakan per-sumbu.
+///
+/// Diambil yang terbesar, bukan rata-ratanya: bola yang mengecil di bawah
+/// bentuk yang digambar membuat benda tampak melayang, sedangkan yang sedikit
+/// membesar hanya membuatnya berhenti sedikit lebih awal — kesalahan yang jauh
+/// lebih mudah dilihat dan jauh lebih tidak merusak.
+float UniformScale(const Vec3& scale) {
+    return std::max({std::abs(scale.x), std::abs(scale.y), std::abs(scale.z)});
+}
+
+bool IsNonUniform(const Vec3& scale) {
+    const float largest = UniformScale(scale);
+    const float smallest =
+        std::min({std::abs(scale.x), std::abs(scale.y), std::abs(scale.z)});
+    return largest > 1e-6f && (largest - smallest) / largest > 1e-3f;
+}
+
+BodyKind ToBodyKind(scene::RigidBodyKind kind) {
+    switch (kind) {
+        case scene::RigidBodyKind::Static: return BodyKind::Static;
+        case scene::RigidBodyKind::Kinematic: return BodyKind::Kinematic;
+        case scene::RigidBodyKind::Dynamic: return BodyKind::Dynamic;
+    }
+    return BodyKind::Dynamic;
+}
+
+ShapeKind ToShapeKind(scene::ColliderShape shape) {
+    switch (shape) {
+        case scene::ColliderShape::Box: return ShapeKind::Box;
+        case scene::ColliderShape::Sphere: return ShapeKind::Sphere;
+        case scene::ColliderShape::Capsule: return ShapeKind::Capsule;
+        case scene::ColliderShape::Plane: return ShapeKind::Plane;
+    }
+    return ShapeKind::Box;
+}
+
+/// Menerjemahkan collider beserta skala entity menjadi bentuk solver.
+ShapeDesc ToShapeDesc(const scene::ColliderComponent& collider, const Vec3& scale) {
+    ShapeDesc shape;
+    shape.kind = ToShapeKind(collider.shape);
+    shape.localPosition = collider.offset * scale;
+
+    const float uniform = UniformScale(scale);
+    switch (shape.kind) {
+        case ShapeKind::Box:
+            shape.halfExtents = collider.halfExtents * glm::abs(scale);
+            break;
+        case ShapeKind::Sphere:
+            shape.radius = collider.radius * uniform;
+            break;
+        case ShapeKind::Capsule:
+            shape.radius = collider.radius * uniform;
+            // `ShapeDesc` menyimpan setengah-tinggi silinder kapsul di
+            // `halfExtents.x` — konvensi PhysX, diterjemahkan di sini supaya
+            // `ColliderComponent` bisa menyebutnya dengan namanya sendiri.
+            shape.halfExtents.x = collider.halfHeight * uniform;
+            break;
+        case ShapeKind::Plane:
+            break;
+    }
+    return shape;
+}
+
+/// Menelusuri hierarki dari akar, induk sebelum anak.
+///
+/// **Urutan ini bagian dari masukan simulasi, bukan detail.** PhysX menyelesaikan
+/// kontak dalam urutan benda dimasukkan, jadi dua muat level yang sama harus
+/// menghasilkan urutan yang sama. Penelusuran hierarki memberikannya karena
+/// urutannya urutan berkas; iterasi view entt memberikannya juga hari ini, tetapi
+/// lewat urutan kolam komponen yang tidak dijanjikan API-nya.
+void CollectDepthFirst(const scene::World& world, scene::Entity entity,
+                       std::vector<scene::Entity>& out) {
+    out.push_back(entity);
+    for (const scene::Entity child : world.ChildrenOf(entity)) {
+        CollectDepthFirst(world, child, out);
+    }
+}
+
+}  // namespace
+
+bool PhysicsScene::Build(scene::World& world, const WorldDesc& desc) {
+    Clear();
+
+    if (!simulation_.Create(desc)) {
+        return false;
+    }
+
+    std::vector<scene::Entity> order;
+    order.reserve(world.Count());
+    for (const scene::Entity root : world.Roots()) {
+        CollectDepthFirst(world, root, order);
+    }
+
+    for (const scene::Entity entity : order) {
+        const auto* body = world.TryGet<scene::RigidBodyComponent>(entity);
+        if (body == nullptr) {
+            continue;
+        }
+        const auto* collider = world.TryGet<scene::ColliderComponent>(entity);
+        if (collider == nullptr) {
+            // Dilaporkan sekali per entity, dengan namanya. Benda tanpa bentuk
+            // jatuh menembus lantai, dan tanpa baris ini satu-satunya petunjuk
+            // adalah entity yang menghilang dari layar.
+            ++stats_.skippedWithoutCollider;
+            SIM_WARN("Physics", "'{}' has a Rigid Body but no Collider, so it is not simulated",
+                     world.NameOf(entity));
+            continue;
+        }
+
+        const Decomposed placement = Decompose(world.WorldMatrix(entity));
+
+        const bool needsUniform = collider->shape == scene::ColliderShape::Sphere ||
+                                  collider->shape == scene::ColliderShape::Capsule;
+        if (needsUniform && IsNonUniform(placement.scale)) {
+            ++stats_.nonUniformScale;
+            SIM_WARN("Physics",
+                     "'{}' is scaled unevenly but its collider cannot be, so the largest axis is "
+                     "used and the shape will not match what is drawn",
+                     world.NameOf(entity));
+        }
+
+        BodyDesc bodyDesc;
+        bodyDesc.kind = ToBodyKind(body->kind);
+        bodyDesc.shape = ToShapeDesc(*collider, placement.scale);
+        bodyDesc.material.staticFriction = collider->staticFriction;
+        bodyDesc.material.dynamicFriction = collider->dynamicFriction;
+        bodyDesc.material.restitution = collider->restitution;
+        bodyDesc.position = placement.position;
+        bodyDesc.rotation = placement.rotation;
+        bodyDesc.mass = body->mass;
+        bodyDesc.density = body->density;
+        bodyDesc.linearDamping = body->linearDamping;
+        bodyDesc.angularDamping = body->angularDamping;
+        bodyDesc.allowSleeping = body->allowSleeping;
+
+        const BodyHandle handle = simulation_.AddBody(bodyDesc);
+        if (handle == BodyHandle::Invalid) {
+            SIM_WARN("Physics", "'{}' could not be added to the simulation",
+                     world.NameOf(entity));
+            continue;
+        }
+
+        Tracked entry;
+        entry.entity = entity;
+        entry.body = handle;
+        entry.scale = placement.scale;
+        entry.kinematic = body->kind == scene::RigidBodyKind::Kinematic;
+        entry.dynamic = body->kind == scene::RigidBodyKind::Dynamic;
+        tracked_.push_back(entry);
+        byEntity_.emplace(static_cast<uint32_t>(entity), handle);
+        ++stats_.bodies;
+    }
+
+    return true;
+}
+
+void PhysicsScene::Clear() {
+    simulation_.Destroy();
+    tracked_.clear();
+    byEntity_.clear();
+    stats_ = PhysicsSceneStats{};
+}
+
+BodyHandle PhysicsScene::BodyOf(scene::Entity entity) const {
+    const auto it = byEntity_.find(static_cast<uint32_t>(entity));
+    return it == byEntity_.end() ? BodyHandle::Invalid : it->second;
+}
+
+uint32_t PhysicsScene::Advance(scene::World& world, float deltaSeconds) {
+    if (!simulation_.IsValid()) {
+        return 0;
+    }
+    PushKinematic(world);
+    const uint32_t steps = simulation_.Advance(deltaSeconds);
+    // **Tidak disalin balik bila tidak ada langkah yang berjalan**, dan itu
+    // sering terjadi: pada layar 144 Hz kebanyakan frame tidak memuat satu pun
+    // langkah 60 Hz. Menyalinnya tetap berarti menulis angka yang sama persis
+    // lalu menandai transform seluruh keturunan setiap entity dinamis perlu
+    // dihitung ulang — kerja yang hasilnya identik dengan tidak melakukannya.
+    //
+    // Yang membuat gerakan tetap mulus di antara langkah adalah interpolasi
+    // memakai `PhysicsWorld::Alpha()`, dan itu belum dipasang di sini.
+    if (steps > 0) {
+        PullDynamic(world);
+    }
+    return steps;
+}
+
+void PhysicsScene::Step(scene::World& world, uint32_t steps) {
+    if (!simulation_.IsValid()) {
+        return;
+    }
+    PushKinematic(world);
+    simulation_.Step(steps);
+    PullDynamic(world);
+}
+
+void PhysicsScene::PushKinematic(scene::World& world) {
+    for (const Tracked& entry : tracked_) {
+        if (!entry.kinematic || !world.IsAlive(entry.entity)) {
+            continue;
+        }
+        // **Arah scene → fisika, dan hanya untuk yang kinematik.** Itulah arti
+        // "digerakkan transform, bukan gaya": yang menentukan letaknya adalah
+        // apa yang ditulis animasi atau skrip ke `TransformComponent`, dan
+        // solver hanya diberi tahu ke mana ia bergerak supaya benda dinamis di
+        // jalurnya ikut terdorong.
+        const Decomposed placement = Decompose(world.WorldMatrix(entry.entity));
+        simulation_.MoveKinematic(entry.body, placement.position, placement.rotation);
+    }
+}
+
+void PhysicsScene::PullDynamic(scene::World& world) {
+    for (const Tracked& entry : tracked_) {
+        if (!entry.dynamic || !world.IsAlive(entry.entity)) {
+            continue;
+        }
+        BodyState state;
+        if (!simulation_.ReadState(entry.body, state)) {
+            continue;
+        }
+        auto* transform = world.TryGet<scene::TransformComponent>(entry.entity);
+        if (transform == nullptr) {
+            continue;
+        }
+
+        // Solver bekerja di ruang dunia; `TransformComponent` menyimpan ruang
+        // induk. Untuk entity berinduk keduanya berbeda, dan menuliskan posisi
+        // dunia apa adanya membuat benda melompat sejauh transform induknya —
+        // gejala yang muncul hanya pada level yang entity fisikanya ditata di
+        // dalam grup, yaitu hampir semua level sungguhan.
+        const scene::Entity parent = world.ParentOf(entry.entity);
+        if (parent == scene::kNullEntity) {
+            transform->position = state.position;
+            transform->rotation = state.rotation;
+        } else {
+            const Mat4 parentWorld = world.WorldMatrix(parent);
+            const Mat4 local = glm::affineInverse(parentWorld) *
+                               glm::translate(Mat4(1.0f), state.position) *
+                               glm::mat4_cast(state.rotation);
+            const Decomposed placement = Decompose(local);
+            transform->position = placement.position;
+            transform->rotation = placement.rotation;
+        }
+
+        // Skala sengaja tidak disentuh: solver tidak pernah mengubahnya, dan
+        // menuliskannya kembali dari matriks hasil dekomposisi hanya akan
+        // menumpuk galat pembulatan sampai benda perlahan mengecil.
+        world.MarkTransformDirty(entry.entity);
+    }
+}
+
+}  // namespace sim::physics

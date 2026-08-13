@@ -32,10 +32,6 @@ namespace {
 /// Nama folder skrip editor, relatif terhadap folder aset.
 constexpr std::string_view kEditorScriptFolder = "Editor";
 
-/// Mesh yang dipakai entity "Shader Ball" di level contoh, relatif terhadap
-/// folder aset. Boleh tidak ada: level contoh tetap terbentuk tanpanya.
-constexpr std::string_view kStarterMeshPath = "Meshes/shaderBall.fbx";
-
 extern "C" void OnFatalSignal(int signal) {
     // Ini pelanggaran aturan async-signal-safety yang disengaja dan diketahui:
     // menulis log dan menyimpan layout memakai malloc. Alternatifnya adalah
@@ -283,7 +279,10 @@ void EditorApp::RegisterCoreActions() {
                              icons::kPlay,
                              ImGuiKey_F5,
                              [this]() { Play(); },
-                             [this]() { return !playing_ && context_.scripts != nullptr; }});
+                             // Tidak lagi menuntut `scripts`: Play menjalankan
+                             // fisika juga, dan build tanpa Lua tetap berhak
+                             // melihat levelnya bergerak.
+                             [this]() { return !playing_; }});
 
     actions_.Register(Action{"play.stop",
                              "Stop",
@@ -1211,6 +1210,17 @@ void EditorApp::DrawFrame(float deltaSeconds) {
     }
 #endif
 
+    // Fisika melangkah **sesudah** skrip, dan di luar pagar Lua di atas. Skrip
+    // yang memindahkan benda kinematik pada frame ini harus terbaca solver pada
+    // frame ini juga; urutan sebaliknya membuat setiap gerakan tertinggal satu
+    // frame — cukup untuk terlihat sebagai getaran pada platform yang bergerak.
+    //
+    // `Advance` sendiri yang memutuskan berapa langkah muat di dalam
+    // `deltaSeconds`, dan sering jawabannya nol.
+    if (playing_ && !pausedAtBreakpoint_) {
+        physics_.Advance(world_, deltaSeconds);
+    }
+
     // Harus mendahului panel mana pun: Viewport memakai gizmo, dan keadaan
     // per-frame-nya hanya direset di sini.
     BeginGizmoFrame();
@@ -1564,10 +1574,16 @@ void EditorApp::ReloadChangedScripts() {
 }
 
 void EditorApp::Play() {
-#if SIM_WITH_LUA
-    if (playing_ || context_.scripts == nullptr) {
+    if (playing_) {
         return;
     }
+    // **Play tidak lagi menuntut skrip.** Dulu seluruh fungsi ini dipagari
+    // `#if SIM_WITH_LUA` dan langsung kembali bila `scripts` null, karena satu-
+    // satunya yang berjalan saat Play memang skrip. Sekarang fisika juga
+    // berjalan, dan ia tidak ada hubungannya dengan Lua — build tanpa Lua yang
+    // tidak bisa menjalankan simulasinya adalah dua fitur opsional yang saling
+    // mengunci tanpa alasan.
+    //
     // Cuplikan diambil sebelum satu baris skrip pun berjalan. Ini yang membuat
     // Play aman dicoba kapan saja: apa pun yang dilakukan skrip terhadap scene
     // — memindahkan, menghapus, membuat entity — hilang seluruhnya saat Stop.
@@ -1593,20 +1609,59 @@ void EditorApp::Play() {
     selection_.Clear();
     history_.CloseMergeGroup();
 
-    context_.scripts->Start();
+#if SIM_WITH_LUA
+    if (context_.scripts != nullptr) {
+        context_.scripts->Start();
+    }
+#endif
+
+    StartPhysics();
+
     playing_ = true;
     pausedAtBreakpoint_ = false;
     context_.playing = true;
     notifications_.Info("Play");
-#endif
+}
+
+void EditorApp::StartPhysics() {
+    if (!physics::Available()) {
+        // Sekali, saat Play ditekan — bukan tiap frame. Yang perlu diketahui
+        // pengguna adalah mengapa tidak ada yang jatuh, dan itu satu kalimat.
+        SIM_INFO("Editor", "Play without physics: {}", "this build has no PhysX");
+        return;
+    }
+    if (!physics_.Build(world_)) {
+        SIM_WARN("Editor", "Physics could not start: {}", physics_.Error());
+        notifications_.Warning("Physics could not start: " + physics_.Error());
+        return;
+    }
+
+    const physics::PhysicsSceneStats& stats = physics_.Stats();
+    if (stats.bodies == 0) {
+        return;
+    }
+    // Yang dilewati disebutkan di notifikasi, bukan hanya di log: benda yang
+    // punya Rigid Body tanpa Collider jatuh menembus segalanya, dan pengguna
+    // yang baru menekan Play sedang menatap viewport, bukan berkas log.
+    if (stats.skippedWithoutCollider > 0) {
+        notifications_.Warning(std::to_string(stats.skippedWithoutCollider) +
+                               " rigid bodies have no collider and are not simulated");
+    }
+    SIM_INFO("Editor", "Physics: {} bodies", stats.bodies);
 }
 
 void EditorApp::Stop() {
-#if SIM_WITH_LUA
     if (!playing_) {
         return;
     }
-    context_.scripts->Stop();
+#if SIM_WITH_LUA
+    if (context_.scripts != nullptr) {
+        context_.scripts->Stop();
+    }
+#endif
+    // Dibuang sebelum scene dipulihkan: benda di dalamnya menunjuk entity yang
+    // sebentar lagi tidak ada lagi.
+    physics_.Clear();
     selection_.Clear();
 
     const scene::LevelIoResult result = scene::LoadLevelFromString(world_, playSnapshot_);
@@ -1640,7 +1695,6 @@ void EditorApp::Stop() {
     // Play, sedangkan scene baru saja dibangun ulang dari nol. Membiarkannya
     // berarti Ctrl+Z menerapkan perubahan ke entity yang sudah tidak sama.
     history_.Clear();
-#endif
 }
 
 std::string EditorApp::WindowTitle() const {

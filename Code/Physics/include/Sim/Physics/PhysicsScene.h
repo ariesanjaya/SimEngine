@@ -1,0 +1,94 @@
+#pragma once
+
+#include "Sim/Physics/PhysicsWorld.h"
+#include "Sim/Scene/World.h"
+
+#include <cstddef>
+#include <string>
+#include <unordered_map>
+#include <vector>
+
+/// Jembatan antara scene yang disunting dan simulasi yang berjalan.
+///
+/// **Ada di `Sim::Physics`, bukan di `Sim::EditorFramework`.** Terlihat seperti
+/// kode editor — ia membaca komponen dan menulis transform — tetapi
+/// `Sim::EditorFramework` menarik `Sim::Render`, dan menaruhnya di sana berarti
+/// tidak ada yang bisa mensimulasikan tanpa perangkat grafis. Server dedicated
+/// dan `SimHeadless` butuh `Sim::Scene` dan modul ini saja.
+///
+/// Arahnya juga disengaja: `Sim::Physics` yang bergantung pada `Sim::Scene`,
+/// bukan sebaliknya. `Sim::Scene` dipakai importir aset, serialisasi, dan tool
+/// yang tidak pernah mensimulasikan apa pun; membalik arahnya membuat semuanya
+/// ikut menautkan PhysX.
+namespace sim::physics {
+
+/// Ringkasan hasil `Build`, untuk log dan panel.
+struct PhysicsSceneStats {
+    std::size_t bodies = 0;
+    /// Entity ber-`RigidBodyComponent` yang dilewati karena tidak punya
+    /// `ColliderComponent`. Dihitung, bukan diabaikan: benda tanpa bentuk jatuh
+    /// menembus segalanya, dan angka ini yang menjelaskan sebabnya.
+    std::size_t skippedWithoutCollider = 0;
+    /// Entity yang bentuknya diskalakan tidak seragam padahal bentuknya tidak
+    /// mendukungnya (bola, kapsul).
+    std::size_t nonUniformScale = 0;
+};
+
+/// Satu simulasi yang dibangun dari sebuah `scene::World`.
+///
+/// Alurnya: `Build` sekali saat Play ditekan, `Advance` tiap frame, `Clear` saat
+/// Stop. Menyunting scene selama simulasi berjalan tidak tercermin — itu
+/// disengaja, karena keadaan solver tidak bisa dibangun ulang di tengah jalan
+/// tanpa membuang momentum setiap benda.
+class PhysicsScene {
+public:
+    /// Membangun benda dari seluruh entity ber-`RigidBodyComponent`.
+    ///
+    /// False bila PhysX tidak ada di build ini; `Error()` menyebutnya. Scene-nya
+    /// sendiri tidak diubah sama sekali.
+    bool Build(scene::World& world, const WorldDesc& desc = {});
+
+    void Clear();
+    bool IsValid() const { return simulation_.IsValid(); }
+    const std::string& Error() const { return simulation_.Error(); }
+
+    /// Menjalankan simulasi untuk waktu nyata yang berlalu, lalu menyalin
+    /// hasilnya ke `world`. Mengembalikan banyaknya langkah tetap yang berjalan.
+    uint32_t Advance(scene::World& world, float deltaSeconds);
+
+    /// Menjalankan tepat `steps` langkah, mengabaikan akumulator. Untuk test dan
+    /// untuk simulasi yang panjangnya ditentukan angka, bukan waktu.
+    void Step(scene::World& world, uint32_t steps = 1);
+
+    const PhysicsSceneStats& Stats() const { return stats_; }
+
+    /// Simulasi di baliknya, untuk yang butuh lebih dari sinkronisasi transform.
+    PhysicsWorld& Simulation() { return simulation_; }
+    const PhysicsWorld& Simulation() const { return simulation_; }
+
+    /// Handle benda milik sebuah entity, atau `BodyHandle::Invalid`.
+    BodyHandle BodyOf(scene::Entity entity) const;
+
+private:
+    /// Mendorong transform entity kinematik ke solver. Arah scene → fisika.
+    void PushKinematic(scene::World& world);
+    /// Menyalin hasil solver ke transform entity dinamis. Arah fisika → scene.
+    void PullDynamic(scene::World& world);
+
+    struct Tracked {
+        scene::Entity entity = scene::kNullEntity;
+        BodyHandle body = BodyHandle::Invalid;
+        /// Skala yang dipakai saat bentuknya dibangun. Disimpan supaya
+        /// penulisan balik tidak menghapusnya dari `TransformComponent`.
+        Vec3 scale{1.0f};
+        bool kinematic = false;
+        bool dynamic = false;
+    };
+
+    PhysicsWorld simulation_;
+    std::vector<Tracked> tracked_;
+    std::unordered_map<uint32_t, BodyHandle> byEntity_;
+    PhysicsSceneStats stats_;
+};
+
+}  // namespace sim::physics

@@ -6,6 +6,7 @@
 #include "Sim/Editor/Actions.h"
 #include "Sim/Editor/Command.h"
 #include "Sim/Editor/EditorContext.h"
+#include "Sim/Physics/PhysicsScene.h"
 #include "Sim/Editor/EditorScripting.h"
 #include "Sim/Editor/EditorShell.h"
 #include "Sim/Editor/Notifications.h"
@@ -79,6 +80,13 @@ public:
     void SetFrameLock(float hz, std::string reason);
 
     scene::World& GetWorld() { return world_; }
+
+    /// Simulasi yang sedang berjalan. Kosong dan tidak valid di luar Play.
+    ///
+    /// Terbuka supaya panel bisa menampilkan jumlah benda dan sebab kegagalan,
+    /// dan supaya uji bisa melangkahkannya tanpa melalui `DrawFrame` — yang
+    /// menuntut konteks ImGui yang tidak ada di luar editor.
+    physics::PhysicsScene& GetPhysics() { return physics_; }
 
     // --- project --------------------------------------------------------------
 
@@ -233,6 +241,9 @@ private:
     TaskPool* tasks_ = nullptr;
     std::filesystem::path graphCacheDir_;
     /// Cuplikan level sesaat sebelum Play, dipakai Stop untuk mengembalikannya.
+    /// Membangun simulasi saat Play, dan melaporkan sebabnya bila tidak bisa.
+    void StartPhysics();
+
     std::string playSnapshot_;
     /// Seleksi sesaat sebelum Play, disimpan sebagai GUID.
     ///
@@ -240,6 +251,12 @@ private:
     /// jadi handle entity yang lama tidak menunjuk apa pun sesudahnya. GUID
     /// justru bertahan — ia yang tertulis di berkas level.
     std::vector<Uuid> playSelection_;
+    /// Simulasi yang berjalan selama Play, dibangun ulang tiap kali ditekan.
+    ///
+    /// Selalu ada sebagai anggota, juga di build tanpa PhysX: yang di dalamnya
+    /// menolak dengan pesan, dan itu jauh lebih berguna daripada pointer null
+    /// yang harus diperiksa di setiap titik panggil.
+    physics::PhysicsScene physics_;
     bool playing_ = false;
     /// Play sedang tertahan sebuah breakpoint graph. Scene tetap tergambar,
     /// yang berhenti hanyalah OnUpdate.
