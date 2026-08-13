@@ -4,6 +4,7 @@
 #include "Sim/Physics/PhysicsJoint.h"
 #include "Sim/Physics/PhysicsQuery.h"
 #include "Sim/Physics/PhysicsTypes.h"
+#include "Sim/Physics/PhysicsVehicle.h"
 
 #include <cstddef>
 #include <memory>
@@ -127,6 +128,26 @@ public:
 
     /// Keadaan sebuah link, menurut indeks di `ArticulationDesc::links`.
     bool ReadLinkState(ArticulationHandle articulation, std::size_t link, BodyState& out) const;
+
+    // --- kendaraan -----------------------------------------------------------
+
+    /// Membangun kendaraan. `VehicleHandle::Invalid` bila gagal; `Error()`
+    /// menyebut sebabnya.
+    VehicleHandle AddVehicle(const VehicleDesc& desc);
+    void RemoveVehicle(VehicleHandle vehicle);
+    bool IsVehicleAlive(VehicleHandle vehicle) const;
+    std::size_t VehicleCount() const;
+
+    /// Perintah pengemudi untuk langkah-langkah berikutnya. Bertahan sampai
+    /// diganti — bukan sekali pakai, karena gas yang harus dikirim ulang tiap
+    /// frame adalah gas yang mati setiap kali frame terlewat.
+    bool SetVehicleInput(VehicleHandle vehicle, const VehicleInput& input);
+
+    bool ReadVehicleState(VehicleHandle vehicle, VehicleState& out) const;
+
+    /// Bodi tegar chassis-nya, untuk scene query dan sendi. Roda tidak punya
+    /// handle: ia bukan benda tegar.
+    BodyHandle VehicleChassis(VehicleHandle vehicle) const;
 
     // --- scene query --------------------------------------------------------
     //

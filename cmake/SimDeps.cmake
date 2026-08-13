@@ -946,7 +946,14 @@ if(SIM_WITH_PHYSX AND SIM_PHYSX_ROOT AND EXISTS "${SIM_PHYSX_ROOT}/include/PxPhy
     # Urutannya penting: penaut GNU memproses arsip sekali, dari kiri ke kanan,
     # jadi yang bergantung harus mendahului yang dibergantungi. PhysX → Common →
     # Foundation adalah rantainya.
-    foreach(physxLib PhysXExtensions PhysXVehicle2 PhysXCharacterKinematic PhysXCooking
+    #
+    # **Vehicle2 mendahului Extensions**, dan itu bukan urutan yang tampak jelas:
+    # `PxVehiclePhysXActorCreate` memakai `PxDefaultMemoryOutputStream` yang
+    # tinggal di Extensions. Urutan sebaliknya menghasilkan simbol tak ditemukan
+    # yang menyebut nama berkas PhysX, bukan nama pustaka yang salah tempat —
+    # ditemukan saat P6, sesudah tautannya berjalan tanpa keluhan selama lima
+    # milestone.
+    foreach(physxLib PhysXVehicle2 PhysXExtensions PhysXCharacterKinematic PhysXCooking
                      PhysX PhysXPvdSDK PhysXCommon PhysXFoundation)
         find_library(SIM_PHYSX_LIB_${physxLib} NAMES ${physxLib}_static_64 ${physxLib}
                      PATHS "${SIM_PHYSX_ROOT}/lib" NO_DEFAULT_PATH)

@@ -12,8 +12,11 @@
 
 #include "Sim/Core/Log.h"
 
+#include "VehicleBackend.h"
+
 #include <algorithm>
 #include <atomic>
+#include <memory>
 #include <unordered_map>
 #include <vector>
 
@@ -104,6 +107,20 @@ struct PhysicsWorld::Impl {
     /// PhysX tidak menjanjikan urutan yang dikembalikannya sama dengan urutan
     /// pembuatan, sedangkan `ReadLinkState` menjanjikan indeks yang sama dengan
     /// yang ditulis pemanggil di `desc.links`.
+    /// Kendaraan, beserta konteks simulasi yang dibagi seluruhnya.
+    ///
+    /// **Konteksnya milik dunia, bukan milik tiap kendaraan**: ia menyebut
+    /// gravitasi, kerangka sumbu, dan scene yang sama untuk semuanya, dan
+    /// menyalinnya per kendaraan berarti dua puluh salinan yang harus ikut
+    /// berubah setiap kali gravitasi disetel.
+    std::unordered_map<uint64_t, std::unique_ptr<VehicleInstance>> vehicles;
+    uint64_t nextVehicleHandle = 1;
+    physx::vehicle2::PxVehiclePhysXSimulationContext vehicleContext;
+    physx::PxConvexMesh* unitCylinderMesh = nullptr;
+    physx::PxMaterial* vehicleMaterial = nullptr;
+    physx::PxCookingParams* cookingParams = nullptr;
+    bool vehicleExtensionReady = false;
+
     std::unordered_map<uint64_t, physx::PxArticulationReducedCoordinate*> articulations;
     std::unordered_map<uint64_t, std::vector<physx::PxArticulationLink*>> articulationLinks;
     uint64_t nextArticulationHandle = 1;
@@ -165,6 +182,45 @@ struct PhysicsWorld::Impl {
     }
 
     void Shutdown() {
+        // **Chassis kendaraan terdaftar dua kali dengan sengaja** — sebagai
+        // benda biasa supaya scene query dan sendi bisa menyebutnya, dan sebagai
+        // milik kendaraan yang membuatnya. Yang melepasnya hanya boleh satu:
+        // `PxVehiclePhysXActorDestroy`. Tanpa pencabutan di bawah ini, gelung
+        // `bodies` melepasnya untuk kedua kalinya, dan itu tidak terlihat
+        // sebagai galat melainkan sebagai segfault saat dunia ditutup.
+        for (auto& [handle, vehicle] : vehicles) {
+            if (vehicle == nullptr) {
+                continue;
+            }
+            physx::PxRigidBody* chassis = vehicle->RigidBody();
+            if (chassis != nullptr) {
+                const auto found = handlesByActor.find(chassis);
+                if (found != handlesByActor.end()) {
+                    bodies.erase(found->second);
+                    handlesByActor.erase(found);
+                }
+            }
+            if (scene != nullptr) {
+                vehicle->RemoveFromScene(*scene);
+            }
+            vehicle->Destroy();
+        }
+        vehicles.clear();
+        if (unitCylinderMesh != nullptr) {
+            unitCylinderMesh->release();
+            unitCylinderMesh = nullptr;
+        }
+        if (vehicleMaterial != nullptr) {
+            vehicleMaterial->release();
+            vehicleMaterial = nullptr;
+        }
+        delete cookingParams;
+        cookingParams = nullptr;
+        if (vehicleExtensionReady) {
+            physx::vehicle2::PxCloseVehicleExtension();
+            vehicleExtensionReady = false;
+        }
+
         // Articulation memiliki link-nya sendiri; melepasnya melepas semuanya.
         for (auto& [handle, articulation] : articulations) {
             if (articulation != nullptr) {
@@ -291,6 +347,37 @@ bool PhysicsWorld::Create(const WorldDesc& desc) {
     }
 
     impl_ = std::move(impl);
+
+    // Ekstensi kendaraan disiapkan bersama dunia, bukan saat kendaraan pertama
+    // ditambahkan. Ongkosnya sekali dan kecil, sedangkan menyiapkannya belakangan
+    // berarti `AddVehicle` bisa gagal karena alasan yang tidak ada hubungannya
+    // dengan kendaraan yang diminta.
+    if (physx::vehicle2::PxInitVehicleExtension(*impl_->foundation)) {
+        impl_->vehicleExtensionReady = true;
+        impl_->cookingParams =
+            new physx::PxCookingParams(impl_->physics->getTolerancesScale());
+        impl_->vehicleMaterial = impl_->physics->createMaterial(0.8f, 0.8f, 0.0f);
+
+        // **Konteks disetel lebih dulu, baru mesh sapuannya dibuat darinya.**
+        // Urutan sebaliknya membangun silinder satuan dari kerangka sumbu yang
+        // belum berisi apa-apa, dan kegagalannya tidak terlihat sebagai galat:
+        // query jalan tidak pernah menemukan tanah, dan mobil hanya diam di
+        // tempat dengan gas penuh.
+        impl_->vehicleContext.setToDefault();
+        // Kerangka sumbu disamakan dengan yang dipakai backend — Y di atas,
+        // bukan Z bawaan PhysX.
+        impl_->vehicleContext.frame = SimVehicleFrame();
+        impl_->vehicleContext.gravity = ToPx(desc.gravity);
+        impl_->unitCylinderMesh = physx::vehicle2::PxVehicleUnitCylinderSweepMeshCreate(
+            impl_->vehicleContext.frame, *impl_->physics, *impl_->cookingParams);
+        impl_->vehicleContext.physxScene = impl_->scene;
+        impl_->vehicleContext.physxUnitCylinderSweepMesh = impl_->unitCylinderMesh;
+        impl_->vehicleContext.physxActorUpdateMode =
+            physx::vehicle2::PxVehiclePhysXActorUpdateMode::eAPPLY_VELOCITY;
+    } else {
+        SIM_WARN("Physics", "the PhysX vehicle extension failed to start; vehicles are off");
+    }
+
     return true;
 }
 
@@ -516,6 +603,15 @@ void PhysicsWorld::Step(uint32_t steps) {
     // memanggil `Advance` dan hampir selalu berlangkah satu.
     impl_->stepping.store(true, std::memory_order_release);
     for (uint32_t i = 0; i < steps; ++i) {
+        // **Kendaraan dilangkahkan sebelum scene, di dalam langkah yang sama.**
+        // Ia menghitung gaya suspensi dan ban lalu menuliskannya ke aktornya;
+        // menjalankannya sesudah `simulate` berarti gaya frame ini baru terasa
+        // pada frame berikutnya, dan mobil terasa seperti dikemudikan lewat pos.
+        for (auto& [handle, vehicle] : impl_->vehicles) {
+            if (vehicle != nullptr) {
+                vehicle->Step(impl_->desc.fixedTimeStep, impl_->vehicleContext);
+            }
+        }
         impl_->scene->simulate(impl_->desc.fixedTimeStep);
         // Blocking: penulisan transform ke `World` terjadi di main thread, dan
         // menunggu di sini jauh lebih sederhana daripada satu keadaan lagi yang
@@ -561,6 +657,107 @@ float PhysicsWorld::Alpha() const {
 }
 
 uint64_t PhysicsWorld::StepCount() const { return impl_ != nullptr ? impl_->stepCount : 0; }
+
+// --- kendaraan ---------------------------------------------------------------
+
+VehicleHandle PhysicsWorld::AddVehicle(const VehicleDesc& desc) {
+    if (!IsValid()) {
+        return VehicleHandle::Invalid;
+    }
+    if (!impl_->vehicleExtensionReady) {
+        impl_->error = "the PhysX vehicle extension is not available";
+        return VehicleHandle::Invalid;
+    }
+
+    auto vehicle = std::make_unique<VehicleInstance>();
+    if (!vehicle->Create(desc, *impl_->physics, *impl_->cookingParams, *impl_->vehicleMaterial,
+                         impl_->error)) {
+        return VehicleHandle::Invalid;
+    }
+    vehicle->AddToScene(*impl_->scene);
+
+    const uint64_t handle = impl_->nextVehicleHandle++;
+    // Chassis-nya ikut terdaftar sebagai benda biasa, sehingga scene query dan
+    // sendi bisa menyebutnya — roda tidak, karena roda memang bukan benda tegar.
+    physx::PxRigidActor* chassis = vehicle->RigidBody();
+    if (chassis != nullptr) {
+        impl_->bodies.emplace(impl_->nextHandle, chassis);
+        impl_->handlesByActor.emplace(chassis, impl_->nextHandle);
+        ++impl_->nextHandle;
+    }
+    impl_->vehicles.emplace(handle, std::move(vehicle));
+    return static_cast<VehicleHandle>(handle);
+}
+
+void PhysicsWorld::RemoveVehicle(VehicleHandle vehicle) {
+    if (!IsValid()) {
+        return;
+    }
+    const auto found = impl_->vehicles.find(static_cast<uint64_t>(vehicle));
+    if (found == impl_->vehicles.end()) {
+        return;
+    }
+    if (found->second != nullptr) {
+        physx::PxRigidBody* chassis = found->second->RigidBody();
+        if (chassis != nullptr) {
+            const auto handle = impl_->handlesByActor.find(chassis);
+            if (handle != impl_->handlesByActor.end()) {
+                impl_->ReleaseJointsTouching(chassis);
+                impl_->bodies.erase(handle->second);
+                impl_->handlesByActor.erase(handle);
+            }
+        }
+        found->second->RemoveFromScene(*impl_->scene);
+        found->second->Destroy();
+    }
+    impl_->vehicles.erase(found);
+}
+
+bool PhysicsWorld::IsVehicleAlive(VehicleHandle vehicle) const {
+    return impl_ != nullptr && impl_->vehicles.count(static_cast<uint64_t>(vehicle)) != 0;
+}
+
+std::size_t PhysicsWorld::VehicleCount() const {
+    return impl_ != nullptr ? impl_->vehicles.size() : 0;
+}
+
+bool PhysicsWorld::SetVehicleInput(VehicleHandle vehicle, const VehicleInput& input) {
+    if (!IsValid()) {
+        return false;
+    }
+    const auto found = impl_->vehicles.find(static_cast<uint64_t>(vehicle));
+    if (found == impl_->vehicles.end() || found->second == nullptr) {
+        return false;
+    }
+    found->second->SetInput(input);
+    return true;
+}
+
+bool PhysicsWorld::ReadVehicleState(VehicleHandle vehicle, VehicleState& out) const {
+    out = VehicleState{};
+    if (impl_ == nullptr) {
+        return false;
+    }
+    const auto found = impl_->vehicles.find(static_cast<uint64_t>(vehicle));
+    if (found == impl_->vehicles.end() || found->second == nullptr) {
+        return false;
+    }
+    found->second->ReadState(out);
+    return true;
+}
+
+BodyHandle PhysicsWorld::VehicleChassis(VehicleHandle vehicle) const {
+    if (impl_ == nullptr) {
+        return BodyHandle::Invalid;
+    }
+    const auto found = impl_->vehicles.find(static_cast<uint64_t>(vehicle));
+    if (found == impl_->vehicles.end() || found->second == nullptr) {
+        return BodyHandle::Invalid;
+    }
+    const auto handle = impl_->handlesByActor.find(found->second->RigidBody());
+    return handle == impl_->handlesByActor.end() ? BodyHandle::Invalid
+                                                 : static_cast<BodyHandle>(handle->second);
+}
 
 // --- articulation ------------------------------------------------------------
 
@@ -1245,6 +1442,19 @@ uint32_t PhysicsWorld::Advance(float /*deltaSeconds*/) { return 0; }
 void PhysicsWorld::Step(uint32_t /*steps*/) {}
 float PhysicsWorld::Alpha() const { return 0.0f; }
 uint64_t PhysicsWorld::StepCount() const { return 0; }
+
+VehicleHandle PhysicsWorld::AddVehicle(const VehicleDesc&) { return VehicleHandle::Invalid; }
+void PhysicsWorld::RemoveVehicle(VehicleHandle) {}
+bool PhysicsWorld::IsVehicleAlive(VehicleHandle) const { return false; }
+std::size_t PhysicsWorld::VehicleCount() const { return 0; }
+bool PhysicsWorld::SetVehicleInput(VehicleHandle, const VehicleInput&) { return false; }
+
+bool PhysicsWorld::ReadVehicleState(VehicleHandle, VehicleState& out) const {
+    out = VehicleState{};
+    return false;
+}
+
+BodyHandle PhysicsWorld::VehicleChassis(VehicleHandle) const { return BodyHandle::Invalid; }
 
 ArticulationHandle PhysicsWorld::AddArticulation(const ArticulationDesc&) {
     return ArticulationHandle::Invalid;
