@@ -912,8 +912,9 @@ private:
 
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 8.0f);
             if (ImGui::InputText("##name", &parameter.name)) {
-                Touch();
+                TouchDeferred();
             }
+            RecompileOnCommit();
             ImGui::SameLine();
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 6.0f);
             if (DrawKindCombo("##kind", parameter.kind)) {
@@ -922,8 +923,9 @@ private:
             ImGui::SameLine();
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.0f);
             if (ImGui::InputText("##default", &parameter.defaultValue)) {
-                Touch();
+                TouchDeferred();
             }
+            RecompileOnCommit();
             ImGui::SameLine();
             const bool remove = ImGui::SmallButton("x");
             ImGui::PopID();
@@ -991,9 +993,13 @@ private:
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
             if (ImGui::InputText(pin.label.empty() ? pin.name.c_str() : pin.label.c_str(),
                                  &value)) {
+                // Modelnya tetap diperbarui tiap ketukan — yang ditunda hanya
+                // kompilasinya. Menahan modelnya juga berarti teks yang diketik
+                // hilang begitu panel digambar ulang karena sebab lain.
                 node->pinValues[pin.name] = value;
-                Touch();
+                TouchDeferred();
             }
+            RecompileOnCommit();
             ImGui::PopID();
         }
     }
@@ -1003,8 +1009,9 @@ private:
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
         if (ImGui::InputText(label, &value)) {
             node.settings[key] = value;
-            Touch();
+            TouchDeferred();
         }
+        RecompileOnCommit();
     }
 
     void DrawParameterCombo(MaterialNode& node) {
@@ -1501,9 +1508,43 @@ private:
     /// Kompilasi di setiap suntingan, bukan atas permintaan: yang membuat editor
     /// node berguna adalah melihat akibat sebuah sambungan langsung, dan graph
     /// material berukuran wajar dikompilasi dalam waktu yang tidak terasa.
+    ///
+    /// **Untuk suntingan yang selesai dalam satu tindakan** — menyambung kabel,
+    /// menambah node, memilih dari combo. Yang diketik huruf demi huruf memakai
+    /// pasangan `TouchDeferred`/`RecompileOnCommit` di bawah.
     void Touch() {
         dirty_ = true;
         Recompile();
+    }
+
+    /// Menandai berubah **tanpa** mengompilasi ulang.
+    ///
+    /// Dipakai kotak teks: mengetik "0.75" adalah empat ketukan, dan tiga di
+    /// antaranya adalah nilai yang tidak pernah dimaksudkan siapa pun — "0",
+    /// "0.", "0.7". Mengompilasi ketiganya berarti menjalankan `slangc` tiga
+    /// kali untuk hasil yang langsung dibuang, dan pada graph besar itu terasa
+    /// sebagai editor yang tersendat justru saat sedang diketik.
+    ///
+    /// Penanda "belum tersimpan" tetap dinaikkan tiap ketukan: modelnya memang
+    /// sudah berubah, dan tombol Save yang baru menyala setelah pindah fokus
+    /// adalah tombol yang berbohong.
+    void TouchDeferred() { dirty_ = true; }
+
+    /// Mengompilasi ulang bila widget yang baru saja digambar **selesai**
+    /// disunting.
+    ///
+    /// `IsItemDeactivatedAfterEdit` menjawab tepat pertanyaan itu: ia benar pada
+    /// frame ketika fokus berpindah — klik ke tempat lain, Tab, atau Enter — dan
+    /// hanya bila isinya memang berubah. Memakai `EnterReturnsTrue` saja tidak
+    /// cukup: yang mengetik lalu mengklik kanvas tidak pernah menekan Enter, dan
+    /// suntingannya tidak akan pernah terlihat.
+    ///
+    /// Ia juga menutup seretan slider: satu seretan adalah puluhan frame yang
+    /// nilainya berubah, dan yang dikompilasi hanya yang terakhir.
+    void RecompileOnCommit() {
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            Recompile();
+        }
     }
 
     void Recompile() {
