@@ -17,6 +17,7 @@ struct PrepassPush {
     // Tidak dibaca di sini, tapi tata letaknya harus sama dengan `BoxPush` di
     // sisi C++: ketiga pass memakai struct push constant yang sama.
     float4 partColor;
+    uint instanceBase;
 };
 
 [[vk::push_constant]] ConstantBuffer<PrepassPush> push;
@@ -27,12 +28,12 @@ struct PrepassVarying {
 };
 
 [shader("vertex")]
-PrepassVarying main(BoxVertex vertex) {
+PrepassVarying main(BoxVertex vertex, uint instanceId : SV_InstanceID) {
     float3 localPosition;
     float3 localNormal;
     applySkin(vertex, localPosition, localNormal);
 
-    float4x4 model = instanceModel(vertex);
+    float4x4 model = instanceModel(push.instanceBase + instanceId);
     float4 world = mul(model, float4(localPosition, 1.0));
 
     PrepassVarying output;

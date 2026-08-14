@@ -425,6 +425,10 @@ pernah melihatnya**.
 - **Larik bindless berisi format campuran** belum ada. Hari ini tiap tekstur
   punya satu set descriptor sendiri, seperti sebelum T3. Itu bagian dari
   keputusan set-0 di E8.4, bukan bagian dari jalur KTX2.
+- Kriteria terakhir — normal BC5 dan ORM BC4 **digambar** — menunggu pipeline
+  material di pass forward. Langkah pertamanya sudah mendarat: transform instance
+  kini di storage buffer, seperti yang dibaca modul material. Urutan sisanya ada
+  di [PLAN-RENDER.md § E8.4](PLAN-RENDER.md).
 - Cache tekstur masih tumbuh tanpa batas — sama seperti sesudah T2.
 
 ### T4 — HDR dan IBL ke BC6H · ⬜ (butuh I2)

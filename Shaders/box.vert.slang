@@ -13,12 +13,14 @@ struct BoxPush {
     // Warna dasar ruas yang sedang digambar; `w` nol berarti ruas ini tidak
     // punya material di berkasnya.
     float4 partColor;
+    // `firstInstance` draw ini. Lihat catatannya di instance_common.slang.
+    uint instanceBase;
 };
 
 [[vk::push_constant]] ConstantBuffer<BoxPush> push;
 
 [shader("vertex")]
-BoxVarying main(BoxVertex vertex) {
+BoxVarying main(BoxVertex vertex, uint instanceId : SV_InstanceID) {
     // **Kulit lebih dulu, transform instance sesudahnya.** Palet memetakan ruang
     // bind ke ruang lokal mesh, jadi ia berada di dalam transform dunia
     // entity-nya — bukan menggantikannya. Urutan yang terbalik membuat karakter
@@ -27,7 +29,7 @@ BoxVarying main(BoxVertex vertex) {
     float3 localNormal;
     applySkin(vertex, localPosition, localNormal);
 
-    float4x4 model = instanceModel(vertex);
+    float4x4 model = instanceModel(push.instanceBase + instanceId);
     float4 world = mul(model, float4(localPosition, 1.0));
 
     BoxVarying output;

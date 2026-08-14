@@ -22,16 +22,17 @@ struct ShadowPush {
     float4x4 lightViewProj;
     // Tidak dibaca di sini; lihat catatan di prepass.vert.
     float4 partColor;
+    uint instanceBase;
 };
 
 [[vk::push_constant]] ConstantBuffer<ShadowPush> push;
 
 [shader("vertex")]
-float4 main(BoxVertex vertex) : SV_Position {
+float4 main(BoxVertex vertex, uint instanceId : SV_InstanceID) : SV_Position {
     // Kulit ikut di sini, dan itu wajib bukan tambahan: bayangan yang tetap
     // berdiri di bind pose sementara karakternya bergerak adalah bayangan yang
     // lepas dari pemiliknya — cacat yang jauh lebih mencolok daripada tidak ada
     // bayangan sama sekali.
-    float4x4 model = instanceModel(vertex);
+    float4x4 model = instanceModel(push.instanceBase + instanceId);
     return mul(push.lightViewProj, mul(model, float4(skinPosition(vertex), 1.0)));
 }

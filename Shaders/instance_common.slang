@@ -1,14 +1,23 @@
 // Atribut per-instance kubus, dipakai pass forward, prepass, dan bayangan.
 //
-// **`row0..row3` sebenarnya KOLOM matriks model.** Namanya warisan dari sisi
-// C++, yang menuliskan `model[0..3]` — dan indeks glm memilih kolom, bukan
-// baris. GLSL menyusunnya kembali dengan `mat4(a,b,c,d)` yang juga kolom-mayor,
-// jadi di sana keduanya cocok tanpa transpose di mana pun.
+// **Transform instance ada di storage buffer, bukan di atribut vertex.** Ia
+// pindah ke sini supaya pipeline material — yang memang membacanya dari buffer —
+// bisa menggantikan `box.frag` tanpa mengubah cara instance dikumpulkan. Yang
+// ikut hilang: 64 byte per instance di aliran atribut, dan empat lokasi atribut
+// yang harus disediakan setiap pipeline yang tidak memakainya.
 //
-// Slang mengikuti HLSL: `float4x4(a,b,c,d)` menyusunnya sebagai **baris**. Jadi
-// di sini transpose-nya harus disebut, dan disebut sekali di satu tempat.
-// Melewatkannya tidak menghasilkan galat apa pun — hanya setiap kotak yang
-// tergambar di tempat yang salah, dengan orientasi yang salah.
+// **Lokasi 2..5 sengaja dibiarkan kosong.** Menomori ulang atribut sesudahnya
+// akan menggeser normal, warna, dan uv ke lokasi yang berbeda dari yang tertulis
+// di sisi C++ — dan yang terjadi bukan galat validasi melainkan mesh yang
+// membaca uv sebagai warna.
+//
+// **Matriksnya diunggah apa adanya, tanpa transpose di sisi mana pun.** Slang
+// mendekorasi `float4x4` di dalam StructuredBuffer dengan `RowMajor` sementara
+// `glm::mat4` menyimpan kolom demi kolom, dan kedua kata itu terbaca
+// bertentangan. Yang menyelesaikannya bukan penalaran melainkan bukti yang sudah
+// ada: `push.viewProj` diunggah sebagai `glm::mat4` mentah, mendapat dekorasi
+// yang sama persis, dan `mul` pada keduanya menjadi `OpVectorTimesMatrix` yang
+// sama — dan jalur itu sudah menggambar dengan benar sejak E8.1.
 
 #ifndef INSTANCE_COMMON_SLANG
 #define INSTANCE_COMMON_SLANG
@@ -16,10 +25,7 @@
 struct BoxVertex {
     [[vk::location(0)]] float3 position;
     [[vk::location(1)]] float3 normal;
-    [[vk::location(2)]] float4 row0;
-    [[vk::location(3)]] float4 row1;
-    [[vk::location(4)]] float4 row2;
-    [[vk::location(5)]] float4 row3;
+    // Lokasi 2..5 dulu memuat kolom matriks model; lihat catatan di atas.
     [[vk::location(6)]] float4 color;
     [[vk::location(7)]] uint flags;
     // Skin: empat bone dan bobotnya, per vertex. Lihat `skin_common.slang` —
@@ -49,8 +55,24 @@ struct BoxVertex {
     [[vk::location(12)]] float2 uv;
 };
 
-float4x4 instanceModel(BoxVertex vertex) {
-    return transpose(float4x4(vertex.row0, vertex.row1, vertex.row2, vertex.row3));
+#ifndef INSTANCE_SET
+#error "INSTANCE_SET harus didefinisikan sebelum meng-include instance_common.slang"
+#endif
+
+/// Transform dunia tiap instance, sejajar dengan aliran atribut instance.
+[[vk::binding(1, INSTANCE_SET)]] StructuredBuffer<float4x4> instanceTransforms;
+
+/// Transform instance ke-`index`.
+///
+/// **Indeksnya bukan `SV_InstanceID` apa adanya.** slangc menerjemahkan
+/// `SV_InstanceID` menjadi `gl_InstanceIndex - gl_BaseInstance`, jadi ia mulai
+/// dari nol pada setiap draw — sementara atribut instance di sebelahnya diambil
+/// menurut `gl_InstanceIndex`, yaitu **termasuk** `firstInstance`. Pemanggil
+/// menambahkan basisnya lewat push constant supaya keduanya menunjuk instance
+/// yang sama; tanpa itu, setiap ruas sesudah yang pertama memakai transform
+/// milik ruas pertama.
+float4x4 instanceModel(uint index) {
+    return instanceTransforms[index];
 }
 
 #endif

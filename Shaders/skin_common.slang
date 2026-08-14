@@ -20,6 +20,10 @@
 #error "SKIN_SET harus didefinisikan sebelum meng-include skin_common.slang"
 #endif
 
+// Transform instance tinggal di set yang sama dengan palet kulit, dan itu bukan
+// kebetulan: pass bayangan hanya mengikat satu set, jadi keduanya harus berada
+// di sana bersama-sama atau pass itu tidak bisa menggambar sama sekali.
+#define INSTANCE_SET SKIN_SET
 #include "instance_common.slang"
 
 /// Konstanta spesialisasi, bukan cabang runtime.

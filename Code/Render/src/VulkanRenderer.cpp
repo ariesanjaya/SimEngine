@@ -44,6 +44,15 @@ struct BoxPush {
     /// berarti satu entry instance per ruas per entity, yaitu menyalin seluruh
     /// matriks model sebanyak jumlah materialnya.
     Vec4 partColor{0.0f};
+    /// `firstInstance` panggilan gambar ini.
+    ///
+    /// **Ada karena `SV_InstanceID` dimulai dari nol pada setiap draw**, bukan
+    /// dari `firstInstance` — slangc menerjemahkannya menjadi
+    /// `gl_InstanceIndex - gl_BaseInstance`. Atribut instance di sebelahnya
+    /// justru diambil menurut `gl_InstanceIndex`. Tanpa basis ini, setiap ruas
+    /// sesudah yang pertama memakai transform milik ruas pertama sambil memakai
+    /// warna miliknya sendiri.
+    uint32_t instanceBase = 0;
 };
 
 /// Harus sama persis dengan blok push_constant di Shaders/sdf_debug.{vert,frag}.
@@ -228,10 +237,11 @@ static_assert(offsetof(assets::SkinInfluence, weights) == 8, "weights harus di o
 /// Satu instance kotak. Tata letaknya harus sama persis dengan atribut instance
 /// di Shaders/box.vert.
 struct BoxInstance {
-    Vec4 row0;
-    Vec4 row1;
-    Vec4 row2;
-    Vec4 row3;
+    /// **Transform-nya tidak di sini melainkan di storage buffer.** Ia pindah
+    /// supaya pipeline material — yang memang membacanya dari buffer — bisa
+    /// menggantikan `box.frag` tanpa mengubah cara instance dikumpulkan; yang
+    /// ikut hilang 64 byte per instance dan empat lokasi atribut yang harus
+    /// disediakan setiap pipeline yang tidak memakainya.
     Vec4 color;
     /// Bit 0: menerima bayangan. Sebuah bitmask, bukan float bernilai 0/1 —
     /// bendera per-instance berikutnya tinggal mengambil bit berikutnya alih-alih
@@ -370,21 +380,34 @@ std::vector<BoxVertex> BuildUnitCube() {
     return vertices;
 }
 
-BoxInstance MakeInstance(const Mat4& model, const Vec4& color, bool receiveShadows,
-                         bool forceColor, uint32_t skinBase) {
+BoxInstance MakeInstance(const Vec4& color, bool receiveShadows, bool forceColor,
+                         uint32_t skinBase) {
     BoxInstance instance;
-    // Kolom glm ditulis apa adanya sebagai empat atribut. Shader menyusunnya
-    // kembali dengan `mat4(...)`, yang juga kolom-mayor — jadi keduanya cocok
-    // tanpa transpose di mana pun.
-    instance.row0 = model[0];
-    instance.row1 = model[1];
-    instance.row2 = model[2];
-    instance.row3 = model[3];
     instance.color = color;
     instance.flags = (receiveShadows ? kInstanceReceiveShadows : 0u) |
                      (forceColor ? kInstanceForceColor : 0u);
     instance.skinBase = skinBase;
     return instance;
+}
+
+/// Bentuk matriks model seperti yang dibaca shader dari storage buffer.
+///
+/// **Apa adanya, tanpa transpose — dan itu diperiksa, bukan diasumsikan.**
+/// Godaannya besar untuk menambahkan transpose di sini: Slang mendekorasi
+/// `float4x4` di dalam StructuredBuffer dengan `RowMajor`, sementara `glm::mat4`
+/// menyimpan kolom demi kolom, dan kedua kata itu terbaca bertentangan.
+///
+/// Yang menyelesaikannya adalah bukti yang sudah ada di repo ini: `BoxPush`
+/// mengunggah `viewProj` sebagai `glm::mat4` mentah, slangc mendekorasinya
+/// **dengan cara yang sama persis** (`OpMemberDecorate ... RowMajor`,
+/// MatrixStride 16), `mul` pada keduanya menjadi `OpVectorTimesMatrix` yang
+/// sama, dan jalur itu sudah menggambar dengan benar sejak E8.1. Perlakuan yang
+/// identik menuntut unggahan yang identik.
+///
+/// Transpose yang salah di sini tidak menghasilkan galat apa pun — hanya setiap
+/// objek di tempat yang salah dengan orientasi yang salah.
+Mat4 InstanceTransform(const Mat4& model) {
+    return model;
 }
 
 /// Renderer Vulkan E8.1.
@@ -439,7 +462,9 @@ public:
                 !slot.shadowFaceBuffer.Create(device_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                               sizeof(GpuShadowFace) * 64) ||
                 !slot.skinBuffer.Create(device_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                        sizeof(Mat4) * 256)) {
+                                        sizeof(Mat4) * 256) ||
+                !slot.instanceBuffer.Create(device_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                            sizeof(Mat4) * 256)) {
                 return false;
             }
         }
@@ -661,8 +686,23 @@ public:
             upload_.clear();
             upload_.insert(upload_.end(), opaque_.begin(), opaque_.end());
             upload_.insert(upload_.end(), transparent_.begin(), transparent_.end());
-            slotReady = slot.buffer.Reserve(sizeof(BoxInstance) * upload_.size()) &&
-                        slot.buffer.Write(upload_.data(), sizeof(BoxInstance) * upload_.size());
+            transformUpload_.clear();
+            transformUpload_.insert(transformUpload_.end(), opaqueTransforms_.begin(),
+                                    opaqueTransforms_.end());
+            transformUpload_.insert(transformUpload_.end(), transparentTransforms_.begin(),
+                                    transparentTransforms_.end());
+            const VkDeviceSize transformBytes = sizeof(Mat4) * transformUpload_.size();
+            const VkBuffer beforeTransforms = slot.instanceBuffer.Handle();
+            slotReady =
+                slot.buffer.Reserve(sizeof(BoxInstance) * upload_.size()) &&
+                slot.buffer.Write(upload_.data(), sizeof(BoxInstance) * upload_.size()) &&
+                slot.instanceBuffer.Reserve(transformBytes) &&
+                slot.instanceBuffer.Write(transformUpload_.data(), transformBytes);
+            if (slot.instanceBuffer.Handle() != beforeTransforms) {
+                // Buffer yang tumbuh adalah `VkBuffer` yang lain — alasan yang
+                // sama persis dengan palet kulit di bawah.
+                WriteSkinDescriptor(slot);
+            }
         }
 
         // **Paletnya diunggah utuh, bukan per instance yang lolos culling.**
@@ -1207,6 +1247,10 @@ private:
         /// sebelumnya masih membacanya adalah pose yang sesekali melompat satu
         /// frame, bukan sebuah galat.
         rhi::DynamicBuffer skinBuffer;
+        /// Transform dunia tiap instance frame ini, sejajar dengan aliran
+        /// atribut instance. Per slot dengan alasan yang sama seperti palet
+        /// kulit.
+        rhi::DynamicBuffer instanceBuffer;
         VkDescriptorSet shadowSet = VK_NULL_HANDLE;
         VkDescriptorSet skinSet = VK_NULL_HANDLE;
         uint64_t submitId = 0;
@@ -1400,6 +1444,8 @@ private:
     void Gather(const ViewportDesc& desc, const ViewportScene& scene, const Mat4& viewProj) {
         opaque_.clear();
         transparent_.clear();
+        opaqueTransforms_.clear();
+        transparentTransforms_.clear();
         opaqueRuns_.clear();
         casterRuns_.clear();
         transparentRuns_.clear();
@@ -1443,20 +1489,20 @@ private:
                 colorCount = mesh.partCount;
             }
             const Vec4 color = mesh.selected ? kSelectedColor : mesh.color;
-            const BoxInstance instance = MakeInstance(model, color, mesh.receiveShadows,
-                                                      mesh.selected, skinned ? mesh.skinFirst : 0u);
+            const BoxInstance instance = MakeInstance(color, mesh.receiveShadows, mesh.selected,
+                                                      skinned ? mesh.skinFirst : 0u);
             if (color.a >= 0.999f) {
-                gathered_.push_back(
-                    GatherEntry{mesh.mesh, skinned, colorFirst, colorCount, instance,
-                                mesh.castShadows});
+                gathered_.push_back(GatherEntry{mesh.mesh, skinned, colorFirst, colorCount,
+                                                instance, InstanceTransform(model),
+                                                mesh.castShadows});
                 continue;
             }
             const float distance = glm::length(world.Centre() - eye);
             // Tembus pandang tidak pernah menjatuhkan bayangan — kaca yang
             // menghitamkan lantai di bawahnya adalah kesalahan yang lebih
             // mencolok daripada kaca yang tidak berbayang sama sekali.
-            sorted_.push_back(
-                SortedEntry{distance, mesh.mesh, skinned, colorFirst, colorCount, instance});
+            sorted_.push_back(SortedEntry{distance, mesh.mesh, skinned, colorFirst, colorCount,
+                                          instance, InstanceTransform(model)});
         }
 
         // **Yang menjatuhkan bayangan lebih dulu, lalu dikelompokkan per mesh.**
@@ -1487,6 +1533,7 @@ private:
                          });
 
         opaque_.reserve(gathered_.size());
+        opaqueTransforms_.reserve(gathered_.size());
         for (const GatherEntry& entry : gathered_) {
             if (entry.caster) {
                 ++casterCount_;
@@ -1494,6 +1541,7 @@ private:
             AppendRun(opaqueRuns_, entry.mesh, entry.skinned, entry.colorFirst, entry.colorCount,
                       static_cast<uint32_t>(opaque_.size()));
             opaque_.push_back(entry.instance);
+            opaqueTransforms_.push_back(entry.transform);
         }
         // Ruas bayangan adalah awalan daftar yang sama, dipotong di
         // `casterCount_`. Dipotong, bukan dibangun ulang: dua daftar yang harus
@@ -1519,10 +1567,12 @@ private:
         std::stable_sort(sorted_.begin(), sorted_.end(),
                   [](const SortedEntry& a, const SortedEntry& b) { return a.distance > b.distance; });
         transparent_.reserve(sorted_.size());
+        transparentTransforms_.reserve(sorted_.size());
         for (const SortedEntry& entry : sorted_) {
             AppendRun(transparentRuns_, entry.mesh, entry.skinned, entry.colorFirst,
                       entry.colorCount, static_cast<uint32_t>(transparent_.size()));
             transparent_.push_back(entry.instance);
+            transparentTransforms_.push_back(entry.transform);
         }
     }
 
@@ -1710,7 +1760,8 @@ private:
                                 static_cast<uint32_t>(sets.size()), sets.data(), 0, nullptr);
         vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(BoxPush),
                            &push);
-        DrawRuns(cmd, slot, runs, instanceBase, pipelines, pipelineLayout_, push);
+        DrawRuns(cmd, slot, runs, instanceBase, pipelines, pipelineLayout_, push,
+                 /*bindsMaterial=*/true);
     }
 
     /// Mengikat geometri tiap ruas lalu menggambarnya. Dipakai bersama pass
@@ -1722,9 +1773,15 @@ private:
     /// ada, dua ruas berturut-turut bisa menuntut pipeline yang berbeda — dan
     /// pemanggil yang mengikatnya sekali di awal akan menggambar sebagian ruas
     /// lewat pipeline yang bukan miliknya, tanpa satu pun galat.
+    /// `bindsMaterial` false untuk pass bayangan. **Bukan optimisasi.**
+    /// `shadowLayout_` hanya mendeklarasikan satu set, jadi mengikat set material
+    /// di nomor dua di sana adalah `firstSet + descriptorSetCount >
+    /// setLayoutCount` — perilaku tak terdefinisi yang di mesin ini berakhir
+    /// sebagai segfault beberapa detik sesudah adegan yang menjatuhkan bayangan
+    /// selesai dimuat, jauh dari sebabnya.
     void DrawRuns(VkCommandBuffer cmd, InstanceSlot& slot, std::span<const DrawRun> runs,
                   uint32_t instanceBase, const PipelineVariants& pipelines,
-                  VkPipelineLayout layout, const BoxPush& push) {
+                  VkPipelineLayout layout, const BoxPush& push, bool bindsMaterial) {
         VkPipeline bound = VK_NULL_HANDLE;
         for (const DrawRun& run : runs) {
             if (run.count == 0 || run.mesh >= meshes_.size()) {
@@ -1767,6 +1824,10 @@ private:
                 // material entity adalah keputusan orang yang menyusun adegan,
                 // dan keputusan itu tidak boleh dikalahkan oleh berkasnya.
                 partPush.partColor = part.baseColor;
+                // Basis instance ruas ini. Lihat catatannya di `BoxPush`:
+                // `SV_InstanceID` mulai dari nol tiap draw, sementara atribut
+                // instance di sebelahnya tidak.
+                partPush.instanceBase = instanceBase + run.first;
                 if (partIndex < run.partColorCount) {
                     const Vec4& assigned = partColors_[run.partColorFirst + partIndex];
                     if (assigned.a > 0.0f) {
@@ -1776,8 +1837,8 @@ private:
                 // Set material ruas ini. Yang tidak punya tekstur mendapat yang
                 // putih — nilai satuan perkalian, jadi ia tergambar persis
                 // seperti sebelum jalur tekstur ada.
-                VkDescriptorSet materialSet = fallbackSet_;
-                if (partIndex < run.partColorCount &&
+                VkDescriptorSet materialSet = bindsMaterial ? fallbackSet_ : VK_NULL_HANDLE;
+                if (bindsMaterial && partIndex < run.partColorCount &&
                     run.partColorFirst + partIndex < partTextures_.size()) {
                     const TextureHandle handle = partTextures_[run.partColorFirst + partIndex];
                     if (handle != kInvalidTexture && handle <= materialTextures_.size()) {
@@ -2107,8 +2168,9 @@ private:
         // dengan prepass: shader fragment yang menulis ke lampiran warna yang
         // tidak dipasang adalah peringatan validasi berulang, dan menghapusnya
         // juga jalur yang lebih cepat.
-        // Atribut 0, 2..5, dan 8..10: posisi, keempat kolom matriks, dan ketiga
-        // atribut skin. Normal, warna, dan bendera tidak dibaca pass bayangan.
+        // Atribut 0 dan 8..10: posisi dan ketiga atribut skin. Normal, warna,
+        // dan bendera tidak dibaca pass bayangan; transform instance tidak lagi
+        // menjadi atribut sama sekali.
         //
         // **Atribut skin ikut walaupun `kSkinned` mati.** Slang mengunci daftar
         // antarmuka entry point sebelum konstanta spesialisasi dinilai, jadi
@@ -2120,7 +2182,7 @@ private:
                 shadowVertex, VK_NULL_HANDLE, /*depthWrite=*/true, VK_COMPARE_OP_LESS_OR_EQUAL,
                 /*blend=*/false, /*colorWrite=*/false, /*skinned=*/skinned != 0, shadowLayout_,
                 kShadowFormat, /*colorAttachment=*/VK_FORMAT_UNDEFINED,
-                /*attributeMask=*/0b0111'0011'1101u);
+                /*attributeMask=*/0b0111'0000'0001u);
         }
         vkDestroyShaderModule(device_.Handle(), shadowVertex, nullptr);
 
@@ -2135,15 +2197,15 @@ private:
             CreateShaderModule(device_.Handle(), shaderDirectory / "prepass.vert.spv");
         VkShaderModule prepassFragment =
             CreateShaderModule(device_.Handle(), shaderDirectory / "prepass.frag.spv");
-        // Atribut 0..5 dan 8..10: posisi, normal, keempat kolom matriks, dan
-        // skin. Warna dan bendera tidak dibacanya.
+        // Atribut 0, 1, dan 8..10: posisi, normal, dan skin. Warna dan bendera
+        // tidak dibacanya.
         for (std::size_t skinned = 0; skinned < kPipelineVariants; ++skinned) {
             prepassPipelines_[skinned] =
                 BuildPipeline(prepassVertex, prepassFragment, /*depthWrite=*/true,
                               VK_COMPARE_OP_GREATER, /*blend=*/false, /*colorWrite=*/true,
                               /*skinned=*/skinned != 0, /*layout=*/VK_NULL_HANDLE,
                               /*depthFormat=*/VK_FORMAT_UNDEFINED, kNormalFormat,
-                              /*attributeMask=*/0b0111'0011'1111u);
+                              /*attributeMask=*/0b0111'0000'0011u);
             // Uji EQUAL, bukan GREATER: depth-nya sudah diisi prepass, jadi hanya
             // fragmen yang benar-benar terlihat yang boleh menjalankan shader.
             // Itulah gunanya prepass — bukan menghemat depth test, melainkan
@@ -2192,7 +2254,7 @@ private:
                              bool skinned = false, VkPipelineLayout layout = VK_NULL_HANDLE,
                              VkFormat depthFormat = VK_FORMAT_UNDEFINED,
                              VkFormat colorAttachment = VK_FORMAT_UNDEFINED,
-                             uint32_t attributeMask = 0x1FFFu) {
+                             uint32_t attributeMask = 0x1FC3u) {
         // `kSkinned`, konstanta spesialisasi 0 di `Shaders/skin_common.slang`.
         // Ukurannya empat byte walaupun tipenya bool: Vulkan menyatakan
         // konstanta spesialisasi boolean berukuran `VkBool32`, dan ukuran yang
@@ -2237,19 +2299,11 @@ private:
                 2, skinned ? static_cast<uint32_t>(sizeof(assets::SkinInfluence)) : 0u,
                 VK_VERTEX_INPUT_RATE_VERTEX},
         };
-        const std::array<VkVertexInputAttributeDescription, 13> attributes{
+        const std::array<VkVertexInputAttributeDescription, 9> attributes{
             VkVertexInputAttributeDescription{0, 0, VK_FORMAT_R32G32B32_SFLOAT,
                                               offsetof(BoxVertex, position)},
             VkVertexInputAttributeDescription{1, 0, VK_FORMAT_R32G32B32_SFLOAT,
                                               offsetof(BoxVertex, normal)},
-            VkVertexInputAttributeDescription{2, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
-                                              offsetof(BoxInstance, row0)},
-            VkVertexInputAttributeDescription{3, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
-                                              offsetof(BoxInstance, row1)},
-            VkVertexInputAttributeDescription{4, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
-                                              offsetof(BoxInstance, row2)},
-            VkVertexInputAttributeDescription{5, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
-                                              offsetof(BoxInstance, row3)},
             VkVertexInputAttributeDescription{6, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
                                               offsetof(BoxInstance, color)},
             VkVertexInputAttributeDescription{7, 1, VK_FORMAT_R32_UINT,
@@ -2286,7 +2340,7 @@ private:
         // adalah peringatan validasi di setiap pembuatan pipeline. Menyaringnya
         // di sini bukan sekadar meredam peringatan: atribut yang tidak diambil
         // memang tidak perlu diambil.
-        std::array<VkVertexInputAttributeDescription, 13> used{};
+        std::array<VkVertexInputAttributeDescription, 9> used{};
         uint32_t usedCount = 0;
         for (const VkVertexInputAttributeDescription& attribute : attributes) {
             if ((attributeMask & (1u << attribute.location)) != 0u) {
@@ -2675,17 +2729,25 @@ private:
     /// lampiran dan sebagai descriptor pada draw yang sama. Set kecil ini bisa
     /// diikat kedua pass tanpa membawa apa pun yang bukan miliknya.
     bool CreateSkinDescriptors() {
-        const VkDescriptorSetLayoutBinding binding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
-                                                   VK_SHADER_STAGE_VERTEX_BIT, nullptr};
+        // Binding 0 palet kulit, binding 1 transform instance. **Keduanya di set
+        // yang sama, dan itu ditentukan pass bayangan**: ia hanya mengikat satu
+        // set, jadi apa pun yang dibutuhkan tahap vertexnya harus ada di sana
+        // bersama-sama.
+        const std::array<VkDescriptorSetLayoutBinding, 2> bindings{
+            VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                         VK_SHADER_STAGE_VERTEX_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                         VK_SHADER_STAGE_VERTEX_BIT, nullptr}};
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        layoutInfo.bindingCount = 1;
-        layoutInfo.pBindings = &binding;
+        layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+        layoutInfo.pBindings = bindings.data();
         SIM_VK_CHECK(
             vkCreateDescriptorSetLayout(device_.Handle(), &layoutInfo, nullptr, &skinSetLayout_));
 
+        // Dua storage buffer per set, jadi dua kali jumlah slot.
         const VkDescriptorPoolSize size{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                        static_cast<uint32_t>(slots_.size())};
+                                        static_cast<uint32_t>(slots_.size()) * 2};
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
         poolInfo.maxSets = static_cast<uint32_t>(slots_.size());
@@ -2721,15 +2783,20 @@ private:
     /// sudah dibebaskan — kerusakan yang muncul sebagai pose acak pada frame
     /// tempat sebuah karakter kedua masuk ke adegan, bukan sebagai galat.
     void WriteSkinDescriptor(const InstanceSlot& slot) {
-        const VkDescriptorBufferInfo buffer{slot.skinBuffer.Handle(), 0, VK_WHOLE_SIZE};
-        VkWriteDescriptorSet write{};
-        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = slot.skinSet;
-        write.dstBinding = 0;
-        write.descriptorCount = 1;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        write.pBufferInfo = &buffer;
-        vkUpdateDescriptorSets(device_.Handle(), 1, &write, 0, nullptr);
+        const std::array<VkDescriptorBufferInfo, 2> buffers{
+            VkDescriptorBufferInfo{slot.skinBuffer.Handle(), 0, VK_WHOLE_SIZE},
+            VkDescriptorBufferInfo{slot.instanceBuffer.Handle(), 0, VK_WHOLE_SIZE}};
+        std::array<VkWriteDescriptorSet, 2> writes{};
+        for (std::size_t i = 0; i < writes.size(); ++i) {
+            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[i].dstSet = slot.skinSet;
+            writes[i].dstBinding = static_cast<uint32_t>(i);
+            writes[i].descriptorCount = 1;
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[i].pBufferInfo = &buffers[i];
+        }
+        vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
+                               writes.data(), 0, nullptr);
     }
 
     /// Seluruh slot sekaligus. **Hanya saat start.** Di tengah frame yang boleh
@@ -2854,7 +2921,8 @@ private:
                 const BoxPush push{entry.viewProjection};
                 vkCmdPushConstants(cmd, shadowLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
                                    sizeof(BoxPush), &push);
-                DrawRuns(cmd, slot, casterRuns_, 0, shadowPipelines_, shadowLayout_, push);
+                DrawRuns(cmd, slot, casterRuns_, 0, shadowPipelines_, shadowLayout_, push,
+                         /*bindsMaterial=*/false);
             }
         }
         vkCmdEndRendering(cmd);
@@ -3481,7 +3549,8 @@ private:
                                         &slot.skinSet, 0, nullptr);
                 vkCmdPushConstants(cmd, shadowLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
                                    sizeof(BoxPush), &push);
-                DrawRuns(cmd, slot, casterRuns_, 0, shadowPipelines_, shadowLayout_, push);
+                DrawRuns(cmd, slot, casterRuns_, 0, shadowPipelines_, shadowLayout_, push,
+                         /*bindsMaterial=*/false);
             }
             vkCmdEndRendering(cmd);
         }
@@ -3510,6 +3579,7 @@ private:
             slot.shadowFaceBuffer.Destroy();
             slot.sdfStaging.Destroy();
             slot.skinBuffer.Destroy();
+            slot.instanceBuffer.Destroy();
         }
         dummySkin_.Destroy();
         hiz_.Destroy();
@@ -3717,6 +3787,16 @@ private:
     std::vector<BoxInstance> opaque_;
     std::vector<BoxInstance> transparent_;
     std::vector<BoxInstance> upload_;
+    /// Transform tiap instance, **sejajar indeks** dengan `opaque_`,
+    /// `transparent_`, dan `upload_`.
+    ///
+    /// Larik terpisah, bukan medan di dalam `BoxInstance`: yang satu menjadi
+    /// atribut vertex dan yang lain menjadi storage buffer, dan menggabungkannya
+    /// berarti mengunggah 64 byte per instance ke aliran atribut yang tidak
+    /// membacanya.
+    std::vector<Mat4> opaqueTransforms_;
+    std::vector<Mat4> transparentTransforms_;
+    std::vector<Mat4> transformUpload_;
     /// Warna ruas frame ini, disalin dari `ViewportScene`. Disalin dan bukan
     /// disimpan sebagai span: span pemanggil hanya sah selama `Render()`,
     /// sementara perekaman command buffer membacanya di dalam recorder yang
@@ -3729,6 +3809,7 @@ private:
         uint32_t colorFirst = 0;
         uint32_t colorCount = 0;
         BoxInstance instance;
+        Mat4 transform{1.0f};
     };
     std::vector<SortedEntry> sorted_;
     /// Instance buram sebelum diurutkan menjadi ruas.
@@ -3738,6 +3819,7 @@ private:
         uint32_t colorFirst = 0;
         uint32_t colorCount = 0;
         BoxInstance instance;
+        Mat4 transform{1.0f};
         bool caster = false;
     };
     std::vector<GatherEntry> gathered_;

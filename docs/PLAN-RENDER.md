@@ -815,6 +815,74 @@ tepi yang baru muncul bersama data sungguhannya.
 Syarat masuknya jelas dan bisa ditulis sekarang: **sebuah rig wajah dengan morph
 target di repo**, seperti rig Mixamo yang sudah menjadi acuan skinning.
 
+##### Nomor 4, langkah pertama: transform instance pindah ke storage buffer · ✅
+
+Transform instance tidak lagi menjadi atribut vertex ber-rate instance. Ia
+tinggal di `StructuredBuffer<float4x4>`, di **set yang sama dengan palet kulit,
+binding 1** — dan set itu ditentukan pass bayangan, yang hanya mengikat satu set:
+apa pun yang dibutuhkan tahap vertexnya harus ada di sana bersama-sama.
+
+Yang berubah: 64 byte per instance hilang dari aliran atribut, empat lokasi
+atribut (2..5) tidak lagi harus disediakan setiap pipeline, dan pipeline kotak
+kini sepakat dengan modul material tentang **dari mana** transform datang.
+
+**Lokasi 2..5 dibiarkan kosong, tidak dinomori ulang.** Menomori ulang akan
+menggeser normal, warna, dan uv ke lokasi yang berbeda dari yang tertulis di sisi
+C++ — dan yang terjadi bukan galat validasi melainkan mesh yang membaca uv
+sebagai warna.
+
+**`SV_InstanceID` bukan `gl_InstanceIndex`.** slangc menerjemahkannya menjadi
+`gl_InstanceIndex - gl_BaseInstance`, jadi ia mulai dari nol pada setiap draw —
+sementara atribut instance di sebelahnya (warna, bendera, `skinBase`) tetap
+diambil menurut `gl_InstanceIndex`, yaitu **termasuk** `firstInstance`. Basisnya
+karena itu dikirim lewat push constant. Tanpa itu setiap ruas sesudah yang
+pertama memakai transform milik ruas pertama sambil memakai warna miliknya
+sendiri — dan tidak ada satu pun galat yang menyertainya.
+
+**Matriksnya diunggah apa adanya, tanpa transpose — dan itu diperiksa.**
+Godaannya besar untuk menambahkan transpose: slangc mendekorasi `float4x4` di
+dalam StructuredBuffer dengan `RowMajor` sementara `glm::mat4` menyimpan kolom
+demi kolom, dan kedua kata itu terbaca bertentangan. Yang menyelesaikannya bukan
+penalaran melainkan pembongkaran SPIR-V dari `box.vert.spv` yang sungguh dibangun
+— dengan `-matrix-layout-column-major` seperti seluruh shader di sini:
+
+| | dekorasi | bentuk perkalian |
+| --- | --- | --- |
+| `push.viewProj` (glm mentah, benar sejak E8.1) | `RowMajor`, MatrixStride 16 | `OpVectorTimesMatrix` |
+| `instanceTransforms` (baru) | `RowMajor`, MatrixStride 16 | `OpVectorTimesMatrix` |
+
+Perlakuan yang identik menuntut unggahan yang identik. Transpose yang salah di
+sini tidak menghasilkan galat apa pun — hanya setiap objek di tempat yang salah
+dengan orientasi yang salah.
+
+**Satu bug lama ikut ketahuan, dan ia sedang menabrak editor.** `DrawRuns`
+dipakai bersama pass forward dan pass bayangan, dan sejak Jalur A ia mengikat set
+material di nomor dua untuk keduanya. `shadowLayout_` hanya mendeklarasikan satu
+set, jadi setiap draw bayangan adalah `firstSet + descriptorSetCount >
+setLayoutCount` — perilaku tak terdefinisi yang di mesin ini berakhir sebagai
+**segfault** beberapa detik sesudah adegan yang menjatuhkan bayangan selesai
+dimuat. Diverifikasi ada juga pada `main` sebelum perubahan ini. Sesudah
+diperbaiki, satu sesi editor penuh tidak menghasilkan **satu pun** galat
+validation layer.
+
+Yang membuatnya bertahan diam-diam: **tidak ada satu pun uji yang menjalankan
+editor.** `SimTextureUploadTests` sudah membuka jalan — ia membaca galat
+validation layer dari `LogRing` dan gagal bila ada — tetapi ia berhenti di
+unggahan tekstur.
+
+**Yang tersisa dari nomor 4**, dan urutannya:
+
+1. `AssembleMaterialModule` menuliskan set 0 renderer seutuhnya, bukan
+   `FrameParams` miliknya sendiri, dan membaca transform instance dari **set
+   kulit binding 1** alih-alih set 0 binding 2 seperti sekarang
+   (`MaterialBindings::kInstanceTransforms`). `VulkanMaterialPreview` menyediakan
+   yang tidak dimilikinya dengan tekstur tiruan 1×1.
+2. Atribut vertex modul material didamaikan dengan `BoxVertex`.
+3. Pipeline material di pass forward, `box.frag` sebagai jalur mundur.
+
+Baru sesudah ketiganya, normal BC5 dan ORM BC4 yang sudah di-bake T2 punya yang
+membacanya — dan kriteria terakhir T3 bisa ditutup.
+
 ##### Yang sudah dikerjakan dari daftar ini
 
 - **Nomor 1 ✅** `AssetRecord::triangleCount`/`vertexCount`, dilaporkan dari yang
@@ -864,7 +932,7 @@ menggagalkan impornya — materialnya tetap ditulis, hanya tanpa tekstur.
 3. Rujukan tekstur di `MaterialImport`, lalu penyalinan teksturnya ke project.
 4. Keputusan set 0 → transform instance lewat storage buffer →
    [Jalur B](ANALISA-TEKSTUR-PERMUKAAN.md), `box.frag` dipertahankan sebagai
-   jalur mundur.
+   jalur mundur. **🔨 langkah pertamanya sudah mendarat** — lihat di bawah.
 5. LOD mesh **bila** angka dari nomor 1 membenarkannya; meshoptimizer masuk di
    sini.
 6. Blend shape **bila** ada rig wajah untuk mengujinya.
