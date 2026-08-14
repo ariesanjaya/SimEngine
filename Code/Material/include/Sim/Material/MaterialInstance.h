@@ -51,6 +51,28 @@ struct ParameterOverride {
     MaterialValue value;
 };
 
+/// Tekstur yang menggantikan isi sebuah node `input.texture` di graph induk.
+///
+/// **Terpisah dari `ParameterOverride`, dan bukan karena kerapian.**
+/// `MaterialValue` adalah empat float; sebuah GUID juga enam belas byte, jadi
+/// menyelundupkannya lewat medan yang sama akan **kompilasi dengan mulus** dan
+/// menghasilkan tekstur yang berganti setiap kali ada yang menormalkan
+/// nilainya, membandingkannya dengan toleransi, atau menuliskannya sebagai
+/// `float4(...)`. Yang berbeda tipenya disimpan terpisah.
+///
+/// Node-nya disebut lewat **GUID, bukan nama** — aturan yang sudah dipegang
+/// koneksi di dalam graph, dan karena alasan yang sama: memindahkan atau
+/// menamai ulang node tidak boleh memutus apa pun. Indeks lebih buruk lagi:
+/// menambah tekstur kedua di induk akan menggeser setiap instance yang sudah
+/// ada, dan yang tergeser adalah gambar yang terpasang di ratusan model.
+///
+/// Inilah yang membuat satu induk bersama bisa melayani ratusan material impor
+/// yang albedonya berbeda-beda.
+struct TextureOverride {
+    Uuid node;
+    Uuid texture;
+};
+
 /// Material instance: sebuah `.simmat` induk ditambah nilai yang ditimpa.
 ///
 /// **Instance tidak menyalin graph.** Ia hanya menyimpan GUID induk dan daftar
@@ -65,12 +87,22 @@ struct ParameterOverride {
 struct MaterialInstance {
     Uuid parent;
     std::vector<ParameterOverride> overrides;
+    /// Tekstur yang menggantikan isi node induknya. Yang tidak disebut memakai
+    /// apa pun yang dipasang induknya — aturan yang sama dengan parameter.
+    std::vector<TextureOverride> textures;
 
     const ParameterOverride* Find(std::string_view name) const;
     /// Memasang atau memperbarui satu timpaan.
     void Set(std::string_view name, const MaterialValue& value);
     /// Membuang timpaan sebuah parameter, mengembalikannya ke nilai induk.
     void Clear(std::string_view name);
+
+    /// Tekstur yang menggantikan isi sebuah node, atau GUID tak sah.
+    Uuid Texture(const Uuid& node) const;
+    /// Memasang penggantinya. GUID tekstur tak sah membuang penggantian itu —
+    /// satu jalan untuk "pakai punya induk", bukan dua yang harus dibedakan
+    /// setiap pembaca.
+    void SetTexture(const Uuid& node, const Uuid& texture);
 };
 
 /// Parameter sebuah instance beserta nilai yang BERLAKU.

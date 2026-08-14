@@ -815,6 +815,35 @@ tepi yang baru muncul bersama data sungguhannya.
 Syarat masuknya jelas dan bisa ditulis sekarang: **sebuah rig wajah dengan morph
 target di repo**, seperti rig Mixamo yang sudah menjadi acuan skinning.
 
+##### Yang sudah dikerjakan dari daftar ini
+
+- **Nomor 1 ✅** `AssetRecord::triangleCount`/`vertexCount`, dilaporkan dari yang
+  memuatnya lewat `AssetDatabase::ReportMeshStats`, dan terlihat di Asset
+  Browser.
+- **Nomor 2 ✅ (Jalur A)** atribut uv, `IViewportRenderer::AcquireTexture`, dan
+  set descriptor material di set 2 dengan konvensi binding kompiler graph.
+  `box.frag` mengalikan albedo-nya. Pemakai pertamanya `DecalComponent::texture`.
+- **Nomor 3 🔨 separuh.** `MaterialInstance` kini bisa mengganti tekstur sebuah
+  node `input.texture` induknya, dan itu bertahan lewat `.simmatinst`.
+
+**Yang menghalangi separuh sisanya, ditemukan saat mengerjakannya:** material
+induk bersama `Resources/Materials/Sistem/Material Impor.simmat` **tidak punya
+satu pun node `input.texture`**. Ia hanya lima `param.get` dan sebuah
+`output.surface`. Jadi importir belum punya slot untuk diisi, betapapun
+lengkapnya mekanisme penggantian di sisi instance.
+
+Menambahkannya bukan sekadar menyisipkan node: induk itu **sudah dirujuk setiap
+`.simmatinst` yang pernah dibangkitkan**, jadi perubahannya harus menjaga
+material yang sudah ada tetap tergambar sama persis. Bentuk yang aman:
+`input.texture` yang kosong menghasilkan putih, dikalikan dengan `baseColor`
+yang sudah ada — sehingga material tanpa tekstur tidak berubah sedikit pun.
+
+Sesudah itu barulah: importir mengisi penggantinya dari
+`MeshMaterial::baseColorTexture`, teksturnya disalin ke dalam project (jalurnya
+relatif terhadap berkas mesh dan kerap naik satu tingkat), dan `SceneView`
+menyelesaikan penggantian itu menjadi `partTextures` — jalur yang sudah
+menunggu, dan yang hari ini selalu diisi nol untuk ruas mesh.
+
 ##### Ringkasnya
 
 1. Jumlah segitiga di indeks aset — murah, dan ia yang mengukur.

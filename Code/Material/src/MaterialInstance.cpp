@@ -127,6 +127,39 @@ void MaterialInstance::Clear(std::string_view name) {
                     overrides.end());
 }
 
+Uuid MaterialInstance::Texture(const Uuid& node) const {
+    const auto it = std::find_if(textures.begin(), textures.end(),
+                                 [&node](const TextureOverride& entry) {
+                                     return entry.node == node;
+                                 });
+    return it == textures.end() ? Uuid{} : it->texture;
+}
+
+void MaterialInstance::SetTexture(const Uuid& node, const Uuid& texture) {
+    if (!node.IsValid()) {
+        return;
+    }
+    const auto it = std::find_if(textures.begin(), textures.end(),
+                                 [&node](const TextureOverride& entry) {
+                                     return entry.node == node;
+                                 });
+    if (!texture.IsValid()) {
+        // GUID tak sah membuang penggantiannya alih-alih menyimpan entri
+        // kosong. Dua cara menyatakan "pakai punya induk" berarti setiap
+        // pembaca harus memeriksa keduanya, dan yang memeriksa satu saja akan
+        // salah separuh waktu.
+        if (it != textures.end()) {
+            textures.erase(it);
+        }
+        return;
+    }
+    if (it != textures.end()) {
+        it->texture = texture;
+        return;
+    }
+    textures.push_back({node, texture});
+}
+
 std::vector<ResolvedParameter> ResolveParameters(const MaterialGraph& parent,
                                                  const MaterialInstance& instance) {
     std::vector<ResolvedParameter> result;
@@ -169,6 +202,19 @@ std::string SaveInstanceToString(const MaterialInstance& instance) {
         overrides.push_back(std::move(object));
     }
     root["overrides"] = std::move(overrides);
+
+    // Ditulis hanya bila ada. Berkas instance dari sebelum tekstur ada tetap
+    // terbaca, dan yang tidak memasang tekstur tetap sekecil sebelumnya.
+    if (!instance.textures.empty()) {
+        Json textures = Json::array();
+        for (const TextureOverride& entry : instance.textures) {
+            Json object;
+            object["node"] = entry.node.ToString();
+            object["texture"] = entry.texture.ToString();
+            textures.push_back(std::move(object));
+        }
+        root["textures"] = std::move(textures);
+    }
 
     return root.dump(2) + "\n";
 }
@@ -233,6 +279,25 @@ MaterialIoResult LoadInstanceFromString(MaterialInstance& instance, const std::s
                 continue;
             }
             instance.overrides.push_back(std::move(over));
+        }
+    }
+
+    if (const auto textures = root.find("textures");
+        textures != root.end() && textures->is_array()) {
+        for (const Json& entry : *textures) {
+            const Uuid node = Uuid::Parse(entry.value("node", std::string{}));
+            const Uuid texture = Uuid::Parse(entry.value("texture", std::string{}));
+            if (!node.IsValid() || !texture.IsValid()) {
+                continue;
+            }
+            // Alasan yang sama dengan timpaan ganda di atas: yang kedua akan
+            // diam-diam dikalahkan yang pertama, dan perilaku yang ditentukan
+            // urutan penyimpanan tidak terlihat di panel mana pun.
+            if (instance.Texture(node).IsValid()) {
+                SIM_WARN("Material", "Dropping a second texture for node {}", node.ToString());
+                continue;
+            }
+            instance.textures.push_back({node, texture});
         }
     }
 

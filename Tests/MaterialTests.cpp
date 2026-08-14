@@ -1669,3 +1669,47 @@ TEST_CASE("Setiap material bawaan editor terbaca, sah, dan menghasilkan berkas y
     }
     CHECK(checked >= 4);
 }
+
+TEST_CASE("Jalur A: instance mengganti tekstur node induknya, dan itu bertahan lewat berkas") {
+    // **Terpisah dari `ParameterOverride`, dan bukan karena kerapian.**
+    // `MaterialValue` adalah empat float; sebuah GUID juga enam belas byte, jadi
+    // menyelundupkannya lewat medan yang sama akan kompilasi dengan mulus dan
+    // menghasilkan tekstur yang berganti setiap kali ada yang menormalkan
+    // nilainya atau menuliskannya sebagai `float4(...)`.
+    MaterialInstance instance;
+    instance.parent = Uuid::Generate();
+    instance.Set("baseColor", ParseValue(ValueKind::Float3, "float3(0.8)"));
+
+    const Uuid node = Uuid::Generate();
+    const Uuid albedo = Uuid::Generate();
+    instance.SetTexture(node, albedo);
+    CHECK(instance.Texture(node) == albedo);
+    CHECK_FALSE(instance.Texture(Uuid::Generate()).IsValid());
+
+    const std::string text = SaveInstanceToString(instance);
+    MaterialInstance loaded;
+    INFO(text);
+    REQUIRE(LoadInstanceFromString(loaded, text).ok);
+    CHECK(loaded.Texture(node) == albedo);
+    CHECK(loaded.overrides.size() == 1);
+    // Bolak-balik menghasilkan berkas yang sama: yang berubah urutannya tiap
+    // simpan membuat setiap `.simmatinst` tampak termodifikasi di git.
+    CHECK(SaveInstanceToString(loaded) == text);
+
+    // Memasang ulang mengganti, bukan menumpuk.
+    const Uuid other = Uuid::Generate();
+    instance.SetTexture(node, other);
+    CHECK(instance.textures.size() == 1);
+    CHECK(instance.Texture(node) == other);
+
+    // GUID tak sah membuang pemasangannya: satu jalan untuk "tidak ada
+    // tekstur", bukan dua yang harus dibedakan setiap pembaca.
+    instance.SetTexture(node, Uuid{});
+    CHECK(instance.textures.empty());
+    CHECK_FALSE(instance.Texture(node).IsValid());
+
+    // Instance tanpa tekstur tidak menulis kunci "textures" sama sekali —
+    // berkas dari sebelum tekstur ada tetap terbaca, dan yang tidak memakainya
+    // tetap sekecil sebelumnya.
+    CHECK(SaveInstanceToString(instance).find("textures") == std::string::npos);
+}
