@@ -918,45 +918,71 @@ akhirnya menghasilkan sorotan, alih-alih iradiansi Lambert yang dikalikan albedo
   material yang menganimasikan dirinya diam di viewport. Ditulis nol dan
   disebutkan, bukan dikarang dari sesuatu yang kebetulan bergerak.
 
-##### Nomor 4, langkah ketiga: pipeline material di pass forward · 🔨 ditulis, belum diverifikasi
+##### Nomor 4, langkah ketiga: pipeline material di pass forward · ✅
 
-Ada di cabang **`wip/e84-material-forward`**, bukan di `main`. Ia terbangun
-bersih di ketiga konfigurasi dan shader fragmennya dikompilasi `slangc` sungguhan
-di uji — tetapi **jalurnya tidak pernah benar-benar dijalankan**, dan kode GPU
-yang belum pernah jalan tidak masuk `main`. Segfault pass bayangan di langkah
-pertama datang persis dari kelalaian bentuk itu.
-
-Yang sudah ada di cabang itu:
+Renderer mengompilasi shader material per material, membangun pipeline-nya, dan
+mengikatnya **per ruas** — `box.frag` tetap jalur mundur untuk ruas yang
+materialnya belum ada, gagal dikompilasi, atau memang tidak punya.
 
 - `IViewportRenderer::AcquireMaterial(key, MaterialProgram)` — SPIR-V, blok
   parameter, dan daftar tekstur. Bentuk yang sama persis dengan
   `MaterialPreviewShaders`, jadi `Sim::Render` tetap tidak mengenal
   `Sim::Material`.
-- Renderer membangun set layout, pipeline layout, empat pipeline
-  (opaque/transparan × ber-kulit), descriptor set, dan UBO parameternya.
-  `box.vert` dipakai ulang sebagai tahap vertexnya.
-- Pipeline diikat **di dalam gelung ruas**, bukan per mesh: dua ruas dari mesh
-  yang sama bisa memakai material yang berbeda.
-- `box.frag` tetap jalur mundur untuk ruas yang materialnya belum ada, gagal
-  dikompilasi, atau memang tidak punya.
-- `SceneView` mengompilasi sekali per GUID: instance → induk → graph →
-  `CompileMaterial` → `AssembleForwardMaterialModule` → `ShaderCache`.
+- Empat pipeline per material (opaque/transparan × ber-kulit); `box.vert` dipakai
+  ulang sebagai tahap vertexnya.
+- **Diikat di dalam gelung ruas, bukan per mesh**: dua ruas dari mesh yang sama
+  bisa memakai material yang berbeda. Set 0 dan set 1 tidak ikut terganggu karena
+  kedua pipeline layout *compatible* untuk keduanya — set layoutnya objek yang
+  sama dan push constant range-nya sama.
+- **Kompilasinya di `TaskPool`**, lewat `editor::MaterialPrograms`. Worker
+  mengurai graph dan memanggil slangc; main thread mengumpulkan jalur berkasnya
+  lebih dulu — `AssetDatabase` ditukar utuh saat pemindaian selesai — dan
+  membangun pipeline-nya di akhir, karena hanya itu yang menyentuh Vulkan.
 
-**Dua hal yang harus selesai sebelum ia layak masuk:**
+#### Empat kesalahan yang hanya muncul saat dijalankan
 
-1. **Kompilasi masih berjalan di main thread, di dalam `SceneView::Build`.**
-   Ia di-cache per GUID jadi hanya sekali per material — tetapi sekali itu satu
-   panggilan `slangc`, yaitu detik, dan selama itu editor membeku. Tempatnya
-   `TaskPool`, dengan keadaan `Pending` dan jalur mundur sambil menunggu, persis
-   pola `assets::TextureBakery` yang sudah ada.
-2. **Ia butuh sebuah level yang terbuka untuk bisa diuji sama sekali.** Level
-   dipilih orang lewat pemilih level dan tidak dimuat otomatis — keputusan yang
-   disengaja dan dicatat di `OpenProject` — jadi sesi editor yang dijalankan
-   tanpa orang tidak menggambar satu pun entity, dan tanpa entity tidak ada ruas,
-   tidak ada material, tidak ada yang diuji.
+Tidak satu pun tertangkap uji yang ada, dan ketiganya yang pertama menghasilkan
+gambar yang salah tanpa galat apa pun.
 
-Baru sesudah keduanya, normal BC5 dan ORM BC4 yang sudah di-bake T2 punya yang
-membacanya, dan kriteria terakhir T3 bisa ditutup.
+1. **Berkas shader renderer tidak ada di sebelah executable.** Modul material
+   menanam deklarasi set 0 dari berkas yang di-`#include` `box.frag`, tetapi yang
+   disalin ke `bin/Shaders/` hanya `openpbr.slang`. Penanamnya menyisipkan
+   `#error`, dan yang terlihat *preprocessor error* dari slangc. **Seluruh uji
+   membaca folder sumber**, tempat berkasnya selalu ada — jadi tidak satu pun
+   bisa melihatnya. Sekarang ada uji yang menelusuri `#include` dari ketiga akar
+   lalu membandingkannya dengan daftar yang disalin CMake.
+2. **Material dibangun sementara teksturnya masih di-bake.** Descriptor set
+   ditulis sekali dan tidak pernah ditinjau lagi, jadi placeholder magenta
+   terkunci ke dalamnya selamanya — bukan objek yang menunggu melainkan objek
+   yang **selesai dengan jawaban yang salah**. Penyelesai tekstur sekarang
+   menjawab handle **dan** kesiapannya, dan materialnya ditahan sampai seluruhnya
+   siap.
+3. **Pratinjau material tidak pernah menerima satu pun gambar.**
+   `MaterialPreviewShaders` hanya membawa *jumlah* tekstur, jadi setiap slot
+   mendapat putih 1×1 — material bertekstur tampak persis seperti material polos,
+   sejak pratinjau ada. `IMaterialPreview::SetTextures` menutupnya, dengan jalur
+   `.ktx2` hasil bake dan bukan berkas sumber.
+4. **`SceneView` hanya mencari aset di indeks project.** Prefab bawaan merujuk
+   aset milik editor, dan setiap level yang memasukkannya membawa GUID itu apa
+   adanya — jadi Shader Ball, Ground, dan Sky Dome semuanya jatuh ke kubus
+   satuan. `FindAsset` sekarang mencari di project **lalu** di bawaan, dan
+   mengembalikan indeks yang **memiliki** recordnya: `AbsolutePath` milik indeks
+   itu, dan memakai yang salah menghasilkan jalur ke folder project untuk berkas
+   yang ada di folder editor.
+
+#### Yang masih kurang, dan disebut
+
+- **Spekular tak-langsung.** Set 0 renderer tidak memuat peta lingkungan
+  terprafilter maupun LUT DFG — keduanya hanya dipanggang pratinjau material —
+  jadi `evaluateOpenPBR_IBL` dipanggil dengan keduanya nol. Logam gelap di luar
+  sorotan langsungnya sampai renderer ikut memanggang IBL-nya.
+- **Jam.** `inputs.time` nol; material yang menganimasikan dirinya diam di
+  viewport.
+- **Larik bindless berformat campuran** belum ada; tiap material punya satu set
+  descriptor sendiri.
+
+Dengan ini normal BC5 dan ORM BC4 yang sudah di-bake T2 punya yang membacanya,
+dan kriteria terakhir T3 selesai.
 
 `AssembleMaterialModule` yang lama **tidak disentuh**: ia melayani
 `VulkanMaterialPreview`, yang punya set 0-nya sendiri beserta IBL-nya sendiri, dan
