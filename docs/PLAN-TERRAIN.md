@@ -565,6 +565,12 @@ renderer ini belum menggambar tekstur pada mesh sama sekali. UV-nya tetap
 dipanggang 0..1 sepanjang jejaknya, supaya tekstur yang menyusul tidak menuntut
 membangun ulang geometrinya.
 
+Jalan keluarnya diuraikan di
+[ANALISA-TEKSTUR-PERMUKAAN.md](ANALISA-TEKSTUR-PERMUKAAN.md): celahnya ternyata
+jauh lebih sempit daripada bunyi kalimat itu — kompiler graph, cache SPIR-V,
+konvensi binding, dan jalur berkas→`VkImage` semuanya sudah ada, dan yang belum
+ada hanya penyambungannya di pass forward.
+
 **Ukurannya dari skala entity, bukan dari medan di komponennya.** Dua sumber
 ukuran berarti satu gizmo yang berbohong: menyeret gagang skala akan mengubah
 angka yang bukan yang dipakai. Yang menentukan jejaknya adalah skala X dan Z;
