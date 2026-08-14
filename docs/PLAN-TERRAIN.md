@@ -546,6 +546,44 @@ nol dependensi, sehingga `UsersOf()` tidak pernah menyebutnya. Satu baris.
 - Material yang dipakai sebuah layer terrain terhitung terpakai. ✅ Mengeluarkan
   Terrain dari daftar itu lagi menggugurkan ujinya.
 
+### L7 — Decal yang menempel di terrain · ⬜
+
+Sebuah tanda yang diletakkan di atas tanah: jalan setapak, bekas ledakan, garis
+batas.
+
+**Digambar sebagai geometri, bukan diproyeksikan saat menggambar.** Decal
+proyektif sejati menuntut membaca kembali buffer kedalaman dan menghitung ulang
+posisi dunia tiap piksel — jalur yang belum ada di renderer ini, dan yang
+membangunnya berarti mengerjakan milestone renderer dengan nama decal. Yang
+dikerjakan di sini: menyalin permukaan terrain di dalam jejak decal, mengangkatnya
+sedikit, dan mewarnainya. Itu cara yang sama dipakai mesin lain untuk decal di
+terrain, dan ia punya sifat yang tidak dimiliki decal proyektif — ia mengikuti
+lereng dan lubang dengan sendirinya, karena ia memang permukaan itu.
+
+**Warna rata, belum bertekstur.** Alasannya sama dengan yang tercatat di L6:
+renderer ini belum menggambar tekstur pada mesh sama sekali. UV-nya tetap
+dipanggang 0..1 sepanjang jejaknya, supaya tekstur yang menyusul tidak menuntut
+membangun ulang geometrinya.
+
+**Ukurannya dari skala entity, bukan dari medan di komponennya.** Dua sumber
+ukuran berarti satu gizmo yang berbohong: menyeret gagang skala akan mengubah
+angka yang bukan yang dipakai. Yang menentukan jejaknya adalah skala X dan Z;
+rotasi terhadap Y memutar jejaknya.
+
+**Diproyeksikan lurus ke bawah**, apa pun kemiringan entity-nya. Decal terrain
+yang menyamping tidak punya arti — dan yang memiringkannya akan mendapat jejak
+yang menyempit tanpa ada yang menjelaskan mengapa.
+
+**Kriteria terima**
+- Simpul decal berada di permukaan terrain, terangkat sebesar `lift` — diperiksa
+  terhadap `HeightAtWorld`, bukan terhadap bidang datar.
+- Decal di atas lereng mengikuti lerengnya, bukan menjadi quad datar yang
+  separuhnya tertanam.
+- Jejaknya mengikuti skala dan rotasi entity, dan terpotong di tepi peta.
+- Sampel berlubang tidak menghasilkan segitiga: decal tidak menambal lubang.
+- Meshnya dibangun ulang ketika bentuk terrain berubah, dan **tidak** ketika
+  catnya berubah.
+
 ---
 
 ## Risiko
