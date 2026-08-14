@@ -918,11 +918,45 @@ akhirnya menghasilkan sorotan, alih-alih iradiansi Lambert yang dikalikan albedo
   material yang menganimasikan dirinya diam di viewport. Ditulis nol dan
   disebutkan, bukan dikarang dari sesuatu yang kebetulan bergerak.
 
-**Yang tersisa dari nomor 4** tinggal satu: renderer mengompilasi shader ini per
-material, membuat pipeline-nya, dan mengikatnya — dengan `box.frag` dipertahankan
-sebagai jalur mundur sampai yang baru terbukti. Baru sesudah itu normal BC5 dan
-ORM BC4 yang sudah di-bake T2 punya yang membacanya, dan kriteria terakhir T3
-bisa ditutup.
+##### Nomor 4, langkah ketiga: pipeline material di pass forward · 🔨 ditulis, belum diverifikasi
+
+Ada di cabang **`wip/e84-material-forward`**, bukan di `main`. Ia terbangun
+bersih di ketiga konfigurasi dan shader fragmennya dikompilasi `slangc` sungguhan
+di uji — tetapi **jalurnya tidak pernah benar-benar dijalankan**, dan kode GPU
+yang belum pernah jalan tidak masuk `main`. Segfault pass bayangan di langkah
+pertama datang persis dari kelalaian bentuk itu.
+
+Yang sudah ada di cabang itu:
+
+- `IViewportRenderer::AcquireMaterial(key, MaterialProgram)` — SPIR-V, blok
+  parameter, dan daftar tekstur. Bentuk yang sama persis dengan
+  `MaterialPreviewShaders`, jadi `Sim::Render` tetap tidak mengenal
+  `Sim::Material`.
+- Renderer membangun set layout, pipeline layout, empat pipeline
+  (opaque/transparan × ber-kulit), descriptor set, dan UBO parameternya.
+  `box.vert` dipakai ulang sebagai tahap vertexnya.
+- Pipeline diikat **di dalam gelung ruas**, bukan per mesh: dua ruas dari mesh
+  yang sama bisa memakai material yang berbeda.
+- `box.frag` tetap jalur mundur untuk ruas yang materialnya belum ada, gagal
+  dikompilasi, atau memang tidak punya.
+- `SceneView` mengompilasi sekali per GUID: instance → induk → graph →
+  `CompileMaterial` → `AssembleForwardMaterialModule` → `ShaderCache`.
+
+**Dua hal yang harus selesai sebelum ia layak masuk:**
+
+1. **Kompilasi masih berjalan di main thread, di dalam `SceneView::Build`.**
+   Ia di-cache per GUID jadi hanya sekali per material — tetapi sekali itu satu
+   panggilan `slangc`, yaitu detik, dan selama itu editor membeku. Tempatnya
+   `TaskPool`, dengan keadaan `Pending` dan jalur mundur sambil menunggu, persis
+   pola `assets::TextureBakery` yang sudah ada.
+2. **Ia butuh sebuah level yang terbuka untuk bisa diuji sama sekali.** Level
+   dipilih orang lewat pemilih level dan tidak dimuat otomatis — keputusan yang
+   disengaja dan dicatat di `OpenProject` — jadi sesi editor yang dijalankan
+   tanpa orang tidak menggambar satu pun entity, dan tanpa entity tidak ada ruas,
+   tidak ada material, tidak ada yang diuji.
+
+Baru sesudah keduanya, normal BC5 dan ORM BC4 yang sudah di-bake T2 punya yang
+membacanya, dan kriteria terakhir T3 bisa ditutup.
 
 `AssembleMaterialModule` yang lama **tidak disentuh**: ia melayani
 `VulkanMaterialPreview`, yang punya set 0-nya sendiri beserta IBL-nya sendiri, dan
