@@ -734,10 +734,103 @@ mendarat:
 2. *"glTF belum ada"* — sudah ada, lewat `cgltf`, beserta pengeluaran tekstur
    yang tertanam di dalamnya.
 
-Jalan keluar untuk dua ❌ yang saling terkait — tekstur dan pipeline material —
-diuraikan di
+#### Rekomendasi penyelesaian
+
+Lima ❌ di atas tidak setara. Dua di antaranya saling mengunci, satu murah dan
+menentukan apakah dua yang lain layak dikerjakan sama sekali, dan satu tidak
+punya pemakai.
+
+**Urutannya dipilih supaya yang mengukur mendahului yang dioptimasi**, dan supaya
+tidak ada medan yang tersimpan sebelum ada yang membacanya.
+
+##### 1. Jumlah segitiga di indeks aset — murah, dan ia yang mengukur
+
+Satu medan di `ImportResult`, satu di `AssetRecord`, satu kolom di Asset Browser.
+Setengah hari.
+
+Didahulukan bukan karena mudah melainkan karena **ia satu-satunya angka yang bisa
+menjawab apakah LOD mesh layak dikerjakan.** Tanpa ia, keputusan nomor 4 hanya
+bisa ditebak — dan menebak "adegan kita berat" adalah cara paling umum
+mengerjakan LOD untuk adegan yang sebenarnya terikat di tempat lain.
+
+Ia juga menutup lubang yang lebih memalukan: hari ini importir tahu persis berapa
+segitiga yang diuraikannya, lalu membuangnya.
+
+##### 2. Tekstur dan pipeline material — dua ❌ yang sebenarnya satu
+
+Diuraikan lengkap di
 [ANALISA-TEKSTUR-PERMUKAAN.md](ANALISA-TEKSTUR-PERMUKAAN.md), termasuk jawaban
-untuk keputusan set 0 yang digantung di bawah.
+untuk keputusan set 0 yang digantung di bawah — **perluas set 0 renderer, jangan
+beri material set keempat** — dan temuan bahwa celahnya jauh lebih sempit
+daripada yang tertulis di sini: kompiler graph, cache SPIR-V, konvensi binding
+set 2, dan jalur berkas→`VkImage` semuanya sudah ada.
+
+Yang perlu dicatat **di sini**, karena menyangkut urutan E8.4 sendiri:
+
+- **Rujukan tekstur di `MaterialImport` ditulis belakangan, bukan duluan.**
+  Menuliskannya sekarang menghasilkan medan yang tersimpan dan tidak pernah
+  dibaca — persis `TerrainLayer::material`, yang baru ketahuan lewat smoke test
+  L6 sesudah bertahan berbulan-bulan sebagai medan mati. Jalur A di analisa itu
+  yang memberinya pembaca; sesudah itu barulah importir mengisinya.
+- **Menyalin tekstur ke dalam project adalah pekerjaan tersendiri**, dan bukan
+  bagian dari pipeline. Jalurnya relatif terhadap berkas mesh dan kerap naik satu
+  tingkat (`..\checkerA.tga` di sebelah `shaderBall.fbx`), jadi yang menyalinnya
+  harus menyelesaikannya lebih dulu. Ia bisa mendarat kapan saja sesudah nomor 1
+  dan tidak memblokir apa pun.
+
+##### 3. LOD mesh — **tunda sampai nomor 1 memberi angkanya**
+
+Dan ketika saatnya tiba, ia jauh lebih murah daripada saat plan ini ditulis:
+**mesin ini sudah punya seluruh mesinnya**, dibangun untuk terrain.
+
+| Yang dibutuhkan LOD mesh | Sudah ada, dari |
+| --- | --- |
+| Pemilih LOD sebagai fungsi murni jarak | `terrain::SelectLod` (L2) |
+| Geometri per tingkat yang di-cache dan dibangun ulang saat berubah | `TerrainStore::TileMesh` (L3) |
+| Renderer menerima geometri dari data, berkunci versi | `IViewportRenderer::AcquireMeshData` (W5) |
+| Pemilihan geometri per instance saat menyusun daftar gambar | `SceneView::AppendTerrain` (L3) |
+
+Yang tersisa khusus untuk mesh: rantai LOD di dalam `MeshData` (atau aset
+terpisah per tingkat), dan penyederhanaannya. **Di situlah meshoptimizer masuk** —
+dan itu satu-satunya alasan meminta dependensi baru.
+
+`meshopt_optimizeVertexCache` bisa mendarat lebih dulu dan sendirian: ia satu
+panggilan sesudah pengindeksan, tidak mengubah satu pun bentuk data, dan
+hasilnya terukur lewat `PassTimings` yang sudah ada. Tetapi **ia pun jangan
+dikerjakan sebelum nomor 1** — menambah dependensi untuk perbaikan yang tidak
+bisa diukur adalah cara menumpuk dependensi.
+
+##### 4. Blend shape — **tunda, dan sebutkan alasannya**
+
+Ia satu-satunya bagian E8.4 yang **tidak punya pemakai hari ini**. Tidak ada rig
+wajah di repo ini, importir belum membaca morph target, dan `GltfClipImport`
+sudah mencatat sendiri bahwa channel `weights` diabaikan karena "mesin ini
+belum".
+
+Mengerjakannya sekarang berarti membangun jalur data, jalur GPU, dan jalur
+animasi untuk sesuatu yang tidak bisa dibuka satu berkas pun untuk mengujinya —
+dan yang tidak bisa diuji dengan data sungguhan hampir selalu salah pada kasus
+tepi yang baru muncul bersama data sungguhannya.
+
+Syarat masuknya jelas dan bisa ditulis sekarang: **sebuah rig wajah dengan morph
+target di repo**, seperti rig Mixamo yang sudah menjadi acuan skinning.
+
+##### Ringkasnya
+
+1. Jumlah segitiga di indeks aset — murah, dan ia yang mengukur.
+2. [Jalur A](ANALISA-TEKSTUR-PERMUKAAN.md) — uv, cache tekstur, set material →
+   decal dan layer terrain bertekstur, mesh impor memperlihatkan albedonya.
+3. Rujukan tekstur di `MaterialImport`, lalu penyalinan teksturnya ke project.
+4. Keputusan set 0 → transform instance lewat storage buffer →
+   [Jalur B](ANALISA-TEKSTUR-PERMUKAAN.md), `box.frag` dipertahankan sebagai
+   jalur mundur.
+5. LOD mesh **bila** angka dari nomor 1 membenarkannya; meshoptimizer masuk di
+   sini.
+6. Blend shape **bila** ada rig wajah untuk mengujinya.
+
+Nomor 1 sampai 3 bisa dikerjakan tanpa menyentuh pass forward sama sekali. Nomor
+4 satu-satunya yang "tidak boleh dimulai separuh" — dan ia satu-satunya yang
+menuntut jalur mundur.
 
 **Selesai: geometri mesh sungguhan di viewport**
 (`Code/Assets/{include/Sim/Assets/MeshData.h,src/MeshImport.cpp}`,
@@ -801,12 +894,11 @@ Terukur di editor (RTX 2060, viewport 1277x696):
 | `forward-opaque` | 0,014 ms |
 | Galat validation layer | **0** |
 
-**Yang belum ada dari E8.4:** LOD dan meshoptimizer, blend shape. glTF dan USD
-sejak itu mendarat, lewat `cgltf` dan OpenUSD. Indeks aset juga belum mencatat
-jumlah segitiga: itu menuntut medan baru di `ImportResult` beserta panel yang
-menampilkannya.
+**Yang belum ada dari E8.4** sudah didaftar di tabel status dan diurutkan di
+§ Rekomendasi penyelesaian di atas. Yang di bawah ini adalah catatan teknis yang
+tetap berlaku untuk nomor 2 dan 4 di sana.
 
-**Sedang berjalan: material dan tekstur dari berkasnya.**
+**Catatan teknis: material dan tekstur dari berkasnya.**
 
 1. **Aset material yang dibangkitkan saat impor.** ✅ **untuk parameternya,**
    ❌ **untuk teksturnya.** `MeshMaterial` menjadi satu `.simmatinst` per
@@ -840,7 +932,7 @@ Modul material dan pipeline kotak tidak sepakat pada tiga hal sekaligus:
 
 | | modul material | `box.vert` sekarang |
 | --- | --- | --- |
-| Atribut vertex | 0 posisi, 1 normal, **2 tangent**, 3 uv0, 4 warna, 5–6 skin | 0 posisi, 1 normal, 2–5 kolom matriks, 6 warna, 7 bendera, 8–10 skin |
+| Atribut vertex | 0 posisi, 1 normal, **2 tangent**, 3 uv0, 4 warna, 5–6 skin | 0 posisi, 1 normal, 2–5 kolom matriks, 6 warna instance, 7 bendera, 8–10 skin, **11 warna simpul** |
 | Transform instance | storage buffer, set 0 binding 2 | atribut vertex ber-rate instance |
 | Matriks kulit | set 0 binding 1 | set 1 (forward) / set 0 (bayangan) |
 
@@ -862,6 +954,12 @@ Tiga akibatnya, berurutan dari yang paling menentukan:
   ikut menuliskan seluruh binding itu), atau material mendapat set keempat.
 - **Transform instance pindah dari atribut ke storage buffer**, yang menyentuh
   `Gather`, buffer instance, dan keempat pipeline yang sudah ada.
+
+**Yang sudah tidak menjadi rintangan:** uv dan tangent **sudah terunggah ke GPU**
+— buffer vertexnya di-`memcpy` dari `MeshVertex` apa adanya, jadi keduanya duduk
+di offset 24 dan 32 tanpa satu pun byte tambahan. Yang belum ada hanya
+`VkVertexInputAttributeDescription` dan varying-nya, yaitu tiga baris. Itu pula
+sebabnya [Jalur A](ANALISA-TEKSTUR-PERMUKAAN.md) bisa mendarat sendirian.
 
 **Karena itu ini bukan pekerjaan satu duduk, dan tidak boleh dimulai separuh:**
 selama pass forward setengah bermigrasi, viewport tidak menggambar apa-apa.
