@@ -702,10 +702,42 @@ tidak ikut berubah.
 titik sambung untuk global illumination, yang mengganti sumbernya tanpa mengubah
 satu baris pun model shading-nya. Lihat catatan GI di bawah.
 
-### E8.4 — Mesh & animasi
+### E8.4 — Mesh & animasi · 🔨 geometri dan material selesai; tekstur dan LOD belum
 Impor mesh (FBX SDK/cgltf) menggantikan importer pass-through E5, LOD dari
 meshoptimizer, GPU skinning dengan skinning buffer, blend shape.
 **Titik sambung:** Animation Editor memutar mesh skinned sungguhan.
+
+#### Status, diperiksa ulang terhadap kode
+
+| Bagian | Keadaan |
+| --- | --- |
+| Geometri mesh sungguhan di viewport | ✅ |
+| Impor FBX (FBX SDK), OBJ | ✅ |
+| Impor glTF (`cgltf`), USD (OpenUSD, opsional) | ✅ menyusul sesudah plan ini ditulis |
+| GPU skinning lewat skinning buffer | ✅ `SKIN_SET`, `skinBase`, varian pipeline |
+| Cache mesh di renderer, draw dikelompokkan per mesh | ✅ |
+| Aset material dibangkitkan saat impor (`.simmatinst` di atas satu induk) | ✅ menyusul sesudah plan ini ditulis |
+| `MeshRendererComponent::materials` per ruas | ✅ |
+| **Tekstur** dari berkas mesh sampai ke material | ❌ `MeshMaterial` membawa `baseColorTexture`/`normalTexture`, dan `MaterialImport` menulis lima parameter skalar saja |
+| **Pipeline material menggantikan `box.frag`** | ❌ belum dimulai |
+| LOD mesh & meshoptimizer | ❌ meshoptimizer belum menjadi dependensi sama sekali — ia hanya disebut di komentar dan tabel DEPENDENCIES |
+| Blend shape | ❌ |
+| Jumlah segitiga di indeks aset | ❌ `AssetRecord` menyimpan ukuran berkas dan dimensi gambar, tidak ada statistik mesh |
+
+**Dua koreksi terhadap teks di bawah**, yang ditulis sebelum beberapa hal
+mendarat:
+
+1. *"`MeshVertex` belum punya tangent sama sekali"* — **tidak lagi berlaku.**
+   `MeshVertex` sekarang membawa posisi, normal, uv, tangent, dan warna simpul
+   (sejak L6). Tangent dibangkitkan importir. Rintangan yang disebut "paling
+   menentukan" di bawah sudah lewat.
+2. *"glTF belum ada"* — sudah ada, lewat `cgltf`, beserta pengeluaran tekstur
+   yang tertanam di dalamnya.
+
+Jalan keluar untuk dua ❌ yang saling terkait — tekstur dan pipeline material —
+diuraikan di
+[ANALISA-TEKSTUR-PERMUKAAN.md](ANALISA-TEKSTUR-PERMUKAAN.md), termasuk jawaban
+untuk keputusan set 0 yang digantung di bawah.
 
 **Selesai: geometri mesh sungguhan di viewport**
 (`Code/Assets/{include/Sim/Assets/MeshData.h,src/MeshImport.cpp}`,
@@ -769,21 +801,28 @@ Terukur di editor (RTX 2060, viewport 1277x696):
 | `forward-opaque` | 0,014 ms |
 | Galat validation layer | **0** |
 
-**Yang belum ada dari E8.4:** LOD dan meshoptimizer, blend shape, serta glTF —
-FBX SDK membaca FBX dan OBJ; glTF sejak itu mendarat lewat `cgltf`, dan USD
-lewat OpenUSD. Indeks aset juga belum
-mencatat jumlah segitiga: itu menuntut medan baru di `ImportResult` beserta panel
-yang menampilkannya.
+**Yang belum ada dari E8.4:** LOD dan meshoptimizer, blend shape. glTF dan USD
+sejak itu mendarat, lewat `cgltf` dan OpenUSD. Indeks aset juga belum mencatat
+jumlah segitiga: itu menuntut medan baru di `ImportResult` beserta panel yang
+menampilkannya.
 
-**Sedang berjalan: material dan tekstur dari berkasnya.** Sisi impornya sudah
-mendarat (lihat di bawah); yang tersisa dua, dan yang kedua besar.
+**Sedang berjalan: material dan tekstur dari berkasnya.**
 
-1. **Aset material yang dibangkitkan saat impor.** `MeshMaterial` yang datar
-   menjadi `.simmat`, teksturnya disalin ke dalam project, dan
-   `MeshRendererComponent::material` menunjuk hasilnya. Jalur teksturnya relatif
-   terhadap berkas mesh dan kerap naik satu tingkat, jadi yang menyalinnya harus
-   menyelesaikannya lebih dulu — `..\checkerA.tga` di sebelah `shaderBall.fbx`.
-2. **Pipeline material menggantikan `box.frag` di pass forward.** Inilah yang
+1. **Aset material yang dibangkitkan saat impor.** ✅ **untuk parameternya,**
+   ❌ **untuk teksturnya.** `MeshMaterial` menjadi satu `.simmatinst` per
+   material di atas satu induk bersama, dan `MeshRendererComponent::materials`
+   menunjuk hasilnya per ruas. Yang **tidak** ikut: `MaterialImport` menulis
+   lima parameter — baseColor, metalness, roughness, emissive, opacity — dan
+   melewatkan `baseColorTexture` maupun `normalTexture` yang sudah dibawa
+   `MeshMaterial`. Teksturnya juga belum disalin ke dalam project; jalurnya
+   relatif terhadap berkas mesh dan kerap naik satu tingkat, jadi yang
+   menyalinnya harus menyelesaikannya lebih dulu — `..\checkerA.tga` di sebelah
+   `shaderBall.fbx`.
+
+   Menuliskan rujukan teksturnya sekarang tidak ada gunanya sampai nomor 2
+   mendarat: ia akan menjadi medan yang tersimpan dan tidak pernah dibaca, persis
+   seperti `TerrainLayer::material` yang baru ketahuan lewat smoke test L6.
+2. **Pipeline material menggantikan `box.frag` di pass forward.** ❌ Inilah yang
    ditunggu sejak E8.3 untuk menyambungkan IBL, dan yang membuat tekstur berarti
    sama sekali. `box.frag` sekarang hanya `input.color.rgb` dikali cahaya — tidak
    ada roughness, tidak ada metalness, tidak ada tekstur — jadi material yang
@@ -807,10 +846,11 @@ Modul material dan pipeline kotak tidak sepakat pada tiga hal sekaligus:
 
 Tiga akibatnya, berurutan dari yang paling menentukan:
 
-- **`MeshVertex` belum punya tangent sama sekali** — sekarang hanya posisi,
-  normal, dan uv. Peta normal tidak berarti apa-apa tanpanya, jadi tangent harus
-  dibangkitkan saat impor (dan disatukan dengan benar pada seam UV, yang punya
-  jebakannya sendiri).
+- ~~**`MeshVertex` belum punya tangent sama sekali**~~ — **sudah selesai.**
+  `MeshVertex` membawa posisi, normal, uv, tangent, dan warna simpul; tangent
+  dibangkitkan importir. UV dan tangent bahkan **sudah terunggah ke GPU** karena
+  buffer vertexnya di-`memcpy` apa adanya — yang belum ada hanya deklarasi
+  atributnya.
 - **Set 0 milik modul material bukan set 0 milik renderer.** Modul menulis
   `FrameParams` sendiri — viewProj, kamera, satu arah cahaya, SH probe — sementara
   set 0 renderer memuat 21 binding: cascade bayangan, daftar cluster lampu, atlas
