@@ -12,6 +12,7 @@
 #include "Sim/Editor/SkinnedPreview.h"
 #include "Sim/Editor/WhiteboxCommands.h"
 #include "Sim/Editor/TerrainStore.h"
+#include "Sim/Editor/TextureSettingsCommand.h"
 #include "Sim/Terrain/TerrainBrush.h"
 #include "Sim/Terrain/TerrainPicking.h"
 #include "Sim/Editor/WhiteboxStore.h"
@@ -1971,4 +1972,75 @@ TEST_CASE("Jalur A: tekstur decal terhitung sebagai pemakai asetnya") {
     const std::vector<scene::Entity> users = scene::EntitiesUsingAsset(world, decal.texture.guid);
     REQUIRE(users.size() == 1);
     CHECK(users.front() == entity);
+}
+
+// ============================================================================
+// T1 — pengaturan tekstur lewat riwayat undo
+// ============================================================================
+
+TEST_CASE("T1: mengubah pengaturan tekstur bisa dibatalkan") {
+    const std::filesystem::path directory =
+        std::filesystem::temp_directory_path() / "sim-texcfg-undo";
+    std::error_code ec;
+    std::filesystem::remove_all(directory, ec);
+    std::filesystem::create_directories(directory, ec);
+    const std::filesystem::path texture = directory / "batu.png";
+    {
+        std::ofstream stream(texture);
+        stream << "bukan png sungguhan";
+    }
+
+    assets::TextureSettings before;
+    REQUIRE(assets::LoadTextureSettings(before, texture));
+    REQUIRE(before.usage == assets::TextureUsage::Color);
+
+    assets::TextureSettings after = before;
+    after.usage = assets::TextureUsage::NormalMap;
+    after.compress = false;
+
+    CommandHistory history;
+    history.Execute(std::make_unique<SetTextureSettingsCommand>(texture, before, after));
+    history.CloseMergeGroup();
+
+    assets::TextureSettings onDisk;
+    REQUIRE(assets::LoadTextureSettings(onDisk, texture));
+    CHECK(onDisk == after);
+
+    // Membatalkannya mengembalikan bawaan — dan karena bawaan itu berarti
+    // "tidak ada yang diatur", berkasnya ikut hilang.
+    REQUIRE(history.Undo());
+    REQUIRE(assets::LoadTextureSettings(onDisk, texture));
+    CHECK(onDisk == before);
+    CHECK_FALSE(std::filesystem::exists(assets::TextureSettingsPath(texture)));
+
+    REQUIRE(history.Redo());
+    REQUIRE(assets::LoadTextureSettings(onDisk, texture));
+    CHECK(onDisk == after);
+
+    // **Satu geseran adalah satu langkah undo, bukan puluhan.** Perubahan
+    // berturut-turut pada tekstur yang sama menyatu selama kelompoknya terbuka.
+    assets::TextureSettings again = after;
+    again.quality = assets::TextureQuality::Best;
+    history.Execute(std::make_unique<SetTextureSettingsCommand>(texture, after, again));
+    const std::size_t entries = history.Entries().size();
+    assets::TextureSettings third = again;
+    third.generateMips = false;
+    history.Execute(std::make_unique<SetTextureSettingsCommand>(texture, again, third));
+    CHECK(history.Entries().size() == entries);
+
+    // Tekstur berbeda tidak digabung: berpindah aset adalah keputusan baru
+    // pengguna, dan satu Ctrl+Z yang membatalkan dua aset sekaligus adalah
+    // Ctrl+Z yang tidak dipercaya siapa pun.
+    const std::filesystem::path other = directory / "kayu.png";
+    {
+        std::ofstream stream(other);
+        stream << "juga bukan png";
+    }
+    assets::TextureSettings otherAfter;
+    otherAfter.usage = assets::TextureUsage::Mask;
+    history.Execute(std::make_unique<SetTextureSettingsCommand>(
+        other, assets::TextureSettings{}, otherAfter));
+    CHECK(history.Entries().size() == entries + 1);
+
+    std::filesystem::remove_all(directory, ec);
 }

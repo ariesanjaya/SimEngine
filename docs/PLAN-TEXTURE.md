@@ -174,17 +174,54 @@ levelnya berhenti tepat di 1×1 dengan sendirinya; yang membuktikannya tekstur
 16×4, yang sisi pendeknya habis lebih dulu — dan ukuran nol membuat
 `vkCmdCopyBufferToImage` menolak seluruh unggahan.
 
-### T1 — `TextureSettings` dan panel Inspector · ⬜
+### T1 — `TextureSettings` dan panelnya · ✅
 
 Sidecar `.simtexcfg` mengikuti pola `MeshSettings`. Panel di Inspector dengan
 command/undo. Tebakan awal `usage` saat impor dari nama berkas (`_n`, `_normal`,
 `_rough`) — **sebagai tebakan yang bisa diubah, bukan sebagai kebenaran.**
 
 **Kriteria terima**
-- Mengubah `usage` menandai aset perlu di-bake ulang.
-- Round-trip tulis-baca `.simtexcfg` identik; diuji doctest.
-- Aset tanpa `.simtexcfg` memakai bawaan `Color`, dan tidak ada berkas yang
-  ditulis sampai ada yang benar-benar mengubahnya.
+- Round-trip tulis-baca `.simtexcfg` identik. ✅ Termasuk byte-per-byte pada
+  penyimpanan kedua: berkas yang urutannya berubah tiap simpan menghasilkan diff
+  yang tidak membawa informasi.
+- Aset tanpa `.simtexcfg` memakai bawaan, dan tidak ada berkas yang ditulis
+  sampai ada yang benar-benar mengubahnya. ✅
+- Mengubah `usage` menandai aset perlu di-bake ulang. ⏸ **tidak ada yang bisa
+  ditandai sampai T2 ada.** Dan ketika ia ada, penandaannya tidak perlu ditulis
+  sama sekali: cache dikunci `(hash isi, pengaturan)`, jadi pengaturan yang
+  berubah **adalah** kunci yang berbeda. Bendera "perlu di-bake" akan menjadi
+  keadaan kedua yang bisa berselisih dengan yang pertama.
+
+**Bawaannya bukan `TextureSettings{}` melainkan bawaan berkas itu** — struct
+bawaan ditambah tebakan `usage` dari namanya. Bedanya menentukan, dan versi
+pertama saya salah di situ: tekstur bernama `batu_n.png` yang sengaja disetel
+pengguna ke `Color` akan tersimpan sebagai "sama dengan bawaan", berkasnya
+dihapus, dan tebakan namanya kembali memaksanya menjadi `NormalMap` pada
+pemuatan berikutnya. Pengguna tidak punya cara menolak tebakan itu — **dan yang
+tidak bisa ditolak bukan tebakan lagi.**
+
+Akhiran dicocokkan **sebagai kata**, bukan sebagai potongan huruf: `_n` yang
+dicocokkan apa adanya ikut mengenai `kayu_batan`, dan yang tertandai normal map
+adalah tekstur warna yang lalu tampak biru pekat. Kedua kesalahan itu ditangkap
+mutasi.
+
+Nilainya ditulis sebagai **nama**, bukan angka. Berkas ini ikut kontrol versi dan
+dibaca manusia saat menelusuri perbedaan; `"usage": 1` menuntut membuka header
+untuk tahu artinya, dan nomor yang bergeser saat sebuah nilai disisipkan mengubah
+arti setiap berkas yang sudah ada tanpa satu pun tanda.
+
+**Panelnya di Asset Browser, bukan di Inspector.** Inspector menampilkan komponen
+sebuah entity, dan tekstur bukan entity — yang memilih aset adalah Asset Browser,
+dan panel itu sudah memuat rincian aset di sebelahnya (jalur, ukuran, GUID,
+jumlah segitiga). Pengaturannya dimuat sekali per pilihan, bukan tiap frame:
+membaca berkas enam puluh kali per detik untuk menggambar lima kotak pilihan akan
+menimpa suntingan yang sedang berlangsung dengan isi disk.
+
+Suntingannya lewat `CommandHistory`, **tidak seperti dokumen terrain**. Terrain
+tidak bisa karena `CommandHistory` tidak punya cakupan dokumen; pengaturan
+tekstur tidak punya masalah itu karena perintahnya memegang jalur berkasnya, jadi
+ia berlaku pada aset yang sama betapapun jauh pengguna sudah berpindah pilihan.
+Perubahan berturut-turut pada tekstur yang sama menyatu; tekstur berbeda tidak.
 
 ### T2 — Baker: mip, kompresi, cache · ⬜ (butuh I0)
 

@@ -8,6 +8,7 @@ sim_add_library(Assets
         src/MeshImport.cpp
         src/UsdImport.cpp
         src/MeshSettings.cpp
+        src/TextureSettings.cpp
         src/Thumbnail.cpp
     PUBLIC_DEPS
         Sim::Core

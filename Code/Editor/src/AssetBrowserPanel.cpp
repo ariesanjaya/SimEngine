@@ -10,6 +10,8 @@
 #include "Sim/Editor/Panel.h"
 #include "Sim/Editor/PanelIds.h"
 #include "Sim/Editor/PanelRegistry.h"
+#include "Sim/Assets/TextureSettings.h"
+#include "Sim/Editor/TextureSettingsCommand.h"
 #include "Sim/Editor/Widgets.h"
 #include "Sim/Whitebox/WhiteboxIo.h"
 
@@ -530,6 +532,65 @@ private:
     /// gagasan "folder yang sedang dibuka"; panel ini punya, dan menaruh berkas
     /// di tempat lain daripada yang ditunjuk orang adalah cara tercepat membuat
     /// orang kehilangan berkasnya sendiri.
+    /// Pengaturan impor sebuah tekstur, disunting lewat riwayat undo.
+    ///
+    /// **Dimuat sekali per aset, bukan tiap frame.** Membaca berkas pengaturan
+    /// enam puluh kali per detik untuk menggambar lima kotak pilihan adalah
+    /// pembacaan disk yang tidak menghasilkan apa pun — dan yang lebih buruk, ia
+    /// akan menimpa suntingan yang sedang berlangsung dengan isi disk.
+    void DrawTextureSettings(EditorContext& context, const assets::AssetRecord& record) {
+        const std::filesystem::path path = context.assets->AbsolutePath(record);
+        if (settingsGuid_ != record.guid) {
+            settingsGuid_ = record.guid;
+            assets::LoadTextureSettings(settings_, path);
+        }
+
+        ImGui::Separator();
+        ImGui::TextDisabled("Import");
+
+        const assets::TextureSettings before = settings_;
+        assets::TextureSettings edited = settings_;
+
+        static const char* const kUsage[] = {"Color", "Normal Map", "Mask", "HDR", "Height"};
+        int usage = static_cast<int>(edited.usage);
+        ImGui::SetNextItemWidth(-widgets::kPanelRightMargin);
+        if (ImGui::Combo("Usage", &usage, kUsage, IM_ARRAYSIZE(kUsage))) {
+            edited.usage = static_cast<assets::TextureUsage>(usage);
+        }
+        widgets::Tooltip(
+            "Menentukan format blok dan colorspace saat di-bake.\n"
+            "Ditebak dari nama berkasnya, dan tebakan itu boleh ditolak.");
+
+        static const char* const kQuality[] = {"Fast", "Balanced", "Best"};
+        int quality = static_cast<int>(edited.quality);
+        ImGui::SetNextItemWidth(-widgets::kPanelRightMargin);
+        if (ImGui::Combo("Quality", &quality, kQuality, IM_ARRAYSIZE(kQuality))) {
+            edited.quality = static_cast<assets::TextureQuality>(quality);
+        }
+
+        static const char* const kAlpha[] = {"None", "Punch-through", "Full"};
+        int alpha = static_cast<int>(edited.alpha);
+        ImGui::SetNextItemWidth(-widgets::kPanelRightMargin);
+        if (ImGui::Combo("Alpha", &alpha, kAlpha, IM_ARRAYSIZE(kAlpha))) {
+            edited.alpha = static_cast<assets::TextureAlpha>(alpha);
+        }
+
+        ImGui::Checkbox("Compress", &edited.compress);
+        ImGui::SameLine();
+        ImGui::Checkbox("Mips", &edited.generateMips);
+
+        if (edited == before) {
+            return;
+        }
+        settings_ = edited;
+        // Lewat riwayat, bukan langsung: mengubah pengaturan impor adalah
+        // suntingan seperti yang lain, dan yang tidak bisa dibatalkan membuat
+        // orang takut mencobanya.
+        context.history->Execute(
+            std::make_unique<SetTextureSettingsCommand>(path, before, edited));
+        context.history->CloseMergeGroup();
+    }
+
     /// Akhiran berkas yang dijanjikan sebuah prompt, atau nullptr untuk yang
     /// tidak membuat berkas.
     static const char* PromptExtension(PromptKind kind) {
@@ -1183,6 +1244,14 @@ private:
                           record->height, record->channels);
             DetailRow("Dimensions", dimensions);
         }
+        // Pengaturan impor tekstur. **Di sini, bukan di Inspector**: Inspector
+        // menampilkan komponen sebuah entity, dan tekstur bukan entity. Yang
+        // memilih aset adalah panel ini, dan panel inilah yang sudah memuat
+        // rincian aset di sebelahnya.
+        if (record->type == assets::AssetType::Texture) {
+            DrawTextureSettings(context, *record);
+        }
+
         if (record->triangleCount > 0) {
             char stats[80];
             std::snprintf(stats, sizeof(stats), "%u tris, %u verts", record->triangleCount,
@@ -1573,6 +1642,11 @@ private:
     std::string search_;
     std::string currentFolder_;
     std::string renameBuffer_;
+
+    /// Aset yang pengaturannya sedang dipegang `settings_`, supaya berkasnya
+    /// dibaca sekali per pilihan alih-alih tiap frame.
+    Uuid settingsGuid_;
+    assets::TextureSettings settings_;
 
     PromptKind promptKind_ = PromptKind::None;
     /// Folder tujuan, dibekukan saat prompt dibuka: orang bisa berpindah folder

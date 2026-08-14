@@ -3,6 +3,7 @@
 #include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Assets/Importer.h"
 #include "Sim/Assets/MaterialImport.h"
+#include "Sim/Assets/TextureSettings.h"
 #include "Sim/Assets/MeshData.h"
 #include "Sim/Assets/MeshSettings.h"
 #include "Sim/Assets/Thumbnail.h"
@@ -1526,4 +1527,140 @@ TEST_CASE("Rekomendasi 3: material impor menyebut teksturnya lewat parameter ind
     material::MaterialInstance reloaded;
     REQUIRE(material::LoadInstanceFromFile(reloaded, temp.Path() / written[0]).ok);
     CHECK(reloaded.Texture(kBaseColorTextureParameter) == image);
+}
+
+TEST_CASE("T1: pengaturan tekstur bolak-balik lewat berkas tanpa berubah") {
+    using namespace sim::assets;
+
+    TempDir temp;
+    const std::filesystem::path texture = temp.Path() / "batu.png";
+    WriteFile(texture, "bukan png sungguhan");
+
+    // **Yang belum punya berkas pengaturan memakai bawaan, dan itu bukan
+    // galat** — itu keadaan setiap tekstur yang baru diimpor.
+    TextureSettings loaded;
+    CHECK(LoadTextureSettings(loaded, texture));
+    CHECK(loaded.usage == TextureUsage::Color);
+    CHECK(loaded.compress);
+    CHECK(loaded.generateMips);
+    CHECK(loaded == DefaultTextureSettings(texture));
+    CHECK_FALSE(std::filesystem::exists(TextureSettingsPath(texture)));
+
+    // Menyimpan yang seluruhnya bawaan **tidak menulis berkas**: berkas yang
+    // tidak mengatur apa pun hanya menambah satu berkas yang harus ikut kontrol
+    // versi.
+    CHECK(SaveTextureSettings(DefaultTextureSettings(texture), texture));
+    CHECK_FALSE(std::filesystem::exists(TextureSettingsPath(texture)));
+
+    TextureSettings settings;
+    settings.usage = TextureUsage::NormalMap;
+    settings.quality = TextureQuality::Best;
+    settings.alpha = TextureAlpha::PunchThrough;
+    settings.compress = false;
+    settings.generateMips = false;
+    REQUIRE(SaveTextureSettings(settings, texture));
+    REQUIRE(std::filesystem::exists(TextureSettingsPath(texture)));
+
+    TextureSettings back;
+    REQUIRE(LoadTextureSettings(back, texture));
+    CHECK(back == settings);
+
+    // Menyimpan dua kali menghasilkan byte yang sama: berkas yang urutannya
+    // berubah tiap simpan menghasilkan diff yang tidak membawa informasi.
+    const auto readAll = [](const std::filesystem::path& path) {
+        std::ifstream stream(path, std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(stream)),
+                           std::istreambuf_iterator<char>());
+    };
+    const std::string first = readAll(TextureSettingsPath(texture));
+    REQUIRE(SaveTextureSettings(back, texture));
+    CHECK(readAll(TextureSettingsPath(texture)) == first);
+
+    // Nilainya ditulis sebagai **nama**, bukan angka: berkas yang ikut kontrol
+    // versi dibaca manusia, dan nomor yang bergeser saat sebuah nilai disisipkan
+    // mengubah arti setiap berkas yang sudah ada tanpa satu pun tanda.
+    INFO(first);
+    CHECK(first.find("\"normal\"") != std::string::npos);
+    CHECK(first.find("\"best\"") != std::string::npos);
+
+    // Kembali ke bawaan **menghapus** berkasnya, meninggalkan folder seperti
+    // sebelum ada yang menyentuhnya.
+    REQUIRE(SaveTextureSettings(DefaultTextureSettings(texture), texture));
+    CHECK_FALSE(std::filesystem::exists(TextureSettingsPath(texture)));
+
+    // Dua tekstur bernama sama berbeda ekstensi adalah dua aset, dan pengaturan
+    // yang dibagi keduanya akan membuat yang satu diam-diam mengubah yang lain.
+    CHECK(TextureSettingsPath(temp.Path() / "batu.png") !=
+          TextureSettingsPath(temp.Path() / "batu.tga"));
+}
+
+TEST_CASE("T1: usage ditebak dari nama sebagai tebakan, bukan sebagai kebenaran") {
+    using namespace sim::assets;
+
+    CHECK(GuessUsageFromName("batu_n.png") == TextureUsage::NormalMap);
+    CHECK(GuessUsageFromName("batu_normal.png") == TextureUsage::NormalMap);
+    CHECK(GuessUsageFromName("Batu_NRM.TGA") == TextureUsage::NormalMap);
+    CHECK(GuessUsageFromName("batu-normal.png") == TextureUsage::NormalMap);
+    CHECK(GuessUsageFromName("batu_rough.png") == TextureUsage::Mask);
+    CHECK(GuessUsageFromName("batu_ao.png") == TextureUsage::Mask);
+    CHECK(GuessUsageFromName("batu_orm.png") == TextureUsage::Mask);
+    CHECK(GuessUsageFromName("batu_height.png") == TextureUsage::Height);
+    CHECK(GuessUsageFromName("langit_hdr.exr") == TextureUsage::Hdr);
+
+    // Yang tidak berakhiran apa pun adalah warna — bawaan yang benar untuk
+    // kebanyakan tekstur.
+    CHECK(GuessUsageFromName("batu.png") == TextureUsage::Color);
+    CHECK(GuessUsageFromName("kayu_albedo.png") == TextureUsage::Color);
+
+    // **Akhiran dicocokkan sebagai kata, bukan sebagai potongan huruf.** `_n`
+    // yang dicocokkan apa adanya akan ikut mengenai nama yang kebetulan
+    // berakhiran huruf itu — dan yang tertandai normal map adalah tekstur warna
+    // yang lalu tampak biru pekat.
+    CHECK(GuessUsageFromName("kayu_batan.png") == TextureUsage::Color);
+    CHECK(GuessUsageFromName("beton.png") == TextureUsage::Color);
+    CHECK(GuessUsageFromName("gerobak_karam.png") == TextureUsage::Color);
+
+    // Tanpa ekstensi pun terbaca: yang menebak dari nama utuh tidak akan pernah
+    // mengenali satu pun akhiran, karena semuanya berakhiran ".png".
+    CHECK(GuessUsageFromName("batu_n") == TextureUsage::NormalMap);
+}
+
+TEST_CASE("T1: tebakan nama bisa ditolak, dan penolakannya bertahan") {
+    using namespace sim::assets;
+
+    // **Yang tidak bisa ditolak bukan tebakan lagi.** Tekstur bernama
+    // `batu_n.png` ditebak normal map; pengguna yang tahu itu sebenarnya warna
+    // harus bisa menyetelnya ke `Color` — dan setelan itu harus bertahan.
+    //
+    // Versi pertama mekanisme ini membandingkan terhadap bawaan struct, bukan
+    // terhadap bawaan berkasnya: menyetel ke `Color` berarti "sama dengan
+    // bawaan", berkasnya dihapus, dan tebakan namanya kembali memaksa
+    // `NormalMap` pada pemuatan berikutnya.
+    TempDir temp;
+    const std::filesystem::path texture = temp.Path() / "batu_n.png";
+    WriteFile(texture, "bukan png sungguhan");
+
+    CHECK(DefaultTextureSettings(texture).usage == TextureUsage::NormalMap);
+
+    TextureSettings loaded;
+    REQUIRE(LoadTextureSettings(loaded, texture));
+    CHECK(loaded.usage == TextureUsage::NormalMap);
+
+    // Ditolak: pengguna menyetelnya ke warna.
+    TextureSettings asColor = loaded;
+    asColor.usage = TextureUsage::Color;
+    REQUIRE(SaveTextureSettings(asColor, texture));
+    // Berkasnya **harus** ada — inilah yang membedakan "sama dengan bawaan"
+    // dari "sama dengan bawaan struct".
+    CHECK(std::filesystem::exists(TextureSettingsPath(texture)));
+
+    TextureSettings back;
+    REQUIRE(LoadTextureSettings(back, texture));
+    CHECK(back.usage == TextureUsage::Color);
+
+    // Dan mengembalikannya ke tebakan menghapus berkasnya lagi.
+    REQUIRE(SaveTextureSettings(DefaultTextureSettings(texture), texture));
+    CHECK_FALSE(std::filesystem::exists(TextureSettingsPath(texture)));
+    REQUIRE(LoadTextureSettings(back, texture));
+    CHECK(back.usage == TextureUsage::NormalMap);
 }
