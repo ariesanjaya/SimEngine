@@ -728,6 +728,7 @@ public:
 
         partColors_.assign(scene.partColors.begin(), scene.partColors.end());
         partTextures_.assign(scene.partTextures.begin(), scene.partTextures.end());
+        partMaterials_.assign(scene.partMaterials.begin(), scene.partMaterials.end());
 
         lineVertices_.clear();
         for (const LineSegment& line : scene.lines) {
@@ -921,7 +922,8 @@ public:
             BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/true,
                            /*writeColor=*/true);
             if (slotReady && opaqueCount > 0) {
-                DrawInstances(command, opaquePipelines_, push, slot, opaqueRuns_, 0);
+                DrawInstances(command, opaquePipelines_, push, slot, opaqueRuns_, 0,
+                              /*materialVariant=*/0);
             }
             vkCmdEndRendering(command);
         };
@@ -930,7 +932,7 @@ public:
                            /*writeColor=*/true);
             if (slotReady && transparentCount > 0) {
                 DrawInstances(command, transparentPipelines_, push, slot, transparentRuns_,
-                              opaqueCount);
+                              opaqueCount, /*materialVariant=*/1);
             }
             vkCmdEndRendering(command);
         };
@@ -1154,6 +1156,236 @@ public:
     TextureHandle PendingTexture() const override { return pendingHandle_; }
 
     uint64_t TextureBytes() const override { return textureBytes_; }
+
+
+    /// Material yang pipeline-nya sudah dibangun. Indeks + 1 menjadi handle-nya.
+    struct GpuMaterial {
+        VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
+        VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+        VkDescriptorPool pool = VK_NULL_HANDLE;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        rhi::DynamicBuffer parameters;
+        /// [transparan][ber-kulit].
+        std::array<PipelineVariants, 2> pipelines{};
+    };
+
+    /// Membangun pipeline sebuah material, atau mengembalikan yang sudah ada.
+    ///
+    /// **Set 0 dan set 1 dipakai bersama pipeline kotak, dan itu yang membuat
+    /// pergantian pipeline per ruas tidak merusak apa pun.** Dua pipeline layout
+    /// yang set 0..1-nya objek yang sama persis dan push constant range-nya sama
+    /// bersifat *compatible* untuk kedua set itu, jadi set yang sudah diikat
+    /// sebelum ruas pertama tidak ikut terganggu saat pipeline material diikat
+    /// di tengah jalan.
+    MaterialHandle AcquireMaterial(std::string_view key,
+                                   const MaterialProgram& program) override {
+        if (key.empty() || program.fragmentSpirv.empty() || boxVertexModule_ == VK_NULL_HANDLE) {
+            return kInvalidMaterial;
+        }
+        const std::string cacheKey(key);
+        if (const auto found = materialByKey_.find(cacheKey); found != materialByKey_.end()) {
+            return found->second;
+        }
+        // Kegagalan ikut diingat, aturan yang sama dengan `AcquireMesh` dan
+        // `AcquireTexture`: material yang shader-nya tidak bisa dibangun tidak
+        // boleh dicoba enam puluh kali per detik.
+        materialByKey_.emplace(cacheKey, kInvalidMaterial);
+
+        auto material = std::make_unique<GpuMaterial>();
+        const uint32_t textureCount = static_cast<uint32_t>(program.textures.size());
+
+        // Binding 0 blok parameter, lalu tekstur dan sampler berselang mulai 1 —
+        // konvensi kompiler graph, dan yang menuliskannya di sisi shader adalah
+        // kompiler itu sendiri.
+        std::vector<VkDescriptorSetLayoutBinding> bindings;
+        bindings.push_back({0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
+                            VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+        for (uint32_t i = 0; i < textureCount; ++i) {
+            bindings.push_back({1 + i * 2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1,
+                                VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+            bindings.push_back({2 + i * 2, VK_DESCRIPTOR_TYPE_SAMPLER, 1,
+                                VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+        }
+        VkDescriptorSetLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+        layoutInfo.pBindings = bindings.data();
+        if (vkCreateDescriptorSetLayout(device_.Handle(), &layoutInfo, nullptr,
+                                        &material->setLayout) != VK_SUCCESS) {
+            SIM_WARN("Render", "cannot create descriptor layout for material {}", cacheKey);
+            return kInvalidMaterial;
+        }
+
+        VkPushConstantRange range{};
+        range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        range.size = sizeof(BoxPush);
+        const std::array<VkDescriptorSetLayout, 3> sets{shadowSetLayout_, skinSetLayout_,
+                                                        material->setLayout};
+        VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+        pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        pipelineLayoutInfo.pushConstantRangeCount = 1;
+        pipelineLayoutInfo.pPushConstantRanges = &range;
+        pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(sets.size());
+        pipelineLayoutInfo.pSetLayouts = sets.data();
+        if (vkCreatePipelineLayout(device_.Handle(), &pipelineLayoutInfo, nullptr,
+                                   &material->pipelineLayout) != VK_SUCCESS) {
+            SIM_WARN("Render", "cannot create pipeline layout for material {}", cacheKey);
+            DestroyMaterial(*material);
+            return kInvalidMaterial;
+        }
+
+        VkShaderModuleCreateInfo moduleInfo{};
+        moduleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+        moduleInfo.codeSize = program.fragmentSpirv.size() * sizeof(uint32_t);
+        moduleInfo.pCode = program.fragmentSpirv.data();
+        VkShaderModule fragment = VK_NULL_HANDLE;
+        if (vkCreateShaderModule(device_.Handle(), &moduleInfo, nullptr, &fragment) !=
+            VK_SUCCESS) {
+            SIM_WARN("Render", "material {} has SPIR-V the driver rejected", cacheKey);
+            DestroyMaterial(*material);
+            return kInvalidMaterial;
+        }
+
+        for (std::size_t skinned = 0; skinned < kPipelineVariants; ++skinned) {
+            // Keadaan depth dan blending-nya sama persis dengan pipeline kotak
+            // yang digantikannya — kalau tidak, ruas bermaterial akan diuji
+            // terhadap depth dengan aturan yang berbeda dari tetangganya.
+            material->pipelines[0][skinned] =
+                BuildPipeline(boxVertexModule_, fragment, /*depthWrite=*/false,
+                              VK_COMPARE_OP_EQUAL, /*blend=*/false, /*colorWrite=*/true,
+                              /*skinned=*/skinned != 0, material->pipelineLayout);
+            material->pipelines[1][skinned] =
+                BuildPipeline(boxVertexModule_, fragment, /*depthWrite=*/false,
+                              VK_COMPARE_OP_GREATER, /*blend=*/true, /*colorWrite=*/true,
+                              /*skinned=*/skinned != 0, material->pipelineLayout);
+        }
+        vkDestroyShaderModule(device_.Handle(), fragment, nullptr);
+        for (const PipelineVariants& variants : material->pipelines) {
+            for (VkPipeline pipeline : variants) {
+                if (pipeline == VK_NULL_HANDLE) {
+                    SIM_WARN("Render", "cannot build pipeline for material {}", cacheKey);
+                    DestroyMaterial(*material);
+                    return kInvalidMaterial;
+                }
+            }
+        }
+
+        // Blok parameter. **Minimal satu byte**: buffer berukuran nol tidak sah,
+        // dan material tanpa satu pun parameter tetap mendeklarasikan
+        // `cbuffer`-nya.
+        const VkDeviceSize parameterBytes =
+            std::max<VkDeviceSize>(program.parameters.size(), 16);
+        if (!material->parameters.Create(device_, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
+                                         parameterBytes)) {
+            DestroyMaterial(*material);
+            return kInvalidMaterial;
+        }
+        std::vector<uint8_t> padded(static_cast<std::size_t>(parameterBytes), 0);
+        std::copy(program.parameters.begin(), program.parameters.end(), padded.begin());
+        material->parameters.Write(padded.data(), parameterBytes);
+
+        std::vector<VkDescriptorPoolSize> poolSizes{
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}};
+        if (textureCount > 0) {
+            poolSizes.push_back({VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, textureCount});
+            poolSizes.push_back({VK_DESCRIPTOR_TYPE_SAMPLER, textureCount});
+        }
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.maxSets = 1;
+        poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+        poolInfo.pPoolSizes = poolSizes.data();
+        if (vkCreateDescriptorPool(device_.Handle(), &poolInfo, nullptr, &material->pool) !=
+            VK_SUCCESS) {
+            DestroyMaterial(*material);
+            return kInvalidMaterial;
+        }
+        VkDescriptorSetAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocateInfo.descriptorPool = material->pool;
+        allocateInfo.descriptorSetCount = 1;
+        allocateInfo.pSetLayouts = &material->setLayout;
+        if (vkAllocateDescriptorSets(device_.Handle(), &allocateInfo, &material->set) !=
+            VK_SUCCESS) {
+            DestroyMaterial(*material);
+            return kInvalidMaterial;
+        }
+
+        const VkDescriptorBufferInfo params{material->parameters.Handle(), 0, VK_WHOLE_SIZE};
+        std::vector<VkDescriptorImageInfo> images(textureCount);
+        std::vector<VkDescriptorImageInfo> samplers(textureCount);
+        std::vector<VkWriteDescriptorSet> writes;
+        writes.push_back({});
+        writes[0].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[0].dstSet = material->set;
+        writes[0].dstBinding = 0;
+        writes[0].descriptorCount = 1;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        writes[0].pBufferInfo = &params;
+        for (uint32_t i = 0; i < textureCount; ++i) {
+            // Slot yang kosong mendapat tekstur putih 1x1 — nilai satuan
+            // perkalian, dan yang membuat material yang teksturnya belum
+            // dipasang tetap tergambar alih-alih menampilkan descriptor tak sah.
+            const rhi::Texture2D* texture = &fallbackTexture_;
+            const TextureHandle handle = program.textures[i];
+            if (handle != kInvalidTexture && handle <= materialTextures_.size()) {
+                texture = &materialTextures_[static_cast<std::size_t>(handle) - 1]->texture;
+            }
+            images[i].imageView = texture->View();
+            images[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            samplers[i].sampler = texture->Sampler();
+
+            VkWriteDescriptorSet image{};
+            image.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            image.dstSet = material->set;
+            image.dstBinding = 1 + i * 2;
+            image.descriptorCount = 1;
+            image.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+            image.pImageInfo = &images[i];
+            writes.push_back(image);
+
+            VkWriteDescriptorSet sampler{};
+            sampler.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            sampler.dstSet = material->set;
+            sampler.dstBinding = 2 + i * 2;
+            sampler.descriptorCount = 1;
+            sampler.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+            sampler.pImageInfo = &samplers[i];
+            writes.push_back(sampler);
+        }
+        vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
+                               writes.data(), 0, nullptr);
+
+        materials_.push_back(std::move(material));
+        const MaterialHandle handle = static_cast<MaterialHandle>(materials_.size());
+        materialByKey_[cacheKey] = handle;
+        SIM_INFO("Render", "material ready: {} ({} texture)", cacheKey, textureCount);
+        return handle;
+    }
+
+    void DestroyMaterial(GpuMaterial& material) {
+        for (PipelineVariants& variants : material.pipelines) {
+            for (VkPipeline& pipeline : variants) {
+                if (pipeline != VK_NULL_HANDLE) {
+                    vkDestroyPipeline(device_.Handle(), pipeline, nullptr);
+                    pipeline = VK_NULL_HANDLE;
+                }
+            }
+        }
+        material.parameters.Destroy();
+        if (material.pool != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(device_.Handle(), material.pool, nullptr);
+            material.pool = VK_NULL_HANDLE;
+        }
+        if (material.pipelineLayout != VK_NULL_HANDLE) {
+            vkDestroyPipelineLayout(device_.Handle(), material.pipelineLayout, nullptr);
+            material.pipelineLayout = VK_NULL_HANDLE;
+        }
+        if (material.setLayout != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(device_.Handle(), material.setLayout, nullptr);
+            material.setLayout = VK_NULL_HANDLE;
+        }
+    }
 
     MeshAsset AcquireMesh(std::string_view path) override {
         MeshAsset asset;
@@ -1743,7 +1975,8 @@ private:
     }
 
     void DrawInstances(VkCommandBuffer cmd, const PipelineVariants& pipelines, const BoxPush& push,
-                       InstanceSlot& slot, std::span<const DrawRun> runs, uint32_t instanceBase) {
+                       InstanceSlot& slot, std::span<const DrawRun> runs, uint32_t instanceBase,
+                       int materialVariant = -1) {
         // Descriptor set diikat untuk setiap pipeline forward, termasuk prepass.
         // Prepass tidak membacanya, tapi layout-nya mendeklarasikannya — dan
         // set yang dideklarasikan tapi tidak terikat adalah pelanggaran meski
@@ -1761,7 +1994,7 @@ private:
         vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(BoxPush),
                            &push);
         DrawRuns(cmd, slot, runs, instanceBase, pipelines, pipelineLayout_, push,
-                 /*bindsMaterial=*/true);
+                 /*bindsMaterial=*/true, materialVariant);
     }
 
     /// Mengikat geometri tiap ruas lalu menggambarnya. Dipakai bersama pass
@@ -1781,7 +2014,8 @@ private:
     /// selesai dimuat, jauh dari sebabnya.
     void DrawRuns(VkCommandBuffer cmd, InstanceSlot& slot, std::span<const DrawRun> runs,
                   uint32_t instanceBase, const PipelineVariants& pipelines,
-                  VkPipelineLayout layout, const BoxPush& push, bool bindsMaterial) {
+                  VkPipelineLayout layout, const BoxPush& push, bool bindsMaterial,
+                  int materialVariant = -1) {
         VkPipeline bound = VK_NULL_HANDLE;
         for (const DrawRun& run : runs) {
             if (run.count == 0 || run.mesh >= meshes_.size()) {
@@ -1796,13 +2030,9 @@ private:
             // sini adalah jaring pengaman supaya buffer skin yang tidak ada tidak
             // pernah bisa terikat.
             const bool skinned = run.skinned && mesh.skin.IsValid();
-            VkPipeline pipeline = pipelines[skinned ? 1u : 0u];
-            if (pipeline == VK_NULL_HANDLE) {
+            const VkPipeline fallbackPipeline = pipelines[skinned ? 1u : 0u];
+            if (fallbackPipeline == VK_NULL_HANDLE) {
                 continue;
-            }
-            if (pipeline != bound) {
-                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
-                bound = pipeline;
             }
             const std::array<VkBuffer, 3> buffers{
                 mesh.vertices.Handle(), slot.buffer.Handle(),
@@ -1837,21 +2067,60 @@ private:
                 // Set material ruas ini. Yang tidak punya tekstur mendapat yang
                 // putih — nilai satuan perkalian, jadi ia tergambar persis
                 // seperti sebelum jalur tekstur ada.
-                VkDescriptorSet materialSet = bindsMaterial ? fallbackSet_ : VK_NULL_HANDLE;
-                if (bindsMaterial && partIndex < run.partColorCount &&
-                    run.partColorFirst + partIndex < partTextures_.size()) {
-                    const TextureHandle handle = partTextures_[run.partColorFirst + partIndex];
-                    if (handle != kInvalidTexture && handle <= materialTextures_.size()) {
-                        materialSet =
-                            materialTextures_[static_cast<std::size_t>(handle) - 1]->set;
+                // **Material ruas ini kalau ada, jalur mundur `box.frag` kalau
+                // tidak.** Keduanya hidup berdampingan dengan sengaja: ruas yang
+                // materialnya belum dikompilasi, gagal dikompilasi, atau memang
+                // tidak punya material tetap tergambar — dan viewport tidak
+                // pernah kosong hanya karena satu material bermasalah.
+                const GpuMaterial* material = nullptr;
+                if (materialVariant >= 0 && partIndex < run.partColorCount &&
+                    run.partColorFirst + partIndex < partMaterials_.size()) {
+                    const MaterialHandle handle = partMaterials_[run.partColorFirst + partIndex];
+                    if (handle != kInvalidMaterial && handle <= materials_.size()) {
+                        material = materials_[static_cast<std::size_t>(handle) - 1].get();
+                    }
+                }
+
+                const VkPipelineLayout partLayout =
+                    material != nullptr ? material->pipelineLayout : layout;
+                const VkPipeline partPipeline =
+                    material != nullptr
+                        ? material->pipelines[static_cast<std::size_t>(materialVariant)]
+                                             [skinned ? 1u : 0u]
+                        : fallbackPipeline;
+                if (partPipeline == VK_NULL_HANDLE) {
+                    continue;
+                }
+                // **Pipeline diikat di dalam gelung ruas, bukan di luarnya.**
+                // Dua ruas berturut-turut dari mesh yang sama bisa memakai
+                // material yang berbeda, dan yang mengikatnya sekali per mesh
+                // akan menggambar sebagiannya lewat pipeline yang bukan miliknya
+                // — tanpa satu pun galat.
+                if (partPipeline != bound) {
+                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, partPipeline);
+                    bound = partPipeline;
+                }
+
+                VkDescriptorSet materialSet = VK_NULL_HANDLE;
+                if (material != nullptr) {
+                    materialSet = material->set;
+                } else if (bindsMaterial) {
+                    materialSet = fallbackSet_;
+                    if (partIndex < run.partColorCount &&
+                        run.partColorFirst + partIndex < partTextures_.size()) {
+                        const TextureHandle handle = partTextures_[run.partColorFirst + partIndex];
+                        if (handle != kInvalidTexture && handle <= materialTextures_.size()) {
+                            materialSet =
+                                materialTextures_[static_cast<std::size_t>(handle) - 1]->set;
+                        }
                     }
                 }
                 if (materialSet != VK_NULL_HANDLE) {
-                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 2, 1,
-                                            &materialSet, 0, nullptr);
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, partLayout, 2,
+                                            1, &materialSet, 0, nullptr);
                 }
-                vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(BoxPush),
-                                   &partPush);
+                vkCmdPushConstants(cmd, partLayout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                                   sizeof(BoxPush), &partPush);
                 vkCmdDrawIndexed(cmd, part.indexCount, run.count, static_cast<int32_t>(0),
                                  static_cast<int32_t>(part.firstIndex),
                                  instanceBase + run.first);
@@ -2231,7 +2500,11 @@ private:
             }
         }
 
-        vkDestroyShaderModule(device_.Handle(), vertex, nullptr);
+        // **`box.vert` tidak dilepas.** Pipeline material memakainya kembali
+        // sebagai tahap vertexnya — yang berganti hanya shader fragmen — dan
+        // membangunnya ulang dari berkas tiap kali sebuah material dikompilasi
+        // berarti membaca `.spv` yang sama puluhan kali per sesi.
+        boxVertexModule_ = vertex;
         vkDestroyShaderModule(device_.Handle(), fragment, nullptr);
         for (std::size_t skinned = 0; skinned < kPipelineVariants; ++skinned) {
             if (prepassPipelines_[skinned] == VK_NULL_HANDLE ||
@@ -3246,6 +3519,15 @@ private:
         }
         textureBytes_ = 0;
         pendingHandle_ = kInvalidTexture;
+        for (std::unique_ptr<GpuMaterial>& material : materials_) {
+            DestroyMaterial(*material);
+        }
+        materials_.clear();
+        materialByKey_.clear();
+        if (boxVertexModule_ != VK_NULL_HANDLE) {
+            vkDestroyShaderModule(device_.Handle(), boxVertexModule_, nullptr);
+            boxVertexModule_ = VK_NULL_HANDLE;
+        }
         for (std::unique_ptr<GpuTexture>& texture : materialTextures_) {
             texture->texture.Destroy();
         }
@@ -3881,6 +4163,11 @@ private:
     };
     std::vector<std::unique_ptr<GpuTexture>> materialTextures_;
     std::unordered_map<std::string, TextureHandle> textureByPath_;
+    /// Modul `box.vert`, dipegang supaya pipeline material bisa memakainya.
+    VkShaderModule boxVertexModule_ = VK_NULL_HANDLE;
+    std::vector<std::unique_ptr<GpuMaterial>> materials_;
+    std::unordered_map<std::string, MaterialHandle> materialByKey_;
+    std::vector<MaterialHandle> partMaterials_;
     /// Handle placeholder "sedang di-bake". Menempati slot pertama.
     TextureHandle pendingHandle_ = kInvalidTexture;
     /// Byte tekstur material yang sedang berada di GPU, dijumlahkan dari yang

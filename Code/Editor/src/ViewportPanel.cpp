@@ -226,6 +226,7 @@ public:
         // bisa hidup lebih dulu daripada `EditorContext` yang lengkap, dan yang
         // dipasang sekali dari konteks setengah jadi adalah null selamanya.
         sceneView_.SetTextureBakery(context.textureBakery);
+        sceneView_.SetShaderPaths(context.shaderCacheDir, context.shaderDir);
         sceneView_.Build(*context.world, *context.selection, context.assets, renderer,
                          context.animation, context.builtinAssets, context.whiteboxes,
                          terrainView);
