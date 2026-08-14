@@ -1670,7 +1670,7 @@ TEST_CASE("Setiap material bawaan editor terbaca, sah, dan menghasilkan berkas y
     CHECK(checked >= 4);
 }
 
-TEST_CASE("Jalur A: instance mengganti tekstur node induknya, dan itu bertahan lewat berkas") {
+TEST_CASE("Jalur A: instance menyimpan tekstur parameternya, dan itu bertahan lewat berkas") {
     // **Terpisah dari `ParameterOverride`, dan bukan karena kerapian.**
     // `MaterialValue` adalah empat float; sebuah GUID juga enam belas byte, jadi
     // menyelundupkannya lewat medan yang sama akan kompilasi dengan mulus dan
@@ -1680,17 +1680,16 @@ TEST_CASE("Jalur A: instance mengganti tekstur node induknya, dan itu bertahan l
     instance.parent = Uuid::Generate();
     instance.Set("baseColor", ParseValue(ValueKind::Float3, "float3(0.8)"));
 
-    const Uuid node = Uuid::Generate();
     const Uuid albedo = Uuid::Generate();
-    instance.SetTexture(node, albedo);
-    CHECK(instance.Texture(node) == albedo);
-    CHECK_FALSE(instance.Texture(Uuid::Generate()).IsValid());
+    instance.SetTexture("Albedo", albedo);
+    CHECK(instance.Texture("Albedo") == albedo);
+    CHECK_FALSE(instance.Texture("Normal").IsValid());
 
     const std::string text = SaveInstanceToString(instance);
     MaterialInstance loaded;
     INFO(text);
     REQUIRE(LoadInstanceFromString(loaded, text).ok);
-    CHECK(loaded.Texture(node) == albedo);
+    CHECK(loaded.Texture("Albedo") == albedo);
     CHECK(loaded.overrides.size() == 1);
     // Bolak-balik menghasilkan berkas yang sama: yang berubah urutannya tiap
     // simpan membuat setiap `.simmatinst` tampak termodifikasi di git.
@@ -1698,18 +1697,76 @@ TEST_CASE("Jalur A: instance mengganti tekstur node induknya, dan itu bertahan l
 
     // Memasang ulang mengganti, bukan menumpuk.
     const Uuid other = Uuid::Generate();
-    instance.SetTexture(node, other);
+    instance.SetTexture("Albedo", other);
     CHECK(instance.textures.size() == 1);
-    CHECK(instance.Texture(node) == other);
+    CHECK(instance.Texture("Albedo") == other);
 
     // GUID tak sah membuang pemasangannya: satu jalan untuk "tidak ada
     // tekstur", bukan dua yang harus dibedakan setiap pembaca.
-    instance.SetTexture(node, Uuid{});
+    instance.SetTexture("Albedo", Uuid{});
     CHECK(instance.textures.empty());
-    CHECK_FALSE(instance.Texture(node).IsValid());
+    CHECK_FALSE(instance.Texture("Albedo").IsValid());
 
     // Instance tanpa tekstur tidak menulis kunci "textures" sama sekali —
     // berkas dari sebelum tekstur ada tetap terbaca, dan yang tidak memakainya
     // tetap sekecil sebelumnya.
     CHECK(SaveInstanceToString(instance).find("textures") == std::string::npos);
+}
+
+TEST_CASE("Jalur A: instance hanya bisa mengisi tekstur yang dinyatakan induknya") {
+    // **Inilah yang membedakan material instance dari menyunting induknya.**
+    // Versi pertama mekanisme ini menyebut node `input.texture` lewat GUID, dan
+    // itu membuat sebuah instance bisa menjangkau bagian mana pun dari graph
+    // induk — termasuk tekstur yang penulis induk maksudkan tetap. Yang boleh
+    // diisi harus dinyatakan, sama seperti parameter skalar.
+    MaterialGraph parent;
+    MaterialParameter albedo;
+    albedo.name = "Albedo";
+    albedo.kind = ValueKind::Texture;
+    albedo.tooltip = "Warna dasar";
+    const Uuid parentDefault = Uuid::Generate();
+    albedo.defaultValue = parentDefault.ToString();
+    parent.parameters.push_back(albedo);
+
+    MaterialParameter tint;
+    tint.name = "Tint";
+    tint.kind = ValueKind::Float3;
+    tint.defaultValue = "float3(1.0)";
+    parent.parameters.push_back(tint);
+
+    MaterialInstance instance;
+    instance.parent = Uuid::Generate();
+
+    // Tanpa timpaan: yang berlaku bawaan induknya.
+    std::vector<ResolvedTexture> resolved = ResolveTextures(parent, instance);
+    REQUIRE(resolved.size() == 1);  // hanya yang bertipe Texture
+    CHECK(resolved[0].name == "Albedo");
+    CHECK(resolved[0].texture == parentDefault);
+    CHECK_FALSE(resolved[0].overridden);
+
+    // Dengan timpaan: instance menang, tanpa satu byte pun berubah di induk.
+    const Uuid mine = Uuid::Generate();
+    instance.SetTexture("Albedo", mine);
+    resolved = ResolveTextures(parent, instance);
+    REQUIRE(resolved.size() == 1);
+    CHECK(resolved[0].texture == mine);
+    CHECK(resolved[0].overridden);
+    CHECK(parent.parameters[0].defaultValue == parentDefault.ToString());
+
+    // **Timpaan untuk yang tidak dinyatakan tidak berpengaruh.** Ia tersimpan
+    // — sama seperti timpaan parameter skalar yang namanya salah ketik — tetapi
+    // tidak pernah muncul di hasil, karena yang ditelusuri deklarasi induknya.
+    instance.SetTexture("TidakAda", Uuid::Generate());
+    resolved = ResolveTextures(parent, instance);
+    CHECK(resolved.size() == 1);
+    CHECK(resolved[0].name == "Albedo");
+
+    // Satu induk, dua instance, dua tekstur berbeda — dan itu justru gunanya:
+    // induk menjadi template fungsi material, instance mengisi gambarnya.
+    MaterialInstance second;
+    second.parent = instance.parent;
+    const Uuid other = Uuid::Generate();
+    second.SetTexture("Albedo", other);
+    CHECK(ResolveTextures(parent, second)[0].texture == other);
+    CHECK(ResolveTextures(parent, instance)[0].texture == mine);
 }

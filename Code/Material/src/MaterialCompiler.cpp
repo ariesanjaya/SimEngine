@@ -198,7 +198,21 @@ void Emitter::EmitNode(const MaterialNode& node) {
         const std::string name =
             "t" + SanitizeIdentifier(node.Setting("name", "Texture" + index), "t");
         textureNames_[node.guid] = name;
-        result_.textures.push_back({name, Uuid::Parse(node.Setting("texture")), node.guid});
+        result_.textures.push_back(
+            {name, Uuid::Parse(node.Setting("texture")), node.guid, std::string{}});
+        alias("texture", name);
+        return;
+    }
+    if (type == "param.texture") {
+        // Sama dengan `input.texture` di sisi kode yang dihasilkan — sebuah
+        // binding bernama — dan berbeda hanya pada siapa yang mengisinya.
+        // Perbedaan itu tidak punya wujud di dalam SPIR-V: satu modul melayani
+        // seluruh instance, dan yang berganti hanya gambar yang diikat.
+        const std::string parameter = node.Setting("parameter");
+        const std::string name =
+            "t" + SanitizeIdentifier(parameter.empty() ? "Param" + index : parameter, "t");
+        textureNames_[node.guid] = name;
+        result_.textures.push_back({name, Uuid{}, node.guid, parameter});
         alias("texture", name);
         return;
     }

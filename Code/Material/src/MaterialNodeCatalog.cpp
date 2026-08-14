@@ -152,6 +152,19 @@ MaterialNodeCatalog::MaterialNodeCatalog() {
          "Nilai parameter yang bisa ditimpa material instance",
          {Out("value", ValueKind::Float)}});
 
+    // Tekstur yang **dinyatakan sebagai parameter**, berbeda dari
+    // `input.texture` yang menjadi bagian tetap definisi induknya.
+    //
+    // Pemisahan yang sama dengan skalar: `input.constant` tidak bisa ditimpa,
+    // `param.get` bisa. Tanpa pemisahan ini, sebuah instance bisa menjangkau
+    // tekstur mana pun di dalam graph induk — termasuk yang penulisnya
+    // maksudkan tetap — dan "material instance" berhenti berarti apa pun.
+    add({"param.texture",
+         "Texture Parameter",
+         "Input",
+         "Tekstur yang bisa diisi material instance",
+         {Out("texture", ValueKind::Texture)}});
+
     // --- Matematika ---------------------------------------------------------
     //
     // Pin bertipe Float dengan pelebaran skalar: menyambungkan float3 ke `a`

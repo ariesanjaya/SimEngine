@@ -26,6 +26,11 @@ struct TextureBinding {
     /// Aset tekstur yang dirujuk node. Tidak valid berarti node-nya belum diisi.
     Uuid texture;
     Uuid node;
+    /// Nama parameter yang mengisinya, untuk node `param.texture`. Kosong
+    /// berarti tekstur ini bagian tetap definisi materialnya dan **tidak** bisa
+    /// diisi instance — yang membedakan keduanya bukan renderer melainkan
+    /// penulis materialnya.
+    std::string parameter;
 };
 
 struct MaterialCompileResult {

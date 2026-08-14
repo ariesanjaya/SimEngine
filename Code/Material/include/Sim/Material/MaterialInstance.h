@@ -51,25 +51,28 @@ struct ParameterOverride {
     MaterialValue value;
 };
 
-/// Tekstur yang menggantikan isi sebuah node `input.texture` di graph induk.
+/// Tekstur yang mengisi sebuah **parameter bertipe Texture** milik induknya.
 ///
-/// **Terpisah dari `ParameterOverride`, dan bukan karena kerapian.**
-/// `MaterialValue` adalah empat float; sebuah GUID juga enam belas byte, jadi
-/// menyelundupkannya lewat medan yang sama akan **kompilasi dengan mulus** dan
-/// menghasilkan tekstur yang berganti setiap kali ada yang menormalkan
-/// nilainya, membandingkannya dengan toleransi, atau menuliskannya sebagai
-/// `float4(...)`. Yang berbeda tipenya disimpan terpisah.
+/// **Parameter, bukan node.** Versi pertama medan ini menyebut node
+/// `input.texture` lewat GUID-nya, dan itu salah: ia membuat instance bisa
+/// menjangkau bagian mana pun dari graph induk, termasuk tekstur yang penulis
+/// induk maksudkan sebagai bagian tetap dari definisinya. Yang boleh ditimpa
+/// harus **dinyatakan induknya**, sama seperti parameter skalar yang sudah ada
+/// — `MaterialGraph::parameters` adalah daftar itu, dan `ResolveParameters`
+/// hanya menelusuri yang tercantum di sana.
 ///
-/// Node-nya disebut lewat **GUID, bukan nama** — aturan yang sudah dipegang
-/// koneksi di dalam graph, dan karena alasan yang sama: memindahkan atau
-/// menamai ulang node tidak boleh memutus apa pun. Indeks lebih buruk lagi:
-/// menambah tekstur kedua di induk akan menggeser setiap instance yang sudah
-/// ada, dan yang tergeser adalah gambar yang terpasang di ratusan model.
+/// Konsekuensinya justru yang diinginkan: induk menjadi **template**. Ia
+/// menyatakan "material ini punya satu tekstur albedo", dan setiap instance
+/// mengisinya sendiri — satu fungsi material, ratusan tekstur berbeda, tanpa
+/// satu byte pun berubah di induknya.
 ///
-/// Inilah yang membuat satu induk bersama bisa melayani ratusan material impor
-/// yang albedonya berbeda-beda.
+/// Terpisah dari `ParameterOverride`, dan bukan karena kerapian: `MaterialValue`
+/// adalah empat float, dan sebuah GUID juga enam belas byte — menyelundupkannya
+/// lewat medan yang sama akan **kompilasi dengan mulus** lalu menghasilkan
+/// tekstur yang berganti setiap kali ada yang menormalkan nilainya atau
+/// menuliskannya sebagai `float4(...)`.
 struct TextureOverride {
-    Uuid node;
+    std::string parameter;
     Uuid texture;
 };
 
@@ -87,8 +90,9 @@ struct TextureOverride {
 struct MaterialInstance {
     Uuid parent;
     std::vector<ParameterOverride> overrides;
-    /// Tekstur yang menggantikan isi node induknya. Yang tidak disebut memakai
-    /// apa pun yang dipasang induknya — aturan yang sama dengan parameter.
+    /// Tekstur yang mengisi parameter bertipe Texture milik induknya. Yang
+    /// tidak disebut memakai bawaan induknya — aturan yang sama dengan
+    /// parameter skalar.
     std::vector<TextureOverride> textures;
 
     const ParameterOverride* Find(std::string_view name) const;
@@ -97,12 +101,26 @@ struct MaterialInstance {
     /// Membuang timpaan sebuah parameter, mengembalikannya ke nilai induk.
     void Clear(std::string_view name);
 
-    /// Tekstur yang menggantikan isi sebuah node, atau GUID tak sah.
-    Uuid Texture(const Uuid& node) const;
-    /// Memasang penggantinya. GUID tekstur tak sah membuang penggantian itu —
-    /// satu jalan untuk "pakai punya induk", bukan dua yang harus dibedakan
-    /// setiap pembaca.
-    void SetTexture(const Uuid& node, const Uuid& texture);
+    /// Tekstur yang mengisi sebuah parameter, atau GUID tak sah.
+    ///
+    /// **Tidak memeriksa apakah induknya memang menyatakan parameter itu** —
+    /// yang memeriksanya `ResolveTextures`, karena hanya ia yang memegang
+    /// induknya. Timpaan untuk parameter yang tidak ada tersimpan tanpa
+    /// berpengaruh, persis seperti timpaan parameter skalar yang namanya salah
+    /// ketik.
+    Uuid Texture(std::string_view parameter) const;
+    /// Memasangnya. GUID tekstur tak sah membuang timpaan itu — satu jalan
+    /// untuk "pakai bawaan induk", bukan dua yang harus dibedakan setiap
+    /// pembaca.
+    void SetTexture(std::string_view parameter, const Uuid& texture);
+};
+
+/// Parameter bertipe Texture beserta aset yang BERLAKU untuknya.
+struct ResolvedTexture {
+    std::string name;
+    std::string tooltip;
+    Uuid texture;
+    bool overridden = false;
 };
 
 /// Parameter sebuah instance beserta nilai yang BERLAKU.
@@ -129,6 +147,15 @@ struct ResolvedParameter {
 /// juga: sebuah angka yang menjadi warna tidak punya nilai lama yang masuk akal.
 std::vector<ResolvedParameter> ResolveParameters(const MaterialGraph& parent,
                                                  const MaterialInstance& instance);
+
+/// Parameter bertipe Texture milik induk, beserta aset yang berlaku.
+///
+/// **Menelusuri deklarasi induk, bukan daftar timpaan instance.** Itu yang
+/// membuat instance tidak bisa menjangkau apa pun yang tidak dinyatakan induknya
+/// — aturan yang sama persis dengan `ResolveParameters`, dan bukan kebetulan:
+/// keduanya menjawab pertanyaan yang sama untuk tipe yang berbeda.
+std::vector<ResolvedTexture> ResolveTextures(const MaterialGraph& parent,
+                                             const MaterialInstance& instance);
 
 std::string SaveInstanceToString(const MaterialInstance& instance);
 MaterialIoResult SaveInstanceToFile(const MaterialInstance& instance,

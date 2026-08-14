@@ -127,21 +127,21 @@ void MaterialInstance::Clear(std::string_view name) {
                     overrides.end());
 }
 
-Uuid MaterialInstance::Texture(const Uuid& node) const {
+Uuid MaterialInstance::Texture(std::string_view parameter) const {
     const auto it = std::find_if(textures.begin(), textures.end(),
-                                 [&node](const TextureOverride& entry) {
-                                     return entry.node == node;
+                                 [parameter](const TextureOverride& entry) {
+                                     return entry.parameter == parameter;
                                  });
     return it == textures.end() ? Uuid{} : it->texture;
 }
 
-void MaterialInstance::SetTexture(const Uuid& node, const Uuid& texture) {
-    if (!node.IsValid()) {
+void MaterialInstance::SetTexture(std::string_view parameter, const Uuid& texture) {
+    if (parameter.empty()) {
         return;
     }
     const auto it = std::find_if(textures.begin(), textures.end(),
-                                 [&node](const TextureOverride& entry) {
-                                     return entry.node == node;
+                                 [parameter](const TextureOverride& entry) {
+                                     return entry.parameter == parameter;
                                  });
     if (!texture.IsValid()) {
         // GUID tak sah membuang penggantiannya alih-alih menyimpan entri
@@ -157,7 +157,7 @@ void MaterialInstance::SetTexture(const Uuid& node, const Uuid& texture) {
         it->texture = texture;
         return;
     }
-    textures.push_back({node, texture});
+    textures.push_back({std::string(parameter), texture});
 }
 
 std::vector<ResolvedParameter> ResolveParameters(const MaterialGraph& parent,
@@ -188,6 +188,35 @@ std::vector<ResolvedParameter> ResolveParameters(const MaterialGraph& parent,
     return result;
 }
 
+std::vector<ResolvedTexture> ResolveTextures(const MaterialGraph& parent,
+                                             const MaterialInstance& instance) {
+    std::vector<ResolvedTexture> result;
+    // **Deklarasi induk yang ditelusuri**, bukan daftar timpaan instance. Itu
+    // yang membuat sebuah instance tidak bisa menjangkau tekstur yang penulis
+    // induk maksudkan sebagai bagian tetap dari definisinya — dan itu pula yang
+    // membuat induk berfungsi sebagai template: ia menyatakan slotnya, instance
+    // mengisinya.
+    for (const MaterialParameter& declared : parent.parameters) {
+        if (declared.kind != ValueKind::Texture) {
+            continue;
+        }
+        ResolvedTexture resolved;
+        resolved.name = declared.name;
+        resolved.tooltip = declared.tooltip;
+        // Bawaan induk disimpan sebagai GUID di `defaultValue` — medan itu
+        // memang string literal, dan sebuah GUID adalah literal yang sah untuk
+        // tipe ini.
+        resolved.texture = Uuid::Parse(declared.defaultValue);
+
+        if (const Uuid override = instance.Texture(declared.name); override.IsValid()) {
+            resolved.texture = override;
+            resolved.overridden = true;
+        }
+        result.push_back(std::move(resolved));
+    }
+    return result;
+}
+
 std::string SaveInstanceToString(const MaterialInstance& instance) {
     Json root;
     root["version"] = kInstanceSchemaVersion;
@@ -209,7 +238,7 @@ std::string SaveInstanceToString(const MaterialInstance& instance) {
         Json textures = Json::array();
         for (const TextureOverride& entry : instance.textures) {
             Json object;
-            object["node"] = entry.node.ToString();
+            object["parameter"] = entry.parameter;
             object["texture"] = entry.texture.ToString();
             textures.push_back(std::move(object));
         }
@@ -285,19 +314,19 @@ MaterialIoResult LoadInstanceFromString(MaterialInstance& instance, const std::s
     if (const auto textures = root.find("textures");
         textures != root.end() && textures->is_array()) {
         for (const Json& entry : *textures) {
-            const Uuid node = Uuid::Parse(entry.value("node", std::string{}));
+            const std::string parameter = entry.value("parameter", std::string{});
             const Uuid texture = Uuid::Parse(entry.value("texture", std::string{}));
-            if (!node.IsValid() || !texture.IsValid()) {
+            if (parameter.empty() || !texture.IsValid()) {
                 continue;
             }
             // Alasan yang sama dengan timpaan ganda di atas: yang kedua akan
             // diam-diam dikalahkan yang pertama, dan perilaku yang ditentukan
             // urutan penyimpanan tidak terlihat di panel mana pun.
-            if (instance.Texture(node).IsValid()) {
-                SIM_WARN("Material", "Dropping a second texture for node {}", node.ToString());
+            if (instance.Texture(parameter).IsValid()) {
+                SIM_WARN("Material", "Dropping a second texture for '{}'", parameter);
                 continue;
             }
-            instance.textures.push_back({node, texture});
+            instance.textures.push_back({parameter, texture});
         }
     }
 
