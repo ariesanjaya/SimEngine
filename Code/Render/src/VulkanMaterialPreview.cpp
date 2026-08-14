@@ -5,6 +5,9 @@
 #include "Sim/RHI/Device.h"
 #include "Sim/RHI/RenderTarget.h"
 #include "Sim/RHI/Texture.h"
+#include <memory>
+#include <filesystem>
+#include "Sim/RHI/Ktx2.h"
 #include "Sim/RHI/TextureRegistry.h"
 #include "IblBaker.h"
 #include "Sim/Render/Frustum.h"
@@ -580,14 +583,90 @@ private:
               nullptr);
         write(materialSet_, kMaterialParamsBinding, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, &buffers[4],
               nullptr);
-        for (uint32_t i = 0; i < textureCount_ && i < kMaxTextures; ++i) {
-            write(materialSet_, 1 + i * 2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, nullptr, &image);
-            write(materialSet_, 2 + i * 2, VK_DESCRIPTOR_TYPE_SAMPLER, nullptr, &sampler);
-        }
+        // Tekstur materialnya ditulis fungsi tersendiri: ia dipanggil lagi
+        // setiap kali gambarnya berganti, tanpa membangun ulang apa pun.
+        (void)image;
+        (void)sampler;
 
         vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
+        WriteMaterialTextures();
         return true;
+    }
+
+    /// Menunjuk tiap slot tekstur ke gambarnya, atau ke putih 1x1 bila belum ada.
+    void WriteMaterialTextures() {
+        if (materialSet_ == VK_NULL_HANDLE) {
+            return;
+        }
+        const uint32_t count = std::min(textureCount_, kMaxTextures);
+        std::vector<VkDescriptorImageInfo> images(count);
+        std::vector<VkDescriptorImageInfo> samplers(count);
+        std::vector<VkWriteDescriptorSet> writes;
+        writes.reserve(static_cast<std::size_t>(count) * 2);
+        for (uint32_t i = 0; i < count; ++i) {
+            const rhi::Texture2D* texture = &fallbackTexture_;
+            if (i < materialTextures_.size() && materialTextures_[i] != nullptr &&
+                materialTextures_[i]->IsValid()) {
+                texture = materialTextures_[i].get();
+            }
+            images[i] = {VK_NULL_HANDLE, texture->View(),
+                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+            samplers[i] = {texture->Sampler(), VK_NULL_HANDLE, VK_IMAGE_LAYOUT_UNDEFINED};
+
+            VkWriteDescriptorSet imageWrite{};
+            imageWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            imageWrite.dstSet = materialSet_;
+            imageWrite.dstBinding = 1 + i * 2;
+            imageWrite.descriptorCount = 1;
+            imageWrite.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+            imageWrite.pImageInfo = &images[i];
+            writes.push_back(imageWrite);
+
+            VkWriteDescriptorSet samplerWrite{};
+            samplerWrite.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            samplerWrite.dstSet = materialSet_;
+            samplerWrite.dstBinding = 2 + i * 2;
+            samplerWrite.descriptorCount = 1;
+            samplerWrite.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+            samplerWrite.pImageInfo = &samplers[i];
+            writes.push_back(samplerWrite);
+        }
+        if (!writes.empty()) {
+            vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
+                                   writes.data(), 0, nullptr);
+        }
+    }
+
+    void SetTextures(std::span<const std::string> ktx2Paths) override {
+        // Device ditunggu diam sebelum yang lama dilepas: gambar yang masih
+        // dibaca frame yang belum selesai tidak boleh dihancurkan, dan pratinjau
+        // memang mengganti teksturnya tepat saat pengguna sedang menyunting.
+        device_.WaitIdle();
+        materialTextures_.clear();
+        materialTextures_.reserve(ktx2Paths.size());
+        for (const std::string& path : ktx2Paths) {
+            if (path.empty()) {
+                // Slot kosong: belum di-bake, atau memang tidak diisi. Putih
+                // 1x1 yang berlaku, dan itu bukan galat.
+                materialTextures_.push_back(nullptr);
+                continue;
+            }
+            rhi::Ktx2Texture image;
+            const rhi::Ktx2Result read = rhi::ReadKtx2(std::filesystem::path(path), image);
+            if (!read.ok) {
+                SIM_WARN("Render", "preview cannot load {}: {}", path, read.error);
+                materialTextures_.push_back(nullptr);
+                continue;
+            }
+            auto texture = std::make_unique<rhi::Texture2D>();
+            if (!texture->CreateFromKtx2(device_, image)) {
+                materialTextures_.push_back(nullptr);
+                continue;
+            }
+            materialTextures_.push_back(std::move(texture));
+        }
+        WriteMaterialTextures();
     }
 
     // --- per frame ----------------------------------------------------------
@@ -782,6 +861,7 @@ private:
         materialUniform_.Destroy();
         parameters_.clear();
         textureCount_ = 0;
+        materialTextures_.clear();
         parameterBytes_ = 0;
     }
 
@@ -835,6 +915,13 @@ private:
     VkPipeline pipeline_ = VK_NULL_HANDLE;
 
     uint32_t textureCount_ = 0;
+    /// Gambar tiap slot material. `unique_ptr` karena `Texture2D` memegang
+    /// objek Vulkan dan vektor yang tumbuh akan memindahkannya; null berarti
+    /// slot itu memakai putih 1x1.
+    ///
+    /// Namanya `materialTextures_`, bukan `textures_`: yang terakhir sudah
+    /// dipakai registry tekstur ImGui di kelas ini.
+    std::vector<std::unique_ptr<rhi::Texture2D>> materialTextures_;
     uint32_t parameterBytes_ = 0;
     std::vector<uint8_t> parameters_;
     bool parametersDirty_ = false;

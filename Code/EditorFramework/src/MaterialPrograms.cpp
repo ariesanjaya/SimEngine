@@ -65,9 +65,10 @@ MaterialProgramRef MaterialPrograms::Request(const assets::AssetDatabase& assets
             }
             // Sudah selesai dikompilasi dan belum diambil. Sisanya **wajib**
             // main thread: ia membuat pipeline dan descriptor set.
-            ready = std::move(entry.result);
-            entry.result = {};
-            entry.compiled = false;
+            //
+            // **Disalin, bukan diambil.** Kalau ternyata ada teksturnya yang
+            // belum di-bake, entri ini harus tetap utuh untuk frame berikutnya.
+            ready = entry.result;
         } else {
             // Dicatat `Pending` **sebelum** tugasnya diantre. Tanpa itu,
             // permintaan kedua pada frame yang sama mengantre tugas kedua untuk
@@ -123,18 +124,42 @@ MaterialProgramRef MaterialPrograms::Request(const assets::AssetDatabase& assets
         if (!entry.compiled) {
             return {entry.state, entry.handle};
         }
-        ready = std::move(entry.result);
-        entry.result = {};
-        entry.compiled = false;
+        ready = entry.result;
     }
 
     // Tekstur diselesaikan di sini dan bukan di worker: yang memegang baker
     // tekstur adalah pemanggil, dan hasilnya sebuah handle GPU.
     std::vector<render::TextureHandle> textures;
     textures.reserve(ready.textures.size());
+    bool texturesReady = true;
     for (const Uuid& image : ready.textures) {
-        textures.push_back(image.IsValid() && resolveTexture ? resolveTexture(image)
-                                                             : render::kInvalidTexture);
+        if (!image.IsValid() || !resolveTexture) {
+            textures.push_back(render::kInvalidTexture);
+            continue;
+        }
+        const ResolvedMaterialTexture resolved = resolveTexture(image);
+        texturesReady = texturesReady && resolved.ready;
+        textures.push_back(resolved.handle);
+    }
+
+    // **Materialnya tidak dibangun sampai seluruh teksturnya siap.** Descriptor
+    // set ditulis sekali dan tidak pernah ditinjau lagi, jadi membangunnya
+    // sekarang berarti mengunci placeholder ke dalamnya selamanya — dan yang
+    // terlihat bukan objek yang sedang menunggu melainkan objek magenta yang
+    // tidak pernah berubah.
+    //
+    // Sambil menunggu, ruas itu digambar jalur mundur `box.frag`. Itu tetap
+    // memperlihatkan bentuk dan warnanya; yang tertunda hanya modelnya.
+    if (!texturesReady) {
+        return {MaterialProgramState::Pending, render::kInvalidMaterial};
+    }
+
+    {
+        // Hasil kompilasinya baru boleh dilepas sekarang.
+        std::lock_guard<std::mutex> lock(mutex_);
+        Entry& entry = entries_[guid];
+        entry.result = {};
+        entry.compiled = false;
     }
 
     // Kuncinya memuat hash SPIR-V-nya, bukan hanya GUID-nya. Material yang

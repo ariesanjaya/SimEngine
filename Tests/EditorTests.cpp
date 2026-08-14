@@ -5,6 +5,8 @@
 #include "Sim/Core/TaskPool.h"
 #include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Editor/MaterialPrograms.h"
+#include "Sim/Material/MaterialGraph.h"
+#include "Sim/Material/MaterialNodeCatalog.h"
 #include "Sim/Editor/Command.h"
 #include "Sim/Editor/PanelManager.h"
 #include "Sim/Editor/Selection.h"
@@ -588,7 +590,9 @@ TEST_CASE("E8.4: shader material dikompilasi di TaskPool, bukan di thread pemang
     }
 
     RecordingRenderer renderer;
-    const auto resolve = [](const Uuid&) { return render::kInvalidTexture; };
+    const auto resolve = [](const Uuid&) {
+        return ResolvedMaterialTexture{render::kInvalidTexture, true};
+    };
 
     // Frame pertama: belum siap, dan **tidak menunggu**.
     const MaterialProgramRef first =
@@ -648,7 +652,9 @@ TEST_CASE("E8.4: material yang tidak ada di indeks gagal, dan tidak dicoba lagi"
     }
 
     RecordingRenderer renderer;
-    const auto resolve = [](const Uuid&) { return render::kInvalidTexture; };
+    const auto resolve = [](const Uuid&) {
+        return ResolvedMaterialTexture{render::kInvalidTexture, true};
+    };
     const Uuid missing = Uuid::Generate();
 
     CHECK(programs.Request(database, missing, renderer, resolve).state ==
@@ -684,7 +690,9 @@ TEST_CASE("E8.4: material rusak diingat gagal sampai dilupakan") {
         return;
     }
     RecordingRenderer renderer;
-    const auto resolve = [](const Uuid&) { return render::kInvalidTexture; };
+    const auto resolve = [](const Uuid&) {
+        return ResolvedMaterialTexture{render::kInvalidTexture, true};
+    };
 
     CHECK(programs.Request(database, guid, renderer, resolve).state ==
           MaterialProgramState::Pending);
@@ -743,12 +751,107 @@ TEST_CASE("E8.4: tanpa TaskPool, kompilasi dikerjakan di tempat dan langsung sia
         return;
     }
     RecordingRenderer renderer;
-    const auto resolve = [](const Uuid&) { return render::kInvalidTexture; };
+    const auto resolve = [](const Uuid&) {
+        return ResolvedMaterialTexture{render::kInvalidTexture, true};
+    };
 
     // Sekali panggil, langsung siap — tanpa frame kedua dan tanpa `WaitIdle`.
     const MaterialProgramRef ref = programs.Request(database, record->guid, renderer, resolve);
     CHECK(ref.state == MaterialProgramState::Ready);
     CHECK(ref.handle != render::kInvalidMaterial);
     CHECK(renderer.acquires == 1);
+    CHECK(programs.CompileCount() == 1);
+}
+
+TEST_CASE("E8.4: material menunggu teksturnya siap sebelum pipeline-nya dibangun") {
+    // **Descriptor set material ditulis sekali dan tidak pernah ditinjau lagi.**
+    // Membangunnya sementara sebuah teksturnya masih di-bake berarti mengunci
+    // placeholder ke dalamnya selamanya — dan yang terlihat bukan objek yang
+    // sedang menunggu melainkan objek magenta yang tidak pernah berubah. Itu
+    // persis yang sempat terjadi, dan uji ini yang menjaganya tidak terulang.
+    TempDir temp;
+    const std::filesystem::path assetsDir = temp.Path() / "Assets";
+    std::error_code error;
+    std::filesystem::create_directories(assetsDir, error);
+
+    // Material bawaan tidak punya slot tekstur sama sekali, jadi ia tidak bisa
+    // memperlihatkan apa pun tentang penungguan ini. Yang dipakai di sini graph
+    // yang memang menyampel sebuah tekstur — bentuk yang sama dengan yang
+    // dihasilkan Material Editor saat sebuah tekstur dijatuhkan ke kanvasnya.
+    material::MaterialGraph graph;
+    {
+        material::MaterialNode output;
+        output.guid = Uuid::Generate();
+        output.type = std::string(material::kSurfaceOutputType);
+        material::MaterialNode texture;
+        texture.guid = Uuid::Generate();
+        texture.type = "input.texture";
+        texture.settings["name"] = "Albedo";
+        texture.settings["texture"] = Uuid::Generate().ToString();
+        material::MaterialNode sample;
+        sample.guid = Uuid::Generate();
+        sample.type = "input.sample";
+
+        material::MaterialLink toSample;
+        toSample.guid = Uuid::Generate();
+        toSample.fromNode = texture.guid;
+        toSample.fromPin = "texture";
+        toSample.toNode = sample.guid;
+        toSample.toPin = "texture";
+        material::MaterialLink toColor;
+        toColor.guid = Uuid::Generate();
+        toColor.fromNode = sample.guid;
+        toColor.fromPin = "rgb";
+        toColor.toNode = output.guid;
+        toColor.toPin = "baseColor";
+
+        graph.nodes.push_back(std::move(output));
+        graph.nodes.push_back(std::move(texture));
+        graph.nodes.push_back(std::move(sample));
+        graph.links.push_back(std::move(toSample));
+        graph.links.push_back(std::move(toColor));
+    }
+    REQUIRE(material::SaveMaterialToFile(graph, assetsDir / "Bertekstur.simmat").ok);
+
+    TaskPool tasks;
+    assets::AssetDatabase database;
+    database.Initialize({assetsDir, &tasks, 0.0f});
+    tasks.WaitIdle();
+    database.Update(0.0f);
+    const assets::AssetRecord* record = database.FindByRelativePath("Bertekstur.simmat");
+    REQUIRE(record != nullptr);
+
+    MaterialPrograms programs(temp.Path() / "ShaderCache", SIM_SHADER_DIR, &tasks);
+    if (!programs.Usable()) {
+        MESSAGE("slangc tidak ditemukan — uji dilewati");
+        return;
+    }
+    RecordingRenderer renderer;
+
+    bool baked = false;
+    const auto resolve = [&baked](const Uuid&) {
+        // Handle-nya selalu ada — placeholder selama belum di-bake, persis
+        // seperti yang dilakukan SceneView. Yang membedakan hanya `ready`.
+        return ResolvedMaterialTexture{7, baked};
+    };
+
+    programs.Request(database, record->guid, renderer, resolve);
+    tasks.WaitIdle();
+
+    // Sudah dikompilasi, tetapi teksturnya belum. Pipeline **tidak** dibangun.
+    for (int frame = 0; frame < 3; ++frame) {
+        CHECK(programs.Request(database, record->guid, renderer, resolve).state ==
+              MaterialProgramState::Pending);
+    }
+    CHECK(renderer.acquires == 0);
+    // Dan tidak dikompilasi ulang berkali-kali sambil menunggu.
+    CHECK(programs.CompileCount() == 1);
+
+    baked = true;
+    const MaterialProgramRef ready =
+        programs.Request(database, record->guid, renderer, resolve);
+    CHECK(ready.state == MaterialProgramState::Ready);
+    CHECK(renderer.acquires == 1);
+    CHECK(renderer.textureCount == 1);
     CHECK(programs.CompileCount() == 1);
 }

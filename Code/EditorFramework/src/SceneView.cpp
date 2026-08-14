@@ -106,6 +106,9 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                       const SkinnedPreview* animation,
                       const assets::AssetDatabase* builtinAssets,
                       WhiteboxStore* whiteboxes, const TerrainView& terrainView) {
+    // Dipasang di sini supaya `FindAsset` bisa memakainya tanpa menambah
+    // parameter kesembilan ke fungsi yang sudah delapan panjangnya.
+    builtinAssets_ = builtinAssets;
     ++frame_;
     meshes_.clear();
     skinMatrices_.clear();
@@ -211,9 +214,9 @@ void SceneView::Build(scene::World& world, const Selection& selection,
 
                 if (!fromWhitebox && assets != nullptr && renderer != nullptr &&
                     meshRenderer != nullptr && meshRenderer->mesh.IsValid()) {
-                    if (const assets::AssetRecord* record = assets->Find(meshRenderer->mesh.guid)) {
-                        const render::MeshAsset mesh =
-                            renderer->AcquireMesh(assets->AbsolutePath(*record).string());
+                    if (const AssetLookup found = FindAsset(assets, meshRenderer->mesh.guid)) {
+                        const render::MeshAsset mesh = renderer->AcquireMesh(
+                            found.database->AbsolutePath(*found.record).string());
                         // Angkanya dilaporkan balik ke indeks aset. Yang
                         // memuatnya sudah memegangnya, dan menghitungnya lagi
                         // saat impor berarti mengurai berkas yang sama dua kali
@@ -223,7 +226,7 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                         // yang dibenarkan: yang ditulis bukan isi indeks
                         // melainkan catatan tentang isinya.
                         if (mesh.loaded && mesh.triangleCount > 0) {
-                            const_cast<assets::AssetDatabase*>(assets)->ReportMeshStats(
+                            const_cast<assets::AssetDatabase*>(found.database)->ReportMeshStats(
                                 meshRenderer->mesh.guid, mesh.triangleCount, mesh.vertexCount);
                         }
                         if (mesh.loaded) {
@@ -281,6 +284,24 @@ void SceneView::Build(scene::World& world, const Selection& selection,
 /// tertulis di berkas mesh untuk ruas itu — yang tidak diketahui editor. Mengisi
 /// warna bawaan di sini akan menimpanya, dan model yang berkasnya membawa
 /// warnanya sendiri akan tergambar abu-abu seluruhnya.
+SceneView::AssetLookup SceneView::FindAsset(const assets::AssetDatabase* assets,
+                                            const Uuid& guid) const {
+    if (!guid.IsValid()) {
+        return {};
+    }
+    if (assets != nullptr) {
+        if (const assets::AssetRecord* record = assets->Find(guid)) {
+            return {assets, record};
+        }
+    }
+    if (builtinAssets_ != nullptr && builtinAssets_ != assets) {
+        if (const assets::AssetRecord* record = builtinAssets_->Find(guid)) {
+            return {builtinAssets_, record};
+        }
+    }
+    return {};
+}
+
 void SceneView::AppendPartColors(const scene::MeshRendererComponent& renderer, uint32_t partCount,
                                  const assets::AssetDatabase* assets,
                                  render::IViewportRenderer* textureRenderer,
@@ -324,10 +345,11 @@ Vec4 SceneView::MaterialColor(const assets::AssetDatabase* assets, const Uuid& g
         return found->second;
     }
     Vec4 color = kMeshColor;
-    if (assets != nullptr) {
-        if (const assets::AssetRecord* record = assets->Find(guid)) {
+    {
+        if (const AssetLookup found = FindAsset(assets, guid)) {
             material::MaterialGraph graph;
-            if (material::LoadMaterialFromFile(graph, assets->AbsolutePath(*record)).ok) {
+            if (material::LoadMaterialFromFile(graph,
+                                               found.database->AbsolutePath(*found.record)).ok) {
                 for (const material::MaterialNode& node : graph.nodes) {
                     if (node.type != material::kSurfaceOutputType) {
                         continue;
@@ -364,10 +386,11 @@ render::TextureHandle SceneView::MaterialTexture(const assets::AssetDatabase* as
     if (const auto found = materialTexture_.find(guid); found != materialTexture_.end()) {
         texture = found->second;
     } else {
-        const assets::AssetRecord* record = assets->Find(guid);
+        const AssetLookup owner = FindAsset(assets, guid);
         material::MaterialInstance instance;
-        if (record != nullptr &&
-            material::LoadInstanceFromFile(instance, assets->AbsolutePath(*record)).ok) {
+        if (owner && material::LoadInstanceFromFile(
+                         instance, owner.database->AbsolutePath(*owner.record))
+                         .ok) {
             // Nama parameternya disebut satu tempat, dipakai importir maupun di
             // sini: dua ejaan berarti tekstur yang tersimpan tetapi tidak pernah
             // terpasang, dan tidak ada satu pun galat yang menyertainya.
@@ -398,11 +421,12 @@ render::TextureHandle SceneView::UploadedTexture(const assets::AssetDatabase* as
     if (assets == nullptr || renderer == nullptr || bakery_ == nullptr) {
         return render::kInvalidTexture;
     }
-    const assets::AssetRecord* record = assets->Find(image);
-    if (record == nullptr) {
+    const AssetLookup found = FindAsset(assets, image);
+    if (!found) {
         return render::kInvalidTexture;
     }
-    const assets::BakedTextureRef baked = bakery_->Request(assets->AbsolutePath(*record));
+    const assets::BakedTextureRef baked =
+        bakery_->Request(found.database->AbsolutePath(*found.record));
     switch (baked.state) {
         case assets::BakeState::Ready:
             return renderer->AcquireTexture(baked.path.string());
@@ -430,9 +454,24 @@ render::MaterialHandle SceneView::ForwardMaterial(const assets::AssetDatabase* a
     if (assets == nullptr || renderer == nullptr || materialPrograms_ == nullptr) {
         return render::kInvalidMaterial;
     }
+    // Indeks yang memiliki materialnya, bukan selalu indeks project: material
+    // bawaan menyebut induk yang juga bawaan, dan yang mencarinya harus indeks
+    // yang sama.
+    const AssetLookup owner = FindAsset(assets, guid);
+    if (!owner) {
+        return render::kInvalidMaterial;
+    }
     const MaterialProgramRef program = materialPrograms_->Request(
-        *assets, guid, *renderer,
-        [&](const Uuid& image) { return UploadedTexture(assets, renderer, image); });
+        *owner.database, guid, *renderer, [&](const Uuid& image) -> ResolvedMaterialTexture {
+            ResolvedMaterialTexture resolved;
+            resolved.handle = UploadedTexture(assets, renderer, image);
+            // Siap berarti bukan placeholder: `UploadedTexture` menjawab
+            // placeholder magenta selama bake-nya berjalan, dan handle itu tidak
+            // boleh terkunci ke dalam descriptor set material.
+            resolved.ready = renderer->PendingTexture() == render::kInvalidTexture ||
+                             resolved.handle != renderer->PendingTexture();
+            return resolved;
+        });
     return program.state == MaterialProgramState::Ready ? program.handle
                                                         : render::kInvalidMaterial;
 }

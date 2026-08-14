@@ -54,12 +54,25 @@ struct MaterialProgramRef {
     render::MaterialHandle handle = render::kInvalidMaterial;
 };
 
+struct ResolvedMaterialTexture {
+    render::TextureHandle handle = render::kInvalidTexture;
+    /// False selama hasil bake-nya belum ada.
+    ///
+    /// **Dibawa terpisah dari handle-nya, dan itu menentukan.** Handle yang
+    /// belum siap tetap sebuah handle — placeholder magenta — dan material yang
+    /// dibangun dengan handle itu akan memakainya **selamanya**: descriptor
+    /// set-nya ditulis sekali, dan tidak ada yang meninjaunya lagi. Yang
+    /// terlihat adalah objek magenta yang tidak pernah berubah, bukan objek
+    /// yang sedang menunggu.
+    bool ready = false;
+};
+
 /// Menyelesaikan sebuah aset gambar menjadi handle tekstur.
 ///
 /// Diserahkan pemanggil karena jalur itu miliknya: ia yang memegang baker
 /// tekstur, dan ia pula yang tahu placeholder apa yang berlaku sementara hasil
 /// bake-nya belum ada.
-using MaterialTextureResolver = std::function<render::TextureHandle(const Uuid&)>;
+using MaterialTextureResolver = std::function<ResolvedMaterialTexture(const Uuid&)>;
 
 class MaterialPrograms {
 public:

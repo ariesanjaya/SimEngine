@@ -150,6 +150,9 @@ sim_add_test(SimMaterialTests
 # tertinggal satu build akan membuat test lulus atas kode yang sudah berubah.
 target_compile_definitions(SimMaterialTests
     PRIVATE SIM_SHADER_DIR="${CMAKE_SOURCE_DIR}/Shaders"
+    # Dipakai uji yang membandingkan berkas shader yang **ditanam** modul
+    # material dengan berkas yang **disalin** CMake ke sebelah executable.
+    PRIVATE SIM_CODE_DIR="${CMAKE_SOURCE_DIR}/Code"
     # Isi bawaan editor, dibaca dari folder sumber dengan alasan yang sama:
     # yang diuji harus berkas yang sedang ada di repo, bukan salinan yang
     # tertinggal satu build.

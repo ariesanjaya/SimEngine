@@ -27,7 +27,9 @@
         },
         "MeshRenderer": {
           "mesh": "a4a01a1f-084a-4e29-a682-65a615e92e3c",
-          "materials": [],
+          "materials": [
+            "5d0e9a76-2f41-4c8b-9d33-7e15b208a4c6"
+          ],
           "castShadows": true,
           "receiveShadows": true,
           "lodBias": 0.0

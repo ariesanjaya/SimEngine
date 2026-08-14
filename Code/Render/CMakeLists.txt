@@ -89,15 +89,46 @@ sim_compile_shaders(SimShadersGrid
 
 add_dependencies(SimRender SimShadersGrid)
 
-# openpbr.slang disalin sebagai SUMBER, bukan dikompilasi. Preview material
-# menanamnya ke dalam modul yang dirakit lalu memanggil slangc saat itu juga,
-# jadi yang harus ada di sebelah executable adalah teksnya — dan menyalinnya
-# lewat target sendiri membuat menyunting model shading memicu penyalinan ulang.
+# Beberapa shader disalin sebagai SUMBER, bukan dikompilasi. Modul material
+# dirakit saat editor berjalan — teksnya ditanam lalu diserahkan ke slangc saat
+# itu juga — jadi yang harus ada di sebelah executable adalah teksnya.
+#
+# **Bukan hanya `openpbr.slang`.** Shader material untuk pass forward menanam
+# deklarasi set 0 milik renderer dari berkas yang sama persis yang di-`#include`
+# `box.frag`, dan berkas yang tidak ada di sebelah executable menjadi `#error`
+# saat modulnya dirakit — yaitu "preprocessor error" dari slangc, jauh dari
+# sebabnya. Daftar ini karena itu harus mengikuti apa yang ditanam
+# `MaterialPrograms`; ketidakcocokannya muncul sebagai material yang gagal
+# dikompilasi hanya di editor yang sudah dipasang, bukan di uji yang membaca
+# folder sumber.
+set(SIM_SHADER_SOURCES_COPIED
+    openpbr.slang
+    box_varyings.slang
+    cluster_common.slang
+    shadow_common.slang
+    gi_resolve.slang
+    gi_common.slang
+    gi_depth.slang)
+
+set(_sim_copied_shaders)
+foreach(_shader IN LISTS SIM_SHADER_SOURCES_COPIED)
+    list(APPEND _sim_copied_shaders
+         "${CMAKE_COMMAND}" -E copy_if_different
+         "${CMAKE_SOURCE_DIR}/Shaders/${_shader}"
+         "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Shaders/${_shader}")
+endforeach()
+
 add_custom_target(SimShadersOpenPbr
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different
-            "${CMAKE_SOURCE_DIR}/Shaders/openpbr.slang"
-            "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Shaders/openpbr.slang"
-    DEPENDS "${CMAKE_SOURCE_DIR}/Shaders/openpbr.slang"
-    COMMENT "copy openpbr.slang"
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+            "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Shaders"
+    COMMENT "copy shader sources"
     VERBATIM)
+foreach(_shader IN LISTS SIM_SHADER_SOURCES_COPIED)
+    add_custom_command(TARGET SimShadersOpenPbr POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_SOURCE_DIR}/Shaders/${_shader}"
+                "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Shaders/${_shader}"
+        DEPENDS "${CMAKE_SOURCE_DIR}/Shaders/${_shader}"
+        VERBATIM)
+endforeach()
 add_dependencies(SimRender SimShadersOpenPbr)
