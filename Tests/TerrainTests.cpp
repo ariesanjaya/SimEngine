@@ -2,6 +2,7 @@
 
 #include "Sim/Terrain/Terrain.h"
 #include "Sim/Terrain/TerrainBrush.h"
+#include "Sim/Terrain/TerrainDecal.h"
 #include "Sim/Terrain/TerrainIo.h"
 #include "Sim/Terrain/TerrainMesh.h"
 #include "Sim/Terrain/TerrainPicking.h"
@@ -2164,4 +2165,185 @@ TEST_CASE("L6a: ubin yang seluruhnya berlubang tidak menyisakan warna menggantun
     const assets::MeshData mesh = BuildTileMesh(terrain, 0, 0);
     CHECK_FALSE(mesh.IsValid());
     CHECK(mesh.vertices.empty());
+}
+
+// ============================================================================
+// L7 — decal yang menempel di terrain
+// ============================================================================
+
+TEST_CASE("L7: simpul decal berada di permukaan, terangkat sebesar lift") {
+    TerrainDesc desc = SmallDesc();
+    desc.tileSamples = 32;
+    desc.maxHeight = 200.0f;
+    Terrain terrain(desc);
+    SculptHills(terrain);
+
+    DecalProjection decal;
+    decal.center = Vec3(20.0f, 0.0f, 20.0f);
+    decal.halfSize = Vec2(4.0f, 3.0f);
+    decal.lift = 0.05f;
+    decal.color = Vec4(0.9f, 0.2f, 0.1f, 1.0f);
+
+    const assets::MeshData mesh = BuildDecalMesh(terrain, decal);
+    REQUIRE(mesh.IsValid());
+
+    // **Diperiksa terhadap `HeightAtWorld`, bukan terhadap bidang datar.** Decal
+    // yang menjadi quad datar akan lolos setiap pemeriksaan yang hanya melihat
+    // satu titik.
+    for (const assets::MeshVertex& vertex : mesh.vertices) {
+        const float surface = terrain.HeightAtWorld(vertex.position.x, vertex.position.z);
+        INFO("di (" << vertex.position.x << ", " << vertex.position.z << ")");
+        CHECK(vertex.position.y == doctest::Approx(surface + decal.lift).epsilon(0.001));
+        CHECK(vertex.color.x == doctest::Approx(decal.color.x).epsilon(0.001));
+    }
+
+    // Dan permukaannya memang tidak rata — kalau tidak, uji di atas juga lolos
+    // untuk decal yang datar.
+    float lowest = 1e30f;
+    float highest = -1e30f;
+    for (const assets::MeshVertex& vertex : mesh.vertices) {
+        lowest = std::min(lowest, vertex.position.y);
+        highest = std::max(highest, vertex.position.y);
+    }
+    INFO("rentang tinggi decal " << highest - lowest << " m");
+    CHECK(highest - lowest > 0.5f);
+}
+
+TEST_CASE("L7: decal di lereng mengikuti lerengnya") {
+    TerrainDesc desc;
+    desc.tileSamples = 64;
+    desc.tilesX = 1;
+    desc.tilesY = 1;
+    desc.sampleSpacing = 1.0f;
+    desc.minHeight = 0.0f;
+    desc.maxHeight = 100.0f;
+    Terrain terrain(desc);
+    // Lereng tetap: naik dua meter tiap sampel ke arah +X.
+    for (int y = 0; y < terrain.SamplesY(); ++y) {
+        for (int x = 0; x < terrain.SamplesX(); ++x) {
+            terrain.SetHeightAt(x, y, 2.0f * static_cast<float>(x));
+        }
+    }
+
+    DecalProjection decal;
+    decal.center = Vec3(20.0f, 0.0f, 20.0f);
+    decal.halfSize = Vec2(5.0f, 5.0f);
+    decal.lift = 0.0f;
+
+    const assets::MeshData mesh = BuildDecalMesh(terrain, decal);
+    REQUIRE(mesh.IsValid());
+
+    // Beda tinggi antara tepi kiri dan kanan jejaknya harus sepuluh meter:
+    // sepuluh meter lebar × lereng dua meter per meter... yaitu 20 m.
+    float atLeft = 1e30f;
+    float atRight = -1e30f;
+    for (const assets::MeshVertex& vertex : mesh.vertices) {
+        if (std::abs(vertex.position.x - 15.0f) < 0.01f) {
+            atLeft = vertex.position.y;
+        }
+        if (std::abs(vertex.position.x - 25.0f) < 0.01f) {
+            atRight = vertex.position.y;
+        }
+    }
+    REQUIRE(atLeft < 1e29f);
+    REQUIRE(atRight > -1e29f);
+    INFO("kiri " << atLeft << " kanan " << atRight);
+    CHECK(atRight - atLeft == doctest::Approx(20.0f).epsilon(0.01));
+
+    // Normalnya pun mengikuti permukaan, bukan tegak lurus ke atas: decal yang
+    // dinyalakan seolah menghadap langit terlihat menempel di kaca.
+    const Vec3 normal(mesh.vertices.front().normal);
+    CHECK(normal.y < 0.6f);
+    CHECK(normal.x < -0.7f);
+}
+
+TEST_CASE("L7: jejaknya mengikuti ukuran dan rotasi") {
+    Terrain terrain(SmallDesc());
+
+    DecalProjection decal;
+    decal.center = Vec3(8.0f, 0.0f, 8.0f);
+    decal.halfSize = Vec2(3.0f, 1.0f);
+
+    const assets::MeshData flat = BuildDecalMesh(terrain, decal);
+    REQUIRE(flat.IsValid());
+    CHECK(flat.boundsMax.x - flat.boundsMin.x == doctest::Approx(6.0f).epsilon(0.01));
+    CHECK(flat.boundsMax.z - flat.boundsMin.z == doctest::Approx(2.0f).epsilon(0.01));
+
+    // Diputar sembilan puluh derajat, panjang dan lebarnya bertukar.
+    decal.rotationY = 1.5707963f;
+    const assets::MeshData turned = BuildDecalMesh(terrain, decal);
+    REQUIRE(turned.IsValid());
+    CHECK(turned.boundsMax.x - turned.boundsMin.x == doctest::Approx(2.0f).epsilon(0.02));
+    CHECK(turned.boundsMax.z - turned.boundsMin.z == doctest::Approx(6.0f).epsilon(0.02));
+}
+
+TEST_CASE("L7: yang menggantung di luar peta kehilangan bagian itu saja") {
+    Terrain terrain(SmallDesc());
+
+    DecalProjection decal;
+    decal.center = Vec3(0.0f, 0.0f, 8.0f);  // separuh di luar tepi kiri
+    decal.halfSize = Vec2(4.0f, 2.0f);
+
+    const assets::MeshData mesh = BuildDecalMesh(terrain, decal);
+    REQUIRE(mesh.IsValid());
+    // Tidak ada satu pun segitiga di sebelah kiri nol.
+    CHECK(mesh.boundsMin.x >= -0.001f);
+
+    // Dan yang seluruhnya di luar tidak menghasilkan apa pun.
+    decal.center = Vec3(-50.0f, 0.0f, 8.0f);
+    CHECK_FALSE(BuildDecalMesh(terrain, decal).IsValid());
+
+    // Ukuran nol pun ditolak alih-alih menghasilkan segitiga berluas nol.
+    decal.center = Vec3(8.0f, 0.0f, 8.0f);
+    decal.halfSize = Vec2(0.0f, 2.0f);
+    CHECK_FALSE(BuildDecalMesh(terrain, decal).IsValid());
+}
+
+TEST_CASE("L7: decal tidak menambal lubang") {
+    TerrainDesc desc = SmallDesc();
+    desc.tileSamples = 32;
+    Terrain terrain(desc);
+
+    DecalProjection decal;
+    decal.center = Vec3(10.0f, 0.0f, 10.0f);
+    decal.halfSize = Vec2(4.0f, 4.0f);
+
+    const assets::MeshData solid = BuildDecalMesh(terrain, decal);
+    REQUIRE(solid.IsValid());
+
+    // Lubang 4×4 sampel tepat di tengah jejaknya.
+    for (int y = 9; y <= 12; ++y) {
+        for (int x = 9; x <= 12; ++x) {
+            terrain.SetHoleAt(x, y, true);
+        }
+    }
+    const assets::MeshData holed = BuildDecalMesh(terrain, decal);
+    REQUIRE(holed.IsValid());
+    INFO("segitiga: utuh " << solid.indices.size() / 3 << ", berlubang "
+                           << holed.indices.size() / 3);
+    CHECK(holed.indices.size() < solid.indices.size());
+    // Dan bukan seluruhnya hilang: lubangnya di tengah, tepinya masih tanah.
+    CHECK(holed.indices.size() > solid.indices.size() / 2);
+}
+
+TEST_CASE("L7: rapatnya mengikuti jarak sampel, dengan batas yang disebutkan") {
+    TerrainDesc desc = SmallDesc();
+    desc.tileSamples = 64;
+    desc.sampleSpacing = 1.0f;
+    Terrain terrain(desc);
+
+    DecalProjection decal;
+    decal.center = Vec3(30.0f, 0.0f, 30.0f);
+    decal.halfSize = Vec2(5.0f, 5.0f);
+    // Sepuluh meter pada jarak sampel satu meter: sepuluh petak per sumbu.
+    const assets::MeshData mesh = BuildDecalMesh(terrain, decal);
+    REQUIRE(mesh.IsValid());
+    CHECK(mesh.vertices.size() == 11 * 11);
+
+    // Dan jejak raksasa dibatasi, bukan dibiarkan menjadi jutaan segitiga untuk
+    // sebuah noda.
+    decal.halfSize = Vec2(1000.0f, 1000.0f);
+    decal.maxSteps = 16;
+    const assets::MeshData huge = BuildDecalMesh(terrain, decal);
+    CHECK(huge.vertices.size() <= 17 * 17);
 }

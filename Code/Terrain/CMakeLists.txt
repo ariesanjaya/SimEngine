@@ -2,6 +2,7 @@ sim_add_library(Terrain
     SOURCES
         src/Terrain.cpp
         src/TerrainBrush.cpp
+        src/TerrainDecal.cpp
         src/TerrainIo.cpp
         src/TerrainMesh.cpp
         src/TerrainPicking.cpp

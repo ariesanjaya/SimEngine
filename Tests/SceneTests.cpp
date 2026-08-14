@@ -499,3 +499,45 @@ TEST_CASE("L0: TerrainComponent bertahan lewat simpan-muat level") {
     // kebetulan bernilai bawaan.
     CHECK(SaveLevelToString(reloaded) == text);
 }
+
+TEST_CASE("L7: DecalComponent bertahan lewat simpan-muat level") {
+    World world;
+    const Entity terrain = world.Create("Lanskap");
+    world.Add<TerrainComponent>(terrain).terrain.guid = Uuid::Generate();
+
+    // Decal sebagai anak terrainnya: itu cara menyatakan tuan rumah secara
+    // eksplisit, dan hierarkinya harus ikut bertahan.
+    const Entity decal = world.Create("Jalan", terrain);
+    auto& component = world.Add<DecalComponent>(decal);
+    component.color = Vec4(0.1f, 0.2f, 0.3f, 0.75f);
+    component.lift = 0.125f;
+    component.maxSteps = 32;
+    auto& transform = *world.TryGet<TransformComponent>(decal);
+    transform.position = Vec3(12.0f, 0.0f, 34.0f);
+    transform.scale = Vec3(8.0f, 1.0f, 2.0f);
+    world.MarkTransformDirty(decal);
+
+    const Uuid decalGuid = world.GuidOf(decal);
+    const std::string text = SaveLevelToString(world);
+
+    World reloaded;
+    REQUIRE(LoadLevelFromString(reloaded, text).ok);
+    const Entity loaded = reloaded.FindByGuid(decalGuid);
+    REQUIRE(IsValid(loaded));
+    CHECK(reloaded.NameOf(reloaded.ParentOf(loaded)) == "Lanskap");
+
+    const auto* back = reloaded.TryGet<DecalComponent>(loaded);
+    REQUIRE(back != nullptr);
+    CHECK(back->color.w == doctest::Approx(0.75f));
+    CHECK(back->lift == doctest::Approx(0.125f));
+    CHECK(back->maxSteps == 32);
+
+    // Ukurannya hidup di transform, bukan di komponennya — jadi ia harus ikut
+    // kembali dari sana.
+    const auto* shape = reloaded.TryGet<TransformComponent>(loaded);
+    REQUIRE(shape != nullptr);
+    CHECK(shape->scale.x == doctest::Approx(8.0f));
+    CHECK(shape->scale.z == doctest::Approx(2.0f));
+
+    CHECK(SaveLevelToString(reloaded) == text);
+}

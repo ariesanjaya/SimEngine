@@ -324,6 +324,20 @@ void RegisterCoreComponents() {
             .Label("Show Tiles");
         components.Register<TerrainComponent>();
 
+        types.Type<DecalComponent>("Decal")
+            .Field<&DecalComponent::color>("color")
+            .Label("Color")
+            .Field<&DecalComponent::lift>("lift")
+            .Label("Lift")
+            .Tooltip("Jarak angkat dari permukaan; nol menghasilkan z-fighting")
+            .Range(0.0f, 1.0f)
+            .Field<&DecalComponent::maxSteps>("maxSteps")
+            .Label("Max Steps")
+            .Tooltip("Batas petak per sumbu, supaya decal raksasa tidak menjadi "
+                     "jutaan segitiga")
+            .Range(1.0f, 256.0f);
+        components.Register<DecalComponent>();
+
         types.Type<CameraComponent>("Camera")
             .Field<&CameraComponent::fovYRadians>("fovY")
             .Label("Field of View")

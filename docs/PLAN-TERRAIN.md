@@ -546,7 +546,7 @@ nol dependensi, sehingga `UsersOf()` tidak pernah menyebutnya. Satu baris.
 - Material yang dipakai sebuah layer terrain terhitung terpakai. ✅ Mengeluarkan
   Terrain dari daftar itu lagi menggugurkan ujinya.
 
-### L7 — Decal yang menempel di terrain · ⬜
+### L7 — Decal yang menempel di terrain · ✅
 
 Sebuah tanda yang diletakkan di atas tanah: jalan setapak, bekas ledakan, garis
 batas.
@@ -575,14 +575,49 @@ yang menyamping tidak punya arti — dan yang memiringkannya akan mendapat jejak
 yang menyempit tanpa ada yang menjelaskan mengapa.
 
 **Kriteria terima**
-- Simpul decal berada di permukaan terrain, terangkat sebesar `lift` — diperiksa
-  terhadap `HeightAtWorld`, bukan terhadap bidang datar.
-- Decal di atas lereng mengikuti lerengnya, bukan menjadi quad datar yang
-  separuhnya tertanam.
-- Jejaknya mengikuti skala dan rotasi entity, dan terpotong di tepi peta.
-- Sampel berlubang tidak menghasilkan segitiga: decal tidak menambal lubang.
-- Meshnya dibangun ulang ketika bentuk terrain berubah, dan **tidak** ketika
-  catnya berubah.
+- Simpul decal berada di permukaan, terangkat sebesar `lift`. ✅ Diperiksa
+  terhadap `HeightAtWorld` di **setiap** simpul, ditambah pemeriksaan bahwa
+  permukaannya memang tidak rata — kalau tidak, uji itu juga lolos untuk decal
+  yang datar. Mengambil tinggi pusatnya saja menggugurkan 64 pernyataan.
+- Decal di lereng mengikuti lerengnya. ✅ Beda tinggi antar tepi jejaknya
+  dihitung tangan sebelum uji dijalankan, dan normalnya ikut diperiksa: decal
+  yang dinyalakan seolah menghadap langit terlihat menempel di kaca alih-alih di
+  tanah.
+- Jejaknya mengikuti skala dan rotasi entity, dan terpotong di tepi peta. ✅
+  Petak yang salah satu sudutnya di luar peta dibuang seluruhnya — separuh petak
+  yang direntangkan ke tepi adalah segitiga yang membentang ke tempat yang tidak
+  ditunjuk siapa pun.
+- Decal tidak menambal lubang. ✅ Dengan pemeriksaan bahwa yang hilang hanya
+  bagian tengahnya, bukan seluruh decal.
+- Meshnya dibangun ulang ketika bentuk berubah, tidak ketika catnya berubah. ✅
+  Lewat `TileRevision` ubin yang memuat pusatnya — pemisahan yang sudah ada
+  sejak L6a.
+
+**Ukurannya dibaca dari panjang kolom matriks**, bukan dari
+`TransformComponent::scale`. Medan skala sudah hilang begitu transformnya
+menjadi matriks, dan yang membacanya langsung akan salah begitu decal itu anak
+dari sesuatu yang diskalakan. Kemiringan diabaikan, bukan dipaksakan: sumbu X
+yang menukik tetap menghasilkan jejak seluas proyeksinya di bidang datar.
+
+Aritmatikanya dipisah menjadi `ProjectDecal` supaya bisa diuji tanpa renderer.
+Yang bisa salah di sini bukan penggambarannya melainkan hitungannya — membaca
+kolom yang salah menggugurkan ujinya.
+
+**Tuan rumahnya induknya, kalau induknya terrain.** Yang eksplisit menang atas
+yang ditebak. Kalau tidak, dipakai terrain pertama yang ditemukan di dunia —
+aturan yang sama dengan `FindSky`, dan karena alasan yang sama: dua terrain yang
+tumpang tindih adalah kesalahan penyusunan, dan memilih "yang terdekat" akan
+membuat decal berpindah tuan rumah ketika seseorang menggesernya sedikit.
+
+Instance-nya memakai transform **tuan rumah**, bukan transform decal:
+geometrinya sudah berada di ruang terrain, dan memakai transform decal akan
+menerapkan skalanya dua kali. Dan ia tidak menjatuhkan bayangan — ia selembar
+kulit di atas tanah, dan bayangannya akan mendarat di permukaan yang sama persis,
+menghitamkan dirinya sendiri.
+
+Meshnya di-cache per entity dan dibuang dua frame sesudah decal-nya hilang dari
+scene. Dibersihkan di awal `Build`, bukan di akhir: yang membersihkan sesudah
+menyusun daftar akan membuang yang baru saja dipakai frame ini.
 
 ---
 

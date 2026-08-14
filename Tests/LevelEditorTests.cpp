@@ -1908,3 +1908,52 @@ TEST_CASE("L6a: mengecat membangun ulang mesh ubin, tanpa menyentuh yang lain") 
     REQUIRE(store.TileMesh(guid, 2, 2, 0, flat) != nullptr);
     CHECK(store.TileUpload(guid, 2, 2) == farBefore);
 }
+
+// ============================================================================
+// L7 — decal di terrain
+// ============================================================================
+
+TEST_CASE("L7: jejak decal diturunkan dari transformnya, bukan dari medan skala") {
+    // Medan skala sudah **hilang** begitu transform entity menjadi matriks —
+    // yang tersisa panjang kolomnya. Yang membaca `TransformComponent::scale`
+    // langsung akan salah begitu decal itu anak dari sesuatu yang diskalakan.
+    scene::DecalComponent component;
+    component.lift = 0.25f;
+    component.maxSteps = 12;
+    component.color = Vec4(0.1f, 0.2f, 0.3f, 0.4f);
+
+    Mat4 local(1.0f);
+    local[0] = Vec4(6.0f, 0.0f, 0.0f, 0.0f);  // panjang 6 → setengah 3
+    local[2] = Vec4(0.0f, 0.0f, 2.0f, 0.0f);  // panjang 2 → setengah 1
+    local[3] = Vec4(11.0f, 5.0f, 13.0f, 1.0f);
+
+    const terrain::DecalProjection flat = ProjectDecal(component, local);
+    CHECK(flat.halfSize.x == doctest::Approx(3.0f).epsilon(0.001));
+    CHECK(flat.halfSize.y == doctest::Approx(1.0f).epsilon(0.001));
+    CHECK(flat.center.x == doctest::Approx(11.0f).epsilon(0.001));
+    CHECK(flat.center.z == doctest::Approx(13.0f).epsilon(0.001));
+    CHECK(flat.rotationY == doctest::Approx(0.0f).epsilon(0.001));
+    // Sisanya diteruskan apa adanya.
+    CHECK(flat.lift == doctest::Approx(0.25f));
+    CHECK(flat.maxSteps == 12);
+    CHECK(flat.color.w == doctest::Approx(0.4f));
+
+    // Diputar 90° terhadap Y: sumbu X-nya menunjuk +Z.
+    Mat4 turned(1.0f);
+    turned[0] = Vec4(0.0f, 0.0f, 4.0f, 0.0f);
+    turned[2] = Vec4(-2.0f, 0.0f, 0.0f, 0.0f);
+    turned[3] = Vec4(0.0f, 0.0f, 0.0f, 1.0f);
+    const terrain::DecalProjection rotated = ProjectDecal(component, turned);
+    CHECK(rotated.rotationY == doctest::Approx(1.5707963f).epsilon(0.001));
+    CHECK(rotated.halfSize.x == doctest::Approx(2.0f).epsilon(0.001));
+    CHECK(rotated.halfSize.y == doctest::Approx(1.0f).epsilon(0.001));
+
+    // **Kemiringan diabaikan, bukan dipaksakan.** Sumbu X yang menukik tetap
+    // menghasilkan jejak yang sama seperti proyeksinya di bidang datar.
+    Mat4 tilted(1.0f);
+    tilted[0] = Vec4(3.0f, 4.0f, 0.0f, 0.0f);  // panjang 5, menukik
+    tilted[2] = Vec4(0.0f, 0.0f, 2.0f, 0.0f);
+    const terrain::DecalProjection leaning = ProjectDecal(component, tilted);
+    CHECK(leaning.rotationY == doctest::Approx(0.0f).epsilon(0.001));
+    CHECK(leaning.halfSize.x == doctest::Approx(2.5f).epsilon(0.001));
+}

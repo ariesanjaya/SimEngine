@@ -4,6 +4,7 @@
 #include "Sim/Material/MaterialGraph.h"
 #include "Sim/Material/MaterialNodeCatalog.h"
 #include "Sim/Editor/EditorContext.h"
+#include "Sim/Terrain/TerrainDecal.h"
 #include "Sim/Editor/Icons.h"
 #include "Sim/Editor/Selection.h"
 #include "Sim/Scene/Components.h"
@@ -100,6 +101,7 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                       const SkinnedPreview* animation,
                       const assets::AssetDatabase* builtinAssets,
                       WhiteboxStore* whiteboxes, const TerrainView& terrainView) {
+    ++frame_;
     meshes_.clear();
     skinMatrices_.clear();
     partColors_.clear();
@@ -111,6 +113,13 @@ void SceneView::Build(scene::World& world, const Selection& selection,
     // view<> menghasilkan entt::entity, sedangkan scene::Entity adalah enum
     // tersendiri supaya tipe entity kita tidak otomatis tertukar dengan tipe
     // pustaka. Konversinya eksplisit di satu tempat ini saja.
+    // Decal yang tidak lagi ada di scene tidak boleh menahan meshnya selamanya.
+    // Dibersihkan di awal, bukan di akhir: yang membersihkan sesudah menyusun
+    // daftar akan membuang yang baru saja dipakai frame ini.
+    for (auto it = decals_.begin(); it != decals_.end();) {
+        it = it->second.touched + 2 < frame_ ? decals_.erase(it) : std::next(it);
+    }
+
     for (const auto raw : world.Registry().view<scene::IdComponent>()) {
         const auto entity = static_cast<scene::Entity>(raw);
         const auto* visibility = world.TryGet<scene::VisibilityComponent>(entity);
@@ -123,6 +132,12 @@ void SceneView::Build(scene::World& world, const Selection& selection,
         // Entity terkunci tetap digambar tapi tidak masuk daftar pickable —
         // itu justru gunanya: latar yang terlihat tanpa terpilih tak sengaja.
         const bool pickable = visibility == nullptr || !visibility->locked;
+
+        if (const auto* decalComponent = world.TryGet<scene::DecalComponent>(entity)) {
+            AppendDecal(*decalComponent, entity, matrix, selected, pickable, assets, renderer,
+                        terrainView, world);
+            continue;
+        }
 
         if (const auto* terrainComponent = world.TryGet<scene::TerrainComponent>(entity)) {
             AppendTerrain(*terrainComponent, entity, matrix, selected, pickable, assets, renderer,
@@ -345,6 +360,129 @@ void SceneView::AppendSkinPalette(uint32_t boneCount, std::span<const Mat4> pale
 /// — itu seam #1 di docs/ARCHITECTURE.md — dan yang paling mudah bocor lewat
 /// batas itu justru penerjemahan seperti ini: bagaimana rotasi entity menjadi
 /// arah pancar, dan bagaimana sudut kerucut menjadi kosinus.
+terrain::DecalProjection ProjectDecal(const scene::DecalComponent& decal, const Mat4& local) {
+    terrain::DecalProjection projection;
+    projection.center = Vec3(local[3]);
+    // Skala X dan Z menentukan jejaknya — panjang kolom matriksnya, bukan medan
+    // skala yang sudah hilang begitu transformnya menjadi matriks.
+    projection.halfSize =
+        Vec2(glm::length(Vec3(local[0])) * 0.5f, glm::length(Vec3(local[2])) * 0.5f);
+    // Rotasi terhadap Y saja, dibaca dari arah sumbu X-nya yang diproyeksikan ke
+    // bidang datar. Kemiringan diabaikan, bukan dipaksakan: decal terrain yang
+    // menyamping tidak punya arti.
+    const Vec3 axis = Vec3(local[0]);
+    projection.rotationY = std::atan2(axis.z, axis.x);
+    projection.lift = decal.lift;
+    projection.color = decal.color;
+    projection.maxSteps = decal.maxSteps;
+    return projection;
+}
+
+/// Terrain pertama yang ditemukan di dunia, atau entity tak sah.
+///
+/// **Yang pertama, bukan yang terdekat.** Aturan yang sama dengan `FindSky` di
+/// ViewportPanel, dan karena alasan yang sama: dua terrain yang tumpang tindih
+/// di satu level adalah kesalahan penyusunan, dan memilih "yang terdekat" akan
+/// membuat decal berpindah tuan rumah ketika seseorang menggesernya sedikit.
+static scene::Entity FindTerrainHost(const scene::World& world, scene::Entity decal) {
+    // Induknya lebih dulu: itu cara menyatakan tuan rumah secara eksplisit, dan
+    // yang eksplisit harus menang atas yang ditebak.
+    const scene::Entity parent = world.ParentOf(decal);
+    if (world.IsAlive(parent) && world.TryGet<scene::TerrainComponent>(parent) != nullptr) {
+        return parent;
+    }
+    for (const auto raw : world.Registry().view<scene::TerrainComponent>()) {
+        return static_cast<scene::Entity>(raw);
+    }
+    return scene::kNullEntity;
+}
+
+void SceneView::AppendDecal(const scene::DecalComponent& component, scene::Entity entity,
+                            const Mat4& matrix, bool selected, bool pickable,
+                            const assets::AssetDatabase* assets,
+                            render::IViewportRenderer* renderer, const TerrainView& view,
+                            scene::World& world) {
+    if (view.store == nullptr || assets == nullptr || renderer == nullptr) {
+        return;
+    }
+    const scene::Entity host = FindTerrainHost(world, entity);
+    if (!world.IsAlive(host)) {
+        return;  // tidak ada terrain untuk ditempeli
+    }
+    const auto* terrainComponent = world.TryGet<scene::TerrainComponent>(host);
+    if (terrainComponent == nullptr || !terrainComponent->terrain.IsValid()) {
+        return;
+    }
+    const assets::AssetRecord* record = assets->Find(terrainComponent->terrain.guid);
+    if (record == nullptr) {
+        return;
+    }
+    terrain::Terrain* map =
+        view.store->Get(terrainComponent->terrain.guid, assets->AbsolutePath(*record));
+    if (map == nullptr) {
+        return;
+    }
+
+    // Decal berada di ruang dunia; terrain punya transformnya sendiri. Jejaknya
+    // dihitung di ruang terrain, karena di situlah heightmap-nya tinggal.
+    const Mat4 hostWorld = world.WorldMatrix(host);
+    const Mat4 toTerrain = glm::inverse(hostWorld);
+    const Mat4 local = toTerrain * matrix;
+
+    const terrain::DecalProjection projection = ProjectDecal(component, local);
+
+    CachedDecal& cached = decals_[ToSelectionId(entity)];
+    cached.touched = frame_;
+    // Revisi ubin yang memuat pusatnya: memahat di bawah decal harus
+    // membangunnya ulang, mengecat tidak.
+    const terrain::TerrainDesc& desc = map->Desc();
+    const float tileSize = static_cast<float>(desc.tileSamples) * desc.sampleSpacing;
+    const uint32_t terrainRevision = map->TileRevision(
+        static_cast<int>(projection.center.x / std::max(tileSize, 1e-3f)),
+        static_cast<int>(projection.center.z / std::max(tileSize, 1e-3f)));
+
+    if (cached.builtTransform != local || cached.builtColor != projection.color ||
+        cached.builtLift != projection.lift || cached.builtSteps != projection.maxSteps ||
+        cached.builtTerrain != terrainRevision) {
+        cached.mesh = terrain::BuildDecalMesh(*map, projection);
+        cached.builtTransform = local;
+        cached.builtColor = projection.color;
+        cached.builtLift = projection.lift;
+        cached.builtSteps = projection.maxSteps;
+        cached.builtTerrain = terrainRevision;
+        ++cached.upload;
+    }
+    if (!cached.mesh.IsValid()) {
+        return;
+    }
+
+    const std::string key = "decal:" + std::to_string(ToSelectionId(entity));
+    const render::MeshAsset mesh = renderer->AcquireMeshData(key, cached.mesh, cached.upload);
+    if (!mesh.loaded) {
+        return;
+    }
+
+    render::MeshInstance instance;
+    // Transform tuan rumahnya, bukan transform decal: geometrinya sudah berada
+    // di ruang terrain, dan memakai transform decal akan menerapkan skalanya
+    // dua kali.
+    instance.transform = hostWorld;
+    instance.mesh = mesh.handle;
+    instance.boundsMin = mesh.boundsMin;
+    instance.boundsMax = mesh.boundsMax;
+    instance.color = Vec4(1.0f);
+    instance.selected = selected;
+    // Decal tidak menjatuhkan bayangan: ia selembar kulit di atas tanah, dan
+    // bayangan yang dijatuhkannya akan mendarat di permukaan yang sama persis —
+    // menghitamkan dirinya sendiri.
+    instance.castShadows = false;
+    meshes_.push_back(instance);
+
+    if (pickable) {
+        pickables_.push_back(Pickable{entity, hostWorld, mesh.boundsMin, mesh.boundsMax});
+    }
+}
+
 void SceneView::AppendTerrain(const scene::TerrainComponent& component, scene::Entity entity,
                               const Mat4& matrix, bool selected, bool pickable,
                               const assets::AssetDatabase* assets,

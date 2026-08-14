@@ -5,6 +5,7 @@
 #include "Sim/Render/Types.h"
 #include "Sim/Editor/SkinnedPreview.h"
 #include "Sim/Editor/TerrainStore.h"
+#include "Sim/Terrain/TerrainDecal.h"
 #include "Sim/Editor/WhiteboxStore.h"
 #include "Sim/Scene/World.h"
 
@@ -20,6 +21,14 @@ namespace sim::editor {
 
 class Selection;
 class TerrainStore;
+
+/// Jejak sebuah decal, diturunkan dari transformnya di **ruang terrain**.
+///
+/// Dipisah menjadi fungsi supaya bisa diuji tanpa renderer. Yang bisa salah di
+/// sini bukan penggambarannya melainkan aritmatikanya: ukuran diambil dari
+/// panjang kolom matriks — medan skala sudah hilang begitu transformnya menjadi
+/// matriks — dan rotasinya dari arah sumbu X yang diproyeksikan ke bidang datar.
+terrain::DecalProjection ProjectDecal(const scene::DecalComponent& decal, const Mat4& local);
 
 /// Apa yang dibutuhkan untuk menggambar terrain: dokumennya, dan dari mana ia
 /// dilihat.
@@ -118,6 +127,29 @@ public:
     void AddWireBox(const Vec3& boxMin, const Vec3& boxMax, const Vec4& color);
 
 private:
+    /// Mesh decal yang sudah dibangun, beserta keadaan yang menghasilkannya.
+    ///
+    /// Di-cache dengan alasan yang sama seperti mesh ubin: `Build` berjalan tiap
+    /// frame, dan menyalin permukaan terrain di dalam jejak decal tiap frame
+    /// adalah ribuan simpul yang dihitung untuk hasil yang sama persis.
+    struct CachedDecal {
+        assets::MeshData mesh;
+        Mat4 builtTransform{0.0f};
+        Vec4 builtColor{0.0f};
+        float builtLift = -1.0f;
+        int builtSteps = -1;
+        uint32_t builtTerrain = 0;
+        uint64_t upload = 1;
+        /// Frame terakhir yang memakainya. Decal yang hilang dari scene tidak
+        /// boleh menahan meshnya selamanya.
+        uint64_t touched = 0;
+    };
+
+    void AppendDecal(const scene::DecalComponent& component, scene::Entity entity,
+                     const Mat4& matrix, bool selected, bool pickable,
+                     const assets::AssetDatabase* assets, render::IViewportRenderer* renderer,
+                     const TerrainView& view, scene::World& world);
+
     void AppendTerrain(const scene::TerrainComponent& component, scene::Entity entity,
                        const Mat4& matrix, bool selected, bool pickable,
                        const assets::AssetDatabase* assets, render::IViewportRenderer* renderer,
@@ -166,6 +198,10 @@ public:
     bool BoundsOf(const std::vector<scene::Entity>& entities, Vec3& outMin, Vec3& outMax) const;
 
 private:
+    /// Diindeks nomor entity. Bertahan lintas frame — itu gunanya.
+    std::unordered_map<uint64_t, CachedDecal> decals_;
+    uint64_t frame_ = 0;
+
     std::vector<render::MeshInstance> meshes_;
     /// Palet kulit seluruh instance ber-skin, bersambung. Tiap `MeshInstance`
     /// menunjuk ruasnya sendiri di sini.

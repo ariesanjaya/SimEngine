@@ -496,6 +496,37 @@ struct TerrainComponent {
     bool showTiles = false;
 };
 
+/// Tanda yang menempel di permukaan terrain: jalan setapak, bekas ledakan,
+/// garis batas.
+///
+/// **Ukurannya dari skala entity, bukan dari medan di sini.** Dua sumber ukuran
+/// berarti satu gizmo yang berbohong — menyeret gagang skala akan mengubah angka
+/// yang bukan yang dipakai. Skala X dan Z menentukan jejaknya; rotasi terhadap Y
+/// memutarnya.
+///
+/// Diproyeksikan lurus ke bawah, apa pun kemiringan entity-nya: decal terrain
+/// yang menyamping tidak punya arti, dan yang memiringkannya akan mendapat jejak
+/// yang menyempit tanpa ada yang menjelaskan mengapa.
+struct DecalComponent {
+    /// Warna decal. **Belum bertekstur**, dan itu bukan kelalaian: renderer ini
+    /// belum menggambar tekstur pada mesh sama sekali. UV-nya sudah dipanggang
+    /// 0..1 sepanjang jejaknya, sehingga tekstur yang menyusul tidak menuntut
+    /// membangun ulang geometrinya.
+    Vec4 color{0.85f, 0.75f, 0.55f, 1.0f};
+
+    /// Jarak angkat dari permukaan, meter.
+    ///
+    /// **Bukan nol.** Dua permukaan yang sebidang persis menghasilkan
+    /// z-fighting yang berkedip mengikuti gerakan kamera — cacat yang paling
+    /// mudah dikira bug renderer.
+    float lift = 0.02f;
+
+    /// Batas jumlah petak per sumbu. Jejaknya bisa diskalakan sebesar apa pun
+    /// oleh gizmo, dan decal selebar satu kilometer pada jarak sampel seperempat
+    /// meter adalah enam belas juta segitiga untuk sebuah noda.
+    int maxSteps = 64;
+};
+
 struct CameraComponent {
     float fovYRadians = 1.047f;  // 60°
     float nearZ = 0.05f;
