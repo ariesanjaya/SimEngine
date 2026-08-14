@@ -24,6 +24,24 @@ uint64_t ReadU64(std::span<const uint8_t> bytes, std::size_t at) {
     return value;
 }
 
+/// Apakah `[offset, offset + length)` benar-benar berada di dalam `size`.
+///
+/// **Dihitung dengan pengurangan, bukan penjumlahan.** `offset` dan `length`
+/// dibaca apa adanya dari berkas, dan berkas aset datang dari luar — dari
+/// unduhan, dari kiriman artis, dari arsip yang rusak. `offset + length`
+/// melimpah diam-diam pada nilai seperti `0xFFFFFFFFFFFFFFFF`, hasilnya
+/// mengecil, pemeriksaannya lolos, dan yang berikutnya terjadi adalah membaca
+/// memori di luar buffer.
+///
+/// Bentuk `length > size - offset` tidak bisa melimpah karena `offset <= size`
+/// sudah dipastikan lebih dulu.
+bool FitsInside(uint64_t offset, uint64_t length, std::size_t size) {
+    if (offset > size) {
+        return false;
+    }
+    return length <= static_cast<uint64_t>(size) - offset;
+}
+
 Ktx2Result Fail(std::string message) {
     Ktx2Result result;
     result.error = std::move(message);
@@ -37,10 +55,16 @@ std::span<const uint8_t> Ktx2Texture::LevelBytes(std::size_t level) const {
         return {};
     }
     const Ktx2Level& entry = levels[level];
-    if (entry.offset + entry.length > bytes.size()) {
+    // Diperiksa lagi di sini, bukan dipercayakan pada pembacanya. `Ktx2Texture`
+    // adalah struct terbuka: siapa pun boleh menyusunnya tangan, dan yang
+    // menyusunnya salah tidak boleh berakhir sebagai pointer di luar buffer.
+    if (!FitsInside(entry.offset, entry.length, bytes.size())) {
         return {};
     }
-    return std::span<const uint8_t>(bytes.data() + entry.offset,
+    // Pointer-nya dibentuk **sesudah** rentangnya terbukti di dalam. Membentuk
+    // pointer jauh di luar sebuah larik sudah merupakan perilaku tak
+    // terdefinisi, bahkan sebelum ia dibaca.
+    return std::span<const uint8_t>(bytes.data() + static_cast<std::size_t>(entry.offset),
                                     static_cast<std::size_t>(entry.length));
 }
 
@@ -94,6 +118,16 @@ Ktx2Result ReadKtx2(std::span<const uint8_t> bytes, Ktx2Texture& out) {
         return Fail("levelCount is zero, which asks the loader to generate mips itself");
     }
 
+    // Sebuah rantai mip tidak bisa lebih panjang daripada jumlah kali sebuah
+    // ukuran bisa dibagi dua — tiga puluh dua sudah jauh di atas tekstur
+    // terbesar yang bisa dibuat perangkat mana pun. Tanpa batas ini,
+    // `levelCount` bernilai empat miliar dari berkas rusak menjadi permintaan
+    // alokasi puluhan gigabyte sebelum satu byte pun diperiksa.
+    constexpr uint32_t kMaxLevels = 32;
+    if (levelCount > kMaxLevels) {
+        return Fail("levelCount " + std::to_string(levelCount) + " is impossible for a texture");
+    }
+
     const std::size_t indexBytes = static_cast<std::size_t>(levelCount) * kLevelIndexEntryBytes;
     if (bytes.size() < kHeaderBytes + indexBytes) {
         return Fail("file ends inside its level index");
@@ -122,7 +156,7 @@ Ktx2Result ReadKtx2(std::span<const uint8_t> bytes, Ktx2Texture& out) {
         if (entry.length == 0) {
             return Fail("level " + std::to_string(level) + " is empty");
         }
-        if (entry.offset + entry.length > bytes.size()) {
+        if (!FitsInside(entry.offset, entry.length, bytes.size())) {
             return Fail("level " + std::to_string(level) + " points past the end of the file");
         }
         out.levels.push_back(entry);

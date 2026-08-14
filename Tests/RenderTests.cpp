@@ -4880,3 +4880,60 @@ TEST_CASE("T0: berkas yang tidak didukung ditolak beserta sebabnya") {
     CHECK_FALSE(result.ok);
     CHECK(result.error.find("past the end") != std::string::npos);
 }
+
+TEST_CASE("T0: berkas yang dibuat jahat tidak membuat pembacanya membaca ke luar") {
+    using namespace sim::rhi;
+
+    // **Berkas aset datang dari luar** — unduhan, kiriman artis, arsip yang
+    // rusak. Pemeriksaan `offset + length > size` melimpah diam-diam pada nilai
+    // besar: hasilnya mengecil, pemeriksaannya lolos, dan yang berikutnya
+    // terjadi adalah membaca memori di luar buffer.
+    std::vector<uint8_t> file = MakeKtx2(kBc7Srgb, 16, 16, {256});
+    const std::size_t levelIndex = 80;
+    const auto put64 = [&](std::size_t at, uint64_t value) {
+        std::memcpy(file.data() + at, &value, sizeof(value));
+    };
+
+    Ktx2Texture texture;
+
+    // Offset raksasa dengan panjang satu: `offset + length` membungkus menjadi
+    // nol pada aritmetika 64 bit.
+    put64(levelIndex, 0xFFFFFFFFFFFFFFFFull);
+    put64(levelIndex + 8, 1);
+    Ktx2Result result = ReadKtx2(file, texture);
+    INFO(result.error);
+    CHECK_FALSE(result.ok);
+
+    // Panjang raksasa dengan offset yang sah — bentuk yang sama, sisi lain.
+    put64(levelIndex, 80 + 24);
+    put64(levelIndex + 8, 0xFFFFFFFFFFFFFF00ull);
+    result = ReadKtx2(file, texture);
+    INFO(result.error);
+    CHECK_FALSE(result.ok);
+
+    // Offset tepat di ujung berkas dengan panjang nol pun tidak lolos: level
+    // kosong ditolak lebih dulu, dan yang penting di sini ia tidak membentuk
+    // pointer di luar larik.
+    put64(levelIndex, file.size());
+    put64(levelIndex + 8, 0);
+    CHECK_FALSE(ReadKtx2(file, texture).ok);
+
+    // `levelCount` empat miliar adalah permintaan alokasi puluhan gigabyte
+    // sebelum satu byte pun diperiksa.
+    std::vector<uint8_t> huge = MakeKtx2(kBc7Srgb, 16, 16, {256});
+    uint32_t levels = 0xFFFFFFFFu;
+    std::memcpy(huge.data() + 40, &levels, sizeof(levels));
+    result = ReadKtx2(huge, texture);
+    CHECK_FALSE(result.ok);
+    CHECK(result.error.find("impossible") != std::string::npos);
+
+    // Dan `Ktx2Texture` yang disusun tangan dengan rentang yang melimpah tetap
+    // menjawab kosong: ia struct terbuka, dan yang menyusunnya salah tidak boleh
+    // berakhir sebagai pointer di luar buffer.
+    Ktx2Texture handmade;
+    handmade.width = 4;
+    handmade.height = 4;
+    handmade.bytes.assign(64, 0);
+    handmade.levels.push_back(Ktx2Level{0xFFFFFFFFFFFFFFFFull, 1, 1, 4, 4});
+    CHECK(handmade.LevelBytes(0).empty());
+}
