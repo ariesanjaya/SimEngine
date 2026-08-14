@@ -7,8 +7,7 @@
 #include "Sim/Editor/TerrainStore.h"
 #include "Sim/Terrain/TerrainDecal.h"
 #include "Sim/Editor/WhiteboxStore.h"
-#include "Sim/Material/MaterialParameterBlock.h"
-#include "Sim/Material/ShaderCache.h"
+#include "Sim/Editor/MaterialPrograms.h"
 #include "Sim/Scene/World.h"
 
 #include <filesystem>
@@ -133,11 +132,10 @@ public:
     /// `.ktx2`.
     void SetTextureBakery(assets::TextureBakery* bakery) { bakery_ = bakery; }
 
-    /// Tempat SPIR-V material di-cache, dan tempat berkas shader renderer
-    /// dibaca. Kosong berarti tidak ada material yang dikompilasi sama sekali —
-    /// dan setiap ruas digambar jalur mundur `box.frag`, seperti sebelum jalur
-    /// ini ada.
-    void SetShaderPaths(std::filesystem::path shaderCacheDir, std::filesystem::path shaderDir);
+    /// Penjaga shader material. Null berarti tidak ada material yang
+    /// dikompilasi sama sekali — dan setiap ruas digambar jalur mundur
+    /// `box.frag`, seperti sebelum jalur ini ada.
+    void SetMaterialPrograms(MaterialPrograms* programs) { materialPrograms_ = programs; }
 
     /// Menambahkan kotak wireframe sejajar sumbu, sesudah `Build`.
     ///
@@ -193,13 +191,10 @@ private:
     /// Material sebuah ruas sebagai pipeline yang sudah dibangun renderer, atau
     /// nol bila ia harus digambar jalur mundur.
     ///
-    /// **Dikompilasi sekali per GUID lalu diingat.** Merakit modul dan
-    /// memanggil `slangc` adalah puluhan milidetik; melakukannya tiap frame
-    /// adalah editor yang berhenti bergerak.
+    /// **Yang mengompilasinya `MaterialPrograms`, di `TaskPool`.** Yang di sini
+    /// hanya menanyakannya dan menerima jawaban "belum" tanpa menunggu.
     render::MaterialHandle ForwardMaterial(const assets::AssetDatabase* assets,
                                            render::IViewportRenderer* renderer, const Uuid& guid);
-    /// Menyiapkan cache shader dan membaca berkas renderer sekali per sesi.
-    bool EnsureShaderToolchain();
     /// Warna material bawaan editor — yang mengisi mesh tanpa material sendiri.
     Vec4 BuiltinColor(const assets::AssetDatabase* builtinAssets);
     void AppendPartColors(const scene::MeshRendererComponent& renderer, uint32_t partCount,
@@ -256,18 +251,7 @@ private:
     /// Sejajar dengan `partColors_`, dengan alasan yang sama persis.
     std::vector<render::MaterialHandle> partMaterials_;
     assets::TextureBakery* bakery_ = nullptr;
-    std::filesystem::path shaderCacheDir_;
-    std::filesystem::path shaderDir_;
-    material::ShaderCache shaderCache_;
-    std::string openPbrPrelude_;
-    std::string frameDeclarations_;
-    /// 0 belum dicoba, 1 siap, 2 tidak tersedia. Dicoba tepat sekali: mesin
-    /// tanpa `slangc` tidak boleh mencoba memanggilnya per frame.
-    int toolchainState_ = 0;
-    std::unordered_map<Uuid, render::MaterialHandle> materialProgram_;
-    material::MaterialParameterBlock parameterBlock_;
-    std::vector<uint8_t> parameterBytes_;
-    std::vector<render::TextureHandle> materialTextures_;
+    MaterialPrograms* materialPrograms_ = nullptr;
     std::vector<render::LineSegment> lines_;
     std::vector<render::LightInstance> lights_;
     std::vector<Pickable> pickables_;

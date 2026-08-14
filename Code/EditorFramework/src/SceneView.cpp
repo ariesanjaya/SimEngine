@@ -6,8 +6,6 @@
 #include "Sim/Assets/MaterialImport.h"
 #include "Sim/Material/MaterialGraph.h"
 #include "Sim/Core/Log.h"
-#include "Sim/Material/MaterialShaderModule.h"
-#include "Sim/Material/MaterialCompiler.h"
 #include "Sim/Material/MaterialInstance.h"
 #include "Sim/Material/MaterialNodeCatalog.h"
 #include "Sim/Editor/EditorContext.h"
@@ -420,152 +418,23 @@ render::TextureHandle SceneView::UploadedTexture(const assets::AssetDatabase* as
     return render::kInvalidTexture;
 }
 
-void SceneView::SetShaderPaths(std::filesystem::path shaderCacheDir,
-                               std::filesystem::path shaderDir) {
-    if (shaderCacheDir == shaderCacheDir_ && shaderDir == shaderDir_) {
-        return;
-    }
-    shaderCacheDir_ = std::move(shaderCacheDir);
-    shaderDir_ = std::move(shaderDir);
-    // Jalur yang berganti berarti seluruh yang sudah dikompilasi dibangun
-    // terhadap berkas yang lain. Dicoba lagi dari nol, bukan dipakai apa adanya.
-    toolchainState_ = 0;
-    materialProgram_.clear();
-}
-
-bool SceneView::EnsureShaderToolchain() {
-    if (toolchainState_ != 0) {
-        return toolchainState_ == 1;
-    }
-    toolchainState_ = 2;
-    if (shaderCacheDir_.empty() || shaderDir_.empty()) {
-        return false;
-    }
-    const std::string identity = material::SlangCompilerIdentity();
-    if (identity.empty()) {
-        // **Dilaporkan sekali, bukan didiamkan.** Tanpa slangc setiap ruas
-        // digambar jalur mundur, dan yang melihatnya akan mengira materialnya
-        // yang salah alih-alih toolchain-nya yang tidak ada.
-        SIM_WARN("Editor", "slangc not found — meshes draw with the fallback shader");
-        return false;
-    }
-    openPbrPrelude_ = material::LoadOpenPbrPrelude(shaderDir_);
-    if (openPbrPrelude_.empty()) {
-        SIM_WARN("Editor", "openpbr.slang not found in {}", shaderDir_.string());
-        return false;
-    }
-    // Berkas yang sama persis yang di-`#include` `box.frag`. Lihat catatannya di
-    // `AssembleForwardMaterialModule`.
-    frameDeclarations_ = material::InlineShaderIncludes(
-        shaderDir_, {"box_varyings.slang", "cluster_common.slang", "gi_resolve.slang"});
-    if (frameDeclarations_.empty()) {
-        SIM_WARN("Editor", "renderer shader headers not found in {}", shaderDir_.string());
-        return false;
-    }
-    shaderCache_.Configure(shaderCacheDir_, identity);
-    shaderCache_.SetCompiler(material::MakeSlangCompiler());
-    toolchainState_ = 1;
-    return true;
-}
-
+/// Material sebuah ruas, lewat `MaterialPrograms`.
+///
+/// **Yang belum selesai dikompilasi menjawab nol, dan nol berarti jalur
+/// mundur.** Ruas itu tetap tergambar — `box.frag` dengan albedonya — jadi yang
+/// terlihat saat sebuah level dibuka adalah permukaan yang berubah rupa begitu
+/// materialnya siap, bukan permukaan yang muncul dari ketiadaan.
 render::MaterialHandle SceneView::ForwardMaterial(const assets::AssetDatabase* assets,
                                                   render::IViewportRenderer* renderer,
                                                   const Uuid& guid) {
-    if (assets == nullptr || renderer == nullptr) {
+    if (assets == nullptr || renderer == nullptr || materialPrograms_ == nullptr) {
         return render::kInvalidMaterial;
     }
-    if (const auto found = materialProgram_.find(guid); found != materialProgram_.end()) {
-        return found->second;
-    }
-    // Hasilnya diingat lebih dulu, termasuk kegagalannya: merakit modul dan
-    // memanggil slangc tiap frame untuk material yang memang tidak bisa
-    // dikompilasi adalah editor yang berhenti bergerak.
-    materialProgram_.emplace(guid, render::kInvalidMaterial);
-    if (!EnsureShaderToolchain()) {
-        return render::kInvalidMaterial;
-    }
-
-    const assets::AssetRecord* record = assets->Find(guid);
-    if (record == nullptr) {
-        return render::kInvalidMaterial;
-    }
-
-    // **Graph-nya milik induk, nilainya milik instance.** Yang dirujuk sebuah
-    // ruas hampir selalu `.simmatinst`; yang menyatakan node dan parameternya
-    // adalah `.simmat` di atasnya. Berkas yang bukan instance dibuka sebagai
-    // graph apa adanya — itu material yang ditulis tangan, dan ia sah.
-    material::MaterialInstance instance;
-    material::MaterialGraph graph;
-    const std::filesystem::path path = assets->AbsolutePath(*record);
-    if (material::LoadInstanceFromFile(instance, path).ok) {
-        const assets::AssetRecord* parent = assets->Find(instance.parent);
-        if (parent == nullptr ||
-            !material::LoadMaterialFromFile(graph, assets->AbsolutePath(*parent)).ok) {
-            return render::kInvalidMaterial;
-        }
-    } else if (!material::LoadMaterialFromFile(graph, path).ok) {
-        return render::kInvalidMaterial;
-    }
-
-    const material::MaterialCompileResult compiled = material::CompileMaterial(graph);
-    if (!compiled.ok) {
-        SIM_WARN("Editor", "material {} does not compile", record->name);
-        return render::kInvalidMaterial;
-    }
-
-    material::ForwardMaterialOptions options;
-    options.prelude = openPbrPrelude_;
-    options.frameDeclarations = frameDeclarations_;
-    options.lobes = compiled.lobes;
-    const material::CompileOutput fragment =
-        shaderCache_.Get(material::MakeForwardMaterialRequest(compiled.slang, options));
-    if (!fragment.ok) {
-        SIM_WARN("Editor", "material {} failed to compile: {}", record->name, fragment.error);
-        return render::kInvalidMaterial;
-    }
-
-    parameterBlock_.Build(graph.parameters);
-    parameterBlock_.Fill(graph.parameters, instance.overrides, parameterBytes_);
-
-    // Tekstur tiap slot, urutannya urutan deklarasi kompiler. Slot yang diisi
-    // parameter diambil dari instance; yang tidak, dari node-nya sendiri —
-    // pembagian yang sama yang dipegang `ResolveTextures`.
-    materialTextures_.clear();
-    materialTextures_.reserve(compiled.textures.size());
-    for (const material::TextureBinding& binding : compiled.textures) {
-        Uuid image = binding.texture;
-        if (!binding.parameter.empty()) {
-            const Uuid overridden = instance.Texture(binding.parameter);
-            if (overridden.IsValid()) {
-                image = overridden;
-            }
-        }
-        materialTextures_.push_back(image.IsValid() ? UploadedTexture(assets, renderer, image)
-                                                    : render::kInvalidTexture);
-    }
-
-    // Kuncinya memuat hash SPIR-V-nya, bukan hanya GUID-nya. Material yang
-    // disunting menghasilkan shader yang lain, dan kunci yang cuma GUID akan
-    // membuat renderer dengan patuh mengembalikan pipeline yang lama.
-    uint64_t hash = 1469598103934665603ull;
-    for (const uint32_t word : fragment.spirv) {
-        hash = (hash ^ word) * 1099511628211ull;
-    }
-    for (const uint8_t byte : parameterBytes_) {
-        hash = (hash ^ byte) * 1099511628211ull;
-    }
-    for (const render::TextureHandle texture : materialTextures_) {
-        hash = (hash ^ texture) * 1099511628211ull;
-    }
-
-    render::IViewportRenderer::MaterialProgram program;
-    program.fragmentSpirv = fragment.spirv;
-    program.parameters = parameterBytes_;
-    program.textures = materialTextures_;
-    const render::MaterialHandle handle =
-        renderer->AcquireMaterial(guid.ToString() + ":" + std::to_string(hash), program);
-    materialProgram_[guid] = handle;
-    return handle;
+    const MaterialProgramRef program = materialPrograms_->Request(
+        *assets, guid, *renderer,
+        [&](const Uuid& image) { return UploadedTexture(assets, renderer, image); });
+    return program.state == MaterialProgramState::Ready ? program.handle
+                                                        : render::kInvalidMaterial;
 }
 
 /// Warna material bawaan editor — yang mengisi mesh tanpa material sendiri.

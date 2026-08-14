@@ -27,6 +27,7 @@ class ScriptRuntime;
 }
 
 namespace sim::editor {
+class MaterialPrograms;
 
 class SkinnedPreview;
 
@@ -99,6 +100,9 @@ struct EditorContext {
     /// aset dan bukan penggambaran: ia mendekode PNG, membangkitkan mip, dan
     /// menjalankan encoder BC7. Renderer hanya menerima `.ktx2`-nya.
     assets::TextureBakery* textureBakery = nullptr;
+    /// Penjaga shader material untuk pass forward. Dimiliki pemanggil EditorApp,
+    /// dan seperti baker tekstur ia mengerjakan pekerjaannya di `TaskPool`.
+    MaterialPrograms* materialPrograms = nullptr;
     /// Perender kedua untuk Mesh Editor: target rendernya sendiri, dengan
     /// alasan yang sama seperti pratinjau material — panel Viewport dan panel
     /// ini sama-sama menggambar `ImGui::Image()`, dan satu target berarti yang

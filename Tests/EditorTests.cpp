@@ -1,6 +1,10 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 
 #include "Sim/Editor/Actions.h"
+#include "Sim/Render/IViewportRenderer.h"
+#include "Sim/Core/TaskPool.h"
+#include "Sim/Assets/AssetDatabase.h"
+#include "Sim/Editor/MaterialPrograms.h"
 #include "Sim/Editor/Command.h"
 #include "Sim/Editor/PanelManager.h"
 #include "Sim/Editor/Selection.h"
@@ -9,13 +13,16 @@
 #include <doctest/doctest.h>
 
 #include <cstdio>
+#include <atomic>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <unistd.h>
 #include <vector>
 #include <cstdlib>
 
+using namespace sim;
 using namespace sim::editor;
 
 namespace {
@@ -477,4 +484,271 @@ TEST_CASE("Impor yang tidak menghasilkan apa pun dilaporkan sebagai galat") {
         ImportSource("/tidak/ada/berkas.fbx", folder.Path(), SourceImportOptions{});
     CHECK_FALSE(missing.ok);
     CHECK(missing.error == "file not found");
+}
+
+// ---------------------------------------------------------------------------
+// E8.4 #4 — shader material dikompilasi di TaskPool
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// Folder sementara yang membersihkan dirinya sendiri.
+class TempDir {
+public:
+    TempDir() {
+        static std::atomic<int> counter{0};
+        path_ = std::filesystem::temp_directory_path() /
+                ("simeditor_" + std::to_string(counter.fetch_add(1)) + "_" +
+                 std::to_string(::getpid()));
+        std::filesystem::create_directories(path_);
+    }
+    ~TempDir() {
+        std::error_code error;
+        std::filesystem::remove_all(path_, error);
+    }
+    const std::filesystem::path& Path() const { return path_; }
+
+private:
+    std::filesystem::path path_;
+};
+
+/// Perender tiruan yang hanya mencatat apa yang diserahkan kepadanya.
+///
+/// **Cukup untuk menguji seluruh jalur kecuali Vulkan-nya**, dan itu memang
+/// batas yang benar: yang diuji di sini adalah bahwa kompilasi berjalan di luar
+/// thread pemanggil, bahwa hasilnya sampai utuh, dan bahwa ia terjadi sekali.
+class RecordingRenderer final : public render::IViewportRenderer {
+public:
+    void Resize(uint32_t, uint32_t) override {}
+    render::MeshAsset AcquireMesh(std::string_view) override { return {}; }
+    void Render(const render::ViewportDesc&, const render::ViewportScene&) override {}
+    render::TextureHandle ColorTarget() const override { return 0; }
+    Vec2 ColorTargetUvMax() const override { return Vec2(1.0f); }
+    uint32_t Width() const override { return 0; }
+    uint32_t Height() const override { return 0; }
+    const char* Name() const override { return "recording"; }
+
+    render::MaterialHandle AcquireMaterial(std::string_view key,
+                                           const MaterialProgram& program) override {
+        ++acquires;
+        lastKey = std::string(key);
+        spirvWords = program.fragmentSpirv.size();
+        parameterBytes = program.parameters.size();
+        textureCount = program.textures.size();
+        return static_cast<render::MaterialHandle>(acquires);
+    }
+
+    int acquires = 0;
+    std::string lastKey;
+    std::size_t spirvWords = 0;
+    std::size_t parameterBytes = 0;
+    std::size_t textureCount = 0;
+};
+
+/// Project sementara berisi satu material bawaan yang disalin dari repo.
+std::filesystem::path CopyBuiltinMaterial(const std::filesystem::path& assetsDir) {
+    std::error_code error;
+    std::filesystem::create_directories(assetsDir, error);
+    const std::filesystem::path source =
+        std::filesystem::path(SIM_BUILTIN_DIR) / "Materials" / "Default.simmat";
+    const std::filesystem::path target = assetsDir / "Default.simmat";
+    std::filesystem::copy_file(source, target,
+                               std::filesystem::copy_options::overwrite_existing, error);
+    return error ? std::filesystem::path{} : target;
+}
+
+}  // namespace
+
+TEST_CASE("E8.4: shader material dikompilasi di TaskPool, bukan di thread pemanggil") {
+    // **Inilah alasan MaterialPrograms ada.** Satu panggilan slangc adalah
+    // detik, dan detik di dalam `SceneView::Build` berarti editor membeku tepat
+    // pada frame sebuah level dibuka.
+    TempDir temp;
+    const std::filesystem::path assetsDir = temp.Path() / "Assets";
+    const std::filesystem::path material = CopyBuiltinMaterial(assetsDir);
+    if (material.empty()) {
+        MESSAGE("material bawaan tidak terbaca — uji dilewati");
+        return;
+    }
+
+    TaskPool tasks;
+    assets::AssetDatabase database;
+    database.Initialize({assetsDir, &tasks, 0.0f});
+    tasks.WaitIdle();
+    database.Update(0.0f);
+
+    const assets::AssetRecord* record = database.FindByRelativePath("Default.simmat");
+    REQUIRE_MESSAGE(record != nullptr, "material tidak masuk indeks");
+    const Uuid guid = record->guid;
+
+    MaterialPrograms programs(temp.Path() / "ShaderCache", SIM_SHADER_DIR, &tasks);
+    if (!programs.Usable()) {
+        MESSAGE("slangc tidak ditemukan — uji dilewati");
+        return;
+    }
+
+    RecordingRenderer renderer;
+    const auto resolve = [](const Uuid&) { return render::kInvalidTexture; };
+
+    // Frame pertama: belum siap, dan **tidak menunggu**.
+    const MaterialProgramRef first =
+        programs.Request(database, guid, renderer, resolve);
+    CHECK(first.state == MaterialProgramState::Pending);
+    CHECK(first.handle == render::kInvalidMaterial);
+    CHECK(renderer.acquires == 0);
+
+    // Permintaan berulang pada frame yang sama tidak mengantre tugas kedua.
+    CHECK(programs.Request(database, guid, renderer, resolve).state ==
+          MaterialProgramState::Pending);
+    CHECK(programs.Request(database, guid, renderer, resolve).state ==
+          MaterialProgramState::Pending);
+
+    tasks.WaitIdle();
+    // **Sekali, bukan tiga kali.** Tiga permintaan pada frame yang sama untuk
+    // material yang sama menghasilkan SPIR-V yang identik, jadi tugas kedua dan
+    // ketiga tidak punya satu pun akibat yang terlihat — yang terbuang hanya
+    // beberapa detik inti, diam-diam.
+    CHECK(programs.CompileCount() == 1);
+
+    // Frame berikutnya: pipeline dibangun **di thread ini**, karena hanya main
+    // thread yang boleh menyentuh renderer.
+    const MaterialProgramRef ready =
+        programs.Request(database, guid, renderer, resolve);
+    CHECK(ready.state == MaterialProgramState::Ready);
+    CHECK(ready.handle != render::kInvalidMaterial);
+    CHECK(renderer.acquires == 1);
+    CHECK(renderer.spirvWords > 0);
+    CHECK(programs.PendingCount() == 0);
+
+    // Dan sesudahnya tidak dibangun lagi, betapapun sering ia diminta.
+    for (int i = 0; i < 5; ++i) {
+        CHECK(programs.Request(database, guid, renderer, resolve).handle == ready.handle);
+    }
+    CHECK(renderer.acquires == 1);
+    CHECK(programs.CompileCount() == 1);
+
+    // Kuncinya memuat hash SPIR-V-nya, bukan hanya GUID-nya: material yang
+    // disunting menghasilkan shader yang lain, dan kunci yang cuma GUID membuat
+    // renderer mengembalikan pipeline yang lama.
+    CHECK(renderer.lastKey.find(guid.ToString()) == 0);
+    CHECK(renderer.lastKey.size() > guid.ToString().size() + 1);
+}
+
+TEST_CASE("E8.4: material yang tidak ada di indeks gagal, dan tidak dicoba lagi") {
+    TempDir temp;
+    TaskPool tasks;
+    assets::AssetDatabase database;
+    database.Initialize({temp.Path() / "Assets", &tasks, 0.0f});
+    tasks.WaitIdle();
+
+    MaterialPrograms programs(temp.Path() / "ShaderCache", SIM_SHADER_DIR, &tasks);
+    if (!programs.Usable()) {
+        MESSAGE("slangc tidak ditemukan — uji dilewati");
+        return;
+    }
+
+    RecordingRenderer renderer;
+    const auto resolve = [](const Uuid&) { return render::kInvalidTexture; };
+    const Uuid missing = Uuid::Generate();
+
+    CHECK(programs.Request(database, missing, renderer, resolve).state ==
+          MaterialProgramState::Failed);
+    CHECK(programs.Request(database, missing, renderer, resolve).state ==
+          MaterialProgramState::Failed);
+    CHECK(renderer.acquires == 0);
+    CHECK(programs.PendingCount() == 0);
+}
+
+TEST_CASE("E8.4: material rusak diingat gagal sampai dilupakan") {
+    TempDir temp;
+    const std::filesystem::path assetsDir = temp.Path() / "Assets";
+    std::error_code error;
+    std::filesystem::create_directories(assetsDir, error);
+    {
+        std::ofstream broken(assetsDir / "Rusak.simmat");
+        broken << "ini bukan material";
+    }
+
+    TaskPool tasks;
+    assets::AssetDatabase database;
+    database.Initialize({assetsDir, &tasks, 0.0f});
+    tasks.WaitIdle();
+    database.Update(0.0f);
+    const assets::AssetRecord* record = database.FindByRelativePath("Rusak.simmat");
+    REQUIRE(record != nullptr);
+    const Uuid guid = record->guid;
+
+    MaterialPrograms programs(temp.Path() / "ShaderCache", SIM_SHADER_DIR, &tasks);
+    if (!programs.Usable()) {
+        MESSAGE("slangc tidak ditemukan — uji dilewati");
+        return;
+    }
+    RecordingRenderer renderer;
+    const auto resolve = [](const Uuid&) { return render::kInvalidTexture; };
+
+    CHECK(programs.Request(database, guid, renderer, resolve).state ==
+          MaterialProgramState::Pending);
+    tasks.WaitIdle();
+    CHECK(programs.Request(database, guid, renderer, resolve).state ==
+          MaterialProgramState::Failed);
+    CHECK(programs.CompileCount() == 1);
+
+    // **Dan ia benar-benar diingat, bukan sekadar gagal lagi dengan cara yang
+    // sama.** Berkasnya diganti dengan yang sah; jawabannya tetap gagal, dan
+    // tidak ada satu pun panggilan slangc yang bertambah — itu yang mencegah
+    // material rusak dikompilasi enam puluh kali per detik.
+    std::filesystem::copy_file(
+        std::filesystem::path(SIM_BUILTIN_DIR) / "Materials" / "Default.simmat",
+        assetsDir / "Rusak.simmat", std::filesystem::copy_options::overwrite_existing, error);
+    REQUIRE_MESSAGE(!error, error.message());
+    CHECK(programs.Request(database, guid, renderer, resolve).state ==
+          MaterialProgramState::Failed);
+    CHECK(programs.CompileCount() == 1);
+
+    // Dan `Invalidate` itulah jalan keluarnya — yang dipanggil ketika berkasnya
+    // berubah.
+    programs.Invalidate(guid);
+    CHECK(programs.Request(database, guid, renderer, resolve).state ==
+          MaterialProgramState::Pending);
+    tasks.WaitIdle();
+    CHECK(programs.Request(database, guid, renderer, resolve).state ==
+          MaterialProgramState::Ready);
+    CHECK(programs.CompileCount() == 2);
+}
+
+TEST_CASE("E8.4: tanpa TaskPool, kompilasi dikerjakan di tempat dan langsung siap") {
+    // **Jalur ini tidak pernah dilewati editor**, jadi tidak ada yang akan
+    // menemukan kesalahannya di sana. Ia sempat mengunci dirinya sendiri —
+    // `Compile` mengambil kunci yang masih dipegang pemanggilnya — dan yang
+    // menemukannya sebuah mutasi, bukan sebuah sesi.
+    TempDir temp;
+    const std::filesystem::path assetsDir = temp.Path() / "Assets";
+    const std::filesystem::path material = CopyBuiltinMaterial(assetsDir);
+    if (material.empty()) {
+        MESSAGE("material bawaan tidak terbaca — uji dilewati");
+        return;
+    }
+
+    TaskPool tasks;
+    assets::AssetDatabase database;
+    database.Initialize({assetsDir, &tasks, 0.0f});
+    tasks.WaitIdle();
+    database.Update(0.0f);
+    const assets::AssetRecord* record = database.FindByRelativePath("Default.simmat");
+    REQUIRE(record != nullptr);
+
+    MaterialPrograms programs(temp.Path() / "ShaderCache", SIM_SHADER_DIR, /*tasks=*/nullptr);
+    if (!programs.Usable()) {
+        MESSAGE("slangc tidak ditemukan — uji dilewati");
+        return;
+    }
+    RecordingRenderer renderer;
+    const auto resolve = [](const Uuid&) { return render::kInvalidTexture; };
+
+    // Sekali panggil, langsung siap — tanpa frame kedua dan tanpa `WaitIdle`.
+    const MaterialProgramRef ref = programs.Request(database, record->guid, renderer, resolve);
+    CHECK(ref.state == MaterialProgramState::Ready);
+    CHECK(ref.handle != render::kInvalidMaterial);
+    CHECK(renderer.acquires == 1);
+    CHECK(programs.CompileCount() == 1);
 }

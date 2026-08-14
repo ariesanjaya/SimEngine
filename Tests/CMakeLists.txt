@@ -94,7 +94,14 @@ sim_add_test(SimEditorTests
 # Impor berkas sumber diuji terhadap mesh sungguhan di folder sumber, alasan
 # yang sama dengan SIM_MESH_DIR pada SimAssetTests.
 target_compile_definitions(SimEditorTests
-    PRIVATE SIM_MESH_DIR="${CMAKE_SOURCE_DIR}/Resources/Meshes")
+    PRIVATE SIM_MESH_DIR="${CMAKE_SOURCE_DIR}/Resources/Meshes"
+    # Shader renderer dan `openpbr.slang`, dibaca dari folder sumber: uji yang
+    # mengompilasi material harus memakai berkas yang sedang ada di repo.
+    PRIVATE SIM_SHADER_DIR="${CMAKE_SOURCE_DIR}/Shaders"
+    # Material bawaan editor, dipakai uji sebagai material sungguhan yang bisa
+    # dikompilasi — bukan graph buatan uji, yang hanya membuktikan uji itu
+    # sepakat dengan dirinya sendiri.
+    PRIVATE SIM_BUILTIN_DIR="${CMAKE_SOURCE_DIR}/Resources")
 
 sim_add_test(SimAssetTests
     SOURCES
