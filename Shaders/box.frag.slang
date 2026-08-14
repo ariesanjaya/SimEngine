@@ -10,6 +10,16 @@
 /// yang selalu terlalu terang.
 static const float kFallbackAmbient = 0.25;
 
+/// Albedo ruas ini, di set material — **nomor set dan binding yang sama persis
+/// dengan yang dihasilkan kompiler graph material.** Ruas tanpa tekstur
+/// mendapat putih 1x1, yaitu nilai satuan perkalian.
+///
+/// Tekstur dan sampler terpisah, bukan `Sampler2D` gabungan: itu bentuk yang
+/// ditulis kompiler graph, dan menyamakannya sekarang berarti pipeline material
+/// nanti mengganti shader ini tanpa menyentuh satu pun descriptor.
+[[vk::binding(1, 2)]] Texture2D<float4> baseColorTexture;
+[[vk::binding(2, 2)]] SamplerState baseColorSampler;
+
 [shader("fragment")]
 float4 main(BoxVarying input) : SV_Target {
     // Pencahayaan sementara: satu arah plus ambient. Bukan model shading —
@@ -55,7 +65,12 @@ float4 main(BoxVarying input) : SV_Target {
     }
     // Radiance matahari datang dari scene sekarang — warna dikali intensitas
     // dikali eksposur — bukan lagi angka 0,75 yang ditulis di sini.
-    float3 lit = input.color.rgb *
+    // **Dikalikan, bukan menggantikan.** Ruas tanpa tekstur membawa putih, dan
+    // putih tidak mengubah apa pun — jadi setiap mesh yang sudah ada tergambar
+    // persis seperti sebelum jalur ini ada.
+    float4 albedo = baseColorTexture.Sample(baseColorSampler, input.uv);
+    float3 surface = input.color.rgb * albedo.rgb;
+    float3 lit = surface *
                  (indirect + shadowParams.sunRadiance.rgb * (ndotl * shadow) + punctual);
-    return float4(lit, input.color.a);
+    return float4(lit, input.color.a * albedo.a);
 }

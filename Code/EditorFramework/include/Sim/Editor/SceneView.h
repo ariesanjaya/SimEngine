@@ -208,6 +208,8 @@ private:
     std::vector<Mat4> skinMatrices_;
     /// Warna per slot material seluruh instance, bersambung.
     std::vector<Vec4> partColors_;
+    /// Sejajar dengan `partColors_`. Nol berarti ruas itu tanpa tekstur.
+    std::vector<render::TextureHandle> partTextures_;
     std::vector<render::LineSegment> lines_;
     std::vector<render::LightInstance> lights_;
     std::vector<Pickable> pickables_;

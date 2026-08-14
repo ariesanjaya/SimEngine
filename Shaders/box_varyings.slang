@@ -22,6 +22,7 @@ struct BoxVarying {
     [[vk::location(0)]] float3 normal;
     [[vk::location(1)]] float4 color;
     [[vk::location(2)]] float3 worldPosition;
+    [[vk::location(4)]] float2 uv;
     // `nointerpolation`: bitmask tidak punya arti kalau diinterpolasi
     // antar-vertex.
     [[vk::location(3)]] nointerpolation uint flags;

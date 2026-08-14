@@ -43,6 +43,10 @@ struct BoxVertex {
     // seperti sebelum atribut ini ada. Yang memakainya hari ini terrain, yang
     // memadukan warna layernya menurut bobot cat dan memanggangnya ke simpul.
     [[vk::location(11)]] float4 vertexColor;
+    // UV. Sudah terunggah ke GPU sejak mesh sungguhan masuk — buffer vertexnya
+    // di-`memcpy` dari `MeshVertex` apa adanya — dan yang belum ada selama ini
+    // hanya deklarasi ini.
+    [[vk::location(12)]] float2 uv;
 };
 
 float4x4 instanceModel(BoxVertex vertex) {

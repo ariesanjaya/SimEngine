@@ -1183,6 +1183,18 @@ private:
                           record->height, record->channels);
             DetailRow("Dimensions", dimensions);
         }
+        if (record->triangleCount > 0) {
+            char stats[80];
+            std::snprintf(stats, sizeof(stats), "%u tris, %u verts", record->triangleCount,
+                          record->vertexCount);
+            DetailRow("Geometry", stats);
+        } else if (record->type == assets::AssetType::Mesh) {
+            // Disebutkan, bukan dikosongkan. Baris yang hilang terbaca sebagai
+            // "mesh ini tidak punya segitiga"; yang ini menjelaskan bahwa
+            // angkanya datang dari yang memuatnya, dan mesh ini belum pernah
+            // dimuat.
+            DetailRow("Geometry", "not loaded yet");
+        }
         DetailRow("GUID", record->guid.ToString().c_str());
         if (ImGui::IsItemClicked()) {
             ImGui::SetClipboardText(record->guid.ToString().c_str());

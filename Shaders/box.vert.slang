@@ -53,6 +53,7 @@ BoxVarying main(BoxVertex vertex) {
     // tembus pandang; sorotan seleksi memakai jalur `forceInstanceColor` di
     // atas dan karena itu tidak ikut teredam warna simpul.
     output.color = tint * vertex.vertexColor;
+    output.uv = vertex.uv;
     output.worldPosition = world.xyz;
     output.flags = vertex.flags;
     output.position = mul(push.viewProj, world);

@@ -153,6 +153,24 @@ void AssetDatabase::Shutdown() {
     snapshot_ = {};
 }
 
+void AssetDatabase::ReportMeshStats(const Uuid& guid, uint32_t triangles, uint32_t vertices) {
+    if (!guid.IsValid() || triangles == 0) {
+        return;
+    }
+    auto& stats = meshStats_[guid];
+    if (stats.first == triangles && stats.second == vertices) {
+        return;  // sudah tercatat; tidak ada yang berubah
+    }
+    stats = {triangles, vertices};
+    // Record yang sedang hidup ikut diisi supaya panel melihatnya frame ini,
+    // bukan setelah pemindaian berikutnya kebetulan berjalan.
+    const auto found = byGuid_.find(guid);
+    if (found != byGuid_.end()) {
+        records_[found->second].triangleCount = triangles;
+        records_[found->second].vertexCount = vertices;
+    }
+}
+
 void AssetDatabase::ScanNow() {
     Apply(Scan(root_, snapshot_));
 }
@@ -360,6 +378,14 @@ void AssetDatabase::Reindex() {
     byPath_.reserve(records_.size());
     for (std::size_t i = 0; i < records_.size(); ++i) {
         byGuid_.emplace(records_[i].guid, i);
+        // Statistik mesh dituangkan kembali ke record yang baru. Isi indeks
+        // ditukar utuh tiap pemindaian, jadi angka yang tidak dituang ulang di
+        // sini akan hilang beberapa detik sesudah dilaporkan.
+        const auto stats = meshStats_.find(records_[i].guid);
+        if (stats != meshStats_.end()) {
+            records_[i].triangleCount = stats->second.first;
+            records_[i].vertexCount = stats->second.second;
+        }
         byPath_.emplace(records_[i].relativePath, i);
     }
 

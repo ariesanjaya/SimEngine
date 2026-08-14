@@ -9,6 +9,7 @@
 #include "SdfClipmapResource.h"
 #include "Sim/Assets/MeshData.h"
 #include "Sim/Core/Log.h"
+#include "Sim/ImageIO/ImageIO.h"
 #include "Sim/RHI/Buffer.h"
 #include "Sim/RHI/Device.h"
 #include "Sim/RHI/GpuProfiler.h"
@@ -687,6 +688,7 @@ public:
         }
 
         partColors_.assign(scene.partColors.begin(), scene.partColors.end());
+        partTextures_.assign(scene.partTextures.begin(), scene.partTextures.end());
 
         lineVertices_.clear();
         for (const LineSegment& line : scene.lines) {
@@ -1027,8 +1029,14 @@ public:
         const auto found = meshDataVersion_.find(name);
         if (found != meshDataVersion_.end() && found->second.version == version) {
             const GpuMesh& mesh = *meshes_[static_cast<std::size_t>(found->second.handle)];
-            return MeshAsset{found->second.handle, mesh.boundsMin, mesh.boundsMax, true,
-                             static_cast<uint32_t>(mesh.parts.size()), mesh.boneCount};
+            return MeshAsset{found->second.handle,
+                             mesh.boundsMin,
+                             mesh.boundsMax,
+                             true,
+                             static_cast<uint32_t>(mesh.parts.size()),
+                             mesh.boneCount,
+                             mesh.triangleCount,
+                             mesh.vertexCount};
         }
 
         // Versinya berubah: yang lama sudah bukan bentuk yang sama lagi. Ia
@@ -1043,8 +1051,64 @@ public:
         meshDataVersion_[name] = GeneratedMesh{handle, version};
 
         const GpuMesh& mesh = *meshes_[static_cast<std::size_t>(handle)];
-        return MeshAsset{handle, mesh.boundsMin, mesh.boundsMax, true,
-                         static_cast<uint32_t>(mesh.parts.size()), mesh.boneCount};
+        return MeshAsset{handle,
+                         mesh.boundsMin,
+                         mesh.boundsMax,
+                         true,
+                         static_cast<uint32_t>(mesh.parts.size()),
+                         mesh.boneCount,
+                         mesh.triangleCount,
+                         mesh.vertexCount};
+    }
+
+    TextureHandle AcquireTexture(std::string_view path) override {
+        if (path.empty() || materialSetLayout_ == VK_NULL_HANDLE) {
+            return kInvalidTexture;
+        }
+        const std::string key(path);
+        const auto found = textureByPath_.find(key);
+        if (found != textureByPath_.end()) {
+            return found->second;
+        }
+
+        // RGBA8 dipaksa di sini, bukan diterima apa adanya: `CreateFromRgba`
+        // hanya menerima bentuk itu, dan yang mengubahnya sesudah dekode berarti
+        // dua buffer hidup bersamaan untuk gambar yang bisa ratusan megabyte.
+        imageio::ReadOptions options;
+        options.channels = 4;
+        options.type = imageio::PixelType::UInt8;
+        imageio::Image image;
+        const imageio::ImageIoResult read =
+            imageio::Read(std::filesystem::path(key), options, image);
+        if (!read.ok) {
+            // Dicatat gagal supaya tidak diurai ulang tiap frame — aturan yang
+            // sama dengan `AcquireMesh`.
+            SIM_WARN("Render", "cannot load texture {}: {}", key, read.error);
+            textureByPath_.emplace(key, kInvalidTexture);
+            return kInvalidTexture;
+        }
+
+        auto entry = std::make_unique<GpuTexture>();
+        if (!entry->texture.CreateFromRgba(device_, image.desc.width, image.desc.height,
+                                           image.bytes.data())) {
+            SIM_WARN("Render", "cannot upload texture {}", key);
+            textureByPath_.emplace(key, kInvalidTexture);
+            return kInvalidTexture;
+        }
+        entry->set = AllocateMaterialSet(entry->texture);
+        if (entry->set == VK_NULL_HANDLE) {
+            textureByPath_.emplace(key, kInvalidTexture);
+            return kInvalidTexture;
+        }
+
+        materialTextures_.push_back(std::move(entry));
+        // Handle-nya indeks + 1: nol tetap berarti "tidak ada", sehingga
+        // pemanggil tidak perlu membedakan "belum diminta" dari "gagal".
+        const TextureHandle handle = static_cast<TextureHandle>(materialTextures_.size());
+        textureByPath_.emplace(key, handle);
+        SIM_INFO("Render", "texture ready: {} ({}x{})", key, image.desc.width,
+                 image.desc.height);
+        return handle;
     }
 
     MeshAsset AcquireMesh(std::string_view path) override {
@@ -1062,8 +1126,14 @@ public:
                 return asset;
             }
             const GpuMesh& mesh = *meshes_[static_cast<std::size_t>(found->second)];
-            return MeshAsset{found->second,   mesh.boundsMin, mesh.boundsMax, true,
-                             static_cast<uint32_t>(mesh.parts.size()), mesh.boneCount};
+            return MeshAsset{found->second,
+                             mesh.boundsMin,
+                             mesh.boundsMax,
+                             true,
+                             static_cast<uint32_t>(mesh.parts.size()),
+                             mesh.boneCount,
+                             mesh.triangleCount,
+                             mesh.vertexCount};
         }
 
         std::string error;
@@ -1082,8 +1152,14 @@ public:
         const GpuMesh& uploaded = *meshes_[static_cast<std::size_t>(handle)];
         SIM_INFO("Render", "mesh ready: {} ({} tris, {} verts, {} bones)", key,
                  data.TriangleCount(), data.vertices.size(), uploaded.boneCount);
-        return MeshAsset{handle, data.boundsMin, data.boundsMax, true,
-                         static_cast<uint32_t>(uploaded.parts.size()), uploaded.boneCount};
+        return MeshAsset{handle,
+                         data.boundsMin,
+                         data.boundsMax,
+                         true,
+                         static_cast<uint32_t>(uploaded.parts.size()),
+                         uploaded.boneCount,
+                         uploaded.triangleCount,
+                         uploaded.vertexCount};
     }
 
     TextureHandle ColorTarget() const override { return textureHandle_; }
@@ -1693,6 +1769,22 @@ private:
                         partPush.partColor = assigned;
                     }
                 }
+                // Set material ruas ini. Yang tidak punya tekstur mendapat yang
+                // putih — nilai satuan perkalian, jadi ia tergambar persis
+                // seperti sebelum jalur tekstur ada.
+                VkDescriptorSet materialSet = fallbackSet_;
+                if (partIndex < run.partColorCount &&
+                    run.partColorFirst + partIndex < partTextures_.size()) {
+                    const TextureHandle handle = partTextures_[run.partColorFirst + partIndex];
+                    if (handle != kInvalidTexture && handle <= materialTextures_.size()) {
+                        materialSet =
+                            materialTextures_[static_cast<std::size_t>(handle) - 1]->set;
+                    }
+                }
+                if (materialSet != VK_NULL_HANDLE) {
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 2, 1,
+                                            &materialSet, 0, nullptr);
+                }
                 vkCmdPushConstants(cmd, layout, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(BoxPush),
                                    &partPush);
                 vkCmdDrawIndexed(cmd, part.indexCount, run.count, static_cast<int32_t>(0),
@@ -1731,6 +1823,8 @@ private:
                      data.skeleton.bones.size());
         }
         mesh->indexCount = static_cast<uint32_t>(data.indices.size());
+        mesh->triangleCount = static_cast<uint32_t>(data.TriangleCount());
+        mesh->vertexCount = static_cast<uint32_t>(data.vertices.size());
         for (const assets::SubMesh& part : data.parts) {
             GpuMesh::Part gpuPart;
             gpuPart.firstIndex = part.firstIndex;
@@ -1948,7 +2042,8 @@ private:
         range.size = sizeof(BoxPush);
         // Set 0 keadaan bayangan per-frame, set 1 palet kulit. Nomornya harus
         // sama dengan `SKIN_SET` di box.vert dan prepass.vert.
-        const std::array<VkDescriptorSetLayout, 2> forwardSets{shadowSetLayout_, skinSetLayout_};
+        const std::array<VkDescriptorSetLayout, 3> forwardSets{shadowSetLayout_, skinSetLayout_,
+                                                               materialSetLayout_};
         VkPipelineLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         layoutInfo.pushConstantRangeCount = 1;
@@ -2093,7 +2188,7 @@ private:
                              bool skinned = false, VkPipelineLayout layout = VK_NULL_HANDLE,
                              VkFormat depthFormat = VK_FORMAT_UNDEFINED,
                              VkFormat colorAttachment = VK_FORMAT_UNDEFINED,
-                             uint32_t attributeMask = 0xFFFu) {
+                             uint32_t attributeMask = 0x1FFFu) {
         // `kSkinned`, konstanta spesialisasi 0 di `Shaders/skin_common.slang`.
         // Ukurannya empat byte walaupun tipenya bool: Vulkan menyatakan
         // konstanta spesialisasi boolean berukuran `VkBool32`, dan ukuran yang
@@ -2138,7 +2233,7 @@ private:
                 2, skinned ? static_cast<uint32_t>(sizeof(assets::SkinInfluence)) : 0u,
                 VK_VERTEX_INPUT_RATE_VERTEX},
         };
-        const std::array<VkVertexInputAttributeDescription, 12> attributes{
+        const std::array<VkVertexInputAttributeDescription, 13> attributes{
             VkVertexInputAttributeDescription{0, 0, VK_FORMAT_R32G32B32_SFLOAT,
                                               offsetof(BoxVertex, position)},
             VkVertexInputAttributeDescription{1, 0, VK_FORMAT_R32G32B32_SFLOAT,
@@ -2169,6 +2264,11 @@ private:
             // seragam.
             VkVertexInputAttributeDescription{11, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
                                               offsetof(BoxVertex, color)},
+            // UV, juga di binding 0: ia sudah terunggah di dalam `MeshVertex`
+            // sejak mesh sungguhan masuk, dan yang belum ada selama ini hanya
+            // baris ini.
+            VkVertexInputAttributeDescription{12, 0, VK_FORMAT_R32G32_SFLOAT,
+                                              offsetof(BoxVertex, uv)},
         };
         // Tiap pipeline menyebutkan atribut mana yang benar-benar dibacanya.
         // Buffer-nya sama dan stride-nya sama; yang berbeda hanya atribut yang
@@ -2182,7 +2282,7 @@ private:
         // adalah peringatan validasi di setiap pembuatan pipeline. Menyaringnya
         // di sini bukan sekadar meredam peringatan: atribut yang tidak diambil
         // memang tidak perlu diambil.
-        std::array<VkVertexInputAttributeDescription, 12> used{};
+        std::array<VkVertexInputAttributeDescription, 13> used{};
         uint32_t usedCount = 0;
         for (const VkVertexInputAttributeDescription& attribute : attributes) {
             if ((attributeMask & (1u << attribute.location)) != 0u) {
@@ -2431,7 +2531,109 @@ private:
         poolInfo.pPoolSizes = sizes.data();
         SIM_VK_CHECK(
             vkCreateDescriptorPool(device_.Handle(), &poolInfo, nullptr, &shadowPool_));
-        return CreateSkinDescriptors();
+        return CreateSkinDescriptors() && CreateMaterialDescriptors();
+    }
+
+    /// Set descriptor material: parameter, tekstur, sampler — **nomor binding
+    /// yang sama persis dengan yang dihasilkan kompiler graph material.**
+    ///
+    /// Binding 0 (parameter) dideklarasikan walau `box.frag` belum membacanya,
+    /// dan diisi buffer kecil bersama. Itu yang membuat janji "pipeline material
+    /// mengganti shader-nya, bukan pipa-nya" bisa ditepati: layout-nya sudah
+    /// berbentuk final, dan yang berubah nanti hanya siapa yang membacanya.
+    bool CreateMaterialDescriptors() {
+        const std::array<VkDescriptorSetLayoutBinding, 3> bindings{
+            VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_SAMPLER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+        };
+        VkDescriptorSetLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+        layoutInfo.pBindings = bindings.data();
+        SIM_VK_CHECK(vkCreateDescriptorSetLayout(device_.Handle(), &layoutInfo, nullptr,
+                                                 &materialSetLayout_));
+
+        // Satu set per tekstur, ditambah satu untuk yang mundur. Batasnya
+        // disebut angka, bukan dibiarkan tumbuh: pool yang kehabisan
+        // mengembalikan galat alokasi di tengah frame, dan yang terlihat adalah
+        // tekstur yang hilang secara acak.
+        constexpr uint32_t kMaxMaterialSets = 1024;
+        const std::array<VkDescriptorPoolSize, 3> sizes{
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kMaxMaterialSets},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxMaterialSets},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLER, kMaxMaterialSets},
+        };
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.maxSets = kMaxMaterialSets;
+        poolInfo.poolSizeCount = static_cast<uint32_t>(sizes.size());
+        poolInfo.pPoolSizes = sizes.data();
+        SIM_VK_CHECK(
+            vkCreateDescriptorPool(device_.Handle(), &poolInfo, nullptr, &materialPool_));
+
+        // Buffer parameter bersama. Isinya tidak pernah dibaca hari ini, tetapi
+        // binding yang dideklarasikan dan tidak pernah ditulis adalah descriptor
+        // tak sah pada setiap pengikatan.
+        if (!materialParams_.Create(device_, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, 64)) {
+            SIM_ERROR("Render", "cannot create material parameter buffer");
+            return false;
+        }
+        const std::array<float, 16> zeros{};
+        materialParams_.Write(zeros.data(), sizeof(zeros));
+
+        // Tekstur mundur putih 1x1. Putih adalah nilai satuan perkalian, jadi
+        // ruas tanpa tekstur tergambar persis seperti sebelum jalur ini ada.
+        const uint32_t white = 0xFFFFFFFFu;
+        if (!fallbackTexture_.CreateFromRgba(device_, 1, 1, &white)) {
+            SIM_ERROR("Render", "cannot create fallback texture");
+            return false;
+        }
+        fallbackSet_ = AllocateMaterialSet(fallbackTexture_);
+        return fallbackSet_ != VK_NULL_HANDLE;
+    }
+
+    /// Satu set descriptor yang menunjuk sebuah tekstur.
+    VkDescriptorSet AllocateMaterialSet(const rhi::Texture2D& texture) {
+        VkDescriptorSetAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocateInfo.descriptorPool = materialPool_;
+        allocateInfo.descriptorSetCount = 1;
+        allocateInfo.pSetLayouts = &materialSetLayout_;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        if (vkAllocateDescriptorSets(device_.Handle(), &allocateInfo, &set) != VK_SUCCESS) {
+            SIM_WARN("Render", "material descriptor pool is full; texture falls back to white");
+            return VK_NULL_HANDLE;
+        }
+
+        const VkDescriptorBufferInfo params{materialParams_.Handle(), 0, VK_WHOLE_SIZE};
+        VkDescriptorImageInfo image{};
+        image.imageView = texture.View();
+        image.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkDescriptorImageInfo sampler{};
+        sampler.sampler = texture.Sampler();
+
+        std::array<VkWriteDescriptorSet, 3> writes{};
+        for (VkWriteDescriptorSet& write : writes) {
+            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet = set;
+            write.descriptorCount = 1;
+        }
+        writes[0].dstBinding = 0;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        writes[0].pBufferInfo = &params;
+        writes[1].dstBinding = 1;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        writes[1].pImageInfo = &image;
+        writes[2].dstBinding = 2;
+        writes[2].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+        writes[2].pImageInfo = &sampler;
+        vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
+                               writes.data(), 0, nullptr);
+        return set;
     }
 
     /// Set descriptor palet kulit: satu storage buffer, tahap vertex.
@@ -2937,6 +3139,21 @@ private:
         if (skinPool_ != VK_NULL_HANDLE) {
             vkDestroyDescriptorPool(device_.Handle(), skinPool_, nullptr);
             skinPool_ = VK_NULL_HANDLE;
+        }
+        for (std::unique_ptr<GpuTexture>& texture : materialTextures_) {
+            texture->texture.Destroy();
+        }
+        materialTextures_.clear();
+        textureByPath_.clear();
+        fallbackTexture_.Destroy();
+        materialParams_.Destroy();
+        if (materialPool_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(device_.Handle(), materialPool_, nullptr);
+            materialPool_ = VK_NULL_HANDLE;
+        }
+        if (materialSetLayout_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(device_.Handle(), materialSetLayout_, nullptr);
+            materialSetLayout_ = VK_NULL_HANDLE;
         }
         if (skinSetLayout_ != VK_NULL_HANDLE) {
             vkDestroyDescriptorSetLayout(device_.Handle(), skinSetLayout_, nullptr);
@@ -3504,6 +3721,10 @@ private:
     struct GpuMesh {
         rhi::DynamicBuffer vertices;
         rhi::DynamicBuffer indices;
+        /// Disimpan supaya jalur cache-hit bisa menjawabnya tanpa memegang
+        /// `MeshData` yang sudah dilepas sesudah diunggah.
+        uint32_t triangleCount = 0;
+        uint32_t vertexCount = 0;
         /// Pengaruh skin, sejajar dengan `vertices`. Tidak dibuat sama sekali
         /// untuk mesh tanpa rangka — 24 byte per vertex adalah harga yang tidak
         /// ada gunanya dibayar mesh statis, dan mesh statis adalah hampir
@@ -3533,6 +3754,20 @@ private:
     std::vector<std::unique_ptr<GpuMesh>> meshes_;
     /// Jalur → handle. Jalur yang gagal dimuat dipetakan ke kubus satuan supaya
     /// ia tidak dicoba lagi setiap frame.
+    /// Tekstur yang sudah di GPU, beserta set descriptor-nya.
+    struct GpuTexture {
+        rhi::Texture2D texture;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+    };
+    std::vector<std::unique_ptr<GpuTexture>> materialTextures_;
+    std::unordered_map<std::string, TextureHandle> textureByPath_;
+    VkDescriptorSetLayout materialSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool materialPool_ = VK_NULL_HANDLE;
+    rhi::DynamicBuffer materialParams_;
+    rhi::Texture2D fallbackTexture_;
+    VkDescriptorSet fallbackSet_ = VK_NULL_HANDLE;
+    std::vector<TextureHandle> partTextures_;
+
     std::unordered_map<std::string, MeshHandle> meshByPath_;
     /// Mesh yang datang sebagai data. Versinya disimpan supaya yang tidak
     /// berubah tidak diunggah ulang tiap frame.

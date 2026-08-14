@@ -54,6 +54,20 @@ public:
     /// membuka proyek, ketika daftar aset harus sudah lengkap.
     void ScanNow();
 
+    /// Mencatat berapa segitiga dan vertex sebuah mesh, dari yang memuatnya.
+    ///
+    /// **Bertahan lintas pemindaian.** Isi indeks ditukar utuh setiap kali
+    /// pemindaian latar selesai, jadi angka yang hanya ditulis ke `AssetRecord`
+    /// akan hilang beberapa detik kemudian tanpa ada yang menyadarinya. Yang
+    /// disimpan di sini adalah peta terpisah berkunci guid, dan `Apply` yang
+    /// menuangkannya kembali ke tiap record.
+    ///
+    /// Tidak persisten antar sesi — itu disengaja. Menyimpannya ke `.meta`
+    /// berarti menaruh data turunan ke dalam kontrol versi, dan berkas identitas
+    /// yang ikut kotor setiap kali sebuah mesh dibuka adalah berkas yang
+    /// akhirnya diabaikan orang.
+    void ReportMeshStats(const Uuid& guid, uint32_t triangles, uint32_t vertices);
+
     const AssetRecord* Find(const Uuid& guid) const;
     const AssetRecord* FindByRelativePath(std::string_view relativePath) const;
     const std::vector<AssetRecord>& All() const { return records_; }
@@ -136,6 +150,8 @@ private:
     std::vector<AssetRecord> records_;
     std::vector<std::string> folders_;
     std::unordered_map<Uuid, std::size_t> byGuid_;
+    /// guid → (segitiga, vertex), dari yang memuatnya.
+    std::unordered_map<Uuid, std::pair<uint32_t, uint32_t>> meshStats_;
     std::unordered_map<std::string, std::size_t> byPath_;
     uint64_t version_ = 0;
     std::vector<Uuid> changed_;

@@ -17,6 +17,7 @@
 #include "Sim/Editor/WhiteboxStore.h"
 #include "Sim/Physics/PhysicsScene.h"
 #include "Sim/Whitebox/WhiteboxIo.h"
+#include "Sim/Scene/AssetUsage.h"
 #include "Sim/Scene/Components.h"
 
 #include <cmath>
@@ -1956,4 +1957,18 @@ TEST_CASE("L7: jejak decal diturunkan dari transformnya, bukan dari medan skala"
     const terrain::DecalProjection leaning = ProjectDecal(component, tilted);
     CHECK(leaning.rotationY == doctest::Approx(0.0f).epsilon(0.001));
     CHECK(leaning.halfSize.x == doctest::Approx(2.5f).epsilon(0.001));
+}
+
+TEST_CASE("Jalur A: tekstur decal terhitung sebagai pemakai asetnya") {
+    // Tekstur yang dipakai decal harus terhitung terpakai, dengan alasan yang
+    // sama seperti material layer terrain di L6c: yang menghapusnya tanpa
+    // peringatan baru tahu ketika decalnya menjadi putih polos.
+    scene::World world;
+    const scene::Entity entity = world.Create("Jalan");
+    auto& decal = world.Add<scene::DecalComponent>(entity);
+    decal.texture.guid = Uuid::Generate();
+
+    const std::vector<scene::Entity> users = scene::EntitiesUsingAsset(world, decal.texture.guid);
+    REQUIRE(users.size() == 1);
+    CHECK(users.front() == entity);
 }

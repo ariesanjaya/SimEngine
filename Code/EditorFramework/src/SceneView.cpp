@@ -105,6 +105,7 @@ void SceneView::Build(scene::World& world, const Selection& selection,
     meshes_.clear();
     skinMatrices_.clear();
     partColors_.clear();
+    partTextures_.clear();
     lights_.clear();
     lines_.clear();
     icons_.clear();
@@ -207,6 +208,18 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                     if (const assets::AssetRecord* record = assets->Find(meshRenderer->mesh.guid)) {
                         const render::MeshAsset mesh =
                             renderer->AcquireMesh(assets->AbsolutePath(*record).string());
+                        // Angkanya dilaporkan balik ke indeks aset. Yang
+                        // memuatnya sudah memegangnya, dan menghitungnya lagi
+                        // saat impor berarti mengurai berkas yang sama dua kali
+                        // — sekali untuk digambar, sekali untuk ditampilkan.
+                        //
+                        // `assets` const, jadi ini satu-satunya jalur non-const
+                        // yang dibenarkan: yang ditulis bukan isi indeks
+                        // melainkan catatan tentang isinya.
+                        if (mesh.loaded && mesh.triangleCount > 0) {
+                            const_cast<assets::AssetDatabase*>(assets)->ReportMeshStats(
+                                meshRenderer->mesh.guid, mesh.triangleCount, mesh.vertexCount);
+                        }
                         if (mesh.loaded) {
                             instance.mesh = mesh.handle;
                             instance.boundsMin = mesh.boundsMin;
@@ -278,6 +291,16 @@ void SceneView::AppendPartColors(const scene::MeshRendererComponent& renderer, u
                               renderer.materials[slot].IsValid();
         partColors_.push_back(assigned ? MaterialColor(assets, renderer.materials[slot].guid)
                                        : Vec4(0.0f));
+        // Sejajar, selalu. Larik yang panjangnya tidak sama dengan `partColors_`
+        // membuat setiap indeks sesudah ruas pertama menunjuk tekstur milik
+        // instance lain — dan yang terlihat bukan galat melainkan tekstur yang
+        // berpindah objek.
+        // Belum ada sumbernya: material impor menyimpan lima parameter skalar
+        // dan belum menyebut teksturnya. Yang penting di sini larik ini tetap
+        // **sejajar** — panjang yang berbeda membuat setiap indeks sesudah ruas
+        // pertama menunjuk tekstur milik instance lain, dan yang terlihat bukan
+        // galat melainkan tekstur yang berpindah objek.
+        partTextures_.push_back(render::kInvalidTexture);
     }
 }
 
@@ -462,11 +485,27 @@ void SceneView::AppendDecal(const scene::DecalComponent& component, scene::Entit
         return;
     }
 
+    // Tekstur decal, bila ada. Ruas tunggal, jadi satu entri warna dan satu
+    // entri tekstur.
+    render::TextureHandle texture = render::kInvalidTexture;
+    if (component.texture.IsValid()) {
+        if (const assets::AssetRecord* image = assets->Find(component.texture.guid)) {
+            texture = renderer->AcquireTexture(assets->AbsolutePath(*image).string());
+        }
+    }
+
     render::MeshInstance instance;
     // Transform tuan rumahnya, bukan transform decal: geometrinya sudah berada
     // di ruang terrain, dan memakai transform decal akan menerapkan skalanya
     // dua kali.
     instance.transform = hostWorld;
+    instance.partFirst = static_cast<uint32_t>(partColors_.size());
+    instance.partCount = 1;
+    // Warna putih di slot ruasnya: yang mewarnai decal adalah warna simpulnya,
+    // yang sudah dipanggang `BuildDecalMesh`. Menaruh warnanya di sini juga
+    // berarti mengalikannya dua kali.
+    partColors_.push_back(Vec4(1.0f));
+    partTextures_.push_back(texture);
     instance.mesh = mesh.handle;
     instance.boundsMin = mesh.boundsMin;
     instance.boundsMax = mesh.boundsMax;
@@ -649,6 +688,7 @@ render::ViewportScene SceneView::Scene() const {
     scene.meshes = meshes_;
     scene.skinMatrices = skinMatrices_;
     scene.partColors = partColors_;
+    scene.partTextures = partTextures_;
     scene.lines = lines_;
     scene.lights = lights_;
     return scene;

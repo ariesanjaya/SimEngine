@@ -325,6 +325,9 @@ void RegisterCoreComponents() {
         components.Register<TerrainComponent>();
 
         types.Type<DecalComponent>("Decal")
+            .Field<&DecalComponent::texture>("texture")
+            .Label("Texture")
+            .Tooltip("Dipetakan 0..1 sepanjang jejak decal; kosong berarti warnanya saja")
             .Field<&DecalComponent::color>("color")
             .Label("Color")
             .Field<&DecalComponent::lift>("lift")

@@ -541,3 +541,22 @@ TEST_CASE("L7: DecalComponent bertahan lewat simpan-muat level") {
 
     CHECK(SaveLevelToString(reloaded) == text);
 }
+
+TEST_CASE("Jalur A: DecalComponent membawa rujukan tekstur lewat simpan-muat") {
+    World world;
+    const Entity entity = world.Create("Jalan");
+    auto& decal = world.Add<DecalComponent>(entity);
+    decal.texture.guid = Uuid::Generate();
+    decal.color = Vec4(1.0f, 1.0f, 1.0f, 1.0f);
+
+    const Uuid entityGuid = world.GuidOf(entity);
+    const Uuid textureGuid = decal.texture.guid;
+    const std::string text = SaveLevelToString(world);
+
+    World reloaded;
+    REQUIRE(LoadLevelFromString(reloaded, text).ok);
+    const auto* back = reloaded.TryGet<DecalComponent>(reloaded.FindByGuid(entityGuid));
+    REQUIRE(back != nullptr);
+    CHECK(back->texture.guid == textureGuid);
+    CHECK(SaveLevelToString(reloaded) == text);
+}

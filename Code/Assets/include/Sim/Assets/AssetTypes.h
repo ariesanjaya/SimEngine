@@ -78,6 +78,16 @@ struct AssetRecord {
     uint32_t height = 0;
     uint32_t channels = 0;
 
+    /// Terisi untuk mesh yang **sudah pernah dimuat**. Nol berarti belum
+    /// diketahui, bukan nol segitiga.
+    ///
+    /// Angkanya datang dari yang memuatnya, bukan dari importir — lihat
+    /// `render::MeshAsset`. Konsekuensinya jujur: mesh yang belum pernah dipakai
+    /// tidak punya angka. Itu justru himpunan yang benar untuk pertanyaan yang
+    /// membuat angka ini ada — "seberapa berat adegan yang saya gambar".
+    uint32_t triangleCount = 0;
+    uint32_t vertexCount = 0;
+
     /// GUID aset lain yang dirujuk berkas ini.
     std::vector<Uuid> dependencies;
 };

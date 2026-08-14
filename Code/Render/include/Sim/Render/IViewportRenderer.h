@@ -75,6 +75,24 @@ public:
         return {};
     }
 
+    /// Tekstur dari berkas, di-cache dan siap diikat sebagai albedo sebuah
+    /// ruas.
+    ///
+    /// Nol berarti tidak ada — berkasnya tidak bisa dibaca, atau jalurnya
+    /// kosong. Yang gagal dicatat gagal dan tidak dicoba lagi, aturan yang sama
+    /// dengan `AcquireMesh`: berkas rusak yang diurai ulang tiap frame
+    /// membanjiri log dengan pesan yang sama sampai tidak ada pesan lain yang
+    /// terbaca.
+    ///
+    /// **Nomor set dan binding-nya sengaja sama dengan yang dihasilkan kompiler
+    /// graph material** — set 2, parameter di binding 0, tekstur dan sampler
+    /// berselang mulai binding 1. Begitu pipeline material menggantikan
+    /// `box.frag`, yang berganti adalah shader-nya, bukan pipa ini.
+    virtual TextureHandle AcquireTexture(std::string_view path) {
+        (void)path;
+        return kInvalidTexture;
+    }
+
     virtual void Render(const ViewportDesc& desc, const ViewportScene& scene) = 0;
 
     /// Handle tekstur hasil render terakhir, siap dilempar ke ImGui::Image().

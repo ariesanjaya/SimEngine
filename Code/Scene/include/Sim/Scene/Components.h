@@ -508,10 +508,17 @@ struct TerrainComponent {
 /// yang menyamping tidak punya arti, dan yang memiringkannya akan mendapat jejak
 /// yang menyempit tanpa ada yang menjelaskan mengapa.
 struct DecalComponent {
-    /// Warna decal. **Belum bertekstur**, dan itu bukan kelalaian: renderer ini
-    /// belum menggambar tekstur pada mesh sama sekali. UV-nya sudah dipanggang
-    /// 0..1 sepanjang jejaknya, sehingga tekstur yang menyusul tidak menuntut
-    /// membangun ulang geometrinya.
+    /// Tekstur yang digambar di dalam jejaknya, dipetakan 0..1 sepanjang jejak
+    /// itu. Kosong berarti warnanya saja.
+    ///
+    /// **Aset tekstur langsung, bukan material.** Decal butuh satu albedo, dan
+    /// meminta material penuh berarti membuat orang menyusun graph untuk
+    /// menempelkan satu gambar. Ketika pipeline material menggantikan jalur ini,
+    /// medan material menyusul di sebelahnya — bukan menggantikan yang ini.
+    AssetRef texture;
+
+    /// Warna decal, **dikalikan** dengan teksturnya. Putih berarti teksturnya
+    /// apa adanya; tanpa tekstur, ia warnanya sendiri.
     Vec4 color{0.85f, 0.75f, 0.55f, 1.0f};
 
     /// Jarak angkat dari permukaan, meter.

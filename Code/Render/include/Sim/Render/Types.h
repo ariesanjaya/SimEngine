@@ -55,6 +55,20 @@ struct MeshAsset {
     /// bone, hierarki, dan bind pose datang dari sisi aset, dari berkas yang
     /// sama.
     uint32_t boneCount = 0;
+    /// Segitiga dan vertex mesh ini, atau nol bila tidak diketahui.
+    ///
+    /// **Dilaporkan dari sini, bukan dihitung importir.** Menghitungnya saat
+    /// impor menuntut mengurai berkasnya — 118 ms untuk satu FBX — dan
+    /// pemindaian pertama sebuah project berjalan **sinkron**, jadi seratus mesh
+    /// berarti sepuluh detik sebelum jendela pertama muncul. Yang mengunggahnya
+    /// ke GPU sudah memegang angkanya; menyerahkannya di sini berarti nol
+    /// penguraian tambahan, selamanya.
+    ///
+    /// Di akhir struct, bukan di tengahnya: beberapa tempat menyusunnya dengan
+    /// kurung kurawal berurutan, dan menyisipkan medan di tengah memindahkan
+    /// `boneCount` ke tempat yang salah tanpa satu pun galat kompilasi.
+    uint32_t triangleCount = 0;
+    uint32_t vertexCount = 0;
 };
 
 enum class DrawMode : uint8_t {
@@ -461,6 +475,14 @@ struct ViewportScene {
     /// kulit — dan karena alasan yang sama: satu span per instance berarti satu
     /// penyalinan per entity per frame.
     std::span<const Vec4> partColors;
+    /// Tekstur albedo per ruas, **sejajar dengan `partColors`**. Nol berarti
+    /// tidak ada, dan ruas itu digambar dengan warnanya saja.
+    ///
+    /// Sejajar dan bukan digabung menjadi satu struct: `partColors` sudah
+    /// menjadi kunci pengelompokan draw, dan menambah medan ke dalamnya membuat
+    /// dua ruas yang warnanya sama tetapi teksturnya sama pula gagal
+    /// dikelompokkan hanya karena strukturnya membesar.
+    std::span<const TextureHandle> partTextures;
     std::span<const LineSegment> lines;
     /// Lampu punctual. Directional boleh ada di sini juga — renderer memakai
     /// yang pertama sebagai matahari dan mengabaikan sisanya, karena cascade

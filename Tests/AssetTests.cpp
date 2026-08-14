@@ -1420,3 +1420,48 @@ TEST_CASE("L6c: material yang dipakai layer terrain terhitung terpakai") {
     REQUIRE(users.size() == 1);
     CHECK(users.front() == record->guid);
 }
+
+TEST_CASE("E8.4: statistik mesh dilaporkan dari yang memuatnya dan bertahan lintas pemindaian") {
+    using namespace sim::assets;
+
+    // **Bukan dihitung importir.** Mengurai FBX saat impor berarti 118 ms per
+    // berkas, dan pemindaian pertama sebuah project berjalan sinkron — seratus
+    // mesh berarti sepuluh detik sebelum jendela pertama muncul.
+    TempDir temp;
+    WriteFile(temp.Path() / "batu.obj", "v 0 0 0\n");
+
+    AssetDatabase db;
+    REQUIRE(db.Initialize({temp.Path(), nullptr, 1.0f}));
+    const AssetRecord* record = db.FindByRelativePath("batu.obj");
+    REQUIRE(record != nullptr);
+    const Uuid guid = record->guid;
+
+    // Belum pernah dimuat: nol berarti "belum diketahui", bukan nol segitiga.
+    CHECK(record->triangleCount == 0);
+    CHECK(record->vertexCount == 0);
+
+    db.ReportMeshStats(guid, 67832, 35897);
+    // Terlihat frame ini juga, bukan setelah pemindaian berikutnya kebetulan
+    // berjalan.
+    REQUIRE(db.Find(guid) != nullptr);
+    CHECK(db.Find(guid)->triangleCount == 67832);
+    CHECK(db.Find(guid)->vertexCount == 35897);
+
+    // **Dan bertahan.** Isi indeks ditukar utuh tiap pemindaian; angka yang
+    // hanya ditulis ke record akan hilang beberapa detik kemudian tanpa ada yang
+    // menyadarinya. Berkas kedua memaksa pemindaian menghasilkan daftar baru.
+    WriteFile(temp.Path() / "kayu.obj", "v 1 0 0\n");
+    db.ScanNow();
+    REQUIRE(db.Find(guid) != nullptr);
+    CHECK(db.Find(guid)->triangleCount == 67832);
+    CHECK(db.Find(guid)->vertexCount == 35897);
+    // Yang lain tetap kosong — laporan satu mesh tidak mewarnai seluruh indeks.
+    const AssetRecord* other = db.FindByRelativePath("kayu.obj");
+    REQUIRE(other != nullptr);
+    CHECK(other->triangleCount == 0);
+
+    // Laporan yang tidak masuk akal ditolak diam-diam: nol segitiga berarti
+    // "tidak tahu", dan menuliskannya akan menghapus angka yang sudah benar.
+    db.ReportMeshStats(guid, 0, 0);
+    CHECK(db.Find(guid)->triangleCount == 67832);
+}
