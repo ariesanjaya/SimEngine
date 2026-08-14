@@ -1826,3 +1826,146 @@ TEST_CASE("Material Impor punya slot tekstur, dan yang kosong tidak mengubah apa
     CHECK(ResolveTextures(graph, instance)[0].texture == image);
     CHECK(ResolveTextures(graph, empty)[0].texture.IsValid() == false);
 }
+
+TEST_CASE("Rekomendasi 1: lapisan yang tidak mungkin dipakai dimatikan saat kompilasi") {
+    // **Di GPU, cabang yang diambil sebagian lane dalam satu warp membayar kedua
+    // sisinya.** Jadi satu material bercoat di layar membuat tetangganya ikut
+    // membayar, dan material yang coat-nya nol tetap membawa kodenya di dalam
+    // SPIR-V. Yang dimatikan saat kompilasi bukan cabang yang tidak diambil
+    // melainkan kode yang tidak pernah ada.
+    MaterialGraph graph;
+    MaterialNode output;
+    output.guid = Uuid::Generate();
+    output.type = std::string(kSurfaceOutputType);
+    graph.nodes.push_back(output);
+
+    MaterialCompileOptions options;
+    options.moduleName = "uji.simmat";
+
+    // Material polos: keempat lapisan tambahan bawaannya nol.
+    const MaterialCompileResult plain = CompileMaterial(graph, options);
+    REQUIRE(plain.ok);
+    CHECK_FALSE(plain.lobes.coat);
+    CHECK_FALSE(plain.lobes.fuzz);
+    CHECK_FALSE(plain.lobes.anisotropy);
+    CHECK_FALSE(plain.lobes.diffuseRoughness);
+
+    // Literal nol yang ditulis eksplisit tetap dibaca nol.
+    graph.nodes[0].pinValues["coatWeight"] = "0.0";
+    CHECK_FALSE(CompileMaterial(graph, options).lobes.coat);
+
+    // Literal bukan nol menyalakannya.
+    graph.nodes[0].pinValues["coatWeight"] = "1.0";
+    CHECK(CompileMaterial(graph, options).lobes.coat);
+    graph.nodes[0].pinValues["fuzzWeight"] = "0.25";
+    CHECK(CompileMaterial(graph, options).lobes.fuzz);
+
+    // **Satu sakelar untuk kedua anisotropi**: `anisotropicAlpha` dipakai lobe
+    // spekular maupun coat, jadi mematikannya menuntut kedua-duanya isotropik.
+    graph.nodes[0].pinValues["coatRoughnessAnisotropy"] = "0.5";
+    CHECK(CompileMaterial(graph, options).lobes.anisotropy);
+    graph.nodes[0].pinValues["coatRoughnessAnisotropy"] = "0.0";
+    CHECK_FALSE(CompileMaterial(graph, options).lobes.anisotropy);
+    graph.nodes[0].pinValues["specularRoughnessAnisotropy"] = "0.3";
+    CHECK(CompileMaterial(graph, options).lobes.anisotropy);
+
+    // Literal yang tidak terbaca sebagai angka dijawab "mungkin": tebakan salah
+    // ke arah ini hanya membuat material membayar lobe yang tidak dipakainya,
+    // sedangkan ke arah sebaliknya ia menghilangkan lapisan tanpa satu pun
+    // galat.
+    MaterialGraph odd = graph;
+    odd.nodes[0].pinValues.clear();
+    odd.nodes[0].pinValues["coatWeight"] = "gWeirdGlobal";
+    CHECK(CompileMaterial(odd, options).lobes.coat);
+}
+
+TEST_CASE("Rekomendasi 1: modul yang dirakit menyebut lapisannya sebagai konstanta") {
+    // Yang menentukan biaya bukan bendera di dalam `MaterialCompileResult`
+    // melainkan `#define` yang benar-benar sampai ke `slangc`.
+    MaterialGraph graph;
+    MaterialNode output;
+    output.guid = Uuid::Generate();
+    output.type = std::string(kSurfaceOutputType);
+    graph.nodes.push_back(output);
+
+    MaterialCompileOptions compileOptions;
+    compileOptions.moduleName = "uji.simmat";
+    const MaterialCompileResult compiled = CompileMaterial(graph, compileOptions);
+    REQUIRE(compiled.ok);
+
+    MaterialModuleOptions options;
+    options.prelude = "// prelude tiruan\n";
+    options.lobes = compiled.lobes;
+    const std::string module = AssembleMaterialModule(compiled.slang, options);
+
+    INFO(module.substr(0, 800));
+    CHECK(module.find("#define OPENPBR_HAS_COAT 0") != std::string::npos);
+    CHECK(module.find("#define OPENPBR_HAS_FUZZ 0") != std::string::npos);
+    CHECK(module.find("#define OPENPBR_HAS_ANISOTROPY 0") != std::string::npos);
+    CHECK(module.find("#define OPENPBR_HAS_DIFFUSE_ROUGHNESS 0") != std::string::npos);
+
+    // **Sebelum prelude-nya**, kalau tidak `#ifndef` di dalam openpbr.slang
+    // sudah terlanjur memasang nilai bawaannya dan yang di sini tidak berlaku.
+    CHECK(module.find("#define OPENPBR_HAS_COAT") < module.find("// prelude tiruan"));
+
+    // Dan material bercoat menyalakannya.
+    graph.nodes[0].pinValues["coatWeight"] = "1.0";
+    const MaterialCompileResult coated = CompileMaterial(graph, compileOptions);
+    options.lobes = coated.lobes;
+    CHECK(AssembleMaterialModule(coated.slang, options).find("#define OPENPBR_HAS_COAT 1") !=
+          std::string::npos);
+}
+
+TEST_CASE("Rekomendasi 1: material polos menghasilkan SPIR-V yang lebih kecil") {
+    // **Inilah pembuktiannya, dan bukan yang lain.** Bendera di dalam
+    // `MaterialCompileResult` dan `#define` di dalam teks modul keduanya bisa
+    // benar sementara `slangc` tetap menghasilkan instruksi yang sama. Yang
+    // menentukan biaya adalah SPIR-V-nya.
+    const std::string identity = SlangCompilerIdentity();
+    if (identity.empty()) {
+        MESSAGE("slangc tidak ditemukan — bagian integrasi dilewati");
+        return;
+    }
+
+    MaterialModuleOptions moduleOptions;
+    moduleOptions.prelude = LoadOpenPbrPrelude(std::filesystem::path(SIM_SHADER_DIR));
+    REQUIRE_FALSE(moduleOptions.prelude.empty());
+
+    MaterialGraph graph;
+    MaterialNode output;
+    output.guid = Uuid::Generate();
+    output.type = std::string(kSurfaceOutputType);
+    graph.nodes.push_back(output);
+
+    MaterialCompileOptions compileOptions;
+    compileOptions.moduleName = "uji.simmat";
+    const MaterialCompileResult compiled = CompileMaterial(graph, compileOptions);
+    REQUIRE(compiled.ok);
+    REQUIRE_FALSE(compiled.lobes.coat);
+
+    TempCacheDir dir("lobes");
+    ShaderCache cache;
+    cache.Configure(dir.path, identity);
+    cache.SetCompiler(MakeSlangCompiler());
+
+    const auto compileWith = [&](const SurfaceLobes& lobes) {
+        MaterialModuleOptions options = moduleOptions;
+        options.lobes = lobes;
+        const CompileRequest request =
+            MakeMaterialRequest(compiled.slang, ShaderStage::Fragment, options);
+        const CompileOutput out = cache.Get(request);
+        INFO("slangc: " << out.error);
+        REQUIRE(out.ok);
+        return out.spirv.size();
+    };
+
+    // Material yang sama, dua kali: sekali dengan lapisan yang benar-benar
+    // dipakainya, sekali dengan seluruh lapisan dinyalakan.
+    const std::size_t lean = compileWith(compiled.lobes);
+    SurfaceLobes everything;  // bawaannya menyalakan semuanya
+    const std::size_t full = compileWith(everything);
+
+    MESSAGE("SPIR-V: " << lean << " byte tanpa lapisan tambahan, " << full
+                       << " byte dengan semuanya");
+    CHECK(lean < full);
+}

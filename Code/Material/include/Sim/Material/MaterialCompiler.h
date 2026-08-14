@@ -33,6 +33,26 @@ struct TextureBinding {
     std::string parameter;
 };
 
+/// Lapisan OpenPBR yang **mungkin** dipakai sebuah material.
+///
+/// **Mungkin, bukan pasti.** Pin yang tersambung ke sesuatu bisa bernilai apa
+/// saja saat digambar, jadi jawabannya "ya" — yang bisa dijawab "tidak" hanya
+/// pin yang literalnya nol dan tidak tersambung ke mana pun. Tebakan ke arah
+/// sebaliknya akan menghapus lobe yang ternyata dipakai, dan yang terlihat
+/// bukan galat melainkan coat yang hilang pada material tertentu saja.
+///
+/// Gunanya mematikan lobe **saat kompilasi**. Di GPU, cabang yang diambil
+/// sebagian lane dalam satu warp membayar kedua sisinya — jadi satu material
+/// bercoat di layar membuat tetangganya ikut membayar, dan material yang
+/// coat-nya nol tetap membawa kodenya di dalam SPIR-V. Dengan konstanta yang
+/// nilainya diketahui saat kompilasi, kodenya tidak pernah ada.
+struct SurfaceLobes {
+    bool coat = true;
+    bool fuzz = true;
+    bool anisotropy = true;
+    bool diffuseRoughness = true;
+};
+
 struct MaterialCompileResult {
     bool ok = false;
     /// Sumber Slang yang dihasilkan. Terisi juga saat gagal, supaya panel bisa
@@ -45,6 +65,9 @@ struct MaterialCompileResult {
     /// pernah dibaca tetap ikut ditulis ke cbuffer — tata letaknya harus sama
     /// dengan yang diharapkan material instance, apa pun isi graph-nya.
     std::vector<std::string> usedParameters;
+    /// Lapisan yang mungkin dipakai. Dipakai `AssembleMaterialModule` untuk
+    /// mematikan yang tidak mungkin dipakai sebelum `slangc` melihatnya.
+    SurfaceLobes lobes;
 
     /// Node yang bertanggung jawab atas sebuah baris. Inilah yang mengubah
     /// "error di baris 42" menjadi node yang menyala merah di kanvas.

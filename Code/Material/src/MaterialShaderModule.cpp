@@ -54,6 +54,18 @@ std::string AssembleMaterialModule(const std::string& generatedSlang,
     out << "[vk::constant_id(1)] const bool kInstanced = false;\n";
     out << "[vk::constant_id(2)] const bool kAlphaTest = false;\n\n";
 
+    // **Lapisan yang tidak mungkin dipakai dimatikan di sini**, sebelum
+    // `slangc` melihat model shadingnya. Nilainya diketahui saat kompilasi, jadi
+    // yang mati bukan cabang yang tidak diambil melainkan kode yang tidak pernah
+    // ada — dan di GPU keduanya sangat berbeda: cabang yang diambil sebagian
+    // lane dalam satu warp membayar kedua sisinya.
+    out << "// --- lapisan yang dipakai material ini -----------------------------\n";
+    out << "#define OPENPBR_HAS_COAT " << (options.lobes.coat ? 1 : 0) << "\n";
+    out << "#define OPENPBR_HAS_FUZZ " << (options.lobes.fuzz ? 1 : 0) << "\n";
+    out << "#define OPENPBR_HAS_ANISOTROPY " << (options.lobes.anisotropy ? 1 : 0) << "\n";
+    out << "#define OPENPBR_HAS_DIFFUSE_ROUGHNESS "
+        << (options.lobes.diffuseRoughness ? 1 : 0) << "\n\n";
+
     out << "// --- model shading (openpbr.slang, ditanam) -----------------------\n";
     out << options.prelude;
     if (!options.prelude.empty() && options.prelude.back() != '\n') {

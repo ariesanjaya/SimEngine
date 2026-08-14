@@ -3,6 +3,7 @@
 #include "Sim/Material/MaterialNodeCatalog.h"
 
 #include <algorithm>
+#include <cstdlib>
 #include <map>
 #include <set>
 #include <sstream>
@@ -88,6 +89,8 @@ private:
 
     /// True bila pin masukan itu punya sumber atau nilai yang ditulis pengguna.
     bool IsDriven(const MaterialNode& node, const MaterialPin& pin) const;
+    bool MaybeNonZero(const MaterialNode& node, std::string_view pin) const;
+    SurfaceLobes DetectLobes(const MaterialNode& output) const;
 
     void EmitNode(const MaterialNode& node);
     void Line(std::string text, const Uuid& node = {});
@@ -137,6 +140,55 @@ void Emitter::CollectReachable(const Uuid& guid) {
     if (!IsLayoutOnly(*node)) {
         order_.push_back(node);
     }
+}
+
+/// Apakah sebuah pin **mungkin** bernilai bukan nol.
+///
+/// Pin yang tersambung ke sesuatu dijawab "ya" tanpa dilihat lagi: nilainya
+/// ditentukan saat menggambar, dan menebak "nol" akan menghapus lobe yang
+/// ternyata dipakai. Yang bisa dijawab "tidak" hanya literal yang benar-benar
+/// nol.
+///
+/// Literal yang tidak bisa diurai juga dijawab "ya". Tebakan yang salah ke arah
+/// itu hanya membuat material membayar lobe yang tidak dipakainya; ke arah
+/// sebaliknya ia menghilangkan lapisan tanpa satu pun galat.
+bool Emitter::MaybeNonZero(const MaterialNode& node, std::string_view pin) const {
+    if (graph_.LinkInto(node.guid, std::string(pin)) != nullptr) {
+        return true;
+    }
+    const auto typed = node.pinValues.find(std::string(pin));
+    if (typed == node.pinValues.end() || typed->second.empty()) {
+        // Tidak disebut sama sekali: yang berlaku nilai bawaan pin, dan bawaan
+        // keempat lapisan yang disaring di sini semuanya nol.
+        return false;
+    }
+    // Diurai di sini, bukan lewat `ParseValue`: keempat pin yang disaring
+    // semuanya bertipe Float, jadi literalnya sebuah skalar — dan menarik
+    // `MaterialInstance` ke dalam kompiler demi satu `strtof` adalah
+    // ketergantungan yang tidak dibayar apa pun.
+    const std::string& text = typed->second;
+    char* end = nullptr;
+    const float value = std::strtof(text.c_str(), &end);
+    if (end == text.c_str()) {
+        // Tidak terbaca sebagai angka — mungkin `float(x)` atau ekspresi lain.
+        // Dijawab "mungkin": tebakan yang salah ke arah ini hanya membuat
+        // material membayar lobe yang tidak dipakainya, sedangkan ke arah
+        // sebaliknya ia menghilangkan lapisan tanpa satu pun galat.
+        return true;
+    }
+    return value != 0.0f;
+}
+
+SurfaceLobes Emitter::DetectLobes(const MaterialNode& output) const {
+    SurfaceLobes lobes;
+    lobes.coat = MaybeNonZero(output, "coatWeight");
+    lobes.fuzz = MaybeNonZero(output, "fuzzWeight");
+    lobes.diffuseRoughness = MaybeNonZero(output, "baseDiffuseRoughness");
+    // Satu sakelar untuk keduanya: `anisotropicAlpha` dipakai lobe spekular
+    // maupun coat, jadi mematikannya menuntut kedua-duanya isotropik.
+    lobes.anisotropy = MaybeNonZero(output, "specularRoughnessAnisotropy") ||
+                       MaybeNonZero(output, "coatRoughnessAnisotropy");
+    return lobes;
 }
 
 bool Emitter::IsDriven(const MaterialNode& node, const MaterialPin& pin) const {
@@ -383,6 +435,11 @@ MaterialCompileResult Emitter::Run() {
             return node.type == kSurfaceOutputType;
         });
     const MaterialNode& output = *outputIt;  // validasi menjamin tepat satu
+
+    // Lapisan mana yang mungkin dipakai, ditentukan **sebelum** kode ditulis:
+    // hasilnya menjadi `#define` di kepala modul, dan yang mati di sana tidak
+    // pernah menjadi instruksi.
+    result_.lobes = DetectLobes(output);
 
     CollectReachable(output.guid);
     for (const MaterialNode* node : order_) {

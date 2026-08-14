@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Sim/Material/MaterialCompiler.h"
 #include "Sim/Material/ShaderCache.h"
 
 #include <filesystem>
@@ -11,6 +12,10 @@ namespace sim::material {
 struct MaterialModuleOptions {
     /// Isi `openpbr.slang`, **ditanam apa adanya** ke dalam modul.
     std::string prelude;
+    /// Lapisan yang mungkin dipakai, dari `MaterialCompileResult::lobes`.
+    /// Bawaannya menyalakan semuanya — yang tidak menyebutnya mendapat perilaku
+    /// sebelum penyaringan ini ada.
+    SurfaceLobes lobes;
     std::string vertexEntry = "vertexMain";
     std::string fragmentEntry = "fragmentMain";
 };

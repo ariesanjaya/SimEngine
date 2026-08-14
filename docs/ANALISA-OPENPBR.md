@@ -130,7 +130,7 @@ yang mendorong pertanyaan ini justru terpenuhi olehnya.
 Tetapi tiga hal perlu dikerjakan supaya pilihan itu tidak menjadi ongkos yang
 tidak perlu:
 
-### 1. Lapisan dimatikan saat **kompilasi**, bukan saat menggambar
+### 1. Lapisan dimatikan saat **kompilasi**, bukan saat menggambar · ✅ selesai
 
 Hari ini `if (surface.coatWeight > 0.0)` adalah cabang runtime. Pada GPU, cabang
 yang diambil sebagian lane dalam satu warp membayar **kedua** sisinya — jadi satu
@@ -145,6 +145,35 @@ menghasilkan modul **tanpa** lobe coat sama sekali.
 Ini yang membuat "OpenPBR mahal" berhenti benar. Sesudahnya, material
 metallic-roughness biasa menghasilkan kode yang sama dengan mesin
 metallic-roughness — bukan mirip, sama.
+
+**Dikerjakan.** Bentuknya bukan konstanta spesialisasi melainkan `#define` yang
+ditulis `AssembleMaterialModule` **sebelum** prelude-nya. Konstanta spesialisasi
+disetel saat pipeline dibuat, sementara yang menentukan lapisan adalah
+materialnya sendiri — dan SPIR-V-nya memang sudah per-material. Dengan nilai
+yang diketahui `slangc`, kodenya tidak pernah menjadi instruksi; dengan
+konstanta spesialisasi ia tetap ada dan hanya tidak diambil.
+
+`openpbr.slang` memasang bawaan lewat `#ifndef`, jadi berkas itu tetap sah
+dibaca sendirian dan yang tidak menyebut apa-apa mendapat perilaku sebelum
+penyaringan ini ada.
+
+Kompiler menjawab **"mungkin dipakai"**, bukan "dipakai": pin yang tersambung ke
+sesuatu bisa bernilai apa saja saat menggambar, dan literal yang tidak terbaca
+sebagai angka juga dijawab "mungkin". Tebakan ke arah itu hanya membuat material
+membayar lobe yang tidak dipakainya; ke arah sebaliknya ia menghilangkan lapisan
+tanpa satu pun galat.
+
+**Terukur, dan itu yang membuktikannya.** Bendera di `MaterialCompileResult` dan
+`#define` di dalam teks modul keduanya bisa benar sementara `slangc` tetap
+menghasilkan instruksi yang sama, jadi yang diuji adalah SPIR-V-nya: material
+polos yang sama menghasilkan **2.588 byte** dengan lapisan yang benar-benar
+dipakainya, terhadap **4.067 byte** dengan seluruh lapisan dinyalakan — 36% lebih
+kecil.
+
+Mutasi yang memindahkan `#define` ke *sesudah* prelude ikut menggugurkan uji.
+Itu kesalahan yang paling mudah dibuat di sini: modulnya tetap terbentuk,
+`#ifndef` di dalam prelude sudah terlanjur memasang bawaannya, dan penyaringannya
+diam-diam tidak berpengaruh sama sekali.
 
 ### 2. Uji kesetaraan terhadap metallic-roughness
 

@@ -1272,6 +1272,11 @@ private:
         material::MaterialModuleOptions options;
         options.prelude = prelude_;
 
+        // Lapisan yang tidak mungkin dipakai dimatikan sebelum `slangc`
+        // melihatnya. Tanpa baris ini, preview mengompilasi model shading utuh
+        // untuk material yang coat dan fuzz-nya nol — dan yang diukur panel
+        // menjadi biaya yang tidak pernah dibayar saat menggambar.
+        options.lobes = compiled_.lobes;
         const material::CompileOutput vertex = cache_.Get(
             material::MakeMaterialRequest(compiled_.slang, material::ShaderStage::Vertex, options));
         const material::CompileOutput fragment =

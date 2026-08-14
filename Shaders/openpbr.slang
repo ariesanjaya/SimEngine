@@ -72,6 +72,25 @@ struct OpenPBRSurface {
     }
 };
 
+// Lapisan yang disertakan. Dirakit `AssembleMaterialModule` dari graph yang
+// bersangkutan; bawaannya menyalakan semuanya supaya berkas ini tetap sah
+// dibaca sendirian.
+//
+// Nilainya diketahui saat kompilasi, jadi lapisan yang mati bukan cabang yang
+// tidak diambil melainkan kode yang tidak pernah ada.
+#ifndef OPENPBR_HAS_COAT
+#define OPENPBR_HAS_COAT 1
+#endif
+#ifndef OPENPBR_HAS_FUZZ
+#define OPENPBR_HAS_FUZZ 1
+#endif
+#ifndef OPENPBR_HAS_ANISOTROPY
+#define OPENPBR_HAS_ANISOTROPY 1
+#endif
+#ifndef OPENPBR_HAS_DIFFUSE_ROUGHNESS
+#define OPENPBR_HAS_DIFFUSE_ROUGHNESS 1
+#endif
+
 /// Bingkai shading di sebuah titik. Tangent dan bitangent hanya dipakai lobe
 /// yang anisotropik; yang isotropik boleh mengabaikannya.
 struct ShadingFrame {
@@ -100,6 +119,12 @@ float3 fresnelSchlick(float3 f0, float cosTheta) {
 void anisotropicAlpha(float roughness, float anisotropy, out float ax, out float ay) {
     const float r = max(roughness, kMinRoughness);
     const float alpha = r * r;
+#if !OPENPBR_HAS_ANISOTROPY
+    // Material yang tidak menyentuh anisotropi mendapat lobe isotropik apa
+    // adanya: satu perkalian, tanpa akar kuadrat dan tanpa cabang.
+    ax = alpha;
+    ay = alpha;
+#else
     // Anisotropi negatif memutar sumbu panjangnya 90°, bukan menjadi tidak sah.
     const float aspect = sqrt(1.0 - clamp(abs(anisotropy), 0.0, 0.98) * 0.9);
     if (anisotropy >= 0.0) {
@@ -109,6 +134,7 @@ void anisotropicAlpha(float roughness, float anisotropy, out float ax, out float
         ax = alpha * aspect;
         ay = alpha / aspect;
     }
+#endif
 }
 
 float ggxDistribution(float ax, float ay, float3 h, ShadingFrame frame) {
@@ -133,7 +159,7 @@ float smithVisibility(float ax, float ay, float3 v, float3 l, ShadingFrame frame
 /// Difus Oren–Nayar yang disederhanakan. `baseDiffuseRoughness` 0 jatuh persis
 /// ke Lambert, jadi material yang tidak menyentuhnya tidak membayar apa pun.
 float3 diffuseLobe(OpenPBRSurface surface, float nl, float nv, float lv) {
-    if (surface.baseDiffuseRoughness <= 0.0) {
+    if (!OPENPBR_HAS_DIFFUSE_ROUGHNESS || surface.baseDiffuseRoughness <= 0.0) {
         return surface.baseColor / kPi;
     }
     const float sigma = surface.baseDiffuseRoughness * surface.baseDiffuseRoughness;
@@ -200,12 +226,12 @@ float3 evaluateOpenPBR(OpenPBRSurface surface, ShadingFrame frame, float3 lightD
 
     float3 result = diffuse + specular;
 
-    if (surface.fuzzWeight > 0.0) {
+    if (OPENPBR_HAS_FUZZ && surface.fuzzWeight > 0.0) {
         const float sheen = sheenDistribution(surface.fuzzRoughness, nh);
         result += surface.fuzzColor * (sheen * surface.fuzzWeight);
     }
 
-    if (surface.coatWeight > 0.0) {
+    if (OPENPBR_HAS_COAT && surface.coatWeight > 0.0) {
         float cx, cy;
         anisotropicAlpha(surface.coatRoughness, surface.coatRoughnessAnisotropy, cx, cy);
         const float3 coatF0 = float3(iorToF0(surface.coatIor));
@@ -327,14 +353,14 @@ float3 evaluateOpenPBR_IBL(OpenPBRSurface surface, ShadingFrame frame, float3 ir
     float3 result =
         surface.baseColor * (irradiance / kPi) * diffuseEnergy * surface.baseWeight + specular;
 
-    if (surface.fuzzWeight > 0.0) {
+    if (OPENPBR_HAS_FUZZ && surface.fuzzWeight > 0.0) {
         // Sheen lingkungan tanpa LUT-nya sendiri: sheen menyerempet permukaan,
         // jadi ia didekati sebagai irradiance yang dibobot Fresnel sisi.
         const float grazing = pow(1.0 - nv, 3.0);
         result += surface.fuzzColor * (irradiance / kPi) * (grazing * surface.fuzzWeight);
     }
 
-    if (surface.coatWeight > 0.0) {
+    if (OPENPBR_HAS_COAT && surface.coatWeight > 0.0) {
         const float3 coatF0 = float3(iorToF0(surface.coatIor));
         const float3 coatSpecular = environmentSpecular(coatF0, dfg, prefilteredCoat);
         const float3 coatFresnel = fresnelSchlick(coatF0, nv);
