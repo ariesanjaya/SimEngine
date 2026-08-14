@@ -97,6 +97,13 @@ public:
     /// tersedia. Dipakai E8 untuk memilih jalur render modern.
     bool SupportsVulkan13() const { return supportsVulkan13_; }
 
+    /// Apakah perangkat ini bisa menggambar dari format blok BCn.
+    ///
+    /// **Ditanya, bukan diandaikan.** Yang membaca `.ktx2` ber-BC7 pada
+    /// perangkat tanpa dukungan itu harus memilih jalur lain — bukan mengunggah
+    /// dan berharap.
+    bool SupportsBlockCompression() const { return supportsBlockCompression_; }
+
 private:
     bool CreateInstance(const DeviceDesc& desc);
     bool SelectPhysicalDevice();
@@ -133,6 +140,7 @@ private:
     std::string deviceName_;
     bool validationEnabled_ = false;
     bool supportsVulkan13_ = false;
+    bool supportsBlockCompression_ = false;
 };
 
 }  // namespace sim::rhi

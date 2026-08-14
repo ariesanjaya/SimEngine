@@ -32,17 +32,22 @@ Alasannya di bawah — ini keputusan desain yang paling menentukan di seluruh pl
 
 Tiga fakta yang diverifikasi di kode:
 
-- **`Device.cpp:279` belum meminta `textureCompressionBC`.** Blok `VkPhysicalDeviceFeatures`
-  hanya menyalakan `fillModeNonSolid`, `wideLines`, dan `fragmentStoresAndAtomics`.
-- **`Texture.cpp:70` mengunggah `VK_FORMAT_R8G8B8A8_UNORM`** — satu-satunya jalur
-  tekstur yang ada, dan itu untuk thumbnail.
-- **Jalur tekstur material belum ditulis.** [PLAN-RENDER.md](PLAN-RENDER.md)
-  mencatatnya sebagai sedang berjalan: "pipeline material menggantikan
-  `box.frag` di pass forward" belum mendarat.
+- ~~**`Device.cpp:279` belum meminta `textureCompressionBC`**~~ — **sudah,
+  di T0.** Ketiadaannya dicatat di log, bukan disimpulkan dari VRAM yang penuh.
+- **`Texture.cpp` mengunggah `VK_FORMAT_R8G8B8A8_UNORM`** — masih satu-satunya
+  jalur unggah yang ada.
+- ~~**Jalur tekstur material belum ditulis**~~ — **sudah mendarat**, sebagai
+  Jalur A di [ANALISA-TEKSTUR-PERMUKAAN.md](ANALISA-TEKSTUR-PERMUKAAN.md):
+  `IViewportRenderer::AcquireTexture` memuat lewat `Sim::ImageIO` menjadi RGBA8,
+  dan material impor sudah menyebut teksturnya.
 
-Yang ketiga menentukan urgensinya. Begitu jalur itu lahir memuat PNG langsung ke
-RGBA8, KTX2 menjadi jalur kedua yang harus dirawat selamanya — dan jalur pertama
-tidak akan pernah dihapus karena selalu ada yang memakainya.
+**Yang ketiga sudah terjadi, dan itu mengubah urgensinya menjadi hutang yang
+sudah berjalan.** Peringatan di plan ini — "begitu jalur itu lahir memuat PNG
+langsung ke RGBA8, KTX2 menjadi jalur kedua yang harus dirawat selamanya" —
+terjadi persis seperti tertulis. Konsekuensinya bukan membatalkan Jalur A
+melainkan **T3 harus menggantikan isi `AcquireTexture`, bukan berdiri di
+sebelahnya**: satu fungsi, dua sumber format, dan yang RGBA8 menjadi jalur mundur
+untuk berkas yang belum di-bake.
 
 Satu hal yang sudah benar dan harus dijaga: `MaterialParameterBlock.h:101`
 mencatat bahwa renderer mengikat seluruh tekstur sekali sebagai **satu larik
@@ -120,7 +125,7 @@ tekstur sama sekali begitu T3 mendarat.
 
 ## Milestone
 
-### T0 — Fondasi Vulkan · ⬜
+### T0 — Fondasi Vulkan · ✅
 
 `textureCompressionBC` diminta di `Device.cpp` dan ketiadaannya ditangani, bukan
 diabaikan. Pembaca KTX2 di RHI yang mengunggah tiap level dengan `memcpy` ke
@@ -130,12 +135,44 @@ Bisa dikerjakan sekarang tanpa encoder apa pun: berkas uji dibuat manual dengan
 CLI `ktx create`, lalu dimasukkan ke `Resources/` sebagai fixture.
 
 **Kriteria terima**
-- GPU tanpa dukungan BC tetap menjalankan editor; teksturnya jatuh ke RGBA8 dan
-  fakta itu tercatat di log startup, bukan disimpulkan dari gambar yang aneh.
-- `.ktx2` BC7 dengan seluruh rantai mip dimuat dan digambar benar.
-- Nol galat validation layer.
-- Uji doctest membaca header KTX2 fixture dan memeriksa `VkFormat`, jumlah level,
-  serta ukuran tiap level.
+- GPU tanpa dukungan BC tetap menjalankan editor, dan faktanya tercatat di log
+  startup. ✅ `Device::SupportsBlockCompression()` menjawabnya, supaya yang
+  memuat `.ktx2` ber-BC7 bisa memilih jalur lain alih-alih mengunggah dan
+  berharap.
+- Uji doctest membaca header KTX2 dan memeriksa `VkFormat`, jumlah level, serta
+  ukuran tiap level. ✅
+- `.ktx2` BC7 dengan seluruh rantai mip dimuat dan digambar benar. 🔶 pembacanya
+  ada dan diuji; pengunggahannya ke `VkImage` menyusul bersama T3, karena di
+  situlah ia punya pemakai.
+- Nol galat validation layer. ⏸ menunggu unggahan itu.
+
+**Pembacanya ditulis sendiri, dan libktx ditunda ke T2.** Yang dibutuhkan T0
+hanya membaca: header, indeks level, lalu `memcpy` tiap level. Itu struktur
+berkas yang seluruhnya dijelaskan spesifikasinya, dan menariknya lewat pustaka
+penuh berarti dependensi wajib yang belum membayar apa pun — alasan yang sama
+yang membuat enkoder PNG 16-bit ditulis sendiri di E7.3.
+
+libktx tetap masuk di T2, ketika baker harus **menulis** KTX2 dan memakai
+supercompression Zstd. Menulis kontainer, memilih skema supercompression, dan
+menyusun DFD adalah pekerjaan yang tidak layak ditulis tangan.
+
+**Yang tidak didukung ditolak beserta sebabnya**, bukan dibaca separuh: Basis
+Universal (menuntut transcode), supercompression, larik, kubus, dan volume.
+Kelimanya sah menurut spesifikasi dan tidak satu pun dipakai jalur tekstur mesin
+ini hari ini — dan berkas yang diterima separuh menghasilkan gambar yang salah
+tanpa satu pun pesan.
+
+**Ujinya menyusun berkas dari tata letak spesifikasinya**, bukan lewat penulis
+buatan sendiri: round-trip terhadap penulis sendiri hanya membuktikan konsistensi
+dengan diri sendiri, dan ia lulus walaupun kedua sisinya salah membaca
+spesifikasi dengan cara yang sama. Berkas `.ktx2` sungguhan dari CLI `ktx` tetap
+layak ditambahkan sebagai fixture begitu alatnya ada.
+
+Satu mutasi sempat lolos dan uji yang menangkapnya menyusul: **kasus persegi
+tidak bisa membuktikan penjepitan ukuran mip ke satu.** Pada 16×16, kelima
+levelnya berhenti tepat di 1×1 dengan sendirinya; yang membuktikannya tekstur
+16×4, yang sisi pendeknya habis lebih dulu — dan ukuran nol membuat
+`vkCmdCopyBufferToImage` menolak seluruh unggahan.
 
 ### T1 — `TextureSettings` dan panel Inspector · ⬜
 

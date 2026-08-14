@@ -284,12 +284,30 @@ bool Device::CreateLogicalDevice() {
     // ditandai NonWritable ditolak di pembuatan pipeline — ditemukan validation
     // layer, bukan dengan membaca kode.
     features.fragmentStoresAndAtomics = VK_TRUE;
+    // Format blok BCn — BC7 untuk albedo, BC5 untuk normal, BC4 untuk roughness,
+    // BC6H untuk HDR. **Diminta, bukan diandaikan:** setiap GPU desktop sepuluh
+    // tahun terakhir punya, tetapi mengunggah `VK_FORMAT_BC7_...` ke perangkat
+    // yang tidak mendukungnya adalah galat validation layer di setiap tekstur,
+    // bukan gambar yang jelek.
+    features.textureCompressionBC = VK_TRUE;
 
     VkPhysicalDeviceFeatures supported{};
     vkGetPhysicalDeviceFeatures(physicalDevice_, &supported);
     features.fillModeNonSolid &= supported.fillModeNonSolid;
     features.wideLines &= supported.wideLines;
     features.fragmentStoresAndAtomics &= supported.fragmentStoresAndAtomics;
+    features.textureCompressionBC &= supported.textureCompressionBC;
+    supportsBlockCompression_ = features.textureCompressionBC == VK_TRUE;
+
+    // **Ketiadaannya dicatat, bukan didiamkan.** Perangkat tanpa BC tetap
+    // menjalankan editor — teksturnya jatuh ke RGBA8 — tetapi itu berarti empat
+    // kali memori tekstur, dan yang menemukannya lewat "kok VRAM-nya penuh"
+    // akan mencari di tempat yang salah selama berjam-jam.
+    if (!supportsBlockCompression_) {
+        SIM_WARN("RHI",
+                 "this GPU has no BC texture compression; textures fall back to RGBA8 and use "
+                 "about four times the memory");
+    }
 
     // Fitur Vulkan 1.3 yang kita aktifkan sejak sekarang:
     //   - shaderDemoteToHelperInvocation: dibutuhkan segera, karena glslc

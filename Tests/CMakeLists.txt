@@ -168,7 +168,9 @@ sim_add_test(SimRenderTests
         Sim::Render
         # Sim::ImageIO adalah dependensi privat Render, jadi uji harus
         # memintanya sendiri — sama seperti SimAnimationTests dengan Sim::Assets.
-        Sim::ImageIO)
+        Sim::ImageIO
+        # Pembaca KTX2 tinggal di RHI, dan RHI privat milik Render.
+        Sim::RHI)
 
 # Peta lingkungan uji untuk jalur IBL, dibaca dari folder sumber dengan alasan
 # yang sama dengan SIM_MESH_DIR di atas.

@@ -1,5 +1,8 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 
+#include "Sim/RHI/Ktx2.h"
+
+#include <cstring>
 #include "Sim/Render/FrameGraph.h"
 #include "Sim/Render/Frustum.h"
 #include "Sim/Render/Ibl.h"
@@ -4698,4 +4701,182 @@ TEST_CASE("grid kosong ditolak, bukan menghasilkan tekstur nol") {
     CHECK_FALSE(EncodeVolume(empty, VolumeTextureFormat::R8Unorm, bytes, desc));
     CHECK(bytes.empty());
     CHECK(desc.ByteCount() == 0);
+}
+
+// ============================================================================
+// T0 — pembaca KTX2
+// ============================================================================
+
+namespace {
+
+/// Menyusun sebuah berkas KTX2 **dari tata letak spesifikasinya**, bukan lewat
+/// penulis buatan sendiri.
+///
+/// Bedanya menentukan. Round-trip terhadap penulis sendiri hanya membuktikan
+/// konsistensi dengan diri sendiri — ia lulus walaupun kedua sisinya salah
+/// membaca spesifikasi dengan cara yang sama. Yang di sini menuliskan offset
+/// medannya satu per satu, sehingga yang diuji adalah pembacanya terhadap tata
+/// letak yang tertulis, bukan terhadap tebakan yang sama.
+std::vector<uint8_t> MakeKtx2(uint32_t format, uint32_t width, uint32_t height,
+                              const std::vector<uint32_t>& levelSizes,
+                              uint32_t supercompression = 0, uint32_t faceCount = 1,
+                              uint32_t layerCount = 0, uint32_t pixelDepth = 0) {
+    const std::size_t levelCount = levelSizes.size();
+    const std::size_t headerBytes = 80;
+    const std::size_t indexBytes = levelCount * 24;
+    std::size_t payload = 0;
+    for (const uint32_t size : levelSizes) {
+        payload += size;
+    }
+
+    std::vector<uint8_t> bytes(headerBytes + indexBytes + payload, 0);
+    const auto put32 = [&](std::size_t at, uint32_t value) {
+        std::memcpy(bytes.data() + at, &value, sizeof(value));
+    };
+    const auto put64 = [&](std::size_t at, uint64_t value) {
+        std::memcpy(bytes.data() + at, &value, sizeof(value));
+    };
+
+    std::memcpy(bytes.data(), sim::rhi::kKtx2Identifier, 12);
+    put32(12, format);
+    put32(16, 1);  // typeSize
+    put32(20, width);
+    put32(24, height);
+    put32(28, pixelDepth);
+    put32(32, layerCount);
+    put32(36, faceCount);
+    put32(40, static_cast<uint32_t>(levelCount));
+    put32(44, supercompression);
+
+    std::size_t offset = headerBytes + indexBytes;
+    for (std::size_t level = 0; level < levelCount; ++level) {
+        const std::size_t at = headerBytes + level * 24;
+        put64(at, offset);
+        put64(at + 8, levelSizes[level]);
+        put64(at + 16, levelSizes[level]);
+        // Isi yang bisa dibedakan antar level, supaya `LevelBytes` yang menunjuk
+        // level yang salah terlihat.
+        for (uint32_t i = 0; i < levelSizes[level]; ++i) {
+            bytes[offset + i] = static_cast<uint8_t>(level + 1);
+        }
+        offset += levelSizes[level];
+    }
+    return bytes;
+}
+
+/// `VK_FORMAT_BC7_SRGB_BLOCK`, menurut nomor yang ditetapkan Vulkan.
+constexpr uint32_t kBc7Srgb = 146;
+
+}  // namespace
+
+TEST_CASE("T0: KTX2 BC7 berantai mip terbaca beserta ukuran tiap levelnya") {
+    using namespace sim::rhi;
+
+    // 16x16 BC7: blok 4x4 berukuran 16 byte, jadi level 0 = 16 blok = 256 byte,
+    // level 1 = 64, dan seterusnya. Angkanya dihitung tangan, bukan diambil dari
+    // yang dihasilkan kode yang sedang diuji.
+    const std::vector<uint32_t> sizes = {256, 64, 16, 16, 16};
+    const std::vector<uint8_t> file = MakeKtx2(kBc7Srgb, 16, 16, sizes);
+
+    Ktx2Texture texture;
+    const Ktx2Result result = ReadKtx2(file, texture);
+    INFO(result.error);
+    REQUIRE(result.ok);
+    CHECK(texture.IsValid());
+    CHECK(texture.format == kBc7Srgb);
+    CHECK(texture.width == 16);
+    CHECK(texture.height == 16);
+    REQUIRE(texture.levels.size() == 5);
+
+    for (std::size_t level = 0; level < sizes.size(); ++level) {
+        INFO("level " << level);
+        CHECK(texture.levels[level].length == sizes[level]);
+        CHECK(texture.LevelBytes(level).size() == sizes[level]);
+        // Isinya benar-benar level itu, bukan tetangganya.
+        CHECK(texture.LevelBytes(level)[0] == static_cast<uint8_t>(level + 1));
+    }
+
+    // Ukuran per level menyusut separuh dan berhenti di satu — bukan nol, yang
+    // akan membuat `vkCmdCopyBufferToImage` menolak seluruh unggahan.
+    CHECK(texture.levels[0].width == 16);
+    CHECK(texture.levels[1].width == 8);
+    CHECK(texture.levels[4].width == 1);
+    CHECK(texture.levels[4].height == 1);
+
+    // Level di luar batas menjawab kosong, bukan membaca memori tetangga.
+    CHECK(texture.LevelBytes(99).empty());
+}
+
+TEST_CASE("T0: tekstur tidak persegi berhenti di satu, bukan di nol") {
+    using namespace sim::rhi;
+
+    // **Sisi yang pendek habis lebih dulu.** Pada 16x4, level 2 sudah 4x1 dan
+    // level 3 seharusnya 2x1 — bukan 2x0. Ukuran nol membuat
+    // `vkCmdCopyBufferToImage` menolak seluruh unggahan, dan yang terlihat
+    // adalah tekstur yang hilang tanpa satu pun pesan tentang mip.
+    //
+    // Kasus persegi tidak bisa menangkap ini: pada 16x16 kelima levelnya
+    // berhenti tepat di 1x1 dengan sendirinya.
+    const std::vector<uint8_t> file = MakeKtx2(kBc7Srgb, 16, 4, {16, 16, 16, 16, 16});
+
+    Ktx2Texture texture;
+    const Ktx2Result result = ReadKtx2(file, texture);
+    INFO(result.error);
+    REQUIRE(result.ok);
+    REQUIRE(texture.levels.size() == 5);
+
+    CHECK(texture.levels[0].width == 16);
+    CHECK(texture.levels[0].height == 4);
+    CHECK(texture.levels[2].width == 4);
+    CHECK(texture.levels[2].height == 1);
+    CHECK(texture.levels[3].width == 2);
+    CHECK(texture.levels[3].height == 1);
+    CHECK(texture.levels[4].width == 1);
+    CHECK(texture.levels[4].height == 1);
+    for (const Ktx2Level& level : texture.levels) {
+        CHECK(level.width >= 1);
+        CHECK(level.height >= 1);
+    }
+}
+
+TEST_CASE("T0: berkas yang tidak didukung ditolak beserta sebabnya") {
+    using namespace sim::rhi;
+    Ktx2Texture texture;
+
+    // Bukan KTX2 sama sekali.
+    const std::vector<uint8_t> garbage(200, 0x42);
+    Ktx2Result result = ReadKtx2(garbage, texture);
+    CHECK_FALSE(result.ok);
+    CHECK(result.error.find("identifier") != std::string::npos);
+
+    // Terlalu pendek untuk sebuah header.
+    CHECK_FALSE(ReadKtx2(std::vector<uint8_t>(20, 0), texture).ok);
+
+    // **Basis Universal menuntut transcode**, dan mengunggah bloknya ke sebuah
+    // `VkImage` ber-BCn menghasilkan gambar yang salah tanpa satu pun galat.
+    result = ReadKtx2(MakeKtx2(0, 16, 16, {256}), texture);
+    CHECK_FALSE(result.ok);
+    CHECK(result.error.find("Basis") != std::string::npos);
+
+    // Supercompression belum didukung; ia harus disebut, bukan dibaca separuh.
+    result = ReadKtx2(MakeKtx2(kBc7Srgb, 16, 16, {256}, /*supercompression=*/2), texture);
+    CHECK_FALSE(result.ok);
+    CHECK(result.error.find("supercompressed") != std::string::npos);
+
+    // Kubus dan larik punya jalurnya sendiri.
+    CHECK_FALSE(ReadKtx2(MakeKtx2(kBc7Srgb, 16, 16, {256}, 0, /*faceCount=*/6), texture).ok);
+    CHECK_FALSE(
+        ReadKtx2(MakeKtx2(kBc7Srgb, 16, 16, {256}, 0, 1, /*layerCount=*/4), texture).ok);
+    CHECK_FALSE(
+        ReadKtx2(MakeKtx2(kBc7Srgb, 16, 16, {256}, 0, 1, 0, /*pixelDepth=*/4), texture).ok);
+
+    // levelCount nol berarti "bangkitkan mip sendiri" — mesin ini tidak.
+    CHECK_FALSE(ReadKtx2(MakeKtx2(kBc7Srgb, 16, 16, {}), texture).ok);
+
+    // Level yang menunjuk ke luar berkas dipotong, bukan dipercaya.
+    std::vector<uint8_t> truncated = MakeKtx2(kBc7Srgb, 16, 16, {256});
+    truncated.resize(truncated.size() - 100);
+    result = ReadKtx2(truncated, texture);
+    CHECK_FALSE(result.ok);
+    CHECK(result.error.find("past the end") != std::string::npos);
 }
