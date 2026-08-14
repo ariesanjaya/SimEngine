@@ -11,6 +11,7 @@
 #include "Sim/Material/MaterialGraph.h"
 #include "Sim/Material/MaterialInstance.h"
 #include "Sim/Material/MaterialNodeCatalog.h"
+#include "Sim/Assets/TextureBakery.h"
 #include "Sim/Material/MaterialParameterBlock.h"
 #include "Sim/Material/MaterialShaderModule.h"
 #include "Sim/Material/MaterialValidation.h"
@@ -240,6 +241,10 @@ private:
             DrawCanvas(context);
         }
         ImGui::EndChild();
+        // Sesudah `EndChild`, child itulah item terakhir — jadi di sinilah
+        // sasaran jatuhnya dipasang, bukan di dalam `DrawCanvas`. Di dalam sana
+        // item terakhirnya adalah node yang kebetulan digambar paling akhir.
+        HandleTextureDrop(context);
 
         ImGui::SameLine(0.0f, 0.0f);
         DrawSideSplitter(handle);
@@ -832,6 +837,130 @@ private:
         return contains(type.label) || contains(type.key) || contains(type.category);
     }
 
+    // --- menjatuhkan tekstur ------------------------------------------------
+
+    /// Menerima tekstur yang diseret dari Asset Browser dan membuat node untuknya.
+    ///
+    /// **Hanya tekstur.** Menjatuhkan mesh atau material di sini tidak punya
+    /// arti yang jelas — dan yang lebih buruk daripada tidak melakukan apa-apa
+    /// adalah melakukan sesuatu yang tidak diminta, jadi yang lain ditolak
+    /// beserta sebabnya.
+    void HandleTextureDrop(EditorContext& context) {
+        if (!ImGui::BeginDragDropTarget()) {
+            return;
+        }
+        const ImGuiPayload* payload = ImGui::AcceptDragDropPayload("SIM_ASSET");
+        if (payload == nullptr || payload->DataSize != sizeof(Uuid)) {
+            ImGui::EndDragDropTarget();
+            return;
+        }
+        const Uuid guid = *static_cast<const Uuid*>(payload->Data);
+        // Posisinya diambil sebelum `EndDragDropTarget`, dari mouse — sama
+        // dengan yang dipakai palet node, jadi node yang dijatuhkan mendarat di
+        // tempat yang sama dengan node yang dibuat lewat menu.
+        const ImVec2 mouse = ImGui::GetMousePos();
+        ImGui::EndDragDropTarget();
+
+        const assets::AssetRecord* record =
+            context.assets != nullptr ? context.assets->Find(guid) : nullptr;
+        if (record == nullptr) {
+            return;
+        }
+        if (record->type != assets::AssetType::Texture) {
+            context.notifications->Warning(std::string("Only textures can be dropped here; ") +
+                                           record->name + " is a " +
+                                           assets::ToString(record->type));
+            return;
+        }
+        if (!openGuid_.IsValid() || instanceMode_) {
+            return;
+        }
+
+        // **Namanya dihitung sebelum node-nya ada.** Menghitungnya sesudah
+        // berarti node yang baru saja dimasukkan ikut dihitung sebagai pemakai
+        // namanya sendiri, dan tekstur pertama yang dijatuhkan sudah langsung
+        // bernama "Texture2".
+        const std::string name = UniqueTextureName(TextureNodeName(record->name));
+
+        // **Dua node, bukan satu — dan itu yang membuat hasilnya bisa dipakai.**
+        // Keluaran `input.texture` bertipe `Texture`: ia sebuah binding, bukan
+        // warna, dan satu-satunya yang menerimanya adalah masukan `texture`
+        // milik `Sample Texture`. Menjatuhkan node tekstur sendirian karena itu
+        // menghasilkan sesuatu yang tidak bisa disambungkan ke `baseColor` sama
+        // sekali — yang tampak seperti kabelnya menolak, padahal yang kurang
+        // adalah node di antaranya.
+        //
+        // Yang dijatuhkan orang berarti "saya ingin gambar ini terlihat", dan
+        // pasangan inilah bentuk terpendek dari kalimat itu.
+        MaterialNode texture;
+        texture.guid = Uuid::Generate();
+        texture.type = "input.texture";
+        texture.position = Vec2(mouse.x, mouse.y);
+        texture.settings["name"] = name;
+        texture.settings["texture"] = guid.ToString();
+
+        MaterialNode sample;
+        sample.guid = Uuid::Generate();
+        sample.type = "input.sample";
+        // Di sebelah kanannya, sejarak lebar sebuah node. Menumpuk keduanya di
+        // satu titik membuat yang di bawah tidak terlihat sama sekali, dan yang
+        // pertama dilakukan orang adalah menyeretnya untuk mencari yang hilang.
+        sample.position = Vec2(mouse.x + ImGui::GetFontSize() * 12.0f, mouse.y);
+
+        MaterialLink link;
+        link.guid = Uuid::Generate();
+        link.fromNode = texture.guid;
+        link.fromPin = "texture";
+        link.toNode = sample.guid;
+        link.toPin = "texture";
+
+        const std::string sampleName = name;
+        graph_.nodes.push_back(std::move(texture));
+        graph_.nodes.push_back(std::move(sample));
+        graph_.links.push_back(std::move(link));
+        Touch();
+        context.notifications->Info("Dropped " + sampleName +
+                                    " — connect its RGB to Base Color");
+    }
+
+    /// Nama berkas menjadi nama node: tanpa ekstensi, dan tanpa yang kosong.
+    static std::string TextureNodeName(const std::string& assetName) {
+        const std::size_t dot = assetName.rfind('.');
+        std::string stem = dot == std::string::npos ? assetName : assetName.substr(0, dot);
+        return stem.empty() ? std::string("Texture") : stem;
+    }
+
+    /// Nama yang belum dipakai node tekstur lain di graph ini.
+    ///
+    /// **Wajib, bukan kerapian.** Nama node menjadi nama binding di kode yang
+    /// dihasilkan (`tAlbedo`), jadi dua node bernama sama menghasilkan dua
+    /// deklarasi bernama sama — dan yang muncul adalah galat slangc yang
+    /// menyebut simbol, bukan node. Menjatuhkan tekstur yang sama dua kali
+    /// adalah hal yang paling wajar dilakukan orang.
+    std::string UniqueTextureName(const std::string& base) const {
+        const auto taken = [this](const std::string& candidate) {
+            for (const MaterialNode& node : graph_.nodes) {
+                if (node.type != "input.texture") {
+                    continue;
+                }
+                if (node.Setting("name") == candidate) {
+                    return true;
+                }
+            }
+            return false;
+        };
+        if (!taken(base)) {
+            return base;
+        }
+        for (int suffix = 2; suffix < 1000; ++suffix) {
+            const std::string candidate = base + std::to_string(suffix);
+            if (!taken(candidate)) {
+                return candidate;
+            }
+        }
+        return base;
+    }
+
     void AddNode(const std::string& type) {
         MaterialNode node;
         node.guid = Uuid::Generate();
@@ -1107,6 +1236,7 @@ private:
         }
 
         DrawPreviewControls();
+        UpdatePreviewTextures(context, *preview);
         UploadPreviewParameters(*preview);
 
         const float width = std::max(ImGui::GetContentRegionAvail().x, 32.0f);
@@ -1292,6 +1422,9 @@ private:
         }
 
         block_.Build(graph_.parameters);
+        // Jalur tekstur pratinjau ikut dilupakan: modul yang baru punya daftar
+        // slot yang lain, dan yang lama akan menunjuk slot yang sudah bergeser.
+        previewTexturePaths_.clear();
         render::MaterialPreviewShaders shaders;
         shaders.vertexSpirv = vertex.spirv;
         shaders.fragmentSpirv = fragment.spirv;
@@ -1300,6 +1433,54 @@ private:
         if (!preview.SetMaterial(shaders)) {
             previewError_ = preview.LastError();
         }
+    }
+
+    /// Memasang gambar tiap slot tekstur pratinjau.
+    ///
+    /// **Sebelum ini ada, pratinjau selalu memakai putih 1×1 untuk setiap
+    /// slot** — ia menyatakan jumlah teksturnya dan tidak pernah menerima satu
+    /// pun gambar, jadi material bertekstur tampak persis seperti material
+    /// polos. Itu yang membuat tekstur yang dijatuhkan ke kanvas "tidak keluar".
+    ///
+    /// Yang diserahkan jalur `.ktx2` hasil bake, bukan berkas sumbernya: aturan
+    /// yang sama dengan jalur tekstur viewport, dan alasan yang sama — yang
+    /// mendekode gambar adalah baker, bukan yang menggambar.
+    void UpdatePreviewTextures(EditorContext& context, render::IMaterialPreview& preview) {
+        std::vector<std::string> paths;
+        paths.reserve(compiled_.textures.size());
+        for (const material::TextureBinding& binding : compiled_.textures) {
+            Uuid image = binding.texture;
+            // Slot yang diisi parameter diambil dari instance-nya; yang tidak,
+            // dari node-nya sendiri.
+            if (instanceMode_ && !binding.parameter.empty()) {
+                const Uuid overridden = instance_.Texture(binding.parameter);
+                if (overridden.IsValid()) {
+                    image = overridden;
+                }
+            }
+            std::string path;
+            if (image.IsValid() && context.assets != nullptr &&
+                context.textureBakery != nullptr) {
+                if (const assets::AssetRecord* record = context.assets->Find(image)) {
+                    const assets::BakedTextureRef baked =
+                        context.textureBakery->Request(context.assets->AbsolutePath(*record));
+                    if (baked.state == assets::BakeState::Ready) {
+                        path = baked.path.string();
+                    }
+                }
+            }
+            paths.push_back(std::move(path));
+        }
+        // Dibandingkan, bukan dipasang tiap frame: memasangnya berarti menunggu
+        // device diam dan mengunggah ulang setiap gambar, enam puluh kali per
+        // detik. Yang masih di-bake menjadi jalur kosong hari ini dan jalur
+        // sungguhan beberapa frame lagi — dan perbandingan inilah yang membuat
+        // pergantian itu terjadi tepat sekali.
+        if (paths == previewTexturePaths_) {
+            return;
+        }
+        previewTexturePaths_ = std::move(paths);
+        preview.SetTextures(previewTexturePaths_);
     }
 
     /// Menulis blok uniform dari nilai bawaan parameter, ditimpa override
@@ -1646,6 +1827,8 @@ private:
     bool pendingFit_ = false;
     float sideWidth_ = 0.0f;
     Vec2 spawnPosition_{0.0f, 0.0f};
+    /// Jalur `.ktx2` yang sedang terpasang di pratinjau, satu per slot.
+    std::vector<std::string> previewTexturePaths_;
     std::string paletteFilter_;
 
     /// Grup yang ukurannya sudah dipasang ke kanvas, dan selisih ukur-balik

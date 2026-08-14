@@ -347,7 +347,7 @@ adalah pilihan formatnya.
   kuncinya berisi versi baker, jadi berkas dari baker lama tidak pernah terpakai
   — tetapi juga tidak pernah terhapus.
 
-### T3 — Renderer memakai KTX2 · 🔶
+### T3 — Renderer memakai KTX2 · ✅
 
 Jalur tekstur material memuat `.ktx2` dari cache. Berkas sumber tidak pernah
 sampai ke renderer sama sekali.
@@ -367,12 +367,11 @@ sampai ke renderer sama sekali.
   bertekstur" — nilai satuan perkalian — sementara magenta berarti "punya
   tekstur, sedang dikerjakan". Yang menunggu tanpa tahu ia menunggu akan mengira
   teksturnya hilang.
-- Material dengan albedo BC7, normal BC5, dan ORM BC4 digambar benar. 🔶
-  **Ketiganya di-bake, diunggah, dan tersampel dengan benar — tetapi hanya
-  albedo yang sungguh dipakai menggambar.** Pass forward masih `box.frag`, yang
-  tidak punya model pencahayaan untuk memakai normal maupun ORM. Yang
-  menggantinya adalah pipeline material di E8.4, dan di situlah sisa kriteria ini
-  selesai.
+- Material dengan albedo BC7, normal BC5, dan ORM BC4 digambar benar. ✅
+  Pipeline material di pass forward mendarat bersama E8.4 #4, dan sejak itu
+  ketiganya punya yang membacanya. Yang masih kurang bukan teksturnya melainkan
+  spekular tak-langsung: set 0 renderer belum memuat peta lingkungan
+  terprafilter, jadi logam gelap di luar sorotan langsungnya.
 
 #### T0 ditutup di sini: unggahan rantai mip
 
@@ -425,10 +424,8 @@ pernah melihatnya**.
 - **Larik bindless berisi format campuran** belum ada. Hari ini tiap tekstur
   punya satu set descriptor sendiri, seperti sebelum T3. Itu bagian dari
   keputusan set-0 di E8.4, bukan bagian dari jalur KTX2.
-- Kriteria terakhir — normal BC5 dan ORM BC4 **digambar** — menunggu pipeline
-  material di pass forward. Langkah pertamanya sudah mendarat: transform instance
-  kini di storage buffer, seperti yang dibaca modul material. Urutan sisanya ada
-  di [PLAN-RENDER.md § E8.4](PLAN-RENDER.md).
+- **Spekular tak-langsung** belum ada; lihat § E8.4 di
+  [PLAN-RENDER.md](PLAN-RENDER.md).
 - Cache tekstur masih tumbuh tanpa batas — sama seperti sesudah T2.
 
 ### T4 — HDR dan IBL ke BC6H · ⬜ (butuh I2)

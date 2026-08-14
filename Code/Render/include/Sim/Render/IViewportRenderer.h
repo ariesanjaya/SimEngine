@@ -103,6 +103,41 @@ public:
     /// bertekstur" dan tergambar putih — nilai satuan perkalian.
     virtual TextureHandle PendingTexture() const { return kInvalidTexture; }
 
+    /// Program material untuk pass forward: shader fragmen beserta datanya.
+    ///
+    /// **SPIR-V, bukan graph** — bentuk yang sama persis dengan
+    /// `MaterialPreviewShaders`, dan alasannya sama: yang merakit dan
+    /// mengompilasi material adalah editor, dan `Sim::Render` tidak pernah
+    /// mengenal `Sim::Material`. Yang digambar viewport adalah shader yang sama
+    /// persis dengan yang dilihat pratinjau.
+    ///
+    /// Tahap vertexnya **tidak** ada di sini: pass forward memakai `box.vert`
+    /// miliknya sendiri, jadi yang berganti hanya shader fragmen.
+    struct MaterialProgram {
+        std::span<const uint32_t> fragmentSpirv;
+        /// Blok uniform material, sudah terisi nilai instance-nya.
+        std::span<const uint8_t> parameters;
+        /// Tekstur tiap slot, urutannya sama dengan deklarasi materialnya.
+        /// Slot yang kosong diisi tekstur putih 1x1 oleh renderer.
+        std::span<const TextureHandle> textures;
+    };
+
+    /// Membangun (atau mengambil kembali) pipeline sebuah material.
+    ///
+    /// `key` harus berubah setiap kali shader atau datanya berubah — GUID
+    /// material ditambah revisinya. Ia yang membuat pemanggil boleh memanggil
+    /// ini tiap frame: yang kuncinya sudah dikenal tidak membangun apa pun.
+    ///
+    /// Mengembalikan `kInvalidMaterial` bila pipeline-nya gagal dibangun, dan
+    /// ruas yang menerimanya digambar jalur mundur `box.frag` — bukan tidak
+    /// digambar sama sekali.
+    virtual MaterialHandle AcquireMaterial(std::string_view key,
+                                           const MaterialProgram& program) {
+        (void)key;
+        (void)program;
+        return kInvalidMaterial;
+    }
+
     /// Byte tekstur material yang sedang berada di GPU.
     ///
     /// Ada untuk satu alasan yang ditulis rencananya: penghematan VRAM dari

@@ -187,6 +187,10 @@ private:
     /// ThumbnailCache ia tidak butuh device sama sekali — ia mendekode, memampat,
     /// dan menulis berkas, semuanya di CPU.
     std::unique_ptr<assets::TextureBakery> textureBakery_;
+    /// Penjaga shader material, dengan alasan yang sama: ia bekerja di CPU dan
+    /// di `TaskPool`, dan yang menyentuh GPU hanyalah langkah terakhirnya di
+    /// main thread.
+    std::unique_ptr<MaterialPrograms> materialPrograms_;
     /// Indeks isi bawaan editor, berakar di folder `Resources` di sebelah
     /// executable. **Dibuka sekali saat start dan tidak pernah ditutup**: ia
     /// tidak bergantung project mana pun, dan itulah seluruh gunanya — sebuah

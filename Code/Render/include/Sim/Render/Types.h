@@ -19,6 +19,14 @@ namespace sim::render {
 using TextureHandle = uint64_t;
 inline constexpr TextureHandle kInvalidTexture = 0;
 
+/// Material yang pipeline-nya sudah dibangun renderer.
+///
+/// Nol berarti "ruas ini digambar jalur mundur `box.frag`" — bukan sebuah galat.
+/// Itu keadaan setiap ruas yang materialnya belum dikompilasi, gagal
+/// dikompilasi, atau memang tidak punya material sama sekali.
+using MaterialHandle = uint32_t;
+inline constexpr MaterialHandle kInvalidMaterial = 0;
+
 /// Handle buram ke geometri mesh yang sudah ada di GPU.
 ///
 /// **Nol berarti kubus satuan, bukan berarti kesalahan.** Aset mesh yang belum
@@ -483,6 +491,9 @@ struct ViewportScene {
     /// dua ruas yang warnanya sama tetapi teksturnya sama pula gagal
     /// dikelompokkan hanya karena strukturnya membesar.
     std::span<const TextureHandle> partTextures;
+    /// Material per ruas, **sejajar indeks** dengan `partColors`. Kosong atau
+    /// lebih pendek berarti ruas sesudahnya memakai jalur mundur.
+    std::span<const MaterialHandle> partMaterials;
     std::span<const LineSegment> lines;
     /// Lampu punctual. Directional boleh ada di sini juga — renderer memakai
     /// yang pertama sebagai matahari dan mengabaikan sisanya, karena cascade

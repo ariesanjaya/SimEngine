@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <span>
+#include <string>
 
 namespace sim::render {
 
@@ -96,6 +97,19 @@ public:
     /// kosong, bukan menggambar dengan pipeline yang sudah dibuang.
     virtual void ClearMaterial() = 0;
     virtual bool HasMaterial() const = 0;
+
+    /// Memasang tekstur tiap slot material, urutannya sama dengan deklarasi
+    /// materialnya.
+    ///
+    /// **Berkas `.ktx2` yang sudah di-bake, bukan berkas sumber** — aturan yang
+    /// sama dengan `IViewportRenderer::AcquireTexture`, dan alasan yang sama:
+    /// yang mendekode gambar adalah baker, bukan yang menggambar. Jalur yang
+    /// kosong berarti slot itu memakai putih 1×1, yaitu nilai satuan perkalian.
+    ///
+    /// Sebelum ini ada, **setiap** slot memakai putih — pratinjau menyatakan
+    /// jumlah teksturnya dan tidak pernah menerima satu pun gambar, jadi
+    /// material bertekstur tampak persis seperti material polos.
+    virtual void SetTextures(std::span<const std::string> ktx2Paths) { (void)ktx2Paths; }
 
     /// Menulis blok uniform material. Murah — dipanggil setiap kali slider
     /// digeser, tanpa membangun ulang apa pun.

@@ -9,6 +9,7 @@
 #include "Sim/Material/ShaderCache.h"
 
 #include <doctest/doctest.h>
+#include <set>
 
 #include <cstring>
 
@@ -1628,12 +1629,16 @@ TEST_CASE("Setiap material bawaan editor terbaca, sah, dan menghasilkan berkas y
     REQUIRE_MESSAGE(std::filesystem::is_directory(folder),
                     "folder material bawaan tidak ada di " SIM_BUILTIN_DIR);
 
-    // **Tidak menelusuri subfolder, dan itu disengaja.** `Materials/Sistem/`
-    // berisi induk bersama — `Material Impor.simmat`, tempat material hasil
-    // impor mengikat diri — dan induk semacam itu memang bercabang: satu node
-    // `param.get` per parameter yang bisa ditimpa instance. Ia bukan titik awal
-    // untuk disalin, jadi aturan "tepat satu node" di bawah tidak berlaku
-    // untuknya. Yang mengujinya ada di SimAssetTests, bersama konverternya.
+    // **Aturan "tepat satu node" hanya berlaku di folder teratas**, dan
+    // subfoldernya memang dikecualikan: yang di bawah bukan titik awal untuk
+    // disalin melainkan material yang punya pekerjaan sendiri.
+    // `Materials/Sistem/` berisi induk bersama — `Material Impor.simmat`,
+    // tempat material hasil impor mengikat diri, yang memang bercabang satu
+    // `param.get` per parameter. `Materials/Prefab/` berisi material milik
+    // prefab bawaan, yang menyampel teksturnya sendiri.
+    //
+    // Yang **tetap** berlaku untuk semuanya: terbaca, sah, dan bolak-balik tanpa
+    // perubahan. Itu diperiksa lintasan kedua di bawah.
     int checked = 0;
     for (const auto& entry : std::filesystem::directory_iterator(folder)) {
         if (!entry.is_regular_file() || entry.path().extension() != ".simmat") {
@@ -1668,6 +1673,32 @@ TEST_CASE("Setiap material bawaan editor terbaca, sah, dan menghasilkan berkas y
         ++checked;
     }
     CHECK(checked >= 4);
+
+    // Lintasan kedua: seluruh material bawaan, termasuk yang di subfolder.
+    // Aturan percabangannya tidak berlaku, sisanya berlaku — material bawaan
+    // yang tidak bisa dimuat tetap lebih buruk daripada tidak ada, di folder
+    // mana pun ia tinggal.
+    int nested = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(folder)) {
+        if (!entry.is_regular_file() || entry.path().extension() != ".simmat") {
+            continue;
+        }
+        INFO("material bawaan " << entry.path().string());
+        MaterialGraph graph;
+        REQUIRE(LoadMaterialFromFile(graph, entry.path()).ok);
+        const ValidationResult validation = ValidateMaterial(graph);
+        for (const MaterialIssue& issue : validation.errors) {
+            INFO("galat validasi: " << issue.message);
+            CHECK(false);
+        }
+        CHECK(validation.ok);
+        MaterialGraph again;
+        REQUIRE(LoadMaterialFromString(again, SaveMaterialToString(graph)).ok);
+        CHECK(SaveMaterialToString(again) == SaveMaterialToString(graph));
+        ++nested;
+    }
+    // Lebih banyak daripada yang di folder teratas: subfoldernya memang berisi.
+    CHECK(nested > checked);
 }
 
 TEST_CASE("Jalur A: instance menyimpan tekstur parameternya, dan itu bertahan lewat berkas") {
@@ -2065,4 +2096,105 @@ TEST_CASE("E8.4: shader material pass forward dikompilasi slangc sungguhan") {
     // membuat `box.vert` tetap menjadi tahap vertexnya.
     CHECK(module.find("float4 main(BoxVarying input)") != std::string::npos);
     CHECK(module.find("struct MaterialVarying") == std::string::npos);
+}
+
+TEST_CASE("Editor: tekstur yang dijatuhkan menghasilkan pasangan yang bisa mencapai Base Color") {
+    // **Bentuk yang dihasilkan Material Editor saat sebuah tekstur dijatuhkan
+    // ke kanvasnya**, disusun di sini supaya aturannya dijaga uji alih-alih
+    // diingat.
+    //
+    // Yang dijaga: keluaran `input.texture` bertipe `Texture` — sebuah binding,
+    // bukan warna — jadi ia **tidak bisa** disambungkan ke `baseColor`. Yang
+    // bisa adalah keluaran `rgb` milik `Sample Texture` di antaranya. Menjatuhkan
+    // node tekstur sendirian karena itu menghasilkan sesuatu yang tampak seperti
+    // kabelnya menolak, padahal yang kurang adalah node di tengah.
+    MaterialGraph graph;
+    graph.nodes.push_back(Node(1, std::string(kSurfaceOutputType)));
+    graph.nodes.push_back(Node(2, "input.texture"));
+    graph.nodes.back().settings["name"] = "Albedo";
+    graph.nodes.back().settings["texture"] = Id(99).ToString();
+    graph.nodes.push_back(Node(3, "input.sample"));
+    Link(graph, 2, "texture", 3, "texture");
+    Link(graph, 3, "rgb", 1, "baseColor");
+
+    const ValidationResult validation = ValidateMaterial(graph);
+    INFO(FirstError(validation));
+    CHECK(validation.errors.empty());
+
+    const MaterialCompileResult compiled = CompileMaterial(graph);
+    REQUIRE(compiled.ok);
+    // Teksturnya sampai ke daftar binding, beserta GUID-nya — itu yang dibaca
+    // renderer saat mengikat set materialnya.
+    REQUIRE(compiled.textures.size() == 1);
+    CHECK(compiled.textures.front().name == "tAlbedo");
+    CHECK(compiled.textures.front().texture == Id(99));
+    // Dan ia benar-benar disampel di kode yang dihasilkan, bukan sekadar
+    // dideklarasikan.
+    CHECK(compiled.slang.find("tAlbedo.Sample") != std::string::npos);
+
+    // Sisi sebaliknya: menyambungkan node teksturnya **langsung** ke `baseColor`
+    // memang ditolak. Kalau suatu hari ia diterima, pasangan yang dibuat saat
+    // menjatuhkan tekstur berhenti punya alasan — dan uji ini yang akan
+    // memberitahu.
+    MaterialGraph direct;
+    direct.nodes.push_back(Node(1, std::string(kSurfaceOutputType)));
+    direct.nodes.push_back(Node(2, "input.texture"));
+    direct.nodes.back().settings["name"] = "Albedo";
+    Link(direct, 2, "texture", 1, "baseColor");
+    CHECK_FALSE(ValidateMaterial(direct).errors.empty());
+}
+
+TEST_CASE("E8.4: setiap shader yang ditanam modul material ikut disalin ke sebelah executable") {
+    // **Uji yang menangkap kegagalan yang hanya muncul di editor terpasang.**
+    // Modul material dirakit saat editor berjalan dengan menanam berkas shader
+    // renderer dari direktori di sebelah executable — bukan dari folder sumber.
+    // Berkas yang tidak ikut disalin menjadi `#error` di dalam modul, dan yang
+    // terlihat adalah "preprocessor error" dari slangc, jauh dari sebabnya.
+    //
+    // Uji lain di berkas ini membaca folder sumber, tempat semuanya selalu ada,
+    // jadi tidak satu pun dari mereka bisa melihatnya. Yang ini melihatnya.
+    const std::filesystem::path shaders(SIM_SHADER_DIR);
+
+    // Telusuri `#include` dari akar yang sama dengan yang ditanam
+    // `MaterialPrograms`.
+    std::set<std::string> needed{"openpbr.slang"};
+    std::vector<std::string> queue{"box_varyings.slang", "cluster_common.slang",
+                                   "gi_resolve.slang"};
+    while (!queue.empty()) {
+        const std::string name = queue.back();
+        queue.pop_back();
+        if (!needed.insert(name).second) {
+            continue;
+        }
+        std::ifstream file(shaders / name);
+        REQUIRE_MESSAGE(file, "tidak bisa membaca " << name);
+        std::string line;
+        while (std::getline(file, line)) {
+            const std::size_t at = line.find("#include \"");
+            if (at == std::string::npos) {
+                continue;
+            }
+            const std::size_t start = at + 10;
+            const std::size_t end = line.find('"', start);
+            if (end != std::string::npos) {
+                queue.push_back(line.substr(start, end - start));
+            }
+        }
+    }
+
+    std::ifstream cmake(std::filesystem::path(SIM_CODE_DIR) / "Render" / "CMakeLists.txt");
+    REQUIRE(cmake);
+    const std::string text((std::istreambuf_iterator<char>(cmake)),
+                           std::istreambuf_iterator<char>());
+    const std::size_t listStart = text.find("SIM_SHADER_SOURCES_COPIED");
+    REQUIRE_MESSAGE(listStart != std::string::npos,
+                    "daftar shader yang disalin tidak ditemukan di Code/Render/CMakeLists.txt");
+    const std::size_t listEnd = text.find(')', listStart);
+    REQUIRE(listEnd != std::string::npos);
+    const std::string list = text.substr(listStart, listEnd - listStart);
+
+    for (const std::string& name : needed) {
+        INFO("shader yang ditanam tapi tidak disalin: " << name);
+        CHECK(list.find(name) != std::string::npos);
+    }
 }

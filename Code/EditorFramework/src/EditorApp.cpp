@@ -1,6 +1,7 @@
 #include "Sim/Editor/EditorApp.h"
 
 #include "Sim/Assets/TextureBakery.h"
+#include "Sim/Editor/MaterialPrograms.h"
 
 #include "Sim/Platform/FileDialog.h"
 
@@ -92,6 +93,12 @@ bool EditorApp::Initialize(const Config& config) {
     textureBakery_ =
         std::make_unique<assets::TextureBakery>(configDir_ / "TextureCache", config.tasks);
     context_.textureBakery = textureBakery_.get();
+    // Shader material ikut ke `TaskPool`. Satu panggilan `slangc` adalah detik,
+    // dan detik di dalam jalur gambar adalah editor yang membeku tepat pada
+    // frame sebuah level dibuka — yaitu frame yang paling terasa.
+    materialPrograms_ = std::make_unique<MaterialPrograms>(context_.shaderCacheDir,
+                                                           config.shaderDir, config.tasks);
+    context_.materialPrograms = materialPrograms_.get();
     context_.shaderDir = config.shaderDir.string();
     context_.builtinDir = config.resourceDir.string();
 

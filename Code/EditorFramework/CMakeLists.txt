@@ -10,6 +10,7 @@ sim_add_library(EditorFramework
         src/NodeGraph.cpp
         src/Notifications.cpp
         src/SceneCommands.cpp
+        src/MaterialPrograms.cpp
         src/SceneView.cpp
         src/SkinnedPreview.cpp
         src/SourceImport.cpp

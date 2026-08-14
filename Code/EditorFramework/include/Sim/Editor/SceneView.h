@@ -7,14 +7,18 @@
 #include "Sim/Editor/TerrainStore.h"
 #include "Sim/Terrain/TerrainDecal.h"
 #include "Sim/Editor/WhiteboxStore.h"
+#include "Sim/Editor/MaterialPrograms.h"
 #include "Sim/Scene/World.h"
 
+#include <filesystem>
 #include <span>
+#include <string>
 #include <unordered_map>
 #include <vector>
 
 namespace sim::assets {
 class TextureBakery;
+struct AssetRecord;
 class AssetDatabase;
 }
 
@@ -129,6 +133,11 @@ public:
     /// `.ktx2`.
     void SetTextureBakery(assets::TextureBakery* bakery) { bakery_ = bakery; }
 
+    /// Penjaga shader material. Null berarti tidak ada material yang
+    /// dikompilasi sama sekali — dan setiap ruas digambar jalur mundur
+    /// `box.frag`, seperti sebelum jalur ini ada.
+    void SetMaterialPrograms(MaterialPrograms* programs) { materialPrograms_ = programs; }
+
     /// Menambahkan kotak wireframe sejajar sumbu, sesudah `Build`.
     ///
     /// Terbuka karena tidak semua yang perlu digambar berasal dari dunia:
@@ -174,12 +183,39 @@ private:
     /// Tekstur warna dasar sebuah material, sudah diunggah, atau nol.
     render::TextureHandle MaterialTexture(const assets::AssetDatabase* assets,
                                           render::IViewportRenderer* renderer, const Uuid& guid);
+    /// Sebuah aset beserta indeks yang memilikinya.
+    struct AssetLookup {
+        const assets::AssetDatabase* database = nullptr;
+        const assets::AssetRecord* record = nullptr;
+        explicit operator bool() const { return record != nullptr; }
+    };
+
+    /// Mencari sebuah aset di indeks project, **lalu di indeks bawaan editor**.
+    ///
+    /// **Keduanya, dan bukan hanya yang pertama.** Prefab bawaan — Shader Ball,
+    /// Ground, Sky Dome — merujuk aset milik editor, dan setiap level yang
+    /// memasukkannya membawa GUID itu apa adanya. Mencari di indeks project saja
+    /// membuat semuanya jatuh ke kubus satuan: bukan galat, hanya kotak di
+    /// tempat yang seharusnya ada mesh.
+    ///
+    /// Indeksnya ikut dikembalikan karena `AbsolutePath` milik indeks yang
+    /// memegang recordnya — memakai yang salah menghasilkan jalur yang menunjuk
+    /// ke folder project untuk berkas yang ada di folder editor.
+    AssetLookup FindAsset(const assets::AssetDatabase* assets, const Uuid& guid) const;
+
     /// Sebuah aset gambar menjadi handle tekstur, lewat baker.
     ///
     /// Mengembalikan placeholder selama hasil bake-nya belum ada, dan nol bila
     /// tidak ada baker atau bake-nya gagal.
     render::TextureHandle UploadedTexture(const assets::AssetDatabase* assets,
                                           render::IViewportRenderer* renderer, const Uuid& image);
+    /// Material sebuah ruas sebagai pipeline yang sudah dibangun renderer, atau
+    /// nol bila ia harus digambar jalur mundur.
+    ///
+    /// **Yang mengompilasinya `MaterialPrograms`, di `TaskPool`.** Yang di sini
+    /// hanya menanyakannya dan menerima jawaban "belum" tanpa menunggu.
+    render::MaterialHandle ForwardMaterial(const assets::AssetDatabase* assets,
+                                           render::IViewportRenderer* renderer, const Uuid& guid);
     /// Warna material bawaan editor — yang mengisi mesh tanpa material sendiri.
     Vec4 BuiltinColor(const assets::AssetDatabase* builtinAssets);
     void AppendPartColors(const scene::MeshRendererComponent& renderer, uint32_t partCount,
@@ -233,7 +269,12 @@ private:
     std::vector<Vec4> partColors_;
     /// Sejajar dengan `partColors_`. Nol berarti ruas itu tanpa tekstur.
     std::vector<render::TextureHandle> partTextures_;
+    /// Sejajar dengan `partColors_`, dengan alasan yang sama persis.
+    std::vector<render::MaterialHandle> partMaterials_;
     assets::TextureBakery* bakery_ = nullptr;
+    /// Indeks bawaan editor, dipasang tiap `Build`. Lihat `FindAsset`.
+    const assets::AssetDatabase* builtinAssets_ = nullptr;
+    MaterialPrograms* materialPrograms_ = nullptr;
     std::vector<render::LineSegment> lines_;
     std::vector<render::LightInstance> lights_;
     std::vector<Pickable> pickables_;
