@@ -870,18 +870,64 @@ editor.** `SimTextureUploadTests` sudah membuka jalan — ia membaca galat
 validation layer dari `LogRing` dan gagal bila ada — tetapi ia berhenti di
 unggahan tekstur.
 
-**Yang tersisa dari nomor 4**, dan urutannya:
+##### Nomor 4, langkah kedua: shader material untuk pass forward · ✅ dirakit dan dikompilasi
 
-1. `AssembleMaterialModule` menuliskan set 0 renderer seutuhnya, bukan
-   `FrameParams` miliknya sendiri, dan membaca transform instance dari **set
-   kulit binding 1** alih-alih set 0 binding 2 seperti sekarang
-   (`MaterialBindings::kInstanceTransforms`). `VulkanMaterialPreview` menyediakan
-   yang tidak dimilikinya dengan tekstur tiruan 1×1.
-2. Atribut vertex modul material didamaikan dengan `BoxVertex`.
-3. Pipeline material di pass forward, `box.frag` sebagai jalur mundur.
+`AssembleForwardMaterialModule` menghasilkan shader **fragmen** yang menggantikan
+`box.frag`, dan ia sudah dikompilasi `slangc` sungguhan terhadap deklarasi
+renderer yang sungguhan di `SimMaterialTests`.
 
-Baru sesudah ketiganya, normal BC5 dan ORM BC4 yang sudah di-bake T2 punya yang
-membacanya — dan kriteria terakhir T3 bisa ditutup.
+**Dua rintangan yang tercatat di atas ternyata larut, bukan diselesaikan.**
+
+*Rintangan "set 0 modul bukan set 0 renderer"* — jawabannya bukan menuliskan dua
+puluh satu binding di dalam string C++. Modulnya **menanam berkas shader renderer
+sendiri**: `box_varyings.slang`, `cluster_common.slang`, `gi_resolve.slang` —
+berkas yang sama persis yang di-`#include` `box.frag`, beserta seluruh
+`#include`-nya secara rekursif. Tidak ada daftar kedua yang harus dijaga sepakat
+dengan yang pertama, karena tidak ada daftar kedua.
+
+Ditanam dan bukan diserahkan ke `-I`-nya slangc, dengan alasan yang sama persis
+seperti prelude OpenPBR: kunci cache adalah hash teks sumber, dan sumber yang
+cuma menulis `#include "cluster_common.slang"` menghasilkan kunci yang **tidak
+berubah ketika berkas itu berubah**.
+
+*Rintangan "atribut vertex tidak sepakat"* — ia hanya ada kalau modul material
+ikut menghasilkan tahap vertex. Untuk pass forward ia tidak perlu:
+**`box.vert` tetap menjadi tahap vertexnya**, dan yang berganti hanya shader
+fragmen. Tidak ada dua tata letak atribut, jadi tidak ada yang perlu didamaikan.
+
+Yang benar-benar dibutuhkan dari sisi vertex hanya satu hal, dan itu sudah
+mendarat: **tangent**. Ia ikut sebagai atribut 13 dan varying 5 — sudah terunggah
+ke GPU sejak mesh sungguhan masuk, jadi yang bertambah nol byte. Pass bayangan dan
+prepass tidak menyebutnya, jadi keduanya tidak membayar pengambilannya.
+
+**Lampu cluster dinilai satu per satu lewat model shading.** `cluster_common.slang`
+sekarang mengeluarkan `ClusterLightSample` — arah dan radiansi yang sudah diredam
+jarak, kerucut, dan bayangan, **tanpa n·l** — dan `accumulateClusteredLights`
+yang lama ditulis ulang di atasnya. Satu tempat untuk peredupan; dua pemakainya
+tidak bisa meredup berbeda. Yang didapat: lampu titik di sebelah bola logam
+akhirnya menghasilkan sorotan, alih-alih iradiansi Lambert yang dikalikan albedo.
+
+**Dua hal yang belum ada, dan disebut alih-alih didiamkan:**
+
+- **Spekular tak-langsung.** Set 0 renderer tidak memuat peta lingkungan
+  terprafilter maupun LUT DFG — keduanya hanya dipanggang `VulkanMaterialPreview`
+  untuk dirinya sendiri. `evaluateOpenPBR_IBL` karena itu dipanggil dengan
+  keduanya nol, yang menyisakan suku difusnya. Akibatnya logam gelap di luar
+  sorotan langsungnya sampai renderer ikut memanggang IBL-nya.
+- **Jam.** Set 0 renderer tidak membawa waktu, jadi `inputs.time` nol dan
+  material yang menganimasikan dirinya diam di viewport. Ditulis nol dan
+  disebutkan, bukan dikarang dari sesuatu yang kebetulan bergerak.
+
+**Yang tersisa dari nomor 4** tinggal satu: renderer mengompilasi shader ini per
+material, membuat pipeline-nya, dan mengikatnya — dengan `box.frag` dipertahankan
+sebagai jalur mundur sampai yang baru terbukti. Baru sesudah itu normal BC5 dan
+ORM BC4 yang sudah di-bake T2 punya yang membacanya, dan kriteria terakhir T3
+bisa ditutup.
+
+`AssembleMaterialModule` yang lama **tidak disentuh**: ia melayani
+`VulkanMaterialPreview`, yang punya set 0-nya sendiri beserta IBL-nya sendiri, dan
+memaksanya memakai set 0 renderer berarti pratinjau harus menyediakan dua puluh
+satu binding tiruan untuk menggambar satu bola.
 
 ##### Yang sudah dikerjakan dari daftar ini
 

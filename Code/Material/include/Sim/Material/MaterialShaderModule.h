@@ -5,6 +5,7 @@
 
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace sim::material {
 
@@ -73,6 +74,60 @@ std::string LoadOpenPbrPrelude(const std::filesystem::path& shaderDirectory);
 /// sesuatu yang bisa ditemukan dengan membaca salah satunya.
 CompileRequest MakeMaterialRequest(const std::string& generatedSlang, ShaderStage stage,
                                    const MaterialModuleOptions& options = {});
+
+/// Membaca sebuah atau beberapa berkas shader beserta seluruh `#include`-nya,
+/// ditanam menjadi satu teks.
+///
+/// **Ditanam, bukan diserahkan ke `-I`-nya slangc** — alasan yang sama persis
+/// dengan prelude OpenPBR: kunci cache adalah hash teks sumber, jadi sumber yang
+/// cuma menulis `#include "cluster_common.slang"` menghasilkan kunci yang tidak
+/// berubah ketika berkas itu berubah, dan cache akan dengan patuh menyerahkan
+/// SPIR-V yang dibangun terhadap deklarasi yang sudah tidak ada lagi.
+///
+/// Berkas yang sudah pernah ditanam tidak ditanam lagi — `#ifndef` guard di
+/// dalamnya tetap benar, tetapi menanam berkas yang sama dua kali membuat
+/// modulnya berlipat tanpa guna.
+std::string InlineShaderIncludes(const std::filesystem::path& shaderDirectory,
+                                 const std::vector<std::string>& roots);
+
+/// Bahan untuk merakit shader fragmen material **untuk pass forward renderer**.
+struct ForwardMaterialOptions {
+    /// Isi `openpbr.slang`, ditanam apa adanya.
+    std::string prelude;
+    /// Deklarasi milik renderer: varying kotak dan seluruh set 0-nya. Diisi
+    /// dengan `InlineShaderIncludes(dir, {"box_varyings.slang",
+    /// "cluster_common.slang", "gi_resolve.slang"})` — yaitu **berkas yang sama
+    /// persis** yang di-`#include` `box.frag`.
+    std::string frameDeclarations;
+    SurfaceLobes lobes;
+    std::string fragmentEntry = "main";
+};
+
+/// Merakit shader fragmen material yang menggantikan `box.frag` di pass forward.
+///
+/// **Set 0-nya set 0 renderer, dan bukan salinannya.** Deklarasinya datang dari
+/// berkas shader renderer sendiri, ditanam apa adanya — jadi tidak ada daftar
+/// kedua berisi dua puluh satu binding yang harus dijaga sepakat dengan yang
+/// pertama. Itulah yang membuat keputusan "perluas set 0 renderer" di
+/// docs/ANALISA-TEKSTUR-PERMUKAAN.md tidak berbiaya seperti yang diperkirakan di
+/// sana.
+///
+/// **Tahap vertexnya tetap `box.vert`.** Yang berganti hanya shader fragmen, dan
+/// itu yang membuat ketidaksepakatan atribut vertex antara modul material dan
+/// pipeline kotak — yang tercatat sebagai rintangan di § E8.4 — tidak perlu
+/// diselesaikan sama sekali: tidak ada dua tata letak, hanya satu.
+///
+/// **Yang belum ada di sini, dan sengaja disebut:** spekular tak-langsung. Set 0
+/// renderer tidak memuat peta lingkungan terprafilter maupun LUT DFG — keduanya
+/// hanya ada di pratinjau material — jadi `evaluateOpenPBR_IBL` dipanggil dengan
+/// keduanya nol, yang menyisakan suku difusnya saja. Akibatnya logam tampak
+/// gelap di luar sorotan langsungnya sampai renderer ikut memanggang IBL-nya.
+std::string AssembleForwardMaterialModule(const std::string& generatedSlang,
+                                          const ForwardMaterialOptions& options);
+
+/// Permintaan kompilasi untuk shader fragmen pass forward.
+CompileRequest MakeForwardMaterialRequest(const std::string& generatedSlang,
+                                          const ForwardMaterialOptions& options);
 
 /// Tata letak descriptor yang ditulis modul, supaya sisi C++ tidak menebaknya.
 ///

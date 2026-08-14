@@ -158,38 +158,77 @@ uint clusterOf(float2 fragCoord, float viewDepth) {
 /// Difus saja. Ini shader sementara untuk geometri kotak — model shading
 /// sungguhnya OpenPBR lewat pipeline material, dan menulis pendekatan kedua di
 /// sini melanggar aturan yang dipegang seluruh E7.1.
+/// Satu lampu cluster yang sudah lolos seluruh penolakan, siap dinilai BRDF.
+///
+/// **`radiance` belum dikalikan n·l**, dan itu disengaja: model shading yang
+/// mengambilnya — `evaluateOpenPBR` — sudah menghitung sukunya sendiri, dan
+/// mengalikannya dua kali menggelapkan setiap lampu titik tanpa satu pun tanda.
+/// Yang memakai jalur ad-hoc di `box.frag` mengalikannya sendiri, sekali.
+struct ClusterLightSample {
+    /// Dari permukaan ke lampu, sudah dinormalkan.
+    float3 direction;
+    /// Warna x intensitas, sudah diredam jarak, kerucut, dan bayangan.
+    float3 radiance;
+};
+
+/// Rentang indeks lampu untuk cluster sebuah fragmen.
+uint2 clusterLightRange(float2 fragCoord, float viewDepth) {
+    return clusterRanges[clusterOf(fragCoord, viewDepth)];
+}
+
+/// Lampu ke-`i` di dalam sebuah rentang, atau false bila ia tidak menyumbang.
+///
+/// **Satu tempat untuk peredupan, kerucut, dan bayangan.** Dua pemakainya —
+/// jalur ad-hoc `box.frag` dan pipeline material — memanggil yang sama persis,
+/// jadi lampu tidak bisa meredup berbeda tergantung shader mana yang menggambar.
+bool clusterLightAt(uint2 range, uint i, float3 worldPosition, float3 normal,
+                    out ClusterLightSample result) {
+    result.direction = float3(0.0, 1.0, 0.0);
+    result.radiance = float3(0.0);
+
+    GpuLight light = lightBuffer[clusterIndices[range.x + i]];
+    float3 toLight = light.positionInvRangeSq.xyz - worldPosition;
+    float distanceSq = dot(toLight, toLight);
+    float attenuation =
+        distanceAttenuation(distanceSq, light.positionInvRangeSq.w, light.kind.y);
+    if (attenuation <= 0.0) {
+        return false;
+    }
+    float3 direction = toLight * rsqrt(max(distanceSq, 1e-8));
+    // Penolakan pakai normal geometri, bukan normal peta: yang di belakang
+    // permukaan tetap di belakang, dan normal map tidak boleh membuat sebuah
+    // lampu menembus dinding.
+    if (dot(normal, direction) <= 0.0) {
+        return false;
+    }
+    if (light.kind.x > 0.5) {
+        // Kerucut spot: memudar antara kosinus sudut luar dan sudut dalam.
+        float cosAngle = dot(-direction, light.directionCosOuter.xyz);
+        float cone = clamp((cosAngle - light.directionCosOuter.w) /
+                               max(light.colorCosInner.w - light.directionCosOuter.w, 1e-4),
+                           0.0, 1.0);
+        attenuation *= cone * cone;
+    }
+    // Bayangan diambil terakhir: ia yang paling mahal, dan setiap penolakan di
+    // atas menghematnya utuh.
+    attenuation *= sampleAtlasShadow(light, worldPosition, normal, -toLight);
+
+    result.direction = direction;
+    result.radiance = light.colorCosInner.rgb * attenuation;
+    return true;
+}
+
+/// Iradiansi E dari seluruh lampu cluster. Dipakai jalur ad-hoc `box.frag`.
 float3 accumulateClusteredLights(float2 fragCoord, float3 worldPosition, float3 normal,
                                  float viewDepth) {
-    uint cluster = clusterOf(fragCoord, viewDepth);
-    uint2 range = clusterRanges[cluster];
-
+    uint2 range = clusterLightRange(fragCoord, viewDepth);
     float3 sum = float3(0.0);
     for (uint i = 0u; i < range.y; ++i) {
-        GpuLight light = lightBuffer[clusterIndices[range.x + i]];
-        float3 toLight = light.positionInvRangeSq.xyz - worldPosition;
-        float distanceSq = dot(toLight, toLight);
-        float attenuation =
-            distanceAttenuation(distanceSq, light.positionInvRangeSq.w, light.kind.y);
-        if (attenuation <= 0.0) {
+        ClusterLightSample light;
+        if (!clusterLightAt(range, i, worldPosition, normal, light)) {
             continue;
         }
-        float3 direction = toLight * rsqrt(max(distanceSq, 1e-8));
-        float ndotl = max(dot(normal, direction), 0.0);
-        if (ndotl <= 0.0) {
-            continue;
-        }
-        if (light.kind.x > 0.5) {
-            // Kerucut spot: memudar antara kosinus sudut luar dan sudut dalam.
-            float cosAngle = dot(-direction, light.directionCosOuter.xyz);
-            float cone = clamp((cosAngle - light.directionCosOuter.w) /
-                                   max(light.colorCosInner.w - light.directionCosOuter.w, 1e-4),
-                               0.0, 1.0);
-            attenuation *= cone * cone;
-        }
-        // Bayangan diambil terakhir: ia yang paling mahal, dan setiap
-        // penolakan di atas menghematnya utuh.
-        attenuation *= sampleAtlasShadow(light, worldPosition, normal, -toLight);
-        sum += light.colorCosInner.rgb * (ndotl * attenuation);
+        sum += light.radiance * max(dot(normal, light.direction), 0.0);
     }
     return sum;
 }

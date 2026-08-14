@@ -68,6 +68,25 @@ float3 skinPosition(BoxVertex vertex) {
 /// Arah memakai bagian 3x3 saja — benar untuk bone rotasi + translasi + skala
 /// seragam. Skala tak seragam menuntut invers transpose, dan itu belum ada di
 /// jalur mana pun di engine ini.
+/// Posisi, normal, dan tangent ruang lokal sesudah kulit diterapkan.
+///
+/// **Terpisah dari `applySkin`, dan pemisahannya bukan kerapian.** Pass bayangan
+/// dan prepass tidak membaca tangent, dan sebuah fungsi yang menyentuhnya akan
+/// menarik atribut itu ke dalam antarmuka entry point mereka — yaitu satu atribut
+/// yang diambil setiap vertex untuk hasil yang langsung dibuang.
+void applySkinTangent(BoxVertex vertex, out float3 position, out float3 normal,
+                      out float3 tangent) {
+    position = vertex.position;
+    normal = vertex.normal;
+    tangent = vertex.tangent.xyz;
+    if (kSkinned) {
+        float4x4 skin = skinMatrix(vertex);
+        position = mul(skin, float4(vertex.position, 1.0)).xyz;
+        normal = mul((float3x3)skin, vertex.normal);
+        tangent = mul((float3x3)skin, vertex.tangent.xyz);
+    }
+}
+
 void applySkin(BoxVertex vertex, out float3 position, out float3 normal) {
     position = vertex.position;
     normal = vertex.normal;

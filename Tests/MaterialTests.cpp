@@ -1969,3 +1969,100 @@ TEST_CASE("Rekomendasi 1: material polos menghasilkan SPIR-V yang lebih kecil") 
                        << " byte dengan semuanya");
     CHECK(lean < full);
 }
+
+// ---------------------------------------------------------------------------
+// E8.4 #4 — shader material untuk pass forward renderer
+// ---------------------------------------------------------------------------
+
+TEST_CASE("E8.4: deklarasi renderer ditanam beserta include-nya, sekali masing-masing") {
+    // **Ditanam, bukan diserahkan ke `-I`-nya slangc.** Kunci cache adalah hash
+    // teks sumber; sumber yang cuma menulis `#include "cluster_common.slang"`
+    // menghasilkan kunci yang tidak berubah ketika berkas itu berubah, dan cache
+    // akan menyerahkan SPIR-V yang dibangun terhadap deklarasi yang sudah tidak
+    // ada lagi.
+    const std::string text = InlineShaderIncludes(
+        SIM_SHADER_DIR, {"box_varyings.slang", "cluster_common.slang", "gi_resolve.slang"});
+    REQUIRE_MESSAGE(!text.empty(), "berkas shader tidak terbaca dari " SIM_SHADER_DIR);
+
+    // Tidak ada satu pun `#include` yang tersisa: yang tersisa adalah yang tidak
+    // ikut ditanam, dan slangc akan mencarinya di direktori yang tidak disebut
+    // siapa pun.
+    CHECK(text.find("#include \"") == std::string::npos);
+
+    // Isinya benar-benar sampai — ketiga akar dan yang mereka bawa.
+    CHECK(text.find("struct BoxVarying") != std::string::npos);
+    CHECK(text.find("ClusterLightSample") != std::string::npos);
+    CHECK(text.find("giIrradianceAt") != std::string::npos);
+    // `shadow_common.slang` ikut lewat `cluster_common.slang`, tanpa disebut.
+    CHECK(text.find("shadowParams") != std::string::npos);
+
+    // Dan **sekali saja masing-masing**. Yang dihitung `shadow_common.slang`,
+    // bukan sembarang berkas: ia satu-satunya yang ditarik **dua akar yang
+    // berbeda** — `cluster_common.slang` dan `gi_resolve.slang` — jadi hanya ia
+    // yang bisa memperlihatkan dedupnya bekerja. Menghitung berkas yang cuma
+    // punya satu penarik akan lulus juga tanpa dedup sama sekali, dan uji itu
+    // tidak menjaga apa pun. (Saya menghitung yang salah lebih dulu; mutasinya
+    // yang memberitahu.)
+    std::size_t count = 0;
+    for (std::size_t at = text.find("struct ShadowParams"); at != std::string::npos;
+         at = text.find("struct ShadowParams", at + 1)) {
+        ++count;
+    }
+    CHECK(count == 1);
+}
+
+TEST_CASE("E8.4: shader material pass forward dikompilasi slangc sungguhan") {
+    const std::string identity = SlangCompilerIdentity();
+    if (identity.empty()) {
+        MESSAGE("slangc tidak ditemukan — bagian integrasi dilewati");
+        return;
+    }
+
+    ForwardMaterialOptions options;
+    options.prelude = LoadOpenPbrPrelude(SIM_SHADER_DIR);
+    options.frameDeclarations = InlineShaderIncludes(
+        SIM_SHADER_DIR, {"box_varyings.slang", "cluster_common.slang", "gi_resolve.slang"});
+    REQUIRE(!options.prelude.empty());
+    REQUIRE(!options.frameDeclarations.empty());
+
+    // Material yang menyentuh normal map dan logam sekaligus: keduanya justru
+    // yang tidak bisa diperlihatkan `box.frag`, dan keduanya yang menuntut
+    // tangent serta model shading yang sungguhan.
+    MaterialGraph graph = MinimalGraph();
+    graph.nodes.push_back(Node(3, "input.constant"));
+    graph.nodes.back().settings["kind"] = "float";
+    graph.nodes.back().settings["value"] = "0.35";
+    Link(graph, 3, "value", 1, "specularRoughness");
+    graph.nodes.push_back(Node(4, "input.constant"));
+    graph.nodes.back().settings["kind"] = "float";
+    graph.nodes.back().settings["value"] = "1.0";
+    Link(graph, 4, "value", 1, "baseMetalness");
+
+    const MaterialCompileResult compiled = CompileMaterial(graph);
+    REQUIRE(compiled.ok);
+    options.lobes = compiled.lobes;
+
+    TempCacheDir dir("forward");
+    ShaderCache cache;
+    cache.Configure(dir.path, identity);
+    cache.SetCompiler(MakeSlangCompiler());
+
+    const CompileOutput out = cache.Get(MakeForwardMaterialRequest(compiled.slang, options));
+    INFO("slangc: ", out.error);
+    REQUIRE(out.ok);
+    CHECK(LooksLikeSpirv(out.spirv));
+
+    // **Inilah yang membuktikan set 0-nya set 0 renderer.** Modul yang
+    // menuliskan `FrameParams` sendiri tetap dikompilasi dengan sukses; yang
+    // membedakan adalah ia tidak akan pernah bisa membaca bayangan maupun lampu
+    // cluster. Sumbernya diperiksa langsung karena itu.
+    const std::string module = AssembleForwardMaterialModule(compiled.slang, options);
+    CHECK(module.find("sampleShadow(") != std::string::npos);
+    CHECK(module.find("clusterLightAt(") != std::string::npos);
+    CHECK(module.find("giIrradianceAt(") != std::string::npos);
+    CHECK(module.find("evaluateOpenPBR(") != std::string::npos);
+    // Dan ia memakai varying kotak, bukan varying miliknya sendiri — itu yang
+    // membuat `box.vert` tetap menjadi tahap vertexnya.
+    CHECK(module.find("float4 main(BoxVarying input)") != std::string::npos);
+    CHECK(module.find("struct MaterialVarying") == std::string::npos);
+}

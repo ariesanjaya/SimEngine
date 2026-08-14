@@ -53,6 +53,12 @@ struct BoxVertex {
     // di-`memcpy` dari `MeshVertex` apa adanya — dan yang belum ada selama ini
     // hanya deklarasi ini.
     [[vk::location(12)]] float2 uv;
+    // Tangent ruang lokal, `w` menyimpan arah tangan bitangent. Sama seperti uv:
+    // ia sudah ikut terunggah sejak awal, dan yang belum ada hanya deklarasinya.
+    //
+    // Dibutuhkan normal map — dan hanya normal map. Pass bayangan dan prepass
+    // tidak menyebutnya, jadi keduanya tidak membayar pengambilannya.
+    [[vk::location(13)]] float4 tangent;
 };
 
 #ifndef INSTANCE_SET

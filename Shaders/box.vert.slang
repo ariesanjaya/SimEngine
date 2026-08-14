@@ -27,7 +27,8 @@ BoxVarying main(BoxVertex vertex, uint instanceId : SV_InstanceID) {
     // yang dipindahkan di editor tetap berpose di titik asal dunia.
     float3 localPosition;
     float3 localNormal;
-    applySkin(vertex, localPosition, localNormal);
+    float3 localTangent;
+    applySkinTangent(vertex, localPosition, localNormal, localTangent);
 
     float4x4 model = instanceModel(push.instanceBase + instanceId);
     float4 world = mul(model, float4(localPosition, 1.0));
@@ -56,6 +57,9 @@ BoxVarying main(BoxVertex vertex, uint instanceId : SV_InstanceID) {
     // atas dan karena itu tidak ikut teredam warna simpul.
     output.color = tint * vertex.vertexColor;
     output.uv = vertex.uv;
+    // Arah tangen ikut matriks model, sama dengan normal. `w`-nya arah tangan,
+    // yang tidak boleh ikut ditransformasikan — ia sebuah tanda, bukan vektor.
+    output.worldTangent = float4(mul((float3x3)model, localTangent), vertex.tangent.w);
     output.worldPosition = world.xyz;
     output.flags = vertex.flags;
     output.position = mul(push.viewProj, world);

@@ -26,6 +26,12 @@ struct BoxVarying {
     // `nointerpolation`: bitmask tidak punya arti kalau diinterpolasi
     // antar-vertex.
     [[vk::location(3)]] nointerpolation uint flags;
+    /// Tangent ruang dunia, `w` arah bitangent.
+    ///
+    /// Dibawa untuk normal map. `box.frag` tidak membacanya — ia tidak punya
+    /// model shading yang memakainya — sementara shader material hasil kompilasi
+    /// graph justru itu yang pertama diambilnya.
+    [[vk::location(5)]] float4 worldTangent;
 };
 
 #endif

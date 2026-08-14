@@ -1,4 +1,5 @@
 #include "Sim/Material/MaterialShaderModule.h"
+#include <set>
 
 #include <fstream>
 #include <iterator>
@@ -292,6 +293,181 @@ std::string AssembleMaterialModule(const std::string& generatedSlang,
     out << "}\n";
 
     return out.str();
+}
+
+namespace {
+
+/// Menanam sebuah berkas beserta `#include`-nya secara rekursif.
+void InlineOne(const std::filesystem::path& directory, const std::string& name,
+               std::set<std::string>& seen, std::ostringstream& out) {
+    if (!seen.insert(name).second) {
+        return;
+    }
+    std::ifstream stream(directory / name);
+    if (!stream) {
+        // Berkas yang hilang tidak dikarang menjadi teks kosong: modul yang
+        // dirakit tanpanya tetap dikompilasi dan gagal jauh dari sebabnya, dengan
+        // pesan tentang simbol yang tidak dikenal alih-alih tentang berkas.
+        out << "#error \"tidak bisa membaca " << name << "\"\n";
+        return;
+    }
+    std::string line;
+    while (std::getline(stream, line)) {
+        const std::size_t include = line.find("#include \"");
+        if (include != std::string::npos) {
+            const std::size_t start = include + 10;
+            const std::size_t end = line.find('"', start);
+            if (end != std::string::npos) {
+                InlineOne(directory, line.substr(start, end - start), seen, out);
+                continue;
+            }
+        }
+        out << line << '\n';
+    }
+}
+
+}  // namespace
+
+std::string InlineShaderIncludes(const std::filesystem::path& shaderDirectory,
+                                 const std::vector<std::string>& roots) {
+    std::set<std::string> seen;
+    std::ostringstream out;
+    for (const std::string& root : roots) {
+        InlineOne(shaderDirectory, root, seen, out);
+    }
+    return out.str();
+}
+
+std::string AssembleForwardMaterialModule(const std::string& generatedSlang,
+                                          const ForwardMaterialOptions& options) {
+    const std::string entry =
+        options.fragmentEntry.empty() ? std::string("main") : options.fragmentEntry;
+
+    std::ostringstream out;
+    out << "// Dihasilkan AssembleForwardMaterialModule. Jangan disunting tangan.\n\n";
+
+    out << "// --- deklarasi milik renderer (set 0 dan varying) ------------------\n";
+    out << options.frameDeclarations;
+    if (!options.frameDeclarations.empty() && options.frameDeclarations.back() != '\n') {
+        out << '\n';
+    }
+    out << '\n';
+
+    out << "// --- lapisan yang dipakai material ini -----------------------------\n";
+    out << "#define OPENPBR_HAS_COAT " << (options.lobes.coat ? 1 : 0) << "\n";
+    out << "#define OPENPBR_HAS_FUZZ " << (options.lobes.fuzz ? 1 : 0) << "\n";
+    out << "#define OPENPBR_HAS_ANISOTROPY " << (options.lobes.anisotropy ? 1 : 0) << "\n";
+    out << "#define OPENPBR_HAS_DIFFUSE_ROUGHNESS "
+        << (options.lobes.diffuseRoughness ? 1 : 0) << "\n\n";
+
+    out << "// --- model shading (openpbr.slang, ditanam) -----------------------\n";
+    out << options.prelude;
+    if (!options.prelude.empty() && options.prelude.back() != '\n') {
+        out << '\n';
+    }
+    out << '\n';
+
+    out << "// --- kode material -------------------------------------------------\n";
+    out << StripImport(generatedSlang);
+    out << "\n";
+
+    out << "// --- entry point: fragment -----------------------------------------\n";
+    out << "[shader(\"fragment\")]\n";
+    out << "float4 " << entry << "(BoxVarying input) : SV_Target\n{\n";
+    out << "    MaterialInputs inputs;\n";
+    out << "    inputs.uv0 = input.uv;\n";
+    // Warna instance dan warna simpul sudah dikalikan tahap vertex, jadi yang
+    // sampai ke sini satu warna. Ia masuk sebagai warna simpul material — yang
+    // memakainya lewat node `input.vertexColor`, dan yang tidak memakainya tidak
+    // terpengaruh sama sekali.
+    out << "    inputs.vertexColor = input.color;\n";
+    out << "    inputs.worldNormal = normalize(input.normal);\n";
+    out << "    inputs.viewDirection =\n";
+    out << "        normalize(shadowParams.cameraPosition.xyz - input.worldPosition);\n";
+    // Set 0 renderer tidak membawa jam. Material yang menganimasikan dirinya
+    // karena itu diam di viewport — dan yang salah bukan nilainya melainkan
+    // ketiadaannya, jadi ia ditulis nol dan disebutkan, bukan dikarang dari
+    // sesuatu yang kebetulan bergerak.
+    out << "    inputs.time = 0.0;\n\n";
+
+    out << "    MaterialSurface m = evalMaterial(inputs);\n\n";
+
+    out << "    ShadingFrame frame;\n";
+    out << "    frame.normal = inputs.worldNormal;\n";
+    out << "    frame.view = inputs.viewDirection;\n";
+    out << "    float3 tangent = input.worldTangent.xyz;\n";
+    out << "    if (dot(tangent, tangent) < 1e-8) {\n";
+    out << "        const float3 axis = abs(frame.normal.y) < 0.99 ? float3(0, 1, 0)\n";
+    out << "                                                      : float3(1, 0, 0);\n";
+    out << "        tangent = cross(axis, frame.normal);\n";
+    out << "    }\n";
+    // Gram-Schmidt: tangent yang diinterpolasi antar-vertex tidak lagi tegak
+    // lurus normal, dan bingkai yang miring memutar highlight anisotropik.
+    out << "    tangent = normalize(tangent - frame.normal * dot(frame.normal, tangent));\n";
+    out << "    frame.tangent = tangent;\n";
+    out << "    frame.bitangent = cross(frame.normal, tangent) *\n";
+    out << "                      (input.worldTangent.w < 0.0 ? -1.0 : 1.0);\n\n";
+
+    out << "    if (dot(m.normal, m.normal) > 1e-8) {\n";
+    out << "        const float3 n = normalize(m.normal);\n";
+    out << "        frame.normal = normalize(frame.tangent * n.x + frame.bitangent * n.y +\n";
+    out << "                                 inputs.worldNormal * n.z);\n";
+    out << "    }\n\n";
+
+    // Bayangan memakai normal **geometri**, bukan normal peta: bias normalnya
+    // menggeser titik sampel keluar permukaan, dan menggesernya menurut normal
+    // peta membuat bias itu ikut berlekuk — yang terlihat sebagai acne pada
+    // permukaan yang normal map-nya kasar.
+    out << "    const float shadow = (input.flags & kFlagReceiveShadows) != 0u\n";
+    out << "                             ? sampleShadow(input.worldPosition, inputs.worldNormal)\n";
+    out << "                             : 1.0;\n";
+    out << "    float3 lit = evaluateOpenPBR(m.surface, frame,\n";
+    out << "                                 normalize(shadowParams.lightDirection.xyz),\n";
+    out << "                                 shadowParams.sunRadiance.rgb * shadow);\n\n";
+
+    // Lampu cluster dinilai **satu per satu lewat model shading**, bukan
+    // dijumlahkan menjadi iradiansi lalu dikalikan albedo. Yang kedua itu
+    // pendekatan Lambert yang dipakai `box.frag`, dan ia tidak punya spekular
+    // sama sekali — lampu titik di sebelah bola logam tidak menghasilkan sorotan.
+    out << "    const float viewDepth = dot(input.worldPosition - shadowParams.cameraPosition.xyz,\n";
+    out << "                                shadowParams.cameraForward.xyz);\n";
+    out << "    const uint2 lightRange = clusterLightRange(input.position.xy, viewDepth);\n";
+    out << "    for (uint i = 0u; i < lightRange.y; ++i) {\n";
+    out << "        ClusterLightSample light;\n";
+    out << "        if (!clusterLightAt(lightRange, i, input.worldPosition, inputs.worldNormal,\n";
+    out << "                            light)) {\n";
+    out << "            continue;\n";
+    out << "        }\n";
+    out << "        lit += evaluateOpenPBR(m.surface, frame, light.direction, light.radiance);\n";
+    out << "    }\n\n";
+
+    // Iradiansi tak-langsung dari screen probe, sama sumbernya dengan
+    // `box.frag`. Yang berbeda: ia dimasukkan lewat model shading alih-alih
+    // dikalikan albedo langsung, jadi logam tidak ikut menerima difus.
+    out << "    float3 irradiance = float3(0.25);\n";
+    out << "    if (shadowParams.giParams.x > 0.5) {\n";
+    out << "        irradiance = giIrradianceAt(input.position.xy, input.worldPosition,\n";
+    out << "                                    frame.normal, shadowParams.giParams.y);\n";
+    out << "    }\n";
+    // Nol untuk prafilter dan DFG: set 0 renderer tidak memuat keduanya. Lihat
+    // catatan di header — yang tersisa suku difusnya, dan logam gelap di luar
+    // sorotan langsungnya sampai renderer ikut memanggang IBL.
+    out << "    lit += evaluateOpenPBR_IBL(m.surface, frame, irradiance, float3(0.0),\n";
+    out << "                               float3(0.0), float2(0.0));\n";
+    out << "    lit += m.emissive;\n";
+    out << "    return float4(lit, m.opacity * input.color.a);\n";
+    out << "}\n";
+
+    return out.str();
+}
+
+CompileRequest MakeForwardMaterialRequest(const std::string& generatedSlang,
+                                          const ForwardMaterialOptions& options) {
+    CompileRequest request;
+    request.source = AssembleForwardMaterialModule(generatedSlang, options);
+    request.stage = ShaderStage::Fragment;
+    request.entryPoint = options.fragmentEntry.empty() ? std::string("main") : options.fragmentEntry;
+    return request;
 }
 
 CompileRequest MakeMaterialRequest(const std::string& generatedSlang, ShaderStage stage,

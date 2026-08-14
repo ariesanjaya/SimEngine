@@ -2254,7 +2254,7 @@ private:
                              bool skinned = false, VkPipelineLayout layout = VK_NULL_HANDLE,
                              VkFormat depthFormat = VK_FORMAT_UNDEFINED,
                              VkFormat colorAttachment = VK_FORMAT_UNDEFINED,
-                             uint32_t attributeMask = 0x1FC3u) {
+                             uint32_t attributeMask = 0x3FC3u) {
         // `kSkinned`, konstanta spesialisasi 0 di `Shaders/skin_common.slang`.
         // Ukurannya empat byte walaupun tipenya bool: Vulkan menyatakan
         // konstanta spesialisasi boolean berukuran `VkBool32`, dan ukuran yang
@@ -2299,7 +2299,7 @@ private:
                 2, skinned ? static_cast<uint32_t>(sizeof(assets::SkinInfluence)) : 0u,
                 VK_VERTEX_INPUT_RATE_VERTEX},
         };
-        const std::array<VkVertexInputAttributeDescription, 9> attributes{
+        const std::array<VkVertexInputAttributeDescription, 10> attributes{
             VkVertexInputAttributeDescription{0, 0, VK_FORMAT_R32G32B32_SFLOAT,
                                               offsetof(BoxVertex, position)},
             VkVertexInputAttributeDescription{1, 0, VK_FORMAT_R32G32B32_SFLOAT,
@@ -2327,7 +2327,12 @@ private:
             // baris ini.
             VkVertexInputAttributeDescription{12, 0, VK_FORMAT_R32G32_SFLOAT,
                                               offsetof(BoxVertex, uv)},
-        };
+            // Tangent, untuk normal map. Lokasi 13 dan bukan mengisi lubang
+            // 2..5 yang ditinggalkan transform instance: lubang itu memang
+            // dibiarkan supaya tidak ada satu pun atribut yang bergeser.
+            VkVertexInputAttributeDescription{13, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
+                                              offsetof(BoxVertex, tangent)},
+};
         // Tiap pipeline menyebutkan atribut mana yang benar-benar dibacanya.
         // Buffer-nya sama dan stride-nya sama; yang berbeda hanya atribut yang
         // diambil.
@@ -2340,7 +2345,7 @@ private:
         // adalah peringatan validasi di setiap pembuatan pipeline. Menyaringnya
         // di sini bukan sekadar meredam peringatan: atribut yang tidak diambil
         // memang tidak perlu diambil.
-        std::array<VkVertexInputAttributeDescription, 9> used{};
+        std::array<VkVertexInputAttributeDescription, 10> used{};
         uint32_t usedCount = 0;
         for (const VkVertexInputAttributeDescription& attribute : attributes) {
             if ((attributeMask & (1u << attribute.location)) != 0u) {
