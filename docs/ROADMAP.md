@@ -15,6 +15,7 @@ Dokumen ini adalah peta besar. Detail per milestone ada di:
 - [PLAN-WHITEBOX.md](PLAN-WHITEBOX.md) — W0..W6, blok yang disunting di viewport untuk merancang level (selesai)
 - [PLAN-TERRAIN.md](PLAN-TERRAIN.md) — L0..L7, terrain sebagai benda di dunia: mesh, LOD, sculpt 3D, collider, cat, decal
 - [ANALISA-TEKSTUR-PERMUKAAN.md](ANALISA-TEKSTUR-PERMUKAAN.md) — apa yang tersisa sebelum permukaan bisa bertekstur, dan urutannya
+- [ANALISA-OPENPBR.md](ANALISA-OPENPBR.md) — OpenPBR versus metallic-roughness untuk real-time, dan apa yang harus dikerjakan agar pilihan itu tidak mahal
 - [ARCHITECTURE.md](ARCHITECTURE.md) — modul, aturan dependensi, seam
 - [EDITOR-PANELS.md](EDITOR-PANELS.md) — spesifikasi tiap panel
 - [DEPENDENCIES.md](DEPENDENCIES.md) — daftar dependensi + versi terkunci
