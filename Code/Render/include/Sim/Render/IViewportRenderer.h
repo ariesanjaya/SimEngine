@@ -88,10 +88,27 @@ public:
     /// graph material** — set 2, parameter di binding 0, tekstur dan sampler
     /// berselang mulai binding 1. Begitu pipeline material menggantikan
     /// `box.frag`, yang berganti adalah shader-nya, bukan pipa ini.
+    /// `path` adalah sebuah `.ktx2` yang **sudah di-bake**, bukan berkas
+    /// sumber. Yang membangunnya adalah `assets::TextureBakery`; renderer tidak
+    /// pernah mendekode gambar.
     virtual TextureHandle AcquireTexture(std::string_view path) {
         (void)path;
         return kInvalidTexture;
     }
+
+    /// Tekstur placeholder untuk ruas yang punya tekstur tetapi hasil bake-nya
+    /// belum ada. Magenta, dan sengaja tidak bisa dikira apa pun yang lain.
+    ///
+    /// Berbeda arti dari `kInvalidTexture`, yang berarti "ruas ini memang tidak
+    /// bertekstur" dan tergambar putih — nilai satuan perkalian.
+    virtual TextureHandle PendingTexture() const { return kInvalidTexture; }
+
+    /// Byte tekstur material yang sedang berada di GPU.
+    ///
+    /// Ada untuk satu alasan yang ditulis rencananya: penghematan VRAM dari
+    /// kompresi blok harus **terukur**, bukan diyakini. Angkanya dijumlahkan
+    /// dari yang sungguh diunggah tiap tekstur.
+    virtual uint64_t TextureBytes() const { return 0; }
 
     virtual void Render(const ViewportDesc& desc, const ViewportScene& scene) = 0;
 

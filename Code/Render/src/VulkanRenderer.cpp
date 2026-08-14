@@ -9,7 +9,6 @@
 #include "SdfClipmapResource.h"
 #include "Sim/Assets/MeshData.h"
 #include "Sim/Core/Log.h"
-#include "Sim/ImageIO/ImageIO.h"
 #include "Sim/RHI/Buffer.h"
 #include "Sim/RHI/Device.h"
 #include "Sim/RHI/GpuProfiler.h"
@@ -1061,6 +1060,13 @@ public:
                          mesh.vertexCount};
     }
 
+    /// Memuat sebuah `.ktx2` yang sudah di-bake.
+    ///
+    /// **Hanya `.ktx2`, dan itu satu-satunya jalur tekstur material yang ada.**
+    /// Berkas sumber tidak pernah sampai ke sini: yang membangunnya adalah
+    /// `assets::TextureBakery`, di `TaskPool`, dan renderer hanya menerima
+    /// hasilnya. Batas itu ditegakkan uji yang menyisir berkas ini mencari
+    /// `imageio::` — jalur kedua yang terlanjur ada tidak akan pernah dihapus.
     TextureHandle AcquireTexture(std::string_view path) override {
         if (path.empty() || materialSetLayout_ == VK_NULL_HANDLE) {
             return kInvalidTexture;
@@ -1071,17 +1077,10 @@ public:
             return found->second;
         }
 
-        // RGBA8 dipaksa di sini, bukan diterima apa adanya: `CreateFromRgba`
-        // hanya menerima bentuk itu, dan yang mengubahnya sesudah dekode berarti
-        // dua buffer hidup bersamaan untuk gambar yang bisa ratusan megabyte.
-        imageio::ReadOptions options;
-        options.channels = 4;
-        options.type = imageio::PixelType::UInt8;
-        imageio::Image image;
-        const imageio::ImageIoResult read =
-            imageio::Read(std::filesystem::path(key), options, image);
+        rhi::Ktx2Texture image;
+        const rhi::Ktx2Result read = rhi::ReadKtx2(std::filesystem::path(key), image);
         if (!read.ok) {
-            // Dicatat gagal supaya tidak diurai ulang tiap frame — aturan yang
+            // Dicatat gagal supaya tidak dibaca ulang tiap frame — aturan yang
             // sama dengan `AcquireMesh`.
             SIM_WARN("Render", "cannot load texture {}: {}", key, read.error);
             textureByPath_.emplace(key, kInvalidTexture);
@@ -1089,8 +1088,7 @@ public:
         }
 
         auto entry = std::make_unique<GpuTexture>();
-        if (!entry->texture.CreateFromRgba(device_, image.desc.width, image.desc.height,
-                                           image.bytes.data())) {
+        if (!entry->texture.CreateFromKtx2(device_, image)) {
             SIM_WARN("Render", "cannot upload texture {}", key);
             textureByPath_.emplace(key, kInvalidTexture);
             return kInvalidTexture;
@@ -1101,15 +1099,21 @@ public:
             return kInvalidTexture;
         }
 
+        textureBytes_ += entry->texture.GpuBytes();
         materialTextures_.push_back(std::move(entry));
         // Handle-nya indeks + 1: nol tetap berarti "tidak ada", sehingga
         // pemanggil tidak perlu membedakan "belum diminta" dari "gagal".
         const TextureHandle handle = static_cast<TextureHandle>(materialTextures_.size());
         textureByPath_.emplace(key, handle);
-        SIM_INFO("Render", "texture ready: {} ({}x{})", key, image.desc.width,
-                 image.desc.height);
+        SIM_INFO("Render", "texture ready: {} ({}x{}, {} level, format {}, {} KB)", key,
+                 image.width, image.height, image.levels.size(), image.format,
+                 materialTextures_.back()->texture.GpuBytes() / 1024);
         return handle;
     }
+
+    TextureHandle PendingTexture() const override { return pendingHandle_; }
+
+    uint64_t TextureBytes() const override { return textureBytes_; }
 
     MeshAsset AcquireMesh(std::string_view path) override {
         MeshAsset asset;
@@ -2593,7 +2597,34 @@ private:
             return false;
         }
         fallbackSet_ = AllocateMaterialSet(fallbackTexture_);
-        return fallbackSet_ != VK_NULL_HANDLE;
+        if (fallbackSet_ == VK_NULL_HANDLE) {
+            return false;
+        }
+
+        // **Magenta, dan bukan putih maupun hitam.** Ini yang tergambar untuk
+        // ruas yang *punya* tekstur tetapi hasil bake-nya belum ada, dan
+        // keduanya berbeda arti: putih berarti "memang tidak bertekstur", hitam
+        // terlihat seperti bayangan atau material yang salah. Magenta tidak
+        // pernah dikira apa pun selain "belum siap".
+        //
+        // Satu piksel, bukan papan catur: papan catur menuntut sampler
+        // berulang, dan yang lewat `CreateFromRgba` justru clamp — yang terlihat
+        // lalu bukan papan catur melainkan empat kuadran yang meregang.
+        const uint32_t magenta = 0xFFFF00FFu;
+        auto pending = std::make_unique<GpuTexture>();
+        if (!pending->texture.CreateFromRgba(device_, 1, 1, &magenta)) {
+            SIM_ERROR("Render", "cannot create pending texture");
+            return false;
+        }
+        pending->set = AllocateMaterialSet(pending->texture);
+        if (pending->set == VK_NULL_HANDLE) {
+            return false;
+        }
+        materialTextures_.push_back(std::move(pending));
+        // Ia menempati slot pertama supaya handle-nya seperti tekstur lain, dan
+        // jalur gambarnya tidak perlu mengenal satu pun kasus khusus.
+        pendingHandle_ = static_cast<TextureHandle>(materialTextures_.size());
+        return true;
     }
 
     /// Satu set descriptor yang menunjuk sebuah tekstur.
@@ -3140,6 +3171,8 @@ private:
             vkDestroyDescriptorPool(device_.Handle(), skinPool_, nullptr);
             skinPool_ = VK_NULL_HANDLE;
         }
+        textureBytes_ = 0;
+        pendingHandle_ = kInvalidTexture;
         for (std::unique_ptr<GpuTexture>& texture : materialTextures_) {
             texture->texture.Destroy();
         }
@@ -3761,6 +3794,11 @@ private:
     };
     std::vector<std::unique_ptr<GpuTexture>> materialTextures_;
     std::unordered_map<std::string, TextureHandle> textureByPath_;
+    /// Handle placeholder "sedang di-bake". Menempati slot pertama.
+    TextureHandle pendingHandle_ = kInvalidTexture;
+    /// Byte tekstur material yang sedang berada di GPU, dijumlahkan dari yang
+    /// sungguh diunggah — bukan dari dimensi dikali tebakan bytes-per-texel.
+    uint64_t textureBytes_ = 0;
     VkDescriptorSetLayout materialSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool materialPool_ = VK_NULL_HANDLE;
     rhi::DynamicBuffer materialParams_;

@@ -18,6 +18,7 @@ class FrameLimiter;
 }
 
 namespace sim::assets {
+class TextureBakery;
 class AssetDatabase;
 }
 
@@ -91,6 +92,13 @@ struct EditorContext {
     render::IMaterialPreview* materialPreview = nullptr;
     /// Pratinjau aset untuk Asset Browser. Dimiliki pemanggil EditorApp.
     render::IThumbnailCache* thumbnails = nullptr;
+    /// Baker tekstur: dari berkas sumber ke `.ktx2` di cache. Dimiliki pemanggil
+    /// EditorApp.
+    ///
+    /// Ada di sini, bukan di dalam renderer, karena baker adalah pengondisian
+    /// aset dan bukan penggambaran: ia mendekode PNG, membangkitkan mip, dan
+    /// menjalankan encoder BC7. Renderer hanya menerima `.ktx2`-nya.
+    assets::TextureBakery* textureBakery = nullptr;
     /// Perender kedua untuk Mesh Editor: target rendernya sendiri, dengan
     /// alasan yang sama seperti pratinjau material — panel Viewport dan panel
     /// ini sama-sama menggambar `ImGui::Image()`, dan satu target berarti yang

@@ -1,5 +1,7 @@
 #include "Sim/Editor/SceneView.h"
 
+#include "Sim/Assets/TextureBakery.h"
+
 #include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Assets/MaterialImport.h"
 #include "Sim/Material/MaterialGraph.h"
@@ -374,9 +376,39 @@ render::TextureHandle SceneView::MaterialTexture(const assets::AssetDatabase* as
     if (!texture.IsValid()) {
         return render::kInvalidTexture;
     }
-    const assets::AssetRecord* image = assets->Find(texture);
-    return image == nullptr ? render::kInvalidTexture
-                            : renderer->AcquireTexture(assets->AbsolutePath(*image).string());
+    return UploadedTexture(assets, renderer, texture);
+}
+
+/// Sebuah aset gambar menjadi handle tekstur — lewat baker, tidak pernah
+/// langsung.
+///
+/// **Jalur ini yang menjaga renderer tidak pernah mendekode gambar.** Yang
+/// diserahkan ke `AcquireTexture` adalah `.ktx2` di dalam cache; berkas
+/// sumbernya berhenti di sini.
+render::TextureHandle SceneView::UploadedTexture(const assets::AssetDatabase* assets,
+                                                 render::IViewportRenderer* renderer,
+                                                 const Uuid& image) {
+    if (assets == nullptr || renderer == nullptr || bakery_ == nullptr) {
+        return render::kInvalidTexture;
+    }
+    const assets::AssetRecord* record = assets->Find(image);
+    if (record == nullptr) {
+        return render::kInvalidTexture;
+    }
+    const assets::BakedTextureRef baked = bakery_->Request(assets->AbsolutePath(*record));
+    switch (baked.state) {
+        case assets::BakeState::Ready:
+            return renderer->AcquireTexture(baked.path.string());
+        case assets::BakeState::Pending:
+            // Placeholder, bukan putih. Ruas ini **punya** tekstur; menggambarnya
+            // putih membuatnya tidak bisa dibedakan dari ruas yang memang tidak
+            // bertekstur, dan yang menunggu tanpa tahu ia menunggu akan mengira
+            // teksturnya hilang.
+            return renderer->PendingTexture();
+        case assets::BakeState::Failed:
+            break;
+    }
+    return render::kInvalidTexture;
 }
 
 /// Warna material bawaan editor — yang mengisi mesh tanpa material sendiri.
@@ -530,9 +562,7 @@ void SceneView::AppendDecal(const scene::DecalComponent& component, scene::Entit
     // entri tekstur.
     render::TextureHandle texture = render::kInvalidTexture;
     if (component.texture.IsValid()) {
-        if (const assets::AssetRecord* image = assets->Find(component.texture.guid)) {
-            texture = renderer->AcquireTexture(assets->AbsolutePath(*image).string());
-        }
+        texture = UploadedTexture(assets, renderer, component.texture.guid);
     }
 
     render::MeshInstance instance;

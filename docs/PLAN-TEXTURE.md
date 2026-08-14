@@ -347,20 +347,85 @@ adalah pilihan formatnya.
   kuncinya berisi versi baker, jadi berkas dari baker lama tidak pernah terpakai
   — tetapi juga tidak pernah terhapus.
 
-### T3 — Renderer memakai KTX2 · ⬜ (mendarat bersama jalur tekstur material)
+### T3 — Renderer memakai KTX2 · 🔶
 
-Jalur tekstur material memuat `.ktx2` dari cache, bukan mendekode PNG. Larik
-bindless berisi format campuran. Tekstur yang belum di-bake memakai placeholder
-yang jelas terlihat, bukan hitam.
-
-**Ini milestone yang penjadwalannya tidak bebas.** Ia harus mendarat bersama
-jalur tekstur material di E8.4, bukan sesudahnya.
+Jalur tekstur material memuat `.ktx2` dari cache. Berkas sumber tidak pernah
+sampai ke renderer sama sekali.
 
 **Kriteria terima**
-- Material dengan albedo BC7, normal BC5, dan ORM BC4 digambar benar.
-- Pemakaian VRAM tekstur pada level contoh turun terukur, dan angkanya dicatat.
-- Renderer tidak pernah memanggil dekoder gambar apa pun — diuji dengan grep,
-  seperti aturan `stbi_` di I0.
+- Renderer tidak pernah memanggil dekoder gambar apa pun. ✅ Diuji dengan
+  menyisir `VulkanRenderer.cpp`, dan uji-nya membuang komentar lebih dulu —
+  aturan ini soal kode, dan tanpa langkah itu catatan yang menerangkan aturannya
+  sendiri menggagalkannya. `Ibl.cpp` sengaja **tidak** ikut: peta lingkungan
+  masih float dari `.exr`, dan yang memindahkannya adalah T4.
+- Pemakaian VRAM turun terukur, dan angkanya dicatat. ✅ Tekstur 256×256 dengan
+  rantai mip penuh: **349.524 byte RGBA8 → 87.408 byte BC7**, yaitu 25,01%.
+  Yang dijumlahkan muatan tiap level, bukan dimensi dikali tebakan
+  bytes-per-texel.
+- Tekstur yang belum di-bake memakai placeholder yang jelas terlihat. ✅ Magenta,
+  dan **berbeda arti dari putih**: putih berarti "ruas ini memang tidak
+  bertekstur" — nilai satuan perkalian — sementara magenta berarti "punya
+  tekstur, sedang dikerjakan". Yang menunggu tanpa tahu ia menunggu akan mengira
+  teksturnya hilang.
+- Material dengan albedo BC7, normal BC5, dan ORM BC4 digambar benar. 🔶
+  **Ketiganya di-bake, diunggah, dan tersampel dengan benar — tetapi hanya
+  albedo yang sungguh dipakai menggambar.** Pass forward masih `box.frag`, yang
+  tidak punya model pencahayaan untuk memakai normal maupun ORM. Yang
+  menggantinya adalah pipeline material di E8.4, dan di situlah sisa kriteria ini
+  selesai.
+
+#### T0 ditutup di sini: unggahan rantai mip
+
+`Texture2D::CreateFromKtx2` mengunggah seluruh level dalam satu staging buffer
+dan satu `vkCmdCopyBufferToImage`. Tiga hal yang salahnya tidak muncul sebagai
+kompilasi gagal:
+
+- **Barrier harus menyebut seluruh level.** Yang hanya menyebut level 0
+  meninggalkan sisanya di layout `UNDEFINED`.
+- **`imageExtent` diambil dari dimensi level itu**, bukan dari level nol.
+  Keduanya sama untuk ukuran kelipatan dua dan berbeda untuk yang lain.
+- **`bufferRowLength` dibiarkan nol.** Nol berarti "rapat menurut imageExtent",
+  yang benar untuk format blok maupun biasa; menghitungnya sendiri berarti
+  menyalin lagi aturan pembulatan blok 4×4.
+
+Ketiganya lolos setiap uji CPU. Yang menangkapnya adalah
+`SimTextureUploadTests` — **satu-satunya uji di repo ini yang menuntut Vulkan**,
+yang membaca galat validation layer dari `LogRing` dan gagal bila ada satu pun.
+Dua mutasi dicoba: barrier ber-level tunggal menghasilkan tiga galat layout, dan
+`imageExtent` dari level nol menghasilkan `VUID-...-imageSubresource-07971` lalu
+`VK_ERROR_DEVICE_LOST`. Mesin tanpa Vulkan melewatinya alih-alih gagal.
+
+Dan satu galat yang sudah ada sejak sebelumnya ikut ketahuan: **device headless
+meminta `VK_KHR_swapchain` tanpa `VK_KHR_surface`**. Ia tidak pernah terlihat
+karena tidak ada yang pernah membuat device tanpa jendela. Sekarang
+`VK_KHR_swapchain` hanya diminta ketika ada ekstensi instance.
+
+**Sampler tekstur material `REPEAT`, bukan `CLAMP_TO_EDGE`.** Yang lewat jalur
+ini adalah dinding bata yang diulang sepanjang mesh; clamp membuat seluruh
+permukaan di luar 0..1 memakai satu baris piksel tepinya, meregang menjadi garis.
+`Create` tetap clamp karena yang lewat sana adalah thumbnail.
+
+#### Baker dipanggil dari mana
+
+`assets::TextureBakery` memetakan berkas sumber ke `.ktx2` di cache, dan
+menjalankan bake di `TaskPool` — janji yang T2 tunda karena belum ada
+pemanggilnya. Ia dimiliki `EditorApp` dan dipakai `SceneView`; **renderer tidak
+pernah melihatnya**.
+
+- Yang diminta frame ini menjawab `Pending` dan tidak memblokir apa pun.
+- Permintaan kedua pada frame yang sama tidak mengantre tugas kedua. Tanpa itu,
+  satu tekstur yang dipakai lima ruas mesh menjalankan lima encoder BC7 sekaligus
+  untuk menghasilkan berkas yang identik.
+- Kegagalan **diingat**. Diuji dengan mengganti berkas rusaknya dengan yang sah
+  dan memastikan jawabannya tetap gagal — kalau tidak, berkas rusak diurai enam
+  puluh kali per detik. Itu sekaligus alasan `Invalidate` ada.
+
+#### Yang belum
+
+- **Larik bindless berisi format campuran** belum ada. Hari ini tiap tekstur
+  punya satu set descriptor sendiri, seperti sebelum T3. Itu bagian dari
+  keputusan set-0 di E8.4, bukan bagian dari jalur KTX2.
+- Cache tekstur masih tumbuh tanpa batas — sama seperti sesudah T2.
 
 ### T4 — HDR dan IBL ke BC6H · ⬜ (butuh I2)
 

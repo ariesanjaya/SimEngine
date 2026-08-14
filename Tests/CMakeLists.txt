@@ -108,7 +108,13 @@ sim_add_test(SimAssetTests
         # bentuk round-trip yang membuktikan sesuatu. Menautkannya dari
         # `Sim::Assets` sendiri akan menyeret Vulkan ke dalam baker, yang harus
         # tetap bisa jalan di mesin build tanpa GPU.
-        Sim::RHI)
+        Sim::RHI
+        # Dipakai uji yang **menulis** berkas sumbernya sendiri. Fixture di
+        # `Resources/Images` semuanya berukuran delapan piksel — cukup untuk
+        # memeriksa tata letak, dan tidak cukup untuk mengukur penghematan VRAM:
+        # pada tekstur sekecil itu level terdalam yang tetap menempati satu blok
+        # utuh justru mendominasi hasilnya.
+        Sim::ImageIO)
 
 # Folder mesh sumber, bukan salinannya di build — alasan yang sama dengan
 # SIM_SHADER_DIR di bawah: uji yang membaca aset harus membaca berkas yang
@@ -180,10 +186,32 @@ sim_add_test(SimRenderTests
         # Pembaca KTX2 tinggal di RHI, dan RHI privat milik Render.
         Sim::RHI)
 
+# Unggahan tekstur ke GPU sungguhan. **Satu-satunya uji yang menuntut Vulkan**,
+# dan ia melewati dirinya sendiri di mesin yang tidak punya — menggagalkan build
+# di sana akan membuat seluruh suite tidak bisa dipercaya di mesin itu.
+#
+# Terpisah dari SimRenderTests dengan sengaja: yang itu bebas GPU, dan mencampur
+# keduanya berarti tidak ada lagi satu pun uji render yang bisa dijalankan tanpa
+# driver.
+sim_add_test(SimTextureUploadTests
+    SOURCES
+        TextureUploadTests.cpp
+    DEPS
+        Sim::RHI
+        Sim::Assets)
+
+target_compile_definitions(SimTextureUploadTests
+    PRIVATE SIM_IMAGE_DIR="${CMAKE_SOURCE_DIR}/Resources/Images")
+
 # Peta lingkungan uji untuk jalur IBL, dibaca dari folder sumber dengan alasan
 # yang sama dengan SIM_MESH_DIR di atas.
 target_compile_definitions(SimRenderTests
-    PRIVATE SIM_IMAGE_DIR="${CMAKE_SOURCE_DIR}/Resources/Images")
+    PRIVATE SIM_IMAGE_DIR="${CMAKE_SOURCE_DIR}/Resources/Images"
+    # Dipakai uji yang menyisir `Code/Render` untuk memastikan jalur tekstur
+    # material tidak pernah mendekode gambar sendiri — aturan yang sama bentuknya
+    # dengan `stbi_` di I0, dan alasannya juga sama: jalur kedua yang terlanjur
+    # ada tidak akan pernah dihapus.
+    PRIVATE SIM_CODE_DIR="${CMAKE_SOURCE_DIR}/Code")
 
 # Animation: rangka berurutan topologis, klip berbasis kurva, pencampuran pose,
 # penanda fase, root motion, dan format `.simskel`/`.simanim`.

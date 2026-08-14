@@ -123,6 +123,10 @@ bool Device::Create(const DeviceDesc& desc) {
 }
 
 bool Device::CreateInstance(const DeviceDesc& desc) {
+    // Tanpa satu pun ekstensi instance berarti tidak ada jendela — dan karena
+    // itu tidak ada surface, dan karena itu tidak boleh ada swapchain. Dicatat
+    // di sini karena hanya di sini `desc` terlihat.
+    headless_ = desc.instanceExtensions.empty();
     // Ditaut langsung ke loader, jadi simbolnya selalu ada (Vulkan 1.1+).
     apiVersion_ = VK_API_VERSION_1_0;
     SIM_VK_CHECK(vkEnumerateInstanceVersion(&apiVersion_));
@@ -274,7 +278,17 @@ bool Device::CreateLogicalDevice() {
         supportsRayQuery_ = rayQuery && accelerationStructure;
     }
 
-    std::vector<const char*> deviceExtensions{VK_KHR_SWAPCHAIN_EXTENSION_NAME};
+    // **Swapchain hanya kalau ada surface.** `VK_KHR_swapchain` menuntut
+    // `VK_KHR_surface` di sisi instance, dan yang meminta device tanpa ekstensi
+    // instance sama sekali — jalur headless: uji unggahan tekstur, baker, mesin
+    // build tanpa jendela — tidak pernah punya keduanya. Memintanya di sana
+    // menghasilkan galat validation layer pada `vkCreateDevice` yang tidak
+    // berhubungan dengan apa pun yang sedang dikerjakan, dan yang lalu
+    // menenggelamkan galat sungguhan di antara derau.
+    std::vector<const char*> deviceExtensions;
+    if (!headless_) {
+        deviceExtensions.push_back(VK_KHR_SWAPCHAIN_EXTENSION_NAME);
+    }
 
     VkPhysicalDeviceFeatures features{};
     features.fillModeNonSolid = VK_TRUE;  // wireframe di viewport editor

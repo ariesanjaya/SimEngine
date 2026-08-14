@@ -137,6 +137,8 @@ private:
     VkPipelineCache pipelineCache_ = VK_NULL_HANDLE;
     uint32_t apiVersion_ = VK_API_VERSION_1_0;
     bool supportsRayQuery_ = false;
+    /// True bila device dibuat tanpa ekstensi instance — yaitu tanpa jendela.
+    bool headless_ = false;
     std::string deviceName_;
     bool validationEnabled_ = false;
     bool supportsVulkan13_ = false;

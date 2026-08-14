@@ -29,6 +29,13 @@ namespace sim::editor {
 /// modul di docs/ARCHITECTURE.md runtuh.
 class EditorApp {
 public:
+    EditorApp();
+    /// Dideklarasikan dan didefinisikan di `.cpp`, bukan dibiarkan implisit:
+    /// `textureBakery_` sebuah `unique_ptr` ke tipe yang hanya
+    /// dideklarasi-maju di header ini, dan destructor implisit menuntut tipe
+    /// lengkapnya di setiap TU yang menyertakan header ini.
+    ~EditorApp();
+
     struct Config {
         /// Tempat pintasan, layout, log, dan cache turunan disimpan. **Milik
         /// editor, bukan milik project**: yang di sini berlaku untuk seluruh
@@ -176,6 +183,10 @@ private:
     PanelManager panels_;
     scene::World world_;
     assets::AssetDatabase assets_;
+    /// Baker tekstur. **Dimiliki di sini, bukan di `main`**, karena berbeda dari
+    /// ThumbnailCache ia tidak butuh device sama sekali — ia mendekode, memampat,
+    /// dan menulis berkas, semuanya di CPU.
+    std::unique_ptr<assets::TextureBakery> textureBakery_;
     /// Indeks isi bawaan editor, berakar di folder `Resources` di sebelah
     /// executable. **Dibuka sekali saat start dan tidak pernah ditutup**: ia
     /// tidak bergantung project mana pun, dan itulah seluruh gunanya — sebuah

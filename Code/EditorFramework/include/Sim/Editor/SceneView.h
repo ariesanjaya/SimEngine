@@ -14,6 +14,7 @@
 #include <vector>
 
 namespace sim::assets {
+class TextureBakery;
 class AssetDatabase;
 }
 
@@ -117,6 +118,17 @@ public:
                const assets::AssetDatabase* builtinAssets = nullptr,
                WhiteboxStore* whiteboxes = nullptr, const TerrainView& terrain = {});
 
+    /// Baker tekstur yang dipakai menerjemahkan berkas sumber menjadi `.ktx2`.
+    ///
+    /// **Setter, bukan parameter `Build` yang kesembilan.** Ia tidak berubah dari
+    /// frame ke frame, dan daftar parameter yang sudah delapan panjangnya adalah
+    /// tempat argumen tertukar tanpa satu pun galat kompilasi.
+    ///
+    /// Null berarti tidak ada tekstur material yang tergambar sama sekali —
+    /// bukan bahwa berkas sumbernya dipakai apa adanya. Renderer hanya menerima
+    /// `.ktx2`.
+    void SetTextureBakery(assets::TextureBakery* bakery) { bakery_ = bakery; }
+
     /// Menambahkan kotak wireframe sejajar sumbu, sesudah `Build`.
     ///
     /// Terbuka karena tidak semua yang perlu digambar berasal dari dunia:
@@ -162,6 +174,12 @@ private:
     /// Tekstur warna dasar sebuah material, sudah diunggah, atau nol.
     render::TextureHandle MaterialTexture(const assets::AssetDatabase* assets,
                                           render::IViewportRenderer* renderer, const Uuid& guid);
+    /// Sebuah aset gambar menjadi handle tekstur, lewat baker.
+    ///
+    /// Mengembalikan placeholder selama hasil bake-nya belum ada, dan nol bila
+    /// tidak ada baker atau bake-nya gagal.
+    render::TextureHandle UploadedTexture(const assets::AssetDatabase* assets,
+                                          render::IViewportRenderer* renderer, const Uuid& image);
     /// Warna material bawaan editor — yang mengisi mesh tanpa material sendiri.
     Vec4 BuiltinColor(const assets::AssetDatabase* builtinAssets);
     void AppendPartColors(const scene::MeshRendererComponent& renderer, uint32_t partCount,
@@ -215,6 +233,7 @@ private:
     std::vector<Vec4> partColors_;
     /// Sejajar dengan `partColors_`. Nol berarti ruas itu tanpa tekstur.
     std::vector<render::TextureHandle> partTextures_;
+    assets::TextureBakery* bakery_ = nullptr;
     std::vector<render::LineSegment> lines_;
     std::vector<render::LightInstance> lights_;
     std::vector<Pickable> pickables_;

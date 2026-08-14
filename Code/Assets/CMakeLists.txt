@@ -11,6 +11,7 @@ sim_add_library(Assets
         src/UsdImport.cpp
         src/MeshSettings.cpp
         src/TextureBake.cpp
+        src/TextureBakery.cpp
         src/TextureSettings.cpp
         src/Thumbnail.cpp
     PUBLIC_DEPS

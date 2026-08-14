@@ -1,5 +1,7 @@
 #include "Sim/Editor/EditorApp.h"
 
+#include "Sim/Assets/TextureBakery.h"
+
 #include "Sim/Platform/FileDialog.h"
 
 #include "Sim/Core/Log.h"
@@ -52,6 +54,9 @@ extern "C" void OnFatalSignal(int signal) {
 
 }  // namespace
 
+EditorApp::EditorApp() = default;
+EditorApp::~EditorApp() = default;
+
 bool EditorApp::Initialize(const Config& config) {
     configDir_ = config.configDir;
     projectsRoot_ = config.projectsRoot;
@@ -81,6 +86,12 @@ bool EditorApp::Initialize(const Config& config) {
     // cache bersama justru yang benar, dan berpindah project tidak berarti
     // mendekode ulang seluruh thumbnail yang sudah pernah dibuat.
     context_.shaderCacheDir = (configDir_ / "ShaderCache").string();
+    // Tekstur hasil bake ikut aturan yang sama: kuncinya hash isi berkas, jadi
+    // dua project yang memakai tekstur yang sama persis berbagi satu berkas
+    // cache alih-alih memampatnya dua kali.
+    textureBakery_ =
+        std::make_unique<assets::TextureBakery>(configDir_ / "TextureCache", config.tasks);
+    context_.textureBakery = textureBakery_.get();
     context_.shaderDir = config.shaderDir.string();
     context_.builtinDir = config.resourceDir.string();
 

@@ -3,6 +3,7 @@
 #include "Sim/RHI/Ktx2.h"
 
 #include <cstring>
+#include <fstream>
 #include "Sim/Render/FrameGraph.h"
 #include "Sim/Render/Frustum.h"
 #include "Sim/Render/Ibl.h"
@@ -4936,4 +4937,47 @@ TEST_CASE("T0: berkas yang dibuat jahat tidak membuat pembacanya membaca ke luar
     handmade.bytes.assign(64, 0);
     handmade.levels.push_back(Ktx2Level{0xFFFFFFFFFFFFFFFFull, 1, 1, 4, 4});
     CHECK(handmade.LevelBytes(0).empty());
+}
+
+// ---------------------------------------------------------------------------
+// T3 — renderer memakai KTX2
+// ---------------------------------------------------------------------------
+
+TEST_CASE("T3: jalur tekstur material di renderer tidak mendekode gambar sendiri") {
+    // **Aturan struktural, bukan gaya.** Rencananya menyebutnya sendiri: kalau
+    // jalur tekstur kedua terlanjur ada, ia tidak akan pernah dihapus — dan
+    // renderer yang bisa memuat PNG akan terus memuat PNG, tanpa mip dan tanpa
+    // kompresi, untuk setiap tekstur yang kebetulan belum di-bake.
+    //
+    // `Ibl.cpp` sengaja **tidak** ikut aturan ini. Peta lingkungan masih dibaca
+    // sebagai float dari `.exr`, dan yang memindahkannya ke BC6H adalah T4.
+    const std::filesystem::path renderer =
+        std::filesystem::path(SIM_CODE_DIR) / "Render" / "src" / "VulkanRenderer.cpp";
+    std::ifstream file(renderer);
+    REQUIRE_MESSAGE(file, "tidak bisa membuka " << renderer.string());
+    const std::string text((std::istreambuf_iterator<char>(file)),
+                           std::istreambuf_iterator<char>());
+
+    // Komentarnya dibuang lebih dulu. Aturan ini soal kode, bukan soal kata —
+    // dan tanpa langkah ini, catatan yang menerangkan aturannya sendiri
+    // menggagalkannya.
+    std::string source;
+    source.reserve(text.size());
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        if (text[i] == '/' && i + 1 < text.size() && text[i + 1] == '/') {
+            while (i < text.size() && text[i] != '\n') {
+                ++i;
+            }
+        }
+        if (i < text.size()) {
+            source.push_back(text[i]);
+        }
+    }
+
+    CHECK(source.find("imageio::") == std::string::npos);
+    CHECK(source.find("stbi_") == std::string::npos);
+    // Dan ia memang memakai pembaca KTX2 — tanpa baris ini, berkas yang tidak
+    // memuat tekstur sama sekali juga lulus.
+    CHECK(source.find("ReadKtx2") != std::string::npos);
+    CHECK(source.find("CreateFromKtx2") != std::string::npos);
 }

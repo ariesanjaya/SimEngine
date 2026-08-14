@@ -5,6 +5,7 @@
 #include "Sim/Assets/MaterialImport.h"
 #include "Sim/Assets/BlockCompress.h"
 #include "Sim/Assets/TextureBake.h"
+#include "Sim/Assets/TextureBakery.h"
 #include "Sim/Assets/TextureSettings.h"
 #include "Sim/Assets/MeshData.h"
 #include "Sim/Assets/MeshSettings.h"
@@ -12,6 +13,7 @@
 #include "Sim/Material/MaterialGraph.h"
 #include "Sim/Material/MaterialValidation.h"
 
+#include "Sim/ImageIO/ImageIO.h"
 #include "Sim/RHI/Ktx2.h"
 
 #include "Sim/Core/FileWatcher.h"
@@ -2077,4 +2079,159 @@ TEST_CASE("T2: BC7 pada kualitas seimbang tetap di atas ambang PSNR-nya") {
     // adalah bug yang tidak pernah terlihat: yang meminta kualitas terbaik
     // menerima gambar yang lebih buruk dan membayar empat kali lipat waktunya.
     CHECK(best >= balanced);
+}
+
+// ---------------------------------------------------------------------------
+// T3 — bakery: dari berkas sumber ke .ktx2
+// ---------------------------------------------------------------------------
+
+TEST_CASE("T3: bakery menjawab .ktx2, dan hanya sekali mengerjakannya") {
+    TempDir temp;
+    const std::filesystem::path source = temp.Path() / "batu.png";
+    CopyFile(TextureFixture("checker.png"), source);
+
+    // Tanpa TaskPool bake dikerjakan di tempat — itu jalur uji dan jalur
+    // headless, keduanya tidak punya frame yang bisa terlihat membeku.
+    TextureBakery bakery(temp.Path() / "cache", nullptr);
+
+    const uint64_t before = TextureBakeCount();
+    const BakedTextureRef first = bakery.Request(source);
+    CHECK(first.state == BakeState::Ready);
+    CHECK(first.path.extension() == ".ktx2");
+    CHECK(std::filesystem::exists(first.path));
+    CHECK(TextureBakeCount() == before + 1);
+
+    // Permintaan kedua tidak menyentuh baker sama sekali — bukan sekadar
+    // menemukan berkas cache-nya, tetapi tidak bertanya.
+    const BakedTextureRef second = bakery.Request(source);
+    CHECK(second.state == BakeState::Ready);
+    CHECK(second.path == first.path);
+    CHECK(TextureBakeCount() == before + 1);
+
+    // Dan yang dijawabnya benar-benar sebuah KTX2 yang bisa dibaca.
+    rhi::Ktx2Texture texture;
+    const rhi::Ktx2Result read = rhi::ReadKtx2(first.path, texture);
+    REQUIRE_MESSAGE(read.ok, read.error);
+    CHECK(texture.width == 8);
+    CHECK(texture.levels.size() == 4);
+}
+
+TEST_CASE("T3: berkas yang tidak bisa dibaca menjawab gagal, dan tidak dicoba lagi") {
+    TempDir temp;
+    const std::filesystem::path broken = temp.Path() / "rusak.png";
+    WriteFile(broken, "ini bukan PNG");
+
+    TextureBakery bakery(temp.Path() / "cache", nullptr);
+    const uint64_t before = TextureBakeCount();
+
+    CHECK(bakery.Request(broken).state == BakeState::Failed);
+    CHECK(bakery.Request(broken).state == BakeState::Failed);
+    // Nol: yang gagal tidak menghasilkan berkas cache.
+    CHECK(TextureBakeCount() == before);
+
+    // **Dan ia benar-benar diingat, bukan sekadar gagal lagi dengan cara yang
+    // sama.** Berkasnya diganti dengan yang sah; jawabannya tetap gagal, karena
+    // yang sudah dicoba tidak dicoba ulang. Itu yang mencegah berkas rusak
+    // diurai enam puluh kali per detik — dan sekaligus alasan `Invalidate` ada.
+    CopyFile(TextureFixture("checker.png"), broken);
+    CHECK(bakery.Request(broken).state == BakeState::Failed);
+    bakery.Invalidate(broken);
+    CHECK(bakery.Request(broken).state == BakeState::Ready);
+
+    // Yang tidak ada sama sekali juga gagal, bukan menggantung di `Pending`.
+    CHECK(bakery.Request(temp.Path() / "tidak-ada.png").state == BakeState::Failed);
+}
+
+TEST_CASE("T3: dengan TaskPool jawabannya menunggu, bukan memblokir") {
+    // **Inilah alasan bakery ada.** Bake sebuah tekstur 4K adalah detik, bukan
+    // milidetik, dan pekerjaan sebesar itu di dalam jalur gambar berarti editor
+    // yang membeku. Yang diminta frame ini menjawab `Pending`, dan frame itu
+    // menggambar placeholder.
+    TempDir temp;
+    const std::filesystem::path source = temp.Path() / "batu.png";
+    CopyFile(TextureFixture("albedo-srgb.png"), source);
+
+    TaskPool tasks;
+    TextureBakery bakery(temp.Path() / "cache", &tasks);
+
+    const uint64_t before = TextureBakeCount();
+    const BakedTextureRef first = bakery.Request(source);
+    CHECK(first.state == BakeState::Pending);
+    CHECK(first.path.empty());
+    // Permintaan kedua pada frame yang sama **tidak** mengantre tugas kedua.
+    // Tanpa itu, satu tekstur yang dipakai lima ruas mesh menjalankan lima
+    // encoder BC7 sekaligus untuk menghasilkan berkas yang identik.
+    CHECK(bakery.Request(source).state == BakeState::Pending);
+    CHECK(bakery.Request(source).state == BakeState::Pending);
+
+    tasks.WaitIdle();
+    CHECK(TextureBakeCount() == before + 1);
+
+    const BakedTextureRef done = bakery.Request(source);
+    CHECK(done.state == BakeState::Ready);
+    CHECK(std::filesystem::exists(done.path));
+    CHECK(bakery.PendingCount() == 0);
+
+    // Melupakannya membuat permintaan berikutnya membangunnya lagi — itu yang
+    // dipanggil panel ketika pengaturan teksturnya berubah.
+    bakery.Invalidate(source);
+    CHECK(bakery.Request(source).state == BakeState::Pending);
+    tasks.WaitIdle();
+    CHECK(bakery.Request(source).state == BakeState::Ready);
+}
+
+TEST_CASE("T3: BC7 memakai seperempat VRAM RGBA8, dan angkanya diukur") {
+    // Rencananya menuntut penghematannya **terukur**, bukan diyakini. Yang
+    // dijumlahkan adalah muatan tiap level — persis byte yang diunggah ke GPU —
+    // bukan dimensi dikali tebakan bytes-per-texel.
+    //
+    // Sumbernya ditulis di sini, bukan diambil dari `Resources/Images`: fixture
+    // di sana semuanya delapan piksel, dan pada ukuran itu level terdalam yang
+    // tetap menempati satu blok utuh justru mendominasi hasilnya.
+    TempDir temp;
+    constexpr uint32_t kSide = 256;
+    imageio::ImageDesc desc;
+    desc.width = kSide;
+    desc.height = kSide;
+    desc.channels = 1;
+    desc.type = imageio::PixelType::UInt8;
+    imageio::Image image;
+    image.Allocate(desc);
+    for (uint32_t y = 0; y < kSide; ++y) {
+        for (uint32_t x = 0; x < kSide; ++x) {
+            image.bytes[static_cast<std::size_t>(y) * kSide + x] =
+                static_cast<uint8_t>((x ^ y) | ((x / 32 + y / 32) % 2 ? 128 : 0));
+        }
+    }
+    const std::filesystem::path source = temp.Path() / "besar.png";
+    const imageio::ImageIoResult written = imageio::Write(source, image);
+    REQUIRE_MESSAGE(written.ok, written.error);
+
+    auto payload = [&](bool compress, const char* folder) {
+        TextureSettings settings;
+        settings.usage = TextureUsage::Color;
+        settings.compress = compress;
+        const BakeResult result = BakeTexture(source, settings, temp.Path() / folder);
+        REQUIRE_MESSAGE(result.ok, result.error);
+        rhi::Ktx2Texture texture;
+        const rhi::Ktx2Result read = rhi::ReadKtx2(result.path, texture);
+        REQUIRE_MESSAGE(read.ok, read.error);
+        std::size_t bytes = 0;
+        for (std::size_t level = 0; level < texture.levels.size(); ++level) {
+            bytes += texture.LevelBytes(level).size();
+        }
+        return bytes;
+    };
+
+    const std::size_t plain = payload(false, "plain");
+    const std::size_t block = payload(true, "block");
+    INFO("RGBA8 " << plain << " byte, BC7 " << block << " byte");
+    REQUIRE(plain > 0);
+    CHECK(block < plain);
+
+    // BC7 satu byte per teksel, RGBA8 empat — jadi seperempat, dan sisa
+    // beberapa blok di level terdalam. Batasnya 0,3 supaya tetap menangkap
+    // format yang diam-diam kembali ke RGBA8, tanpa terikat pada digit terakhir
+    // hasil sebuah versi encoder.
+    CHECK(static_cast<double>(block) <= static_cast<double>(plain) * 0.30);
 }
