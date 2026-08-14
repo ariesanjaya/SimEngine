@@ -6,6 +6,7 @@ sim_add_library(ImageIO
         src/BackendTiff.cpp
         src/Image.cpp
         src/ImageIO.cpp
+        src/MipChain.cpp
         src/PixelOps.cpp
         src/PngWrite.cpp
         src/TextureColor.cpp

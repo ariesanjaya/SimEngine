@@ -100,7 +100,15 @@ sim_add_test(SimAssetTests
     SOURCES
         AssetTests.cpp
     DEPS
-        Sim::Assets)
+        Sim::Assets
+        # **Uji-nya yang butuh keduanya, bukan Sim::Assets.** Baker menulis
+        # `.ktx2` lewat libktx; yang membacanya di runtime adalah pembaca yang
+        # ditulis tangan di `Sim::RHI`. Round-trip di sini karena itu
+        # membandingkan dua implementasi yang berbeda — dan itulah satu-satunya
+        # bentuk round-trip yang membuktikan sesuatu. Menautkannya dari
+        # `Sim::Assets` sendiri akan menyeret Vulkan ke dalam baker, yang harus
+        # tetap bisa jalan di mesin build tanpa GPU.
+        Sim::RHI)
 
 # Folder mesh sumber, bukan salinannya di build — alasan yang sama dengan
 # SIM_SHADER_DIR di bawah: uji yang membaca aset harus membaca berkas yang

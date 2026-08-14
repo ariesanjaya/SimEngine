@@ -114,12 +114,13 @@ Pemetaan `usage` ke format adalah tabel, bukan tebakan:
 
 | Paket | Untuk apa | Catatan |
 | --- | --- | --- |
-| **KTX-Software (`libktx`)** | Menulis dan membaca kontainer KTX2 | Apache 2.0. KTX2 bisa membawa **blok BCn apa adanya**, bukan hanya Basis; supercompression Zstd tersedia untuk format non-ETC1S |
-| **Encoder BCn** | Menghasilkan bloknya | `bc7enc`/`rgbcx` permisif dan punya RDO. ISPC Texture Compressor lebih cepat tapi menuntut compiler ISPC — keberatan yang sama yang menolak OSPRay |
+| **KTX-Software (`libktx`)** | **Menulis** kontainer KTX2 (T2) | `v4.4.2`, Apache 2.0. Membacanya tidak lewat sini — `Sim::RHI` punya pembaca tulisan tangan sejak T0. Dua jebakan build-nya dicatat di docs/DEPENDENCIES.md |
+| **Encoder BCn** | Menghasilkan bloknya | **`bc7enc_rdo` dipakai** (MIT): `rgbcx` untuk BC1/BC3/BC4/BC5, `bc7enc` untuk BC7, `bc7decomp` untuk sisi urainya. **Tidak ada BC6H di dalamnya** — itu yang menahan T4. ISPC Texture Compressor lebih cepat tapi menuntut compiler ISPC — keberatan yang sama yang menolak OSPRay |
 
 Berbeda dengan backend gambar di [PLAN-IMAGEIO.md](PLAN-IMAGEIO.md) yang semuanya
-opsional, **libktx wajib**: tanpa pembaca KTX2, renderer tidak bisa memuat
-tekstur sama sekali begitu T3 mendarat.
+opsional, **keduanya wajib** — tetapi hanya di sisi editor. Runtime yang dikirim
+bersama game tidak menautkan satu pun: yang dibutuhkannya cuma pembaca KTX2
+tulisan tangan di `Sim::RHI`, dan berkas yang dibacanya sudah selesai di-bake.
 
 ---
 
@@ -223,28 +224,128 @@ tekstur tidak punya masalah itu karena perintahnya memegang jalur berkasnya, jad
 ia berlaku pada aset yang sama betapapun jauh pengguna sudah berpindah pilihan.
 Perubahan berturut-turut pada tekstur yang sama menyatu; tekstur berbeda tidak.
 
-### T2 — Baker: mip, kompresi, cache · ⬜ (butuh I0)
+### T2 — Baker: mip, kompresi, cache · ✅
 
-Membaca sumber lewat `Sim::ImageIO`, membangkitkan mip **di ruang linear**,
-mengompresi sesuai tabel usage, menulis `.ktx2` ke cache.
-
-Cache dikunci hash isi berkas ditambah hash pengaturan, mengikuti pola
-`~/.simengine/ThumbnailCache/` yang sudah memakai FNV-1a 64-bit di
-`Thumbnail.cpp:19`. Bake berjalan di `TaskPool`, hasilnya kembali lewat
-`MainThreadQueue`.
+`Sim::ImageIO/MipChain` membangun rantainya, `Sim::Assets/BlockCompress`
+mengompresinya, `Sim::Assets/Ktx2Write` menulis kontainernya, dan
+`Sim::Assets/TextureBake` merangkai ketiganya di belakang cache.
 
 **Kriteria terima**
 - Bake ulang tidak terjadi kalau berkas dan pengaturannya tidak berubah —
-  dibuktikan dengan menghitung panggilan encoder, bukan dengan mengamati waktu.
-- Mip level 1 dari gradien sRGB **cocok dengan rata-rata yang dihitung di ruang
-  linear**, bukan rata-rata nilai ter-encode. Ini uji yang menangkap kesalahan
-  paling mahal di seluruh plan.
-- Normal map dinormalkan ulang setelah tiap level; uji memeriksa panjang vektor
-  di level terdalam.
-- Tekstur dengan dimensi bukan kelipatan 4 tetap benar; kalau dipadatkan,
-  padatannya tidak bocor ke tepi saat disampel.
-- Waktu bake tekstur 4K tercatat; kalau melebihi beberapa detik pada kualitas
-  `seimbang`, setelan bawaannya diturunkan.
+  dibuktikan dengan **menghitung**, lewat `TextureBakeCount()`. ✅ Isi berkas
+  yang berubah tanpa berganti nama juga terhitung sebagai sumber yang lain.
+- Mip level 1 dari gradien sRGB cocok dengan rata-rata yang dihitung **di ruang
+  linear**. ✅ Hitam dan putih bersebelahan menghasilkan 182, bukan 128; jarak
+  keduanya lima puluh empat tingkat, dan uji-nya menolak 128 secara terpisah
+  supaya tidak bisa lulus karena toleransi.
+- Normal map dinormalkan ulang setelah tiap level. ✅ Diperiksa di level
+  terdalam: panjangnya 1,0 dan bukan 0,71.
+- Dimensi bukan kelipatan 4 tetap benar. ✅ Dan dibuktikan **byte per byte**,
+  bukan dengan toleransi: hasil kompresi gambar 5×3 harus identik dengan hasil
+  kompresi versi 8×4-nya yang tepinya sudah dijepit tangan di sisi uji.
+- Waktu bake tekstur 4K tercatat, dan **setelan bawaannya memang diturunkan**.
+  ✅ Angkanya di bawah.
+
+#### Yang diukur, dan apa yang diubah karenanya
+
+Tekstur 4096×4096, satu berkas, Release, 4096² piksel penuh sampai 1×1.
+
+| Kualitas `seimbang` | Waktu 4K | PSNR (512², BC7) |
+| --- | --- | --- |
+| uber 1, partisi 16 *(bawaan pertama)* | 8,7 s | 46,5 dB |
+| **uber 0, partisi 8** *(bawaan sekarang)* | **5,3 s** | **46,2 dB** |
+| uber 0, partisi 8, **satu thread** | 74 s | 46,2 dB |
+| uber 0, partisi 0 | 3,4 s | 41,4 dB |
+| `terbaik` (uber 4, partisi 64) | 24,4 s | 46,9 dB |
+
+Dua keputusan keluar dari tabel itu.
+
+**Pertama, kompresinya dijadikan paralel** — dan itu memberi 8,5×, jauh melebihi
+apa pun yang bisa didapat dengan menurunkan kualitas. Tiap blok 4×4 berdiri
+sendiri sepenuhnya; tidak ada satu pun keputusan encoder yang menyeberang
+antar-blok. Barisnya dibagi berselang-seling, bukan menjadi potongan berurutan:
+thread yang kebagian daerah rata selesai jauh lebih awal daripada yang kebagian
+daerah berdetail, dan yang menentukan lamanya adalah yang terakhir selesai.
+
+**Kedua, `seimbang` diturunkan ke uber 0 / partisi 8.** Harganya 0,3 dB dan
+imbalannya 3,4 detik. Yang **tidak** dilakukan adalah menolkan partisinya
+sekalian, meski itu tiga detik lebih cepat lagi: harganya lima desibel, dan lima
+desibel terlihat sebagai blok pada setiap tepi tajam. Batas itu sekarang dijaga
+uji PSNR, bukan diingat.
+
+Sisa 2,2 detik dari 5,3 detik itu bukan kompresi melainkan dekode PNG 38 MB dan
+pembangkitan mip, yang keduanya masih satu thread. Itu batas berikutnya kalau
+suatu saat perlu diturunkan lagi.
+
+**Waktunya tidak diuji, PSNR-nya diuji.** Assertion atas jam dinding gagal ketika
+mesinnya sedang sibuk dan lulus ketika sedang senggang — `SimParticleTests` sudah
+memperlihatkan bentuknya. PSNR tidak bergantung pada beban, jadi ia bisa menjaga
+keputusan di atas tanpa pernah gagal palsu.
+
+#### Kontainernya ditulis libktx, pembacanya tetap tulisan tangan
+
+Yang dibayar dari libktx adalah **Data Format Descriptor** — blok wajib di setiap
+KTX2 yang menerangkan tata letak kanal dan fungsi transfernya, dan yang **tidak
+dibaca pembaca kita sendiri**. Menyusunnya salah karena itu menghasilkan berkas
+yang dibuka sempurna oleh mesin ini dan ditolak setiap alat lain, tanpa satu pun
+tanda. Itu bentuk kesalahan yang tidak boleh dipilih sendiri.
+
+Efek sampingnya yang paling berharga: karena penulisnya libktx sementara
+pembacanya bukan, uji round-trip membandingkan **dua implementasi yang berbeda**
+— bukan membuktikan satu implementasi konsisten dengan dirinya sendiri, keberatan
+yang sudah tertulis di `Sim/RHI/Ktx2.h` sejak T0. Jalur mentah dan jalur blok
+diuji terpisah, karena keduanya menempuh cabang yang berbeda di dalam libktx.
+
+Supercompression Zstd sengaja tidak dipakai: pembaca di `Sim::RHI` menolaknya,
+dan baker yang menghasilkan berkas yang tidak bisa dibaca runtime-nya sendiri
+bukan penghematan.
+
+#### Tabel format, dan tiga barisnya yang menyimpang dari rencana awal
+
+| Usage | Format | Catatan |
+| --- | --- | --- |
+| `Color` | `BC7_SRGB` / `BC7_UNORM` | |
+| `Color` tanpa alfa **dan** kualitas `cepat` | `BC1_RGB_SRGB` / `_UNORM` | inilah "mode hemat" yang disebut rencananya — setengah ukuran, gradiennya berpita |
+| `NormalMap` | `BC5_UNORM` | |
+| `Mask` 1 kanal | `BC4_UNORM` | |
+| `Height` | `R16_UNORM` / `R8_UNORM`, **tanpa kompresi** | |
+| `Hdr` | `R32G32B32A32_SFLOAT`, **tanpa kompresi** | |
+
+- **BC1 menuntut dua hal sekaligus**, bukan hanya `alpha = tidak ada`. Tabel
+  rencana menyebut BC7 untuk warna tanpa alfa dan BC1 sebagai "mode hemat", dan
+  satu-satunya cara pengguna meminta mode itu adalah lewat kualitas `cepat`.
+  Yang tidak memintanya mendapat BC7.
+- **`Height` sengaja tidak dikompresi.** Rencananya menawarkan "BC4 atau tanpa
+  kompresi"; BC4 menyimpan endpoint delapan bit, dan terasering yang
+  dihasilkannya pada terrain terbaca sebagai kesalahan terrain — dicari
+  berhari-hari di tempat yang salah.
+- **`Hdr` menunggu T4**, dan itu bukan pilihan: `bc7enc_rdo` tidak memuat encoder
+  BC6H sama sekali.
+
+Yang tidak ada di tabel jatuh ke format tanpa kompresi, bukan ke format blok yang
+kira-kira cocok: tekstur yang lebih besar dari seharusnya adalah masalah
+anggaran, sedangkan tekstur yang bloknya salah adalah gambar yang salah.
+
+**Perlindungan normal map ternyata struktural, bukan berupa bendera.** Jebakan
+nomor tiga menuntut normal map dikompresi tanpa metrik warna; karena ia memakai
+BC5, dan BC5 tidak punya metrik warna sama sekali, bendera `perceptual` tidak
+pernah dibaca di jalur itu. Bendera itu tetap ada — dan diuji sampai ke encoder —
+untuk siapa pun yang memampatkan data ke BC7, tetapi yang menjaga normal map
+adalah pilihan formatnya.
+
+#### Yang belum dikerjakan di sini, dan alasannya
+
+- **Bake belum berjalan di `TaskPool`.** Belum ada yang memanggilnya: jalur
+  tekstur renderer masih mendekode PNG, dan itu justru pekerjaan T3. Menyambung
+  baker ke `TaskPool` dan `MainThreadQueue` sekarang berarti menulis pemanggil
+  buatan hanya supaya ada yang memanggil.
+- Ketika sambungan itu dibuat, `CompressOptions::threads` harus disetel 1:
+  N tekstur yang masing-masing membuka N thread menghasilkan N² thread yang
+  berebut inti yang sama.
+- **Cache belum punya batas ukuran.** Ia tumbuh tanpa dibuang, sama seperti
+  `ThumbnailCache` sebelum batasnya ada. Yang menyelamatkan untuk sekarang:
+  kuncinya berisi versi baker, jadi berkas dari baker lama tidak pernah terpakai
+  — tetapi juga tidak pernah terhapus.
 
 ### T3 — Renderer memakai KTX2 · ⬜ (mendarat bersama jalur tekstur material)
 

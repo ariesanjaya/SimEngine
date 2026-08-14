@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 
 #include "Sim/ImageIO/ImageIO.h"
+#include "Sim/ImageIO/MipChain.h"
 #include "Sim/ImageIO/TextureColor.h"
 
 #include <doctest/doctest.h>
@@ -711,4 +712,159 @@ TEST_CASE("alfa premultiplied dikenali dan dinormalkan ke straight") {
     // Alfanya sendiri tidak pernah ikut dibagi maupun didekode.
     CHECK(pixels[0 * 4 + 3] == doctest::Approx(1.0f).epsilon(0.0001));
     CHECK(pixels[1 * 4 + 3] == doctest::Approx(0.5f).epsilon(0.0001));
+}
+
+// ---------------------------------------------------------------------------
+// T2 — rantai mip
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// Sandi sRGB menurut rumusnya, ditulis di sini alih-alih dipanggil dari mesin.
+///
+/// Uji yang memakai fungsi yang sama dengan kode yang diujinya akan tetap lulus
+/// ketika keduanya salah bersama-sama. Yang dibandingkan di bawah adalah hasil
+/// mesin terhadap angka yang dihitung dari rumus di spesifikasi sRGB, bukan
+/// terhadap dirinya sendiri.
+float SrgbToLinear(float encoded) {
+    return encoded <= 0.04045f ? encoded / 12.92f
+                               : std::pow((encoded + 0.055f) / 1.055f, 2.4f);
+}
+
+float LinearToSrgb(float linear) {
+    return linear <= 0.0031308f ? linear * 12.92f
+                                : 1.055f * std::pow(linear, 1.0f / 2.4f) - 0.055f;
+}
+
+/// Gambar RGB 8-bit dari daftar nilai abu-abu, satu baris.
+Image GreyRow(const std::vector<uint8_t>& values, ColorSpace space) {
+    ImageDesc desc;
+    desc.width = static_cast<uint32_t>(values.size());
+    desc.height = 1;
+    desc.channels = 3;
+    desc.type = PixelType::UInt8;
+    desc.colorSpace = space;
+    Image image;
+    image.Allocate(desc);
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        image.bytes[i * 3 + 0] = values[i];
+        image.bytes[i * 3 + 1] = values[i];
+        image.bytes[i * 3 + 2] = values[i];
+    }
+    return image;
+}
+
+}  // namespace
+
+TEST_CASE("T2: mip tekstur warna dirata-ratakan di ruang linear, bukan di ruang sandi") {
+    // Hitam dan putih bersebelahan adalah kasus yang paling memisahkan kedua
+    // jawaban: yang benar dan yang salah berjarak lima puluh empat tingkat.
+    const Image source = GreyRow({0, 255}, ColorSpace::Srgb);
+
+    MipOptions options;
+    options.usage = TextureUsage::Color;
+    const std::vector<Image> chain = BuildMipChain(source, options);
+
+    REQUIRE(chain.size() == 2);
+    REQUIRE(chain[1].desc.width == 1);
+    REQUIRE(chain[1].desc.height == 1);
+
+    // Setengah cahaya antara hitam dan putih, disandikan kembali.
+    const float halfLight = (SrgbToLinear(0.0f) + SrgbToLinear(1.0f)) * 0.5f;
+    const float expected = LinearToSrgb(halfLight) * 255.0f;
+    INFO("harapan " << expected << ", dapat " << int(chain[1].bytes[0]));
+    CHECK(std::abs(static_cast<float>(chain[1].bytes[0]) - expected) <= 2.0f);
+
+    // Dan bukan jawaban yang salah. Merata-ratakan nilai tersandi apa adanya
+    // menghasilkan 128 — jauh lebih gelap, dan tidak pernah muncul sebagai
+    // galat. Batas ini yang membuat uji di atas tidak bisa lulus karena
+    // toleransi yang kelewat longgar.
+    CHECK(chain[1].bytes[0] > 170);
+}
+
+TEST_CASE("T2: mip peta data dirata-ratakan apa adanya") {
+    // Pasangan yang sama, tetapi angkanya bukan warna: roughness 0 dan
+    // roughness 1 berata-rata menjadi roughness 0,5. Mendekodenya sebagai sRGB
+    // di sini akan mencerahkannya menjadi 188 — kesalahan yang berlawanan arah
+    // dengan yang di atas, dan yang sama tak terlihatnya.
+    const Image source = GreyRow({0, 255}, ColorSpace::Linear);
+
+    MipOptions options;
+    options.usage = TextureUsage::Data;
+    const std::vector<Image> chain = BuildMipChain(source, options);
+
+    REQUIRE(chain.size() == 2);
+    INFO("dapat " << int(chain[1].bytes[0]));
+    CHECK(std::abs(static_cast<int>(chain[1].bytes[0]) - 128) <= 1);
+}
+
+TEST_CASE("T2: normal map dinormalkan ulang di tiap level") {
+    // Papan catur dua normal yang menyimpang ±45° pada sumbu x. Rata-ratanya
+    // menunjuk lurus ke atas tetapi panjangnya hanya cos 45° — dan tanpa
+    // penormalan ulang, kependekan itu terbawa sampai level terdalam.
+    constexpr float kRoot2 = 0.70710678f;
+    ImageDesc desc;
+    desc.width = 8;
+    desc.height = 8;
+    desc.channels = 3;
+    desc.type = PixelType::UInt8;
+    desc.colorSpace = ColorSpace::Linear;
+    Image source;
+    source.Allocate(desc);
+    for (uint32_t y = 0; y < desc.height; ++y) {
+        for (uint32_t x = 0; x < desc.width; ++x) {
+            const float nx = ((x + y) % 2 == 0) ? kRoot2 : -kRoot2;
+            uint8_t* pixel = source.bytes.data() + (static_cast<std::size_t>(y) * desc.width + x) * 3;
+            pixel[0] = static_cast<uint8_t>(std::lround((nx * 0.5f + 0.5f) * 255.0f));
+            pixel[1] = 128;
+            pixel[2] = static_cast<uint8_t>(std::lround((kRoot2 * 0.5f + 0.5f) * 255.0f));
+        }
+    }
+
+    MipOptions options;
+    options.usage = TextureUsage::Data;
+    options.renormalize = true;
+    const std::vector<Image> chain = BuildMipChain(source, options);
+
+    REQUIRE(chain.size() == 4);
+    const Image& deepest = chain.back();
+    REQUIRE(deepest.desc.width == 1);
+    REQUIRE(deepest.desc.height == 1);
+
+    const float x = deepest.bytes[0] / 255.0f * 2.0f - 1.0f;
+    const float y = deepest.bytes[1] / 255.0f * 2.0f - 1.0f;
+    const float z = deepest.bytes[2] / 255.0f * 2.0f - 1.0f;
+    const float length = std::sqrt(x * x + y * y + z * z);
+    INFO("panjang di level terdalam " << length);
+    CHECK(length == doctest::Approx(1.0f).epsilon(0.02));
+
+    // Tanpa penormalan ulang panjangnya turun ke sekitar 0,71 — batas ini yang
+    // membuat pemeriksaan di atas gagal kalau langkahnya dilewati, alih-alih
+    // lulus karena toleransi.
+    CHECK(length > 0.95f);
+}
+
+TEST_CASE("T2: rantai turun sampai 1x1, dan sisi ganjil tidak pernah menjadi nol") {
+    CHECK(MipLevelCount(1, 1) == 1);
+    CHECK(MipLevelCount(8, 8) == 4);
+    CHECK(MipLevelCount(5, 3) == 3);
+    CHECK(MipLevelCount(0, 8) == 0);
+
+    const Image source = GreyRow({10, 20, 30, 40, 50}, ColorSpace::Linear);
+    MipOptions options;
+    options.usage = TextureUsage::Data;
+    const std::vector<Image> chain = BuildMipChain(source, options);
+
+    REQUIRE(chain.size() == 3);
+    CHECK(chain[0].desc.width == 5);
+    CHECK(chain[1].desc.width == 2);
+    CHECK(chain[2].desc.width == 1);
+    for (const Image& level : chain) {
+        // Sisi yang menjadi nol menghasilkan level tanpa piksel, dan unggahan
+        // yang menyusulnya menjadi galat validation layer yang jauh dari
+        // sebabnya.
+        CHECK(level.desc.height == 1);
+        CHECK(level.bytes.size() == level.desc.ByteCount());
+        CHECK(level.desc.ByteCount() > 0);
+    }
 }

@@ -381,6 +381,139 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# KTX-Software (libktx) — penulis kontainer KTX2 untuk baker tekstur (T2)
+#
+# **Menulis saja, dan hanya di sisi editor.** Pembacanya ditulis tangan di
+# `Sim::RHI` pada T0 dan tetap di sana: runtime yang dikirim bersama game hanya
+# perlu membaca dua ratus baris tata letak berkas, dan menyeret libktx ke dalam
+# binary itu untuk pekerjaan sebesar itu adalah harga tanpa imbalan.
+#
+# Yang dibayar di sini adalah **Data Format Descriptor**. Blok itu wajib ada di
+# setiap KTX2 dan tidak dibaca pembaca kita sendiri — jadi menyusunnya salah
+# menghasilkan berkas yang dibuka sempurna oleh mesin ini dan ditolak setiap alat
+# lain, tanpa satu pun tanda sampai seseorang mencoba membukanya di tempat lain.
+# Itu persis bentuk kesalahan yang tidak boleh dipilih sendiri.
+#
+# Dan karena penulisnya libktx sementara pembacanya bukan, uji round-trip di
+# `SimAssetTests` menjadi perbandingan dua implementasi yang berbeda — bukan
+# pembuktian bahwa satu implementasi konsisten dengan dirinya sendiri, yang persis
+# keberatan yang ditulis di `Sim/RHI/Ktx2.h`.
+#
+# Supercompression Zstd sengaja tidak dipakai: pembaca di `Sim::RHI` menolaknya,
+# dan baker yang menghasilkan berkas yang tidak bisa dibaca runtime-nya sendiri
+# bukan penghematan.
+# ---------------------------------------------------------------------------
+set(KTX_FEATURE_TESTS         OFF CACHE BOOL "" FORCE)
+set(KTX_FEATURE_TOOLS         OFF CACHE BOOL "" FORCE)
+set(KTX_FEATURE_LOADTEST_APPS OFF CACHE BOOL "" FORCE)
+set(KTX_FEATURE_DOC           OFF CACHE BOOL "" FORCE)
+set(KTX_FEATURE_JNI           OFF CACHE BOOL "" FORCE)
+set(KTX_FEATURE_PY            OFF CACHE BOOL "" FORCE)
+# Unggahan GL dan Vulkan bawaan libktx dimatikan: yang mengunggah adalah
+# `Sim::RHI`, dan menyalakannya berarti libktx ikut menautkan loader Vulkan ke
+# dalam target yang tidak menyentuh GPU sama sekali.
+#
+# `KTX_FEATURE_KTX1` sengaja **dibiarkan menyala** meski tidak ada satu pun
+# berkas KTX1 di jalur kerja ini: mematikannya pada v4.4.2 meninggalkan
+# `ktxTexture1_constructFromStreamAndHeader` yang masih dipanggil `texture.c`,
+# dan build-nya gagal saat menaut. Kegagalannya di pustaka orang lain, jadi yang
+# bisa dilakukan hanyalah tidak memakainya. Disetel eksplisit, bukan dibiarkan
+# memakai bawaannya, supaya cache lama yang sudah terlanjur berisi OFF ikut
+# diperbaiki alih-alih gagal menaut dengan pesan yang tidak menyebut sebabnya.
+set(KTX_FEATURE_KTX1          ON  CACHE BOOL "" FORCE)
+set(KTX_FEATURE_GL_UPLOAD     OFF CACHE BOOL "" FORCE)
+set(KTX_FEATURE_VK_UPLOAD     OFF CACHE BOOL "" FORCE)
+set(KTX_FEATURE_ETC_UNPACK    OFF CACHE BOOL "" FORCE)
+
+FetchContent_Declare(ktx
+    GIT_REPOSITORY https://github.com/KhronosGroup/KTX-Software.git
+    GIT_TAG        v4.4.2
+    GIT_SHALLOW    TRUE
+    # basisu, astc-encoder, dan dfdutils ikut sebagai submodule; yang terakhir
+    # itulah yang menyusun DFD.
+    GIT_SUBMODULES_RECURSE TRUE)
+
+# Statis, dan hanya untuk blok ini. `BUILD_SHARED_LIBS` adalah variabel global:
+# memaksanya lewat cache akan ikut mengubah setiap dependensi yang dideklarasikan
+# sesudah baris ini. Variabel biasa cukup karena CMP0077 membuat `option()` di
+# dalam libktx menghormatinya, dan nilainya dikembalikan begitu selesai.
+set(_sim_saved_shared_libs ${BUILD_SHARED_LIBS})
+set(BUILD_SHARED_LIBS OFF)
+FetchContent_MakeAvailable(ktx)
+set(BUILD_SHARED_LIBS ${_sim_saved_shared_libs})
+
+# Peringatan pustaka pihak ketiga bukan urusan kita, dan -Werror proyek ini akan
+# menggagalkan build karenanya.
+foreach(_ktx_target ktx ktx_read obj_basisu_cbind objUtil)
+    if(TARGET ${_ktx_target})
+        target_compile_options(${_ktx_target} PRIVATE -w)
+        set_target_properties(${_ktx_target} PROPERTIES FOLDER "ThirdParty")
+
+        # libktx menaruh `_DEBUG` dan `DEBUG` sebagai definisi **PUBLIC** pada
+        # build Debug, jadi keduanya menular ke setiap target yang menautkannya.
+        # `_DEBUG` adalah ejaan CRT-nya MSVC, dan oneTBB — yang ikut lewat
+        # OpenUSD — menulis `#define TBB_USE_DEBUG _DEBUG` lalu `#if
+        # TBB_USE_ASSERT`. Definisi tanpa nilai membuat baris itu menjadi
+        # "expected value in expression" di setiap berkas yang menyentuh USD,
+        # jauh dari sebabnya. Yang dibutuhkan libktx untuk dirinya sendiri tetap
+        # ada; yang dicabut hanya yang menular.
+        # Yang dicabut hanya properti INTERFACE-nya; `COMPILE_DEFINITIONS`
+        # target itu sendiri tidak disentuh, jadi libktx tetap dibangun dengan
+        # keduanya seperti yang dimaksudkan penulisnya.
+        #
+        # Disaring dengan regex, bukan REMOVE_ITEM: nilainya sebuah generator
+        # expression yang mengandung titik koma, jadi CMake sudah memecahnya
+        # menjadi dua item — `$<$<CONFIG:Debug>:_DEBUG` dan `DEBUG>` — dan
+        # mencocokkan teks utuhnya tidak akan pernah kena.
+        get_target_property(_ktx_defs ${_ktx_target} INTERFACE_COMPILE_DEFINITIONS)
+        if(_ktx_defs)
+            list(FILTER _ktx_defs EXCLUDE REGEX "DEBUG")
+            set_property(TARGET ${_ktx_target} PROPERTY INTERFACE_COMPILE_DEFINITIONS
+                         "${_ktx_defs}")
+        endif()
+    endif()
+endforeach()
+add_library(Ktx::Ktx ALIAS ktx)
+message(STATUS "libktx v4.4.2 dipakai — baker tekstur menulis .ktx2")
+
+# ---------------------------------------------------------------------------
+# bc7enc_rdo — encoder BC1/BC3/BC4/BC5/BC7 untuk baker tekstur (T2)
+#
+# **Dipilih karena tidak menuntut apa pun.** ISPC Texture Compressor lebih cepat
+# beberapa kali lipat, dan harganya sebuah compiler baru di setiap mesin build —
+# keberatan yang sama persis yang menolak OSPRay di PLAN-RENDER. Yang ini C++
+# biasa, MIT, dan dua berkas.
+#
+# `bc7decomp.cpp` ikut karena sisi urainya dibutuhkan dua hal yang sama-sama
+# nyata: uji yang memeriksa apa yang sungguh keluar dari encoder, dan
+# perhitungan PSNR di T5. Tanpa sisi urai, satu-satunya cara memeriksa hasil
+# kompresi adalah melihatnya.
+#
+# BC6H tidak ada di sini, dan itu bukan pilihan — repo ini memang tidak
+# memuatnya. HDR karena itu tetap tanpa kompresi sampai T4 membawa encoder yang
+# punya.
+#
+# SOURCE_SUBDIR diarahkan ke folder yang tidak ada, trik yang sama seperti stb
+# dan tinyexr: CMakeLists bawaannya membangun sebuah alat baris perintah beserta
+# lodepng dan miniz-nya.
+# ---------------------------------------------------------------------------
+FetchContent_Declare(bc7enc
+    GIT_REPOSITORY https://github.com/richgel999/bc7enc_rdo.git
+    GIT_TAG        b9438627eef73a1157e84201b6fa6eb2ffd6d9f0
+    GIT_SHALLOW    FALSE
+    SOURCE_SUBDIR  cmake-sengaja-tidak-ada)
+FetchContent_MakeAvailable(bc7enc)
+
+add_library(bc7enc STATIC
+    "${bc7enc_SOURCE_DIR}/rgbcx.cpp"
+    "${bc7enc_SOURCE_DIR}/bc7enc.cpp"
+    "${bc7enc_SOURCE_DIR}/bc7decomp.cpp")
+target_include_directories(bc7enc SYSTEM PUBLIC "${bc7enc_SOURCE_DIR}")
+target_compile_options(bc7enc PRIVATE -w)
+set_target_properties(bc7enc PROPERTIES FOLDER "ThirdParty" POSITION_INDEPENDENT_CODE ON)
+add_library(Bc7Enc::Bc7Enc ALIAS bc7enc)
+
+# ---------------------------------------------------------------------------
 # OpenImageIO — backend gambar opsional yang **didahulukan** (I1)
 #
 # **Opsional dan didahulukan, bukan wajib.** stb, tinyexr, dan libtiff menangani

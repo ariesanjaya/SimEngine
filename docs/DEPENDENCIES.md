@@ -108,10 +108,50 @@ Ditambahkan saat dibutuhkan, dicatat di sini supaya keputusannya tidak diulang:
 | **libtiff** | impor/ekspor heightmap TIFF 16/32-bit (I3). **Opsional** (`SIM_WITH_TIFF`), dicari di sistem |
 | **OpenVDB** | bake mesh → SDF untuk clipmap GI (V1), dan nanti impor `.vdb`. **Opsional** (`SIM_WITH_OPENVDB`), dicari, tidak dibangun — lihat di bawah |
 | **OpenImageIO** | backend gambar yang **didahulukan bila ada** — DDS, PSD utuh, metadata colorspace. **Opsional** (`SIM_WITH_OIIO`), dicari, tidak diunduh — lihat di bawah |
+| **KTX-Software (libktx)** | menulis `.ktx2` di baker tekstur (T2). **Wajib dan diunduh** lewat FetchContent — lihat di bawah |
 | **PhysX 5** | fisika — sumber lokal di `/home/arie/SDK/PhysX-main` |
 | **OpenAL Soft** | audio — sumber lokal di `/home/arie/SDK/openal-soft-1.25.2` |
 | **Tracy** | profiler (opsional, `SIM_WITH_TRACY`) |
 | **slang** | bahasa shader (sudah tersedia sebagai `slangc` di Vulkan SDK) |
+
+### KTX-Software (libktx) — menulis saja, dan hanya di sisi editor
+
+`v4.4.2`, Apache 2.0, lewat FetchContent beserta submodule-nya (basisu,
+astc-encoder, dfdutils).
+
+**Pembacanya tidak lewat sini.** `Sim::RHI/Ktx2.cpp` membaca `.ktx2` dengan dua
+ratus baris yang ditulis tangan di T0, dan itu tetap begitu: runtime yang dikirim
+bersama game hanya perlu header, indeks level, dan `memcpy`. Menyeret libktx ke
+dalam binary itu untuk pekerjaan sebesar itu adalah harga tanpa imbalan — alasan
+yang sama yang membuat enkoder PNG 16-bit ditulis sendiri di E7.3.
+
+**Yang dibayar adalah Data Format Descriptor.** Blok itu wajib ada di setiap
+KTX2, menerangkan tata letak kanal dan fungsi transfernya, dan **tidak dibaca
+pembaca kita sendiri**. Menyusunnya salah karena itu menghasilkan berkas yang
+dibuka sempurna oleh mesin ini dan ditolak setiap alat lain — tanpa satu pun
+tanda sampai seseorang mencoba membukanya di tempat lain. Itu bentuk kesalahan
+yang tidak boleh dipilih sendiri.
+
+Efek sampingnya yang paling berharga: karena penulisnya libktx sementara
+pembacanya bukan, uji round-trip di `SimAssetTests` membandingkan **dua
+implementasi yang berbeda**. Round-trip terhadap penulis sendiri hanya
+membuktikan konsistensi dengan diri sendiri — keberatan yang sudah tertulis di
+`Sim/RHI/Ktx2.h` sejak T0.
+
+Tiga hal yang harus diingat saat memutakhirkannya:
+
+- **`_DEBUG` dan `DEBUG` disebarkannya sebagai definisi PUBLIC** pada build
+  Debug. `_DEBUG` adalah ejaan CRT-nya MSVC, dan oneTBB — yang ikut lewat
+  OpenUSD — menulis `#define TBB_USE_DEBUG _DEBUG` lalu `#if TBB_USE_ASSERT`.
+  Definisi tanpa nilai membuat baris itu menjadi *expected value in expression*
+  di setiap berkas yang menyentuh USD, jauh dari sebabnya. `SimDeps.cmake`
+  mencabutnya dari properti INTERFACE-nya saja.
+- **`KTX_FEATURE_KTX1=OFF` tidak bisa dipakai** di v4.4.2: `texture.c` masih
+  memanggil `ktxTexture1_constructFromStreamAndHeader` yang tidak ikut
+  dikompilasi, dan build-nya gagal saat menaut.
+- **Supercompression Zstd sengaja tidak dipakai.** Pembaca di `Sim::RHI`
+  menolaknya, dan baker yang menghasilkan berkas yang tidak bisa dibaca
+  runtime-nya sendiri bukan penghematan.
 
 ### Autodesk FBX SDK — wajib, dan tidak bisa diambil sendiri
 

@@ -3,12 +3,16 @@
 #include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Assets/Importer.h"
 #include "Sim/Assets/MaterialImport.h"
+#include "Sim/Assets/BlockCompress.h"
+#include "Sim/Assets/TextureBake.h"
 #include "Sim/Assets/TextureSettings.h"
 #include "Sim/Assets/MeshData.h"
 #include "Sim/Assets/MeshSettings.h"
 #include "Sim/Assets/Thumbnail.h"
 #include "Sim/Material/MaterialGraph.h"
 #include "Sim/Material/MaterialValidation.h"
+
+#include "Sim/RHI/Ktx2.h"
 
 #include "Sim/Core/FileWatcher.h"
 #include "Sim/Core/TaskPool.h"
@@ -18,6 +22,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -1663,4 +1668,413 @@ TEST_CASE("T1: tebakan nama bisa ditolak, dan penolakannya bertahan") {
     CHECK_FALSE(std::filesystem::exists(TextureSettingsPath(texture)));
     REQUIRE(LoadTextureSettings(back, texture));
     CHECK(back.usage == TextureUsage::NormalMap);
+}
+
+// ---------------------------------------------------------------------------
+// T2 — baker tekstur
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::filesystem::path TextureFixture(const char* name) {
+    return std::filesystem::path(SIM_IMAGE_DIR) / name;
+}
+
+/// Menyalin sebuah berkas, dipakai uji yang perlu mengubah isinya.
+void CopyFile(const std::filesystem::path& from, const std::filesystem::path& to) {
+    std::error_code error;
+    std::filesystem::copy_file(from, to, std::filesystem::copy_options::overwrite_existing, error);
+    REQUIRE_MESSAGE(!error, error.message());
+}
+
+}  // namespace
+
+TEST_CASE("T2: hasil bake dibaca utuh oleh pembaca KTX2 yang lain") {
+    // **Yang menulis libktx, yang membaca implementasi tangan di Sim::RHI.**
+    // Round-trip terhadap penulis sendiri hanya membuktikan konsistensi dengan
+    // diri sendiri — berkas yang bukan KTX2 sah pun akan lulus. Yang dibuktikan
+    // di sini adalah bahwa kedua sisi sepakat tentang tata letak berkasnya.
+    TempDir temp;
+    TextureSettings settings;
+    settings.usage = TextureUsage::Color;
+    // Tanpa kompresi di sini, supaya yang diperiksa adalah tata letak RGBA8 yang
+    // ukurannya bisa dihitung tangan. Varian ber-BC7-nya diuji terpisah di
+    // bawah, dan keduanya perlu: jalur blok dan jalur mentah menempuh cabang
+    // yang berbeda di dalam libktx.
+    settings.compress = false;
+
+    const BakeResult result = BakeTexture(TextureFixture("checker.png"), settings, temp.Path());
+    REQUIRE_MESSAGE(result.ok, result.error);
+    CHECK_FALSE(result.fromCache);
+    CHECK(result.width == 8);
+    CHECK(result.height == 8);
+    // 8x8 turun sampai 1x1: 8, 4, 2, 1.
+    CHECK(result.levelCount == 4);
+
+    rhi::Ktx2Texture texture;
+    const rhi::Ktx2Result read = rhi::ReadKtx2(result.path, texture);
+    REQUIRE_MESSAGE(read.ok, read.error);
+    CHECK(texture.width == 8);
+    CHECK(texture.height == 8);
+    CHECK(texture.levels.size() == 4);
+    CHECK(texture.format == result.vkFormat);
+
+    // Tiap level punya byte sebanyak yang dituntut dimensinya, dan rentangnya
+    // benar-benar di dalam berkas. Level yang menunjuk ke luar dikembalikan
+    // sebagai span kosong oleh pembacanya, jadi ukuran nol di sini berarti
+    // penulisnya menaruh offset yang salah.
+    for (std::size_t level = 0; level < texture.levels.size(); ++level) {
+        const uint32_t side = 8u >> level;
+        INFO("level " << level);
+        CHECK(texture.levels[level].width == side);
+        CHECK(texture.levels[level].height == side);
+        CHECK(texture.LevelBytes(level).size() == static_cast<std::size_t>(side) * side * 4);
+    }
+}
+
+TEST_CASE("T2: bake kedua tidak mengerjakan apa pun, dan pengaturan yang berubah mengerjakannya lagi") {
+    // Dihitung, bukan diukur. Pemanggilan kedua yang lebih cepat juga dihasilkan
+    // cache halaman sistem berkas, dan itu membuktikan hal yang lain.
+    TempDir temp;
+    const std::filesystem::path source = temp.Path() / "batu.png";
+    CopyFile(TextureFixture("checker.png"), source);
+
+    TextureSettings settings;
+    settings.usage = TextureUsage::Color;
+    const std::filesystem::path cache = temp.Path() / "cache";
+
+    const uint64_t before = TextureBakeCount();
+    const BakeResult first = BakeTexture(source, settings, cache);
+    REQUIRE_MESSAGE(first.ok, first.error);
+    CHECK_FALSE(first.fromCache);
+    CHECK(TextureBakeCount() == before + 1);
+
+    const BakeResult second = BakeTexture(source, settings, cache);
+    REQUIRE_MESSAGE(second.ok, second.error);
+    CHECK(second.fromCache);
+    CHECK(second.path == first.path);
+    CHECK(TextureBakeCount() == before + 1);
+
+    // Pengaturan yang berubah adalah kunci yang berbeda. Inilah yang membuat
+    // "tandai perlu di-bake ulang" tidak perlu ditulis sama sekali — bendera
+    // terpisah hanya akan menjadi keadaan kedua yang bisa berselisih dengan yang
+    // pertama.
+    settings.quality = TextureQuality::Best;
+    const BakeResult reconfigured = BakeTexture(source, settings, cache);
+    REQUIRE_MESSAGE(reconfigured.ok, reconfigured.error);
+    CHECK_FALSE(reconfigured.fromCache);
+    CHECK(reconfigured.path != first.path);
+    CHECK(TextureBakeCount() == before + 2);
+
+    // Dan isi berkas yang berubah juga, meski namanya sama persis. Cache
+    // berkunci jalur akan mengembalikan tekstur basi di sini, dan yang basi itu
+    // terlihat benar.
+    settings.quality = TextureQuality::Balanced;
+    CopyFile(TextureFixture("albedo-srgb.png"), source);
+    const BakeResult replaced = BakeTexture(source, settings, cache);
+    REQUIRE_MESSAGE(replaced.ok, replaced.error);
+    CHECK_FALSE(replaced.fromCache);
+    CHECK(replaced.path != first.path);
+    CHECK(TextureBakeCount() == before + 3);
+}
+
+TEST_CASE("T2: base color memakai format sRGB, normal map tidak pernah") {
+    // Jebakan nomor dua di rencananya: `_SRGB` dan `_UNORM` berisi bit yang
+    // identik, dan yang membedakan hanya tafsir sampler. Normal map yang
+    // ber-format `_SRGB` menghasilkan pencahayaan yang salah sedikit di seluruh
+    // permukaan — tanpa satu pun peringatan.
+    TempDir temp;
+    const std::filesystem::path source = TextureFixture("checker.png");
+
+    // Jalur tanpa kompresi: `_SRGB` versus `_UNORM` pada format RGBA8 yang sama.
+    // Pasangan ber-BC-nya diuji di "tabel format" di bawah.
+    TextureSettings color;
+    color.usage = TextureUsage::Color;
+    color.compress = false;
+    const BakeResult asColor = BakeTexture(source, color, temp.Path() / "color");
+    REQUIRE_MESSAGE(asColor.ok, asColor.error);
+
+    TextureSettings normal;
+    normal.usage = TextureUsage::NormalMap;
+    normal.compress = false;
+    const BakeResult asNormal = BakeTexture(source, normal, temp.Path() / "normal");
+    REQUIRE_MESSAGE(asNormal.ok, asNormal.error);
+
+    // VK_FORMAT_R8G8B8A8_SRGB dan VK_FORMAT_R8G8B8A8_UNORM. Angkanya ditulis
+    // apa adanya karena spesifikasi KTX2 memang menyimpan nomor VkFormat, dan
+    // uji ini akan gagal kalau nomornya bergeser — yang memang harus.
+    CHECK(asColor.vkFormat == 43);
+    CHECK(asNormal.vkFormat == 37);
+    CHECK(asColor.vkFormat != asNormal.vkFormat);
+}
+
+// ---------------------------------------------------------------------------
+// T2 — kompresi blok
+// ---------------------------------------------------------------------------
+
+namespace {
+
+/// Pola RGBA8 yang tepi kanan dan bawahnya jauh berbeda dari bagian dalamnya —
+/// justru bagian yang menentukan apa yang terjadi pada blok tepi.
+uint8_t EdgePattern(uint32_t x, uint32_t y, uint32_t channel) {
+    const uint32_t base = (x >= 4 ? 230u : 25u) + (y >= 2 ? 15u : 0u);
+    return static_cast<uint8_t>(channel == 3 ? 255u : base + channel * 7u);
+}
+
+std::vector<uint8_t> MakePattern(uint32_t width, uint32_t height, uint32_t sourceWidth,
+                                 uint32_t sourceHeight) {
+    std::vector<uint8_t> pixels(static_cast<std::size_t>(width) * height * 4);
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            // Dijepit ke ukuran sumbernya: inilah "ulangi tepinya", ditulis di
+            // sisi uji supaya harapannya tidak datang dari kode yang diuji.
+            const uint32_t sx = std::min(x, sourceWidth - 1);
+            const uint32_t sy = std::min(y, sourceHeight - 1);
+            for (uint32_t c = 0; c < 4; ++c) {
+                pixels[(static_cast<std::size_t>(y) * width + x) * 4 + c] = EdgePattern(sx, sy, c);
+            }
+        }
+    }
+    return pixels;
+}
+
+}  // namespace
+
+TEST_CASE("T2: blok tepi mengulang piksel tepinya, bukan menghitamkannya") {
+    // Jebakan nomor lima di rencananya. Dimensi bukan kelipatan empat
+    // menyisakan blok yang sebagian pikselnya di luar gambar, dan isi piksel itu
+    // ikut menentukan endpoint bloknya — jadi ikut menentukan piksel yang
+    // benar-benar terlihat. Hitam di sana menarik endpoint ke bawah dan
+    // menggelapkan tepi kanan dan bawah setiap tekstur berukuran ganjil.
+    constexpr uint32_t kWidth = 5;
+    constexpr uint32_t kHeight = 3;
+    const std::vector<uint8_t> source = MakePattern(kWidth, kHeight, kWidth, kHeight);
+    // Gambar yang sama, sudah dijepit tangan sampai batas bloknya.
+    const std::vector<uint8_t> extended = MakePattern(8, 4, kWidth, kHeight);
+
+    CompressOptions options;
+    options.format = BlockFormat::Bc7;
+    options.quality = TextureQuality::Balanced;
+
+    std::vector<uint8_t> fromSource;
+    std::vector<uint8_t> fromExtended;
+    REQUIRE(CompressBlocks(options, source, kWidth, kHeight, 4, fromSource));
+    REQUIRE(CompressBlocks(options, extended, 8, 4, 4, fromExtended));
+
+    // Dua blok mendatar, satu menurun, enam belas byte masing-masing.
+    CHECK(fromSource.size() == 32);
+    CHECK(CompressedSize(BlockFormat::Bc7, kWidth, kHeight) == 32);
+    // Byte per byte. Encoder yang memadatkan dengan nol menghasilkan endpoint
+    // yang berbeda, jadi blok yang berbeda — dan perbandingan ini tidak bisa
+    // lulus karena toleransi, karena tidak ada toleransi.
+    CHECK(fromSource == fromExtended);
+}
+
+TEST_CASE("T2: kompresi bolak-balik menjaga gambarnya") {
+    // Encoder yang menghasilkan blok berukuran benar tapi isinya kacau lolos
+    // setiap pemeriksaan ukuran. Yang memeriksanya adalah menguraikannya kembali
+    // dan membandingkan angkanya.
+    constexpr uint32_t kSide = 16;
+    std::vector<uint8_t> source(static_cast<std::size_t>(kSide) * kSide * 4);
+    for (uint32_t y = 0; y < kSide; ++y) {
+        for (uint32_t x = 0; x < kSide; ++x) {
+            uint8_t* pixel = source.data() + (static_cast<std::size_t>(y) * kSide + x) * 4;
+            pixel[0] = static_cast<uint8_t>(x * 16);
+            pixel[1] = static_cast<uint8_t>(y * 16);
+            pixel[2] = static_cast<uint8_t>(128);
+            pixel[3] = 255;
+        }
+    }
+
+    CompressOptions options;
+    options.format = BlockFormat::Bc7;
+    options.quality = TextureQuality::Best;
+
+    std::vector<uint8_t> blocks;
+    REQUIRE(CompressBlocks(options, source, kSide, kSide, 4, blocks));
+    CHECK(blocks.size() == 16 * 16);  // 4x4 blok, 16 byte
+
+    std::vector<uint8_t> decoded;
+    REQUIRE(DecompressBlocks(BlockFormat::Bc7, blocks, kSide, kSide, decoded));
+    REQUIRE(decoded.size() == source.size());
+
+    int worst = 0;
+    for (std::size_t i = 0; i < source.size(); ++i) {
+        worst = std::max(worst, std::abs(static_cast<int>(decoded[i]) - source[i]));
+    }
+    INFO("selisih kanal terbesar " << worst);
+    // Dua puluh, bukan lebih ketat: merah berubah menurut x dan hijau menurut y,
+    // jadi setiap blok memuat variasi dua arah — dan sebuah blok BC7 menyimpan
+    // satu garis di ruang warna. Yang tidak bisa diwakili garis itu adalah
+    // selisih yang tersisa, dan besarnya memang belasan.
+    //
+    // Batasnya tetap berarti: blok yang tertukar tempat menggeser gradien satu
+    // blok penuh — enam puluh empat tingkat — dan baris yang tergeser lebih
+    // jauh lagi.
+    CHECK(worst <= 20);
+}
+
+TEST_CASE("T2: tabel format — warna ke BC7, normal ke BC5, mask ke BC4") {
+    TempDir temp;
+    const std::filesystem::path color = TextureFixture("checker.png");
+
+    TextureSettings settings;
+    settings.compress = true;
+
+    settings.usage = TextureUsage::Color;
+    const BakeResult asColor = BakeTexture(color, settings, temp.Path() / "c");
+    REQUIRE_MESSAGE(asColor.ok, asColor.error);
+    // VK_FORMAT_BC7_SRGB_BLOCK. Warna, jadi sRGB — dan itu tafsir sampler,
+    // bukan konversi: bitnya identik dengan varian UNORM-nya.
+    CHECK(asColor.vkFormat == 146);
+
+    settings.usage = TextureUsage::NormalMap;
+    const BakeResult asNormal = BakeTexture(color, settings, temp.Path() / "n");
+    REQUIRE_MESSAGE(asNormal.ok, asNormal.error);
+    // VK_FORMAT_BC5_UNORM_BLOCK — dan **tidak ada varian sRGB-nya sama sekali**,
+    // yang persis kenapa BC5 adalah jawaban yang benar untuk normal map.
+    CHECK(asNormal.vkFormat == 141);
+
+    settings.usage = TextureUsage::Mask;
+    const BakeResult asMask = BakeTexture(color, settings, temp.Path() / "m");
+    REQUIRE_MESSAGE(asMask.ok, asMask.error);
+    CHECK(asMask.vkFormat == 139);  // VK_FORMAT_BC4_UNORM_BLOCK
+
+    // Dimatikan per aset, seperti yang dijanjikan `TextureSettings` sejak T1.
+    settings.usage = TextureUsage::Color;
+    settings.compress = false;
+    const BakeResult plain = BakeTexture(color, settings, temp.Path() / "p");
+    REQUIRE_MESSAGE(plain.ok, plain.error);
+    CHECK(plain.vkFormat == 43);  // VK_FORMAT_R8G8B8A8_SRGB
+}
+
+TEST_CASE("T2: berkas ber-BC7 dibaca pembaca lain dengan ukuran level yang benar") {
+    // Bahwa libktx menghitung ukuran level dari format bloknya — dan bahwa
+    // pembaca tangan di Sim::RHI membaca offset yang sama.
+    TempDir temp;
+    TextureSettings settings;
+    settings.usage = TextureUsage::Color;
+    settings.compress = true;
+
+    const BakeResult result = BakeTexture(TextureFixture("checker.png"), settings, temp.Path());
+    REQUIRE_MESSAGE(result.ok, result.error);
+    CHECK(result.vkFormat == 146);
+
+    rhi::Ktx2Texture texture;
+    const rhi::Ktx2Result read = rhi::ReadKtx2(result.path, texture);
+    REQUIRE_MESSAGE(read.ok, read.error);
+    CHECK(texture.format == 146);
+    REQUIRE(texture.levels.size() == 4);
+
+    // 8x8 → 2x2 blok → 64 byte. 4x4 → 1 blok. 2x2 dan 1x1 tetap satu blok utuh
+    // masing-masing: format blok tidak punya cara menyimpan setengah blok.
+    const std::size_t expected[] = {64, 16, 16, 16};
+    for (std::size_t level = 0; level < 4; ++level) {
+        INFO("level " << level);
+        CHECK(texture.LevelBytes(level).size() == expected[level]);
+    }
+    // Dan seluruh muatannya lebih kecil daripada level 0 saja tanpa kompresi.
+    // Yang dibandingkan muatannya, bukan `texture.bytes` — itu isi berkas utuh,
+    // dan pada tekstur sekecil ini header beserta DFD-nya lebih besar daripada
+    // gambarnya sendiri.
+    std::size_t payload = 0;
+    for (std::size_t level = 0; level < texture.levels.size(); ++level) {
+        payload += texture.LevelBytes(level).size();
+    }
+    CHECK(payload == 112);
+    CHECK(payload < 8 * 8 * 4);
+}
+
+TEST_CASE("T2: metrik perseptual benar-benar sampai ke encoder") {
+    // Jebakan nomor tiga di rencananya menuntut normal map dikompresi **tanpa**
+    // metrik warna. Perlindungan sebenarnya struktural — normal map memakai BC5,
+    // yang tidak punya metrik warna sama sekali — tetapi bendera itu tetap ada
+    // untuk siapa pun yang memampatkan data ke BC7, dan bendera yang tidak
+    // sampai ke encoder adalah janji yang tidak ditepati tanpa satu pun tanda.
+    constexpr uint32_t kSide = 8;
+    std::vector<uint8_t> source(static_cast<std::size_t>(kSide) * kSide * 4);
+    for (uint32_t y = 0; y < kSide; ++y) {
+        for (uint32_t x = 0; x < kSide; ++x) {
+            uint8_t* pixel = source.data() + (static_cast<std::size_t>(y) * kSide + x) * 4;
+            // Biru berayun jauh sementara merah dan hijau nyaris diam: itulah
+            // kanal yang paling dihemat metrik perseptual, jadi di sinilah kedua
+            // metrik paling berbeda hasilnya.
+            pixel[0] = static_cast<uint8_t>(120 + x);
+            pixel[1] = static_cast<uint8_t>(120 + y);
+            pixel[2] = static_cast<uint8_t>(((x + y) % 2) == 0 ? 10 : 245);
+            pixel[3] = 255;
+        }
+    }
+
+    CompressOptions perceptual;
+    perceptual.format = BlockFormat::Bc7;
+    perceptual.quality = TextureQuality::Balanced;
+    perceptual.perceptual = true;
+
+    CompressOptions linear = perceptual;
+    linear.perceptual = false;
+
+    std::vector<uint8_t> withPerceptual;
+    std::vector<uint8_t> withLinear;
+    REQUIRE(CompressBlocks(perceptual, source, kSide, kSide, 4, withPerceptual));
+    REQUIRE(CompressBlocks(linear, source, kSide, kSide, 4, withLinear));
+
+    REQUIRE(withPerceptual.size() == withLinear.size());
+    CHECK(withPerceptual != withLinear);
+}
+
+TEST_CASE("T2: BC7 pada kualitas seimbang tetap di atas ambang PSNR-nya") {
+    // **Yang dijaga di sini adalah keputusan, bukan implementasi.** Parameter
+    // `seimbang` diturunkan setelah diukur — 4K dari 8,7 detik menjadi 5,3 —
+    // dan godaan berikutnya adalah menurunkannya sekali lagi dengan menolkan
+    // partisinya, yang memang tiga detik lebih cepat lagi. Harganya lima
+    // desibel, dan lima desibel terlihat sebagai blok pada setiap tepi tajam.
+    //
+    // Diukur, bukan diwaktukan: PSNR tidak bergantung pada beban mesin, jadi uji
+    // ini tidak akan pernah gagal hanya karena tiga build berjalan bersamaan.
+    constexpr uint32_t kSide = 512;
+    std::vector<uint8_t> source(static_cast<std::size_t>(kSide) * kSide * 4);
+    uint32_t seed = 12345;
+    for (uint32_t y = 0; y < kSide; ++y) {
+        for (uint32_t x = 0; x < kSide; ++x) {
+            // Gradien, tepi tajam, dan sedikit derau — ketiganya sekaligus,
+            // karena encoder blok bisa unggul pada satu dan gagal pada yang lain.
+            seed = seed * 1664525u + 1013904223u;
+            const uint32_t noise = (seed >> 24) % 24;
+            uint8_t* pixel = source.data() + (static_cast<std::size_t>(y) * kSide + x) * 4;
+            pixel[0] = static_cast<uint8_t>((x * 255 / kSide + noise) & 0xFF);
+            pixel[1] = static_cast<uint8_t>((y * 255 / kSide) ^ ((x / 16) * 17));
+            pixel[2] = static_cast<uint8_t>(((x / 8 + y / 8) % 2) ? 200 + noise : 40 + noise);
+            pixel[3] = 255;
+        }
+    }
+
+    auto psnr = [&](TextureQuality quality) {
+        CompressOptions options;
+        options.format = BlockFormat::Bc7;
+        options.quality = quality;
+        std::vector<uint8_t> blocks;
+        std::vector<uint8_t> back;
+        REQUIRE(CompressBlocks(options, source, kSide, kSide, 4, blocks));
+        REQUIRE(DecompressBlocks(BlockFormat::Bc7, blocks, kSide, kSide, back));
+        double sum = 0.0;
+        for (std::size_t i = 0; i < source.size(); ++i) {
+            const double difference = static_cast<double>(back[i]) - source[i];
+            sum += difference * difference;
+        }
+        return 10.0 * std::log10(255.0 * 255.0 / (sum / static_cast<double>(source.size())));
+    };
+
+    const double balanced = psnr(TextureQuality::Balanced);
+    const double best = psnr(TextureQuality::Best);
+    INFO("seimbang " << balanced << " dB, terbaik " << best << " dB");
+
+    // Terukur 46,2 dB. Ambangnya 44 supaya ada ruang bagi versi encoder yang
+    // berbeda, dan tetap di atas 41,4 dB yang dihasilkan partisi nol — yaitu
+    // tetap menangkap persis penurunan yang ingin dijaga.
+    CHECK(balanced > 44.0);
+    // Dan `terbaik` memang lebih baik. Tingkat kualitas yang urutannya terbalik
+    // adalah bug yang tidak pernah terlihat: yang meminta kualitas terbaik
+    // menerima gambar yang lebih buruk dan membayar empat kali lipat waktunya.
+    CHECK(best >= balanced);
 }

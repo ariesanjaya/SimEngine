@@ -2,12 +2,15 @@ sim_add_library(Assets
     SOURCES
         src/AssetDatabase.cpp
         src/AssetTypes.cpp
+        src/BlockCompress.cpp
         src/Importer.cpp
+        src/Ktx2Write.cpp
         src/GltfImport.cpp
         src/MaterialImport.cpp
         src/MeshImport.cpp
         src/UsdImport.cpp
         src/MeshSettings.cpp
+        src/TextureBake.cpp
         src/TextureSettings.cpp
         src/Thumbnail.cpp
     PUBLIC_DEPS
@@ -25,6 +28,11 @@ sim_add_library(Assets
         # kapabilitas gambar: daftar formatnya dibangkitkan, bukan dipatok.
         Sim::Volume
         Stb::Impl
+        # Penulis kontainer KTX2 untuk baker tekstur. PRIVATE: tipe libktx tidak
+        # pernah muncul di header publik modul ini.
+        Ktx::Ktx
+        # Encoder BC1/BC3/BC4/BC5/BC7, beserta sisi urainya untuk uji dan PSNR.
+        Bc7Enc::Bc7Enc
         Fbx::Fbx
         Cgltf::Cgltf
         nlohmann_json::nlohmann_json)
