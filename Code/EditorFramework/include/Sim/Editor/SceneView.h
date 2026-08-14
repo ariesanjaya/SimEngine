@@ -159,10 +159,15 @@ private:
                            render::MeshInstance& instance);
     /// Warna dasar sebuah material, dari cache atau dibaca dari berkasnya.
     Vec4 MaterialColor(const assets::AssetDatabase* assets, const Uuid& guid);
+    /// Tekstur warna dasar sebuah material, sudah diunggah, atau nol.
+    render::TextureHandle MaterialTexture(const assets::AssetDatabase* assets,
+                                          render::IViewportRenderer* renderer, const Uuid& guid);
     /// Warna material bawaan editor — yang mengisi mesh tanpa material sendiri.
     Vec4 BuiltinColor(const assets::AssetDatabase* builtinAssets);
     void AppendPartColors(const scene::MeshRendererComponent& renderer, uint32_t partCount,
-                          const assets::AssetDatabase* assets, render::MeshInstance& instance);
+                          const assets::AssetDatabase* assets,
+                          render::IViewportRenderer* textureRenderer,
+                          render::MeshInstance& instance);
 
 public:
 
@@ -218,6 +223,10 @@ private:
     /// jawaban yang tidak berubah. Kunci GUID; jalur yang gagal dibaca dicatat
     /// dengan warna bawaan supaya ia juga tidak dicoba lagi.
     std::unordered_map<Uuid, Vec4> materialColor_;
+    /// guid material → aset tekstur warna dasarnya. GUID tak sah berarti
+    /// materialnya tidak menyebut tekstur; diingat juga supaya berkas yang sama
+    /// tidak diurai ulang tiap frame.
+    std::unordered_map<Uuid, Uuid> materialTexture_;
 };
 
 /// Sinar dunia yang melewati sebuah titik di layar.

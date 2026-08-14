@@ -4,6 +4,7 @@
 #include "Sim/Material/MaterialInstance.h"
 
 #include <filesystem>
+#include <functional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -54,9 +55,30 @@ inline constexpr std::string_view kImportedMaterialAsset =
 /// dan tetapan ini adalah satu keputusan di dua tempat; keduanya harus sama.
 inline constexpr std::string_view kImportedMaterialGuid = "5f3c9a21-7d4e-4b16-9c08-2ab6e15d7f40";
 
+/// Nama parameter tekstur di induk. Disebut di satu tempat, dipakai importir
+/// maupun yang menggambar — dua ejaan berarti tekstur yang tersimpan tetapi
+/// tidak pernah terpasang.
+inline constexpr std::string_view kBaseColorTextureParameter = "baseColorTexture";
+
+/// Mengubah jalur tekstur relatif milik `MeshMaterial` menjadi GUID aset.
+///
+/// **Diserahkan pemanggil, bukan dikerjakan di sini.** Jalurnya relatif terhadap
+/// berkas mesh dan kerap naik satu tingkat (`..\checkerA.tga`), jadi
+/// menyelesaikannya menuntut tahu di mana berkas mesh itu berada — dan
+/// menyalinnya ke dalam project menuntut tahu di mana project itu berada.
+/// Keduanya pengetahuan editor, bukan pengetahuan modul aset.
+///
+/// Mengembalikan GUID tak sah bila teksturnya tidak ada atau tidak bisa
+/// disalin; materialnya lalu tetap ditulis, hanya tanpa tekstur.
+using TextureResolver = std::function<Uuid(std::string_view relativePath)>;
+
 /// Mengubah satu material hasil impor menjadi instance dari material induk.
+///
+/// `resolveTexture` boleh kosong — materialnya lalu hanya membawa kelima
+/// parameter skalarnya.
 material::MaterialInstance MaterialInstanceFromMesh(const MeshMaterial& source,
-                                                    const Uuid& parent);
+                                                    const Uuid& parent,
+                                                    const TextureResolver& resolveTexture = {});
 
 /// Menulis satu `.simmatinst` untuk tiap material di `mesh`, ke dalam `folder`.
 ///
@@ -70,6 +92,6 @@ material::MaterialInstance MaterialInstanceFromMesh(const MeshMaterial& source,
 /// aset materialnya.
 bool WriteMaterialInstances(const MeshData& mesh, const std::filesystem::path& folder,
                             const Uuid& parent, std::vector<std::string>& outWritten,
-                            std::string& error);
+                            std::string& error, const TextureResolver& resolveTexture = {});
 
 }  // namespace sim::assets

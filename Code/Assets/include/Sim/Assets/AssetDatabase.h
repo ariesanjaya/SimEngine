@@ -29,6 +29,18 @@ namespace sim::assets {
 /// ditukar masuk oleh `Update()` di main thread. Karena itu seluruh pembaca —
 /// panel, Inspector, PropertyGrid — bisa memakai referensi tanpa kunci sama
 /// sekali, selama mereka tidak menyimpannya melewati satu frame.
+/// GUID sebuah berkas aset, dibaca dari `.meta`-nya atau dibuatkan bila belum
+/// ada.
+///
+/// **Dipisah supaya yang menulis aset baru tidak perlu menunggu pemindaian.**
+/// Importir yang baru saja menyalin sebuah tekstur butuh GUID-nya *sekarang* —
+/// untuk ditulis ke dalam material yang merujuknya — sementara indeks baru akan
+/// melihat berkas itu pada pemindaian berikutnya. Keduanya memakai fungsi yang
+/// sama persis, jadi GUID yang dipakai importir adalah GUID yang kemudian
+/// dibaca indeks; menulis `.meta` sendiri di tempat lain berarti dua penulis
+/// untuk satu format, dan yang kedua akan ketinggalan saat formatnya berubah.
+Uuid EnsureAssetGuid(const std::filesystem::path& assetPath);
+
 class AssetDatabase {
 public:
     struct Config {

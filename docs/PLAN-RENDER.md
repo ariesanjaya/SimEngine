@@ -823,26 +823,38 @@ target di repo**, seperti rig Mixamo yang sudah menjadi acuan skinning.
 - **Nomor 2 ✅ (Jalur A)** atribut uv, `IViewportRenderer::AcquireTexture`, dan
   set descriptor material di set 2 dengan konvensi binding kompiler graph.
   `box.frag` mengalikan albedo-nya. Pemakai pertamanya `DecalComponent::texture`.
-- **Nomor 3 🔨 separuh.** `MaterialInstance` kini bisa mengganti tekstur sebuah
-  node `input.texture` induknya, dan itu bertahan lewat `.simmatinst`.
+- **Nomor 3 ✅** Rantainya utuh: induk menyatakan `param.texture`
+  `baseColorTexture`, instance mengisinya, importir menyalin teksturnya ke dalam
+  project dan menuliskan GUID-nya, dan `SceneView` menyelesaikannya menjadi
+  `partTextures`.
 
-**Yang menghalangi separuh sisanya, ditemukan saat mengerjakannya:** material
-induk bersama `Resources/Materials/Sistem/Material Impor.simmat` **tidak punya
-satu pun node `input.texture`**. Ia hanya lima `param.get` dan sebuah
-`output.surface`. Jadi importir belum punya slot untuk diisi, betapapun
-lengkapnya mekanisme penggantian di sisi instance.
+**Yang sempat menghalanginya, dan bagaimana diselesaikan.** Material induk
+bersama `Material Impor.simmat` tidak punya satu pun node tekstur — hanya lima
+`param.get` dan sebuah `output.surface`. Menambahkannya bukan sekadar
+menyisipkan node: induk itu **sudah dirujuk setiap `.simmatinst` yang pernah
+dibangkitkan**.
 
-Menambahkannya bukan sekadar menyisipkan node: induk itu **sudah dirujuk setiap
-`.simmatinst` yang pernah dibangkitkan**, jadi perubahannya harus menjaga
-material yang sudah ada tetap tergambar sama persis. Bentuk yang aman:
-`input.texture` yang kosong menghasilkan putih, dikalikan dengan `baseColor`
-yang sudah ada — sehingga material tanpa tekstur tidak berubah sedikit pun.
+Bentuk yang dipilih menjaga keduanya: `param.texture` → `input.sample` →
+`math.multiply` ke `baseColor`. Slot yang kosong diikat tekstur putih 1×1 oleh
+renderer — nilai satuan perkalian — sehingga **material tanpa tekstur tidak
+berubah sedikit pun**, dan yang punya tekstur mengikuti konvensi glTF
+(`baseColorFactor × baseColorTexture`).
 
-Sesudah itu barulah: importir mengisi penggantinya dari
-`MeshMaterial::baseColorTexture`, teksturnya disalin ke dalam project (jalurnya
-relatif terhadap berkas mesh dan kerap naik satu tingkat), dan `SceneView`
-menyelesaikan penggantian itu menjadi `partTextures` — jalur yang sudah
-menunggu, dan yang hari ini selalu diisi nol untuk ruas mesh.
+**Teksturnya disalin ke dalam project, bukan dirujuk di tempat asalnya.**
+Jalurnya relatif terhadap berkas mesh dan kerap naik satu tingkat, jadi
+merujuknya apa adanya menghasilkan aset yang menunjuk ke luar project dan hilang
+begitu project dipindahkan. GUID-nya dibuat saat menyalin lewat
+`assets::EnsureAssetGuid` — fungsi yang sama persis dengan yang dipakai indeks —
+karena material yang merujuknya sedang ditulis saat itu juga, sementara indeks
+baru melihat berkas itu pada pemindaian berikutnya.
+
+Penyelesaian jalurnya diserahkan **pemanggil**, lewat `TextureResolver`.
+`Sim::Assets` tidak boleh tahu di mana berkas mesh berada maupun di mana project
+berada; keduanya pengetahuan editor.
+
+Diuji terhadap aset yang dikirim: `shaderBall.fbx` merujuk `checkerA.tga` yang
+memang tidak ikut dikirim, dan jalur "tekstur hilang" itu berjalan tanpa
+menggagalkan impornya — materialnya tetap ditulis, hanya tanpa tekstur.
 
 ##### Ringkasnya
 

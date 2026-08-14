@@ -1,7 +1,9 @@
 #include "Sim/Editor/SceneView.h"
 
 #include "Sim/Assets/AssetDatabase.h"
+#include "Sim/Assets/MaterialImport.h"
 #include "Sim/Material/MaterialGraph.h"
+#include "Sim/Material/MaterialInstance.h"
 #include "Sim/Material/MaterialNodeCatalog.h"
 #include "Sim/Editor/EditorContext.h"
 #include "Sim/Terrain/TerrainDecal.h"
@@ -196,7 +198,7 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                             instance.boundsMin = mesh.boundsMin;
                             instance.boundsMax = mesh.boundsMax;
                             if (meshRenderer != nullptr) {
-                                AppendPartColors(*meshRenderer, mesh.partCount, assets, instance);
+                                AppendPartColors(*meshRenderer, mesh.partCount, assets, renderer, instance);
                             }
                             fromWhitebox = true;
                         }
@@ -224,7 +226,7 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                             instance.mesh = mesh.handle;
                             instance.boundsMin = mesh.boundsMin;
                             instance.boundsMax = mesh.boundsMax;
-                            AppendPartColors(*meshRenderer, mesh.partCount, assets, instance);
+                            AppendPartColors(*meshRenderer, mesh.partCount, assets, renderer, instance);
                             AppendSkinPalette(mesh.boneCount,
                                               animation != nullptr
                                                   ? animation->PaletteFor(entity)
@@ -277,6 +279,7 @@ void SceneView::Build(scene::World& world, const Selection& selection,
 /// warnanya sendiri akan tergambar abu-abu seluruhnya.
 void SceneView::AppendPartColors(const scene::MeshRendererComponent& renderer, uint32_t partCount,
                                  const assets::AssetDatabase* assets,
+                                 render::IViewportRenderer* textureRenderer,
                                  render::MeshInstance& instance) {
     if (partCount == 0) {
         return;
@@ -295,12 +298,9 @@ void SceneView::AppendPartColors(const scene::MeshRendererComponent& renderer, u
         // membuat setiap indeks sesudah ruas pertama menunjuk tekstur milik
         // instance lain — dan yang terlihat bukan galat melainkan tekstur yang
         // berpindah objek.
-        // Belum ada sumbernya: material impor menyimpan lima parameter skalar
-        // dan belum menyebut teksturnya. Yang penting di sini larik ini tetap
-        // **sejajar** — panjang yang berbeda membuat setiap indeks sesudah ruas
-        // pertama menunjuk tekstur milik instance lain, dan yang terlihat bukan
-        // galat melainkan tekstur yang berpindah objek.
-        partTextures_.push_back(render::kInvalidTexture);
+        partTextures_.push_back(assigned ? MaterialTexture(assets, textureRenderer,
+                                                           renderer.materials[slot].guid)
+                                         : render::kInvalidTexture);
     }
 }
 
@@ -336,6 +336,47 @@ Vec4 SceneView::MaterialColor(const assets::AssetDatabase* assets, const Uuid& g
     // editor yang melambat tanpa sebab yang terlihat.
     materialColor_.emplace(guid, color);
     return color;
+}
+
+/// Tekstur warna dasar sebuah material, dibaca sekali lalu diingat.
+///
+/// **Menelusuri instance-nya, bukan graph induknya.** Yang menyimpan "gambar
+/// mana" adalah `.simmatinst`; induknya hanya menyatakan bahwa slot itu ada.
+/// Membaca induk saja akan menghasilkan tekstur yang sama untuk seluruh material
+/// impor — yaitu tidak ada.
+render::TextureHandle SceneView::MaterialTexture(const assets::AssetDatabase* assets,
+                                                 render::IViewportRenderer* renderer,
+                                                 const Uuid& guid) {
+    if (assets == nullptr || renderer == nullptr) {
+        return render::kInvalidTexture;
+    }
+
+    Uuid texture;
+    if (const auto found = materialTexture_.find(guid); found != materialTexture_.end()) {
+        texture = found->second;
+    } else {
+        const assets::AssetRecord* record = assets->Find(guid);
+        material::MaterialInstance instance;
+        if (record != nullptr &&
+            material::LoadInstanceFromFile(instance, assets->AbsolutePath(*record)).ok) {
+            // Nama parameternya disebut satu tempat, dipakai importir maupun di
+            // sini: dua ejaan berarti tekstur yang tersimpan tetapi tidak pernah
+            // terpasang, dan tidak ada satu pun galat yang menyertainya.
+            texture = instance.Texture(assets::kBaseColorTextureParameter);
+        }
+        // Yang gagal dibaca ikut diingat, alasan yang sama dengan warnanya:
+        // mengurai berkas rusak tiap frame adalah editor yang melambat tanpa
+        // sebab yang terlihat. Sebuah `.simmat` yang dibuka di sini juga wajar
+        // gagal — ia induk, bukan instance — dan itu bukan galat.
+        materialTexture_.emplace(guid, texture);
+    }
+
+    if (!texture.IsValid()) {
+        return render::kInvalidTexture;
+    }
+    const assets::AssetRecord* image = assets->Find(texture);
+    return image == nullptr ? render::kInvalidTexture
+                            : renderer->AcquireTexture(assets->AbsolutePath(*image).string());
 }
 
 /// Warna material bawaan editor — yang mengisi mesh tanpa material sendiri.

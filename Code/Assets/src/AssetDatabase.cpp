@@ -70,7 +70,7 @@ std::int64_t ModifiedSeconds(const std::filesystem::directory_entry& entry) {
 /// aset mendapat GUID baru dan setiap level yang memakainya kehilangan
 /// rujukannya — karena itu berkas ini harus ikut masuk kontrol versi bersama
 /// asetnya, dan itu dicatat di dalam berkasnya sendiri.
-Uuid ReadOrCreateMeta(const std::filesystem::path& assetPath, bool& outCreated) {
+Uuid ReadOrCreateMetaImpl(const std::filesystem::path& assetPath, bool& outCreated) {
     const std::filesystem::path metaPath = assetPath.string() + kMetaExtension;
     outCreated = false;
 
@@ -107,6 +107,11 @@ Uuid ReadOrCreateMeta(const std::filesystem::path& assetPath, bool& outCreated) 
 }
 
 }  // namespace
+
+Uuid EnsureAssetGuid(const std::filesystem::path& assetPath) {
+    bool created = false;
+    return ReadOrCreateMetaImpl(assetPath, created);
+}
 
 bool AssetDatabase::Initialize(Config config) {
     root_ = config.root;
@@ -292,7 +297,7 @@ AssetDatabase::ScanResult AssetDatabase::Scan(const std::filesystem::path& root,
         }
 
         bool created = false;
-        record.guid = ReadOrCreateMeta(entry.path(), created);
+        record.guid = ReadOrCreateMetaImpl(entry.path(), created);
 
         if (const IImporter* importer = importers.Find(record.type)) {
             const ImportResult imported = importer->Import(entry.path());

@@ -1770,3 +1770,59 @@ TEST_CASE("Jalur A: instance hanya bisa mengisi tekstur yang dinyatakan induknya
     CHECK(ResolveTextures(parent, second)[0].texture == other);
     CHECK(ResolveTextures(parent, instance)[0].texture == mine);
 }
+
+TEST_CASE("Material Impor punya slot tekstur, dan yang kosong tidak mengubah apa pun") {
+    // **Induk ini sudah dirujuk setiap `.simmatinst` yang pernah dibangkitkan**,
+    // jadi menambah rantai teksturnya harus menjaga material yang ada tergambar
+    // sama persis. Bentuknya: sampel dikalikan ke `baseColor`, dan slot yang
+    // kosong diikat tekstur putih 1x1 oleh renderer — nilai satuan perkalian.
+    const std::filesystem::path path = std::filesystem::path(SIM_BUILTIN_DIR) / "Materials" /
+                                       "Sistem" / "Material Impor.simmat";
+    REQUIRE_MESSAGE(std::filesystem::exists(path), path.string());
+
+    MaterialGraph graph;
+    const MaterialIoResult loaded = LoadMaterialFromFile(graph, path);
+    INFO(loaded.error);
+    REQUIRE(loaded.ok);
+
+    const ValidationResult validation = ValidateMaterial(graph);
+    for (const MaterialIssue& issue : validation.errors) {
+        INFO("galat validasi: " << issue.message);
+        CHECK(false);
+    }
+    REQUIRE(validation.ok);
+
+    // Tepat satu parameter bertipe Texture, dan namanya yang dipakai importir.
+    MaterialInstance empty;
+    const std::vector<ResolvedTexture> textures = ResolveTextures(graph, empty);
+    REQUIRE(textures.size() == 1);
+    CHECK(textures[0].name == "baseColorTexture");
+    CHECK_FALSE(textures[0].texture.IsValid());  // bawaan induk: kosong
+
+    // Kompilasinya menghasilkan tepat satu binding tekstur, dan binding itu
+    // menyebut parameternya — tanpa itu, tidak ada yang bisa memasangkan gambar
+    // yang dipilih instance ke slot yang benar.
+    MaterialCompileOptions options;
+    options.moduleName = "Material Impor.simmat";
+    const MaterialCompileResult compiled = CompileMaterial(graph, options);
+    for (const MaterialIssue& issue : compiled.errors) {
+        INFO("galat kompilasi: " << issue.message);
+        CHECK(false);
+    }
+    REQUIRE(compiled.ok);
+    REQUIRE(compiled.textures.size() == 1);
+    CHECK(compiled.textures[0].parameter == "baseColorTexture");
+
+    // Dan sampelnya benar-benar masuk ke warna dasarnya, bukan menggantung
+    // tanpa pemakai: yang menggantung akan dibuang kompiler, dan teksturnya
+    // tidak pernah terlihat.
+    INFO(compiled.slang);
+    CHECK(compiled.slang.find(compiled.textures[0].name + ".Sample") != std::string::npos);
+
+    // Instance mengisinya tanpa menyentuh induknya.
+    MaterialInstance instance;
+    const Uuid image = Uuid::Generate();
+    instance.SetTexture("baseColorTexture", image);
+    CHECK(ResolveTextures(graph, instance)[0].texture == image);
+    CHECK(ResolveTextures(graph, empty)[0].texture.IsValid() == false);
+}

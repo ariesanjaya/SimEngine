@@ -1465,3 +1465,65 @@ TEST_CASE("E8.4: statistik mesh dilaporkan dari yang memuatnya dan bertahan lint
     db.ReportMeshStats(guid, 0, 0);
     CHECK(db.Find(guid)->triangleCount == 67832);
 }
+
+TEST_CASE("Rekomendasi 3: material impor menyebut teksturnya lewat parameter induk") {
+    using namespace sim::assets;
+
+    // Jalur teksturnya diselesaikan pemanggil, bukan di sini: ia relatif
+    // terhadap berkas mesh dan kerap naik satu tingkat, jadi menyelesaikannya
+    // menuntut tahu di mana berkas mesh itu berada.
+    MeshData mesh;
+    mesh.vertices.resize(3);
+    mesh.indices = {0, 1, 2};
+    MeshMaterial withTexture;
+    withTexture.name = "Aspal";
+    withTexture.baseColor = Vec3(0.5f, 0.5f, 0.5f);
+    withTexture.baseColorTexture = "../tekstur/aspal.png";
+    MeshMaterial plain;
+    plain.name = "Kaca";
+    mesh.materials = {withTexture, plain};
+
+    const Uuid parent = Uuid::Parse(kImportedMaterialGuid);
+    const Uuid image = Uuid::Generate();
+
+    std::string asked;
+    const TextureResolver resolver = [&](std::string_view path) {
+        asked = std::string(path);
+        return image;
+    };
+
+    const material::MaterialInstance textured =
+        MaterialInstanceFromMesh(withTexture, parent, resolver);
+    CHECK(asked == "../tekstur/aspal.png");
+    CHECK(textured.Texture(kBaseColorTextureParameter) == image);
+    // Parameter skalarnya tetap ikut — tekstur menambah, bukan menggantikan.
+    CHECK(textured.overrides.size() == 5);
+
+    // Material tanpa tekstur tidak menulis parameter itu sama sekali: yang
+    // kosong berarti "pakai bawaan induk", yaitu putih — dan itu persis
+    // perilaku material tanpa tekstur.
+    const material::MaterialInstance untouched = MaterialInstanceFromMesh(plain, parent, resolver);
+    CHECK(untouched.textures.empty());
+
+    // Tanpa resolver sama sekali — jalur yang dipakai pemanggil yang tidak bisa
+    // menyalin apa pun — materialnya tetap ditulis, hanya tanpa tekstur.
+    const material::MaterialInstance noResolver = MaterialInstanceFromMesh(withTexture, parent);
+    CHECK(noResolver.textures.empty());
+    CHECK(noResolver.overrides.size() == 5);
+
+    // Resolver yang gagal menyelesaikan jalurnya juga tidak menulis apa pun.
+    const material::MaterialInstance missing =
+        MaterialInstanceFromMesh(withTexture, parent, [](std::string_view) { return Uuid{}; });
+    CHECK(missing.textures.empty());
+
+    // Dan berkasnya benar-benar membawanya.
+    TempDir temp;
+    std::vector<std::string> written;
+    std::string error;
+    REQUIRE_MESSAGE(
+        WriteMaterialInstances(mesh, temp.Path(), parent, written, error, resolver), error);
+    REQUIRE(written.size() == 2);
+    material::MaterialInstance reloaded;
+    REQUIRE(material::LoadInstanceFromFile(reloaded, temp.Path() / written[0]).ok);
+    CHECK(reloaded.Texture(kBaseColorTextureParameter) == image);
+}

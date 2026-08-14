@@ -25,7 +25,8 @@ material::MaterialValue Color(const Vec3& value) {
 }  // namespace
 
 material::MaterialInstance MaterialInstanceFromMesh(const MeshMaterial& source,
-                                                    const Uuid& parent) {
+                                                    const Uuid& parent,
+                                                    const TextureResolver& resolveTexture) {
     material::MaterialInstance instance;
     instance.parent = parent;
 
@@ -41,12 +42,23 @@ material::MaterialInstance MaterialInstanceFromMesh(const MeshMaterial& source,
     instance.Set("roughness", Scalar(source.roughness));
     instance.Set("emissive", Color(source.emissive));
     instance.Set("opacity", Scalar(source.opacity));
+
+    // Tekstur warna dasar, bila ada dan bila pemanggil bisa menyelesaikannya.
+    // Yang tidak terselesaikan **tidak** ditulis sama sekali: parameter yang
+    // kosong berarti "pakai bawaan induk", yaitu putih — dan itu persis
+    // perilaku material tanpa tekstur.
+    if (!source.baseColorTexture.empty() && resolveTexture) {
+        const Uuid texture = resolveTexture(source.baseColorTexture);
+        if (texture.IsValid()) {
+            instance.SetTexture(kBaseColorTextureParameter, texture);
+        }
+    }
     return instance;
 }
 
 bool WriteMaterialInstances(const MeshData& mesh, const std::filesystem::path& folder,
                             const Uuid& parent, std::vector<std::string>& outWritten,
-                            std::string& error) {
+                            std::string& error, const TextureResolver& resolveTexture) {
     outWritten.clear();
     error.clear();
     if (!parent.IsValid()) {
@@ -82,7 +94,8 @@ bool WriteMaterialInstances(const MeshData& mesh, const std::filesystem::path& f
 
         const std::string name = stem + ".simmatinst";
         const material::MaterialIoResult result =
-            material::SaveInstanceToFile(MaterialInstanceFromMesh(source, parent), folder / name);
+            material::SaveInstanceToFile(
+                MaterialInstanceFromMesh(source, parent, resolveTexture), folder / name);
         if (!result.ok) {
             error = result.error;
             return false;

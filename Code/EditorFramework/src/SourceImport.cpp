@@ -3,6 +3,7 @@
 #include "Sim/Animation/AnimationIo.h"
 #include "Sim/Animation/ClipImport.h"
 #include "Sim/Animation/Skeleton.h"
+#include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Assets/MaterialImport.h"
 #include "Sim/Assets/MeshData.h"
 #include "Sim/Core/Log.h"
@@ -168,8 +169,56 @@ SourceImportResult ImportSource(const std::filesystem::path& source,
         std::vector<std::string> materials;
         std::string materialError;
         const Uuid parent = Uuid::Parse(assets::kImportedMaterialGuid);
+
+        // Tekstur disalin ke dalam project, bukan dirujuk di tempat asalnya.
+        //
+        // Jalur di dalam berkas mesh relatif terhadap berkas itu dan kerap naik
+        // satu tingkat — `..\checkerA.tga` di sebelah `shaderBall.fbx` — jadi
+        // merujuknya apa adanya berarti aset yang menunjuk ke luar project, dan
+        // hilang begitu project dipindahkan atau dibagikan.
+        //
+        // GUID-nya dibuat di sini lewat `EnsureAssetGuid`, bukan ditunggu dari
+        // pemindaian berikutnya: material yang merujuknya sedang ditulis
+        // sekarang.
+        std::unordered_map<std::string, Uuid> copied;
+        const auto resolveTexture = [&](std::string_view relativePath) -> Uuid {
+            const std::string key(relativePath);
+            if (const auto found = copied.find(key); found != copied.end()) {
+                // Dua material yang memakai tekstur yang sama menyalinnya sekali.
+                return found->second;
+            }
+
+            std::error_code code;
+            const std::filesystem::path from =
+                std::filesystem::weakly_canonical(source.parent_path() / relativePath, code);
+            if (code || !std::filesystem::is_regular_file(from, code)) {
+                SIM_WARN("Editor", "texture {} referenced by {} is missing", key,
+                         source.filename().string());
+                copied.emplace(key, Uuid{});
+                return Uuid{};
+            }
+
+            // Namanya diambil dari berkasnya saja: `../` di dalam jalur tidak
+            // boleh menjadi folder di dalam project, dan nama yang bentrok
+            // diberi akhiran nomor alih-alih menimpa.
+            const std::filesystem::path destination =
+                FreePath(destinationFolder, assets::SafeAssetFileName(from.stem().string()),
+                         from.extension().string());
+            std::filesystem::copy_file(from, destination,
+                                       std::filesystem::copy_options::overwrite_existing, code);
+            if (code) {
+                SIM_WARN("Editor", "cannot copy texture {}: {}", key, code.message());
+                copied.emplace(key, Uuid{});
+                return Uuid{};
+            }
+            result.written.push_back(destination.filename().string());
+            const Uuid guid = assets::EnsureAssetGuid(destination);
+            copied.emplace(key, guid);
+            return guid;
+        };
+
         if (!assets::WriteMaterialInstances(mesh, destinationFolder, parent, materials,
-                                            materialError)) {
+                                            materialError, resolveTexture)) {
             result.error = materialError;
             return result;
         }
