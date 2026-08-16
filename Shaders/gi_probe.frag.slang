@@ -16,7 +16,8 @@
 struct ProbePush {
     // xy jumlah probe, z ukuran ubin dalam piksel, w akar jumlah ray
     uint4 grid;
-    // x nomor frame, y jumlah frame akumulasi, z jangkauan trace maksimum
+    // x nomor frame, y jumlah frame akumulasi, z jangkauan trace maksimum,
+    // w bias titik asal sepanjang normal, meter
     float4 params;
 };
 
@@ -109,7 +110,20 @@ ProbeSh main(float4 position : SV_Position) {
     float4 world = mul(shadowParams.invViewProj, float4(uv * 2.0 - 1.0, depth, 1.0));
     float3 origin = world.xyz / world.w;
     float3 surfaceNormal = octDecode(gbufferNormal.Load(int3(int2(pixel), 0)).rg);
+    // **Yang disimpan titik permukaannya, bukan titik asal sinar.** Riwayat dan
+    // bobot probe keduanya menolak lewat jarak tegak lurus bidang permukaan, dan
+    // jarak itu diukur ke permukaan — menyimpan titik yang sudah digeser membuat
+    // setiap probe tampak melayang sejauh biasnya di atas dirinya sendiri.
     output.surface = float4(origin, packNormal(surfaceNormal));
+
+    // **Sinar berangkat sedikit di atas permukaan, bukan dari permukaannya.**
+    // Sphere tracing yang mulai tepat di permukaan berhenti pada langkah
+    // pertama: jarak di sana nol, ambang berhentinya setengah voxel. Arah
+    // sinarnya tidak menolong — yang menunjuk lurus menjauh pun mengenai, pada
+    // jarak nol. Lapis layar sudah punya pergeseran seperti ini di sepanjang
+    // arah sinar; lapis SDF tidak punya apa pun, dan `traceTiered` meneruskan
+    // titik asal yang sama ke keduanya.
+    float3 traceOrigin = origin + surfaceNormal * pc.params.w;
 
     uint rayCount = pc.grid.w * pc.grid.w;
     uint frame = uint(pc.params.x);
@@ -128,7 +142,7 @@ ProbeSh main(float4 position : SV_Position) {
     for (uint ray = 0u; ray < rayCount; ++ray) {
         float3 direction =
             giProbeRayDirection(ray, frame, probeIndex, pc.grid.w, jitterPeriod);
-        TieredHit hit = traceTiered(origin, direction, tMax);
+        TieredHit hit = traceTiered(traceOrigin, direction, tMax);
 
         float3 cameraPosition = shadowParams.cameraPosition.xyz;
 

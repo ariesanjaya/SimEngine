@@ -492,7 +492,8 @@ void ProbeField::RecordFilterPass(VkCommandBuffer cmd, const glm::uvec2& counts,
 }
 
 void ProbeField::Record(VkCommandBuffer cmd, VkDescriptorSet frameSet, const ProbeGrid& grid,
-                        uint32_t frameIndex, float traceRange, bool resetHistory) {
+                        uint32_t frameIndex, float traceRange, float normalBias,
+                        bool resetHistory) {
     if (!IsValid() || grid.ProbeCount() == 0 || tracePipeline_ == VK_NULL_HANDLE) {
         return;
     }
@@ -554,7 +555,7 @@ void ProbeField::Record(VkCommandBuffer cmd, VkDescriptorSet frameSet, const Pro
     ProbePush push;
     push.grid = {counts.x, counts.y, grid.Settings().tileSize, grid.Settings().raysPerAxis};
     push.params = {static_cast<float>(frameIndex),
-                   static_cast<float>(grid.Settings().jitterPeriod), traceRange, 0.0f};
+                   static_cast<float>(grid.Settings().jitterPeriod), traceRange, normalBias};
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, tracePipeline_);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, traceLayout_, 0, 1, &frameSet,
                             0, nullptr);

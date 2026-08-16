@@ -63,8 +63,17 @@ public:
     /// seperti GI yang masuk akal: kabur, berwarna benar di dekat dinding
     /// berwarna, dan stabil. Yang tidak dilakukannya hanyalah memantulkan
     /// cahaya.
+    ///
+    /// `normalBias` adalah pergeseran titik asal sinar sepanjang normal
+    /// permukaan, meter. **Nol menghidupkan kembali separuh bug di atas.**
+    /// Memperbaiki `traceRange` saja tidak cukup: sphere tracing yang berangkat
+    /// tepat dari permukaan berhenti pada langkah pertama berapa pun jangkauan
+    /// yang diberikan kepadanya, karena jarak di permukaan nol dan ambang
+    /// berhentinya setengah voxel. Keduanya berbagi akar yang sama — titik asal
+    /// yang duduk di permukaan — tapi hanya satu di antaranya yang bisa
+    /// disembuhkan oleh jangkauan.
     void Record(VkCommandBuffer cmd, VkDescriptorSet frameSet, const ProbeGrid& grid,
-                uint32_t frameIndex, float traceRange, bool resetHistory);
+                uint32_t frameIndex, float traceRange, float normalBias, bool resetHistory);
 
     bool IsValid() const { return normalImage_ != VK_NULL_HANDLE; }
     VkImageView NormalView() const { return normalView_; }

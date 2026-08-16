@@ -38,6 +38,27 @@ struct ProbeGridSettings {
     /// kriterianya sendiri; yang membuat jendela sependek ini bisa ditoleransi
     /// adalah penyaring à-trous dan penjepitan riwayat.
     uint32_t accumulationFrames = 5;
+    /// Pergeseran titik asal sinar sepanjang normal permukaan, dalam voxel
+    /// kaskade SDF terhalus.
+    ///
+    /// **Tanpa ini setiap sinar mengenai permukaan tempat ia berangkat.** Titik
+    /// asal probe direkonstruksi dari depth buffer, jadi ia duduk tepat di
+    /// permukaan — dan sphere tracing yang mulai di permukaan berhenti pada
+    /// langkah pertama, karena jarak di sana nol sedangkan ambang berhentinya
+    /// setengah voxel. Arah sinarnya tidak berpengaruh sama sekali: yang
+    /// menunjuk lurus menjauh pun mengenai, pada jarak nol.
+    ///
+    /// Gejalanya bukan galat melainkan gambar yang tampak masuk akal — sinar
+    /// yang "mengenai" dirinya sendiri lalu dibuang karena cache belum
+    /// mengenalnya, dan probe yang seluruh sinarnya dibuang mengembalikan hitam.
+    /// Inilah sebab dinding Cornell box tetap gelap sesudah `traceRange`
+    /// diperbaiki: keduanya berbagi akar yang sama, tapi yang ini tidak
+    /// bergantung pada jangkauan trace sama sekali.
+    ///
+    /// Satu voxel, bukan setengah: ambangnya sendiri setengah voxel, jadi
+    /// setengah voxel adalah tepat di batasnya — dan sampel trilinear di dekat
+    /// permukaan meleset cukup untuk melewatinya.
+    float normalBiasVoxels = 1.0f;
     /// Panjang urutan jitter sebelum ia berulang.
     ///
     /// **Terpisah dari jendela akumulasi, dan pemisahannya lahir dari sebuah
