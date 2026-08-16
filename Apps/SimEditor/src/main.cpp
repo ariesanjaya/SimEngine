@@ -34,6 +34,7 @@
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <string>
 #include <vector>
@@ -315,11 +316,30 @@ int main(int argc, char** argv) {
     // EditorFramework tidak boleh melihat satu pun dari keduanya.
     editor::ScreenshotFn captureWindow;
     if (swapchain.CanCapture()) {
-        captureWindow = [&swapchain](std::vector<uint8_t>& png, std::string& error) {
+        captureWindow = [&swapchain](const editor::CaptureRect* crop, std::vector<uint8_t>& png,
+                                     std::string& error) {
             std::vector<uint8_t> rgba;
             uint32_t width = 0;
             uint32_t height = 0;
             if (!swapchain.CaptureLastPresented(rgba, width, height, error)) {
+                return false;
+            }
+
+            // Rect dijepit ke dalam gambar. Yang memintanya bekerja dalam satuan
+            // logis ImGui dan menerjemahkannya sendiri ke piksel; selisih satu
+            // piksel di tepi adalah pembulatan, bukan alasan menolak.
+            uint32_t originX = 0;
+            uint32_t originY = 0;
+            uint32_t cropWidth = width;
+            uint32_t cropHeight = height;
+            if (crop != nullptr && crop->width > 0 && crop->height > 0) {
+                originX = std::min(crop->x, width);
+                originY = std::min(crop->y, height);
+                cropWidth = std::min(crop->width, width - originX);
+                cropHeight = std::min(crop->height, height - originY);
+            }
+            if (cropWidth == 0 || cropHeight == 0) {
+                error = "the requested crop is outside the window";
                 return false;
             }
             // **Alfa dibuang, bukan dibawa.** Jendela editor tidak punya alfa
@@ -328,17 +348,22 @@ int main(int argc, char** argv) {
             // dibaca kembali warnanya bisa berbeda dari yang dikirim. Tiga kanal
             // menghilangkan seluruh pertanyaan itu, dan berkasnya seperempat
             // lebih kecil.
-            std::vector<uint8_t> rgb(static_cast<std::size_t>(width) * height * 3u);
-            for (std::size_t pixel = 0; pixel < rgb.size() / 3u; ++pixel) {
-                rgb[pixel * 3u + 0u] = rgba[pixel * 4u + 0u];
-                rgb[pixel * 3u + 1u] = rgba[pixel * 4u + 1u];
-                rgb[pixel * 3u + 2u] = rgba[pixel * 4u + 2u];
+            std::vector<uint8_t> rgb(static_cast<std::size_t>(cropWidth) * cropHeight * 3u);
+            for (uint32_t row = 0; row < cropHeight; ++row) {
+                const std::size_t source =
+                    (static_cast<std::size_t>(originY + row) * width + originX) * 4u;
+                const std::size_t target = static_cast<std::size_t>(row) * cropWidth * 3u;
+                for (uint32_t column = 0; column < cropWidth; ++column) {
+                    rgb[target + column * 3u + 0u] = rgba[source + column * 4u + 0u];
+                    rgb[target + column * 3u + 1u] = rgba[source + column * 4u + 1u];
+                    rgb[target + column * 3u + 2u] = rgba[source + column * 4u + 2u];
+                }
             }
             rgba = std::vector<uint8_t>();
 
             imageio::Image image;
-            image.desc.width = width;
-            image.desc.height = height;
+            image.desc.width = cropWidth;
+            image.desc.height = cropHeight;
             image.desc.channels = 3;
             image.desc.type = imageio::PixelType::UInt8;
             // Swapchain-nya UNORM dan ImGui menggambar dengan warna yang sudah

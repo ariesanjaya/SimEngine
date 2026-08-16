@@ -290,7 +290,7 @@ ai::ToolDefinition EditorScreenshot(ScreenshotFn screenshot) {
     tool.handler = [screenshot = std::move(screenshot)](std::string_view) {
         std::vector<uint8_t> png;
         std::string error;
-        if (!screenshot(png, error)) {
+        if (!screenshot(/*crop=*/nullptr, png, error)) {
             return Text("Could not capture the window: " + error, /*isError=*/true);
         }
         ai::ToolResult result;
@@ -396,21 +396,62 @@ ai::ToolDefinition ViewportCapture(EditorApp& app, ScreenshotFn screenshot) {
 
         std::vector<uint8_t> png;
         std::string error;
-        std::future<bool> captured =
-            MainThreadQueue::Get().Submit([&screenshot, &png, &error]() {
-                return screenshot(png, error);
+        bool cropped = false;
+        std::future<bool> captured = MainThreadQueue::Get().Submit(
+            [&app, &screenshot, &png, &error, &cropped]() {
+                // **Rect diterjemahkan di main thread, bersama tangkapannya.**
+                // Membacanya lebih dulu lalu memotong belakangan berarti memakai
+                // tata letak frame yang lain — panel bisa saja sudah diseret di
+                // antara keduanya, dan potongannya lalu memuat separuh panel
+                // tetangga tanpa satu pun tanda.
+                const EditorContext::ViewportRect& rect = app.Context().viewportRect;
+                if (rect.size.x <= 0.0f || rect.size.y <= 0.0f || rect.mainSize.x <= 0.0f) {
+                    return screenshot(/*crop=*/nullptr, png, error);
+                }
+                // Ukuran gambar belum diketahui sebelum ditangkap, jadi skalanya
+                // diminta dari tangkapan itu sendiri: potong dua langkah, yang
+                // pertama hanya untuk mengetahui lebarnya.
+                std::vector<uint8_t> probe;
+                std::string probeError;
+                if (!screenshot(/*crop=*/nullptr, probe, probeError)) {
+                    error = probeError;
+                    return false;
+                }
+                // Lebar PNG ada di byte 16..19 kepala IHDR-nya.
+                if (probe.size() < 24) {
+                    png = std::move(probe);
+                    return true;
+                }
+                const uint32_t imageWidth = (uint32_t(probe[16]) << 24) |
+                                            (uint32_t(probe[17]) << 16) |
+                                            (uint32_t(probe[18]) << 8) | uint32_t(probe[19]);
+                const float scale = static_cast<float>(imageWidth) / rect.mainSize.x;
+                CaptureRect crop;
+                crop.x = static_cast<uint32_t>(std::max(0.0f, rect.position.x * scale));
+                crop.y = static_cast<uint32_t>(std::max(0.0f, rect.position.y * scale));
+                crop.width = static_cast<uint32_t>(std::max(1.0f, rect.size.x * scale));
+                crop.height = static_cast<uint32_t>(std::max(1.0f, rect.size.y * scale));
+                if (!screenshot(&crop, png, error)) {
+                    return false;
+                }
+                cropped = true;
+                return true;
             });
-        if (captured.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+        if (captured.wait_for(std::chrono::seconds(10)) != std::future_status::ready) {
             return Text("The editor did not answer; it may be showing a modal dialog.",
                         /*isError=*/true);
         }
         if (!captured.get()) {
-            return Text("Could not capture the window: " + error, /*isError=*/true);
+            return Text("Could not capture the viewport: " + error, /*isError=*/true);
         }
 
         ai::ToolResult result;
-        result.text = hasFrom ? "Editor window, viewport looking from the point you gave."
-                              : "Editor window, viewport as it already was.";
+        // Disebut apa yang benar-benar dikirim. Gambar seluruh jendela yang
+        // diperkenalkan sebagai viewport membuat agen menyimpulkan viewport-nya
+        // memuat panel dan menu.
+        result.text = std::string(cropped ? "Viewport only" : "Whole editor window (the "
+                                                              "viewport rectangle is not known)") +
+                      (hasFrom ? ", looking from the point you gave." : ", as it already was.");
         result.imageBytes = std::move(png);
         result.imageMimeType = "image/png";
         return result;

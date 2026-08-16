@@ -35,7 +35,21 @@ class EditorApp;
 /// Mengembalikan false dan mengisi `error` bila gagal. Kosong berarti editor ini
 /// tidak bisa menangkap layar sama sekali, dan tool-nya tidak didaftarkan —
 /// lebih baik daripada tool yang ada tapi selalu gagal.
-using ScreenshotFn = std::function<bool(std::vector<uint8_t>& pngBytes, std::string& error)>;
+/// Sepetak piksel di dalam jendela. Nullptr berarti seluruh jendela.
+struct CaptureRect {
+    uint32_t x = 0;
+    uint32_t y = 0;
+    uint32_t width = 0;
+    uint32_t height = 0;
+};
+
+/// `crop` nullptr berarti seluruh jendela. Rect yang keluar batas gambar
+/// **dijepit**, bukan ditolak: yang meminta memakai satuan logis dan
+/// menerjemahkannya sendiri, jadi selisih satu piksel di tepi adalah pembulatan,
+/// bukan kesalahan yang layak menggagalkan tangkapan.
+using ScreenshotFn =
+    std::function<bool(const CaptureRect* crop, std::vector<uint8_t>& pngBytes,
+                       std::string& error)>;
 
 void RegisterEditorTools(ai::ToolRegistry& tools, ai::ResourceRegistry& resources,
                          EditorApp& app, ScreenshotFn screenshot = {});

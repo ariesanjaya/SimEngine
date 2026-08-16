@@ -311,6 +311,15 @@ public:
         renderer->Render(desc, sceneView_.Scene());
 
         const ImVec2 imagePos = ImGui::GetCursorScreenPos();
+        // Diumumkan supaya `viewport.capture` bisa memotong tangkapan jendela ke
+        // gambar ini saja. Relatif terhadap titik asal viewport utama: `imagePos`
+        // berada di ruang layar virtual ImGui, yang titik nolnya bukan pojok
+        // jendela ketika multi-viewport menyala.
+        if (const ImGuiViewport* main = ImGui::GetMainViewport()) {
+            context.viewportRect.position = Vec2(imagePos.x - main->Pos.x, imagePos.y - main->Pos.y);
+            context.viewportRect.size = Vec2(size.x, size.y);
+            context.viewportRect.mainSize = Vec2(main->Size.x, main->Size.y);
+        }
         const render::TextureHandle texture = renderer->ColorTarget();
         if (texture != render::kInvalidTexture) {
             // UV diambil dari renderer, bukan (1,1): target render boleh lebih

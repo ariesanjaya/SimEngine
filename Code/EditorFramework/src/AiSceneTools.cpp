@@ -338,10 +338,33 @@ ai::ToolDefinition EntityGet(EditorApp& app) {
                         /*isError=*/true);
         }
 
+        // **Penyaring, bukan paginasi.** Yang bisa membesar di sini bukan jumlah
+        // komponen — ia terbatas pada apa yang terdaftar — melainkan isi satu
+        // komponen yang memuat larik panjang. Paginasi atas daftar komponen
+        // karena itu memotong di tempat yang salah; yang benar-benar dibutuhkan
+        // agen adalah "tunjukkan Transform-nya saja".
+        std::vector<std::string> wanted;
+        if (arguments.contains("components") && arguments.at("components").is_array()) {
+            for (const json& item : arguments.at("components")) {
+                if (item.is_string()) {
+                    wanted.push_back(item.get<std::string>());
+                }
+            }
+        }
+
         json components = json::object();
+        json skipped = json::array();
         for (const scene::ComponentOps& ops : scene::ComponentRegistry::Get().All()) {
             void* component = ops.tryGet(world->Registry(), static_cast<entt::entity>(entity));
             if (component == nullptr) {
+                continue;
+            }
+            if (!wanted.empty() &&
+                std::find(wanted.begin(), wanted.end(), ops.type->name) == wanted.end()) {
+                // Yang disaring keluar tetap disebut namanya: daftar yang
+                // dipotong tanpa jejak membuat agen menyimpulkan entity-nya
+                // tidak punya komponen itu.
+                skipped.push_back(ops.type->name);
                 continue;
             }
             // Rumus yang sama dengan yang menulis berkas level. Dua jalur
@@ -355,13 +378,18 @@ ai::ToolDefinition EntityGet(EditorApp& app) {
 
         json result = DescribeEntity(*world, entity);
         result["componentValues"] = std::move(components);
+        if (!skipped.empty()) {
+            result["notReturned"] = std::move(skipped);
+        }
         return Structured(result);
     };
     tool.inputSchemaJson = R"({
   "type": "object",
   "required": ["entity"],
   "properties": {
-    "entity": {"type": "string", "description": "Entity GUID."}
+    "entity": {"type": "string", "description": "Entity GUID."},
+    "components": {"type": "array", "items": {"type": "string"},
+                   "description": "Only these components. Omit for all of them; the ones left out are listed under \"notReturned\"."}
   }
 })";
     return tool;
