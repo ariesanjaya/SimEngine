@@ -415,6 +415,18 @@ int main(int argc, char** argv) {
     // Panel AI Bridge menampilkan keadaannya dan bisa mematikan-menyalakannya.
     // Closure-nya dipegang context, bukan panel: panel bisa ditutup, dan yang
     // ditutup tidak boleh membawa serta kemampuan menyalakan servernya lagi.
+    // **Penyetuju dipasang sebelum Start.** Ia dibaca dari thread jaringan, dan
+    // memasangnya sesudah server melayani permintaan adalah perlombaan yang
+    // tidak punya arti yang benar.
+    //
+    // Tenggatnya dua menit: orang butuh waktu membaca argumen sebuah tool call,
+    // dan lima detik yang dipakai `mainThreadTimeout` adalah tenggat untuk
+    // menunggu mesin. Yang lewat batas ditolak.
+    mcpServer.SetApprover([&app](const ai::ToolDefinition& tool, std::string_view arguments) {
+        return app.Approvals().Ask({tool.name, ai::ToString(tool.permission),
+                                    std::string(arguments)},
+                                   std::chrono::minutes(2));
+    });
     app.Context().mcpServer = &mcpServer;
     app.Context().mcpStart = [&mcpServer, &mcpTools, &mcpResources, &mcpConfig]() {
         return mcpServer.Start(mcpTools, mcpResources, mcpConfig);
@@ -596,6 +608,7 @@ int main(int argc, char** argv) {
     // Sebelum apa pun yang lain. `Stop()` menunggu thread jaringannya selesai,
     // jadi sesudah baris ini dijamin tidak ada handler yang masih memegang
     // `World` — dan itulah kriteria terima A0 nomor 4.
+    app.Approvals().Shutdown();
     mcpServer.Stop();
     // Induk dialog dilepas sebelum jendelanya dihancurkan: sebuah dialog yang
     // masih terbuka saat editor ditutup akan menunjuk jendela yang sudah tidak
