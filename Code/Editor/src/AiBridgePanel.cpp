@@ -1,4 +1,6 @@
 #include "Sim/AIBridge/McpServer.h"
+#include "Sim/Editor/Command.h"
+#include "Sim/Editor/EditorContext.h"
 #include "Sim/Editor/Icons.h"
 #include "Sim/Editor/Panel.h"
 #include "Sim/Editor/PanelIds.h"
@@ -7,6 +9,7 @@
 #include <imgui.h>
 
 #include <string>
+#include <vector>
 
 namespace sim::editor {
 namespace {
@@ -74,8 +77,52 @@ public:
             }
 
             ImGui::Separator();
+
+            // **Pilihan modenya di sini, dan berlaku untuk semua klien.**
+            // Server yang sama melayani Claude Code dan panel AI Assistant;
+            // mode yang hanya ditegakkan salah satunya adalah mode yang tidak
+            // menjanjikan apa-apa.
+            ai::PermissionMode mode = server->Mode();
+            const struct {
+                ai::PermissionMode value;
+                const char* label;
+                const char* help;
+            } kModes[] = {
+                {ai::PermissionMode::ReadOnly, "read-only",
+                 "Only tools that read. Everything else is refused, and does not even appear "
+                 "in the agent's tool list."},
+                {ai::PermissionMode::Ask, "ask",
+                 "Every tool that changes data asks first. With nothing able to ask, they are "
+                 "refused rather than run quietly."},
+                {ai::PermissionMode::Auto, "auto",
+                 "Tools that change data run on their own. Tools that cannot be undone still "
+                 "ask."},
+            };
+            ImGui::TextUnformatted("Permission");
+            for (const auto& entry : kModes) {
+                ImGui::SameLine();
+                if (ImGui::RadioButton(entry.label, mode == entry.value)) {
+                    server->SetMode(entry.value);
+                    mode = entry.value;
+                }
+            }
+            for (const auto& entry : kModes) {
+                if (entry.value == mode) {
+                    ImGui::TextWrapped("%s", entry.help);
+                }
+            }
+
+            ImGui::Separator();
             ImGui::Text("Served   %llu",
                         static_cast<unsigned long long>(server->RequestCount()));
+            const uint64_t refused = server->RefusedByPolicyCount();
+            if (refused > 0) {
+                // Bukan merah: ini bukan tanda bahaya, ini mode izin yang
+                // bekerja. Yang layak dilihat orang adalah bahwa agen memang
+                // sedang mencoba lebih dari yang diizinkan.
+                ImGui::TextDisabled("Refused  %llu (permission)",
+                                    static_cast<unsigned long long>(refused));
+            }
             const uint64_t rejected = server->RejectedCount();
             if (rejected > 0) {
                 // Merah, dan bukan karena dramatis: angka ini hanya naik kalau
@@ -102,6 +149,39 @@ public:
         }
 
         ImGui::Spacing();
+
+        // **Undo semua yang dilakukan agen.** Tiap mutasi agen dibungkus
+        // transaksi bernama "AI: <tool>" sejak A1, jadi yang dicari di sini
+        // adalah entri `AI:` paling awal yang masih ada di riwayat — bukan
+        // sebuah penanda sesi yang harus dijaga tetap benar di tempat kedua.
+        if (CommandHistory* history = context.history) {
+            const std::vector<CommandHistory::Entry>& entries = history->Entries();
+            int firstAgentEntry = -1;
+            for (int at = 0; at < static_cast<int>(entries.size()); ++at) {
+                if (entries[static_cast<std::size_t>(at)].name.rfind("AI: ", 0) == 0) {
+                    firstAgentEntry = at;
+                    break;
+                }
+            }
+            ImGui::BeginDisabled(firstAgentEntry < 0);
+            if (ImGui::Button("Undo everything the agent did")) {
+                history->JumpTo(firstAgentEntry);
+            }
+            ImGui::EndDisabled();
+            if (firstAgentEntry < 0) {
+                ImGui::TextDisabled("The agent has not changed anything in this history.");
+            } else {
+                // Dikatakan apa adanya. Riwayatnya satu garis, jadi mundur ke
+                // sebelum perubahan agen yang pertama juga membatalkan
+                // suntingan orang yang datang sesudahnya — dan tombol yang
+                // tidak menyebutkan itu akan mengejutkan seseorang.
+                ImGui::TextWrapped(
+                    "Rewinds to before the agent's first change. Anything you changed after "
+                    "that point is undone too; redo brings it back.");
+            }
+            ImGui::Spacing();
+        }
+
         ImGui::TextDisabled("Register with Claude Code:");
         const std::string command =
             "claude mcp add simengine --transport http " +

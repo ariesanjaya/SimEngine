@@ -1,4 +1,5 @@
 #include "Sim/Editor/EditorApp.h"
+#include "Sim/Editor/ToolApproval.h"
 
 #include "Sim/Assets/TextureBakery.h"
 #include "Sim/Editor/MaterialPrograms.h"
@@ -1177,6 +1178,17 @@ bool EditorApp::LoadLevel(const std::filesystem::path& path) {
 void EditorApp::DrawFrame(float deltaSeconds) {
     context_.deltaSeconds = deltaSeconds;
 
+    // **Digambar sebelum percabangan layar, bukan sesudahnya.** Kedua cabang di
+    // bawah `return` lebih awal, dan agen bisa memanggil tool di layar mana pun
+    // — justru `level.open` adalah tool pertama yang dipanggilnya, tepat saat
+    // pemilih level sedang tampil. Sebuah dialog persetujuan yang hanya muncul
+    // di satu dari tiga layar akan menahan tool call sampai tenggatnya habis,
+    // tanpa satu pun tanda tentang kenapa.
+    //
+    // Ini ketahuan dengan menjalankannya: kodenya terbaca benar di tempatnya
+    // yang lama, tepat di sebelah dialog level.
+    DrawApprovalPrompt();
+
     // **Tanpa project, tidak ada yang lain digambar sama sekali.** Bukan sekadar
     // urutan: panel membaca indeks aset, folder level, dan runtime skrip, dan
     // ketiganya baru punya arti sesudah sebuah project dipilih. Menggambar shell
@@ -1318,6 +1330,60 @@ void EditorApp::ApplyTimeOfDay(float deltaSeconds) {
         world_.MarkTransformDirty(entity);
         break;
     }
+}
+
+void EditorApp::DrawApprovalPrompt() {
+    // **Digambar di sini, bukan di panel AI Bridge.** Panel bisa ditutup, dan
+    // mode `ask` yang berhenti bertanya karena sebuah panel ditutup akan
+    // menahan setiap tool call agen sampai tenggatnya habis — tanpa satu pun
+    // tanda di layar tentang kenapa.
+    ToolApprovalGate::Question question;
+    if (!approvals_.Pending(question)) {
+        return;
+    }
+
+    if (!ImGui::IsPopupOpen("##ToolApproval")) {
+        ImGui::OpenPopup("##ToolApproval");
+    }
+    const ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+    ImGui::SetNextWindowPos(center, ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
+    if (!ImGui::BeginPopupModal("##ToolApproval", nullptr, ImGuiWindowFlags_AlwaysAutoResize)) {
+        return;
+    }
+
+    ImGui::Text("The agent wants to run %s", question.tool.c_str());
+    ImGui::TextDisabled("%s", question.permission.c_str());
+    ImGui::Separator();
+
+    // **Argumennya ditampilkan, dan itu yang membuat ini sebuah persetujuan.**
+    // Dialog yang hanya menyebut nama tool meminta orang menyetujui sesuatu yang
+    // tidak bisa ia lihat, dan yang tidak bisa dilihat akan disetujui setiap
+    // kali. Panjangnya dibatasi: tool batch mengirim ribuan baris, dan dialog
+    // setinggi layar sama tidak terbacanya dengan dialog kosong.
+    constexpr std::size_t kMaxShown = 2000;
+    std::string shown = question.arguments;
+    if (shown.size() > kMaxShown) {
+        shown.resize(kMaxShown);
+        shown += "\n… (" + std::to_string(question.arguments.size() - kMaxShown) +
+                 " more characters)";
+    }
+    ImGui::InputTextMultiline("##arguments", shown.data(), shown.size() + 1,
+                              ImVec2(520.0f, 220.0f), ImGuiInputTextFlags_ReadOnly);
+
+    ImGui::Separator();
+    if (ImGui::Button("Allow", ImVec2(120.0f, 0.0f))) {
+        approvals_.Answer(true);
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::SameLine();
+    // Menolak lebih dulu dalam urutan tab, dan mendapat Escape: yang ragu-ragu
+    // menekan Escape, dan yang ragu-ragu sedang tidak menyetujui.
+    if (ImGui::Button("Refuse", ImVec2(120.0f, 0.0f)) ||
+        ImGui::IsKeyPressed(ImGuiKey_Escape)) {
+        approvals_.Answer(false);
+        ImGui::CloseCurrentPopup();
+    }
+    ImGui::EndPopup();
 }
 
 void EditorApp::DrawLevelDialogs() {

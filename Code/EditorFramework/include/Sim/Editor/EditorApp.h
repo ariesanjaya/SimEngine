@@ -13,6 +13,7 @@
 #include "Sim/Editor/PanelManager.h"
 #include "Sim/Editor/ProjectLibrary.h"
 #include "Sim/Editor/Selection.h"
+#include "Sim/Editor/ToolApproval.h"
 #include "Sim/Editor/SkinnedPreview.h"
 #include "Sim/Scene/World.h"
 
@@ -124,6 +125,11 @@ public:
     /// menurunkan layar ini, jadi memuat level dari mana pun selain pemilihnya
     /// sendiri menukar isi dunia diam-diam sementara editor tetap menampilkan
     /// pemilih — dan tidak ada satu pun cara mengetahuinya dari luar.
+    /// Gerbang persetujuan mode `ask`. Composition root memasangnya ke
+    /// `McpServer::SetApprover`; `EditorApp` yang menggambar dialognya, karena
+    /// dialog itu harus muncul walau panel AI Bridge tertutup.
+    ToolApprovalGate& Approvals() { return approvals_; }
+
     bool IsAwaitingLevelChoice() const { return awaitingLevelChoice_; }
 
     /// Membuat berkas level kosong bernama `name` lalu membukanya.
@@ -245,7 +251,11 @@ private:
     std::string newLevelName_;
 
     void ApplyTimeOfDay(float deltaSeconds);
+    ToolApprovalGate approvals_;
+
     void DrawLevelDialogs();
+    void DrawApprovalPrompt();
+
     void DrawExitPrompt();
     void UpdateAutosave(float deltaSeconds);
 

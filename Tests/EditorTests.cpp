@@ -12,6 +12,7 @@
 #include "Sim/Editor/PanelIds.h"
 #include "Sim/Editor/PanelManager.h"
 #include "Sim/Editor/Selection.h"
+#include "Sim/Editor/ToolApproval.h"
 #include "Sim/Editor/SourceImport.h"
 
 #include <doctest/doctest.h>
@@ -20,6 +21,9 @@
 #include <cstdio>
 #include <cstring>
 #include <atomic>
+#include <chrono>
+#include <thread>
+#include <future>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -1005,4 +1009,115 @@ TEST_CASE("Setiap panel yang disusun layout benar-benar mendapat node dock") {
 
     ImGui::EndFrame();
     ImGui::DestroyContext(context);
+}
+
+// Gerbang persetujuan menyeberangkan satu pertanyaan dari thread jaringan ke
+// main thread dan menahan yang bertanya sampai dijawab. Yang diuji di sini
+// adalah perilaku threading-nya; dialognya sendiri hanya menggambar apa yang
+// dilaporkan `Pending`.
+TEST_CASE("Gerbang persetujuan menahan penanya sampai dijawab") {
+    ToolApprovalGate gate;
+
+    SUBCASE("jawaban ya diteruskan") {
+        std::atomic<bool> answered{false};
+        std::future<bool> asking = std::async(std::launch::async, [&gate] {
+            return gate.Ask({"entity.create", "write", R"({"name":"Kubus"})"},
+                            std::chrono::seconds(5));
+        });
+
+        // Meniru main thread: menunggu pertanyaannya muncul, lalu menjawabnya.
+        ToolApprovalGate::Question seen;
+        for (int spin = 0; spin < 500 && !gate.Pending(seen); ++spin) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        CHECK(seen.tool == "entity.create");
+        CHECK(seen.permission == "write");
+        // Argumennya ikut menyeberang: persetujuan tanpa melihat apa yang
+        // disetujui bukan persetujuan.
+        CHECK(seen.arguments.find("Kubus") != std::string::npos);
+        gate.Answer(true);
+        answered = true;
+
+        CHECK(asking.get());
+        CHECK(answered.load());
+    }
+
+    SUBCASE("jawaban tidak diteruskan") {
+        std::future<bool> asking = std::async(std::launch::async, [&gate] {
+            return gate.Ask({"file.write", "dangerous", "{}"}, std::chrono::seconds(5));
+        });
+        ToolApprovalGate::Question seen;
+        for (int spin = 0; spin < 500 && !gate.Pending(seen); ++spin) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        gate.Answer(false);
+        CHECK_FALSE(asking.get());
+    }
+
+    SUBCASE("tenggat habis berarti menolak, bukan menyetujui") {
+        // Menyetujui sesuatu karena tidak ada yang menjawab adalah kebalikan
+        // dari yang diminta mode `ask`.
+        const auto started = std::chrono::steady_clock::now();
+        CHECK_FALSE(gate.Ask({"entity.delete", "write", "{}"},
+                             std::chrono::milliseconds(120)));
+        CHECK(std::chrono::steady_clock::now() - started >= std::chrono::milliseconds(100));
+        // Dan gerbangnya bersih sesudahnya: pertanyaan yang kedaluwarsa tidak
+        // boleh tertinggal sebagai dialog yang tidak pernah hilang.
+        ToolApprovalGate::Question stale;
+        CHECK_FALSE(gate.Pending(stale));
+    }
+
+    SUBCASE("dua penanya dilayani bergiliran, bukan bersamaan") {
+        // Dua dialog yang saling menimpa membuat yang diklik orang menjadi
+        // tidak jelas milik yang mana.
+        std::atomic<int> concurrent{0};
+        std::atomic<int> peak{0};
+        const auto ask = [&](const char* name) {
+            return std::async(std::launch::async, [&gate, name] {
+                return gate.Ask({name, "write", "{}"}, std::chrono::seconds(5));
+            });
+        };
+        std::future<bool> first = ask("test.a");
+        std::future<bool> second = ask("test.b");
+
+        std::vector<std::string> order;
+        for (int answered = 0; answered < 2;) {
+            ToolApprovalGate::Question seen;
+            if (!gate.Pending(seen)) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                continue;
+            }
+            // Hanya satu yang pernah terlihat menunggu pada satu waktu.
+            concurrent.fetch_add(1);
+            peak.store(std::max(peak.load(), concurrent.load()));
+            order.push_back(seen.tool);
+            gate.Answer(true);
+            concurrent.fetch_sub(1);
+            ++answered;
+        }
+        CHECK(first.get());
+        CHECK(second.get());
+        CHECK(peak.load() == 1);
+        REQUIRE(order.size() == 2);
+        CHECK(order[0] != order[1]);
+    }
+
+    SUBCASE("Shutdown melepaskan yang sedang menunggu, dengan menolaknya") {
+        std::future<bool> asking = std::async(std::launch::async, [&gate] {
+            // Tenggat panjang: yang mengakhirinya harus Shutdown, bukan waktu.
+            return gate.Ask({"lua.eval", "dangerous", "{}"}, std::chrono::seconds(30));
+        });
+        ToolApprovalGate::Question seen;
+        for (int spin = 0; spin < 500 && !gate.Pending(seen); ++spin) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        const auto started = std::chrono::steady_clock::now();
+        gate.Shutdown();
+        CHECK_FALSE(asking.get());
+        // Penutupan editor tidak boleh memakan waktu setenggat penuh.
+        CHECK(std::chrono::steady_clock::now() - started < std::chrono::seconds(5));
+
+        // Dan sesudah ditutup, pertanyaan baru langsung ditolak.
+        CHECK_FALSE(gate.Ask({"entity.create", "write", "{}"}, std::chrono::seconds(30)));
+    }
 }

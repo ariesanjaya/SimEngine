@@ -26,6 +26,7 @@ sim_add_library(EditorFramework
         src/Selection.cpp
         src/TerrainStore.cpp
         src/TextureSettingsCommand.cpp
+        src/ToolApproval.cpp
         src/Widgets.cpp
         src/WhiteboxCommands.cpp
         src/WhiteboxStore.cpp

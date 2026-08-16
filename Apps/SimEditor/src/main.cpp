@@ -37,6 +37,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -393,9 +394,39 @@ int main(int argc, char** argv) {
     ai::McpServer mcpServer;
     ai::McpServerConfig mcpConfig;
     mcpConfig.advertisePath = configDir / "mcp.json";
+    // **Mode izin boleh ditetapkan dari baris perintah**, supaya sebuah editor
+    // bisa dijalankan read-only tanpa seseorang harus mengklik radio button
+    // lebih dulu — yang berarti mode itu tidak bisa diuji terhadap editor
+    // sungguhan, dan yang tidak bisa diuji tidak layak dipercaya. SimHeadless
+    // nanti memakai bendera yang sama.
+    for (int at = 1; at + 1 < argc; ++at) {
+        if (argv[at] == nullptr || std::string_view(argv[at]) != "--mcp-permission") {
+            continue;
+        }
+        ai::PermissionMode requested = ai::PermissionMode::Auto;
+        if (!ai::PermissionModeFromString(argv[at + 1], requested)) {
+            SIM_ERROR("Editor", "unknown --mcp-permission \"{}\"; known: read-only, ask, auto",
+                      argv[at + 1]);
+            return 1;
+        }
+        mcpConfig.permissionMode = requested;
+        SIM_INFO("Editor", "MCP permission mode: {}", ai::ToString(requested));
+    }
     // Panel AI Bridge menampilkan keadaannya dan bisa mematikan-menyalakannya.
     // Closure-nya dipegang context, bukan panel: panel bisa ditutup, dan yang
     // ditutup tidak boleh membawa serta kemampuan menyalakan servernya lagi.
+    // **Penyetuju dipasang sebelum Start.** Ia dibaca dari thread jaringan, dan
+    // memasangnya sesudah server melayani permintaan adalah perlombaan yang
+    // tidak punya arti yang benar.
+    //
+    // Tenggatnya dua menit: orang butuh waktu membaca argumen sebuah tool call,
+    // dan lima detik yang dipakai `mainThreadTimeout` adalah tenggat untuk
+    // menunggu mesin. Yang lewat batas ditolak.
+    mcpServer.SetApprover([&app](const ai::ToolDefinition& tool, std::string_view arguments) {
+        return app.Approvals().Ask({tool.name, ai::ToString(tool.permission),
+                                    std::string(arguments)},
+                                   std::chrono::minutes(2));
+    });
     app.Context().mcpServer = &mcpServer;
     app.Context().mcpStart = [&mcpServer, &mcpTools, &mcpResources, &mcpConfig]() {
         return mcpServer.Start(mcpTools, mcpResources, mcpConfig);
@@ -412,8 +443,23 @@ int main(int argc, char** argv) {
     // **Bukan pengganti project manager melainkan jalan pintas ke dalamnya:**
     // yang gagal dibuka tetap mendarat di manager beserta pesannya, bukan pada
     // editor kosong yang tidak menjelaskan apa-apa.
-    if (argc > 1 && argv[1] != nullptr && argv[1][0] != '\0') {
-        app.OpenProject(std::filesystem::path(argv[1]));
+    // Argumen pertama yang bukan bendera. Sebelum ada bendera, `argv[1]`
+    // selalu project — dan membiarkannya begitu berarti `--mcp-permission`
+    // dibuka sebagai nama folder.
+    for (int at = 1; at < argc; ++at) {
+        if (argv[at] == nullptr || argv[at][0] == '\0') {
+            continue;
+        }
+        const std::string_view argument(argv[at]);
+        if (argument == "--mcp-permission") {
+            ++at;  // nilainya, sudah dibaca di atas
+            continue;
+        }
+        if (argument.starts_with("--")) {
+            continue;
+        }
+        app.OpenProject(std::filesystem::path(argument));
+        break;
     }
 
     // Runtime Lua tidak lagi dipasang di sini. Ia memegang pointer ke indeks
@@ -562,6 +608,7 @@ int main(int argc, char** argv) {
     // Sebelum apa pun yang lain. `Stop()` menunggu thread jaringannya selesai,
     // jadi sesudah baris ini dijamin tidak ada handler yang masih memegang
     // `World` — dan itulah kriteria terima A0 nomor 4.
+    app.Approvals().Shutdown();
     mcpServer.Stop();
     // Induk dialog dilepas sebelum jendelanya dihancurkan: sebuah dialog yang
     // masih terbuka saat editor ditutup akan menunjuk jendela yang sudah tidak

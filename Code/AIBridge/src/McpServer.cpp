@@ -145,7 +145,61 @@ struct McpServer::Impl {
     std::atomic<uint16_t> port{0};
     std::atomic<uint64_t> requests{0};
     std::atomic<uint64_t> rejected{0};
+    std::atomic<uint64_t> refusedByPolicy{0};
     std::atomic<bool> running{false};
+    /// Dibaca dari thread jaringan, ditulis dari thread UI.
+    std::atomic<PermissionMode> mode{PermissionMode::Auto};
+    /// Dipasang sebelum `Start`. Tidak atomik dengan sengaja: mengganti
+    /// penyetuju saat server melayani permintaan adalah perlombaan yang tidak
+    /// punya arti yang benar, jadi ia tidak dijanjikan aman.
+    ToolApprover approver;
+
+    /// Apakah sebuah tool boleh dijalankan sekarang. Mengisi `refusal` bila tidak.
+    ///
+    /// Aturannya satu tabel, di satu tempat:
+    ///
+    ///   mode        Read   Write        Dangerous
+    ///   read-only   ya     tidak        tidak
+    ///   ask         ya     penyetuju    penyetuju
+    ///   auto        ya     ya           penyetuju bila ada, selain itu ya
+    ///
+    /// `Read` tidak pernah ditanyakan: tool yang hanya membaca tidak mengubah
+    /// apa pun, dan meminta persetujuan untuk melihat akan melatih pengguna
+    /// mengklik "ya" tanpa membacanya.
+    bool Allows(const ToolDefinition& tool, std::string_view arguments, std::string& refusal) {
+        if (tool.permission == ToolPermission::Read) {
+            return true;
+        }
+        const PermissionMode current = mode.load();
+        if (current == PermissionMode::ReadOnly) {
+            refusal = std::string("Refused: the editor is in read-only mode, and \"") +
+                      tool.name + "\" is a " + ToString(tool.permission) +
+                      " tool. Ask the person at the editor to change the mode in the AI "
+                      "Bridge panel.";
+            return false;
+        }
+        if (current == PermissionMode::Auto && tool.permission == ToolPermission::Write) {
+            return true;
+        }
+        if (!approver) {
+            if (current == PermissionMode::Auto) {
+                // Dangerous di mode auto tanpa penyetuju: tidak ada yang
+                // menunggu jawaban, dan menolak akan membuat mode ini tidak
+                // berguna justru pada mesin yang memang tidak punya UI.
+                return true;
+            }
+            refusal = std::string("Refused: the editor is in ask mode but has nobody to ask. "
+                                  "\"") +
+                      tool.name + "\" was not run.";
+            return false;
+        }
+        if (approver(tool, arguments)) {
+            return true;
+        }
+        refusal = std::string("Refused: the person at the editor did not approve \"") +
+                  tool.name + "\".";
+        return false;
+    }
 
     /// Menjalankan sesuatu di thread yang benar, dengan tenggat.
     ///
@@ -241,8 +295,16 @@ struct McpServer::Impl {
         }
 
         if (request.method == "tools/list") {
+            // Mode read-only menyembunyikan tool yang tidak akan dijalankannya.
+            // Agen yang tidak melihatnya tidak membuang panggilan mencobanya —
+            // dan daftar yang menawarkan sesuatu yang selalu ditolak adalah
+            // daftar yang berbohong.
+            const bool readOnly = mode.load() == PermissionMode::ReadOnly;
             json list = json::array();
             for (const ToolDefinition& tool : tools->All()) {
+                if (readOnly && tool.permission != ToolPermission::Read) {
+                    continue;
+                }
                 list.push_back(DescribeTool(tool));
             }
             return json{{"tools", std::move(list)}};
@@ -268,6 +330,18 @@ struct McpServer::Impl {
                     throw RpcException(RpcError::InvalidParams, "\"arguments\" must be an object");
                 }
                 argumentsJson = arguments.dump();
+            }
+
+            // **Diperiksa lagi di sini, bukan hanya disaring dari daftar.**
+            // Klien yang memegang daftar lama, atau yang menebak nama tool,
+            // tidak boleh lolos hanya karena ia tidak membaca daftar terbaru.
+            std::string refusal;
+            if (!Allows(*tool, argumentsJson, refusal)) {
+                refusedByPolicy.fetch_add(1);
+                SIM_WARN("AIBridge", "refused {} in {} mode", tool->name,
+                         ToString(mode.load()));
+                return json{{"content", json::array({json{{"type", "text"}, {"text", refusal}}})},
+                            {"isError", true}};
             }
 
             const ToolResult result = OnCorrectThread(
@@ -365,6 +439,7 @@ bool McpServer::Start(const ToolRegistry& tools, const ResourceRegistry& resourc
     impl_->tools = &tools;
     impl_->resources = &resources;
     impl_->config = config;
+    impl_->mode.store(config.permissionMode);
     if (impl_->config.bearerToken.empty() && impl_->config.generateBearerToken) {
         impl_->config.bearerToken = GenerateToken();
     }
@@ -490,5 +565,13 @@ uint64_t McpServer::RequestCount() const { return impl_->requests.load(); }
 uint64_t McpServer::RejectedCount() const { return impl_->rejected.load(); }
 
 std::string McpServer::BearerToken() const { return impl_->config.bearerToken; }
+
+PermissionMode McpServer::Mode() const { return impl_->mode.load(); }
+
+void McpServer::SetMode(PermissionMode mode) { impl_->mode.store(mode); }
+
+void McpServer::SetApprover(ToolApprover approver) { impl_->approver = std::move(approver); }
+
+uint64_t McpServer::RefusedByPolicyCount() const { return impl_->refusedByPolicy.load(); }
 
 }  // namespace sim::ai
