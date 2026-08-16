@@ -2,6 +2,7 @@ sim_add_library(Render
     SOURCES
         src/FrameGraph.cpp
         src/FrameGraphExecutor.cpp
+        src/Presenter.cpp
         src/VulkanRenderer.cpp
         src/Frustum.cpp
         src/Ibl.cpp
@@ -69,6 +70,7 @@ sim_compile_shaders(SimShadersGrid
         ${CMAKE_SOURCE_DIR}/Shaders/exposure.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/tonemap.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/fullscreen_uv.vert.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/present.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/bloom_down.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/bloom_up.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/sky_transmittance.frag.slang

@@ -49,6 +49,14 @@ public:
     /// Submit + present. Mengembalikan false bila swapchain perlu dibangun ulang.
     bool EndFrame(const Frame& frame);
 
+    /// Frame yang sedang berjalan, seperti yang diisi `BeginFrame` terakhir.
+    ///
+    /// **Ada supaya sebuah pass bisa menggambar ke layar tanpa frame-nya
+    /// diteruskan sebagai parameter melalui header publik `Sim::Render`.**
+    /// Header itu tidak boleh menyebut satu pun tipe Vulkan, dan `Frame` adalah
+    /// salah satunya. `commandBuffer` null berarti belum ada frame yang dimulai.
+    const Frame& CurrentFrame() const { return currentFrame_; }
+
     VkRenderPass RenderPass() const { return renderPass_; }
     VkFormat ImageFormat() const { return surfaceFormat_.format; }
     uint32_t ImageCount() const { return static_cast<uint32_t>(images_.size()); }
@@ -111,6 +119,7 @@ private:
     /// bila belum ada. Isinya masih utuh sesudah present — yang berpindah ke
     /// mesin presentasi adalah haknya menampilkan, bukan pikselnya.
     uint32_t lastPresented_ = UINT32_MAX;
+    Frame currentFrame_{};
 };
 
 }  // namespace sim::rhi

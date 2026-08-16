@@ -13,6 +13,7 @@
 #include "Sim/RHI/Device.h"
 #include "Sim/RHI/GpuProfiler.h"
 #include "Sim/RHI/RenderTarget.h"
+#include "PresentSource.h"
 #include "Sim/RHI/TextureRegistry.h"
 #include "Sim/Render/FrameGraph.h"
 #include "Sim/Render/Frustum.h"
@@ -420,7 +421,7 @@ Mat4 InstanceTransform(const Mat4& model) {
 /// disimpulkannya sendiri, dengan depth prepass, transparansi tersortir, dan
 /// reversed-Z. Kotak adalah geometri yang cukup untuk membuktikan semua itu, dan
 /// begitu mesh sungguhan masuk, yang berganti hanya sumber vertex-nya.
-class VulkanRenderer final : public IViewportRenderer {
+class VulkanRenderer final : public IViewportRenderer, public IPresentSource {
 public:
     VulkanRenderer(rhi::Device& device, rhi::ITextureRegistry& textures)
         : device_(device), textures_(textures) {}
@@ -1448,6 +1449,12 @@ public:
                        std::string& error) override {
         return target_.ReadPixels(outRgba, outWidth, outHeight, error);
     }
+
+    // --- IPresentSource: dipakai `Presenter` untuk menyalinnya ke layar ---
+    VkImageView PresentView() const override { return target_.ColorView(); }
+    VkSampler PresentSampler() const override { return target_.Sampler(); }
+    float PresentUvMaxU() const override { return target_.UvMaxU(); }
+    float PresentUvMaxV() const override { return target_.UvMaxV(); }
 
     TextureHandle ColorTarget() const override { return textureHandle_; }
     Vec2 ColorTargetUvMax() const override { return {target_.UvMaxU(), target_.UvMaxV()}; }

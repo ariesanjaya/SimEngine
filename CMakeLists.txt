@@ -112,6 +112,9 @@ if(SIM_BUILD_EDITOR)
     # Ikut SIM_BUILD_EDITOR karena ia menyusun inti editor yang sama. Ia tidak
     # menautkan panel maupun SDL — lihat alasannya di CMakeLists-nya.
     add_subdirectory(Apps/SimHeadless)
+    # Player (E9). Ikut SIM_BUILD_EDITOR untuk sementara: ia masih menautkan
+    # EditorFramework demi SceneView — lihat CMakeLists-nya.
+    add_subdirectory(Apps/SimRuntime)
 endif()
 
 if(SIM_BUILD_TESTS)
