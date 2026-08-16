@@ -1,6 +1,7 @@
 sim_add_library(EditorFramework
     SOURCES
         src/Actions.cpp
+        src/AiAssetTools.cpp
         src/AiEntityTools.cpp
         src/AiSceneTools.cpp
         src/AiTools.cpp
@@ -53,6 +54,10 @@ sim_add_library(EditorFramework
         ImGui::ImGui
         IconFonts::Headers
     PRIVATE_DEPS
+        # Thumbnail tekstur untuk agen MCP dibangun di CPU — dibaca, diperkecil
+        # lewat rantai mip, disandikan PNG — jadi ia berjalan juga di mode
+        # headless yang tidak punya GPU untuk merendernya.
+        Sim::ImageIO
         # Hanya Gizmo.cpp yang memakainya, dan header Gizmo.h sengaja tidak
         # membocorkan satu pun tipe ImGuizmo — jadi panel tetap tidak tahu apa
         # yang dipakai di baliknya.
