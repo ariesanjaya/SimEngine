@@ -14,8 +14,13 @@ dikerjakan oleh keputusan arsitektur di fase editor.
 
 ## Keadaan · 16 Agustus 2026
 
-**A0, A1, A2, dan hampir seluruh A3 sudah di `main`.** Editor menyalakan MCP
-server dengan **48 tool** dan dua resource. A4 belum dimulai.
+**A0, A1, A2, hampir seluruh A3, dan dua langkah pertama A4 sudah di `main`.**
+Editor menyalakan MCP server dengan **48 tool** dan dua resource.
+
+Dari A4: mode izin (`read-only` / `ask` / `auto`) ditegakkan di server dan
+berlaku untuk semua klien, dialog persetujuan untuk mode `ask`, tombol "undo
+semua yang dilakukan agen", dan bendera `--mcp-permission`. Yang belum: panel AI
+Assistant dan `SimHeadless`.
 
 Empat belas tool A3: `lua.eval`, `lua.script_write`, `material.graph_get`,
 `material.graph_set`, `material.preview`, `particle.get`, `particle.set`,
@@ -299,12 +304,31 @@ SimHeadless --project /path/Project --mcp-port 7777 --headless
 
 **Kriteria terima**
 
-1. Dari panel, perintah "tambahkan pagar di sekeliling area spawn" berjalan sampai
+1. ◐ Dari panel, perintah "tambahkan pagar di sekeliling area spawn" berjalan sampai
    selesai dengan mode `ask`, dan tiap persetujuan menampilkan pratinjau yang benar.
-2. Mode `read-only` benar-benar menolak semua tool yang mengubah data.
-3. "Undo semua" mengembalikan project ke keadaan sebelum sesi agen.
-4. `SimHeadless` jalan di mesin tanpa display (`XDG_SESSION_TYPE` kosong) dan
+   Separuh persetujuannya ada dan terbukti hidup: mode `ask` memunculkan dialog
+   yang menyebut tool, tingkat izinnya, dan argumennya, dan menahan tool call
+   sampai dijawab. Yang belum ada panelnya — perintah itu masih harus datang dari
+   Claude Code, bukan dari dalam editor.
+2. ✅ Mode `read-only` benar-benar menolak semua tool yang mengubah data.
+   Ditegakkan di `McpServer`, jadi berlaku untuk Claude Code juga. Diverifikasi
+   hidup: 48 tool jadi 23 yang semuanya `read`, dan `entity.create`,
+   `file.write`, serta `lua.eval` ditolak tanpa mengubah apa pun. Uji-nya memakai
+   tool yang mencatat apakah handler-nya benar-benar berjalan.
+3. ◐ "Undo semua" mengembalikan project ke keadaan sebelum sesi agen.
+   Tombolnya ada di panel AI Bridge dan mundur ke sebelum entri `AI:` paling awal
+   di riwayat. Yang belum: pemulihan berkas aset — suntingan material, partikel,
+   skrip, dan animasi sengaja tidak melewati `CommandHistory`, jadi "semua" di
+   sini berarti semua perubahan **scene**. Sama dengan kriteria A3 nomor 4.
+4. ⬜ `SimHeadless` jalan di mesin tanpa display (`XDG_SESSION_TYPE` kosong) dan
    `viewport.capture` tetap menghasilkan gambar.
+   **Terhalang satu hal yang belum ada: jalur readback GPU.** `Sim::RHI::Device`
+   sudah punya mode headless (dipakai uji unggahan tekstur), tapi satu-satunya
+   cara mengambil gambar di engine ini adalah `Swapchain::CaptureLastPresented`,
+   dan tanpa jendela tidak ada swapchain. `viewport.capture` dan
+   `material.preview` sama-sama menempuh tangkapan jendela lalu dipotong karena
+   alasan itu. Membaca balik target render viewport adalah pekerjaan RHI
+   tersendiri, dan ia mendahului SimHeadless.
 
 ---
 
