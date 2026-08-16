@@ -20,8 +20,8 @@ const char* WorkspaceName(Workspace workspace);
 /// Menyusun layout dock untuk sebuah workspace.
 ///
 /// Meniru tata letak acuan (docs/EDITOR-PANELS.md) untuk Workspace::Level:
-///   kiri-atas   Entity Outliner      tengah  Viewport
-///   kiri-bawah  Asset Browser        kanan   Entity Inspector
+///   kiri-atas   Entity Outliner            tengah  Viewport
+///   kiri-bawah  Asset Browser | Prefabs    kanan   Entity Inspector
 ///   bawah       Console
 ///
 /// Menghapus isi node yang ada, jadi aman dipanggil untuk "View > Reset Layout".

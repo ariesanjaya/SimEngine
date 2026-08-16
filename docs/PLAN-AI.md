@@ -12,6 +12,26 @@ dikerjakan oleh keputusan arsitektur di fase editor.
 
 ---
 
+## Keadaan · 16 Agustus 2026
+
+**A0, A1, dan A2 sudah di `main`.** Editor menyalakan MCP server dengan **34 tool**
+dan dua resource. A3 dan A4 belum dimulai.
+
+| Modul | Isi |
+|---|---|
+| `Code/AIBridge` | `JsonRpc`, `McpServer`, `ToolRegistry`, `ResourceRegistry` |
+| `Code/EditorFramework` | `AiTools.cpp`, `AiSceneTools.cpp`, `AiEntityTools.cpp`, `AiAssetTools.cpp`, `SceneCommands.cpp` |
+| `Code/Editor` | `AiBridgePanel` |
+
+| Uji | Jumlah |
+|---|---|
+| `SimAIBridgeTests` | 19 kasus / 163 assertion, lewat soket HTTP sungguhan, bersih di bawah ThreadSanitizer |
+| `SimAiToolsTests` | 26 kasus / 495 assertion, `EditorApp` headless |
+
+Penanda kriteria di bawah: ✅ terbukti, ◐ sebagian, ⬜ belum.
+
+---
+
 ## Dua arah integrasi
 
 Keduanya dibutuhkan, dan keduanya memakai modul yang sama (`Code/AIBridge`).
@@ -91,14 +111,22 @@ tool sederhana yang benar-benar mengubah sesuatu di editor.
 
 **Kriteria terima**
 
-1. `claude mcp add simengine --transport http http://127.0.0.1:7777/mcp` berhasil,
+1. ⬜ `claude mcp add simengine --transport http http://127.0.0.1:7777/mcp` berhasil,
    dan `/mcp` di Claude Code menampilkan daftar tool SimEngine.
-2. Agen memanggil `editor.screenshot` → menerima gambar jendela editor.
-3. Agen memanggil `editor.execute_action("view.reset_layout")` → layout di editor
+   **Sengaja tidak dijalankan** — `claude mcp add` menulis ke config Claude Code
+   milik pengguna. Yang sudah dibuktikan terhadap URL yang sama: `initialize`,
+   `tools/list`, dan `tools/call` dijawab benar lewat soket HTTP sungguhan.
+   Pendaftarannya tinggal dijalankan pengguna sendiri.
+2. ✅ Agen memanggil `editor.screenshot` → menerima gambar jendela editor.
+3. ◐ Agen memanggil `editor.execute_action("view.reset_layout")` → layout di editor
    benar-benar berubah, dan tidak ada race (diverifikasi dengan TSan selama 200
    panggilan beruntun).
-4. Menutup editor saat ada request menggantung tidak menyebabkan crash.
-5. Port yang sudah dipakai → editor memilih port berikutnya dan menuliskannya ke
+   Bagian race-nya terbukti: `Dua ratus panggilan beruntun lewat main thread`
+   bersih di bawah TSan. Bagian "layout berubah" belum terisolasi — pada tiap
+   percobaan, tata letak tersimpan sudah sama dengan bawaannya, jadi sebelum dan
+   sesudah tidak bisa dibedakan.
+4. ✅ Menutup editor saat ada request menggantung tidak menyebabkan crash.
+5. ✅ Port yang sudah dipakai → editor memilih port berikutnya dan menuliskannya ke
    `~/.simengine/mcp.json` supaya agen bisa menemukannya.
 
 ---
@@ -134,14 +162,20 @@ tool sederhana yang benar-benar mengubah sesuatu di editor.
 
 **Kriteria terima**
 
-1. Agen diminta "buat 3 kubus berjajar dengan jarak 2 meter dan sebuah lampu di
+1. ✅ Agen diminta "buat 3 kubus berjajar dengan jarak 2 meter dan sebuah lampu di
    atasnya" → hasilnya benar, terlihat di Outliner, dan **satu** kali `editor.undo`
    dari sisi manusia mengembalikan tiap langkah agen secara berurutan.
-2. `viewport.capture` dari sudut yang diminta menghasilkan gambar yang sesuai.
-3. `history.rollback` ke checkpoint mengembalikan level persis (dibandingkan
+   Ditegakkan oleh `Satu tool call adalah satu entri undo, dan namanya menyebut
+   asalnya`: `entity.create_many` menaruh seluruh batch dalam satu transaksi
+   bernama `AI: entity.create_many`.
+2. ✅ `viewport.capture` dari sudut yang diminta menghasilkan gambar yang sesuai.
+3. ✅ `history.rollback` ke checkpoint mengembalikan level persis (dibandingkan
    byte-per-byte dengan simpanan sebelum checkpoint).
-4. Tool call saat editor sedang membuka dialog modal ditolak dengan pesan jelas,
+4. ✅ Tool call saat editor sedang membuka dialog modal ditolak dengan pesan jelas,
    bukan menggantung.
+   Lewat tenggat, bukan deteksi modal: main thread yang tidak men-drain antrean
+   menghasilkan galat bertenggat, diuji oleh `Main thread yang tidak pernah
+   men-drain menghasilkan tenggat, bukan gantung`.
 
 ---
 
@@ -159,10 +193,18 @@ tool sederhana yang benar-benar mengubah sesuatu di editor.
 
 **Kriteria terima**
 
-1. Agen menemukan tekstur yang sesuai deskripsi ("cari tekstur batu"), melihat
+1. ◐ Agen menemukan tekstur yang sesuai deskripsi ("cari tekstur batu"), melihat
    thumbnail-nya, lalu memakainya di material — tanpa manusia menyebut nama file.
-2. `file.write` di luar folder project ditolak (uji path traversal `../../etc/passwd`).
-3. Aset yang dibuat agen muncul di Asset Browser tanpa restart.
+   Dua langkah pertama terbukti hidup: `asset.search` menemukannya, `asset.thumbnail`
+   mengembalikan PNG yang benar-benar tergambar dari teksturnya. Langkah ketiga
+   menunggu `material.graph_set` di A3 — belum ada tool yang bisa memasang tekstur
+   ke material.
+2. ✅ `file.write` di luar folder project ditolak (uji path traversal `../../etc/passwd`).
+   Penjagaannya leksikal **dan** nyata: `weakly_canonical` lebih dulu, jadi symlink
+   yang menunjuk keluar project ikut ditolak.
+3. ✅ Aset yang dibuat agen muncul di Asset Browser tanpa restart.
+   Dibuktikan dengan dua tangkapan layar dari editor yang sama: sebelum 4 aset,
+   sesudah 6, dan tekstur yang baru diimpor tampil dengan thumbnail-nya sendiri.
 
 ---
 
@@ -277,6 +319,27 @@ Selain tool, server juga menyediakan:
 - `sim:diagnose` — kumpulkan log + screenshot + info scene untuk mendiagnosis masalah
 
 ---
+
+## Cacat yang hanya muncul saat dijalankan
+
+Dicatat karena satu kelas kesalahan muncul berulang di A0–A2 dan tidak satu pun
+tertangkap oleh uji: **tool melapor sukses untuk sesuatu yang tidak terjadi.**
+Balasan `isError: false` tidak membuktikan apa-apa; yang membuktikan adalah
+melihat gambarnya, atau membaca kembali keadaan yang katanya sudah berubah.
+Karena itu tool tulis sekarang memverifikasi hasilnya sendiri sebelum melapor
+berhasil.
+
+| Cacat | Yang terlihat | Sebabnya |
+|---|---|---|
+| `EditorApp::LoadLevel` tidak pernah membersihkan `awaitingLevelChoice_` | Level termuat dan tergambar, tapi di balik layar pemilih level yang tidak pernah tertutup | Satu flag yang lupa di-reset. Ini juga yang menggagalkan verifikasi GI sebelumnya — bukan GI-nya yang salah |
+| `viewport.capture` mengembalikan Material Editor berlabel "viewport" | Gambar yang sah, isi yang salah | Panel yang terbuka tapi berada di belakang tab lain di dock yang sama **tidak digambar sama sekali**. `SetOpen` saja tidak cukup, perlu `RequestFocus` |
+| `entity.modify` segfault untuk komponen yang belum ada | Editor mati | `SetComponentsCommand::Apply` melewati entity yang tidak punya komponennya, lalu pembacaan balik men-dereference nullptr |
+| `entity.reparent` ke diri sendiri lolos | Lapor sukses, hierarki tidak berubah, tapi meninggalkan entri undo hantu | `IsDescendantOf(x, x)` bernilai false, jadi penjaga siklus tidak menangkapnya |
+| Menu Window satu-satunya menu di luar `ActionRegistry` | `editor.execute_action` tidak bisa membuka panel apa pun | `PanelManager::DrawWindowMenu` menggambar sendiri. Membuat janji A0 "akses ke semua menu" tidak benar |
+| Panel Prefabs mengambang menutupi kolom kiri | Asset Browser tergambar tapi tak terlihat | `BuildLayout` tidak pernah menyebut `kPrefabs`; jendela tanpa DockId menang atas host dockspace yang ber-`NoBringToFrontOnFocus` |
+| Dua server bisa mengikat port yang sama | Koneksi dibagi rata kernel, jawaban tertukar | `SO_REUSEPORT` menyala secara bawaan di cpp-httplib. Sekarang hanya `SO_REUSEADDR` |
+| Satu `bind_to_port` yang gagal mematikan objek `Server` selamanya | Pencarian port berhenti di percobaan pertama | `is_decommissioned` hanya bersih setelah `server.stop()` |
+| TSan mati di dalam alokatornya sendiri | Bukan race di kode kita | `getaddrinfo_a` glibc membuat thread di luar sepengetahuan TSan. `HTTPLIB_USE_NON_BLOCKING_GETADDRINFO=OFF` |
 
 ## Urutan & ketergantungan
 

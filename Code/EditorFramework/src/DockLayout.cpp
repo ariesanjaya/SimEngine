@@ -34,6 +34,21 @@ void DockDocumentEditors(ImGuiID center) {
     Dock(panel_id::kParticleEditor, center);
 }
 
+/// **Panel yang tidak disebut di sini akan mengambang, bukan tersembunyi.**
+/// ImGui menaruh jendela tanpa DockId di atas host dockspace, dan host itu punya
+/// NoBringToFrontOnFocus — jadi panel mengambang selalu menang, menutupi apa pun
+/// yang ter-dock di bawahnya, dan tidak bisa disingkirkan dengan memfokuskan
+/// panel lain.
+///
+/// Prefabs terkena persis itu: ia tidak pernah disebut layout mana pun, jadi
+/// muncul di 0,50 selebar 319 px dan menutupi seluruh kolom kiri — Outliner dan
+/// Asset Browser ada di sana, tergambar, tapi tak terlihat. Ketahuan saat
+/// memverifikasi kriteria A2 nomor 3, yang mengharuskan melihat aset baru muncul
+/// di Asset Browser.
+///
+/// Prefabs berpasangan dengan Asset Browser, bukan dengan Outliner: keduanya
+/// katalog yang isinya diseret ke dalam adegan, sedangkan Outliner menampilkan
+/// adegan yang sudah jadi.
 ImGuiID ResetRoot(ImGuiID dockspaceId) {
     ImGui::DockBuilderRemoveNode(dockspaceId);
     ImGui::DockBuilderAddNode(dockspaceId, ImGuiDockNodeFlags_DockSpace);
@@ -58,6 +73,7 @@ void BuildLevelLayout(ImGuiID dockspaceId) {
 
     Dock(panel_id::kOutliner, left);
     Dock(panel_id::kAssetBrowser, leftBottom);
+    Dock(panel_id::kPrefabs, leftBottom);
     Dock(panel_id::kInspector, right);
     Dock(panel_id::kConsole, bottom);
     Dock(panel_id::kLuaConsole, bottom);
@@ -80,6 +96,7 @@ void BuildAuthoringLayout(ImGuiID dockspaceId) {
     ImGuiID bottom = ImGui::DockBuilderSplitNode(center, ImGuiDir_Down, 0.18f, nullptr, &center);
 
     Dock(panel_id::kAssetBrowser, left);
+    Dock(panel_id::kPrefabs, left);
     Dock(panel_id::kOutliner, left);
     Dock(panel_id::kInspector, right);
     Dock(panel_id::kHistory, right);
@@ -103,6 +120,7 @@ void BuildDebugLayout(ImGuiID dockspaceId) {
 
     Dock(panel_id::kOutliner, left);
     Dock(panel_id::kAssetBrowser, left);
+    Dock(panel_id::kPrefabs, left);
     Dock(panel_id::kConsole, bottom);
     Dock(panel_id::kLuaConsole, bottom);
     Dock(panel_id::kStatistics, bottomRight);

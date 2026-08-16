@@ -8,11 +8,14 @@
 #include "Sim/Material/MaterialGraph.h"
 #include "Sim/Material/MaterialNodeCatalog.h"
 #include "Sim/Editor/Command.h"
+#include "Sim/Editor/DockLayout.h"
+#include "Sim/Editor/PanelIds.h"
 #include "Sim/Editor/PanelManager.h"
 #include "Sim/Editor/Selection.h"
 #include "Sim/Editor/SourceImport.h"
 
 #include <doctest/doctest.h>
+#include <imgui_internal.h>
 
 #include <cstdio>
 #include <atomic>
@@ -854,4 +857,77 @@ TEST_CASE("E8.4: material menunggu teksturnya siap sebelum pipeline-nya dibangun
     CHECK(renderer.acquires == 1);
     CHECK(renderer.textureCount == 1);
     CHECK(programs.CompileCount() == 1);
+}
+
+// Panel yang tidak disebut BuildLayout tidak "tersembunyi" — ia mengambang di
+// atas host dockspace dan menutupi apa pun yang ter-dock di bawahnya. Prefabs
+// terkena itu: begitu dibuka, ia menutupi seluruh kolom kiri, dan Asset Browser
+// di baliknya tetap tergambar tapi tak terlihat.
+//
+// ImGui menyimpan hasil DockBuilderDockWindow untuk jendela yang belum pernah
+// ada ke ImGuiWindowSettings, jadi seluruh pemeriksaan ini jalan tanpa satu pun
+// frame digambar dan tanpa backend grafis.
+TEST_CASE("Setiap panel yang disusun layout benar-benar mendapat node dock") {
+    IMGUI_CHECKVERSION();
+    ImGuiContext* context = ImGui::CreateContext();
+    ImGui::SetCurrentContext(context);
+    ImGuiIO& io = ImGui::GetIO();
+    io.ConfigFlags |= ImGuiConfigFlags_DockingEnable;
+    io.DisplaySize = ImVec2(1920.0f, 1080.0f);
+    io.DeltaTime = 1.0f / 60.0f;
+    io.Fonts->AddFontDefault();
+    io.Fonts->Build();
+    // Backend biasanya yang mengisi ini; tanpanya NewFrame menolak jalan.
+    io.Fonts->TexID = static_cast<ImTextureID>(1);
+
+    ImGui::NewFrame();
+
+    const ImGuiID dockspaceId = ImGui::GetID("##TestDockspace");
+
+    // Judul panel boleh berubah; id-nya tidak. Kunci settings-nya dihitung dari
+    // "###id" persis seperti yang dilakukan DockLayout.
+    const auto dockOf = [](const char* panelId) -> ImGuiID {
+        const std::string key = std::string("###") + panelId;
+        ImGuiWindowSettings* settings = ImGui::FindWindowSettingsByID(ImHashStr(key.c_str()));
+        return settings != nullptr ? settings->DockId : 0;
+    };
+
+    struct Placement {
+        ImGuiID prefabs;
+        ImGuiID assetBrowser;
+        ImGuiID viewport;
+        ImGuiID console;
+    };
+    const auto place = [&](Workspace workspace) {
+        BuildLayout(dockspaceId, workspace);
+        return Placement{dockOf(panel_id::kPrefabs), dockOf(panel_id::kAssetBrowser),
+                         dockOf(panel_id::kViewport), dockOf(panel_id::kConsole)};
+    };
+
+    // Diperiksa per workspace dengan pesan literal: argumen pesan doctest yang
+    // berupa `const char*` non-literal diubah jadi bool, dan `std::string` tidak
+    // bisa di-stream sama sekali — nama workspace hanya akan tercetak "1".
+    const Placement level = place(Workspace::Level);
+    const Placement authoring = place(Workspace::Authoring);
+    const Placement debug = place(Workspace::Debug);
+
+    CHECK_MESSAGE(level.prefabs != 0, "Prefabs mengambang di workspace Level");
+    CHECK_MESSAGE(authoring.prefabs != 0, "Prefabs mengambang di workspace Authoring");
+    CHECK_MESSAGE(debug.prefabs != 0, "Prefabs mengambang di workspace Debug");
+
+    // Pasangannya: Prefabs katalog seperti Asset Browser, jadi keduanya harus
+    // mendarat di node yang sama, bukan sekadar ter-dock di mana pun.
+    CHECK_MESSAGE(level.prefabs == level.assetBrowser, "Prefabs lepas dari Asset Browser: Level");
+    CHECK_MESSAGE(authoring.prefabs == authoring.assetBrowser,
+                  "Prefabs lepas dari Asset Browser: Authoring");
+    CHECK_MESSAGE(debug.prefabs == debug.assetBrowser, "Prefabs lepas dari Asset Browser: Debug");
+
+    // Penjaga agar uji ini tidak lulus karena alasan yang salah: kalau dockOf
+    // selalu mengembalikan nilai yang sama, seluruh CHECK di atas lulus palsu.
+    CHECK(level.viewport != level.console);
+    CHECK(authoring.viewport != authoring.console);
+    CHECK(debug.viewport != debug.console);
+
+    ImGui::EndFrame();
+    ImGui::DestroyContext(context);
 }
