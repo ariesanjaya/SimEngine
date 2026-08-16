@@ -23,6 +23,17 @@ struct McpServerConfig {
 
     /// Berkas tempat port yang **benar-benar** dipakai dituliskan, supaya agen
     /// tidak perlu menebak. Kosong berarti tidak ditulis.
+    ///
+    /// Isinya menyebut `pid` pemiliknya. Editor yang mati paksa melewati
+    /// `Stop()` dan meninggalkan berkas ini menunjuk port yang sudah tidak ada;
+    /// yang membedakan berkas hidup dari berkas basi tidak bisa ditulis oleh
+    /// yang sudah mati, jadi yang ditulis adalah siapa pemiliknya — dan pembaca
+    /// memeriksa apakah proses itu masih ada sebelum mempercayai portnya.
+    ///
+    /// Yang menghapusnya saat berhenti hanyalah pemilik yang tercatat. Dua
+    /// editor terbuka berarti yang kedua menimpa berkas ini; menghapusnya tanpa
+    /// memeriksa akan mencabut pengumuman milik editor pertama yang masih
+    /// berjalan.
     std::filesystem::path advertisePath;
 
     /// Berapa lama thread jaringan menunggu main thread sebelum menyerah.

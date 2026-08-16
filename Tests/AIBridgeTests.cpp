@@ -10,6 +10,9 @@
 
 #include <doctest/doctest.h>
 
+#include <filesystem>
+#include <fstream>
+#include <unistd.h>
 #include <atomic>
 #include <chrono>
 #include <string>
@@ -601,4 +604,85 @@ TEST_CASE("Menghentikan server saat ada permintaan menggantung tidak merusak apa
     // Pekerjaan yang terlanjur diantrikan dibuang supaya tidak bocor ke uji
     // berikutnya.
     MainThreadQueue::Get().Drain();
+}
+
+// --- berkas pengumuman --------------------------------------------------------
+
+namespace {
+
+/// Folder sementara yang membersihkan dirinya sendiri.
+struct TempDir {
+    std::filesystem::path path;
+
+    TempDir() {
+        path = std::filesystem::temp_directory_path() /
+               ("sim-mcp-" + std::to_string(::getpid()) + "-" +
+                std::to_string(reinterpret_cast<uintptr_t>(this)));
+        std::filesystem::create_directories(path);
+    }
+    ~TempDir() {
+        std::error_code ec;
+        std::filesystem::remove_all(path, ec);
+    }
+};
+
+}  // namespace
+
+TEST_CASE("Berkas pengumuman menyebut pemiliknya, dan hanya pemilik yang menghapusnya") {
+    TempDir temp;
+    const std::filesystem::path advert = temp.path / "mcp.json";
+
+    SUBCASE("ditulis saat menyala, dibuang saat berhenti") {
+        Harness harness;
+        harness.config.advertisePath = advert;
+        REQUIRE(harness.Start());
+
+        REQUIRE(std::filesystem::exists(advert));
+        std::ifstream file(advert);
+        const json written = json::parse(file);
+        CHECK(written.at("port") == harness.server.Port());
+        CHECK(written.at("transport") == "http");
+        CHECK(written.at("auth") == "none");
+        // Inilah yang membuat berkas basi bisa dikenali: pembaca memeriksa
+        // apakah proses ini masih ada sebelum mempercayai portnya.
+        CHECK(written.at("pid") == static_cast<int64_t>(::getpid()));
+        // Token tidak pernah ikut — berkas ini bisa dibaca proses lain milik
+        // pengguna yang sama, yaitu tepat yang hendak dihalangi token.
+        CHECK_FALSE(written.contains("token"));
+        file.close();
+
+        harness.server.Stop();
+        CHECK_FALSE(std::filesystem::exists(advert));
+    }
+
+    SUBCASE("berkas milik proses lain tidak disentuh") {
+        // **Dua editor terbuka adalah keadaan biasa.** Yang kedua menimpa berkas
+        // ini dengan portnya sendiri; menghapusnya tanpa memeriksa akan mencabut
+        // pengumuman milik editor pertama yang masih berjalan, dan sejak itu ia
+        // tidak bisa ditemukan agen mana pun.
+        {
+            std::ofstream file(advert);
+            file << json{{"name", "simengine"}, {"pid", 999999999}, {"port", 7777}}.dump();
+        }
+
+        Harness harness;
+        harness.config.advertisePath = advert;
+        REQUIRE(harness.Start());
+        // Menyala tetap menimpanya: yang paling baru menyala adalah yang paling
+        // masuk akal untuk ditemukan.
+        {
+            std::ifstream file(advert);
+            CHECK(json::parse(file).at("pid") == static_cast<int64_t>(::getpid()));
+        }
+
+        // Sekarang tulis ulang seolah-olah proses lain merebutnya, lalu berhenti.
+        {
+            std::ofstream file(advert);
+            file << json{{"name", "simengine"}, {"pid", 999999999}, {"port", 7778}}.dump();
+        }
+        harness.server.Stop();
+        CHECK(std::filesystem::exists(advert));
+        std::ifstream file(advert);
+        CHECK(json::parse(file).at("port") == 7778);
+    }
 }

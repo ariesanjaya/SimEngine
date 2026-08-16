@@ -12,6 +12,12 @@
 #include <fstream>
 #include <future>
 #include <random>
+
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
 #include <string_view>
 #include <thread>
 
@@ -105,6 +111,15 @@ std::string Base64(const std::vector<uint8_t>& bytes) {
         out.push_back('=');
     }
     return out;
+}
+
+/// PID proses ini, sebagai angka biasa.
+int64_t ProcessId() {
+#if defined(_WIN32)
+    return static_cast<int64_t>(_getpid());
+#else
+    return static_cast<int64_t>(getpid());
+#endif
 }
 
 std::string GenerateToken() {
@@ -291,20 +306,40 @@ struct McpServer::Impl {
         // port-nya, dan ia bisa dibaca proses lain milik pengguna yang sama —
         // yaitu tepat yang hendak dihalangi token. Menuliskannya di sini
         // membatalkan seluruh gunanya.
+        //
+        // **`pid` ikut, dan itu yang menutup berkas basi.** Editor yang mati
+        // paksa melewati `Stop()` dan meninggalkan berkas ini menunjuk port yang
+        // sudah tidak ada — agen lalu menyambung, gagal, dan menyalahkan
+        // servernya. Yang membedakan berkas hidup dari berkas basi tidak bisa
+        // ditulis oleh yang sudah mati; yang bisa hanyalah menyebutkan siapa
+        // pemiliknya, dan membiarkan pembaca memeriksa apakah ia masih ada.
         const json advertised{{"name", config.serverName},
                               {"auth", config.bearerToken.empty() ? "none" : "bearer"},
+                              {"pid", ProcessId()},
                               {"port", port.load()},
                               {"url", "http://127.0.0.1:" + std::to_string(port.load()) + "/mcp"},
                               {"transport", "http"}};
         file << advertised.dump(2) << '\n';
     }
 
+    /// Membuang berkas pengumuman, **tapi hanya bila ia masih menyebut kita**.
+    ///
+    /// Dua editor terbuka berarti yang kedua menimpa berkas ini dengan portnya
+    /// sendiri. Menghapusnya tanpa memeriksa membuat editor kedua yang ditutup
+    /// mencabut pengumuman milik editor pertama — yang masih berjalan, dan
+    /// sejak itu tidak bisa ditemukan agen mana pun. Yang menghapus hanyalah
+    /// pemilik yang tercatat.
     void RemoveAdvertiseFile() {
         if (config.advertisePath.empty()) {
             return;
         }
-        // Berkas basi yang menunjuk port mati lebih buruk daripada tidak ada
-        // berkas: agen menyambung, gagal, dan menyalahkan servernya.
+        std::ifstream file(config.advertisePath);
+        if (file) {
+            const json existing = json::parse(file, nullptr, /*allow_exceptions=*/false);
+            if (existing.is_object() && existing.value("pid", int64_t{0}) != ProcessId()) {
+                return;
+            }
+        }
         std::error_code ec;
         std::filesystem::remove(config.advertisePath, ec);
     }
