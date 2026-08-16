@@ -19,8 +19,10 @@ Editor menyalakan MCP server dengan **48 tool** dan dua resource.
 
 Dari A4: mode izin (`read-only` / `ask` / `auto`) ditegakkan di server dan
 berlaku untuk semua klien, dialog persetujuan untuk mode `ask`, tombol "undo
-semua yang dilakukan agen", dan bendera `--mcp-permission`. Yang belum: panel AI
-Assistant dan `SimHeadless`.
+semua yang dilakukan agen", bendera `--mcp-permission`, dan **readback target
+render** — `viewport.capture` sekarang membaca piksel yang benar-benar dirender
+alih-alih memotong tangkapan jendela. Yang belum: `SimHeadless` dan panel AI
+Assistant.
 
 Empat belas tool A3: `lua.eval`, `lua.script_write`, `material.graph_get`,
 `material.graph_set`, `material.preview`, `particle.get`, `particle.set`,
@@ -320,15 +322,18 @@ SimHeadless --project /path/Project --mcp-port 7777 --headless
    di riwayat. Yang belum: pemulihan berkas aset — suntingan material, partikel,
    skrip, dan animasi sengaja tidak melewati `CommandHistory`, jadi "semua" di
    sini berarti semua perubahan **scene**. Sama dengan kriteria A3 nomor 4.
-4. ⬜ `SimHeadless` jalan di mesin tanpa display (`XDG_SESSION_TYPE` kosong) dan
+4. ◐ `SimHeadless` jalan di mesin tanpa display (`XDG_SESSION_TYPE` kosong) dan
    `viewport.capture` tetap menghasilkan gambar.
-   **Terhalang satu hal yang belum ada: jalur readback GPU.** `Sim::RHI::Device`
-   sudah punya mode headless (dipakai uji unggahan tekstur), tapi satu-satunya
-   cara mengambil gambar di engine ini adalah `Swapchain::CaptureLastPresented`,
-   dan tanpa jendela tidak ada swapchain. `viewport.capture` dan
-   `material.preview` sama-sama menempuh tangkapan jendela lalu dipotong karena
-   alasan itu. Membaca balik target render viewport adalah pekerjaan RHI
-   tersendiri, dan ia mendahului SimHeadless.
+   Prasyaratnya sudah ada: `RenderTarget::ReadPixels` dan
+   `IViewportRenderer::CapturePixels`, dan `viewport.capture` sudah memakainya —
+   jadi bagian "tetap menghasilkan gambar" tidak lagi bergantung pada swapchain.
+   `Sim::RHI::Device` juga sudah punya mode headless, dipakai uji unggahan
+   tekstur. Yang tersisa adalah target `SimHeadless` itu sendiri: loop tanpa
+   jendela, tanpa ImGui, yang menyalakan server dan memutar frame.
+
+   `material.preview` dan `particle.preview` masih menempuh tangkapan jendela
+   lalu dipotong; keduanya bisa menyusul lewat seam yang sama, karena
+   `IMaterialPreview` juga punya target rendernya sendiri.
 
 ---
 
