@@ -4,6 +4,7 @@
 #include "Sim/ImageIO/MipChain.h"
 #include "Sim/ImageIO/TextureColor.h"
 
+#include <array>
 #include <doctest/doctest.h>
 
 #include <algorithm>
@@ -867,4 +868,141 @@ TEST_CASE("T2: rantai turun sampai 1x1, dan sisi ganjil tidak pernah menjadi nol
         CHECK(level.bytes.size() == level.desc.ByteCount());
         CHECK(level.desc.ByteCount() > 0);
     }
+}
+
+// --- PNG berwarna ------------------------------------------------------------
+//
+// **Ditulis bersamaan dengan jalur berwarnanya, bukan sesudahnya.** Catatan di
+// `BackendStb` menyebut alasan PNG di sini lama hanya greyscale: menyalakan
+// format tanpa uji berarti menjanjikan berkas yang tidak pernah dibaca siapa
+// pun. Uji ini yang membayar janji itu — ia menyandikan lalu membacanya kembali
+// dan membandingkan setiap byte, jadi kanal yang tertukar atau `bpp` filter
+// yang salah tidak bisa lolos.
+
+TEST_CASE("PNG berwarna bolak-balik utuh") {
+    const uint32_t width = 7;   // sengaja bukan kelipatan apa pun
+    const uint32_t height = 5;
+
+    auto roundTrip = [&](uint32_t channels) {
+        CAPTURE(channels);
+        imageio::Image source;
+        source.desc.width = width;
+        source.desc.height = height;
+        source.desc.channels = channels;
+        source.desc.type = imageio::PixelType::UInt8;
+        source.desc.colorSpace = imageio::ColorSpace::Srgb;
+        source.bytes.resize(static_cast<std::size_t>(width) * height * channels);
+        // Pola yang berbeda di tiap kanal: kanal yang tertukar akan terlihat,
+        // sedangkan pola abu-abu seragam akan menyembunyikannya.
+        for (std::size_t i = 0; i < source.bytes.size(); ++i) {
+            const std::size_t pixel = i / channels;
+            const std::size_t channel = i % channels;
+            // **Alfa dibuat penuh, dan itu bukan menghindari kasus sulit.**
+            // Pembaca di sini meng-*associate* alfa — mengalikan warna dengan
+            // alfa, di ruang linear — persis seperti yang dijanjikan
+            // `premultipliedAlpha` di `ImageDesc`. Alfa yang tidak penuh karena
+            // itu memang tidak kembali seperti semula, dan menuntutnya kembali
+            // berarti menguji janji yang tidak pernah dibuat. Yang diuji di sini
+            // enkodernya; asosiasi alfa diuji terpisah di bawah.
+            const bool isAlpha = channels == 4 && channel == 3;
+            source.bytes[i] = isAlpha
+                                  ? uint8_t{255}
+                                  : static_cast<uint8_t>((pixel * 7u + channel * 61u) & 0xFFu);
+        }
+
+        std::vector<uint8_t> png;
+        const imageio::ImageIoResult encoded = imageio::Encode(source, ".png", png);
+        REQUIRE_MESSAGE(encoded.ok, encoded.error);
+        REQUIRE(png.size() > 8);
+        // Tanda tangan PNG, supaya kegagalan "bukan PNG" terbaca sebagai itu
+        // dan bukan sebagai piksel yang salah.
+        const std::array<uint8_t, 8> signature{137, 80, 78, 71, 13, 10, 26, 10};
+        CHECK(std::equal(signature.begin(), signature.end(), png.begin()));
+
+        imageio::ReadOptions options;
+        options.channels = channels;
+        imageio::Image decoded;
+        const imageio::ImageIoResult read = imageio::Read(png, ".png", options, decoded);
+        REQUIRE_MESSAGE(read.ok, read.error);
+        CHECK(decoded.desc.width == width);
+        CHECK(decoded.desc.height == height);
+        CHECK(decoded.desc.channels == channels);
+        REQUIRE(decoded.bytes.size() == source.bytes.size());
+        for (std::size_t i = 0; i < source.bytes.size(); ++i) {
+            if (source.bytes[i] != decoded.bytes[i]) {
+                INFO("byte ", i, " (piksel ", i / channels, " kanal ", i % channels,
+                     "): sumber ", int(source.bytes[i]), " != hasil ", int(decoded.bytes[i]));
+                CHECK(source.bytes[i] == decoded.bytes[i]);
+                break;
+            }
+        }
+        CHECK(std::equal(source.bytes.begin(), source.bytes.end(), decoded.bytes.begin()));
+    };
+
+    SUBCASE("RGB") { roundTrip(3); }
+    SUBCASE("RGBA") { roundTrip(4); }
+    SUBCASE("greyscale tetap seperti semula") { roundTrip(1); }
+}
+
+TEST_CASE("PNG menolak yang memang tidak bisa ditulisnya") {
+    imageio::Image image;
+    image.desc.width = 2;
+    image.desc.height = 2;
+    image.desc.channels = 2;  // grey+alpha: PNG punya kodenya, enkoder ini tidak
+    image.desc.type = imageio::PixelType::UInt8;
+    image.bytes.resize(8);
+
+    std::vector<uint8_t> png;
+    const imageio::ImageIoResult result = imageio::Encode(image, ".png", png);
+    CHECK_FALSE(result.ok);
+    // Pesannya menyebut apa yang diterimanya, bukan hanya bahwa ia menolak.
+    CHECK(result.error.find("2-channel") != std::string::npos);
+}
+
+TEST_CASE("PNG RGBA dengan alfa tidak penuh kembali dalam bentuk ter-associate") {
+    // **Ini mengunci perilaku, bukan merayakannya.** Pembaca gambar di sini
+    // meng-associate alfa saat membaca — warna dikalikan alfanya, di ruang
+    // linear — dan itu tercatat di `ImageDesc::premultipliedAlpha`. Yang
+    // menemukannya adalah uji round-trip PNG berwarna, dan yang membuatnya mahal
+    // adalah bahwa gambarnya tetap terlihat masuk akal: hanya lebih gelap di
+    // tempat yang alfanya rendah.
+    //
+    // Karena itu `editor.screenshot` mengirim RGB, bukan RGBA. Jendela editor
+    // tidak punya alfa yang berarti, dan membawanya berarti membawa pertanyaan
+    // ini ke setiap orang yang membaca berkasnya kembali.
+    imageio::Image source;
+    source.desc.width = 4;
+    source.desc.height = 1;
+    source.desc.channels = 4;
+    source.desc.type = imageio::PixelType::UInt8;
+    source.desc.colorSpace = imageio::ColorSpace::Srgb;
+    source.bytes = {200, 200, 200, 255,   // alfa penuh: harus utuh
+                    200, 200, 200, 128,   // separuh: menggelap
+                    200, 200, 200, 0,     // nol: hilang seluruhnya
+                    10,  10,  10,  255};
+
+    std::vector<uint8_t> png;
+    REQUIRE(imageio::Encode(source, ".png", png).ok);
+
+    imageio::ReadOptions options;
+    options.channels = 4;
+    imageio::Image decoded;
+    REQUIRE(imageio::Read(png, ".png", options, decoded).ok);
+    REQUIRE(decoded.bytes.size() == source.bytes.size());
+
+    // Alfa sendiri selalu kembali utuh — yang berubah warnanya.
+    for (std::size_t pixel = 0; pixel < 4; ++pixel) {
+        CAPTURE(pixel);
+        CHECK(decoded.bytes[pixel * 4 + 3] == source.bytes[pixel * 4 + 3]);
+        // Associate hanya bisa menggelapkan, tidak pernah mencerahkan. Berlaku
+        // juga bila backend yang aktif ternyata tidak meng-associate sama
+        // sekali — yang salah lalu tetap tertangkap, yang benar tetap lulus.
+        for (std::size_t channel = 0; channel < 3; ++channel) {
+            CHECK(decoded.bytes[pixel * 4 + channel] <= source.bytes[pixel * 4 + channel]);
+        }
+    }
+    // Alfa penuh tidak boleh berubah sama sekali: itu jaminan yang dipakai
+    // `editor.screenshot` kalau suatu saat ia kembali membawa alfa.
+    CHECK(decoded.bytes[0] == 200);
+    CHECK(decoded.bytes[12] == 10);
 }

@@ -40,6 +40,11 @@ public:
     /// alih-alih satu submit per potongan.
     bool WriteAt(VkDeviceSize offset, const void* data, VkDeviceSize bytes);
 
+    /// Pemetaan host-nya, untuk pemanggil yang **membaca** dari buffer ini.
+    /// Nullptr bila belum dibuat. Dipakai readback tangkapan layar; jalur
+    /// tulis tetap lewat `Write`/`WriteAt` supaya batasnya diperiksa.
+    const void* Mapped() const { return mapped_; }
+
     VkBuffer Handle() const { return buffer_; }
     VkDeviceSize Capacity() const { return capacity_; }
     bool IsValid() const { return buffer_ != VK_NULL_HANDLE; }

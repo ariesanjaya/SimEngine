@@ -1,5 +1,6 @@
 #pragma once
 
+#include "Sim/AIBridge/ResourceRegistry.h"
 #include "Sim/AIBridge/ToolRegistry.h"
 
 #include <chrono>
@@ -34,6 +35,24 @@ struct McpServerConfig {
 
     std::string serverName = "simengine";
     std::string serverVersion = "0.1.0";
+
+    /// Token yang harus dibawa setiap permintaan di header `Authorization`.
+    /// Kosong berarti tanpa autentikasi.
+    ///
+    /// **Yang dilindunginya bukan jaringan melainkan mesin ini sendiri.** Server
+    /// sudah terkunci ke 127.0.0.1, jadi tidak ada yang bisa menyambung dari
+    /// luar. Yang tersisa adalah proses lain milik pengguna yang sama — sebuah
+    /// tab peramban yang menjalankan skrip pihak ketiga bisa memanggil localhost
+    /// — dan itulah yang ditutup token ini.
+    std::string bearerToken;
+
+    /// Membangkitkan `bearerToken` acak saat start bila ia masih kosong.
+    ///
+    /// Bawaannya mati: token membuat `claude mcp add` menuntut `--header`, dan
+    /// menyalakannya diam-diam berarti setiap orang yang mengikuti PLAN-AI.md
+    /// apa adanya mendapat 401 tanpa tahu sebabnya. Yang menyalakannya adalah
+    /// pengguna, lewat panel.
+    bool generateBearerToken = false;
 };
 
 /// Server MCP di atas HTTP, terkunci ke localhost.
@@ -59,6 +78,11 @@ public:
     /// dan salinan akan membekukan daftarnya pada saat start.
     bool Start(const ToolRegistry& tools, const McpServerConfig& config);
 
+    /// Bentuk lengkapnya. `resources` juga dipegang sebagai referensi dan harus
+    /// hidup lebih lama daripada server.
+    bool Start(const ToolRegistry& tools, const ResourceRegistry& resources,
+               const McpServerConfig& config);
+
     /// Menghentikan server dan menunggu thread jaringannya selesai. Aman
     /// dipanggil berkali-kali, dan aman dipanggil saat ada permintaan yang
     /// sedang ditangani — itu justru keadaan yang diuji kriteria terima A0
@@ -73,6 +97,13 @@ public:
 
     /// Berapa permintaan yang sudah dilayani. Untuk panel dan uji.
     uint64_t RequestCount() const;
+    /// Berapa yang ditolak karena token. Nol yang terus naik adalah tanda ada
+    /// sesuatu di mesin ini yang mencoba menyambung tanpa diundang.
+    uint64_t RejectedCount() const;
+
+    /// Token yang sedang berlaku, kosong bila tanpa autentikasi. Panel
+    /// menampilkannya supaya pengguna bisa menyalinnya.
+    std::string BearerToken() const;
 
 private:
     struct Impl;

@@ -2,6 +2,7 @@ sim_add_library(AIBridge
     SOURCES
         src/JsonRpc.cpp
         src/McpServer.cpp
+        src/ResourceRegistry.cpp
         src/ToolRegistry.cpp
     PUBLIC_DEPS
         # MainThreadQueue: setiap handler yang menyentuh World/ImGui/Vulkan

@@ -38,6 +38,14 @@ struct ToolResult {
     /// Teks yang dikembalikan ke agen. Untuk hasil terstruktur, ini JSON yang
     /// sudah di-serialisasi; MCP membungkusnya sebagai content bertipe text.
     std::string text;
+
+    /// Bila terisi, hasilnya dikirim sebagai content bertipe image.
+    ///
+    /// **Byte mentah, bukan base64.** Penyandiannya urusan lapisan protokol,
+    /// dan tool yang menyandikan sendiri berarti setiap tool harus tahu bentuk
+    /// kawat MCP — sesuatu yang akan berubah tanpa mereka.
+    std::vector<uint8_t> imageBytes;
+    std::string imageMimeType = "image/png";
 };
 
 /// Handler sebuah tool. `argumentsJson` adalah objek JSON `arguments` dari

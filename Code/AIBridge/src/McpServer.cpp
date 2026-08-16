@@ -11,6 +11,7 @@
 #include <atomic>
 #include <fstream>
 #include <future>
+#include <random>
 #include <string_view>
 #include <thread>
 
@@ -70,28 +71,82 @@ json DescribeTool(const ToolDefinition& tool) {
                 {"_meta", json{{"simengine/permission", ToString(tool.permission)}}}};
 }
 
+/// Token acak 32 heksadesimal — 128 bit dari `random_device`.
+///
+/// Bukan `mt19937` yang di-seed waktu: benih seperti itu bisa ditebak oleh
+/// proses lain di mesin yang sama, dan proses lain di mesin yang sama adalah
+/// tepat yang hendak dihalangi token ini.
+/// Base64 standar (RFC 4648), dengan padding.
+///
+/// Ditulis di sini alih-alih dipinjam dari httplib: milik httplib tidak
+/// diekspor, dan menariknya keluar berarti bergantung pada bagian dalam sebuah
+/// pustaka yang kebetulan terlihat.
+std::string Base64(const std::vector<uint8_t>& bytes) {
+    static constexpr char kAlphabet[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve(((bytes.size() + 2) / 3) * 4);
+    std::size_t i = 0;
+    for (; i + 2 < bytes.size(); i += 3) {
+        const uint32_t triple = (uint32_t(bytes[i]) << 16) | (uint32_t(bytes[i + 1]) << 8) |
+                                uint32_t(bytes[i + 2]);
+        out.push_back(kAlphabet[(triple >> 18) & 0x3F]);
+        out.push_back(kAlphabet[(triple >> 12) & 0x3F]);
+        out.push_back(kAlphabet[(triple >> 6) & 0x3F]);
+        out.push_back(kAlphabet[triple & 0x3F]);
+    }
+    if (i < bytes.size()) {
+        const bool two = i + 1 < bytes.size();
+        const uint32_t triple =
+            (uint32_t(bytes[i]) << 16) | (two ? uint32_t(bytes[i + 1]) << 8 : 0u);
+        out.push_back(kAlphabet[(triple >> 18) & 0x3F]);
+        out.push_back(kAlphabet[(triple >> 12) & 0x3F]);
+        out.push_back(two ? kAlphabet[(triple >> 6) & 0x3F] : '=');
+        out.push_back('=');
+    }
+    return out;
+}
+
+std::string GenerateToken() {
+    std::random_device source;
+    std::uniform_int_distribution<int> nibble(0, 15);
+    static constexpr char kDigits[] = "0123456789abcdef";
+    std::string token;
+    token.reserve(32);
+    for (int i = 0; i < 32; ++i) {
+        token.push_back(kDigits[nibble(source)]);
+    }
+    return token;
+}
+
 }  // namespace
 
 struct McpServer::Impl {
     httplib::Server server;
     std::thread thread;
     const ToolRegistry* tools = nullptr;
+    const ResourceRegistry* resources = nullptr;
     McpServerConfig config;
     std::atomic<uint16_t> port{0};
     std::atomic<uint64_t> requests{0};
+    std::atomic<uint64_t> rejected{0};
     std::atomic<bool> running{false};
 
-    /// Menjalankan handler sebuah tool, di thread yang benar.
-    ToolResult Invoke(const ToolDefinition& tool, const std::string& argumentsJson) {
-        if (!tool.needsMainThread) {
-            return tool.handler(argumentsJson);
+    /// Menjalankan sesuatu di thread yang benar, dengan tenggat.
+    ///
+    /// Satu bentuk untuk tool dan resource: keduanya punya alasan yang sama
+    /// untuk diantrikan, dan dua salinan aturan tenggat adalah dua aturan yang
+    /// akan berselisih.
+    template <class Work>
+    auto OnCorrectThread(bool needsMainThread, Work&& work) -> decltype(work()) {
+        if (!needsMainThread) {
+            return work();
         }
 
-        // Yang diantrikan menyalin argumennya. Thread jaringan bisa saja sudah
-        // menyerah karena tenggat dan membuang buffer-nya sebelum main thread
-        // sempat menjalankan ini.
-        std::future<ToolResult> pending = MainThreadQueue::Get().Submit(
-            [handler = tool.handler, argumentsJson]() { return handler(argumentsJson); });
+        // Yang diantrikan menyalin apa yang dibutuhkannya. Thread jaringan bisa
+        // saja sudah menyerah karena tenggat dan membuang buffer-nya sebelum
+        // main thread sempat menjalankan ini.
+        auto pending = MainThreadQueue::Get().Submit(std::forward<Work>(work));
 
         if (pending.wait_for(config.mainThreadTimeout) != std::future_status::ready) {
             throw RpcException(
@@ -105,11 +160,62 @@ struct McpServer::Impl {
 
     json HandleMethod(const RpcRequest& request) {
         if (request.method == "initialize") {
+            // **`listChanged` false, dan itu jujur.** Mengumumkannya true berarti
+            // berjanji mengirim `notifications/tools/list_changed` saat daftarnya
+            // berubah — dan server ini tidak punya aliran SSE untuk mengirim apa
+            // pun atas inisiatifnya sendiri. Klien yang percaya janji itu akan
+            // memakai daftar basi selamanya alih-alih menanyakannya lagi.
+            json capabilities{{"tools", json{{"listChanged", false}}}};
+            // Kapabilitas resource hanya diumumkan kalau memang ada isinya.
+            // Klien memakai pengumuman ini untuk memutuskan apakah akan memanggil
+            // `resources/list` sama sekali.
+            if (resources != nullptr && resources->Count() > 0) {
+                capabilities["resources"] = json{{"listChanged", false}, {"subscribe", false}};
+            }
+            // `prompts` sengaja tidak diumumkan: metodenya ada supaya klien yang
+            // memanggilnya tetap mendapat jawaban yang sah, tapi belum ada satu
+            // pun prompt. Yang direncanakan PLAN-AI — sim:build-level dan
+            // seterusnya — menggambarkan alur di atas tool yang belum ada.
             return json{
                 {"protocolVersion", NegotiateProtocol(request.params)},
-                {"capabilities", json{{"tools", json{{"listChanged", false}}}}},
+                {"capabilities", std::move(capabilities)},
                 {"serverInfo",
                  json{{"name", config.serverName}, {"version", config.serverVersion}}}};
+        }
+
+        if (request.method == "resources/list") {
+            json list = json::array();
+            if (resources != nullptr) {
+                for (const ResourceDefinition& resource : resources->All()) {
+                    list.push_back(json{{"uri", resource.uri},
+                                        {"name", resource.name},
+                                        {"description", resource.description},
+                                        {"mimeType", resource.mimeType}});
+                }
+            }
+            return json{{"resources", std::move(list)}};
+        }
+
+        if (request.method == "resources/read") {
+            if (!request.params.is_object() || !request.params.contains("uri") ||
+                !request.params.at("uri").is_string()) {
+                throw RpcException(RpcError::InvalidParams, "\"uri\" must be a string");
+            }
+            const std::string uri = request.params.at("uri").get<std::string>();
+            const ResourceDefinition* resource =
+                resources == nullptr ? nullptr : resources->Find(uri);
+            if (resource == nullptr) {
+                throw RpcException(RpcError::InvalidParams, "no resource at \"" + uri + "\"");
+            }
+            std::string text = OnCorrectThread(resource->needsMainThread,
+                                               [read = resource->read]() { return read(); });
+            return json{{"contents", json::array({json{{"uri", resource->uri},
+                                                       {"mimeType", resource->mimeType},
+                                                       {"text", std::move(text)}}})}};
+        }
+
+        if (request.method == "prompts/list") {
+            return json{{"prompts", json::array()}};
         }
 
         // Notifikasi siklus hidup. Balasannya tidak pernah dikirim — dispatcher
@@ -149,10 +255,22 @@ struct McpServer::Impl {
                 argumentsJson = arguments.dump();
             }
 
-            const ToolResult result = Invoke(*tool, argumentsJson);
-            return json{
-                {"content", json::array({json{{"type", "text"}, {"text", result.text}}})},
-                {"isError", result.isError}};
+            const ToolResult result = OnCorrectThread(
+                tool->needsMainThread,
+                [handler = tool->handler, argumentsJson]() { return handler(argumentsJson); });
+
+            json content = json::array();
+            // Teks lebih dulu bila ada: ia yang menjelaskan gambarnya, dan
+            // sebagian klien hanya menampilkan blok pertama.
+            if (!result.text.empty() || result.imageBytes.empty()) {
+                content.push_back(json{{"type", "text"}, {"text", result.text}});
+            }
+            if (!result.imageBytes.empty()) {
+                content.push_back(json{{"type", "image"},
+                                       {"data", Base64(result.imageBytes)},
+                                       {"mimeType", result.imageMimeType}});
+            }
+            return json{{"content", std::move(content)}, {"isError", result.isError}};
         }
 
         throw RpcException(RpcError::MethodNotFound, "no method named \"" + request.method + "\"");
@@ -169,7 +287,12 @@ struct McpServer::Impl {
             SIM_WARN("AIBridge", "cannot write {}", config.advertisePath.string());
             return;
         }
+        // **Token sengaja tidak ikut.** Berkas ini ada supaya agen menemukan
+        // port-nya, dan ia bisa dibaca proses lain milik pengguna yang sama —
+        // yaitu tepat yang hendak dihalangi token. Menuliskannya di sini
+        // membatalkan seluruh gunanya.
         const json advertised{{"name", config.serverName},
+                              {"auth", config.bearerToken.empty() ? "none" : "bearer"},
                               {"port", port.load()},
                               {"url", "http://127.0.0.1:" + std::to_string(port.load()) + "/mcp"},
                               {"transport", "http"}};
@@ -192,12 +315,24 @@ McpServer::McpServer() : impl_(std::make_unique<Impl>()) {}
 McpServer::~McpServer() { Stop(); }
 
 bool McpServer::Start(const ToolRegistry& tools, const McpServerConfig& config) {
+    // Registry kosong yang hidup selama program: server tanpa resource tetap
+    // menjawab `resources/list` dengan daftar kosong, bukan dengan galat.
+    static const ResourceRegistry kNoResources;
+    return Start(tools, kNoResources, config);
+}
+
+bool McpServer::Start(const ToolRegistry& tools, const ResourceRegistry& resources,
+                      const McpServerConfig& config) {
     if (impl_->running.load()) {
         return true;
     }
 
     impl_->tools = &tools;
+    impl_->resources = &resources;
     impl_->config = config;
+    if (impl_->config.bearerToken.empty() && impl_->config.generateBearerToken) {
+        impl_->config.bearerToken = GenerateToken();
+    }
 
     // **SO_REUSEADDR saja, tanpa SO_REUSEPORT.** Bawaan httplib memasang
     // keduanya, dan SO_REUSEPORT membuat `bind_to_port` **berhasil** pada port
@@ -243,6 +378,19 @@ bool McpServer::Start(const ToolRegistry& tools, const McpServerConfig& config) 
 
     impl_->server.Post("/mcp", [this](const httplib::Request& request,
                                       httplib::Response& response) {
+        // **401, bukan galat JSON-RPC.** Yang gagal adalah transport, bukan
+        // metodenya — dan klien MCP tahu cara menangani 401 (meminta kredensial)
+        // sedangkan galat JSON-RPC di dalam body 200 hanya diteruskan ke model
+        // sebagai teks yang membingungkan.
+        if (!impl_->config.bearerToken.empty()) {
+            const std::string expected = "Bearer " + impl_->config.bearerToken;
+            if (request.get_header_value("Authorization") != expected) {
+                impl_->rejected.fetch_add(1);
+                response.status = 401;
+                response.set_header("WWW-Authenticate", "Bearer");
+                return;
+            }
+        }
         impl_->requests.fetch_add(1);
         const std::string reply = DispatchJsonRpc(
             request.body, [this](const RpcRequest& rpc) { return impl_->HandleMethod(rpc); });
@@ -303,5 +451,9 @@ std::string McpServer::Url() const {
 }
 
 uint64_t McpServer::RequestCount() const { return impl_->requests.load(); }
+
+uint64_t McpServer::RejectedCount() const { return impl_->rejected.load(); }
+
+std::string McpServer::BearerToken() const { return impl_->config.bearerToken; }
 
 }  // namespace sim::ai

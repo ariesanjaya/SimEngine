@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 
 #include "Sim/AIBridge/McpServer.h"
+#include "Sim/AIBridge/ResourceRegistry.h"
 #include "Sim/AIBridge/ToolRegistry.h"
 #include "Sim/Core/MainThreadQueue.h"
 
@@ -31,6 +32,7 @@ namespace {
 /// Server yang menyala di port bebas mana pun, beserta klien yang menunjuknya.
 struct Harness {
     ToolRegistry tools;
+    ResourceRegistry resources;
     McpServer server;
     McpServerConfig config;
 
@@ -42,7 +44,7 @@ struct Harness {
         config.mainThreadTimeout = timeout;
     }
 
-    bool Start() { return server.Start(tools, config); }
+    bool Start() { return server.Start(tools, resources, config); }
 
     httplib::Client Client() const {
         httplib::Client client("127.0.0.1", server.Port());
@@ -323,4 +325,158 @@ TEST_CASE("Main thread yang tidak pernah men-drain menghasilkan tenggat, bukan g
     // Pekerjaan yang terlanjur diantrikan dibuang supaya tidak bocor ke uji
     // berikutnya.
     MainThreadQueue::Get().Drain();
+}
+
+// --- resources & prompts -----------------------------------------------------
+
+namespace {
+
+ResourceDefinition NoteResource() {
+    ResourceDefinition resource;
+    resource.uri = "simengine://test/note";
+    resource.name = "Test note";
+    resource.description = "A fixed string, so the test asserts transport, not content.";
+    resource.mimeType = "text/plain";
+    resource.needsMainThread = false;
+    resource.read = []() { return std::string("catatan"); };
+    return resource;
+}
+
+}  // namespace
+
+TEST_CASE("Kapabilitas resource hanya diumumkan kalau ada isinya") {
+    SUBCASE("tanpa resource") {
+        Harness harness;
+        REQUIRE(harness.Start());
+        const json response = harness.Call("initialize");
+        // Mengumumkan kapabilitas yang kosong membuat klien memanggil
+        // `resources/list` untuk mendapati tidak ada apa-apa — satu perjalanan
+        // pulang-pergi untuk sebuah jawaban yang sudah diketahui.
+        CHECK_FALSE(response.at("result").at("capabilities").contains("resources"));
+    }
+
+    SUBCASE("dengan resource") {
+        Harness harness;
+        harness.resources.Register(NoteResource());
+        REQUIRE(harness.Start());
+        const json response = harness.Call("initialize");
+        CHECK(response.at("result").at("capabilities").contains("resources"));
+        // Tidak pernah true: tidak ada aliran SSE untuk mengirim notifikasi.
+        CHECK(response.at("result").at("capabilities").at("resources").at("listChanged") == false);
+    }
+}
+
+TEST_CASE("resources/list dan resources/read") {
+    Harness harness;
+    harness.resources.Register(NoteResource());
+    REQUIRE(harness.Start());
+
+    SUBCASE("daftar") {
+        const json response = harness.Call("resources/list");
+        const json& list = response.at("result").at("resources");
+        REQUIRE(list.size() == 1);
+        CHECK(list[0].at("uri") == "simengine://test/note");
+        CHECK(list[0].at("mimeType") == "text/plain");
+    }
+
+    SUBCASE("baca") {
+        const json response =
+            harness.Call("resources/read", json{{"uri", "simengine://test/note"}});
+        const json& contents = response.at("result").at("contents");
+        REQUIRE(contents.size() == 1);
+        CHECK(contents[0].at("uri") == "simengine://test/note");
+        CHECK(contents[0].at("text") == "catatan");
+    }
+
+    SUBCASE("uri yang tidak ada") {
+        const json response =
+            harness.Call("resources/read", json{{"uri", "simengine://test/hantu"}});
+        CHECK(response.at("error").at("code") == -32602);
+    }
+
+    SUBCASE("uri yang bukan string") {
+        const json response = harness.Call("resources/read", json{{"uri", 7}});
+        CHECK(response.at("error").at("code") == -32602);
+    }
+}
+
+TEST_CASE("prompts/list menjawab daftar kosong, bukan MethodNotFound") {
+    Harness harness;
+    REQUIRE(harness.Start());
+    // Metodenya ada supaya klien yang memanggilnya tetap mendapat jawaban yang
+    // sah; kapabilitasnya sengaja tidak diumumkan karena belum ada isinya.
+    const json response = harness.Call("prompts/list");
+    CHECK(response.at("result").at("prompts").is_array());
+    CHECK(response.at("result").at("prompts").empty());
+    CHECK_FALSE(harness.Call("initialize").at("result").at("capabilities").contains("prompts"));
+}
+
+// --- token bearer ------------------------------------------------------------
+
+TEST_CASE("Token bearer menolak dengan 401, bukan dengan galat JSON-RPC") {
+    Harness harness;
+    harness.config.bearerToken = "rahasia";
+    harness.tools.Register(EchoTool());
+    REQUIRE(harness.Start());
+
+    const std::string body = R"({"jsonrpc":"2.0","id":1,"method":"ping"})";
+    httplib::Client client = harness.Client();
+
+    // Penghitung diperiksa di dalam tiap subcase, bukan sesudahnya: doctest
+    // menjalankan ulang badan test untuk setiap subcase, jadi apa pun yang
+    // ditulis di bawah sini melihat server yang baru saja dibuat.
+    SUBCASE("tanpa header sama sekali") {
+        const httplib::Result result = client.Post("/mcp", body, "application/json");
+        REQUIRE(result);
+        // Yang gagal adalah transport, bukan metodenya — dan klien MCP tahu cara
+        // menangani 401 sedangkan galat JSON-RPC di dalam 200 hanya diteruskan
+        // ke model sebagai teks yang membingungkan.
+        CHECK(result->status == 401);
+        CHECK(result->get_header_value("WWW-Authenticate") == "Bearer");
+        // Yang ditolak dihitung terpisah dari yang dilayani: angka yang terus
+        // naik adalah tanda ada sesuatu di mesin ini yang mencoba menyambung
+        // tanpa diundang.
+        CHECK(harness.server.RejectedCount() == 1);
+        CHECK(harness.server.RequestCount() == 0);
+    }
+
+    SUBCASE("token salah") {
+        const httplib::Result result = client.Post(
+            "/mcp", {{"Authorization", "Bearer salah"}}, body, "application/json");
+        REQUIRE(result);
+        CHECK(result->status == 401);
+        CHECK(harness.server.RejectedCount() == 1);
+    }
+
+    SUBCASE("token benar") {
+        const httplib::Result result = client.Post(
+            "/mcp", {{"Authorization", "Bearer rahasia"}}, body, "application/json");
+        REQUIRE(result);
+        CHECK(result->status == 200);
+        CHECK(json::parse(result->body).contains("result"));
+        CHECK(harness.server.RejectedCount() == 0);
+        CHECK(harness.server.RequestCount() == 1);
+    }
+}
+
+TEST_CASE("Token dibangkitkan saat diminta, dan tidak ada saat tidak diminta") {
+    SUBCASE("bawaan tanpa token") {
+        Harness harness;
+        REQUIRE(harness.Start());
+        CHECK(harness.server.BearerToken().empty());
+    }
+
+    SUBCASE("dibangkitkan") {
+        Harness harness;
+        harness.config.generateBearerToken = true;
+        REQUIRE(harness.Start());
+        // 128 bit sebagai heksadesimal.
+        CHECK(harness.server.BearerToken().size() == 32);
+
+        Harness other;
+        other.config.generateBearerToken = true;
+        other.config.preferredPort = 47900;
+        REQUIRE(other.Start());
+        CHECK(other.server.BearerToken() != harness.server.BearerToken());
+    }
 }

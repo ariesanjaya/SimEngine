@@ -1,6 +1,12 @@
 #pragma once
 
+#include <cstdint>
+#include <functional>
+#include <string>
+#include <vector>
+
 namespace sim::ai {
+class ResourceRegistry;
 class ToolRegistry;
 }
 
@@ -18,6 +24,20 @@ class EditorApp;
 /// `app` harus hidup lebih lama daripada `tools`: handler-nya memegangnya lewat
 /// referensi, karena tool yang menyalin keadaan editor akan menjawab agen dengan
 /// keadaan pada saat pendaftaran, bukan pada saat ditanya.
-void RegisterEditorTools(ai::ToolRegistry& tools, EditorApp& app);
+
+/// Menangkap isi jendela editor sebagai PNG.
+///
+/// **Sebuah callback, dan itulah yang menjaga batas modulnya.** Tangkapan layar
+/// hanya bisa diambil oleh yang memegang swapchain, yaitu yang boleh melihat
+/// Vulkan — dan EditorFramework tidak boleh. Composition root adalah satu-satunya
+/// tempat yang melihat keduanya, jadi ia yang menyediakannya.
+///
+/// Mengembalikan false dan mengisi `error` bila gagal. Kosong berarti editor ini
+/// tidak bisa menangkap layar sama sekali, dan tool-nya tidak didaftarkan —
+/// lebih baik daripada tool yang ada tapi selalu gagal.
+using ScreenshotFn = std::function<bool(std::vector<uint8_t>& pngBytes, std::string& error)>;
+
+void RegisterEditorTools(ai::ToolRegistry& tools, ai::ResourceRegistry& resources,
+                         EditorApp& app, ScreenshotFn screenshot = {});
 
 }  // namespace sim::editor

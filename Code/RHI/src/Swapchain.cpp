@@ -1,4 +1,8 @@
 #include "Sim/RHI/Swapchain.h"
+#include <vector>
+#include <string>
+#include <cstring>
+#include "Sim/RHI/Buffer.h"
 
 #include "Sim/Core/Assert.h"
 
@@ -106,6 +110,17 @@ bool Swapchain::CreateSwapchain(uint32_t width, uint32_t height) {
     info.imageExtent = extent_;
     info.imageArrayLayers = 1;
     info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+    // TRANSFER_SRC dipakai `CaptureLastPresented` — tangkapan layar penuh untuk
+    // agen MCP. **Diminta hanya bila permukaannya mengizinkan**, dan hasilnya
+    // diingat: memintanya tanpa memeriksa membuat pembuatan swapchain gagal
+    // seluruhnya di perangkat yang tidak mendukungnya, yaitu menukar sebuah
+    // fitur diagnostik dengan editor yang tidak bisa menggambar apa pun.
+    canCapture_ = (capabilities.supportedUsageFlags & VK_IMAGE_USAGE_TRANSFER_SRC_BIT) != 0;
+    if (canCapture_) {
+        info.imageUsage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
+    } else {
+        SIM_WARN("RHI", "permukaan ini tidak mengizinkan TRANSFER_SRC — editor.screenshot mati");
+    }
     info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
     info.preTransform = capabilities.currentTransform;
     info.compositeAlpha = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
@@ -358,6 +373,9 @@ bool Swapchain::EndFrame(const Frame& frame) {
     present.pImageIndices = &frame.imageIndex;
 
     const VkResult result = vkQueuePresentKHR(device_->GraphicsQueue(), &present);
+    // Dicatat sebelum cabang galat: OUT_OF_DATE dan SUBOPTIMAL keduanya tetap
+    // mempresentasikan image ini, dan isinya tetap yang terakhir terlihat.
+    lastPresented_ = frame.imageIndex;
     frameIndex_ = (frameIndex_ + 1) % kFramesInFlight;
 
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
@@ -418,6 +436,108 @@ void Swapchain::Destroy() {
         renderPass_ = VK_NULL_HANDLE;
     }
     device_ = nullptr;
+}
+
+
+bool Swapchain::CaptureLastPresented(std::vector<uint8_t>& outRgba, uint32_t& outWidth,
+                                     uint32_t& outHeight, std::string& error) {
+    if (!canCapture_) {
+        error = "this surface does not allow reading swapchain images back";
+        return false;
+    }
+    if (lastPresented_ >= images_.size()) {
+        error = "no frame has been presented yet";
+        return false;
+    }
+    // Hanya dua tata letak yang benar-benar muncul di swapchain desktop. Yang
+    // lain ditolak dengan menyebut namanya, bukan disalin lalu ditafsirkan
+    // salah — gambar dengan kanal tertukar terlihat seperti bug rendering, dan
+    // yang mencarinya akan mencarinya di renderer.
+    const VkFormat format = surfaceFormat_.format;
+    const bool bgra = format == VK_FORMAT_B8G8R8A8_UNORM || format == VK_FORMAT_B8G8R8A8_SRGB;
+    const bool rgba = format == VK_FORMAT_R8G8B8A8_UNORM || format == VK_FORMAT_R8G8B8A8_SRGB;
+    if (!bgra && !rgba) {
+        error = "swapchain format " + std::to_string(static_cast<int>(format)) +
+                " is not one of BGRA8/RGBA8";
+        return false;
+    }
+
+    const uint32_t width = extent_.width;
+    const uint32_t height = extent_.height;
+    const VkDeviceSize bytes = VkDeviceSize(width) * height * 4;
+
+    DynamicBuffer staging;
+    if (!staging.Create(*device_, VK_BUFFER_USAGE_TRANSFER_DST_BIT, bytes)) {
+        error = "cannot allocate a staging buffer for the screenshot";
+        return false;
+    }
+
+    // Menunggu GPU diam supaya penyalinan tidak berlomba dengan frame yang
+    // masih berjalan. Boleh mahal: lihat catatan di headernya.
+    device_->WaitIdle();
+
+    VkImage image = images_[lastPresented_];
+    const auto barrier = [&](VkCommandBuffer cmd, VkImageLayout from, VkImageLayout to,
+                             VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
+                             VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess) {
+        VkImageMemoryBarrier2 memory{};
+        memory.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        memory.srcStageMask = srcStage;
+        memory.srcAccessMask = srcAccess;
+        memory.dstStageMask = dstStage;
+        memory.dstAccessMask = dstAccess;
+        memory.oldLayout = from;
+        memory.newLayout = to;
+        memory.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        memory.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        memory.image = image;
+        memory.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+        VkDependencyInfo dependency{};
+        dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dependency.imageMemoryBarrierCount = 1;
+        dependency.pImageMemoryBarriers = &memory;
+        vkCmdPipelineBarrier2(cmd, &dependency);
+    };
+
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {width, height, 1};
+
+    VkCommandBuffer cmd = device_->BeginOneShot();
+    barrier(cmd, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_COPY_BIT,
+            VK_ACCESS_2_TRANSFER_READ_BIT);
+    vkCmdCopyImageToBuffer(cmd, image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging.Handle(), 1,
+                           &region);
+    // Dikembalikan ke PRESENT_SRC: image ini akan dipakai lagi oleh frame
+    // berikutnya, dan yang menemukannya dalam tata letak lain adalah
+    // validation layer di tengah frame yang tidak ada hubungannya.
+    barrier(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_PRESENT_SRC_KHR,
+            VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT, VK_ACCESS_2_NONE);
+    device_->EndOneShot(cmd);
+
+    const uint8_t* source = static_cast<const uint8_t*>(staging.Mapped());
+    if (source == nullptr) {
+        error = "the staging buffer is not mapped";
+        return false;
+    }
+
+    outRgba.resize(static_cast<std::size_t>(bytes));
+    if (rgba) {
+        std::memcpy(outRgba.data(), source, static_cast<std::size_t>(bytes));
+    } else {
+        for (std::size_t i = 0; i < static_cast<std::size_t>(bytes); i += 4) {
+            outRgba[i + 0] = source[i + 2];
+            outRgba[i + 1] = source[i + 1];
+            outRgba[i + 2] = source[i + 0];
+            outRgba[i + 3] = source[i + 3];
+        }
+    }
+    outWidth = width;
+    outHeight = height;
+    return true;
 }
 
 }  // namespace sim::rhi

@@ -5,6 +5,7 @@
 // saling mencari lewat singleton.
 
 #include "Sim/AIBridge/McpServer.h"
+#include "Sim/AIBridge/ResourceRegistry.h"
 #include "Sim/AIBridge/ToolRegistry.h"
 #include "Sim/Core/FrameLimiter.h"
 #include "Sim/Core/Log.h"
@@ -308,12 +309,57 @@ int main(int argc, char** argv) {
     // adalah yang menyusun aplikasi — dan `SimHeadless` nanti menyusun himpunan
     // tool yang berbeda dari editor yang sama.
     ai::ToolRegistry mcpTools;
-    editor::RegisterEditorTools(mcpTools, app);
+    ai::ResourceRegistry mcpResources;
+    // Tangkapan layar dirakit di sini karena hanya di sini kedua sisinya
+    // terlihat: swapchain milik RHI, penyandi PNG milik ImageIO, dan
+    // EditorFramework tidak boleh melihat satu pun dari keduanya.
+    editor::ScreenshotFn captureWindow;
+    if (swapchain.CanCapture()) {
+        captureWindow = [&swapchain](std::vector<uint8_t>& png, std::string& error) {
+            std::vector<uint8_t> rgba;
+            uint32_t width = 0;
+            uint32_t height = 0;
+            if (!swapchain.CaptureLastPresented(rgba, width, height, error)) {
+                return false;
+            }
+            // **Alfa dibuang, bukan dibawa.** Jendela editor tidak punya alfa
+            // yang berarti — swapchain-nya opaque — dan pembaca gambar di sini
+            // meng-associate alfa saat membaca, jadi PNG berkanal empat yang
+            // dibaca kembali warnanya bisa berbeda dari yang dikirim. Tiga kanal
+            // menghilangkan seluruh pertanyaan itu, dan berkasnya seperempat
+            // lebih kecil.
+            std::vector<uint8_t> rgb(static_cast<std::size_t>(width) * height * 3u);
+            for (std::size_t pixel = 0; pixel < rgb.size() / 3u; ++pixel) {
+                rgb[pixel * 3u + 0u] = rgba[pixel * 4u + 0u];
+                rgb[pixel * 3u + 1u] = rgba[pixel * 4u + 1u];
+                rgb[pixel * 3u + 2u] = rgba[pixel * 4u + 2u];
+            }
+            rgba = std::vector<uint8_t>();
+
+            imageio::Image image;
+            image.desc.width = width;
+            image.desc.height = height;
+            image.desc.channels = 3;
+            image.desc.type = imageio::PixelType::UInt8;
+            // Swapchain-nya UNORM dan ImGui menggambar dengan warna yang sudah
+            // dalam ruang sRGB — jadi byte-nya memang sRGB, dan menyebutnya
+            // linear akan membuat siapa pun yang membacanya mencerahkannya lagi.
+            image.desc.colorSpace = imageio::ColorSpace::Srgb;
+            image.bytes = std::move(rgb);
+            const imageio::ImageIoResult result = imageio::Encode(image, ".png", png);
+            if (!result) {
+                error = result.error;
+                return false;
+            }
+            return true;
+        };
+    }
+    editor::RegisterEditorTools(mcpTools, mcpResources, app, std::move(captureWindow));
 
     ai::McpServer mcpServer;
     ai::McpServerConfig mcpConfig;
     mcpConfig.advertisePath = configDir / "mcp.json";
-    if (!mcpServer.Start(mcpTools, mcpConfig)) {
+    if (!mcpServer.Start(mcpTools, mcpResources, mcpConfig)) {
         // Editor tetap jalan tanpa server. Yang hilang adalah kendali agen,
         // bukan kemampuan menyunting — dan editor yang menolak dibuka karena
         // sebuah port sibuk akan sangat mengganggu.

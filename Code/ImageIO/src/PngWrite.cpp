@@ -97,10 +97,15 @@ std::size_t FilterCost(const std::vector<unsigned char>& line) {
 
 /// Menyusun berkas PNG dari baris piksel mentah yang sudah dalam tata letak
 /// berkasnya.
-std::vector<unsigned char> EncodePng(const std::vector<unsigned char>& raw, int width, int height,
-                                     int bitDepth) {
+std::vector<unsigned char> EncodeRaw(const std::vector<unsigned char>& raw, int width, int height,
+                                     int bitDepth, int channels) {
     std::vector<unsigned char> png;
-    const int bpp = bitDepth / 8;  // byte per sampel greyscale
+    // **Byte per piksel, bukan per sampel.** Filter PNG mengurangkan tetangga
+    // kiri sejauh satu piksel penuh, jadi pada RGBA8 jaraknya empat byte — dan
+    // menghitungnya sebagai satu membuat kanal merah diprediksi dari alfa
+    // tetangganya. Hasilnya tetap PNG yang sah, hanya jauh lebih besar dan,
+    // pada baris tertentu, salah.
+    const int bpp = (bitDepth / 8) * channels;
     const std::size_t stride = static_cast<std::size_t>(width) * static_cast<std::size_t>(bpp);
 
     std::vector<unsigned char> filtered;
@@ -162,7 +167,10 @@ std::vector<unsigned char> EncodePng(const std::vector<unsigned char>& raw, int 
     ihdr[6] = static_cast<unsigned char>(static_cast<uint32_t>(height) >> 8);
     ihdr[7] = static_cast<unsigned char>(static_cast<uint32_t>(height));
     ihdr[8] = static_cast<unsigned char>(bitDepth);
-    ihdr[9] = 0;   // greyscale
+    // 0 greyscale, 2 truecolour, 6 truecolour + alfa. Tiga kanal tanpa alfa
+    // memang punya kodenya sendiri; menulisnya sebagai RGBA dengan alfa penuh
+    // akan menggelembungkan berkasnya sepertiga tanpa menambah apa pun.
+    ihdr[9] = channels == 1 ? 0 : (channels == 3 ? 2 : 6);
     ihdr[10] = 0;  // kompresi deflate
     ihdr[11] = 0;  // metode filter standar
     ihdr[12] = 0;  // tanpa interlace
@@ -175,41 +183,45 @@ std::vector<unsigned char> EncodePng(const std::vector<unsigned char>& raw, int 
 
 }  // namespace
 
-bool EncodeGreyscalePng(const Image& image, std::vector<uint8_t>& out) {
+bool EncodePng(const Image& image, std::vector<uint8_t>& out) {
     const ImageDesc& desc = image.desc;
-    if (desc.width == 0 || desc.height == 0 || desc.channels != 1) {
+    const bool channelsOk = desc.channels == 1 || desc.channels == 3 || desc.channels == 4;
+    if (desc.width == 0 || desc.height == 0 || !channelsOk) {
         return false;
     }
     const auto width = static_cast<int>(desc.width);
     const auto height = static_cast<int>(desc.height);
+    const auto channels = static_cast<int>(desc.channels);
+    const std::size_t samples =
+        static_cast<std::size_t>(width) * static_cast<std::size_t>(height) *
+        static_cast<std::size_t>(channels);
 
     if (desc.type == PixelType::UInt8) {
         const uint8_t* values = image.AsU8();
-        const std::vector<unsigned char> raw(
-            values, values + static_cast<std::size_t>(width) * static_cast<std::size_t>(height));
-        out = EncodePng(raw, width, height, 8);
+        if (values == nullptr || image.bytes.size() < samples) {
+            return false;
+        }
+        // Kanal sudah berselang-seling di memori, dan itu persis tata letak
+        // baris PNG — tidak ada yang perlu disusun ulang.
+        const std::vector<unsigned char> raw(values, values + samples);
+        out = EncodeRaw(raw, width, height, 8, channels);
         return !out.empty();
     }
 
     if (desc.type != PixelType::UInt16) {
         return false;
     }
-    const uint16_t* samples = image.AsU16();
-    // PNG menyimpan sampel 16-bit big-endian, apa pun endianness mesinnya.
-    const std::size_t stride = static_cast<std::size_t>(width) * 2u;
-    std::vector<unsigned char> raw(stride * static_cast<std::size_t>(height));
-    for (int y = 0; y < height; ++y) {
-        for (int x = 0; x < width; ++x) {
-            const uint16_t value = samples[static_cast<std::size_t>(y) *
-                                               static_cast<std::size_t>(width) +
-                                           static_cast<std::size_t>(x)];
-            raw[static_cast<std::size_t>(y) * stride + static_cast<std::size_t>(x) * 2u] =
-                static_cast<unsigned char>(value >> 8);
-            raw[static_cast<std::size_t>(y) * stride + static_cast<std::size_t>(x) * 2u + 1u] =
-                static_cast<unsigned char>(value & 0xffU);
-        }
+    const uint16_t* values = image.AsU16();
+    if (values == nullptr || image.bytes.size() < samples * 2u) {
+        return false;
     }
-    out = EncodePng(raw, width, height, 16);
+    // PNG menyimpan sampel 16-bit big-endian, apa pun endianness mesinnya.
+    std::vector<unsigned char> raw(samples * 2u);
+    for (std::size_t i = 0; i < samples; ++i) {
+        raw[i * 2u] = static_cast<unsigned char>(values[i] >> 8);
+        raw[i * 2u + 1u] = static_cast<unsigned char>(values[i] & 0xffU);
+    }
+    out = EncodeRaw(raw, width, height, 16, channels);
     return !out.empty();
 }
 

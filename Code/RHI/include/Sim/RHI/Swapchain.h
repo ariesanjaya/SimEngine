@@ -4,6 +4,7 @@
 
 #include <array>
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace sim::rhi {
@@ -55,6 +56,25 @@ public:
     uint32_t Width() const { return extent_.width; }
     uint32_t Height() const { return extent_.height; }
 
+    /// True bila permukaannya mengizinkan image swapchain dibaca kembali.
+    bool CanCapture() const { return canCapture_; }
+
+    /// Menyalin isi image yang terakhir dipresentasikan ke memori host, sebagai
+    /// RGBA8 rapat tanpa padding.
+    ///
+    /// **Ini jalur diagnostik, bukan jalur render.** Ia menunggu GPU sampai diam
+    /// sebelum menyalin — mahal, dan justru itu yang membuatnya sederhana dan
+    /// benar. Tangkapan layar datang dari agen beberapa kali per sesi, bukan
+    /// enam puluh kali per detik, jadi tidak ada yang perlu ditukar demi
+    /// kecepatan di sini.
+    ///
+    /// Harus dipanggil dari thread yang memiliki device. Mengembalikan false
+    /// bila belum ada frame yang dipresentasikan, bila permukaannya tidak
+    /// mengizinkan penyalinan, atau bila format swapchain-nya bukan salah satu
+    /// dari BGRA8/RGBA8 — `error` lalu menyebut yang mana.
+    bool CaptureLastPresented(std::vector<uint8_t>& outRgba, uint32_t& outWidth,
+                              uint32_t& outHeight, std::string& error);
+
 private:
     bool CreateSwapchain(uint32_t width, uint32_t height);
     bool CreateRenderPass();
@@ -86,6 +106,11 @@ private:
     };
     std::array<FrameSync, kFramesInFlight> frames_{};
     uint32_t frameIndex_ = 0;
+    bool canCapture_ = false;
+    /// Indeks image yang terakhir benar-benar dipresentasikan, atau UINT32_MAX
+    /// bila belum ada. Isinya masih utuh sesudah present — yang berpindah ke
+    /// mesin presentasi adalah haknya menampilkan, bukan pikselnya.
+    uint32_t lastPresented_ = UINT32_MAX;
 };
 
 }  // namespace sim::rhi
