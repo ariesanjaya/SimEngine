@@ -379,11 +379,16 @@ int main(int argc, char** argv) {
             return true;
         };
     }
-    editor::RegisterEditorTools(mcpTools, mcpResources, app, std::move(captureWindow));
+    // **Disalin, bukan dipindah.** Dua kelompok tool memakai penangkap layar
+    // yang sama, dan `std::move` di sini mengosongkannya sebelum yang kedua
+    // sempat melihatnya — `material.preview` lalu diam-diam tidak didaftarkan.
+    // Kegagalannya tidak menghasilkan satu pun peringatan: yang tersisa adalah
+    // `std::function` kosong, yang sah dan bernilai false.
+    editor::RegisterEditorTools(mcpTools, mcpResources, app, captureWindow);
     editor::RegisterSceneTools(mcpTools, mcpResources, app);
     editor::RegisterEntityTools(mcpTools, app);
     editor::RegisterAssetTools(mcpTools, app);
-    editor::RegisterAuthoringTools(mcpTools, app);
+    editor::RegisterAuthoringTools(mcpTools, app, std::move(captureWindow));
 
     ai::McpServer mcpServer;
     ai::McpServerConfig mcpConfig;

@@ -169,6 +169,29 @@ struct EditorContext {
     };
     ViewportRect viewportRect;
 
+    /// Keadaan pratinjau material pada frame terakhir.
+    ///
+    /// **`ready` menjawab pertanyaan yang berbeda dari `rect.size != 0`.** Panel
+    /// Material Editor menggambar sesuatu di petak itu jauh sebelum pipeline
+    /// materialnya jadi: "Compiling…", pesan galat slangc, atau keterangan bahwa
+    /// perangkat ini tidak punya pratinjau. Ketiganya adalah gambar yang sah dan
+    /// tak satu pun memperlihatkan materialnya.
+    ///
+    /// Dipakai `material.preview` milik track AI. Tanpa `ready`, satu-satunya
+    /// yang bisa dilakukan tool itu adalah menunggu sekian ratus milidetik lalu
+    /// memotret apa pun yang ada — dan mengirimkan gambar tulisan "Compiling…"
+    /// dengan keterangan "ini materialmu" adalah kebohongan yang tidak akan
+    /// pernah diperiksa agen.
+    struct MaterialPreviewState {
+        ViewportRect rect;
+        /// Material yang sedang terbuka. Tidak sah bila belum ada yang dibuka.
+        Uuid material;
+        bool ready = false;
+        /// Kenapa belum siap, bila belum. Kosong saat siap.
+        std::string status;
+    };
+    MaterialPreviewState materialPreviewState;
+
     /// Server MCP, bila ada. Nullptr di build atau mode yang tidak
     /// menyalakannya.
     ///

@@ -15,6 +15,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <atomic>
 #include "Sim/ImageIO/ImageIO.h"
 #include "Sim/Assets/AssetDatabase.h"
@@ -377,9 +378,14 @@ TEST_CASE("Tool tangkapan layar tidak didaftarkan tanpa perangkat yang bisa mena
     Harness harness;
     CHECK(harness.tools.Find("editor.screenshot") == nullptr);
     CHECK(harness.tools.Find("viewport.capture") == nullptr);
-    // Sisanya tetap ada.
+    // `material.preview` ikut, dan karena alasan yang sama: tidak ada jalur
+    // readback GPU di engine ini, jadi ia menempuh tangkapan jendela lalu
+    // dipotong. Tanpa penangkap layar ia hanya bisa selalu gagal.
+    CHECK(harness.tools.Find("material.preview") == nullptr);
+    // Sisanya tetap ada, termasuk tool authoring yang tidak butuh gambar.
     CHECK(harness.tools.Find("editor.status") != nullptr);
     CHECK(harness.tools.Find("scene.describe") != nullptr);
+    CHECK(harness.tools.Find("material.graph_get") != nullptr);
 }
 
 TEST_CASE("Resource komponen dibangkitkan dari reflection") {
@@ -982,5 +988,101 @@ TEST_CASE("material.graph_get dan graph_set bolak-balik tanpa merusak") {
         harness.CallOk("asset.create",
                        json{{"type", "script"}, {"path", "Assets/bukan"}, {"text", "return {}"}});
         CHECK(harness.Call("material.graph_get", json{{"asset", "bukan.lua"}}).isError);
+    }
+}
+
+TEST_CASE("Dua kelompok tool berbagi satu penangkap layar, dan keduanya mendapatkannya") {
+    // **Regresi.** Composition root sempat memanggil `std::move` pada
+    // ScreenshotFn di pendaftaran pertama, jadi pendaftaran kedua menerima
+    // `std::function` kosong dan `material.preview` diam-diam tidak terdaftar.
+    // Tidak ada peringatan kompilasi: fungsi kosong itu sah, dan bernilai false
+    // persis seperti "perangkat ini tidak bisa menangkap layar".
+    Harness harness;
+    ai::ToolRegistry withCapture;
+    ai::ResourceRegistry resources;
+
+    int calls = 0;
+    ScreenshotFn capture = [&calls](const CaptureRect*, std::vector<uint8_t>& png,
+                                    std::string&) {
+        ++calls;
+        png = {0x89, 'P', 'N', 'G'};
+        return true;
+    };
+
+    RegisterEditorTools(withCapture, resources, harness.app, capture);
+    RegisterAuthoringTools(withCapture, harness.app, std::move(capture));
+
+    CHECK(withCapture.Find("editor.screenshot") != nullptr);
+    CHECK(withCapture.Find("viewport.capture") != nullptr);
+    CHECK(withCapture.Find("material.preview") != nullptr);
+    CHECK(calls == 0);
+}
+
+TEST_CASE("material.graph_set menolak apa yang akan dibuang pemuatnya diam-diam") {
+    // **Ini ketahuan dengan menjalankannya, bukan dengan membacanya.** Percobaan
+    // pertama menyetel `pinValues` dengan nama `metalness` dan `roughness` —
+    // tebakan yang wajar, dan keduanya salah. Berkasnya terurai tanpa galat,
+    // lolos validasi, dan tersimpan persis seperti sebelumnya. Yang dilihat agen
+    // adalah `ok: true`; yang dilihat orang adalah bola putih.
+    Harness harness;
+    const json created =
+        harness.CallOk("asset.create", json{{"type", "material"}, {"path", "Assets/Logam"}});
+    const std::string guid = created.at("guid").get<std::string>();
+    const json read = harness.CallOk("material.graph_get", json{{"asset", guid}});
+
+    SUBCASE("skema pin memberi nama yang sebenarnya, karena graph-nya tidak") {
+        // Material bawaan tidak menulis satu pun "pins" — kunci itu hanya muncul
+        // saat nilainya menyimpang dari bawaan katalog. Tanpa skema, graph yang
+        // dibaca agen tidak memuat contoh nama pin sama sekali.
+        REQUIRE(read.contains("pinSchema"));
+        REQUIRE(read.at("pinSchema").contains("output.surface"));
+        std::vector<std::string> names;
+        for (const json& pin : read.at("pinSchema").at("output.surface")) {
+            names.push_back(pin.at("name").get<std::string>());
+        }
+        CHECK(std::find(names.begin(), names.end(), "baseColor") != names.end());
+        // Nama OpenPBR, bukan nama yang akan ditebak siapa pun dari luar.
+        CHECK(std::find(names.begin(), names.end(), "baseMetalness") != names.end());
+        CHECK(std::find(names.begin(), names.end(), "metalness") == names.end());
+    }
+
+    SUBCASE("kunci node yang tidak dibaca pemuat ditolak") {
+        json guessed = read.at("graph");
+        guessed.at("nodes")[0]["pinValues"] = json{{"baseMetalness", "1.0"}};
+        const ai::ToolResult failed =
+            harness.Call("material.graph_set", json{{"asset", guid}, {"graph", guessed}});
+        REQUIRE(failed.isError);
+        const json body = json::parse(failed.text, nullptr, false);
+        REQUIRE_FALSE(body.is_discarded());
+        CHECK(body.at("stage") == "shape");
+        CHECK(body.at("dropped").dump().find("pinValues") != std::string::npos);
+    }
+
+    SUBCASE("nama pin yang tidak ada pada tipe node itu ditolak") {
+        json guessed = read.at("graph");
+        guessed.at("nodes")[0]["pins"] = json{{"metalness", "1.0"}, {"roughness", "0.35"}};
+        const ai::ToolResult failed =
+            harness.Call("material.graph_set", json{{"asset", guid}, {"graph", guessed}});
+        REQUIRE(failed.isError);
+        const json body = json::parse(failed.text, nullptr, false);
+        CHECK(body.at("stage") == "shape");
+        CHECK(body.at("dropped").size() == 2);
+    }
+
+    SUBCASE("nama pin yang benar diterima dan benar-benar tersimpan") {
+        json gold = read.at("graph");
+        gold.at("nodes")[0]["pins"] = json{{"baseColor", "float3(1.0, 0.766, 0.336)"},
+                                           {"baseMetalness", "1.0"},
+                                           {"specularRoughness", "0.35"}};
+        CHECK(harness.CallOk("material.graph_set", json{{"asset", guid}, {"graph", gold}})
+                  .at("ok") == true);
+
+        // **Dibaca kembali dari disk.** Kalau nilainya hilang di perjalanan,
+        // graph_set tetap melapor berhasil — dan hanya pembacaan ulang yang
+        // membedakan keduanya.
+        const json again = harness.CallOk("material.graph_get", json{{"asset", guid}});
+        const json& pins = again.at("graph").at("nodes")[0].at("pins");
+        CHECK(pins.at("baseMetalness") == "1.0");
+        CHECK(pins.at("specularRoughness") == "0.35");
     }
 }
