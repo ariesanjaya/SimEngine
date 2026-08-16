@@ -22,6 +22,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <thread>
+#include "Sim/Render/IViewportRenderer.h"
+#include "Sim/Core/MainThreadQueue.h"
 #include "Sim/ImageIO/ImageIO.h"
 #include "Sim/Assets/AssetDatabase.h"
 #include <fstream>
@@ -1359,4 +1363,81 @@ TEST_CASE("Tool animasi membaca klip dan mengganti kunci satu kanal") {
         REQUIRE(failed.isError);
         CHECK(failed.text.find("bezier") != std::string::npos);
     }
+}
+
+namespace {
+
+/// Perender yang tidak menggambar apa pun tapi bisa menyerahkan pikselnya.
+///
+/// Cukup untuk menguji satu hal: apa yang menentukan `viewport.capture`
+/// didaftarkan. Sejak ada readback, jawabannya perendernya — bukan jendelanya.
+class FakeCapturingRenderer final : public render::IViewportRenderer {
+public:
+    void Resize(uint32_t, uint32_t) override {}
+    render::MeshAsset AcquireMesh(std::string_view) override { return {}; }
+    void Render(const render::ViewportDesc&, const render::ViewportScene&) override {}
+    render::TextureHandle ColorTarget() const override { return 1; }
+    Vec2 ColorTargetUvMax() const override { return Vec2(1.0f, 1.0f); }
+    uint32_t Width() const override { return 4; }
+    uint32_t Height() const override { return 2; }
+    const char* Name() const override { return "fake"; }
+
+    bool CapturePixels(std::vector<uint8_t>& outRgba, uint32_t& outWidth, uint32_t& outHeight,
+                       std::string&) override {
+        outWidth = 4;
+        outHeight = 2;
+        outRgba.assign(static_cast<std::size_t>(outWidth) * outHeight * 4, 0x40);
+        return true;
+    }
+};
+
+}  // namespace
+
+TEST_CASE("Yang menentukan viewport.capture didaftarkan adalah perendernya, bukan jendelanya") {
+    // **Kontrak SimHeadless.** Di sana tidak ada jendela sama sekali, jadi
+    // `editor.screenshot` memang tidak boleh ada — tapi `viewport.capture`
+    // membaca target render, dan mengikatnya pada penangkap jendela berarti
+    // agen di CI kehilangan satu-satunya cara melihat hasil kerjanya.
+    Harness harness;
+    FakeCapturingRenderer renderer;
+    harness.app.Context().viewportRenderer = &renderer;
+
+    ai::ToolRegistry tools;
+    ai::ResourceRegistry resources;
+    RegisterEditorTools(tools, resources, harness.app);  // tanpa ScreenshotFn
+
+    CHECK(tools.Find("viewport.capture") != nullptr);
+    CHECK(tools.Find("editor.screenshot") == nullptr);
+
+    // Dan ia benar-benar mengembalikan gambar, bukan galat "tidak ada jendela".
+    harness.app.Context().viewportRect.size = Vec2(4.0f, 2.0f);
+    harness.app.Context().viewportRect.mainSize = Vec2(4.0f, 2.0f);
+    const ai::ToolDefinition* capture = tools.Find("viewport.capture");
+    REQUIRE(capture != nullptr);
+    // Handler-nya mengantre ke main thread; uji ini adalah main thread-nya.
+    std::atomic<bool> done{false};
+    ai::ToolResult result;
+    std::thread caller([&] {
+        result = capture->handler("{}");
+        done.store(true);
+    });
+    while (!done.load()) {
+        MainThreadQueue::Get().Drain();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    caller.join();
+
+    CHECK_FALSE(result.isError);
+    CHECK_FALSE(result.imageBytes.empty());
+    CHECK(result.imageMimeType == "image/png");
+    // Ukurannya dari perender, bukan dari tata letak panel: byte 16..23 kepala
+    // IHDR-nya.
+    REQUIRE(result.imageBytes.size() > 24);
+    const auto be32 = [&](std::size_t at) {
+        return (uint32_t(result.imageBytes[at]) << 24) |
+               (uint32_t(result.imageBytes[at + 1]) << 16) |
+               (uint32_t(result.imageBytes[at + 2]) << 8) | uint32_t(result.imageBytes[at + 3]);
+    };
+    CHECK(be32(16) == 4);
+    CHECK(be32(20) == 2);
 }

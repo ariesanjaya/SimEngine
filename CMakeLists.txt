@@ -109,6 +109,9 @@ add_subdirectory(Code/Editor)
 
 if(SIM_BUILD_EDITOR)
     add_subdirectory(Apps/SimEditor)
+    # Ikut SIM_BUILD_EDITOR karena ia menyusun inti editor yang sama. Ia tidak
+    # menautkan panel maupun SDL — lihat alasannya di CMakeLists-nya.
+    add_subdirectory(Apps/SimHeadless)
 endif()
 
 if(SIM_BUILD_TESTS)

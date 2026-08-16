@@ -19,10 +19,14 @@ Editor menyalakan MCP server dengan **48 tool** dan dua resource.
 
 Dari A4: mode izin (`read-only` / `ask` / `auto`) ditegakkan di server dan
 berlaku untuk semua klien, dialog persetujuan untuk mode `ask`, tombol "undo
-semua yang dilakukan agen", bendera `--mcp-permission`, dan **readback target
-render** — `viewport.capture` sekarang membaca piksel yang benar-benar dirender
-alih-alih memotong tangkapan jendela. Yang belum: `SimHeadless` dan panel AI
-Assistant.
+semua yang dilakukan agen", bendera `--mcp-permission`, readback target render —
+`viewport.capture` membaca piksel yang benar-benar dirender alih-alih memotong
+tangkapan jendela — dan **`SimHeadless`**. Yang belum: panel AI Assistant.
+
+| Aplikasi | Isi |
+|---|---|
+| `Apps/SimEditor` | editor lengkap: 48 tool, jendela, panel |
+| `Apps/SimHeadless` | inti editor yang sama tanpa jendela: 44 tool, tanpa `editor.screenshot` |
 
 Empat belas tool A3: `lua.eval`, `lua.script_write`, `material.graph_get`,
 `material.graph_set`, `material.preview`, `particle.get`, `particle.set`,
@@ -322,18 +326,18 @@ SimHeadless --project /path/Project --mcp-port 7777 --headless
    di riwayat. Yang belum: pemulihan berkas aset — suntingan material, partikel,
    skrip, dan animasi sengaja tidak melewati `CommandHistory`, jadi "semua" di
    sini berarti semua perubahan **scene**. Sama dengan kriteria A3 nomor 4.
-4. ◐ `SimHeadless` jalan di mesin tanpa display (`XDG_SESSION_TYPE` kosong) dan
+4. ✅ `SimHeadless` jalan di mesin tanpa display (`XDG_SESSION_TYPE` kosong) dan
    `viewport.capture` tetap menghasilkan gambar.
-   Prasyaratnya sudah ada: `RenderTarget::ReadPixels` dan
-   `IViewportRenderer::CapturePixels`, dan `viewport.capture` sudah memakainya —
-   jadi bagian "tetap menghasilkan gambar" tidak lagi bergantung pada swapchain.
-   `Sim::RHI::Device` juga sudah punya mode headless, dipakai uji unggahan
-   tekstur. Yang tersisa adalah target `SimHeadless` itu sendiri: loop tanpa
-   jendela, tanpa ImGui, yang menyalakan server dan memutar frame.
+   Diverifikasi dengan `DISPLAY`, `WAYLAND_DISPLAY`, `XDG_SESSION_TYPE`, dan
+   `XDG_RUNTIME_DIR` semuanya dicabut — diperiksa lagi dari `/proc/<pid>/environ`,
+   bukan hanya dari perintah yang menjalankannya. 44 tool, level termuat,
+   `scene.describe` menjawab 9 entity, dan `viewport.capture` mengembalikan PNG
+   1280x720 berisi cornell box dari sudut yang diminta agen.
 
    `material.preview` dan `particle.preview` masih menempuh tangkapan jendela
-   lalu dipotong; keduanya bisa menyusul lewat seam yang sama, karena
-   `IMaterialPreview` juga punya target rendernya sendiri.
+   lalu dipotong, jadi keduanya belum ada di SimHeadless. Keduanya bisa menyusul
+   lewat seam yang sama, karena `IMaterialPreview` juga punya target rendernya
+   sendiri.
 
 ---
 
