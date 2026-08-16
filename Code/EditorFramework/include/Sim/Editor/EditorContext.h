@@ -135,6 +135,40 @@ struct EditorContext {
     /// dimiliki salah satu panel akan hilang begitu panel itu ditutup.
     render::GiSettings gi;
 
+    /// Permintaan menempatkan kamera viewport dari luar panel.
+    ///
+    /// **Sebuah permintaan, bukan nilai kamera.** Kamera itu sendiri milik panel
+    /// Viewport — ia yang menyimpan orbit, batas pitch, dan kecepatan terbang —
+    /// dan menaruhnya di sini berarti dua tempat yang berhak mengubahnya, dengan
+    /// yang satu menimpa yang lain di tengah seretan mouse. Yang lewat sini
+    /// hanya "tolong lihat dari sana", dan panel yang memutuskan bagaimana.
+    ///
+    /// Dipakai `viewport.capture` milik track AI: agen memeriksa hasil kerjanya
+    /// dari sudut yang ia pilih sendiri.
+    struct ViewportCameraRequest {
+        bool pending = false;
+        Vec3 from{0.0f, 0.0f, 0.0f};
+        Vec3 lookAt{0.0f, 0.0f, 0.0f};
+    };
+    ViewportCameraRequest cameraRequest;
+
+    /// Tempat gambar viewport berada di dalam jendela utama, frame terakhir.
+    ///
+    /// **Satuan logis ImGui, bukan piksel.** Yang menulisnya adalah panel, yang
+    /// hanya mengenal satuan itu; yang memakainya adalah penangkap layar, yang
+    /// hanya mengenal piksel. Skalanya diturunkan di tempat pemakaian dari
+    /// perbandingan lebar gambar terhadap `mainSize` — bukan dari faktor DPI
+    /// yang harus dibaca dari tempat ketiga dan bisa berbeda per monitor.
+    ///
+    /// `size` nol berarti panel Viewport tidak digambar pada frame terakhir, dan
+    /// itu jawaban yang berbeda dari "digambar di pojok kiri atas".
+    struct ViewportRect {
+        Vec2 position{0.0f, 0.0f};  ///< relatif terhadap titik asal jendela utama
+        Vec2 size{0.0f, 0.0f};
+        Vec2 mainSize{0.0f, 0.0f};  ///< ukuran logis jendela utama
+    };
+    ViewportRect viewportRect;
+
     /// Server MCP, bila ada. Nullptr di build atau mode yang tidak
     /// menyalakannya.
     ///

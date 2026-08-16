@@ -285,12 +285,41 @@ public:
         }
         desc.clouds = context.clouds;
         camera_.ApplyTo(desc.camera);
+        // Permintaan kamera dari luar panel — `viewport.capture` milik track AI.
+        // Dikonsumsi di sini, sebelum `desc.camera` disusun, supaya frame ini
+        // sudah menggambar dari sudut yang diminta alih-alih frame berikutnya.
+        if (context.cameraRequest.pending) {
+            const Vec3 offset = context.cameraRequest.from - context.cameraRequest.lookAt;
+            const float distance = glm::length(offset);
+            if (distance > 1e-4f) {
+                const Vec3 direction = offset / distance;
+                camera_.focus = context.cameraRequest.lookAt;
+                camera_.distance = std::clamp(distance, 0.05f, 5000.0f);
+                // Kebalikan `OrbitCamera::Offset()`, termasuk tanda minus pada X
+                // yang dijelaskan di sana. Menurunkannya dengan cara lain
+                // menghasilkan kamera yang menghadap ke arah cermin.
+                camera_.pitch = std::clamp(std::asin(std::clamp(direction.y, -1.0f, 1.0f)),
+                                           -OrbitCamera::kPitchLimit, OrbitCamera::kPitchLimit);
+                camera_.yaw = std::atan2(-direction.x, direction.z);
+            }
+            context.cameraRequest.pending = false;
+        }
+
         desc.camera.orthographic = orthographic_;
         desc.camera.orthoHeight = camera_.distance;
 
         renderer->Render(desc, sceneView_.Scene());
 
         const ImVec2 imagePos = ImGui::GetCursorScreenPos();
+        // Diumumkan supaya `viewport.capture` bisa memotong tangkapan jendela ke
+        // gambar ini saja. Relatif terhadap titik asal viewport utama: `imagePos`
+        // berada di ruang layar virtual ImGui, yang titik nolnya bukan pojok
+        // jendela ketika multi-viewport menyala.
+        if (const ImGuiViewport* main = ImGui::GetMainViewport()) {
+            context.viewportRect.position = Vec2(imagePos.x - main->Pos.x, imagePos.y - main->Pos.y);
+            context.viewportRect.size = Vec2(size.x, size.y);
+            context.viewportRect.mainSize = Vec2(main->Size.x, main->Size.y);
+        }
         const render::TextureHandle texture = renderer->ColorTarget();
         if (texture != render::kInvalidTexture) {
             // UV diambil dari renderer, bukan (1,1): target render boleh lebih

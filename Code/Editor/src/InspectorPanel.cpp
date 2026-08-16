@@ -32,41 +32,6 @@
 namespace sim::editor {
 namespace {
 
-class AddComponentCommand final : public ICommand {
-public:
-    AddComponentCommand(scene::World* world, scene::Entity entity, const scene::ComponentOps* ops)
-        : world_(world), entity_(entity), ops_(ops) {}
-
-    void Do() override { ops_->emplace(world_->Registry(), scene::World::ToEntt(entity_)); }
-    void Undo() override { ops_->remove(world_->Registry(), scene::World::ToEntt(entity_)); }
-    std::string Name() const override { return "Add " + ops_->type->name; }
-
-private:
-    scene::World* world_;
-    scene::Entity entity_;
-    const scene::ComponentOps* ops_;
-};
-
-class RemoveComponentCommand final : public ICommand {
-public:
-    RemoveComponentCommand(scene::World* world, scene::Entity entity,
-                           const scene::ComponentOps* ops, std::string snapshot)
-        : world_(world), entity_(entity), ops_(ops), snapshot_(std::move(snapshot)) {}
-
-    void Do() override { ops_->remove(world_->Registry(), scene::World::ToEntt(entity_)); }
-    void Undo() override {
-        void* data = ops_->emplace(world_->Registry(), scene::World::ToEntt(entity_));
-        scene::DeserializeComponent(*ops_->type, data, snapshot_);
-    }
-    std::string Name() const override { return "Remove " + ops_->type->name; }
-
-private:
-    scene::World* world_;
-    scene::Entity entity_;
-    const scene::ComponentOps* ops_;
-    std::string snapshot_;
-};
-
 class InspectorPanel final : public Panel {
 public:
     InspectorPanel()
@@ -165,7 +130,7 @@ private:
                 context.history->BeginTransaction("Add " + ops.type->name);
                 for (const scene::Entity entity : entities) {
                     if (ops.tryGet(world.Registry(), scene::World::ToEntt(entity)) == nullptr) {
-                        context.history->Execute<AddComponentCommand>(&world, entity, &ops);
+                        context.history->Execute<AddComponentCommand>(&world, world.GuidOf(entity), &ops);
                     }
                 }
                 context.history->EndTransaction();
@@ -532,8 +497,8 @@ private:
                 context.history->CloseMergeGroup();
                 context.history->BeginTransaction("Remove " + ops.type->name);
                 for (std::size_t i = 0; i < entities.size(); ++i) {
-                    context.history->Execute<RemoveComponentCommand>(&world, entities[i], &ops,
-                                                                     items[i].before);
+                    context.history->Execute<RemoveComponentCommand>(
+                        &world, world.GuidOf(entities[i]), &ops, items[i].before);
                 }
                 context.history->EndTransaction();
             }

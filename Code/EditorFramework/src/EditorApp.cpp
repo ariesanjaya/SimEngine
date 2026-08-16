@@ -384,32 +384,6 @@ namespace {
 /// GUID-nya disimpan, bukan dibuat ulang saat redo: kalau berubah, semua yang
 /// merujuk entity itu — prefab, referensi antar-komponen nanti — akan menunjuk
 /// objek yang sudah tidak ada setelah satu kali undo lalu redo.
-class CreateEntityCommand final : public ICommand {
-public:
-    CreateEntityCommand(scene::World* world, Selection* selection, scene::Entity parent)
-        : world_(world), selection_(selection), parent_(parent), guid_(Uuid::Generate()) {}
-
-    void Do() override {
-        entity_ = world_->CreateWithGuid(guid_, "Entity", parent_);
-        if (selection_ != nullptr) {
-            selection_->SelectOnly(ToSelectionId(entity_));
-        }
-    }
-    void Undo() override {
-        world_->Destroy(entity_);
-        if (selection_ != nullptr) {
-            selection_->Clear();
-        }
-    }
-    std::string Name() const override { return "Create Entity"; }
-
-private:
-    scene::World* world_;
-    Selection* selection_;
-    scene::Entity parent_;
-    Uuid guid_;
-    scene::Entity entity_ = scene::kNullEntity;
-};
 
 
 }  // namespace
@@ -1150,6 +1124,14 @@ bool EditorApp::LoadLevel(const std::filesystem::path& path) {
     history_.Clear();
     levelPath_ = path;
     context_.levelName = path.stem().string();
+    // **Memuat sebuah level berarti level itu sekarang terbuka.** Tanpa baris
+    // ini, hanya dua jalur klik di dalam pemilih level sendiri yang pernah
+    // menurunkan layarnya — jadi `LoadLevel` yang dipanggil dari mana pun yang
+    // lain menukar isi dunia diam-diam sementara editor tetap menampilkan
+    // pemilih. Yang terlihat adalah editor yang mengabaikan permintaan;
+    // yang sebenarnya terjadi adalah level yang termuat penuh di balik layar
+    // yang menutupinya.
+    awaitingLevelChoice_ = false;
     SIM_INFO("Editor", "Loaded {} entities from {}", result.entityCount, path.string());
     if (result.migrated) {
         notifications_.Warning("Level migrated from schema " +

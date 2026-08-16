@@ -79,6 +79,37 @@ private:
     std::vector<Item> items_;
 };
 
+/// Membuat satu entity kosong dengan GUID yang tetap melewati undo–redo.
+///
+/// **GUID dibangkitkan sekali di konstruktor, bukan di `Do()`.** Redo harus
+/// menghasilkan entity dengan GUID yang sama persis, kalau tidak setiap perintah
+/// lain yang menunjuk hasil pembuatan ini — dan setiap GUID yang sudah
+/// terlanjur diberikan kepada agen — menjadi tidak sah setelah satu undo–redo.
+///
+/// Namanya boleh disebut di muka. Tanpa itu, memberi nama yang diminta menuntut
+/// `RenameEntityCommand` menyusul, dan history lalu memuat dua entri untuk satu
+/// tindakan yang di mata penggunanya tunggal.
+class CreateEntityCommand final : public ICommand {
+public:
+    CreateEntityCommand(scene::World* world, Selection* selection, scene::Entity parent,
+                        std::string name = "Entity");
+
+    void Do() override;
+    void Undo() override;
+    std::string Name() const override { return "Create " + name_; }
+
+    /// GUID entity yang dibuat. Sah sejak konstruksi, bukan sejak `Do()`.
+    Uuid Guid() const { return guid_; }
+
+private:
+    scene::World* world_;
+    Selection* selection_;
+    scene::Entity parent_;
+    std::string name_;
+    Uuid guid_;
+    scene::Entity entity_ = scene::kNullEntity;
+};
+
 class RenameEntityCommand final : public ICommand {
 public:
     RenameEntityCommand(scene::World* world, Uuid guid, std::string before, std::string after);
@@ -137,6 +168,46 @@ private:
     std::vector<bool> before_;
     Flag flag_;
     bool value_;
+};
+
+/// Menambahkan satu komponen ke sebuah entity, dengan nilai bawaannya.
+///
+/// **GUID, bukan handle.** Bentuk sebelumnya — di `InspectorPanel` — menyimpan
+/// `scene::Entity`, dan itu melanggar aturan yang dinyatakan di kepala berkas
+/// ini: entity yang dihapus lalu dihidupkan kembali oleh undo boleh mendapat
+/// nomor yang berbeda, dan perintah yang memegang nomor lama lalu menyentuh
+/// objek yang salah. Gejalanya hanya muncul pada urutan tambah–hapus–undo–undo,
+/// yang tidak pernah dilakukan siapa pun sampai sebuah agen melakukannya.
+class AddComponentCommand final : public ICommand {
+public:
+    AddComponentCommand(scene::World* world, Uuid guid, const scene::ComponentOps* ops);
+
+    void Do() override;
+    void Undo() override;
+    std::string Name() const override { return "Add " + ops_->type->name; }
+
+private:
+    scene::World* world_;
+    Uuid guid_;
+    const scene::ComponentOps* ops_;
+};
+
+/// Membuang satu komponen, menyimpan isinya supaya undo bisa mengembalikannya.
+class RemoveComponentCommand final : public ICommand {
+public:
+    RemoveComponentCommand(scene::World* world, Uuid guid, const scene::ComponentOps* ops,
+                           std::string snapshot);
+
+    void Do() override;
+    void Undo() override;
+    std::string Name() const override { return "Remove " + ops_->type->name; }
+    std::size_t MemoryCost() const override;
+
+private:
+    scene::World* world_;
+    Uuid guid_;
+    const scene::ComponentOps* ops_;
+    std::string snapshot_;
 };
 
 /// Menghapus sejumlah entity beserta keturunannya.

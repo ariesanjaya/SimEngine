@@ -109,6 +109,30 @@ public:
     /// Menutup project yang sedang dibuka dan kembali ke project manager.
     void CloseProject();
 
+    /// Folder isi project yang sedang dibuka. Kosong bila belum ada project.
+    ///
+    /// **Publik sejak A1.** Tool MCP menyusun jalur level dari sini, dan
+    /// menyalin aturannya ke sana berarti dua tempat yang menghitung folder yang
+    /// sama — yang akan berselisih pada project yang memakai tata letak sendiri,
+    /// yaitu justru yang `Project::levelsPath` ada untuk mengizinkan.
+    std::filesystem::path AssetsDirectory() const;
+    std::filesystem::path LevelsDirectory() const;
+
+    /// True selama layar pemilih level menutupi editor.
+    ///
+    /// **Terbaca dari luar supaya bisa diuji.** `LoadLevel` sempat tidak pernah
+    /// menurunkan layar ini, jadi memuat level dari mana pun selain pemilihnya
+    /// sendiri menukar isi dunia diam-diam sementara editor tetap menampilkan
+    /// pemilih — dan tidak ada satu pun cara mengetahuinya dari luar.
+    bool IsAwaitingLevelChoice() const { return awaitingLevelChoice_; }
+
+    /// Membuat berkas level kosong bernama `name` lalu membukanya.
+    ///
+    /// Publik dengan alasan yang sama dengan kedua folder di atas: `level.new`
+    /// milik track AI memanggilnya, dan menyalin aturan pembuatannya ke sana
+    /// berarti dua tempat yang harus sepakat soal bentuk level kosong.
+    bool CreateLevelFile(const std::string& name);
+
     ProjectLibrary& Projects() { return projects_; }
 
     /// Membuat level contoh saat editor dibuka tanpa berkas apa pun.
@@ -158,7 +182,6 @@ private:
     scene::Entity PlaceTemplate(const char* group, const char* name, scene::Entity parent,
                                 const char* renameTo = nullptr);
 
-    bool CreateLevelFile(const std::string& name);
     /// Mencatat level yang barusan dibuka ke berkas project.
     ///
     /// Dipakai layar pemilih sebagai sorotan "terakhir dibuka" — **bukan** untuk
@@ -166,9 +189,6 @@ private:
     void RememberStartupLevel(const std::filesystem::path& path);
     void PickFolder(const std::filesystem::path& start,
                     std::function<void(const std::filesystem::path&)> accept);
-    /// Folder isi project yang sedang dibuka. Kosong bila belum ada project.
-    std::filesystem::path AssetsDirectory() const;
-    std::filesystem::path LevelsDirectory() const;
     void CreateEntityAction();
     void DeleteSelectionAction();
     void DuplicateSelectionAction();
