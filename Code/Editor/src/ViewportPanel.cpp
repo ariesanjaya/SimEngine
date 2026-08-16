@@ -285,6 +285,26 @@ public:
         }
         desc.clouds = context.clouds;
         camera_.ApplyTo(desc.camera);
+        // Permintaan kamera dari luar panel — `viewport.capture` milik track AI.
+        // Dikonsumsi di sini, sebelum `desc.camera` disusun, supaya frame ini
+        // sudah menggambar dari sudut yang diminta alih-alih frame berikutnya.
+        if (context.cameraRequest.pending) {
+            const Vec3 offset = context.cameraRequest.from - context.cameraRequest.lookAt;
+            const float distance = glm::length(offset);
+            if (distance > 1e-4f) {
+                const Vec3 direction = offset / distance;
+                camera_.focus = context.cameraRequest.lookAt;
+                camera_.distance = std::clamp(distance, 0.05f, 5000.0f);
+                // Kebalikan `OrbitCamera::Offset()`, termasuk tanda minus pada X
+                // yang dijelaskan di sana. Menurunkannya dengan cara lain
+                // menghasilkan kamera yang menghadap ke arah cermin.
+                camera_.pitch = std::clamp(std::asin(std::clamp(direction.y, -1.0f, 1.0f)),
+                                           -OrbitCamera::kPitchLimit, OrbitCamera::kPitchLimit);
+                camera_.yaw = std::atan2(-direction.x, direction.z);
+            }
+            context.cameraRequest.pending = false;
+        }
+
         desc.camera.orthographic = orthographic_;
         desc.camera.orthoHeight = camera_.distance;
 

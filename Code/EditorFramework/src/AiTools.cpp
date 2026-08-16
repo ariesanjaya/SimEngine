@@ -3,8 +3,12 @@
 #include "Sim/AIBridge/ResourceRegistry.h"
 #include "Sim/AIBridge/ToolRegistry.h"
 #include "Sim/Core/Log.h"
+#include "Sim/Core/MainThreadQueue.h"
 #include "Sim/Editor/Actions.h"
 #include "Sim/Editor/Command.h"
+#include "Sim/Editor/Panel.h"
+#include "Sim/Editor/PanelIds.h"
+#include "Sim/Editor/PanelManager.h"
 #include "Sim/Editor/EditorApp.h"
 #include "Sim/Editor/EditorContext.h"
 #include "Sim/Render/IViewportRenderer.h"
@@ -14,6 +18,8 @@
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
+#include <thread>
+#include <chrono>
 #include <string>
 
 namespace sim::editor {
@@ -299,6 +305,128 @@ ai::ToolDefinition EditorScreenshot(ScreenshotFn screenshot) {
     return tool;
 }
 
+// --- viewport.capture ----------------------------------------------------------
+
+ai::ToolDefinition ViewportCapture(EditorApp& app, ScreenshotFn screenshot) {
+    ai::ToolDefinition tool;
+    tool.name = "viewport.capture";
+    tool.description =
+        "Look at the scene from a point you choose, then take a picture. Give \"from\" and "
+        "\"look_at\" in world space to move the editor camera first; omit them to shoot from "
+        "wherever it already is. The image is the whole editor window, with the viewport "
+        "showing the angle you asked for.";
+    tool.permission = ai::ToolPermission::Read;
+    // **Handler ini berjalan di thread jaringan, dan itu disengaja.** Ia harus
+    // menunggu beberapa frame di antara menggeser kamera dan memotret, dan
+    // menunggu dari dalam main thread berarti menunggu frame yang tidak akan
+    // pernah datang — `Drain()` dipanggil sekali per frame, jadi menahannya
+    // menahan frame itu sendiri. Yang diantrikan ke main thread hanyalah dua
+    // langkah pendeknya.
+    tool.needsMainThread = false;
+    tool.handler = [&app, screenshot = std::move(screenshot)](std::string_view argumentsJson) {
+        const json arguments = ParseArguments(argumentsJson);
+
+        const auto readVec = [&](const char* key, Vec3& out) {
+            if (!arguments.contains(key) || !arguments.at(key).is_array() ||
+                arguments.at(key).size() != 3) {
+                return false;
+            }
+            out = Vec3(arguments.at(key)[0].get<float>(), arguments.at(key)[1].get<float>(),
+                       arguments.at(key)[2].get<float>());
+            return true;
+        };
+
+        Vec3 from(0.0f);
+        Vec3 lookAt(0.0f);
+        const bool hasFrom = readVec("from", from);
+        const bool hasLookAt = readVec("look_at", lookAt);
+        if (hasFrom != hasLookAt) {
+            return Text("Give both \"from\" and \"look_at\", or neither.", /*isError=*/true);
+        }
+
+        if (hasFrom) {
+            std::future<bool> placed = MainThreadQueue::Get().Submit([&app, from, lookAt]() {
+                // Panel yang tertutup tidak menggambar, dan yang tidak menggambar
+                // tidak pernah membaca permintaan kamera. Membukanya di sini
+                // menutup kasus yang paling umum; yang tersisa — panel terbuka
+                // tapi berada di belakang tab lain — terdeteksi di bawah.
+                if (Panel* viewport = app.Panels().Find(panel_id::kViewport)) {
+                    viewport->SetOpen(true);
+                    // **Dibuka saja tidak cukup.** Panel yang terbuka tapi
+                    // berada di belakang tab lain di dock yang sama tidak
+                    // digambar sama sekali, jadi ia tidak pernah membaca
+                    // permintaan kamera — dan gambar yang kembali memperlihatkan
+                    // panel yang lain. `RequestFocus` yang memilih tab-nya;
+                    // itulah yang disebut komentarnya di `PanelManager`.
+                    viewport->RequestFocus();
+                }
+                app.Context().cameraRequest = {true, from, lookAt};
+                return true;
+            });
+            if (placed.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+                return Text("The editor did not answer; it may be showing a modal dialog.",
+                            /*isError=*/true);
+            }
+            // Beberapa frame supaya permintaannya benar-benar terkonsumsi dan
+            // tergambar. Menunggu satu frame saja adalah lomba: panel Viewport
+            // mungkin sudah lewat titik konsumsinya pada frame yang sedang
+            // berjalan.
+            std::this_thread::sleep_for(std::chrono::milliseconds(120));
+
+            // **Diperiksa, bukan diasumsikan.** Permintaan yang masih tergantung
+            // berarti panel Viewport tidak menggambar sama sekali — tertutup,
+            // atau berada di belakang tab lain di dock yang sama. Gambar yang
+            // dikembalikan lalu memperlihatkan panel yang lain sama sekali, dan
+            // mengirimkannya dengan keterangan "dari sudut yang kamu minta"
+            // adalah kebohongan yang tidak akan pernah diperiksa agen.
+            std::future<bool> consumed = MainThreadQueue::Get().Submit(
+                [&app]() { return !app.Context().cameraRequest.pending; });
+            if (consumed.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+                return Text("The editor did not answer; it may be showing a modal dialog.",
+                            /*isError=*/true);
+            }
+            if (!consumed.get()) {
+                return Text(
+                    "The camera was not moved: the Viewport panel is not being drawn. It is "
+                    "probably behind another tab in the same dock. Bring it to the front "
+                    "(Window > Viewport) and call this again.",
+                    /*isError=*/true);
+            }
+        }
+
+        std::vector<uint8_t> png;
+        std::string error;
+        std::future<bool> captured =
+            MainThreadQueue::Get().Submit([&screenshot, &png, &error]() {
+                return screenshot(png, error);
+            });
+        if (captured.wait_for(std::chrono::seconds(5)) != std::future_status::ready) {
+            return Text("The editor did not answer; it may be showing a modal dialog.",
+                        /*isError=*/true);
+        }
+        if (!captured.get()) {
+            return Text("Could not capture the window: " + error, /*isError=*/true);
+        }
+
+        ai::ToolResult result;
+        result.text = hasFrom ? "Editor window, viewport looking from the point you gave."
+                              : "Editor window, viewport as it already was.";
+        result.imageBytes = std::move(png);
+        result.imageMimeType = "image/png";
+        return result;
+    };
+    tool.inputSchemaJson = R"({
+  "type": "object",
+  "properties": {
+    "from": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
+             "description": "World-space eye position."},
+    "look_at": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3,
+                "description": "World-space point to aim at."}
+  }
+})";
+    return tool;
+}
+
 ai::ResourceDefinition RecentLogs() {
     ai::ResourceDefinition resource;
     resource.uri = "simengine://logs/recent";
@@ -328,6 +456,7 @@ void RegisterEditorTools(ai::ToolRegistry& tools, ai::ResourceRegistry& resource
     // membuat agen mencoba lagi dengan argumen yang berbeda, karena dari
     // sisinya kegagalan yang berulang terlihat seperti pemakaian yang salah.
     if (screenshot) {
+        tools.Register(ViewportCapture(app, screenshot));
         tools.Register(EditorScreenshot(std::move(screenshot)));
     }
 

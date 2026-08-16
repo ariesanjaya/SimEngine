@@ -1124,6 +1124,14 @@ bool EditorApp::LoadLevel(const std::filesystem::path& path) {
     history_.Clear();
     levelPath_ = path;
     context_.levelName = path.stem().string();
+    // **Memuat sebuah level berarti level itu sekarang terbuka.** Tanpa baris
+    // ini, hanya dua jalur klik di dalam pemilih level sendiri yang pernah
+    // menurunkan layarnya — jadi `LoadLevel` yang dipanggil dari mana pun yang
+    // lain menukar isi dunia diam-diam sementara editor tetap menampilkan
+    // pemilih. Yang terlihat adalah editor yang mengabaikan permintaan;
+    // yang sebenarnya terjadi adalah level yang termuat penuh di balik layar
+    // yang menutupinya.
+    awaitingLevelChoice_ = false;
     SIM_INFO("Editor", "Loaded {} entities from {}", result.entityCount, path.string());
     if (result.migrated) {
         notifications_.Warning("Level migrated from schema " +

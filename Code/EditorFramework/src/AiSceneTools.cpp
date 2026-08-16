@@ -15,6 +15,8 @@
 #include <algorithm>
 #include <filesystem>
 #include <string>
+#include <utility>
+#include <memory>
 #include <vector>
 
 namespace sim::editor {
@@ -561,6 +563,168 @@ ai::ToolDefinition LevelSave(EditorApp& app) {
     return tool;
 }
 
+// --- history.checkpoint / history.rollback -------------------------------------
+
+/// Titik aman yang bisa dikembalikan.
+///
+/// **Cuplikan levelnya ikut disimpan, bukan hanya posisi kursor history.**
+/// Kursor saja sudah cukup untuk mengembalikan keadaan pada jalur yang normal —
+/// `JumpTo` membatalkan semuanya secara berurutan — tapi ia tidak bisa
+/// membuktikan apa pun. Anggaran memori history membuang entri terlama saat
+/// penuh, dan sejak itu kursor lama menunjuk tempat yang berbeda tanpa satu pun
+/// tanda. Cuplikannya yang membuat rollback bisa mengatakan "berhasil" atau
+/// "tidak sampai", alih-alih mengatakan "berhasil" karena tidak ada yang
+/// memeriksanya.
+struct Checkpoint {
+    std::string label;
+    int cursor = 0;
+    std::string snapshot;
+};
+
+using CheckpointStore = std::vector<std::pair<std::string, Checkpoint>>;
+
+ai::ToolDefinition HistoryCheckpoint(EditorApp& app,
+                                     const std::shared_ptr<CheckpointStore>& store) {
+    ai::ToolDefinition tool;
+    tool.name = "history.checkpoint";
+    tool.description =
+        "Mark a point you can come back to. Take one before a run of changes; history.rollback "
+        "returns the level to exactly this state. Returns an id to pass back.";
+    tool.permission = ai::ToolPermission::Read;
+    tool.needsMainThread = true;
+    tool.handler = [&app, store](std::string_view argumentsJson) {
+        scene::World* world = app.Context().world;
+        if (world == nullptr) {
+            return Text("No scene is open.", /*isError=*/true);
+        }
+        const json arguments = ParseArguments(argumentsJson);
+        Checkpoint checkpoint;
+        checkpoint.label = arguments.value("label", std::string("checkpoint"));
+        checkpoint.cursor = app.History().Cursor();
+        checkpoint.snapshot = scene::SaveLevelToString(*world);
+
+        const std::string id =
+            checkpoint.label + "-" + std::to_string(store->size() + 1);
+        store->emplace_back(id, std::move(checkpoint));
+        return Structured(json{{"checkpoint", id},
+                               {"cursor", store->back().second.cursor},
+                               {"entityCount", world->Count()}});
+    };
+    tool.inputSchemaJson = R"({
+  "type": "object",
+  "properties": {
+    "label": {"type": "string", "description": "Short name, used in the returned id."}
+  }
+})";
+    return tool;
+}
+
+ai::ToolDefinition HistoryRollback(EditorApp& app,
+                                   const std::shared_ptr<CheckpointStore>& store) {
+    ai::ToolDefinition tool;
+    tool.name = "history.rollback";
+    tool.description =
+        "Undo everything done since a checkpoint. Verifies the level really matches the "
+        "checkpoint afterwards, and says so if it does not.";
+    tool.permission = ai::ToolPermission::Write;
+    tool.needsMainThread = true;
+    tool.handler = [&app, store](std::string_view argumentsJson) {
+        scene::World* world = app.Context().world;
+        if (world == nullptr) {
+            return Text("No scene is open.", /*isError=*/true);
+        }
+        const json arguments = ParseArguments(argumentsJson);
+        if (!arguments.contains("checkpoint") || !arguments.at("checkpoint").is_string()) {
+            return Text("\"checkpoint\" is required.", /*isError=*/true);
+        }
+        const std::string id = arguments.at("checkpoint").get<std::string>();
+        const auto found = std::find_if(store->begin(), store->end(),
+                                        [&](const auto& entry) { return entry.first == id; });
+        if (found == store->end()) {
+            return Text("No checkpoint called \"" + id + "\".", /*isError=*/true);
+        }
+
+        app.History().CloseMergeGroup();
+        app.History().JumpTo(found->second.cursor);
+
+        // **Diperiksa, bukan diasumsikan.** Inilah yang membedakan rollback yang
+        // benar-benar mengembalikan keadaan dari rollback yang hanya menggerakkan
+        // kursor ke angka yang kebetulan sama.
+        const std::string now = scene::SaveLevelToString(*world);
+        const bool exact = now == found->second.snapshot;
+        json result{{"checkpoint", id},
+                    {"cursor", app.History().Cursor()},
+                    {"entityCount", world->Count()},
+                    {"exact", exact}};
+        if (!exact) {
+            result["note"] =
+                "The level does not byte-for-byte match the checkpoint. History entries may "
+                "have been dropped by the memory budget, or something changed the scene "
+                "outside the command history.";
+            ai::ToolResult failure;
+            failure.isError = true;
+            failure.text = result.dump(2);
+            return failure;
+        }
+        return Structured(result);
+    };
+    tool.inputSchemaJson = R"({
+  "type": "object",
+  "required": ["checkpoint"],
+  "properties": {
+    "checkpoint": {"type": "string", "description": "Id returned by history.checkpoint."}
+  }
+})";
+    return tool;
+}
+
+ai::ToolDefinition LevelNew(EditorApp& app) {
+    ai::ToolDefinition tool;
+    tool.name = "level.new";
+    tool.description = "Create an empty level in the project and open it.";
+    // Alasan yang sama dengan level.open: ia membuang scene yang belum disimpan
+    // beserta seluruh history-nya, dan itu tidak tertutup undo.
+    tool.permission = ai::ToolPermission::Dangerous;
+    tool.needsMainThread = true;
+    tool.handler = [&app](std::string_view argumentsJson) {
+        if (!app.HasProject()) {
+            return Text("No project is open.", /*isError=*/true);
+        }
+        const json arguments = ParseArguments(argumentsJson);
+        if (!arguments.contains("name") || !arguments.at("name").is_string()) {
+            return Text("\"name\" is required and must be a string.", /*isError=*/true);
+        }
+        const std::string name = arguments.at("name").get<std::string>();
+        if (name.empty() || name.find('/') != std::string::npos ||
+            name.find('\\') != std::string::npos || name.find("..") != std::string::npos) {
+            return Text("Level names cannot be empty or contain path separators.",
+                        /*isError=*/true);
+        }
+        const std::filesystem::path path = app.LevelsDirectory() / (name + ".simlevel");
+        if (std::filesystem::exists(path)) {
+            // Menimpa level yang ada tidak tertutup undo dan tidak diminta:
+            // "buatkan level baru" tidak pernah berarti "hapus yang lama".
+            return Text("A level called \"" + name + "\" already exists.", /*isError=*/true);
+        }
+        if (!app.CreateLevelFile(name)) {
+            return Text("Could not create the level; the editor log has the reason.",
+                        /*isError=*/true);
+        }
+        return Structured(json{{"created", name},
+                               {"entityCount", app.Context().world != nullptr
+                                                   ? json(app.Context().world->Count())
+                                                   : json(nullptr)}});
+    };
+    tool.inputSchemaJson = R"({
+  "type": "object",
+  "required": ["name"],
+  "properties": {
+    "name": {"type": "string", "description": "Level name without the .simlevel extension."}
+  }
+})";
+    return tool;
+}
+
 }  // namespace
 
 void RegisterSceneTools(ai::ToolRegistry& tools, ai::ResourceRegistry& resources,
@@ -573,6 +737,14 @@ void RegisterSceneTools(ai::ToolRegistry& tools, ai::ResourceRegistry& resources
     tools.Register(LevelList(app));
     tools.Register(LevelOpen(app));
     tools.Register(LevelSave(app));
+    tools.Register(LevelNew(app));
+
+    // Store checkpoint hidup selama registry-nya: handler memegangnya lewat
+    // shared_ptr, bukan lewat static, supaya dua server di satu proses — editor
+    // dan SimHeadless di uji yang sama — tidak berbagi titik aman.
+    auto checkpoints = std::make_shared<CheckpointStore>();
+    tools.Register(HistoryCheckpoint(app, checkpoints));
+    tools.Register(HistoryRollback(app, checkpoints));
 
     resources.Register(ComponentDocs());
 }

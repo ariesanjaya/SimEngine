@@ -118,6 +118,13 @@ public:
     std::filesystem::path AssetsDirectory() const;
     std::filesystem::path LevelsDirectory() const;
 
+    /// Membuat berkas level kosong bernama `name` lalu membukanya.
+    ///
+    /// Publik dengan alasan yang sama dengan kedua folder di atas: `level.new`
+    /// milik track AI memanggilnya, dan menyalin aturan pembuatannya ke sana
+    /// berarti dua tempat yang harus sepakat soal bentuk level kosong.
+    bool CreateLevelFile(const std::string& name);
+
     ProjectLibrary& Projects() { return projects_; }
 
     /// Membuat level contoh saat editor dibuka tanpa berkas apa pun.
@@ -167,7 +174,6 @@ private:
     scene::Entity PlaceTemplate(const char* group, const char* name, scene::Entity parent,
                                 const char* renameTo = nullptr);
 
-    bool CreateLevelFile(const std::string& name);
     /// Mencatat level yang barusan dibuka ke berkas project.
     ///
     /// Dipakai layar pemilih sebagai sorotan "terakhir dibuka" — **bukan** untuk
