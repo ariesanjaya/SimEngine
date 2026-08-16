@@ -11,6 +11,7 @@
 #include "Sim/Editor/PanelManager.h"
 #include "Sim/Editor/EditorApp.h"
 #include "Sim/Editor/EditorContext.h"
+#include "Sim/ImageIO/ImageIO.h"
 #include "Sim/Render/IViewportRenderer.h"
 #include "Sim/Scene/Project.h"
 #include "Sim/Scene/World.h"
@@ -313,8 +314,8 @@ ai::ToolDefinition ViewportCapture(EditorApp& app, ScreenshotFn screenshot) {
     tool.description =
         "Look at the scene from a point you choose, then take a picture. Give \"from\" and "
         "\"look_at\" in world space to move the editor camera first; omit them to shoot from "
-        "wherever it already is. The image is the whole editor window, with the viewport "
-        "showing the angle you asked for.";
+        "wherever it already is. The image is the viewport itself, read straight from what "
+        "was rendered — no window chrome, no neighbouring panels.";
     tool.permission = ai::ToolPermission::Read;
     // **Handler ini berjalan di thread jaringan, dan itu disengaja.** Ia harus
     // menunggu beberapa frame di antara menggeser kamera dan memotret, dan
@@ -397,8 +398,58 @@ ai::ToolDefinition ViewportCapture(EditorApp& app, ScreenshotFn screenshot) {
         std::vector<uint8_t> png;
         std::string error;
         bool cropped = false;
+        bool fromRenderer = false;
         std::future<bool> captured = MainThreadQueue::Get().Submit(
-            [&app, &screenshot, &png, &error, &cropped]() {
+            [&app, &screenshot, &png, &error, &cropped, &fromRenderer]() {
+                // **Dibaca langsung dari target render bila perendernya bisa.**
+                // Yang keluar dari sana sudah persis area viewport: tidak ada
+                // chrome jendela, tidak ada panel tetangga yang ikut terpotong,
+                // dan tidak ada skala logis-ke-piksel yang harus ditebak dari
+                // lebar tangkapan. Ia juga satu-satunya jalur yang masih ada di
+                // mesin tanpa jendela.
+                // **Diperiksa dulu bahwa panel Viewport benar-benar menggambar
+                // frame terakhir.** Target render yang belum pernah disentuh
+                // tetap bisa dibaca balik — dan yang keluar adalah 1280x720
+                // piksel (0,0,0,0) yang dikirim dengan keterangan "ini
+                // viewport-mu". Ini ketahuan dengan melihat gambarnya, bukan
+                // dengan membaca kodenya: jalurnya berhasil di setiap langkah.
+                //
+                // `viewportRect.size` nol berarti panelnya tidak digambar frame
+                // lalu — tertutup, atau di belakang tab lain di dock yang sama.
+                render::IViewportRenderer* renderer = app.Context().viewportRenderer;
+                const EditorContext::ViewportRect& drawn = app.Context().viewportRect;
+                if (renderer != nullptr && drawn.size.x > 0.0f && drawn.size.y > 0.0f) {
+                    std::vector<uint8_t> rgba;
+                    uint32_t width = 0;
+                    uint32_t height = 0;
+                    std::string readbackError;
+                    if (renderer->CapturePixels(rgba, width, height, readbackError) &&
+                        width > 0 && height > 0) {
+                        imageio::Image image;
+                        image.desc.width = width;
+                        image.desc.height = height;
+                        image.desc.channels = 4;
+                        image.desc.type = imageio::PixelType::UInt8;
+                        image.bytes = std::move(rgba);
+                        const imageio::ImageIoResult encoded =
+                            imageio::Encode(image, ".png", png);
+                        if (encoded.ok) {
+                            fromRenderer = true;
+                            cropped = true;
+                            return true;
+                        }
+                        error = encoded.error;
+                        return false;
+                    }
+                    // Jatuh ke jalur jendela, tapi sebabnya tetap dicatat: yang
+                    // menolak di sini adalah perender uji, bukan kegagalan.
+                    SIM_DEBUG_LOG("Editor", "viewport readback unavailable: {}", readbackError);
+                }
+
+                if (!screenshot) {
+                    error = "this editor cannot capture anything";
+                    return false;
+                }
                 // **Rect diterjemahkan di main thread, bersama tangkapannya.**
                 // Membacanya lebih dulu lalu memotong belakangan berarti memakai
                 // tata letak frame yang lain — panel bisa saja sudah diseret di
@@ -408,9 +459,6 @@ ai::ToolDefinition ViewportCapture(EditorApp& app, ScreenshotFn screenshot) {
                 if (rect.size.x <= 0.0f || rect.size.y <= 0.0f || rect.mainSize.x <= 0.0f) {
                     return screenshot(/*crop=*/nullptr, png, error);
                 }
-                // Ukuran gambar belum diketahui sebelum ditangkap, jadi skalanya
-                // diminta dari tangkapan itu sendiri: potong dua langkah, yang
-                // pertama hanya untuk mengetahui lebarnya.
                 std::vector<uint8_t> probe;
                 std::string probeError;
                 if (!screenshot(/*crop=*/nullptr, probe, probeError)) {
@@ -449,9 +497,16 @@ ai::ToolDefinition ViewportCapture(EditorApp& app, ScreenshotFn screenshot) {
         // Disebut apa yang benar-benar dikirim. Gambar seluruh jendela yang
         // diperkenalkan sebagai viewport membuat agen menyimpulkan viewport-nya
         // memuat panel dan menu.
-        result.text = std::string(cropped ? "Viewport only" : "Whole editor window (the "
-                                                              "viewport rectangle is not known)") +
-                      (hasFrom ? ", looking from the point you gave." : ", as it already was.");
+        // Disebut jalur mana yang menghasilkannya. Keduanya sah, tapi yang satu
+        // adalah piksel yang benar-benar dirender dan yang lain adalah potongan
+        // jendela — dan agen yang mengukur sesuatu dari gambarnya perlu tahu
+        // mana yang sedang ia ukur.
+        result.text =
+            std::string(fromRenderer  ? "Viewport, read straight from the render target"
+                        : cropped     ? "Viewport, cropped out of a window capture"
+                                      : "Whole editor window (the viewport rectangle is not "
+                                        "known)") +
+            (hasFrom ? ", looking from the point you gave." : ", as it already was.");
         result.imageBytes = std::move(png);
         result.imageMimeType = "image/png";
         return result;

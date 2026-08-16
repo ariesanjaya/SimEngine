@@ -829,7 +829,7 @@ TEST_CASE("Mode ask menjalankan hanya yang disetujui") {
     }
 }
 
-TEST_CASE("Mode auto menjalankan tool tulis, dan tetap bertanya untuk yang berbahaya") {
+TEST_CASE("Mode auto menjalankan semuanya, termasuk yang berbahaya") {
     auto writeRuns = std::make_shared<std::atomic<int>>(0);
     auto dangerRuns = std::make_shared<std::atomic<int>>(0);
     Harness harness;
@@ -838,8 +838,7 @@ TEST_CASE("Mode auto menjalankan tool tulis, dan tetap bertanya untuk yang berba
     harness.tools.Register(CountingTool("test.danger", ToolPermission::Dangerous, dangerRuns));
 
     SUBCASE("tanpa penyetuju semuanya jalan") {
-        // Di mesin tanpa UI tidak ada yang menunggu jawaban, dan menolak akan
-        // membuat mode ini tidak berguna justru di sana.
+        // Di mesin tanpa UI tidak ada yang menunggu jawaban.
         REQUIRE(harness.Start());
         CHECK(harness.Call("tools/call", json{{"name", "test.write"}})
                   .at("result")
@@ -851,7 +850,12 @@ TEST_CASE("Mode auto menjalankan tool tulis, dan tetap bertanya untuk yang berba
         CHECK(dangerRuns->load() == 1);
     }
 
-    SUBCASE("dengan penyetuju, hanya yang berbahaya yang ditanyakan") {
+    SUBCASE("penyetuju yang terpasang tidak ditanyai sama sekali") {
+        // **Regresi.** Aturan awalnya "Dangerous tetap bertanya di auto", dan
+        // itu terdengar benar sampai dijalankan: `level.open` bertingkat
+        // dangerous dan dipanggil hampir setiap sesi, jadi setiap sesi agen
+        // berhenti di sebuah dialog — termasuk di mesin yang tidak ada orangnya.
+        // Mode yang tetap bertanya di `auto` juga membuat namanya berbohong.
         std::vector<std::string> asked;
         std::mutex guard;
         harness.server.SetApprover([&asked, &guard](const ToolDefinition& tool, std::string_view) {
@@ -864,11 +868,8 @@ TEST_CASE("Mode auto menjalankan tool tulis, dan tetap bertanya untuk yang berba
         harness.Call("tools/call", json{{"name", "test.danger"}});
         CHECK(writeRuns->load() == 1);
         CHECK(dangerRuns->load() == 1);
-        // Menanyakan tool tulis di mode auto akan melatih pengguna mengklik
-        // "ya" tanpa membacanya, dan yang berbahaya lalu ikut lolos.
         const std::lock_guard<std::mutex> lock(guard);
-        REQUIRE(asked.size() == 1);
-        CHECK(asked[0] == "test.danger");
+        CHECK(asked.empty());
     }
 }
 

@@ -1,6 +1,9 @@
 #include "Sim/RHI/RenderTarget.h"
 
+#include <cstring>
+
 #include "Sim/Core/Assert.h"
+#include "Sim/RHI/Buffer.h"
 
 #include <array>
 
@@ -283,6 +286,83 @@ void RenderTarget::Destroy() {
         renderPass_ = VK_NULL_HANDLE;
     }
     device_ = nullptr;
+}
+
+bool RenderTarget::ReadPixels(std::vector<uint8_t>& outRgba, uint32_t& outWidth,
+                              uint32_t& outHeight, std::string& error) {
+    if (!IsValid() || width_ == 0 || height_ == 0) {
+        error = "this render target has nothing in it yet";
+        return false;
+    }
+
+    const VkDeviceSize bytes = VkDeviceSize(width_) * height_ * 4;
+    DynamicBuffer staging;
+    if (!staging.Create(*device_, VK_BUFFER_USAGE_TRANSFER_DST_BIT, bytes)) {
+        error = "cannot allocate a staging buffer for the capture";
+        return false;
+    }
+
+    // Menunggu GPU diam supaya penyalinan tidak berlomba dengan frame yang
+    // masih menggambar ke target ini.
+    device_->WaitIdle();
+
+    const auto barrier = [this](VkCommandBuffer cmd, VkImageLayout from, VkImageLayout to,
+                                VkPipelineStageFlags2 srcStage, VkAccessFlags2 srcAccess,
+                                VkPipelineStageFlags2 dstStage, VkAccessFlags2 dstAccess) {
+        VkImageMemoryBarrier2 memory{};
+        memory.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        memory.srcStageMask = srcStage;
+        memory.srcAccessMask = srcAccess;
+        memory.dstStageMask = dstStage;
+        memory.dstAccessMask = dstAccess;
+        memory.oldLayout = from;
+        memory.newLayout = to;
+        memory.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        memory.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        memory.image = colorImage_;
+        memory.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+        VkDependencyInfo dependency{};
+        dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dependency.imageMemoryBarrierCount = 1;
+        dependency.pImageMemoryBarriers = &memory;
+        vkCmdPipelineBarrier2(cmd, &dependency);
+    };
+
+    // Hanya area yang benar-benar digambar. `bufferRowLength` nol berarti baris
+    // dirapatkan ke `imageExtent.width`, jadi yang keluar sudah tanpa sisa
+    // alokasi di kanannya.
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {width_, height_, 1};
+
+    VkCommandBuffer cmd = device_->BeginOneShot();
+    barrier(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_NONE, VK_PIPELINE_STAGE_2_COPY_BIT,
+            VK_ACCESS_2_TRANSFER_READ_BIT);
+    vkCmdCopyImageToBuffer(cmd, colorImage_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           staging.Handle(), 1, &region);
+    // Dikembalikan ke SHADER_READ_ONLY: itulah tata letak yang diharapkan
+    // renderer dan ImGui pada frame berikutnya, dan yang menemukannya dalam
+    // tata letak lain adalah validation layer di tengah frame yang tidak ada
+    // hubungannya dengan tangkapan ini.
+    barrier(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+            VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_READ_BIT,
+            VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT, VK_ACCESS_2_SHADER_SAMPLED_READ_BIT);
+    device_->EndOneShot(cmd);
+
+    const uint8_t* source = static_cast<const uint8_t*>(staging.Mapped());
+    if (source == nullptr) {
+        error = "the staging buffer is not mapped";
+        return false;
+    }
+    // Formatnya kColorFormat = R8G8B8A8_UNORM, jadi tidak ada kanal yang perlu
+    // ditukar — tidak seperti swapchain, yang lazimnya BGRA.
+    outRgba.resize(static_cast<std::size_t>(bytes));
+    std::memcpy(outRgba.data(), source, static_cast<std::size_t>(bytes));
+    outWidth = width_;
+    outHeight = height_;
+    return true;
 }
 
 }  // namespace sim::rhi

@@ -1444,6 +1444,11 @@ public:
                          uploaded.vertexCount};
     }
 
+    bool CapturePixels(std::vector<uint8_t>& outRgba, uint32_t& outWidth, uint32_t& outHeight,
+                       std::string& error) override {
+        return target_.ReadPixels(outRgba, outWidth, outHeight, error);
+    }
+
     TextureHandle ColorTarget() const override { return textureHandle_; }
     Vec2 ColorTargetUvMax() const override { return {target_.UvMaxU(), target_.UvMaxV()}; }
     uint32_t Width() const override { return target_.Width(); }

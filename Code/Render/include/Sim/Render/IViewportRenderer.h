@@ -5,6 +5,8 @@
 #include "Sim/Render/Types.h"
 
 #include <cstdint>
+#include <string>
+#include <vector>
 #include <span>
 #include <string_view>
 
@@ -149,6 +151,27 @@ public:
 
     /// Handle tekstur hasil render terakhir, siap dilempar ke ImGui::Image().
     /// Bisa berubah setelah Resize().
+    /// Menyalin gambar terakhir yang digambar ke RGBA8 di memori CPU, tepat
+    /// seukuran area viewport.
+    ///
+    /// **Ada supaya sebuah gambar bisa keluar dari engine tanpa lewat jendela.**
+    /// Sampai ini ada, satu-satunya jalan adalah menangkap swapchain dan
+    /// memotongnya — yang berarti setiap tool yang mengembalikan gambar mati di
+    /// mode headless, dan yang tidak mati pun mengembalikan potongan yang
+    /// bergantung pada tata letak panel.
+    ///
+    /// Bawaannya menolak: perender uji dan perender masa depan tidak wajib
+    /// bisa, dan yang tidak bisa harus mengatakannya alih-alih mengembalikan
+    /// gambar kosong.
+    virtual bool CapturePixels(std::vector<uint8_t>& outRgba, uint32_t& outWidth,
+                               uint32_t& outHeight, std::string& error) {
+        (void)outRgba;
+        (void)outWidth;
+        (void)outHeight;
+        error = "this renderer cannot read its pixels back";
+        return false;
+    }
+
     virtual TextureHandle ColorTarget() const = 0;
 
     /// Koordinat tekstur pojok kanan-bawah dari bagian yang benar-benar
