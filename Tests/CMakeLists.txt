@@ -324,4 +324,7 @@ sim_add_test(SimAiToolsTests
         # Tool A3 menjalankan Lua sungguhan; harness-nya membuat ScriptRuntime
         # sendiri karena EditorApp menerimanya dari pemanggil, bukan membuatnya.
         Sim::Script
+        # Uji terrain menyemai terrain lewat TerrainStore::Adopt — jalur yang
+        # sama dengan menu "Terrain baru", bukan berkas yang dikarang uji.
+        Sim::Terrain
         nlohmann_json::nlohmann_json)

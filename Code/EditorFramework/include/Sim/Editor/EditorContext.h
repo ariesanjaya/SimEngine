@@ -196,6 +196,7 @@ struct EditorContext {
     };
     DocumentPreviewState materialPreviewState;
     DocumentPreviewState particlePreviewState;
+    DocumentPreviewState animationPreviewState;
 
     /// Server MCP, bila ada. Nullptr di build atau mode yang tidak
     /// menyalakannya.

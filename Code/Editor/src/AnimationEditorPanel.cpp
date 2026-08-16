@@ -422,7 +422,7 @@ private:
         const float previewHeight = std::max(ImGui::GetContentRegionAvail().y * 0.42f,
                                              ImGui::GetFontSize() * 8.0f);
         if (ImGui::BeginChild("##preview", ImVec2(0.0f, previewHeight))) {
-            DrawPreview();
+            DrawPreview(context);
         }
         ImGui::EndChild();
 
@@ -502,9 +502,28 @@ private:
         }
     }
 
-    void DrawPreview() {
+    void DrawPreview(EditorContext& context) {
         const ImVec2 origin = ImGui::GetCursorScreenPos();
         const ImVec2 size = ImGui::GetContentRegionAvail();
+
+        // Diterbitkan untuk `animation.preview`, alasan yang sama dengan
+        // Material dan Particle Editor. `ready` menuntut rangkanya ada: petak
+        // kosong berbingkai adalah gambar yang sah dan tidak memperlihatkan
+        // gerakan apa pun.
+        EditorContext::DocumentPreviewState& published = context.animationPreviewState;
+        published.asset = clipGuid_;
+        published.ready = false;
+        published.rect = {};
+        if (const ImGuiViewport* main = ImGui::GetMainViewport()) {
+            published.rect.position = Vec2(origin.x - main->Pos.x, origin.y - main->Pos.y);
+            published.rect.size = Vec2(size.x, size.y);
+            published.rect.mainSize = Vec2(main->Size.x, main->Size.y);
+            published.ready = clipGuid_.IsValid() && skeleton_.BoneCount() > 0;
+            published.status = published.ready ? ""
+                               : !clipGuid_.IsValid()
+                                   ? "No clip is open."
+                                   : "The clip has no skeleton bound; there is nothing to pose.";
+        }
         ImGui::InvisibleButton("##previewrect", size);
         ImDrawList* draw = ImGui::GetWindowDrawList();
         draw->AddRectFilled(origin, ImVec2(origin.x + size.x, origin.y + size.y),

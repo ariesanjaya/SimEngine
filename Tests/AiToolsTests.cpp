@@ -9,6 +9,11 @@
 #include "Sim/Editor/Selection.h"
 #include "Sim/Scene/Serialization.h"
 #include "Sim/Script/ScriptRuntime.h"
+#include "Sim/Animation/AnimationIo.h"
+#include "Sim/Animation/Clip.h"
+#include "Sim/Terrain/Terrain.h"
+#include "Sim/Terrain/TerrainIo.h"
+#include "Sim/Editor/TerrainStore.h"
 #include "Sim/Scene/World.h"
 
 #include <nlohmann/json.hpp>
@@ -104,14 +109,17 @@ struct Harness {
 
     ai::ToolResult Call(const std::string& name, const json& arguments = json::object()) {
         const ai::ToolDefinition* tool = tools.Find(name);
-        REQUIRE_MESSAGE(tool != nullptr, "no tool called ", name);
+        REQUIRE_MESSAGE(tool != nullptr, "no tool called ", doctest::String(name.c_str()));
         return tool->handler(arguments.dump());
     }
 
     /// Hasil sebuah tool sebagai JSON. Gagal bila tool-nya melaporkan galat.
     json CallOk(const std::string& name, const json& arguments = json::object()) {
         const ai::ToolResult result = Call(name, arguments);
-        REQUIRE_MESSAGE(!result.isError, result.text.c_str());
+        // Dibungkus doctest::String: argumen pesan doctest yang berupa
+        // `const char*` non-literal diubah jadi bool, jadi tanpa ini setiap tool
+        // call yang gagal di berkas ini melapor "1" alih-alih galatnya.
+        REQUIRE_MESSAGE(!result.isError, doctest::String(result.text.c_str()));
         json parsed = json::parse(result.text, nullptr, /*allow_exceptions=*/false);
         REQUIRE_FALSE(parsed.is_discarded());
         return parsed;
@@ -382,6 +390,8 @@ TEST_CASE("Tool tangkapan layar tidak didaftarkan tanpa perangkat yang bisa mena
     // readback GPU di engine ini, jadi ia menempuh tangkapan jendela lalu
     // dipotong. Tanpa penangkap layar ia hanya bisa selalu gagal.
     CHECK(harness.tools.Find("material.preview") == nullptr);
+    CHECK(harness.tools.Find("particle.preview") == nullptr);
+    CHECK(harness.tools.Find("animation.preview") == nullptr);
     // Sisanya tetap ada, termasuk tool authoring yang tidak butuh gambar.
     CHECK(harness.tools.Find("editor.status") != nullptr);
     CHECK(harness.tools.Find("scene.describe") != nullptr);
@@ -1015,6 +1025,8 @@ TEST_CASE("Dua kelompok tool berbagi satu penangkap layar, dan keduanya mendapat
     CHECK(withCapture.Find("editor.screenshot") != nullptr);
     CHECK(withCapture.Find("viewport.capture") != nullptr);
     CHECK(withCapture.Find("material.preview") != nullptr);
+    CHECK(withCapture.Find("particle.preview") != nullptr);
+    CHECK(withCapture.Find("animation.preview") != nullptr);
     CHECK(calls == 0);
 }
 
@@ -1141,5 +1153,210 @@ TEST_CASE("particle.get dan particle.set bolak-balik, dan menolak yang akan dibu
     SUBCASE("aset yang bukan efek ditolak") {
         harness.CallOk("asset.create", json{{"type", "material"}, {"path", "Assets/Bukan"}});
         CHECK(harness.Call("particle.get", json{{"asset", "Bukan.simmat"}}).isError);
+    }
+}
+
+TEST_CASE("Tool terrain membaca, menulis, dan memahat dengan satu goresan undo") {
+    Harness harness;
+    // Terrain lahir di dalam editor, bukan dari berkas: `TerrainStore::Adopt`
+    // ada persis untuk itu, dan uji ini memakai jalur yang sama dengan menu
+    // "Terrain baru".
+    terrain::TerrainDesc desc;
+    desc.tileSamples = 64;
+    desc.tilesX = 1;
+    desc.tilesY = 1;
+    desc.sampleSpacing = 1.0f;
+    desc.minHeight = 0.0f;
+    desc.maxHeight = 100.0f;
+
+    const std::filesystem::path path =
+        harness.app.AssetsDirectory() / "Bukit.simterrain";
+    terrain::Terrain built(desc);
+    terrain::TerrainDocument document;
+    document.name = "Bukit";
+    document.desc = desc;
+    document.heightmapFile = "Bukit.png";
+    {
+        // Dokumennya saja: yang diuji di sini adalah tool, dan tool memakai
+        // terrain yang sudah ada di TerrainStore — berkas pendampingnya tidak
+        // pernah dibaca karena `Adopt` mendahuluinya.
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
+        file << terrain::SaveDocumentToString(document, {});
+    }
+    harness.app.Context().assets->ScanNow();
+    const assets::AssetRecord* record =
+        harness.app.Context().assets->FindByRelativePath("Bukit.simterrain");
+    REQUIRE(record != nullptr);
+    harness.app.Context().terrains->Adopt(record->guid, std::move(built), document);
+    const std::string guid = record->guid.ToString();
+
+    SUBCASE("heightmap_get menolak petak yang terlalu besar dengan menyebut angkanya") {
+        const ai::ToolResult failed = harness.Call(
+            "terrain.heightmap_get",
+            json{{"asset", guid},
+                 {"region", json{{"x", 0}, {"y", 0}, {"width", 64}, {"height", 64}}}});
+        // 64x64 = 4096, masih di bawah batas — ini harus berhasil.
+        CHECK_FALSE(failed.isError);
+    }
+
+    SUBCASE("menulis lalu membaca kembali mengembalikan tinggi yang sama") {
+        json rows = json::array();
+        for (int y = 0; y < 4; ++y) {
+            json row = json::array();
+            for (int x = 0; x < 4; ++x) {
+                row.push_back(10.0f + static_cast<float>(x));
+            }
+            rows.push_back(std::move(row));
+        }
+        const json region{{"x", 2}, {"y", 3}, {"width", 4}, {"height", 4}};
+        CHECK(harness
+                  .CallOk("terrain.heightmap_set",
+                          json{{"asset", guid}, {"region", region}, {"heights", rows}})
+                  .at("samplesWritten") == 16);
+
+        const json read = harness.CallOk("terrain.heightmap_get",
+                                         json{{"asset", guid}, {"region", region}});
+        // Kuantisasi ke uint16 atas rentang 0..100 m: satu langkah ~1.5 mm,
+        // jadi yang dibandingkan adalah kedekatan, bukan kesamaan bit.
+        CHECK(read.at("heights")[0][0].get<float>() == doctest::Approx(10.0f).epsilon(0.001));
+        CHECK(read.at("heights")[3][3].get<float>() == doctest::Approx(13.0f).epsilon(0.001));
+        CHECK(read.at("maxHeight").get<float>() == doctest::Approx(13.0f).epsilon(0.001));
+    }
+
+    SUBCASE("baris yang tidak sepadan ditolak sebelum satu sampel pun ditulis") {
+        const json region{{"x", 0}, {"y", 0}, {"width", 4}, {"height", 4}};
+        const json shortRows = json::array({json::array({1.0, 2.0})});
+        const ai::ToolResult failed = harness.Call(
+            "terrain.heightmap_set",
+            json{{"asset", guid}, {"region", region}, {"heights", shortRows}});
+        REQUIRE(failed.isError);
+        // Setengah petak tertulis akan terlihat sebagai tebing yang tidak
+        // diminta siapa pun, jadi yang diperiksa adalah terrain-nya masih rata.
+        const json read = harness.CallOk("terrain.heightmap_get",
+                                         json{{"asset", guid}, {"region", region}});
+        CHECK(read.at("minHeight").get<float>() == read.at("maxHeight").get<float>());
+    }
+
+    SUBCASE("sculpt menaikkan terrain, dan seluruh panggilan jadi satu goresan") {
+        const json region{{"x", 0}, {"y", 0}, {"width", 32}, {"height", 32}};
+        const float before = harness.CallOk("terrain.heightmap_get",
+                                            json{{"asset", guid}, {"region", region}})
+                                 .at("maxHeight")
+                                 .get<float>();
+
+        const json sculpted =
+            harness.CallOk("terrain.sculpt", json{{"asset", guid},
+                                                  {"kind", "raise"},
+                                                  {"at", json::array({json::array({8.0, 8.0}),
+                                                                      json::array({12.0, 12.0})})},
+                                                  {"radius", 6.0},
+                                                  {"strength", 4.0}});
+        CHECK(sculpted.at("dabs") == 2);
+        // Dua sentuhan, satu goresan: satu undo dari sisi orang mengembalikan
+        // keduanya sekaligus.
+        CHECK(sculpted.at("undoDepth") == 1);
+
+        const float after = harness.CallOk("terrain.heightmap_get",
+                                           json{{"asset", guid}, {"region", region}})
+                                .at("maxHeight")
+                                .get<float>();
+        CHECK(after > before);
+    }
+
+    SUBCASE("kuas yang tidak dikenal ditolak dengan menyebut yang dikenal") {
+        const ai::ToolResult failed = harness.Call(
+            "terrain.sculpt",
+            json{{"asset", guid}, {"kind", "meledak"}, {"at", json::array({json::array({1.0, 1.0})})}});
+        REQUIRE(failed.isError);
+        CHECK(failed.text.find("flatten") != std::string::npos);
+    }
+}
+
+TEST_CASE("Tool animasi membaca klip dan mengganti kunci satu kanal") {
+    Harness harness;
+    // Klip ditulis lewat penulis kanonis modul animasi, bukan dikarang uji:
+    // berkas yang dikarang uji hanya membuktikan uji itu sepakat dengan dirinya
+    // sendiri.
+    animation::Clip clip;
+    clip.name = "Lambai";
+    clip.duration = 2.0f;
+    clip.frameRate = 30.0f;
+    const int track = clip.EnsureTrack("Tangan", animation::Channel::TranslationY);
+    clip.TrackAt(track).curve.AddKey(CurveKey{0.0f, 0.0f, 0.0f, 0.0f, Interpolation::Linear});
+    clip.TrackAt(track).curve.AddKey(CurveKey{1.0f, 3.0f, 0.0f, 0.0f, Interpolation::Linear});
+
+    animation::ClipDocument document;
+
+    const std::filesystem::path path = harness.app.AssetsDirectory() / "Lambai.simanim";
+    REQUIRE(animation::SaveClip(clip, document, path).ok);
+    harness.app.Context().assets->ScanNow();
+
+    const json info = harness.CallOk("animation.clip_info", json{{"asset", "Lambai.simanim"}});
+    CHECK(info.at("duration").get<float>() == doctest::Approx(2.0f));
+    REQUIRE(info.at("tracks").size() == 1);
+    CHECK(info.at("tracks")[0].at("bone") == "Tangan");
+    CHECK(info.at("tracks")[0].at("keys") == 2);
+    CHECK(info.at("tracks")[0].at("maxValue").get<float>() == doctest::Approx(3.0f));
+
+    SUBCASE("kanal yang salah ketik ditolak, bukan mendarat di kanal lain") {
+        // `ChannelFromString` memilih kanal pertama untuk teks yang tidak
+        // dikenal, jadi tanpa pemeriksaan ini "translationYY" akan menulis ke
+        // TranslationX tanpa satu pun tanda.
+        const ai::ToolResult failed =
+            harness.Call("animation.key_set", json{{"asset", "Lambai.simanim"},
+                                                   {"bone", "Tangan"},
+                                                   {"channel", "translationYY"},
+                                                   {"keys", json::array()}});
+        REQUIRE(failed.isError);
+        CHECK(failed.text.find("Known:") != std::string::npos);
+
+        // Dan kanal aslinya tidak tersentuh.
+        CHECK(harness.CallOk("animation.clip_info", json{{"asset", "Lambai.simanim"}})
+                  .at("tracks")[0]
+                  .at("keys") == 2);
+    }
+
+    SUBCASE("kunci baru menggantikan seluruh kanal dan benar-benar tersimpan") {
+        const std::string channel =
+            info.at("tracks")[0].at("channel").get<std::string>();
+        const json keys = json::array({json{{"time", 0.0}, {"value", 0.0}},
+                                       json{{"time", 0.5}, {"value", 5.0}},
+                                       json{{"time", 1.0}, {"value", 0.0}}});
+        const json written = harness.CallOk("animation.key_set",
+                                            json{{"asset", "Lambai.simanim"},
+                                                 {"bone", "Tangan"},
+                                                 {"channel", channel},
+                                                 {"keys", keys}});
+        CHECK(written.at("keys") == 3);
+
+        // Dibaca ulang dari disk: kalau kuncinya tidak sampai ke berkas,
+        // key_set tetap melapor berhasil.
+        const json again =
+            harness.CallOk("animation.clip_info", json{{"asset", "Lambai.simanim"}});
+        CHECK(again.at("tracks")[0].at("keys") == 3);
+        CHECK(again.at("tracks")[0].at("maxValue").get<float>() == doctest::Approx(5.0f));
+    }
+
+    SUBCASE("track baru dibuat untuk bone dan kanal yang belum ada") {
+        harness.CallOk("animation.key_set",
+                       json{{"asset", "Lambai.simanim"},
+                            {"bone", "Kaki"},
+                            {"channel", "ScaleX"},
+                            {"keys", json::array({json{{"time", 0.0}, {"value", 1.0}}})}});
+        CHECK(harness.CallOk("animation.clip_info", json{{"asset", "Lambai.simanim"}})
+                  .at("tracks")
+                  .size() == 2);
+    }
+
+    SUBCASE("interpolasi yang tidak dikenal ditolak dengan menyebut yang dikenal") {
+        const ai::ToolResult failed = harness.Call(
+            "animation.key_set",
+            json{{"asset", "Lambai.simanim"},
+                 {"bone", "Tangan"},
+                 {"channel", info.at("tracks")[0].at("channel")},
+                 {"keys", json::array({json{{"time", 0.0}, {"value", 1.0},
+                                            {"interpolation", "melengkung"}}})}});
+        REQUIRE(failed.isError);
+        CHECK(failed.text.find("bezier") != std::string::npos);
     }
 }
