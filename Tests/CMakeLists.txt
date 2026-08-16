@@ -95,6 +95,11 @@ sim_add_test(SimEditorTests
 # yang sama dengan SIM_MESH_DIR pada SimAssetTests.
 target_compile_definitions(SimEditorTests
     PRIVATE SIM_MESH_DIR="${CMAKE_SOURCE_DIR}/Resources/Meshes"
+    # Panel-nya sendiri ada di `Sim::Editor`, yang sengaja tidak ditautkan ke
+    # uji mana pun. Aturan "panel yang tidak di-dock harus mulai tertutup"
+    # karena itu ditegakkan dengan menyisir sumbernya, pola yang sama dengan
+    # SIM_CODE_DIR pada SimImageIOTests.
+    PRIVATE SIM_CODE_DIR="${CMAKE_SOURCE_DIR}/Code"
     # Shader renderer dan `openpbr.slang`, dibaca dari folder sumber: uji yang
     # mengompilasi material harus memakai berkas yang sedang ada di repo.
     PRIVATE SIM_SHADER_DIR="${CMAKE_SOURCE_DIR}/Shaders"

@@ -120,7 +120,11 @@ class TerrainEditorPanel final : public Panel {
 public:
     TerrainEditorPanel()
         : Panel(panel_id::kTerrainEditor, std::string(icons::kTerrainEditor) + "  Terrain Editor",
-                PanelCategory::Authoring) {}
+                PanelCategory::Authoring) {
+        // Alasan yang sama dengan Script Editor: tidak di-dock, jadi jangan
+        // terbuka sendiri.
+        SetOpen(false);
+    }
 
     void OnDraw(EditorContext& context) override {
         if (context.assets == nullptr || context.terrains == nullptr) {

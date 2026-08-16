@@ -72,7 +72,12 @@ class ScriptEditorPanel final : public Panel {
 public:
     ScriptEditorPanel()
         : Panel(panel_id::kScriptEditor, std::string(icons::kScript) + "  Script Editor",
-                PanelCategory::Authoring) {}
+                PanelCategory::Authoring) {
+        // Dibuka atas permintaan, bukan otomatis: panel ini tidak disusun
+        // BuildLayout, jadi ia mengambang — dan jendela mengambang selalu menang
+        // atas host dockspace, menutupi panel yang ter-dock di bawahnya.
+        SetOpen(false);
+    }
 
     void OnDraw(EditorContext& context) override {
         if (context.assets == nullptr) {
@@ -377,7 +382,11 @@ class ScriptEditorPanel final : public Panel {
 public:
     ScriptEditorPanel()
         : Panel(panel_id::kScriptEditor, std::string(icons::kScript) + "  Script Editor",
-                PanelCategory::Authoring) {}
+                PanelCategory::Authoring) {
+        // Stub tanpa Lua ikut tertutup, supaya build dengan dan tanpa Lua
+        // menampilkan panel yang sama saat pertama dijalankan.
+        SetOpen(false);
+    }
 
     void OnDraw(EditorContext& /*context*/) override {
         ImGui::TextDisabled("This build was configured without Lua.");

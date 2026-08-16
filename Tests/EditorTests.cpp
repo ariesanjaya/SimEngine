@@ -18,11 +18,13 @@
 #include <imgui_internal.h>
 
 #include <cstdio>
+#include <cstring>
 #include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <memory>
 #include <string>
+#include <utility>
 #include <unistd.h>
 #include <vector>
 #include <cstdlib>
@@ -927,6 +929,79 @@ TEST_CASE("Setiap panel yang disusun layout benar-benar mendapat node dock") {
     CHECK(level.viewport != level.console);
     CHECK(authoring.viewport != authoring.console);
     CHECK(debug.viewport != debug.console);
+
+    // Aturan yang sebenarnya berlaku untuk semua panel: **sebuah panel boleh
+    // tidak di-dock, atau boleh terbuka sejak awal, tapi tidak keduanya.**
+    // Panel yang terbuka tanpa node dock akan mengambang menutupi kolom di
+    // bawahnya, dan pengguna baru tidak punya petunjuk kenapa panelnya hilang.
+    //
+    // Daftar id-nya dibaca dari PanelIds.h, bukan disalin ke sini: id yang
+    // ditambahkan nanti ikut terperiksa tanpa ada yang perlu ingat.
+    BuildLayout(dockspaceId, Workspace::Level);
+
+    const std::filesystem::path codeDir = SIM_CODE_DIR;
+    const auto readFile = [](const std::filesystem::path& path) {
+        std::ifstream in(path, std::ios::binary);
+        return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    };
+
+    const std::string panelIds =
+        readFile(codeDir / "EditorFramework" / "include" / "Sim" / "Editor" / "PanelIds.h");
+    REQUIRE_FALSE(panelIds.empty());
+
+    // Sumber panel disatukan jadi satu teks: yang dicari hanya "berkas mana
+    // yang menyebut id ini", dan tiap panel tinggal di satu berkas.
+    std::vector<std::pair<std::string, std::string>> sources;  // (nama berkas, isi)
+    for (const auto& entry : std::filesystem::directory_iterator(codeDir / "Editor" / "src")) {
+        if (entry.path().extension() == ".cpp") {
+            sources.emplace_back(entry.path().filename().string(), readFile(entry.path()));
+        }
+    }
+    REQUIRE_FALSE(sources.empty());
+
+    int checked = 0;
+    int floating = 0;
+    for (std::size_t at = panelIds.find("inline constexpr const char* k");
+         at != std::string::npos;
+         at = panelIds.find("inline constexpr const char* k", at + 1)) {
+        const std::size_t nameStart = at + std::strlen("inline constexpr const char* ");
+        const std::size_t nameEnd = panelIds.find(' ', nameStart);
+        const std::size_t idStart = panelIds.find('"', nameEnd) + 1;
+        const std::size_t idEnd = panelIds.find('"', idStart);
+        REQUIRE(idEnd != std::string::npos);
+
+        const std::string constant = panelIds.substr(nameStart, nameEnd - nameStart);
+        const std::string id = panelIds.substr(idStart, idEnd - idStart);
+        ++checked;
+        if (dockOf(id.c_str()) != 0) {
+            continue;
+        }
+        ++floating;
+
+        // Tidak di-dock. Maka berkasnya wajib menutup panelnya sendiri.
+        const std::string needle = "panel_id::" + constant;
+        bool declaredClosed = false;
+        bool found = false;
+        for (const auto& [name, text] : sources) {
+            if (text.find(needle) == std::string::npos) {
+                continue;
+            }
+            found = true;
+            declaredClosed = declaredClosed || text.find("SetOpen(false)") != std::string::npos;
+        }
+        // Dibungkus doctest::String: `const char*` non-literal diubah jadi bool
+        // oleh MessageBuilder, dan `std::string` tidak bisa di-stream sama sekali.
+        INFO("panel ", doctest::String(id.c_str()));
+        CHECK_MESSAGE(found, "Id panel tidak dipakai panel mana pun di Code/Editor/src");
+        CHECK_MESSAGE(declaredClosed,
+                      "Panel ini tidak di-dock BuildLayout tapi juga tidak SetOpen(false), "
+                      "jadi ia akan mengambang menutupi panel lain sejak editor pertama dibuka");
+    }
+
+    // Penjaga terakhir: kalau pembacaan PanelIds.h meleset, loop di atas tidak
+    // memeriksa apa pun dan uji ini lulus tanpa melakukan apa-apa.
+    CHECK(checked >= 20);
+    CHECK(floating > 0);
 
     ImGui::EndFrame();
     ImGui::DestroyContext(context);

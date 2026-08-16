@@ -109,7 +109,11 @@ class GraphEditorPanel final : public Panel {
 public:
     GraphEditorPanel()
         : Panel(panel_id::kGraphEditor, std::string(icons::kNodeGraph) + "  Graph Editor",
-                PanelCategory::Authoring) {}
+                PanelCategory::Authoring) {
+        // Alasan yang sama dengan Script Editor: tidak di-dock, jadi jangan
+        // terbuka sendiri.
+        SetOpen(false);
+    }
 
     void OnDraw(EditorContext& context) override {
         if (context.assets == nullptr || context.scripts == nullptr) {
@@ -1601,7 +1605,11 @@ class GraphEditorPanel final : public Panel {
 public:
     GraphEditorPanel()
         : Panel(panel_id::kGraphEditor, std::string(icons::kNodeGraph) + "  Graph Editor",
-                PanelCategory::Authoring) {}
+                PanelCategory::Authoring) {
+        // Stub tanpa Lua ikut tertutup, supaya build dengan dan tanpa Lua
+        // menampilkan panel yang sama saat pertama dijalankan.
+        SetOpen(false);
+    }
 
     void OnDraw(EditorContext& /*context*/) override {
         ImGui::TextDisabled("This build was configured without Lua.");

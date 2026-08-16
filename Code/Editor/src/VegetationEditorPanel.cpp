@@ -92,7 +92,11 @@ public:
     VegetationEditorPanel()
         : Panel(panel_id::kVegetationEditor,
                 std::string(icons::kVegetationEditor) + "  Vegetation Editor",
-                PanelCategory::Authoring) {}
+                PanelCategory::Authoring) {
+        // Alasan yang sama dengan Script Editor: tidak di-dock, jadi jangan
+        // terbuka sendiri.
+        SetOpen(false);
+    }
 
     void OnDraw(EditorContext& context) override {
         if (context.assets == nullptr) {
