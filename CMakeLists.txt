@@ -100,6 +100,10 @@ add_subdirectory(Code/Animation)
 if(SIM_WITH_LUA)
     add_subdirectory(Code/Script)
 endif()
+# Sebelum EditorFramework: yang menyalakan server dan mendaftarkan tool-nya
+# adalah EditorApp, jadi ia melihat AIBridge — bukan sebaliknya. AIBridge sendiri
+# tidak tahu apa-apa tentang editor.
+add_subdirectory(Code/AIBridge)
 add_subdirectory(Code/EditorFramework)
 add_subdirectory(Code/Editor)
 

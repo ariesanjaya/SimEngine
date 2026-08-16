@@ -4,9 +4,12 @@
 // penyambungan antar-modul terjadi di sini; modul itu sendiri tidak pernah
 // saling mencari lewat singleton.
 
+#include "Sim/AIBridge/McpServer.h"
+#include "Sim/AIBridge/ToolRegistry.h"
 #include "Sim/Core/FrameLimiter.h"
 #include "Sim/Core/Log.h"
 #include "Sim/Core/MainThreadQueue.h"
+#include "Sim/Editor/AiTools.h"
 #include "Sim/Editor/EditorApp.h"
 #include "Sim/Editor/Icons.h"
 #include "Sim/ImGuiIntegration/ImGuiLayer.h"
@@ -296,6 +299,27 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Server MCP (track AI, A0). Dinyalakan sesudah editor siap dan dimatikan
+    // sebelum apa pun dibongkar: sebuah permintaan yang masih ditangani saat
+    // `World` dihancurkan adalah crash yang muncul di thread jaringan, jauh dari
+    // baris mana pun yang menutup editor.
+    //
+    // Registry hidup di sini, bukan di dalam `EditorApp`, karena pemiliknya
+    // adalah yang menyusun aplikasi — dan `SimHeadless` nanti menyusun himpunan
+    // tool yang berbeda dari editor yang sama.
+    ai::ToolRegistry mcpTools;
+    editor::RegisterEditorTools(mcpTools, app);
+
+    ai::McpServer mcpServer;
+    ai::McpServerConfig mcpConfig;
+    mcpConfig.advertisePath = configDir / "mcp.json";
+    if (!mcpServer.Start(mcpTools, mcpConfig)) {
+        // Editor tetap jalan tanpa server. Yang hilang adalah kendali agen,
+        // bukan kemampuan menyunting — dan editor yang menolak dibuka karena
+        // sebuah port sibuk akan sangat mengganggu.
+        SIM_WARN("Editor", "MCP server tidak menyala — editor jalan tanpa kendali agen");
+    }
+
     // Project dari baris perintah, seperti yang dijanjikan docs/PLAN-EDITOR.md.
     // **Bukan pengganti project manager melainkan jalan pintas ke dalamnya:**
     // yang gagal dibuka tetap mendarat di manager beserta pesannya, bukan pada
@@ -447,6 +471,10 @@ int main(int argc, char** argv) {
     }
 
     SIM_INFO("Editor", "SimEditor stopping");
+    // Sebelum apa pun yang lain. `Stop()` menunggu thread jaringannya selesai,
+    // jadi sesudah baris ini dijamin tidak ada handler yang masih memegang
+    // `World` — dan itulah kriteria terima A0 nomor 4.
+    mcpServer.Stop();
     // Induk dialog dilepas sebelum jendelanya dihancurkan: sebuah dialog yang
     // masih terbuka saat editor ditutup akan menunjuk jendela yang sudah tidak
     // ada.

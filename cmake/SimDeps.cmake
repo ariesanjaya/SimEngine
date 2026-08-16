@@ -113,7 +113,38 @@ FetchContent_Declare(doctest
     GIT_TAG        v2.5.3
     GIT_SHALLOW    TRUE)
 
-FetchContent_MakeAvailable(SDL3 glm spdlog nlohmann_json EnTT doctest)
+# ---------------------------------------------------------------------------
+# cpp-httplib — transport HTTP untuk MCP server (A0, lihat docs/PLAN-AI.md)
+#
+# **Setiap kemampuan opsionalnya dimatikan secara eksplisit, bukan dibiarkan
+# terdeteksi.** Bawaan cpp-httplib adalah `USE_*_IF_AVAILABLE`: ia memindai
+# mesin yang sedang membangun dan menyalakan OpenSSL, zlib, atau Brotli kalau
+# kebetulan ada. Artinya dua orang yang membangun commit yang sama mendapat
+# pustaka dengan kemampuan berbeda — dan yang menemukannya adalah orang ketiga
+# yang binernya menuntut .so yang tidak ada di mesinnya.
+#
+# TLS memang tidak dibutuhkan di sini dan bukan karena disederhanakan: server
+# MCP terkunci ke 127.0.0.1 dan tidak punya opsi bind ke alamat lain, jadi tidak
+# pernah ada byte yang meninggalkan mesin ini untuk dienkripsi.
+#
+# SYSTEM: header-nya sepuluh ribu baris milik orang lain, dan modul ini
+# dibangun dengan -Werror.
+# ---------------------------------------------------------------------------
+set(HTTPLIB_REQUIRE_OPENSSL         OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_REQUIRE_ZLIB            OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_REQUIRE_BROTLI          OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_OPENSSL_IF_AVAILABLE OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_ZLIB_IF_AVAILABLE    OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_USE_BROTLI_IF_AVAILABLE  OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_INSTALL                 OFF CACHE BOOL "" FORCE)
+set(HTTPLIB_TEST                    OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(cpp-httplib
+    GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
+    GIT_TAG        v0.53.1
+    GIT_SHALLOW    TRUE
+    SYSTEM)
+
+FetchContent_MakeAvailable(SDL3 glm spdlog nlohmann_json EnTT doctest cpp-httplib)
 
 # ---------------------------------------------------------------------------
 # Dear ImGui — branch docking (docking + multi-viewport + DPI per monitor)
@@ -1136,6 +1167,5 @@ endif()
 
 # ---------------------------------------------------------------------------
 # Ditambahkan pada milestone berikutnya (lihat docs/DEPENDENCIES.md):
-#   A0   cpp-httplib              transport HTTP untuk MCP server
 #   E8   cgltf, meshoptimizer
 # ---------------------------------------------------------------------------
