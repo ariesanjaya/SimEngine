@@ -15,6 +15,7 @@
 #include <doctest/doctest.h>
 
 #include <atomic>
+#include "Sim/ImageIO/ImageIO.h"
 #include "Sim/Assets/AssetDatabase.h"
 #include <fstream>
 #include <filesystem>
@@ -594,4 +595,212 @@ TEST_CASE("asset.info menolak yang tidak ada dengan pesan yang menuntun") {
     const ai::ToolResult byPath =
         harness.Call("asset.info", json{{"asset", "Assets/tidak-ada.png"}});
     CHECK(byPath.isError);
+}
+
+// --- A2: sisi tulis ----------------------------------------------------------------
+
+namespace {
+
+/// Menulis PNG kecil ke `path`, supaya ada tekstur sungguhan untuk diimpor.
+void WriteTestTexture(const std::filesystem::path& path, uint32_t size) {
+    imageio::Image image;
+    image.desc.width = size;
+    image.desc.height = size;
+    image.desc.channels = 4;
+    image.desc.type = imageio::PixelType::UInt8;
+    image.desc.colorSpace = imageio::ColorSpace::Srgb;
+    image.bytes.resize(static_cast<std::size_t>(size) * size * 4u);
+    for (std::size_t pixel = 0; pixel < image.bytes.size() / 4u; ++pixel) {
+        image.bytes[pixel * 4u + 0u] = static_cast<uint8_t>(pixel % 256u);
+        image.bytes[pixel * 4u + 1u] = 128;
+        image.bytes[pixel * 4u + 2u] = 32;
+        image.bytes[pixel * 4u + 3u] = 255;
+    }
+    std::vector<uint8_t> png;
+    REQUIRE(imageio::Encode(image, ".png", png).ok);
+    std::filesystem::create_directories(path.parent_path());
+    std::ofstream file(path, std::ios::binary);
+    file.write(reinterpret_cast<const char*>(png.data()),
+               static_cast<std::streamsize>(png.size()));
+}
+
+}  // namespace
+
+TEST_CASE("file.write menolak keluar project dan tidak menimpa diam-diam") {
+    Harness harness;
+
+    SUBCASE("menulis berkas baru") {
+        const json written = harness.CallOk(
+            "file.write", json{{"path", "Assets/Scripts/halo.lua"}, {"text", "print('hai')"}});
+        CHECK(written.at("replaced") == false);
+        const json read = harness.CallOk("file.read", json{{"path", "Assets/Scripts/halo.lua"}});
+        CHECK(read.at("text") == "print('hai')");
+    }
+
+    SUBCASE("menolak menimpa tanpa diminta") {
+        harness.CallOk("file.write", json{{"path", "Assets/a.txt"}, {"text", "pertama"}});
+        // Menimpa diam-diam adalah cara paling sunyi kehilangan pekerjaan.
+        const ai::ToolResult second =
+            harness.Call("file.write", json{{"path", "Assets/a.txt"}, {"text", "kedua"}});
+        CHECK(second.isError);
+        CHECK(harness.CallOk("file.read", json{{"path", "Assets/a.txt"}}).at("text") == "pertama");
+
+        const json replaced = harness.CallOk(
+            "file.write",
+            json{{"path", "Assets/a.txt"}, {"text", "kedua"}, {"overwrite", true}});
+        CHECK(replaced.at("replaced") == true);
+        CHECK(harness.CallOk("file.read", json{{"path", "Assets/a.txt"}}).at("text") == "kedua");
+    }
+
+    SUBCASE("jalur di luar project ditolak") {
+        const ai::ToolResult escaped = harness.Call(
+            "file.write", json{{"path", "../../tmp/dicuri.txt"}, {"text", "x"}});
+        CHECK(escaped.isError);
+        CHECK(escaped.text.find("outside the project") != std::string::npos);
+        // Dan tidak ada yang tertulis.
+        CHECK_FALSE(std::filesystem::exists(harness.app.CurrentProject().root /
+                                            ".." / ".." / "tmp" / "dicuri.txt"));
+    }
+}
+
+TEST_CASE("asset.create menghasilkan aset yang sah dan langsung terindeks") {
+    Harness harness;
+
+    SUBCASE("material") {
+        const json created =
+            harness.CallOk("asset.create", json{{"type", "material"}, {"path", "Assets/Batu"}});
+        CHECK(created.at("path") == "Assets/Batu.simmat");
+        // Kriteria terima A2 nomor 3: muncul di indeks tanpa restart, jadi
+        // GUID-nya sudah ada pada panggilan yang sama.
+        REQUIRE(created.contains("guid"));
+
+        const json info = harness.CallOk("asset.info", json{{"asset", created.at("guid")}});
+        CHECK(info.at("type") == "Material");
+
+        // **Material yang sah, bukan berkas kosong.** Berkas tanpa isi baru
+        // menjadi material sesudah disunting, dan yang membukanya sebelum itu
+        // akan mengira asetnya rusak.
+        const json body = harness.CallOk("file.read", json{{"path", "Assets/Batu.simmat"}});
+        CHECK(body.at("text").get<std::string>().find("output.surface") != std::string::npos);
+    }
+
+    SUBCASE("ekstensi tidak digandakan") {
+        const json created = harness.CallOk(
+            "asset.create", json{{"type", "material"}, {"path", "Assets/Kayu.simmat"}});
+        // "Batu.simmat" tidak sedang meminta "Batu.simmat.simmat".
+        CHECK(created.at("path") == "Assets/Kayu.simmat");
+    }
+
+    SUBCASE("script dengan isi") {
+        harness.CallOk("asset.create", json{{"type", "script"},
+                                            {"path", "Assets/Scripts/gerak"},
+                                            {"text", "function update() end"}});
+        CHECK(harness.CallOk("file.read", json{{"path", "Assets/Scripts/gerak.lua"}})
+                  .at("text") == "function update() end");
+    }
+
+    SUBCASE("tipe yang tidak dikenal ditolak dengan menyebut yang dikenal") {
+        const ai::ToolResult result =
+            harness.Call("asset.create", json{{"type", "hologram"}, {"path", "Assets/X"}});
+        CHECK(result.isError);
+        CHECK(result.text.find("material") != std::string::npos);
+    }
+
+    SUBCASE("tidak menimpa yang sudah ada") {
+        harness.CallOk("asset.create", json{{"type", "material"}, {"path", "Assets/Sama"}});
+        const ai::ToolResult again =
+            harness.Call("asset.create", json{{"type", "material"}, {"path", "Assets/Sama"}});
+        CHECK(again.isError);
+    }
+
+    SUBCASE("jalur di luar project ditolak") {
+        const ai::ToolResult escaped = harness.Call(
+            "asset.create", json{{"type", "material"}, {"path", "../../tmp/Curian"}});
+        CHECK(escaped.isError);
+    }
+}
+
+TEST_CASE("asset.import menyalin dari luar dan mengurung tujuannya") {
+    Harness harness;
+    const std::filesystem::path outside = harness.scratch.path / "sumber" / "batu.png";
+    WriteTestTexture(outside, 64);
+
+    SUBCASE("tujuan bawaan adalah folder aset") {
+        const json imported = harness.CallOk("asset.import", json{{"source", outside.string()}});
+        CHECK(imported.at("path") == "Assets/batu.png");
+        REQUIRE(imported.contains("guid"));
+        CHECK(imported.at("type") == "Texture");
+    }
+
+    SUBCASE("sumber yang tidak ada ditolak") {
+        const ai::ToolResult missing = harness.Call(
+            "asset.import", json{{"source", (harness.scratch.path / "hantu.png").string()}});
+        CHECK(missing.isError);
+    }
+
+    SUBCASE("tujuan di luar project ditolak walaupun sumbernya sah") {
+        // Sumbernya memang boleh di luar — itu gunanya tool ini. Tujuannya tidak
+        // pernah.
+        const ai::ToolResult escaped =
+            harness.Call("asset.import", json{{"source", outside.string()},
+                                              {"destination", "../../tmp/curian.png"}});
+        CHECK(escaped.isError);
+        CHECK(escaped.text.find("outside the project") != std::string::npos);
+    }
+
+    SUBCASE("tidak menimpa tanpa diminta") {
+        harness.CallOk("asset.import", json{{"source", outside.string()}});
+        const ai::ToolResult again =
+            harness.Call("asset.import", json{{"source", outside.string()}});
+        CHECK(again.isError);
+        CHECK(harness.CallOk("asset.import",
+                             json{{"source", outside.string()}, {"overwrite", true}})
+                  .at("path") == "Assets/batu.png");
+    }
+}
+
+TEST_CASE("asset.thumbnail menggambar tekstur dan menolak yang lain") {
+    Harness harness;
+    const std::filesystem::path outside = harness.scratch.path / "sumber" / "besar.png";
+    WriteTestTexture(outside, 512);
+    const json imported = harness.CallOk("asset.import", json{{"source", outside.string()}});
+    const std::string guid = imported.at("guid");
+
+    SUBCASE("tekstur menghasilkan PNG yang lebih kecil dari sumbernya") {
+        const ai::ToolResult result =
+            harness.Call("asset.thumbnail", json{{"asset", guid}, {"size", 64}});
+        REQUIRE_FALSE(result.isError);
+        REQUIRE_FALSE(result.imageBytes.empty());
+        CHECK(result.imageMimeType == "image/png");
+
+        // Tanda tangan PNG, lalu lebar dari kepala IHDR-nya.
+        REQUIRE(result.imageBytes.size() > 24);
+        CHECK(result.imageBytes[0] == 137);
+        CHECK(result.imageBytes[1] == 'P');
+        const uint32_t width = (uint32_t(result.imageBytes[16]) << 24) |
+                               (uint32_t(result.imageBytes[17]) << 16) |
+                               (uint32_t(result.imageBytes[18]) << 8) |
+                               uint32_t(result.imageBytes[19]);
+        // Level terkecil yang masih setidaknya sebesar yang diminta.
+        CHECK(width == 64);
+        CHECK(result.text.find("512x512") != std::string::npos);
+    }
+
+    SUBCASE("aset bukan tekstur ditolak dengan menyebut jenisnya") {
+        const json material =
+            harness.CallOk("asset.create", json{{"type", "material"}, {"path", "Assets/M"}});
+        const ai::ToolResult result =
+            harness.Call("asset.thumbnail", json{{"asset", material.at("guid")}});
+        // Gambar kosong yang dikirim sebagai thumbnail membuat agen menyimpulkan
+        // asetnya yang kosong.
+        CHECK(result.isError);
+        CHECK(result.text.find("Material") != std::string::npos);
+        CHECK(result.imageBytes.empty());
+    }
+
+    SUBCASE("aset yang tidak ada ditolak") {
+        const ai::ToolResult result =
+            harness.Call("asset.thumbnail", json{{"asset", "Assets/hantu.png"}});
+        CHECK(result.isError);
+    }
 }

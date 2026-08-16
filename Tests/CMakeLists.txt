@@ -315,4 +315,5 @@ sim_add_test(SimAiToolsTests
     DEPS
         Sim::EditorFramework
         Sim::AIBridge
+        Sim::ImageIO
         nlohmann_json::nlohmann_json)
