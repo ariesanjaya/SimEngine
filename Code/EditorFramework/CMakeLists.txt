@@ -1,6 +1,7 @@
 sim_add_library(EditorFramework
     SOURCES
         src/Actions.cpp
+        src/AiAssetTools.cpp
         src/AiEntityTools.cpp
         src/AiSceneTools.cpp
         src/AiTools.cpp

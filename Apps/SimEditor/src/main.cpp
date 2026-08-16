@@ -382,6 +382,7 @@ int main(int argc, char** argv) {
     editor::RegisterEditorTools(mcpTools, mcpResources, app, std::move(captureWindow));
     editor::RegisterSceneTools(mcpTools, mcpResources, app);
     editor::RegisterEntityTools(mcpTools, app);
+    editor::RegisterAssetTools(mcpTools, app);
 
     ai::McpServer mcpServer;
     ai::McpServerConfig mcpConfig;

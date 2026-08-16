@@ -15,6 +15,8 @@
 #include <doctest/doctest.h>
 
 #include <atomic>
+#include "Sim/Assets/AssetDatabase.h"
+#include <fstream>
 #include <filesystem>
 #include <string>
 #include <unistd.h>
@@ -77,6 +79,7 @@ struct Harness {
         RegisterEditorTools(tools, resources, app);
         RegisterSceneTools(tools, resources, app);
         RegisterEntityTools(tools, app);
+        RegisterAssetTools(tools, app);
 
         // **Level baru tidak kosong** — ia sudah memuat sebuah entity
         // "Environment". Uji yang menghitung jumlah mutlak karena itu menguji
@@ -424,4 +427,171 @@ TEST_CASE("scene.describe menyebut cabang yang dipotongnya") {
     for (const json& root : deep.at("roots")) {
         CHECK_FALSE(root.contains("childrenOmitted"));
     }
+}
+
+// --- A2: pengurungan jalur ------------------------------------------------------
+//
+// **Aturan yang berdiri di antara agen dan seluruh berkas di mesin ini.**
+// Kriteria terima A2 nomor 2 menyebut `../../etc/passwd`, dan itu memang kasus
+// pertamanya — tapi bukan satu-satunya bentuk keluar folder.
+
+TEST_CASE("Jalur di luar folder project ditolak") {
+    ScratchDir scratch;
+    const std::filesystem::path root = scratch.path / "Proyek";
+    std::filesystem::create_directories(root / "Assets" / "Scripts");
+    {
+        std::ofstream file(root / "Assets" / "Scripts" / "player.lua");
+        file << "-- halo";
+    }
+
+    std::filesystem::path absolute;
+    const auto resolve = [&](const std::string& relative) {
+        return ResolveProjectPathForTest(root, relative, absolute);
+    };
+
+    SUBCASE("jalur yang sah diterima") {
+        CHECK(resolve("Assets/Scripts/player.lua").empty());
+        CHECK(absolute == std::filesystem::weakly_canonical(root / "Assets/Scripts/player.lua"));
+    }
+
+    SUBCASE("berkas yang belum ada tetap diterima selama di dalam") {
+        // `file.write` menulis berkas yang belum ada; menolak jalur yang belum
+        // menunjuk apa pun akan membuatnya tidak pernah bisa membuat berkas.
+        CHECK(resolve("Assets/baru.txt").empty());
+    }
+
+    SUBCASE("naik keluar dengan ..") {
+        CHECK_FALSE(resolve("../../etc/passwd").empty());
+        CHECK_FALSE(resolve("Assets/../../rahasia.txt").empty());
+    }
+
+    SUBCASE("jalur absolut ditolak, bahkan yang di dalam project") {
+        // Menerimanya berarti agen harus tahu di mana project ini tersimpan di
+        // mesin ini, dan pengetahuan itu tidak pernah dibutuhkan untuk apa pun
+        // yang sah.
+        CHECK_FALSE(resolve("/etc/passwd").empty());
+        CHECK_FALSE(resolve((root / "Assets" / "Scripts" / "player.lua").string()).empty());
+    }
+
+    SUBCASE("symlink yang menunjuk keluar ditolak") {
+        // Membuang `..` secara leksikal menutup kasus di atas tapi tidak yang
+        // ini: jalur teksnya tetap tampak berada di dalam project.
+        const std::filesystem::path outside = scratch.path / "diluar.txt";
+        {
+            std::ofstream file(outside);
+            file << "rahasia";
+        }
+        std::error_code code;
+        std::filesystem::create_symlink(outside, root / "Assets" / "pintu", code);
+        if (code) {
+            MESSAGE("sistem berkas ini tidak mengizinkan symlink — dilewati");
+            return;
+        }
+        CHECK_FALSE(resolve("Assets/pintu").empty());
+    }
+
+    SUBCASE("folder tetangga yang namanya berawalan sama") {
+        // "/…/Proyek" adalah awalan string dari "/…/ProyekLain", dan
+        // perbandingan teks akan menerimanya.
+        std::filesystem::create_directories(scratch.path / "ProyekLain");
+        {
+            std::ofstream file(scratch.path / "ProyekLain" / "curian.txt");
+            file << "x";
+        }
+        CHECK_FALSE(resolve("../ProyekLain/curian.txt").empty());
+    }
+
+    SUBCASE("jalur kosong ditolak") { CHECK_FALSE(resolve("").empty()); }
+}
+
+TEST_CASE("file.read menolak keluar project dan membaca yang di dalam") {
+    Harness harness;
+    const std::filesystem::path root = harness.app.CurrentProject().root;
+    std::filesystem::create_directories(root / "Assets");
+    {
+        std::ofstream file(root / "Assets" / "catatan.txt");
+        file << "isi berkas";
+    }
+
+    const json read = harness.CallOk("file.read", json{{"path", "Assets/catatan.txt"}});
+    CHECK(read.at("text") == "isi berkas");
+    CHECK_FALSE(read.contains("truncated"));
+
+    const ai::ToolResult escaped = harness.Call("file.read", json{{"path", "../../etc/passwd"}});
+    CHECK(escaped.isError);
+    CHECK(escaped.text.find("outside the project") != std::string::npos);
+
+    const ai::ToolResult absolute = harness.Call("file.read", json{{"path", "/etc/passwd"}});
+    CHECK(absolute.isError);
+
+    const ai::ToolResult folder = harness.Call("file.read", json{{"path", "Assets"}});
+    CHECK(folder.isError);
+    CHECK(folder.text.find("not a file") != std::string::npos);
+}
+
+TEST_CASE("file.read memotong berkas besar dan menyebutnya") {
+    Harness harness;
+    const std::filesystem::path root = harness.app.CurrentProject().root;
+    std::filesystem::create_directories(root / "Assets");
+    {
+        std::ofstream file(root / "Assets" / "besar.txt");
+        file << std::string(300u * 1024u, 'x');
+    }
+    const json read = harness.CallOk("file.read", json{{"path", "Assets/besar.txt"}});
+    // Pemotongan yang tidak disebut membuat agen menyimpulkan berkasnya memang
+    // sependek itu.
+    CHECK(read.at("truncated") == true);
+    CHECK(read.at("bytes") == 300u * 1024u);
+    CHECK(read.at("text").get<std::string>().size() == 256u * 1024u);
+}
+
+TEST_CASE("project.info menyebut tata letak dan level project") {
+    Harness harness;
+    const json info = harness.CallOk("project.info");
+    CHECK(info.at("name") == "Uji");
+    CHECK(info.at("folders").at("assets") == "Assets");
+    CHECK(info.at("currentLevel") == "scene");
+    REQUIRE(info.at("levels").is_array());
+    bool sawScene = false;
+    for (const json& level : info.at("levels")) {
+        sawScene = sawScene || level == "scene";
+    }
+    CHECK(sawScene);
+}
+
+TEST_CASE("asset.search menyaring dan menyebut totalnya terpisah") {
+    Harness harness;
+    const assets::AssetDatabase* database = harness.app.Context().assets;
+    REQUIRE(database != nullptr);
+
+    SUBCASE("nama yang tidak cocok apa pun") {
+        const json found =
+            harness.CallOk("asset.search", json{{"name", "tidak ada aset bernama ini"}});
+        CHECK(found.at("total") == 0);
+        CHECK(found.at("assets").empty());
+    }
+
+    SUBCASE("tipe yang tidak dikenal tidak cocok apa pun") {
+        const json found = harness.CallOk("asset.search", json{{"type", "TidakAda"}});
+        CHECK(found.at("total") == 0);
+    }
+
+    SUBCASE("paginasi") {
+        const json page = harness.CallOk("asset.search", json{{"limit", 1}});
+        CHECK(page.at("returned") <= 1);
+        // Total selalu jumlah yang cocok, bukan jumlah yang dikembalikan.
+        CHECK(page.at("total") >= page.at("returned").get<std::size_t>());
+    }
+}
+
+TEST_CASE("asset.info menolak yang tidak ada dengan pesan yang menuntun") {
+    Harness harness;
+    const ai::ToolResult ghost =
+        harness.Call("asset.info", json{{"asset", "00000000-0000-0000-0000-0000deadbeef"}});
+    CHECK(ghost.isError);
+    CHECK(ghost.text.find("asset.search") != std::string::npos);
+
+    const ai::ToolResult byPath =
+        harness.Call("asset.info", json{{"asset", "Assets/tidak-ada.png"}});
+    CHECK(byPath.isError);
 }
