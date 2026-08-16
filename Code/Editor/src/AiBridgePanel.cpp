@@ -74,8 +74,52 @@ public:
             }
 
             ImGui::Separator();
+
+            // **Pilihan modenya di sini, dan berlaku untuk semua klien.**
+            // Server yang sama melayani Claude Code dan panel AI Assistant;
+            // mode yang hanya ditegakkan salah satunya adalah mode yang tidak
+            // menjanjikan apa-apa.
+            ai::PermissionMode mode = server->Mode();
+            const struct {
+                ai::PermissionMode value;
+                const char* label;
+                const char* help;
+            } kModes[] = {
+                {ai::PermissionMode::ReadOnly, "read-only",
+                 "Only tools that read. Everything else is refused, and does not even appear "
+                 "in the agent's tool list."},
+                {ai::PermissionMode::Ask, "ask",
+                 "Every tool that changes data asks first. With nothing able to ask, they are "
+                 "refused rather than run quietly."},
+                {ai::PermissionMode::Auto, "auto",
+                 "Tools that change data run on their own. Tools that cannot be undone still "
+                 "ask."},
+            };
+            ImGui::TextUnformatted("Permission");
+            for (const auto& entry : kModes) {
+                ImGui::SameLine();
+                if (ImGui::RadioButton(entry.label, mode == entry.value)) {
+                    server->SetMode(entry.value);
+                    mode = entry.value;
+                }
+            }
+            for (const auto& entry : kModes) {
+                if (entry.value == mode) {
+                    ImGui::TextWrapped("%s", entry.help);
+                }
+            }
+
+            ImGui::Separator();
             ImGui::Text("Served   %llu",
                         static_cast<unsigned long long>(server->RequestCount()));
+            const uint64_t refused = server->RefusedByPolicyCount();
+            if (refused > 0) {
+                // Bukan merah: ini bukan tanda bahaya, ini mode izin yang
+                // bekerja. Yang layak dilihat orang adalah bahwa agen memang
+                // sedang mencoba lebih dari yang diizinkan.
+                ImGui::TextDisabled("Refused  %llu (permission)",
+                                    static_cast<unsigned long long>(refused));
+            }
             const uint64_t rejected = server->RejectedCount();
             if (rejected > 0) {
                 // Merah, dan bukan karena dramatis: angka ini hanya naik kalau

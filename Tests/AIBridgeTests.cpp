@@ -14,6 +14,9 @@
 #include <fstream>
 #include <unistd.h>
 #include <atomic>
+#include <vector>
+#include <mutex>
+#include <memory>
 #include <chrono>
 #include <string>
 #include <thread>
@@ -685,4 +688,201 @@ TEST_CASE("Berkas pengumuman menyebut pemiliknya, dan hanya pemilik yang menghap
         std::ifstream file(advert);
         CHECK(json::parse(file).at("port") == 7778);
     }
+}
+
+namespace {
+
+/// Tool yang mencatat kalau ia benar-benar dijalankan.
+///
+/// **Yang membuktikan sebuah penolakan bukan pesan galatnya melainkan ini.**
+/// Server yang menjawab "ditolak" sesudah menjalankan handler-nya sudah terlambat
+/// — datanya sudah berubah — dan dari luar kedua keadaan itu terlihat sama.
+ToolDefinition CountingTool(const char* name, ToolPermission permission,
+                            std::shared_ptr<std::atomic<int>> runs) {
+    ToolDefinition tool;
+    tool.name = name;
+    tool.description = "Counts how many times it actually ran.";
+    tool.inputSchemaJson = R"({"type":"object","properties":{}})";
+    tool.permission = permission;
+    tool.needsMainThread = false;
+    tool.handler = [runs](std::string_view) {
+        runs->fetch_add(1);
+        ToolResult result;
+        result.text = "ran";
+        return result;
+    };
+    return tool;
+}
+
+}  // namespace
+
+TEST_CASE("Mode read-only menolak setiap tool yang mengubah data") {
+    // **Kriteria terima A4 nomor 2.** Ditegakkan di server, jadi ia berlaku
+    // untuk Claude Code yang menyambung ke port yang sama — bukan hanya untuk
+    // panel AI Assistant yang menampilkan pilihannya.
+    auto writeRuns = std::make_shared<std::atomic<int>>(0);
+    auto dangerRuns = std::make_shared<std::atomic<int>>(0);
+    auto readRuns = std::make_shared<std::atomic<int>>(0);
+
+    Harness harness;
+    harness.config.permissionMode = PermissionMode::ReadOnly;
+    harness.tools.Register(CountingTool("test.read", ToolPermission::Read, readRuns));
+    harness.tools.Register(CountingTool("test.write", ToolPermission::Write, writeRuns));
+    harness.tools.Register(CountingTool("test.danger", ToolPermission::Dangerous, dangerRuns));
+    REQUIRE(harness.Start());
+    CHECK(harness.server.Mode() == PermissionMode::ReadOnly);
+
+    SUBCASE("daftarnya hanya memuat yang membaca") {
+        // Daftar yang menawarkan sesuatu yang selalu ditolak adalah daftar yang
+        // berbohong.
+        const json tools = harness.Call("tools/list").at("result").at("tools");
+        REQUIRE(tools.size() == 1);
+        CHECK(tools[0].at("name") == "test.read");
+    }
+
+    SUBCASE("yang membaca tetap jalan") {
+        const json result = harness.Call("tools/call", json{{"name", "test.read"}}).at("result");
+        CHECK(result.at("isError") == false);
+        CHECK(readRuns->load() == 1);
+    }
+
+    SUBCASE("yang menulis ditolak, dan handler-nya tidak pernah berjalan") {
+        for (const char* name : {"test.write", "test.danger"}) {
+            const json result =
+                harness.Call("tools/call", json{{"name", name}}).at("result");
+            CHECK(result.at("isError") == true);
+            CHECK(result.at("content")[0].at("text").get<std::string>().find("read-only") !=
+                  std::string::npos);
+        }
+        CHECK(writeRuns->load() == 0);
+        CHECK(dangerRuns->load() == 0);
+        CHECK(harness.server.RefusedByPolicyCount() == 2);
+        // Penolakan izin dihitung terpisah dari penolakan token: yang satu
+        // berarti ada yang menyambung tanpa diundang, yang lain berarti agen
+        // yang diundang mencoba lebih dari yang diizinkan.
+        CHECK(harness.server.RejectedCount() == 0);
+    }
+
+    SUBCASE("nama yang tidak ada di daftar pun tetap diperiksa") {
+        // Klien yang memegang daftar lama tidak boleh lolos hanya karena ia
+        // tidak membaca daftar terbaru.
+        harness.server.SetMode(PermissionMode::Auto);
+        const json listed = harness.Call("tools/list").at("result").at("tools");
+        CHECK(listed.size() == 3);
+        harness.server.SetMode(PermissionMode::ReadOnly);
+        CHECK(harness.Call("tools/call", json{{"name", "test.write"}})
+                  .at("result")
+                  .at("isError") == true);
+        CHECK(writeRuns->load() == 0);
+    }
+}
+
+TEST_CASE("Mode ask menjalankan hanya yang disetujui") {
+    auto runs = std::make_shared<std::atomic<int>>(0);
+    Harness harness;
+    harness.config.permissionMode = PermissionMode::Ask;
+    harness.tools.Register(CountingTool("test.write", ToolPermission::Write, runs));
+
+    SUBCASE("tanpa penyetuju, ask menolak alih-alih melanjutkan diam-diam") {
+        // Pengguna yang meminta ditanya tidak sedang meminta agar dilanjutkan
+        // ketika tidak ada yang bertanya.
+        REQUIRE(harness.Start());
+        const json result =
+            harness.Call("tools/call", json{{"name", "test.write"}}).at("result");
+        CHECK(result.at("isError") == true);
+        CHECK(result.at("content")[0].at("text").get<std::string>().find("nobody to ask") !=
+              std::string::npos);
+        CHECK(runs->load() == 0);
+    }
+
+    SUBCASE("penyetuju yang menolak menghentikan tool sebelum ia berjalan") {
+        std::atomic<int> asked{0};
+        harness.server.SetApprover([&asked](const ToolDefinition& tool, std::string_view) {
+            asked.fetch_add(1);
+            CHECK(tool.name == "test.write");
+            return false;
+        });
+        REQUIRE(harness.Start());
+        CHECK(harness.Call("tools/call", json{{"name", "test.write"}})
+                  .at("result")
+                  .at("isError") == true);
+        CHECK(asked.load() == 1);
+        CHECK(runs->load() == 0);
+    }
+
+    SUBCASE("penyetuju yang mengizinkan meneruskannya, beserta argumennya") {
+        std::string seen;
+        harness.server.SetApprover(
+            [&seen](const ToolDefinition&, std::string_view arguments) {
+                seen = std::string(arguments);
+                return true;
+            });
+        REQUIRE(harness.Start());
+        CHECK(harness.Call("tools/call",
+                           json{{"name", "test.write"}, {"arguments", json{{"a", 1}}}})
+                  .at("result")
+                  .at("isError") == false);
+        CHECK(runs->load() == 1);
+        // Argumennya ikut, karena persetujuan tanpa melihat apa yang disetujui
+        // bukan persetujuan.
+        CHECK(seen.find("\"a\"") != std::string::npos);
+    }
+}
+
+TEST_CASE("Mode auto menjalankan tool tulis, dan tetap bertanya untuk yang berbahaya") {
+    auto writeRuns = std::make_shared<std::atomic<int>>(0);
+    auto dangerRuns = std::make_shared<std::atomic<int>>(0);
+    Harness harness;
+    harness.config.permissionMode = PermissionMode::Auto;
+    harness.tools.Register(CountingTool("test.write", ToolPermission::Write, writeRuns));
+    harness.tools.Register(CountingTool("test.danger", ToolPermission::Dangerous, dangerRuns));
+
+    SUBCASE("tanpa penyetuju semuanya jalan") {
+        // Di mesin tanpa UI tidak ada yang menunggu jawaban, dan menolak akan
+        // membuat mode ini tidak berguna justru di sana.
+        REQUIRE(harness.Start());
+        CHECK(harness.Call("tools/call", json{{"name", "test.write"}})
+                  .at("result")
+                  .at("isError") == false);
+        CHECK(harness.Call("tools/call", json{{"name", "test.danger"}})
+                  .at("result")
+                  .at("isError") == false);
+        CHECK(writeRuns->load() == 1);
+        CHECK(dangerRuns->load() == 1);
+    }
+
+    SUBCASE("dengan penyetuju, hanya yang berbahaya yang ditanyakan") {
+        std::vector<std::string> asked;
+        std::mutex guard;
+        harness.server.SetApprover([&asked, &guard](const ToolDefinition& tool, std::string_view) {
+            const std::lock_guard<std::mutex> lock(guard);
+            asked.push_back(tool.name);
+            return true;
+        });
+        REQUIRE(harness.Start());
+        harness.Call("tools/call", json{{"name", "test.write"}});
+        harness.Call("tools/call", json{{"name", "test.danger"}});
+        CHECK(writeRuns->load() == 1);
+        CHECK(dangerRuns->load() == 1);
+        // Menanyakan tool tulis di mode auto akan melatih pengguna mengklik
+        // "ya" tanpa membacanya, dan yang berbahaya lalu ikut lolos.
+        const std::lock_guard<std::mutex> lock(guard);
+        REQUIRE(asked.size() == 1);
+        CHECK(asked[0] == "test.danger");
+    }
+}
+
+TEST_CASE("Nama mode bolak-balik tanpa berubah, dan yang tidak dikenal ditolak") {
+    for (const PermissionMode mode :
+         {PermissionMode::ReadOnly, PermissionMode::Ask, PermissionMode::Auto}) {
+        PermissionMode parsed = PermissionMode::Auto;
+        REQUIRE(PermissionModeFromString(ToString(mode), parsed));
+        CHECK(parsed == mode);
+    }
+    // Nilai bawaan yang dipilih diam-diam untuk teks yang salah adalah persis
+    // cara sebuah salah ketik membuka lebih banyak daripada yang diminta.
+    PermissionMode untouched = PermissionMode::ReadOnly;
+    CHECK_FALSE(PermissionModeFromString("readonly", untouched));
+    CHECK_FALSE(PermissionModeFromString("", untouched));
+    CHECK(untouched == PermissionMode::ReadOnly);
 }

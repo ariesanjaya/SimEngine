@@ -27,6 +27,34 @@ enum class ToolPermission : uint8_t {
 
 const char* ToString(ToolPermission permission);
 
+/// Seberapa jauh server membiarkan sebuah klien bertindak.
+///
+/// **Ditegakkan di server, bukan di panel yang menampilkannya.** Kalau yang
+/// menegakkannya panel AI Assistant, maka mode ini hanya berlaku untuk klien
+/// itu — dan Claude Code yang menyambung ke port yang sama tetap bisa melakukan
+/// apa saja. Yang dijanjikan kriteria terima A4 nomor 2 adalah "mode read-only
+/// benar-benar menolak semua tool yang mengubah data", dan satu-satunya tempat
+/// yang bisa menjanjikan itu untuk semua klien adalah di sini.
+enum class PermissionMode : uint8_t {
+    /// Hanya tool yang membaca. Yang lain tidak dijalankan, dan tidak muncul di
+    /// `tools/list` — agen yang tidak melihatnya tidak membuang panggilan
+    /// untuk mencobanya.
+    ReadOnly,
+    /// Setiap tool yang mengubah data minta persetujuan.
+    Ask,
+    /// Berjalan sendiri. `Dangerous` tetap minta persetujuan bila ada yang bisa
+    /// ditanya — lihat `ToolApprover`.
+    Auto,
+};
+
+const char* ToString(PermissionMode mode);
+/// Mengembalikan false bila teksnya tidak dikenal, dan tidak menyentuh `out`.
+///
+/// Tidak memilih nilai bawaan untuk teks yang salah: nilai bawaan sebuah
+/// pengaturan izin yang dipilih diam-diam adalah persis cara sebuah salah ketik
+/// membuka lebih banyak daripada yang diminta.
+bool PermissionModeFromString(std::string_view text, PermissionMode& out);
+
 /// Hasil satu pemanggilan tool.
 ///
 /// `isError` di sini adalah **galat tingkat tool**, bukan galat protokol: tool
@@ -71,6 +99,19 @@ struct ToolDefinition {
 
     ToolHandler handler;
 };
+
+/// Ditanya sebelum sebuah tool yang mengubah data dijalankan. `false` menolak.
+///
+/// **Dipanggil di thread jaringan.** Yang memasangnya bertanggung jawab atas
+/// perpindahan thread-nya sendiri: penyetuju di editor memunculkan dialog dan
+/// karena itu harus lewat `MainThreadQueue`, sedangkan penyetuju di mode
+/// headless membaca sebuah flag dan tidak perlu berpindah ke mana pun.
+///
+/// Kosong berarti tidak ada yang bisa ditanya. Mode `ask` lalu **menolak**:
+/// pengguna yang meminta ditanya tidak sedang meminta agar dilanjutkan diam-diam
+/// ketika tidak ada yang bertanya. Mode `auto` sebaliknya melanjutkan, termasuk
+/// untuk `Dangerous` — di sana memang tidak ada yang menunggu jawaban.
+using ToolApprover = std::function<bool(const ToolDefinition& tool, std::string_view arguments)>;
 
 /// Kumpulan tool yang ditawarkan server ke agen.
 ///

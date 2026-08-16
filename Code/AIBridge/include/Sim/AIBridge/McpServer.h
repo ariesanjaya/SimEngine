@@ -64,6 +64,16 @@ struct McpServerConfig {
     /// apa adanya mendapat 401 tanpa tahu sebabnya. Yang menyalakannya adalah
     /// pengguna, lewat panel.
     bool generateBearerToken = false;
+
+    /// Mode izin saat server menyala.
+    ///
+    /// **Bawaannya `auto`, dan itu keputusan yang perlu disebut.** Server ini
+    /// terkunci ke localhost, dinyalakan sengaja oleh pemiliknya, dan sudah
+    /// menjadi cara Claude Code menyunting project sejak A1 — bawaan yang lebih
+    /// ketat akan menolak tool tulis pada setiap orang yang tidak tahu ada
+    /// pengaturan baru yang harus diubah. Yang mengubahnya adalah pengguna,
+    /// lewat panel, dan mode yang dipilihnya berlaku untuk semua klien sekaligus.
+    PermissionMode permissionMode = PermissionMode::Auto;
 };
 
 /// Server MCP di atas HTTP, terkunci ke localhost.
@@ -115,6 +125,24 @@ public:
     /// Token yang sedang berlaku, kosong bila tanpa autentikasi. Panel
     /// menampilkannya supaya pengguna bisa menyalinnya.
     std::string BearerToken() const;
+
+    /// Mode izin yang sedang berlaku. Boleh diubah kapan saja, termasuk saat
+    /// server menyala dan saat ada permintaan yang sedang ditangani.
+    PermissionMode Mode() const;
+    void SetMode(PermissionMode mode);
+
+    /// Memasang yang ditanya sebelum tool yang mengubah data dijalankan.
+    ///
+    /// Harus dipasang sebelum `Start`, atau dijaga sendiri terhadap perlombaan:
+    /// ia dibaca dari thread jaringan.
+    void SetApprover(ToolApprover approver);
+
+    /// Berapa panggilan yang ditolak oleh mode izin. Terpisah dari
+    /// `RejectedCount`, yang menghitung penolakan token: yang satu berarti ada
+    /// sesuatu yang menyambung tanpa diundang, yang lain berarti agen yang
+    /// diundang mencoba melakukan lebih dari yang diizinkan — dan keduanya
+    /// menuntut tindakan yang sama sekali berbeda.
+    uint64_t RefusedByPolicyCount() const;
 
 private:
     struct Impl;

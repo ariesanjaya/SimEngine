@@ -37,6 +37,7 @@
 #include <algorithm>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace {
@@ -393,6 +394,24 @@ int main(int argc, char** argv) {
     ai::McpServer mcpServer;
     ai::McpServerConfig mcpConfig;
     mcpConfig.advertisePath = configDir / "mcp.json";
+    // **Mode izin boleh ditetapkan dari baris perintah**, supaya sebuah editor
+    // bisa dijalankan read-only tanpa seseorang harus mengklik radio button
+    // lebih dulu — yang berarti mode itu tidak bisa diuji terhadap editor
+    // sungguhan, dan yang tidak bisa diuji tidak layak dipercaya. SimHeadless
+    // nanti memakai bendera yang sama.
+    for (int at = 1; at + 1 < argc; ++at) {
+        if (argv[at] == nullptr || std::string_view(argv[at]) != "--mcp-permission") {
+            continue;
+        }
+        ai::PermissionMode requested = ai::PermissionMode::Auto;
+        if (!ai::PermissionModeFromString(argv[at + 1], requested)) {
+            SIM_ERROR("Editor", "unknown --mcp-permission \"{}\"; known: read-only, ask, auto",
+                      argv[at + 1]);
+            return 1;
+        }
+        mcpConfig.permissionMode = requested;
+        SIM_INFO("Editor", "MCP permission mode: {}", ai::ToString(requested));
+    }
     // Panel AI Bridge menampilkan keadaannya dan bisa mematikan-menyalakannya.
     // Closure-nya dipegang context, bukan panel: panel bisa ditutup, dan yang
     // ditutup tidak boleh membawa serta kemampuan menyalakan servernya lagi.
@@ -412,8 +431,23 @@ int main(int argc, char** argv) {
     // **Bukan pengganti project manager melainkan jalan pintas ke dalamnya:**
     // yang gagal dibuka tetap mendarat di manager beserta pesannya, bukan pada
     // editor kosong yang tidak menjelaskan apa-apa.
-    if (argc > 1 && argv[1] != nullptr && argv[1][0] != '\0') {
-        app.OpenProject(std::filesystem::path(argv[1]));
+    // Argumen pertama yang bukan bendera. Sebelum ada bendera, `argv[1]`
+    // selalu project — dan membiarkannya begitu berarti `--mcp-permission`
+    // dibuka sebagai nama folder.
+    for (int at = 1; at < argc; ++at) {
+        if (argv[at] == nullptr || argv[at][0] == '\0') {
+            continue;
+        }
+        const std::string_view argument(argv[at]);
+        if (argument == "--mcp-permission") {
+            ++at;  // nilainya, sudah dibaca di atas
+            continue;
+        }
+        if (argument.starts_with("--")) {
+            continue;
+        }
+        app.OpenProject(std::filesystem::path(argument));
+        break;
     }
 
     // Runtime Lua tidak lagi dipasang di sini. Ia memegang pointer ke indeks
