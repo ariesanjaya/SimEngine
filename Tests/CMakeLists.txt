@@ -304,3 +304,15 @@ sim_add_test(SimAIBridgeTests
         Sim::AIBridge
         httplib::httplib
         nlohmann_json::nlohmann_json)
+
+# Tool MCP diuji di tingkat semantiknya, bukan di tingkat kawat — yang terakhir
+# sudah ditutup SimAIBridgeTests. Yang dikunci di sini adalah apa yang dilakukan
+# sebuah tool call terhadap World, Selection, dan CommandHistory, dengan
+# EditorApp yang berjalan tanpa GPU maupun jendela.
+sim_add_test(SimAiToolsTests
+    SOURCES
+        AiToolsTests.cpp
+    DEPS
+        Sim::EditorFramework
+        Sim::AIBridge
+        nlohmann_json::nlohmann_json)

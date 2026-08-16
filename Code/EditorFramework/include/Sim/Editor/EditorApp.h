@@ -118,6 +118,14 @@ public:
     std::filesystem::path AssetsDirectory() const;
     std::filesystem::path LevelsDirectory() const;
 
+    /// True selama layar pemilih level menutupi editor.
+    ///
+    /// **Terbaca dari luar supaya bisa diuji.** `LoadLevel` sempat tidak pernah
+    /// menurunkan layar ini, jadi memuat level dari mana pun selain pemilihnya
+    /// sendiri menukar isi dunia diam-diam sementara editor tetap menampilkan
+    /// pemilih — dan tidak ada satu pun cara mengetahuinya dari luar.
+    bool IsAwaitingLevelChoice() const { return awaitingLevelChoice_; }
+
     /// Membuat berkas level kosong bernama `name` lalu membukanya.
     ///
     /// Publik dengan alasan yang sama dengan kedua folder di atas: `level.new`
