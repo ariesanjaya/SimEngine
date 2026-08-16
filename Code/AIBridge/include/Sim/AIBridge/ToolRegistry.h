@@ -21,7 +21,10 @@ enum class ToolPermission : uint8_t {
     /// Mengubah data lewat Command, jadi tercatat dan bisa di-undo.
     Write,
     /// Tidak tertutup oleh undo, atau menyentuh hal di luar project.
-    /// Minta persetujuan bahkan di mode `auto`.
+    ///
+    /// Bedanya dengan `Write` terasa di mode `ask` dan di apa yang ditampilkan
+    /// dialog persetujuan — bukan di mode `auto`, yang menjalankan keduanya.
+    /// Lihat tabel aturannya di `McpServer.cpp`.
     Dangerous,
 };
 
@@ -42,8 +45,8 @@ enum class PermissionMode : uint8_t {
     ReadOnly,
     /// Setiap tool yang mengubah data minta persetujuan.
     Ask,
-    /// Berjalan sendiri. `Dangerous` tetap minta persetujuan bila ada yang bisa
-    /// ditanya — lihat `ToolApprover`.
+    /// Berjalan sendiri, termasuk untuk `Dangerous`. Yang menginginkan
+    /// pengawasan memilih `ask`.
     Auto,
 };
 
@@ -109,8 +112,8 @@ struct ToolDefinition {
 ///
 /// Kosong berarti tidak ada yang bisa ditanya. Mode `ask` lalu **menolak**:
 /// pengguna yang meminta ditanya tidak sedang meminta agar dilanjutkan diam-diam
-/// ketika tidak ada yang bertanya. Mode `auto` sebaliknya melanjutkan, termasuk
-/// untuk `Dangerous` — di sana memang tidak ada yang menunggu jawaban.
+/// ketika tidak ada yang bertanya. Mode `auto` tidak pernah memanggilnya sama
+/// sekali.
 using ToolApprover = std::function<bool(const ToolDefinition& tool, std::string_view arguments)>;
 
 /// Kumpulan tool yang ditawarkan server ke agen.

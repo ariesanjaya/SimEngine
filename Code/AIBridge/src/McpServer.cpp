@@ -161,11 +161,22 @@ struct McpServer::Impl {
     ///   mode        Read   Write        Dangerous
     ///   read-only   ya     tidak        tidak
     ///   ask         ya     penyetuju    penyetuju
-    ///   auto        ya     ya           penyetuju bila ada, selain itu ya
+    ///   auto        ya     ya           ya
     ///
     /// `Read` tidak pernah ditanyakan: tool yang hanya membaca tidak mengubah
     /// apa pun, dan meminta persetujuan untuk melihat akan melatih pengguna
     /// mengklik "ya" tanpa membacanya.
+    ///
+    /// **`auto` berarti auto, termasuk untuk `Dangerous`.** Rancangan awal
+    /// menyebut `Dangerous` "minta persetujuan bahkan di mode auto", dan itu
+    /// terdengar benar sampai dijalankan: sembilan dari 48 tool bertingkat
+    /// `Dangerous`, dan `level.open` — tool pertama yang dipanggil hampir setiap
+    /// sesi — salah satunya. Yang terjadi adalah setiap sesi agen berhenti di
+    /// sebuah dialog, termasuk di mesin yang memang tidak ada orangnya.
+    ///
+    /// Mode yang tetap bertanya di `auto` juga membuat namanya berbohong, dan
+    /// nama mode adalah satu-satunya hal yang dibaca orang sebelum memilihnya.
+    /// Yang menginginkan pengawasan memilih `ask`; itu memang gunanya.
     bool Allows(const ToolDefinition& tool, std::string_view arguments, std::string& refusal) {
         if (tool.permission == ToolPermission::Read) {
             return true;
@@ -178,16 +189,10 @@ struct McpServer::Impl {
                       "Bridge panel.";
             return false;
         }
-        if (current == PermissionMode::Auto && tool.permission == ToolPermission::Write) {
+        if (current == PermissionMode::Auto) {
             return true;
         }
         if (!approver) {
-            if (current == PermissionMode::Auto) {
-                // Dangerous di mode auto tanpa penyetuju: tidak ada yang
-                // menunggu jawaban, dan menolak akan membuat mode ini tidak
-                // berguna justru pada mesin yang memang tidak punya UI.
-                return true;
-            }
             refusal = std::string("Refused: the editor is in ask mode but has nobody to ask. "
                                   "\"") +
                       tool.name + "\" was not run.";

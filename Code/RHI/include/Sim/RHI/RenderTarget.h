@@ -3,6 +3,8 @@
 #include "Sim/RHI/Device.h"
 
 #include <cstdint>
+#include <string>
+#include <vector>
 
 namespace sim::rhi {
 
@@ -56,6 +58,24 @@ public:
     VkFormat DepthFormat() const { return depthFormat_; }
     VkSampler Sampler() const { return sampler_; }
     VkFormat ColorFormat() const { return kColorFormat; }
+
+    /// Menyalin isi target ini ke RGBA8 di memori CPU.
+    ///
+    /// **Jalan keluar yang tidak lewat jendela.** Sampai ini ada, satu-satunya
+    /// cara agen mendapat gambar adalah `Swapchain::CaptureLastPresented` — dan
+    /// tanpa jendela tidak ada swapchain, jadi setiap tool yang mengembalikan
+    /// gambar mati di mode headless. Ini juga yang membuat `viewport.capture`
+    /// tidak lagi harus memotret seluruh jendela lalu memotongnya: yang keluar
+    /// dari sini sudah persis area yang digambar.
+    ///
+    /// Yang disalin hanya `Width() x Height()`, bukan seluruh alokasi. Sisa
+    /// gambar tidak pernah diisi, dan mengembalikannya berarti pinggiran berisi
+    /// piksel dari ukuran viewport sebelumnya.
+    ///
+    /// **Menunggu GPU diam.** Boleh mahal: yang memanggilnya adalah tool
+    /// diagnostik yang dipakai sekali-sekali, bukan jalur frame.
+    bool ReadPixels(std::vector<uint8_t>& outRgba, uint32_t& outWidth, uint32_t& outHeight,
+                    std::string& error);
 
 private:
     static constexpr VkFormat kColorFormat = VK_FORMAT_R8G8B8A8_UNORM;

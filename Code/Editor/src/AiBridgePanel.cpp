@@ -95,8 +95,8 @@ public:
                  "Every tool that changes data asks first. With nothing able to ask, they are "
                  "refused rather than run quietly."},
                 {ai::PermissionMode::Auto, "auto",
-                 "Tools that change data run on their own. Tools that cannot be undone still "
-                 "ask."},
+                 "Everything runs on its own, including tools that cannot be undone. Pick "
+                 "\"ask\" if you want to be shown each one first."},
             };
             ImGui::TextUnformatted("Permission");
             for (const auto& entry : kModes) {
