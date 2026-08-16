@@ -285,16 +285,23 @@ TEST_CASE("Tool yang menyentuh editor dijalankan di main thread") {
     // menjadi main thread yang men-drain antriannya — persis pembagian peran
     // di editor.
     json response;
+    // **Yang diperiksa loop tunggu adalah flag, bukan `response` itu sendiri.**
+    // Membaca `response` di sini sementara thread pemanggil menulisinya adalah
+    // data race — ThreadSanitizer menemukannya persis di bentuk sebelumnya, dan
+    // ia benar: `json::is_null()` membaca tag tipe yang sedang ditukar
+    // `operator=` di thread lain. Yang membuat versi ini benar bukan atomiknya
+    // saja melainkan bahwa `response` tidak disentuh sama sekali sampai
+    // `join()`.
+    std::atomic<bool> finished{false};
     std::thread caller([&]() {
         response = harness.Call("tools/call", json{{"name", "test.main_thread"}});
+        finished.store(true, std::memory_order_release);
     });
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    while (std::chrono::steady_clock::now() < deadline) {
+    while (!finished.load(std::memory_order_acquire) &&
+           std::chrono::steady_clock::now() < deadline) {
         MainThreadQueue::Get().Drain();
-        if (!response.is_null()) {
-            break;
-        }
         std::this_thread::sleep_for(std::chrono::milliseconds(2));
     }
     caller.join();
@@ -514,10 +521,28 @@ TEST_CASE("Dua ratus panggilan beruntun lewat main thread, semuanya benar") {
     std::atomic<int> succeeded{0};
     std::atomic<bool> done{false};
     std::thread caller([&]() {
+        // **Satu klien untuk seluruh dua ratus panggilan, dengan keep-alive.**
+        // Bukan penghematan: klien baru per panggilan berarti dua ratus kali
+        // `getaddrinfo`, dan glibc melayaninya lewat thread bantu yang ia buat
+        // sendiri. ThreadSanitizer tidak mengenal thread itu — cache alokator
+        // per-thread miliknya belum ada di sana — dan yang terjadi adalah
+        // segfault di dalam sanitizer, bukan laporan race. Agen sungguhan juga
+        // memakai satu koneksi, jadi bentuk ini sekaligus lebih jujur.
+        httplib::Client client("127.0.0.1", harness.server.Port());
+        client.set_keep_alive(true);
+        client.set_read_timeout(10, 0);
         for (int i = 0; i < kCalls; ++i) {
-            const json response =
-                harness.Call("tools/call", json{{"name", "test.counter"}}, i + 1);
-            if (response.contains("result") &&
+            const json request{{"jsonrpc", "2.0"},
+                               {"id", i + 1},
+                               {"method", "tools/call"},
+                               {"params", json{{"name", "test.counter"}}}};
+            const httplib::Result result =
+                client.Post("/mcp", request.dump(), "application/json");
+            if (!result || result->status != 200) {
+                continue;
+            }
+            const json response = json::parse(result->body, nullptr, false);
+            if (!response.is_discarded() && response.contains("result") &&
                 response.at("result").at("content")[0].at("text") == "ok") {
                 succeeded.fetch_add(1);
             }

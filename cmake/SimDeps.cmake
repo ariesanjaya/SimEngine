@@ -138,6 +138,17 @@ set(HTTPLIB_USE_ZLIB_IF_AVAILABLE    OFF CACHE BOOL "" FORCE)
 set(HTTPLIB_USE_BROTLI_IF_AVAILABLE  OFF CACHE BOOL "" FORCE)
 set(HTTPLIB_INSTALL                 OFF CACHE BOOL "" FORCE)
 set(HTTPLIB_TEST                    OFF CACHE BOOL "" FORCE)
+# **Bawaannya ON, dan mematikannya bukan penyederhanaan.** Jalur ini memakai
+# `getaddrinfo_a`, yang dilayani glibc lewat kolam thread yang ia buat sendiri.
+# ThreadSanitizer tidak mengenal thread itu — cache alokator per-thread miliknya
+# belum ada di sana — jadi yang terjadi bukan laporan race melainkan segfault di
+# dalam sanitizer, pada uji apa pun yang benar-benar menyambung. Kriteria terima
+# A0 nomor 3 menuntut jalan di bawah TSan, dan ini yang menghalanginya.
+#
+# Yang hilang tidak ada: jalur non-blocking ada supaya server DNS yang macet
+# tidak menahan thread selama timeout resolver, dan satu-satunya alamat yang
+# pernah disambungi di sini adalah 127.0.0.1 — yang tidak pernah menyentuh DNS.
+set(HTTPLIB_USE_NON_BLOCKING_GETADDRINFO OFF CACHE BOOL "" FORCE)
 FetchContent_Declare(cpp-httplib
     GIT_REPOSITORY https://github.com/yhirose/cpp-httplib.git
     GIT_TAG        v0.53.1
