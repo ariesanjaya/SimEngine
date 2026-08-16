@@ -158,6 +158,38 @@ bool EditorApp::Initialize(const Config& config) {
     panels_.LoadState(configDir_ / "panels.json");
     SIM_INFO("Editor", "{} panels registered", panels_.Panels().size());
 
+    // Satu aksi per panel, didaftarkan **sesudah** panelnya ada — `panels_`
+    // masih kosong saat `RegisterCoreActions` berjalan.
+    //
+    // **Menu Window sebelumnya satu-satunya menu yang tidak lewat
+    // `ActionRegistry`.** `PanelManager::DrawWindowMenu` menggambarnya
+    // langsung, jadi ia tidak punya id, tidak bisa diberi pintasan papan ketik,
+    // dan tidak terlihat oleh `editor.execute_action` — yang justru dijanjikan
+    // memberi agen akses ke seluruh menu. Sebuah agen yang diminta memeriksa
+    // Asset Browser karena itu tidak punya cara membukanya.
+    //
+    // Membuka saja tidak cukup: panel yang terbuka tapi berada di belakang tab
+    // lain di dock yang sama tidak digambar sama sekali. `RequestFocus` yang
+    // memilih tab-nya.
+    for (const std::unique_ptr<Panel>& panel : panels_.Panels()) {
+        if (panel == nullptr) {
+            continue;
+        }
+        const std::string id = panel->Id();
+        actions_.Register(Action{"panel." + id,
+                                 panel->Title(),
+                                 "Window",
+                                 {},
+                                 ImGuiKey_None,
+                                 [this, id]() {
+                                     if (Panel* target = panels_.Find(id)) {
+                                         target->SetOpen(true);
+                                         target->RequestFocus();
+                                     }
+                                 },
+                                 {}});
+    }
+
     InstallCrashHandler();
     initialized_ = true;
     return true;
