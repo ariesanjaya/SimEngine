@@ -40,4 +40,13 @@ using ScreenshotFn = std::function<bool(std::vector<uint8_t>& pngBytes, std::str
 void RegisterEditorTools(ai::ToolRegistry& tools, ai::ResourceRegistry& resources,
                          EditorApp& app, ScreenshotFn screenshot = {});
 
+/// Tool yang membaca dan menyusun scene (track AI, A1).
+///
+/// Terpisah dari `RegisterEditorTools` karena keduanya menjawab pertanyaan yang
+/// berbeda: yang satu tentang editor sebagai program, yang lain tentang isi
+/// project. `SimHeadless` nanti memakai yang kedua tanpa yang pertama — ia tidak
+/// punya menu, panel, maupun jendela untuk ditangkap.
+void RegisterSceneTools(ai::ToolRegistry& tools, ai::ResourceRegistry& resources,
+                        EditorApp& app);
+
 }  // namespace sim::editor

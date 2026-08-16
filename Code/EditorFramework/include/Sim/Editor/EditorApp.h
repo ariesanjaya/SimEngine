@@ -109,6 +109,15 @@ public:
     /// Menutup project yang sedang dibuka dan kembali ke project manager.
     void CloseProject();
 
+    /// Folder isi project yang sedang dibuka. Kosong bila belum ada project.
+    ///
+    /// **Publik sejak A1.** Tool MCP menyusun jalur level dari sini, dan
+    /// menyalin aturannya ke sana berarti dua tempat yang menghitung folder yang
+    /// sama — yang akan berselisih pada project yang memakai tata letak sendiri,
+    /// yaitu justru yang `Project::levelsPath` ada untuk mengizinkan.
+    std::filesystem::path AssetsDirectory() const;
+    std::filesystem::path LevelsDirectory() const;
+
     ProjectLibrary& Projects() { return projects_; }
 
     /// Membuat level contoh saat editor dibuka tanpa berkas apa pun.
@@ -166,9 +175,6 @@ private:
     void RememberStartupLevel(const std::filesystem::path& path);
     void PickFolder(const std::filesystem::path& start,
                     std::function<void(const std::filesystem::path&)> accept);
-    /// Folder isi project yang sedang dibuka. Kosong bila belum ada project.
-    std::filesystem::path AssetsDirectory() const;
-    std::filesystem::path LevelsDirectory() const;
     void CreateEntityAction();
     void DeleteSelectionAction();
     void DuplicateSelectionAction();
