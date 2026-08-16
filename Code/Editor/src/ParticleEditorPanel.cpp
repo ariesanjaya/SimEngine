@@ -85,7 +85,7 @@ public:
 
         if (ImGui::BeginChild("##preview",
                               ImVec2(std::max(avail - sideWidth_ - handle, 1.0f), 0.0f))) {
-            DrawPreview();
+            DrawPreview(context);
             DrawTimeline();
             DrawStats();
         }
@@ -180,12 +180,30 @@ private:
 
     // --- preview -------------------------------------------------------------
 
-    void DrawPreview() {
+    void DrawPreview(EditorContext& context) {
         const float height = std::max(ImGui::GetContentRegionAvail().y -
                                           ImGui::GetFrameHeightWithSpacing() * 4.0f,
                                       ImGui::GetFontSize() * 8.0f);
         const ImVec2 origin = ImGui::GetCursorScreenPos();
         const ImVec2 size(ImGui::GetContentRegionAvail().x, height);
+
+        // Diterbitkan untuk `particle.preview`, alasan yang sama dengan Material
+        // Editor: tool itu harus tahu petak mana yang dipotong, dan bahwa yang
+        // tergambar di sana benar-benar efek yang diminta.
+        EditorContext::DocumentPreviewState& published = context.particlePreviewState;
+        published.asset = openGuid_;
+        published.ready = false;
+        published.rect = {};
+        published.status = "The Particle Editor never drew the preview.";
+        if (const ImGuiViewport* main = ImGui::GetMainViewport()) {
+            published.rect.position = Vec2(origin.x - main->Pos.x, origin.y - main->Pos.y);
+            published.rect.size = Vec2(size.x, size.y);
+            published.rect.mainSize = Vec2(main->Size.x, main->Size.y);
+            // Tidak ada shader yang perlu dikompilasi di sini — preview partikel
+            // digambar dengan draw list ImGui — jadi tergambar berarti siap.
+            published.ready = openGuid_.IsValid();
+            published.status = openGuid_.IsValid() ? "" : "No effect is open.";
+        }
         ImGui::InvisibleButton("##view", size);
 
         // Orbit dengan seretan kiri, zoom dengan roda — konvensi yang sama

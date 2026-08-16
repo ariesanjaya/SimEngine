@@ -1213,8 +1213,8 @@ private:
         // bukan hanya di jalur yang berhasil. `material.preview` menunggu
         // `ready`, dan keadaan yang tertinggal dari material sebelumnya membuat
         // ia memotret material yang salah tanpa satu pun tanda.
-        EditorContext::MaterialPreviewState& published = context.materialPreviewState;
-        published.material = openGuid_;
+        EditorContext::DocumentPreviewState& published = context.materialPreviewState;
+        published.asset = openGuid_;
         published.ready = false;
         published.rect = {};
 

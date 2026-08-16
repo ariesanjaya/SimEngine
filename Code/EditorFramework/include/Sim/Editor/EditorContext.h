@@ -169,7 +169,7 @@ struct EditorContext {
     };
     ViewportRect viewportRect;
 
-    /// Keadaan pratinjau material pada frame terakhir.
+    /// Keadaan pratinjau sebuah editor dokumen pada frame terakhir.
     ///
     /// **`ready` menjawab pertanyaan yang berbeda dari `rect.size != 0`.** Panel
     /// Material Editor menggambar sesuatu di petak itu jauh sebelum pipeline
@@ -177,20 +177,25 @@ struct EditorContext {
     /// perangkat ini tidak punya pratinjau. Ketiganya adalah gambar yang sah dan
     /// tak satu pun memperlihatkan materialnya.
     ///
-    /// Dipakai `material.preview` milik track AI. Tanpa `ready`, satu-satunya
-    /// yang bisa dilakukan tool itu adalah menunggu sekian ratus milidetik lalu
-    /// memotret apa pun yang ada — dan mengirimkan gambar tulisan "Compiling…"
-    /// dengan keterangan "ini materialmu" adalah kebohongan yang tidak akan
-    /// pernah diperiksa agen.
-    struct MaterialPreviewState {
+    /// Dipakai `material.preview` dan `particle.preview` milik track AI. Tanpa
+    /// `ready`, satu-satunya yang bisa dilakukan tool itu adalah menunggu sekian
+    /// ratus milidetik lalu memotret apa pun yang ada — dan mengirimkan gambar
+    /// tulisan "Compiling…" dengan keterangan "ini materialmu" adalah kebohongan
+    /// yang tidak akan pernah diperiksa agen.
+    ///
+    /// **Satu instance per editor, bukan satu yang dipakai bergantian.** Material
+    /// Editor dan Particle Editor bisa sama-sama tergambar di dock yang berbeda,
+    /// dan satu bidang bersama berarti yang belakangan menimpa yang duluan.
+    struct DocumentPreviewState {
         ViewportRect rect;
-        /// Material yang sedang terbuka. Tidak sah bila belum ada yang dibuka.
-        Uuid material;
+        /// Aset yang sedang terbuka. Tidak sah bila belum ada yang dibuka.
+        Uuid asset;
         bool ready = false;
         /// Kenapa belum siap, bila belum. Kosong saat siap.
         std::string status;
     };
-    MaterialPreviewState materialPreviewState;
+    DocumentPreviewState materialPreviewState;
+    DocumentPreviewState particlePreviewState;
 
     /// Server MCP, bila ada. Nullptr di build atau mode yang tidak
     /// menyalakannya.

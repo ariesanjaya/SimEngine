@@ -7,6 +7,7 @@
 #include "Sim/Material/MaterialGraph.h"
 #include "Sim/Material/MaterialNodeCatalog.h"
 #include "Sim/Material/MaterialValidation.h"
+#include "Sim/Particle/ParticleEffect.h"
 #include "Sim/Editor/Panel.h"
 #include "Sim/Editor/PanelIds.h"
 #include "Sim/Editor/PanelManager.h"
@@ -357,6 +358,43 @@ std::vector<std::string> DroppedByLoader(const json& submitted) {
     return dropped;
 }
 
+/// Kunci yang dikirim tapi tidak muncul lagi setelah berkasnya ditulis ulang.
+///
+/// **Pemeriksaan yang tidak perlu tahu formatnya.** Ia mengurai kiriman agen,
+/// menuliskannya kembali lewat penulis kanonis format itu, lalu mencari kunci
+/// yang hilang di perjalanan. Apa pun yang diabaikan pemuat — salah nama, salah
+/// sarang, field yang sudah tidak ada — muncul di sini.
+///
+/// Yang dicari hanya kunci yang **hilang**, bukan nilai yang berbeda. Penulis
+/// kanonis berhak menormalkan angka (`1` jadi `1.0`) dan mengisi bawaan, dan
+/// melaporkan itu sebagai kehilangan akan membanjiri agen dengan galat palsu
+/// justru pada kiriman yang benar.
+void CollectMissingKeys(const json& sent, const json& stored, const std::string& path,
+                        std::vector<std::string>& missing) {
+    if (sent.is_object()) {
+        for (const auto& [key, value] : sent.items()) {
+            const std::string here = path.empty() ? key : path + "." + key;
+            if (!stored.is_object() || !stored.contains(key)) {
+                missing.push_back(here);
+                continue;
+            }
+            CollectMissingKeys(value, stored.at(key), here, missing);
+        }
+        return;
+    }
+    if (sent.is_array() && stored.is_array()) {
+        const std::size_t shared = std::min(sent.size(), stored.size());
+        for (std::size_t at = 0; at < shared; ++at) {
+            CollectMissingKeys(sent[at], stored[at], path + "[" + std::to_string(at) + "]",
+                               missing);
+        }
+        if (sent.size() > stored.size()) {
+            missing.push_back(path + " has " + std::to_string(sent.size()) + " entries but " +
+                              std::to_string(stored.size()) + " were kept");
+        }
+    }
+}
+
 /// Ringkasan graph yang cukup untuk agen menilai hasilnya tanpa membaca ulang
 /// seluruh JSON-nya.
 json Summarize(const material::MaterialGraph& graph) {
@@ -568,27 +606,47 @@ bool OnMainThread(Fn&& work, bool& answer) {
     return true;
 }
 
-ai::ToolDefinition MaterialPreview(EditorApp& app, ScreenshotFn screenshot) {
+/// Membuka sebuah aset di editor dokumennya, menunggu pratinjaunya benar-benar
+/// menggambar aset itu, lalu memotret petaknya.
+///
+/// **Satu jalur untuk material dan partikel.** Keduanya menempuh langkah yang
+/// sama persis, dan yang membedakan hanya panel mana yang dibuka dan bidang
+/// keadaan mana yang dibaca. Menulisnya dua kali berarti perbaikan pada satu
+/// salinan yang tidak pernah sampai ke salinan lainnya.
+using PreviewStateOf = EditorContext::DocumentPreviewState& (*)(EditorContext&);
+
+struct PreviewKind {
+    const char* toolName;
+    const char* description;
+    const char* panelId;
+    /// Ekstensi yang diterima, diakhiri nullptr.
+    const char* const* extensions;
+    const char* wrongType;
+    PreviewStateOf state;
+    /// Berapa lama pantas ditunggu. Material harus mengompilasi shader dulu;
+    /// pratinjau partikel digambar draw list ImGui dan siap pada frame berikutnya.
+    int polls;
+};
+
+ai::ToolDefinition DocumentPreview(EditorApp& app, ScreenshotFn screenshot, PreviewKind kind) {
     ai::ToolDefinition tool;
-    tool.name = "material.preview";
-    tool.description =
-        "Open a material in the Material Editor and take a picture of its 3D preview. This is "
-        "how you check what a material actually looks like instead of reasoning about its "
-        "graph. Compiling a changed material takes a moment; this waits for it.";
+    tool.name = kind.toolName;
+    tool.description = kind.description;
     tool.permission = ai::ToolPermission::Read;
     // Alasan yang sama dengan `viewport.capture`: ia harus menunggu beberapa
     // frame, dan menunggu dari dalam main thread berarti menunggu frame yang
     // tidak akan pernah datang.
     tool.needsMainThread = false;
-    tool.handler = [&app, screenshot = std::move(screenshot)](std::string_view argumentsJson) {
+    tool.handler = [&app, screenshot = std::move(screenshot),
+                    kind](std::string_view argumentsJson) {
         const json arguments = ParseArguments(argumentsJson);
 
-        Uuid material;
+        Uuid asset;
         std::string assetName;
         std::string failure;
         bool opened = false;
         if (!OnMainThread(
-                [&app, &arguments, &material, &assetName, &failure]() {
+                [&app, &arguments, &asset, &assetName, &failure, &kind]() {
                     const assets::AssetDatabase* database = app.Context().assets;
                     if (database == nullptr || !app.HasProject()) {
                         failure = "No project is open.";
@@ -601,26 +659,29 @@ ai::ToolDefinition MaterialPreview(EditorApp& app, ScreenshotFn screenshot) {
                         return false;
                     }
                     const std::filesystem::path absolute = database->AbsolutePath(*record);
-                    if (absolute.extension() != ".simmat" &&
-                        absolute.extension() != ".simmatinst") {
-                        failure = "That asset is not a material (.simmat or .simmatinst).";
+                    bool accepted = false;
+                    for (const char* const* at = kind.extensions; *at != nullptr; ++at) {
+                        accepted = accepted || absolute.extension() == *at;
+                    }
+                    if (!accepted) {
+                        failure = kind.wrongType;
                         return false;
                     }
-                    material = record->guid;
+                    asset = record->guid;
                     assetName = record->relativePath;
 
                     // **Keadaan pratinjau dikosongkan sebelum menunggu.** Panel
                     // yang tertutup, atau berada di belakang tab lain, tidak
                     // menggambar sama sekali — dan keadaan yang tertinggal dari
-                    // material sebelumnya akan terbaca sebagai "sudah siap".
-                    app.Context().materialPreviewState = {};
+                    // aset sebelumnya akan terbaca sebagai "sudah siap".
+                    kind.state(app.Context()) = {};
 
-                    if (Panel* panel = app.Panels().Find(panel_id::kMaterialEditor)) {
+                    if (Panel* panel = app.Panels().Find(kind.panelId)) {
                         panel->SetOpen(true);
                         panel->RequestFocus();
                     }
                     if (!app.Context().openAsset || !app.Context().openAsset(record->guid)) {
-                        failure = "No editor accepted that material.";
+                        failure = "No editor accepted that asset.";
                         return false;
                     }
                     return true;
@@ -633,25 +694,22 @@ ai::ToolDefinition MaterialPreview(EditorApp& app, ScreenshotFn screenshot) {
             return Text(failure, /*isError=*/true);
         }
 
-        // Kompilasi shader material berjalan di TaskPool, jadi lamanya tidak
-        // bisa ditebak dari sini. Yang ditunggu adalah panel menyatakan sendiri
-        // bahwa yang tergambar adalah material ini — bukan sekian milidetik yang
-        // dipilih dengan harapan.
+        // Yang ditunggu adalah panel menyatakan sendiri bahwa yang tergambar
+        // adalah aset ini — bukan sekian milidetik yang dipilih dengan harapan.
         EditorContext::ViewportRect rect;
-        std::string status = "The Material Editor never drew the preview.";
+        std::string status = "The editor never drew the preview.";
         bool ready = false;
-        constexpr int kPolls = 80;  // 80 x 250 ms = 20 detik
-        for (int poll = 0; poll < kPolls && !ready; ++poll) {
+        for (int poll = 0; poll < kind.polls && !ready; ++poll) {
             std::this_thread::sleep_for(std::chrono::milliseconds(250));
             bool answered = false;
             if (!OnMainThread(
-                    [&app, &material, &rect, &status]() {
-                        const EditorContext::MaterialPreviewState& state =
-                            app.Context().materialPreviewState;
+                    [&app, &asset, &rect, &status, &kind]() {
+                        const EditorContext::DocumentPreviewState& state =
+                            kind.state(app.Context());
                         if (!state.status.empty()) {
                             status = state.status;
                         }
-                        if (!state.ready || state.material != material) {
+                        if (!state.ready || state.asset != asset) {
                             return false;
                         }
                         rect = state.rect;
@@ -708,7 +766,7 @@ ai::ToolDefinition MaterialPreview(EditorApp& app, ScreenshotFn screenshot) {
         }
 
         ai::ToolResult result;
-        result.text = assetName + " — material preview, " +
+        result.text = assetName + " — preview, " +
                       std::to_string(static_cast<int>(rect.size.x)) + "x" +
                       std::to_string(static_cast<int>(rect.size.y)) + " logical units";
         result.imageBytes = std::move(png);
@@ -719,7 +777,213 @@ ai::ToolDefinition MaterialPreview(EditorApp& app, ScreenshotFn screenshot) {
   "type": "object",
   "required": ["asset"],
   "properties": {
-    "asset": {"type": "string", "description": "Material GUID or project-relative path."}
+    "asset": {"type": "string", "description": "Asset GUID or project-relative path."}
+  }
+})";
+    return tool;
+}
+
+constexpr const char* kMaterialExtensions[] = {".simmat", ".simmatinst", nullptr};
+constexpr const char* kEffectExtensions[] = {".simfx", nullptr};
+
+ai::ToolDefinition MaterialPreview(EditorApp& app, ScreenshotFn screenshot) {
+    return DocumentPreview(
+        app, std::move(screenshot),
+        PreviewKind{"material.preview",
+                    "Open a material in the Material Editor and take a picture of its 3D "
+                    "preview. This is how you check what a material actually looks like "
+                    "instead of reasoning about its graph. Compiling a changed material takes "
+                    "a moment; this waits for it.",
+                    panel_id::kMaterialEditor, kMaterialExtensions,
+                    "That asset is not a material (.simmat or .simmatinst).",
+                    [](EditorContext& context) -> EditorContext::DocumentPreviewState& {
+                        return context.materialPreviewState;
+                    },
+                    /*polls=*/80});  // 20 detik: shader-nya dikompilasi dulu
+}
+
+ai::ToolDefinition ParticlePreview(EditorApp& app, ScreenshotFn screenshot) {
+    return DocumentPreview(
+        app, std::move(screenshot),
+        PreviewKind{"particle.preview",
+                    "Open a particle effect in the Particle Editor and take a picture of its "
+                    "preview, with the effect playing. Use it to check what an effect actually "
+                    "does instead of reasoning about its modules.",
+                    panel_id::kParticleEditor, kEffectExtensions,
+                    "That asset is not a particle effect (.simfx).",
+                    [](EditorContext& context) -> EditorContext::DocumentPreviewState& {
+                        return context.particlePreviewState;
+                    },
+                    /*polls=*/16});  // 4 detik: tidak ada yang dikompilasi
+}
+
+// --- partikel -----------------------------------------------------------------------
+
+/// Ringkasan efek: cukup untuk agen menilai hasilnya tanpa membaca ulang JSON-nya.
+json Summarize(const particle::ParticleEffect& effect) {
+    json emitters = json::array();
+    for (const particle::ParticleEmitter& emitter : effect.emitters) {
+        // Modul disimpan sebagai bidang bernama, bukan sebagai daftar — jadi
+        // yang diringkas di sini adalah jenis mana yang menyala, lewat
+        // `IsEnabled`, bukan iterasi atas sebuah koleksi.
+        json modules = json::array();
+        for (const particle::ModuleKind kind :
+             {particle::ModuleKind::Spawn, particle::ModuleKind::Shape,
+              particle::ModuleKind::Initial, particle::ModuleKind::OverLifetime,
+              particle::ModuleKind::Force, particle::ModuleKind::Collision,
+              particle::ModuleKind::Render}) {
+            if (emitter.IsEnabled(kind)) {
+                modules.push_back(particle::ToString(kind));
+            }
+        }
+        emitters.push_back(json{{"name", emitter.name},
+                                {"enabled", emitter.enabled},
+                                {"maxParticles", emitter.maxParticles},
+                                {"modules", std::move(modules)}});
+    }
+    return json{{"name", effect.name},
+                {"emitters", std::move(emitters)}};
+}
+
+ai::ToolDefinition ParticleGet(EditorApp& app) {
+    ai::ToolDefinition tool;
+    tool.name = "particle.get";
+    tool.description =
+        "Read a particle effect (.simfx) as JSON, exactly as it is stored, with a summary of "
+        "its emitters and the modules each one has switched on. Edit what you get back and "
+        "hand it to particle.set.";
+    tool.permission = ai::ToolPermission::Read;
+    tool.needsMainThread = true;
+    tool.handler = [&app](std::string_view argumentsJson) {
+        const assets::AssetDatabase* database = app.Context().assets;
+        if (database == nullptr || !app.HasProject()) {
+            return Text("No project is open.", /*isError=*/true);
+        }
+        const json arguments = ParseArguments(argumentsJson);
+        const assets::AssetRecord* record = FindAsset(app, arguments);
+        if (record == nullptr) {
+            return Text("No asset with that GUID or path. Use asset.search to find one.",
+                        /*isError=*/true);
+        }
+        const std::filesystem::path absolute = database->AbsolutePath(*record);
+        if (absolute.extension() != ".simfx") {
+            return Text("That asset is not a particle effect (.simfx).", /*isError=*/true);
+        }
+
+        const std::string text = ReadFile(absolute);
+        if (text.empty()) {
+            return Text("That effect cannot be read.", /*isError=*/true);
+        }
+        particle::ParticleEffect effect;
+        const particle::EffectIoResult loaded = particle::LoadEffectFromString(effect, text);
+        if (!loaded.ok) {
+            return Structured(json{{"ok", false}, {"error", loaded.error}}, /*isError=*/true);
+        }
+        json effectJson = json::parse(text, nullptr, /*allow_exceptions=*/false);
+        if (effectJson.is_discarded()) {
+            return Text("That effect is not valid JSON.", /*isError=*/true);
+        }
+        return Structured(json{{"guid", record->guid.ToString()},
+                               {"path", record->relativePath},
+                               {"summary", Summarize(effect)},
+                               {"effect", std::move(effectJson)}});
+    };
+    tool.inputSchemaJson = R"({
+  "type": "object",
+  "required": ["asset"],
+  "properties": {
+    "asset": {"type": "string", "description": "Effect GUID or project-relative path."}
+  }
+})";
+    return tool;
+}
+
+ai::ToolDefinition ParticleSet(EditorApp& app) {
+    ai::ToolDefinition tool;
+    tool.name = "particle.set";
+    tool.description =
+        "Replace a particle effect. What you send is parsed, written back out through the "
+        "engine's own writer, and compared: anything the loader would have dropped without a "
+        "word — a misspelled key, a field nested in the wrong place — refuses the write and "
+        "comes back named.";
+    // Dangerous karena tidak bisa di-undo: suntingan aset tidak melewati
+    // CommandHistory, alasan yang sama dengan material.
+    tool.permission = ai::ToolPermission::Dangerous;
+    tool.needsMainThread = true;
+    tool.handler = [&app](std::string_view argumentsJson) {
+        const assets::AssetDatabase* database = app.Context().assets;
+        if (database == nullptr || !app.HasProject()) {
+            return Text("No project is open.", /*isError=*/true);
+        }
+        const json arguments = ParseArguments(argumentsJson);
+        const assets::AssetRecord* record = FindAsset(app, arguments);
+        if (record == nullptr) {
+            return Text("No asset with that GUID or path. Use asset.search to find one.",
+                        /*isError=*/true);
+        }
+        const std::filesystem::path absolute = database->AbsolutePath(*record);
+        if (absolute.extension() != ".simfx") {
+            return Text("That asset is not a particle effect (.simfx).", /*isError=*/true);
+        }
+
+        std::string text;
+        if (arguments.contains("effect") && arguments.at("effect").is_object()) {
+            text = arguments.at("effect").dump();
+        } else if (arguments.contains("text") && arguments.at("text").is_string()) {
+            text = arguments.at("text").get<std::string>();
+        } else {
+            return Text("Pass the effect as \"effect\" (an object) or \"text\" (a string).",
+                        /*isError=*/true);
+        }
+
+        particle::ParticleEffect effect;
+        const particle::EffectIoResult loaded = particle::LoadEffectFromString(effect, text);
+        if (!loaded.ok) {
+            return Structured(json{{"ok", false}, {"stage", "parse"}, {"error", loaded.error}},
+                              /*isError=*/true);
+        }
+
+        const std::string canonical = particle::SaveEffectToString(effect);
+        const json sent = json::parse(text, nullptr, /*allow_exceptions=*/false);
+        const json stored = json::parse(canonical, nullptr, /*allow_exceptions=*/false);
+        if (!sent.is_discarded() && !stored.is_discarded()) {
+            std::vector<std::string> missing;
+            CollectMissingKeys(sent, stored, {}, missing);
+            if (!missing.empty()) {
+                return Structured(json{{"ok", false},
+                                       {"stage", "shape"},
+                                       {"dropped", missing},
+                                       {"hint", "Call particle.get and edit what it returns; "
+                                                "these keys did not survive being written "
+                                                "back out."}},
+                                  /*isError=*/true);
+            }
+        }
+
+        std::ofstream file(absolute, std::ios::binary | std::ios::trunc);
+        if (!file) {
+            return Text("That effect cannot be written.", /*isError=*/true);
+        }
+        file.write(canonical.data(), static_cast<std::streamsize>(canonical.size()));
+        file.close();
+
+        // Disalin sebelum memindai ulang: `record` menggantung setelah ScanNow.
+        const std::string guid = record->guid.ToString();
+        const std::string relativePath = record->relativePath;
+        RefreshAssets(app);
+        return Structured(json{{"ok", true},
+                               {"guid", guid},
+                               {"path", relativePath},
+                               {"bytes", canonical.size()},
+                               {"summary", Summarize(effect)}});
+    };
+    tool.inputSchemaJson = R"({
+  "type": "object",
+  "required": ["asset"],
+  "properties": {
+    "asset": {"type": "string", "description": "Effect GUID or project-relative path."},
+    "effect": {"type": "object", "description": "The whole effect, in the shape particle.get returns under \"effect\"."},
+    "text": {"type": "string", "description": "The effect as raw JSON text. Use this or \"effect\", not both."}
   }
 })";
     return tool;
@@ -734,12 +998,15 @@ void RegisterAuthoringTools(ai::ToolRegistry& tools, EditorApp& app, ScreenshotF
 #endif
     tools.Register(MaterialGraphGet(app));
     tools.Register(MaterialGraphSet(app));
+    tools.Register(ParticleGet(app));
+    tools.Register(ParticleSet(app));
     // **Tanpa penangkap layar, tool ini tidak didaftarkan sama sekali.** Ia
     // menempuh tangkapan jendela lalu dipotong — tidak ada jalur readback GPU di
     // engine ini — jadi editor tanpa kemampuan itu hanya bisa menawarkan tool
     // yang selalu gagal. Aturan yang sama dengan `editor.screenshot`.
     if (screenshot) {
-        tools.Register(MaterialPreview(app, std::move(screenshot)));
+        tools.Register(MaterialPreview(app, screenshot));
+        tools.Register(ParticlePreview(app, std::move(screenshot)));
     }
 }
 

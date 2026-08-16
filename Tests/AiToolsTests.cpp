@@ -1086,3 +1086,60 @@ TEST_CASE("material.graph_set menolak apa yang akan dibuang pemuatnya diam-diam"
         CHECK(pins.at("specularRoughness") == "0.35");
     }
 }
+
+TEST_CASE("particle.get dan particle.set bolak-balik, dan menolak yang akan dibuang") {
+    Harness harness;
+    const json created =
+        harness.CallOk("asset.create", json{{"type", "particle"}, {"path", "Assets/Asap"}});
+    CHECK(created.at("path") == "Assets/Asap.simfx");
+    const std::string guid = created.at("guid").get<std::string>();
+
+    const json read = harness.CallOk("particle.get", json{{"asset", guid}});
+    REQUIRE(read.at("effect").is_object());
+    // Efek baru sudah punya satu emitter: berkas tanpa emitter dibuka orang
+    // sebagai kanvas kosong dan tidak memberi tahu apa pun tentang bentuknya.
+    REQUIRE(read.at("summary").at("emitters").size() == 1);
+
+    SUBCASE("menulis kembali apa yang dibaca tetap sah") {
+        const json written =
+            harness.CallOk("particle.set", json{{"asset", guid}, {"effect", read.at("effect")}});
+        CHECK(written.at("ok") == true);
+        CHECK(harness.CallOk("particle.get", json{{"asset", guid}})
+                  .at("summary")
+                  .at("emitters")
+                  .size() == 1);
+    }
+
+    SUBCASE("perubahan yang sah benar-benar tersimpan") {
+        json edited = read.at("effect");
+        edited["emitters"][0]["name"] = "Asap naik";
+        edited["emitters"][0]["maxParticles"] = 2048;
+        CHECK(harness.CallOk("particle.set", json{{"asset", guid}, {"effect", edited}})
+                  .at("ok") == true);
+
+        // Dibaca kembali dari disk: kalau nilainya hilang di perjalanan,
+        // particle.set tetap melapor berhasil.
+        const json again = harness.CallOk("particle.get", json{{"asset", guid}});
+        CHECK(again.at("summary").at("emitters")[0].at("name") == "Asap naik");
+        CHECK(again.at("summary").at("emitters")[0].at("maxParticles") == 2048);
+    }
+
+    SUBCASE("kunci yang tidak selamat ditulis ulang ditolak dengan menyebutnya") {
+        json guessed = read.at("effect");
+        // Salah nama, dan salah sarang. Keduanya terurai tanpa galat dan
+        // menghasilkan efek yang persis sama dengan sebelumnya.
+        guessed["emitters"][0]["maksimalPartikel"] = 999;
+        const ai::ToolResult failed =
+            harness.Call("particle.set", json{{"asset", guid}, {"effect", guessed}});
+        REQUIRE(failed.isError);
+        const json body = json::parse(failed.text, nullptr, false);
+        REQUIRE_FALSE(body.is_discarded());
+        CHECK(body.at("stage") == "shape");
+        CHECK(body.at("dropped").dump().find("maksimalPartikel") != std::string::npos);
+    }
+
+    SUBCASE("aset yang bukan efek ditolak") {
+        harness.CallOk("asset.create", json{{"type", "material"}, {"path", "Assets/Bukan"}});
+        CHECK(harness.Call("particle.get", json{{"asset", "Bukan.simmat"}}).isError);
+    }
+}
