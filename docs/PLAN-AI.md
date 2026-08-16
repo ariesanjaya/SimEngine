@@ -14,19 +14,23 @@ dikerjakan oleh keputusan arsitektur di fase editor.
 
 ## Keadaan · 16 Agustus 2026
 
-**A0, A1, dan A2 sudah di `main`.** Editor menyalakan MCP server dengan **34 tool**
-dan dua resource. A3 dan A4 belum dimulai.
+**A0, A1, dan A2 sudah di `main`; A3 baru langkah pertamanya.** Editor menyalakan
+MCP server dengan **38 tool** dan dua resource. A4 belum dimulai.
+
+Yang sudah ada dari A3: `lua.eval`, `lua.script_write`, `material.graph_get`,
+`material.graph_set`. Yang belum: `material.preview` dan seluruh tool partikel,
+terrain, vegetasi, dan animasi.
 
 | Modul | Isi |
 |---|---|
 | `Code/AIBridge` | `JsonRpc`, `McpServer`, `ToolRegistry`, `ResourceRegistry` |
-| `Code/EditorFramework` | `AiTools.cpp`, `AiSceneTools.cpp`, `AiEntityTools.cpp`, `AiAssetTools.cpp`, `SceneCommands.cpp` |
+| `Code/EditorFramework` | `AiTools.cpp`, `AiSceneTools.cpp`, `AiEntityTools.cpp`, `AiAssetTools.cpp`, `AiAuthoringTools.cpp`, `SceneCommands.cpp` |
 | `Code/Editor` | `AiBridgePanel` |
 
 | Uji | Jumlah |
 |---|---|
 | `SimAIBridgeTests` | 19 kasus / 163 assertion, lewat soket HTTP sungguhan, bersih di bawah ThreadSanitizer |
-| `SimAiToolsTests` | 26 kasus / 495 assertion, `EditorApp` headless |
+| `SimAiToolsTests` | 29 kasus / 665 assertion, `EditorApp` headless dengan `ScriptRuntime` sungguhan |
 
 Penanda kriteria di bawah: ✅ terbukti, ◐ sebagian, ⬜ belum.
 
@@ -236,13 +240,25 @@ bukan hanya menata entity.
 
 **Kriteria terima**
 
-1. Perintah "buat material emas kasar" menghasilkan graph yang valid, dan preview
+1. ◐ Perintah "buat material emas kasar" menghasilkan graph yang valid, dan preview
    yang dikembalikan agen benar-benar memperlihatkan permukaan logam.
-2. Perintah "buat efek asap yang naik pelan lalu memudar" menghasilkan `.simfx`
+   Separuh pertama ada: `material.graph_set` menolak menulis graph yang tidak
+   lolos `ValidateMaterial`, dan yang ditolak tidak meninggalkan berkas setengah
+   tertulis. Preview-nya menunggu `material.preview`.
+2. ⬜ Perintah "buat efek asap yang naik pelan lalu memudar" menghasilkan `.simfx`
    yang bisa dibuka manusia di Particle Editor dan modulnya masuk akal.
-3. `lua.eval` yang error tidak mematikan editor; pesan error + traceback kembali
+3. ✅ `lua.eval` yang error tidak mematikan editor; pesan error + traceback kembali
    ke agen.
-4. Seluruh hasil kerja agen di sesi ini bisa di-undo sampai kosong.
+   Diperiksa dua kali, dan keduanya lewat panggilan **sesudahnya**, bukan lewat
+   pesan galatnya: di uji, dan di editor sungguhan yang tetap menjawab
+   `editor.status` pada 60 fps setelah `error()` dipanggil dari agen.
+4. ⬜ Seluruh hasil kerja agen di sesi ini bisa di-undo sampai kosong.
+   **Tidak akan tercapai apa adanya**, dan itu keputusan yang lebih tua daripada
+   track ini: suntingan material, graph, dan skrip sengaja tidak melewati
+   CommandHistory — riwayat undo utama menjanjikan pembatalan perubahan *scene*.
+   Tool authoring karena itu bertingkat `Dangerous`. Yang bisa dijanjikan
+   jujur adalah "seluruh perubahan scene bisa di-undo", dan kriteria ini perlu
+   ditulis ulang atau dijawab dengan checkpoint berkas.
 
 ---
 

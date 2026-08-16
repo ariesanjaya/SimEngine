@@ -321,4 +321,7 @@ sim_add_test(SimAiToolsTests
         Sim::EditorFramework
         Sim::AIBridge
         Sim::ImageIO
+        # Tool A3 menjalankan Lua sungguhan; harness-nya membuat ScriptRuntime
+        # sendiri karena EditorApp menerimanya dari pemanggil, bukan membuatnya.
+        Sim::Script
         nlohmann_json::nlohmann_json)

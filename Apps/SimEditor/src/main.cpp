@@ -383,6 +383,7 @@ int main(int argc, char** argv) {
     editor::RegisterSceneTools(mcpTools, mcpResources, app);
     editor::RegisterEntityTools(mcpTools, app);
     editor::RegisterAssetTools(mcpTools, app);
+    editor::RegisterAuthoringTools(mcpTools, app);
 
     ai::McpServer mcpServer;
     ai::McpServerConfig mcpConfig;
