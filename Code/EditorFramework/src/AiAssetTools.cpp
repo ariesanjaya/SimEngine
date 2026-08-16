@@ -8,6 +8,7 @@
 #include "Sim/ImageIO/MipChain.h"
 #include "Sim/Material/MaterialGraph.h"
 #include "Sim/Material/MaterialNodeCatalog.h"
+#include "Sim/Particle/ParticleEffect.h"
 #include "Sim/Scene/AssetUsage.h"
 #include "Sim/Scene/Project.h"
 #include "Sim/Scene/World.h"
@@ -480,7 +481,7 @@ ai::ToolDefinition AssetCreate(EditorApp& app) {
     ai::ToolDefinition tool;
     tool.name = "asset.create";
     tool.description =
-        "Create a new asset in the project: a material, or a Lua script. The result is a valid "
+        "Create a new asset in the project: a material, a particle effect, or a Lua script. The result is a valid "
         "asset ready to edit, not an empty file — and it appears in the Asset Browser "
         "immediately.";
     tool.permission = ai::ToolPermission::Write;
@@ -497,9 +498,12 @@ ai::ToolDefinition AssetCreate(EditorApp& app) {
         const std::string kind = Lowered(arguments.at("type").get<std::string>());
         std::string relative = arguments.at("path").get<std::string>();
 
-        const char* extension = kind == "material" ? ".simmat" : kind == "script" ? ".lua" : nullptr;
+        const char* extension = kind == "material"  ? ".simmat"
+                                : kind == "particle" ? ".simfx"
+                                : kind == "script"   ? ".lua"
+                                                     : nullptr;
         if (extension == nullptr) {
-            return Text("Unknown asset type \"" + kind + "\". Known: material, script.",
+            return Text("Unknown asset type \"" + kind + "\". Known: material, particle, script.",
                         /*isError=*/true);
         }
         // Ekstensi ditambahkan hanya bila belum ada: "Batu.simmat" tidak sedang
@@ -532,6 +536,20 @@ ai::ToolDefinition AssetCreate(EditorApp& app) {
             if (!material::SaveMaterialToFile(graph, resolved.absolute).ok) {
                 return Text("Could not write the material.", /*isError=*/true);
             }
+        } else if (kind == "particle") {
+            // **Satu emitter yang benar-benar mengeluarkan partikel**, alasan
+            // yang sama dengan material: efek tanpa emitter dibuka orang sebagai
+            // kanvas kosong dan tidak memberi tahu apa pun tentang bentuk
+            // berkasnya.
+            particle::ParticleEffect effect;
+            effect.name = resolved.absolute.stem().string();
+            particle::ParticleEmitter emitter;
+            emitter.name = "Emitter";
+            emitter.seed = effect.NextSeed();
+            effect.emitters.push_back(std::move(emitter));
+            if (!particle::SaveEffectToFile(effect, resolved.absolute).ok) {
+                return Text("Could not write the effect.", /*isError=*/true);
+            }
         } else {
             std::ofstream file(resolved.absolute, std::ios::binary | std::ios::trunc);
             if (!file) {
@@ -558,7 +576,7 @@ ai::ToolDefinition AssetCreate(EditorApp& app) {
   "type": "object",
   "required": ["type", "path"],
   "properties": {
-    "type": {"type": "string", "enum": ["material", "script"]},
+    "type": {"type": "string", "enum": ["material", "particle", "script"]},
     "path": {"type": "string", "description": "Project-relative path. The extension is added if you leave it off."},
     "text": {"type": "string", "description": "Initial contents. Scripts only."}
   }

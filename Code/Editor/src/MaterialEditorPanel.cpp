@@ -1209,14 +1209,25 @@ private:
     /// paling mahal: selisihnya tidak akan pernah dicari orang karena tidak ada
     /// yang mengaku salah.
     void DrawPreview(EditorContext& context) {
+        // Keadaan pratinjau diterbitkan di **setiap** jalan keluar fungsi ini,
+        // bukan hanya di jalur yang berhasil. `material.preview` menunggu
+        // `ready`, dan keadaan yang tertinggal dari material sebelumnya membuat
+        // ia memotret material yang salah tanpa satu pun tanda.
+        EditorContext::DocumentPreviewState& published = context.materialPreviewState;
+        published.asset = openGuid_;
+        published.ready = false;
+        published.rect = {};
+
         render::IMaterialPreview* preview = context.materialPreview;
         if (preview == nullptr) {
+            published.status = "This device has no material preview.";
             ImGui::TextColored(kHintColor,
                                "Preview is unavailable on this device. Editing the graph "
                                "does not require it.");
             return;
         }
         if (!compiled_.ok) {
+            published.status = "The graph does not compile; there is nothing to preview.";
             ImGui::TextColored(kErrorColor, "%s  Fix the errors first — nothing to preview.",
                                icons::kLogError);
             return;
@@ -1224,6 +1235,7 @@ private:
 
         EnsurePreviewShaders(context, *preview);
         if (!previewError_.empty()) {
+            published.status = previewError_;
             ImGui::TextColored(kErrorColor, "%s  %s", icons::kLogError, previewError_.c_str());
             // Sumbernya tetap ditampilkan: galat slangc menyebut nomor baris,
             // dan nomor baris tanpa kodenya tidak bisa dipakai siapa pun.
@@ -1231,6 +1243,7 @@ private:
             return;
         }
         if (!preview->HasMaterial()) {
+            published.status = "Still compiling.";
             ImGui::TextColored(kHintColor, "Compiling…");
             return;
         }
@@ -1271,6 +1284,15 @@ private:
         // dan yang gagal diam-diam justru satu-satunya interaksi di sini.
         const ImVec2 origin = ImGui::GetCursorScreenPos();
         const ImVec2 size(width, height);
+        // Relatif terhadap titik asal viewport utama, satuan logis — bentuk yang
+        // sama dengan `viewportRect`, karena yang memotong keduanya sama.
+        if (const ImGuiViewport* main = ImGui::GetMainViewport()) {
+            published.rect.position = Vec2(origin.x - main->Pos.x, origin.y - main->Pos.y);
+            published.rect.size = Vec2(size.x, size.y);
+            published.rect.mainSize = Vec2(main->Size.x, main->Size.y);
+            published.ready = true;
+            published.status.clear();
+        }
         ImGui::InvisibleButton("##view", size,
                                ImGuiButtonFlags_MouseButtonLeft |
                                    ImGuiButtonFlags_MouseButtonRight);

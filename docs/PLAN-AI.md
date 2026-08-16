@@ -14,12 +14,23 @@ dikerjakan oleh keputusan arsitektur di fase editor.
 
 ## Keadaan · 16 Agustus 2026
 
-**A0, A1, dan A2 sudah di `main`; A3 baru langkah pertamanya.** Editor menyalakan
-MCP server dengan **38 tool** dan dua resource. A4 belum dimulai.
+**A0, A1, A2, dan hampir seluruh A3 sudah di `main`.** Editor menyalakan MCP
+server dengan **48 tool** dan dua resource. A4 belum dimulai.
 
-Yang sudah ada dari A3: `lua.eval`, `lua.script_write`, `material.graph_get`,
-`material.graph_set`. Yang belum: `material.preview` dan seluruh tool partikel,
-terrain, vegetasi, dan animasi.
+Empat belas tool A3: `lua.eval`, `lua.script_write`, `material.graph_get`,
+`material.graph_set`, `material.preview`, `particle.get`, `particle.set`,
+`particle.preview`, `terrain.heightmap_get`, `terrain.heightmap_set`,
+`terrain.sculpt`, `animation.clip_info`, `animation.key_set`,
+`animation.preview`. `asset.create` juga menerima tipe `particle`.
+
+**Yang belum, dan kenapa: `vegetation.layer_set` dan `vegetation.scatter`.**
+Vegetasi dimiliki `VegetationEditorPanel` sebagai anggotanya sendiri
+(`vegetation_`), bukan sebuah store bersama seperti `TerrainStore` — jadi tidak
+ada keadaan vegetasi yang bisa dijangkau dari luar panel itu. Menambahkannya
+menuntut `VegetationStore` di `EditorFramework` dan memindahkan kepemilikannya ke
+sana, dengan alasan yang sudah tertulis di `TerrainStore`: panel menyunting,
+viewport menggambar, dan keduanya harus melihat objek yang sama. Itu perubahan
+kepemilikan data di editor, bukan penambahan tool.
 
 | Modul | Isi |
 |---|---|

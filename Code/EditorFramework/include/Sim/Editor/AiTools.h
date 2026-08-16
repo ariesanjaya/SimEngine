@@ -81,7 +81,12 @@ void RegisterAssetTools(ai::ToolRegistry& tools, EditorApp& app);
 /// berbeda — yang satu tentang berkas sebagai berkas, yang lain tentang isinya
 /// sebagai karya. Tool di sini memeriksa isi itu sebelum menuliskannya: sintaks
 /// Lua sebelum berkas skrip tersimpan, validasi graph sebelum material tersimpan.
-void RegisterAuthoringTools(ai::ToolRegistry& tools, EditorApp& app);
+///
+/// `screenshot` kosong berarti `material.preview` tidak didaftarkan: ia
+/// menempuh tangkapan jendela lalu dipotong, jadi tanpa itu ia hanya bisa
+/// selalu gagal.
+void RegisterAuthoringTools(ai::ToolRegistry& tools, EditorApp& app,
+                            ScreenshotFn screenshot = {});
 
 /// Menyelesaikan sebuah jalur relatif terhadap akar project, menolak apa pun
 /// yang keluar darinya. Mengembalikan pesan galat, atau string kosong.

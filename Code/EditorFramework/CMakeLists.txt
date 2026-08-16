@@ -44,6 +44,10 @@ sim_add_library(EditorFramework
         # menggambar panah Platform → EditorFramework; ini pemakai pertamanya.
         # Yang dipakai hanya `Sim/Platform/FileDialog.h`, dan header itu sengaja
         # tidak membocorkan satu pun tipe SDL.
+        # Tool `particle.get`/`particle.set` membaca dan menulis `.simfx` lewat
+        # pemuat dan penulis kanonis modul ini — bukan lewat JSON mentah, supaya
+        # yang diterima agen persis yang diterima Particle Editor.
+        Sim::Particle
         Sim::Platform
         Sim::Render
         Sim::Physics
