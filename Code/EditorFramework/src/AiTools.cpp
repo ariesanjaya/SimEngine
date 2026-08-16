@@ -551,8 +551,16 @@ void RegisterEditorTools(ai::ToolRegistry& tools, ai::ResourceRegistry& resource
     // Didaftarkan hanya bila benar-benar bisa. Tool yang ada tapi selalu gagal
     // membuat agen mencoba lagi dengan argumen yang berbeda, karena dari
     // sisinya kegagalan yang berulang terlihat seperti pemakaian yang salah.
-    if (screenshot) {
+    //
+    // **Keduanya menuntut hal yang berbeda sejak ada readback.**
+    // `editor.screenshot` memotret jendela, jadi ia menuntut jendela.
+    // `viewport.capture` membaca target render, jadi yang dituntutnya adalah
+    // perender — dan itulah yang membuatnya tetap hidup di SimHeadless, di mana
+    // tidak ada jendela sama sekali.
+    if (app.Context().viewportRenderer != nullptr || screenshot) {
         tools.Register(ViewportCapture(app, screenshot));
+    }
+    if (screenshot) {
         tools.Register(EditorScreenshot(std::move(screenshot)));
     }
 

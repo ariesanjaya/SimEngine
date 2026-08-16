@@ -65,6 +65,14 @@ public:
         TaskPool* tasks = nullptr;
         render::IThumbnailCache* thumbnails = nullptr;
         script::ScriptRuntime* scripts = nullptr;
+
+        /// Tidak ada jendela, tidak ada ImGui, tidak ada panel.
+        ///
+        /// Yang dimatikannya adalah **skrip editor**: yang di folder itu
+        /// menambah menu dan panel, dan keduanya memanggil ImGui yang tidak ada.
+        /// Skrip gameplay tidak terpengaruh — ia berjalan lewat Play, dengan
+        /// runtime yang sama.
+        bool headless = false;
     };
 
     bool Initialize(const Config& config);
@@ -73,6 +81,14 @@ public:
     /// Menggambar seluruh UI editor untuk satu frame. Dipanggil di antara
     /// ImGui NewFrame dan Render.
     void DrawFrame(float deltaSeconds);
+
+    /// Bagian frame yang tidak menggambar apa pun: pemindaian aset, skrip,
+    /// animasi, fisika. `DrawFrame` memanggilnya sendiri.
+    ///
+    /// **Ada supaya SimHeadless bisa memutar editor tanpa jendela.** Tanpa
+    /// pemisahan ini, satu-satunya cara memajukan keadaan editor adalah
+    /// memanggil sesuatu yang menyentuh ImGui.
+    void Tick(float deltaSeconds);
 
     bool WantsExit() const { return wantsExit_; }
 
@@ -246,6 +262,7 @@ private:
     /// `startupLevel`. Project yang berisi banyak level tidak punya satu level
     /// yang "benar", dan editor yang selalu membuka yang terakhir memaksa orang
     /// menutup lalu membuka lagi hanya untuk berpindah.
+    bool headless_ = false;
     bool awaitingLevelChoice_ = false;
     /// Nama untuk level baru, dipegang layar pemilih.
     std::string newLevelName_;

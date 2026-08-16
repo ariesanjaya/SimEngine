@@ -80,6 +80,7 @@ bool EditorApp::Initialize(const Config& config) {
     context_.thumbnails = config.thumbnails;
     context_.animation = &animation_;
     context_.scripts = config.scripts;
+    headless_ = config.headless;
     context_.frameLimiter = config.frameLimiter;
     context_.lockedFps = config.lockedFps;
     context_.frameLockReason = config.frameLockReason;
@@ -1175,37 +1176,19 @@ bool EditorApp::LoadLevel(const std::filesystem::path& path) {
     return true;
 }
 
-void EditorApp::DrawFrame(float deltaSeconds) {
+/// Segala yang harus maju satu frame tapi tidak menggambar apa pun.
+///
+/// **Dipisah dari `DrawFrame` supaya ada yang bisa dijalankan tanpa jendela.**
+/// `SimHeadless` memutar loop yang hanya memanggil ini: tidak ada ImGui, tidak
+/// ada panel, tidak ada pintasan papan ketik — tapi indeks aset tetap dipindai,
+/// skrip tetap dimuat ulang, animasi tetap maju, dan fisika tetap melangkah.
+/// Itulah yang membuat tool MCP menjawab hal yang sama di kedua mode.
+///
+/// Garis pemisahnya `BeginGizmoFrame()`: dari sana ke bawah semuanya menyentuh
+/// ImGui.
+void EditorApp::Tick(float deltaSeconds) {
     context_.deltaSeconds = deltaSeconds;
-
-    // **Digambar sebelum percabangan layar, bukan sesudahnya.** Kedua cabang di
-    // bawah `return` lebih awal, dan agen bisa memanggil tool di layar mana pun
-    // — justru `level.open` adalah tool pertama yang dipanggilnya, tepat saat
-    // pemilih level sedang tampil. Sebuah dialog persetujuan yang hanya muncul
-    // di satu dari tiga layar akan menahan tool call sampai tenggatnya habis,
-    // tanpa satu pun tanda tentang kenapa.
-    //
-    // Ini ketahuan dengan menjalankannya: kodenya terbaca benar di tempatnya
-    // yang lama, tepat di sebelah dialog level.
-    DrawApprovalPrompt();
-
-    // **Tanpa project, tidak ada yang lain digambar sama sekali.** Bukan sekadar
-    // urutan: panel membaca indeks aset, folder level, dan runtime skrip, dan
-    // ketiganya baru punya arti sesudah sebuah project dipilih. Menggambar shell
-    // lebih dulu dengan semuanya kosong berarti setiap panel harus punya jalur
-    // "belum ada project" sendiri-sendiri — dan yang lupa memilikinya akan
-    // menulis ke folder yang tidak ada.
     if (!HasProject()) {
-        DrawProjectManager();
-        return;
-    }
-
-    // Alasan yang sama dengan gerbang project di atas: sebelum ada level,
-    // Outliner, Inspector, dan viewport semuanya menggambar dunia kosong — dan
-    // panel yang harus punya jalur "belum ada level" sendiri-sendiri adalah
-    // panel yang salah satunya akan lupa memilikinya.
-    if (awaitingLevelChoice_) {
-        DrawLevelPicker();
         return;
     }
 
@@ -1230,7 +1213,7 @@ void EditorApp::DrawFrame(float deltaSeconds) {
     // dibuat di dalamnya — sehingga mendaftarkan binding di Initialize() berarti
     // menyentuh state Lua yang belum ada. Menunggu di sini menghapus urutan yang
     // harus diingat pemanggil, alih-alih mendokumentasikannya.
-    if (!scriptingReady_ && context_.scripts != nullptr &&
+    if (!headless_ && !scriptingReady_ && context_.scripts != nullptr &&
         context_.scripts->VM().State() != nullptr) {
         // Folder terpisah dari skrip gameplay, dan itu bukan sekadar kerapian:
         // yang di sini berjalan di dalam editor dengan akses ke riwayat undo dan
@@ -1273,6 +1256,44 @@ void EditorApp::DrawFrame(float deltaSeconds) {
     if (playing_ && !pausedAtBreakpoint_) {
         physics_.Advance(world_, deltaSeconds);
     }
+
+}
+
+void EditorApp::DrawFrame(float deltaSeconds) {
+    context_.deltaSeconds = deltaSeconds;
+
+    // **Digambar sebelum percabangan layar, bukan sesudahnya.** Kedua cabang di
+    // bawah `return` lebih awal, dan agen bisa memanggil tool di layar mana pun
+    // — justru `level.open` adalah tool pertama yang dipanggilnya, tepat saat
+    // pemilih level sedang tampil. Sebuah dialog persetujuan yang hanya muncul
+    // di satu dari tiga layar akan menahan tool call sampai tenggatnya habis,
+    // tanpa satu pun tanda tentang kenapa.
+    //
+    // Ini ketahuan dengan menjalankannya: kodenya terbaca benar di tempatnya
+    // yang lama, tepat di sebelah dialog level.
+    DrawApprovalPrompt();
+
+    // **Tanpa project, tidak ada yang lain digambar sama sekali.** Bukan sekadar
+    // urutan: panel membaca indeks aset, folder level, dan runtime skrip, dan
+    // ketiganya baru punya arti sesudah sebuah project dipilih. Menggambar shell
+    // lebih dulu dengan semuanya kosong berarti setiap panel harus punya jalur
+    // "belum ada project" sendiri-sendiri — dan yang lupa memilikinya akan
+    // menulis ke folder yang tidak ada.
+    if (!HasProject()) {
+        DrawProjectManager();
+        return;
+    }
+
+    // Alasan yang sama dengan gerbang project di atas: sebelum ada level,
+    // Outliner, Inspector, dan viewport semuanya menggambar dunia kosong — dan
+    // panel yang harus punya jalur "belum ada level" sendiri-sendiri adalah
+    // panel yang salah satunya akan lupa memilikinya.
+    if (awaitingLevelChoice_) {
+        DrawLevelPicker();
+        return;
+    }
+
+    Tick(deltaSeconds);
 
     // Harus mendahului panel mana pun: Viewport memakai gizmo, dan keadaan
     // per-frame-nya hanya direset di sini.
