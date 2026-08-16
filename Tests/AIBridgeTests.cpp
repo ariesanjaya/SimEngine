@@ -480,3 +480,100 @@ TEST_CASE("Token dibangkitkan saat diminta, dan tidak ada saat tidak diminta") {
         CHECK(other.server.BearerToken() != harness.server.BearerToken());
     }
 }
+
+// --- kriteria terima A0 -------------------------------------------------------
+
+TEST_CASE("Dua ratus panggilan beruntun lewat main thread, semuanya benar") {
+    // Kriteria terima A0 nomor 3. Yang diawasi bukan kecepatan melainkan
+    // ketiadaan lomba: setiap panggilan menyeberang dari thread jaringan ke main
+    // thread dan kembali, dan dua ratus penyeberangan berturut-turut adalah
+    // bentuk paling sederhana yang membuat TSan punya sesuatu untuk dilihat.
+    MainThreadQueue::Get().BindMainThread();
+
+    Harness harness;
+    std::atomic<int> ranOnMainThread{0};
+    std::atomic<int> ranElsewhere{0};
+
+    ToolDefinition tool;
+    tool.name = "test.counter";
+    tool.needsMainThread = true;
+    tool.handler = [&](std::string_view) {
+        if (MainThreadQueue::Get().IsMainThread()) {
+            ranOnMainThread.fetch_add(1);
+        } else {
+            ranElsewhere.fetch_add(1);
+        }
+        ToolResult result;
+        result.text = "ok";
+        return result;
+    };
+    harness.tools.Register(std::move(tool));
+    REQUIRE(harness.Start());
+
+    constexpr int kCalls = 200;
+    std::atomic<int> succeeded{0};
+    std::atomic<bool> done{false};
+    std::thread caller([&]() {
+        for (int i = 0; i < kCalls; ++i) {
+            const json response =
+                harness.Call("tools/call", json{{"name", "test.counter"}}, i + 1);
+            if (response.contains("result") &&
+                response.at("result").at("content")[0].at("text") == "ok") {
+                succeeded.fetch_add(1);
+            }
+        }
+        done.store(true);
+    });
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(60);
+    while (!done.load() && std::chrono::steady_clock::now() < deadline) {
+        MainThreadQueue::Get().Drain();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    caller.join();
+    MainThreadQueue::Get().Drain();
+
+    CHECK(succeeded.load() == kCalls);
+    CHECK(ranOnMainThread.load() == kCalls);
+    // Satu saja yang berjalan di thread jaringan berarti marshaling-nya bocor,
+    // dan kebocoran seperti itu muncul sebagai crash acak jauh dari sebabnya.
+    CHECK(ranElsewhere.load() == 0);
+    CHECK(harness.server.RequestCount() == kCalls);
+}
+
+TEST_CASE("Menghentikan server saat ada permintaan menggantung tidak merusak apa pun") {
+    // Kriteria terima A0 nomor 4, dalam bentuk yang deterministik: main thread
+    // yang tidak pernah men-drain adalah editor yang sedang menampilkan dialog
+    // modal, dan `Stop()` di tengahnya adalah pengguna yang menutup editor.
+    MainThreadQueue::Get().BindMainThread();
+
+    Harness harness{std::chrono::milliseconds{300}};
+    ToolDefinition tool;
+    tool.name = "test.hangs";
+    tool.needsMainThread = true;
+    tool.handler = [](std::string_view) { return ToolResult{}; };
+    harness.tools.Register(std::move(tool));
+    REQUIRE(harness.Start());
+
+    std::atomic<bool> answered{false};
+    std::thread caller([&]() {
+        const httplib::Result result = harness.Post(
+            R"({"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"test.hangs"}})");
+        // Jawabannya boleh apa saja — galat tenggat, atau koneksi yang terputus
+        // karena servernya berhenti. Yang tidak boleh adalah crash.
+        (void)result;
+        answered.store(true);
+    });
+
+    // Cukup lama untuk memastikan permintaannya sudah masuk dan sedang menunggu
+    // main thread, tapi lebih pendek dari tenggatnya.
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    harness.server.Stop();
+    caller.join();
+
+    CHECK(answered.load());
+    CHECK_FALSE(harness.server.IsRunning());
+    // Pekerjaan yang terlanjur diantrikan dibuang supaya tidak bocor ke uji
+    // berikutnya.
+    MainThreadQueue::Get().Drain();
+}

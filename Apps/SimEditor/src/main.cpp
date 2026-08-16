@@ -359,6 +359,14 @@ int main(int argc, char** argv) {
     ai::McpServer mcpServer;
     ai::McpServerConfig mcpConfig;
     mcpConfig.advertisePath = configDir / "mcp.json";
+    // Panel AI Bridge menampilkan keadaannya dan bisa mematikan-menyalakannya.
+    // Closure-nya dipegang context, bukan panel: panel bisa ditutup, dan yang
+    // ditutup tidak boleh membawa serta kemampuan menyalakan servernya lagi.
+    app.Context().mcpServer = &mcpServer;
+    app.Context().mcpStart = [&mcpServer, &mcpTools, &mcpResources, &mcpConfig]() {
+        return mcpServer.Start(mcpTools, mcpResources, mcpConfig);
+    };
+
     if (!mcpServer.Start(mcpTools, mcpResources, mcpConfig)) {
         // Editor tetap jalan tanpa server. Yang hilang adalah kendali agen,
         // bukan kemampuan menyunting — dan editor yang menolak dibuka karena

@@ -24,6 +24,7 @@ inline constexpr const char* kMeshEditor = "mesheditor";
 inline constexpr const char* kTimeOfDay = "timeofday";
 inline constexpr const char* kStatistics = "statistics";
 inline constexpr const char* kHistory = "history";
+inline constexpr const char* kAiBridge = "aibridge";
 inline constexpr const char* kPreferences = "preferences";
 
 }  // namespace sim::editor::panel_id
