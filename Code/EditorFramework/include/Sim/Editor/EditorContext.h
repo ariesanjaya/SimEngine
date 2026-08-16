@@ -6,6 +6,7 @@
 #include "Sim/Render/IViewportRenderer.h"
 #include "Sim/Render/TimeOfDay.h"
 #include "Sim/Render/ThumbnailCache.h"
+#include "Sim/AIBridge/McpServer.h"
 #include "Sim/Scene/World.h"
 
 #include <functional>
@@ -133,6 +134,21 @@ struct EditorContext {
     /// meneruskannya ke renderer, Statistics menyuntingnya. Pengaturan yang
     /// dimiliki salah satu panel akan hilang begitu panel itu ditutup.
     render::GiSettings gi;
+
+    /// Server MCP, bila ada. Nullptr di build atau mode yang tidak
+    /// menyalakannya.
+    ///
+    /// **Panel yang menampilkannya bukan kemewahan.** Server ini memberi siapa
+    /// pun yang menyambung kendali atas project yang sedang dibuka, dan
+    /// satu-satunya yang membuatnya terlihat adalah panel ini — sebuah server
+    /// yang berjalan tanpa ada yang tahu adalah persis keadaan yang tidak boleh
+    /// terjadi.
+    ai::McpServer* mcpServer = nullptr;
+
+    /// Menyalakan ulang server yang dimatikan dari panel. Disediakan composition
+    /// root karena ia yang memegang registry dan konfigurasinya; `Stop` tidak
+    /// perlu ini karena server bisa menghentikan dirinya sendiri.
+    std::function<bool()> mcpStart;
 
     /// Pengaturan post-process. Di sini karena alasan yang sama dengan `gi`:
     /// dua tempat menyentuhnya — panel yang menyuntingnya dan viewport yang

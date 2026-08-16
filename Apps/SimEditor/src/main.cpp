@@ -4,9 +4,13 @@
 // penyambungan antar-modul terjadi di sini; modul itu sendiri tidak pernah
 // saling mencari lewat singleton.
 
+#include "Sim/AIBridge/McpServer.h"
+#include "Sim/AIBridge/ResourceRegistry.h"
+#include "Sim/AIBridge/ToolRegistry.h"
 #include "Sim/Core/FrameLimiter.h"
 #include "Sim/Core/Log.h"
 #include "Sim/Core/MainThreadQueue.h"
+#include "Sim/Editor/AiTools.h"
 #include "Sim/Editor/EditorApp.h"
 #include "Sim/Editor/Icons.h"
 #include "Sim/ImGuiIntegration/ImGuiLayer.h"
@@ -296,6 +300,80 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // Server MCP (track AI, A0). Dinyalakan sesudah editor siap dan dimatikan
+    // sebelum apa pun dibongkar: sebuah permintaan yang masih ditangani saat
+    // `World` dihancurkan adalah crash yang muncul di thread jaringan, jauh dari
+    // baris mana pun yang menutup editor.
+    //
+    // Registry hidup di sini, bukan di dalam `EditorApp`, karena pemiliknya
+    // adalah yang menyusun aplikasi — dan `SimHeadless` nanti menyusun himpunan
+    // tool yang berbeda dari editor yang sama.
+    ai::ToolRegistry mcpTools;
+    ai::ResourceRegistry mcpResources;
+    // Tangkapan layar dirakit di sini karena hanya di sini kedua sisinya
+    // terlihat: swapchain milik RHI, penyandi PNG milik ImageIO, dan
+    // EditorFramework tidak boleh melihat satu pun dari keduanya.
+    editor::ScreenshotFn captureWindow;
+    if (swapchain.CanCapture()) {
+        captureWindow = [&swapchain](std::vector<uint8_t>& png, std::string& error) {
+            std::vector<uint8_t> rgba;
+            uint32_t width = 0;
+            uint32_t height = 0;
+            if (!swapchain.CaptureLastPresented(rgba, width, height, error)) {
+                return false;
+            }
+            // **Alfa dibuang, bukan dibawa.** Jendela editor tidak punya alfa
+            // yang berarti — swapchain-nya opaque — dan pembaca gambar di sini
+            // meng-associate alfa saat membaca, jadi PNG berkanal empat yang
+            // dibaca kembali warnanya bisa berbeda dari yang dikirim. Tiga kanal
+            // menghilangkan seluruh pertanyaan itu, dan berkasnya seperempat
+            // lebih kecil.
+            std::vector<uint8_t> rgb(static_cast<std::size_t>(width) * height * 3u);
+            for (std::size_t pixel = 0; pixel < rgb.size() / 3u; ++pixel) {
+                rgb[pixel * 3u + 0u] = rgba[pixel * 4u + 0u];
+                rgb[pixel * 3u + 1u] = rgba[pixel * 4u + 1u];
+                rgb[pixel * 3u + 2u] = rgba[pixel * 4u + 2u];
+            }
+            rgba = std::vector<uint8_t>();
+
+            imageio::Image image;
+            image.desc.width = width;
+            image.desc.height = height;
+            image.desc.channels = 3;
+            image.desc.type = imageio::PixelType::UInt8;
+            // Swapchain-nya UNORM dan ImGui menggambar dengan warna yang sudah
+            // dalam ruang sRGB — jadi byte-nya memang sRGB, dan menyebutnya
+            // linear akan membuat siapa pun yang membacanya mencerahkannya lagi.
+            image.desc.colorSpace = imageio::ColorSpace::Srgb;
+            image.bytes = std::move(rgb);
+            const imageio::ImageIoResult result = imageio::Encode(image, ".png", png);
+            if (!result) {
+                error = result.error;
+                return false;
+            }
+            return true;
+        };
+    }
+    editor::RegisterEditorTools(mcpTools, mcpResources, app, std::move(captureWindow));
+
+    ai::McpServer mcpServer;
+    ai::McpServerConfig mcpConfig;
+    mcpConfig.advertisePath = configDir / "mcp.json";
+    // Panel AI Bridge menampilkan keadaannya dan bisa mematikan-menyalakannya.
+    // Closure-nya dipegang context, bukan panel: panel bisa ditutup, dan yang
+    // ditutup tidak boleh membawa serta kemampuan menyalakan servernya lagi.
+    app.Context().mcpServer = &mcpServer;
+    app.Context().mcpStart = [&mcpServer, &mcpTools, &mcpResources, &mcpConfig]() {
+        return mcpServer.Start(mcpTools, mcpResources, mcpConfig);
+    };
+
+    if (!mcpServer.Start(mcpTools, mcpResources, mcpConfig)) {
+        // Editor tetap jalan tanpa server. Yang hilang adalah kendali agen,
+        // bukan kemampuan menyunting — dan editor yang menolak dibuka karena
+        // sebuah port sibuk akan sangat mengganggu.
+        SIM_WARN("Editor", "MCP server tidak menyala — editor jalan tanpa kendali agen");
+    }
+
     // Project dari baris perintah, seperti yang dijanjikan docs/PLAN-EDITOR.md.
     // **Bukan pengganti project manager melainkan jalan pintas ke dalamnya:**
     // yang gagal dibuka tetap mendarat di manager beserta pesannya, bukan pada
@@ -447,6 +525,10 @@ int main(int argc, char** argv) {
     }
 
     SIM_INFO("Editor", "SimEditor stopping");
+    // Sebelum apa pun yang lain. `Stop()` menunggu thread jaringannya selesai,
+    // jadi sesudah baris ini dijamin tidak ada handler yang masih memegang
+    // `World` — dan itulah kriteria terima A0 nomor 4.
+    mcpServer.Stop();
     // Induk dialog dilepas sebelum jendelanya dihancurkan: sebuah dialog yang
     // masih terbuka saat editor ditutup akan menunjuk jendela yang sudah tidak
     // ada.

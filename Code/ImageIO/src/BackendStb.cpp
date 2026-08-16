@@ -139,20 +139,23 @@ public:
         return result;
     }
 
-    /// **Greyscale saja**, dan itu bukan batasan enkodernya melainkan batasan
-    /// janjinya: satu-satunya PNG yang ditulis mesin ini adalah heightmap,
-    /// weightmap, peta hole, dan peta kepadatan — semuanya satu kanal. Jalur
-    /// PNG berwarna bisa ditambahkan kapan saja; menyalakannya sekarang berarti
-    /// menjanjikan berkas yang tidak pernah ditulis satu pun uji.
+    /// Greyscale, RGB, dan RGBA — 8 atau 16 bit per sampel, bukan float.
+    ///
+    /// Satu kanal untuk heightmap, weightmap, peta hole, dan peta kepadatan;
+    /// berwarna untuk `editor.screenshot`, yang mengirim jendela editor ke agen
+    /// MCP. Float tetap ditolak: PNG tidak punya tempat untuknya, dan yang
+    /// membutuhkannya sudah punya EXR.
     ImageIoResult Encode(const Image& image, std::vector<uint8_t>& out) const override {
         ImageIoResult result;
-        if (image.desc.channels != 1 || image.desc.type == PixelType::Float32) {
-            result.error = "PNG is written as 8-bit or 16-bit greyscale only; this image is " +
-                           std::to_string(image.desc.channels) + "-channel " +
-                           ToString(image.desc.type);
+        const uint32_t channels = image.desc.channels;
+        const bool channelsOk = channels == 1 || channels == 3 || channels == 4;
+        if (!channelsOk || image.desc.type == PixelType::Float32) {
+            result.error =
+                "PNG is written as 8-bit or 16-bit grey/RGB/RGBA; this image is " +
+                std::to_string(channels) + "-channel " + ToString(image.desc.type);
             return result;
         }
-        if (!EncodeGreyscalePng(image, out)) {
+        if (!EncodePng(image, out)) {
             result.error = "PNG encode failed";
             return result;
         }

@@ -1,6 +1,7 @@
 sim_add_library(EditorFramework
     SOURCES
         src/Actions.cpp
+        src/AiTools.cpp
         src/Command.cpp
         src/DockLayout.cpp
         src/EditorApp.cpp
@@ -25,6 +26,10 @@ sim_add_library(EditorFramework
         src/WhiteboxCommands.cpp
         src/WhiteboxStore.cpp
     PUBLIC_DEPS
+        # Tool MCP yang dilayani editor didaftarkan di sini. PUBLIC karena
+        # `AiTools.h` menyebut `ai::ToolRegistry` di tanda tangannya — yang
+        # memanggilnya adalah composition root, dan ia perlu tipe itu.
+        Sim::AIBridge
         Sim::Animation
         Sim::Assets
         Sim::Core

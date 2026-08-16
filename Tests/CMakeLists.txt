@@ -291,3 +291,16 @@ if(SIM_WITH_LUA)
             Sim::Script
             Sim::Assets)
 endif()
+
+# AIBridge diuji lewat HTTP sungguhan, bukan dengan memanggil dispatcher-nya
+# langsung — yang dilakukan agen adalah mengirim byte ke soket, jadi itu yang
+# diuji. httplib dan nlohmann karena itu ikut ditautkan di sini walaupun
+# keduanya PRIVATE di modulnya: yang butuh keduanya adalah kliennya, bukan
+# header AIBridge.
+sim_add_test(SimAIBridgeTests
+    SOURCES
+        AIBridgeTests.cpp
+    DEPS
+        Sim::AIBridge
+        httplib::httplib
+        nlohmann_json::nlohmann_json)
