@@ -2268,6 +2268,89 @@ TEST_CASE("Sinar yang melewati sisi kotak sepakat soal meleset") {
     CHECK(!wide.hit);
 }
 
+// --- Sinar yang berangkat DARI permukaan -------------------------------------
+//
+// **Seluruh uji trace di atas menembak dari ruang kosong. Sinar probe tidak.**
+// `gi_probe.frag.slang` merekonstruksi titik asal probe dari depth buffer, jadi
+// ia duduk tepat di permukaan — dan `traceTiered` meneruskan titik itu apa
+// adanya ke `traceSdf`, yang mulai menapak pada `travelled = 0`. Titik di
+// permukaan punya jarak nol, dan ambang berhentinya setengah voxel.
+//
+// Itulah kasus yang tidak pernah diuji, dan itulah kasus yang dipakai setiap
+// sinar probe.
+
+TEST_CASE("Sinar SDF dari titik di permukaan tidak mengenai permukaannya sendiri") {
+    // Lantai cornell.simlevel: 10×0,2×10 berpusat di y = −0,1, jadi permukaan
+    // atasnya tepat di y = 0.
+    MeshInstance floor;
+    floor.transform = glm::translate(Mat4(1.0f), Vec3(0.0f, -0.1f, 0.0f));
+    floor.boundsMin = Vec3(-5.0f, -0.1f, -5.0f);
+    floor.boundsMax = Vec3(5.0f, 0.1f, 5.0f);
+    const std::array<MeshInstance, 1> meshes{floor};
+
+    SdfClipmapSettings settings;
+    settings.resolution = 128;
+    settings.cascadeCount = 2;
+    settings.finestVoxelSize = 0.05f;
+    SdfVolume volume;
+    volume.Configure(settings);
+    volume.Clipmap().Scroll(Vec3(0.0f, 0.0f, 0.0f));
+
+    BoxSceneField field;
+    field.Build(meshes);
+    volume.FillAll(field);
+
+    const std::unique_ptr<ITraceBackend> backend = CreateSdfTraceBackend(volume, 96);
+    const float voxel = volume.Clipmap().VoxelSize(0);
+    const Vec3 surface(0.0f, 0.0f, 0.0f);
+    const Vec3 normal(0.0f, 1.0f, 0.0f);
+
+    // Enam belas arah, sama banyaknya dengan sinar satu probe per frame.
+    const auto selfHitsFrom = [&](const Vec3& origin) {
+        int count = 0;
+        for (int i = 0; i < 16; ++i) {
+            const float phi = 6.2831853f * static_cast<float>(i) / 16.0f;
+            const float theta = 0.6f;  // 34° dari vertikal: masih jelas menjauh
+            const Vec3 direction(std::sin(theta) * std::cos(phi), std::cos(theta),
+                                 std::sin(theta) * std::sin(phi));
+            const TraceResult traced = backend->Trace(origin, direction, 20.0f);
+            if (traced.hit && traced.distance < voxel) {
+                ++count;
+            }
+        }
+        return count;
+    };
+
+    SUBCASE("tanpa bias, seluruhnya mengenai dirinya sendiri") {
+        // **Bukan cacat penelusurnya.** Titik di permukaan memang berjarak nol,
+        // dan menjawab "kena" adalah jawaban yang jujur. Yang salah adalah
+        // memberinya titik asal itu — dan itulah yang dilakukan pass probe
+        // sebelum `normalBiasVoxels` ada.
+        const TraceResult up = backend->Trace(surface, normal, 20.0f);
+        INFO("hit=", up.hit, " layer=", static_cast<int>(up.layer), " (",
+             std::string(ToString(up.layer)), ") distance=", up.distance,
+             " steps=", up.steps);
+        CHECK(up.hit);
+        CHECK(up.distance < voxel * 0.5f);
+        CHECK(selfHitsFrom(surface) == 16);
+    }
+
+    SUBCASE("dengan bias normal bawaan, tidak satu pun") {
+        // Memaku `ProbeGridSettings::normalBiasVoxels`: nilainya harus cukup
+        // melewati ambang berhenti sphere tracing, dan test inilah yang
+        // menyatakan seberapa cukup.
+        const ProbeGridSettings probeSettings;
+        const float bias = voxel * probeSettings.normalBiasVoxels;
+        const Vec3 origin = surface + normal * bias;
+
+        const TraceResult up = backend->Trace(origin, normal, 20.0f);
+        INFO("bias=", bias, " m (", probeSettings.normalBiasVoxels, " voxel), hit=", up.hit,
+             " distance=", up.distance);
+        CHECK_FALSE(up.hit);
+        CHECK(selfHitsFrom(origin) == 0);
+    }
+}
+
 
 // --- M2: lapis screen-space -------------------------------------------------
 

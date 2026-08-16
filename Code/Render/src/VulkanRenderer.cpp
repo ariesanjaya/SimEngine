@@ -943,8 +943,14 @@ public:
         }
         if (probePassId_ != kInvalidPass) {
             recorders[probePassId_] = [&](VkCommandBuffer command) {
+                const SdfClipmap& clipmap = sdfClipmap_.Volume().Clipmap();
+                // Diikat ke voxel kaskade terhalus, bukan ke satu angka meter:
+                // yang harus dilewati bias ini adalah ambang berhenti sphere
+                // tracing, dan ambang itu sendiri setengah voxel.
+                const float normalBias =
+                    clipmap.VoxelSize(0) * probeGrid_.Settings().normalBiasVoxels;
                 probes_.Record(command, slot.shadowSet, probeGrid_, probeFrame_,
-                               sdfClipmap_.Volume().Clipmap().MaxRange(), probeReset_);
+                               clipmap.MaxRange(), normalBias, probeReset_);
             };
         }
         if (giDebugId_ != kInvalidPass) {
