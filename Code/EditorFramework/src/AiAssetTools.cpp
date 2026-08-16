@@ -740,7 +740,7 @@ ai::ToolDefinition AssetThumbnail(EditorApp& app) {
 
 }  // namespace
 
-std::string ResolveProjectPathForTest(const std::filesystem::path& root,
+std::string ResolveProjectPath(const std::filesystem::path& root,
                                       const std::string& relative,
                                       std::filesystem::path& absolute) {
     const ResolvedPath resolved = ResolveInsideProject(root, relative);

@@ -75,16 +75,24 @@ void RegisterEntityTools(ai::ToolRegistry& tools, EditorApp& app);
 /// Tool aset dan project (track AI, A2).
 void RegisterAssetTools(ai::ToolRegistry& tools, EditorApp& app);
 
+/// Tool authoring: Lua dan graph material (track AI, A3).
+///
+/// Terpisah dari `RegisterAssetTools` karena keduanya menjawab pertanyaan yang
+/// berbeda — yang satu tentang berkas sebagai berkas, yang lain tentang isinya
+/// sebagai karya. Tool di sini memeriksa isi itu sebelum menuliskannya: sintaks
+/// Lua sebelum berkas skrip tersimpan, validasi graph sebelum material tersimpan.
+void RegisterAuthoringTools(ai::ToolRegistry& tools, EditorApp& app);
+
 /// Menyelesaikan sebuah jalur relatif terhadap akar project, menolak apa pun
 /// yang keluar darinya. Mengembalikan pesan galat, atau string kosong.
 ///
-/// **Terbuka semata-mata untuk diuji, dan itu disengaja.** Aturan ini yang
-/// berdiri di antara agen dan seluruh berkas di mesin ini; menyembunyikannya di
-/// dalam satu berkas .cpp berarti satu-satunya cara memeriksanya adalah lewat
-/// tool yang memakainya, dan uji yang harus menempuh dua lapisan untuk sampai ke
-/// aturan yang diujinya adalah uji yang akan ditulis setengah.
-std::string ResolveProjectPathForTest(const std::filesystem::path& root,
-                                      const std::string& relative,
-                                      std::filesystem::path& absolute);
+/// **Terbuka karena dipakai bersama, dan karena aturan ini layak diuji
+/// langsung.** Inilah yang berdiri di antara agen dan seluruh berkas di mesin
+/// ini. Tool aset dan tool authoring keduanya memanggilnya — menyalinnya ke
+/// berkas kedua adalah cara paling pasti membuat keduanya berbeda tanpa ada yang
+/// menyadarinya. Dan uji yang harus menempuh dua lapisan untuk sampai ke aturan
+/// yang diujinya adalah uji yang akan ditulis setengah.
+std::string ResolveProjectPath(const std::filesystem::path& root, const std::string& relative,
+                               std::filesystem::path& absolute);
 
 }  // namespace sim::editor

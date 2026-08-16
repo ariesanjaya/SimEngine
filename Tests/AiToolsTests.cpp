@@ -8,6 +8,7 @@
 #include "Sim/Editor/EditorContext.h"
 #include "Sim/Editor/Selection.h"
 #include "Sim/Scene/Serialization.h"
+#include "Sim/Script/ScriptRuntime.h"
 #include "Sim/Scene/World.h"
 
 #include <nlohmann/json.hpp>
@@ -62,6 +63,11 @@ struct ScratchDir {
 /// dan seluruh tool AI terdaftar.
 struct Harness {
     ScratchDir scratch;
+    // **Runtime Lua sungguhan, bukan tiruan.** Yang diuji di A3 justru
+    // perilakunya: `Evaluate` yang mengembalikan traceback alih-alih
+    // menjatuhkan proses, dan `CheckSyntax` yang menolak sebelum ada yang
+    // ditulis. Tiruan hanya akan mengulang tebakan penulis ujinya.
+    script::ScriptRuntime scripts;
     EditorApp app;
     ai::ToolRegistry tools;
     ai::ResourceRegistry resources;
@@ -70,6 +76,7 @@ struct Harness {
         EditorApp::Config config;
         config.configDir = scratch.path / "config";
         config.projectsRoot = scratch.path / "projects";
+        config.scripts = &scripts;
         REQUIRE(app.Initialize(config));
         REQUIRE(app.CreateProject(config.projectsRoot, "Uji"));
         REQUIRE(app.CreateLevelFile("scene"));
@@ -81,6 +88,7 @@ struct Harness {
         RegisterSceneTools(tools, resources, app);
         RegisterEntityTools(tools, app);
         RegisterAssetTools(tools, app);
+        RegisterAuthoringTools(tools, app);
 
         // **Level baru tidak kosong** — ia sudah memuat sebuah entity
         // "Environment". Uji yang menghitung jumlah mutlak karena itu menguji
@@ -447,7 +455,7 @@ TEST_CASE("Jalur di luar folder project ditolak") {
 
     std::filesystem::path absolute;
     const auto resolve = [&](const std::string& relative) {
-        return ResolveProjectPathForTest(root, relative, absolute);
+        return ResolveProjectPath(root, relative, absolute);
     };
 
     SUBCASE("jalur yang sah diterima") {
@@ -802,5 +810,177 @@ TEST_CASE("asset.thumbnail menggambar tekstur dan menolak yang lain") {
         const ai::ToolResult result =
             harness.Call("asset.thumbnail", json{{"asset", "Assets/hantu.png"}});
         CHECK(result.isError);
+    }
+}
+
+// --- A3: tool authoring -------------------------------------------------------
+
+TEST_CASE("lua.eval menjawab nilai, dan kesalahannya tidak menjatuhkan editor") {
+    Harness harness;
+
+    SUBCASE("ekspresi menghasilkan nilai") {
+        // Kode diperlakukan sebagai ekspresi lebih dulu. Tanpa itu "1 + 1"
+        // tidak menghasilkan apa pun, dan tool yang tidak menjawab pertanyaan
+        // sederhana akan ditinggalkan agen sama seperti ditinggalkan orang.
+        const json result = harness.CallOk("lua.eval", json{{"code", "1 + 1"}});
+        REQUIRE(result.at("ok") == true);
+        REQUIRE(result.at("values").size() == 1);
+        CHECK(result.at("values")[0].at("value") == "2");
+    }
+
+    SUBCASE("pernyataan tetap dijalankan") {
+        harness.CallOk("lua.eval", json{{"code", "AgenMenulis = 41 + 1"}});
+        const json read = harness.CallOk("lua.eval", json{{"code", "AgenMenulis"}});
+        CHECK(read.at("values")[0].at("value") == "42");
+    }
+
+    SUBCASE("tabel dipecah jadi anak, bukan diratakan jadi alamat") {
+        const json result =
+            harness.CallOk("lua.eval", json{{"code", "{ warna = 'emas', kasar = 0.4 }"}});
+        REQUIRE(result.at("values").size() == 1);
+        const json& value = result.at("values")[0];
+        REQUIRE(value.contains("children"));
+        CHECK(value.at("children").size() == 2);
+        // Alamat tabel berbeda tiap kali dijalankan meski keadaannya sama, jadi
+        // ia adalah selisih palsu bagi agen yang membandingkan dua jawaban.
+        const std::string shown = value.at("value").get<std::string>();
+        CHECK(shown.find("0x") == std::string::npos);
+        CHECK(shown == "table (2 fields)");
+    }
+
+    SUBCASE("kesalahan runtime kembali beserta traceback") {
+        // **Kriteria terima A3 nomor 3.** Yang diuji bukan hanya "ada pesan",
+        // tapi bahwa editor masih hidup sesudahnya — panggilan berikutnya di
+        // harness yang sama harus tetap berhasil.
+        const ai::ToolResult failed =
+            harness.Call("lua.eval", json{{"code", "error('sengaja gagal')"}});
+        REQUIRE(failed.isError);
+        const json body = json::parse(failed.text, nullptr, false);
+        REQUIRE_FALSE(body.is_discarded());
+        CHECK(body.at("ok") == false);
+        const std::string message = body.at("error").get<std::string>();
+        CHECK(message.find("sengaja gagal") != std::string::npos);
+        CHECK(message.find("stack traceback") != std::string::npos);
+
+        CHECK(harness.CallOk("lua.eval", json{{"code", "'masih hidup'"}}).at("ok") == true);
+    }
+
+    SUBCASE("kesalahan sintaks juga kembali sebagai galat, bukan sebagai nilai") {
+        const ai::ToolResult failed = harness.Call("lua.eval", json{{"code", "if then end"}});
+        CHECK(failed.isError);
+        CHECK(harness.CallOk("lua.eval", json{{"code", "2"}}).at("ok") == true);
+    }
+}
+
+TEST_CASE("lua.script_write memeriksa sintaks sebelum ada yang ditulis") {
+    Harness harness;
+
+    SUBCASE("skrip yang sah tersimpan dan terindeks") {
+        const json written =
+            harness.CallOk("lua.script_write", json{{"path", "Assets/Scripts/putar.lua"},
+                                                    {"text", "return { OnUpdate = function() end }"}});
+        CHECK(written.at("ok") == true);
+        CHECK(written.at("replaced") == false);
+        // Terindeks pada panggilan yang sama, alasan yang sama dengan A2 nomor 3.
+        REQUIRE(written.contains("guid"));
+        CHECK(written.at("reloaded") == true);
+
+        CHECK(harness.CallOk("file.read", json{{"path", "Assets/Scripts/putar.lua"}})
+                  .at("text")
+                  .get<std::string>()
+                  .find("OnUpdate") != std::string::npos);
+    }
+
+    SUBCASE("skrip yang tidak terurai tidak pernah sampai ke disk") {
+        const ai::ToolResult failed =
+            harness.Call("lua.script_write", json{{"path", "Assets/Scripts/rusak.lua"},
+                                                  {"text", "function ("}});
+        REQUIRE(failed.isError);
+        // Inilah yang membedakan tool ini dari file.write: berkasnya tidak ada.
+        CHECK(harness.Call("file.read", json{{"path", "Assets/Scripts/rusak.lua"}}).isError);
+    }
+
+    SUBCASE("berkas non-.lua ditolak") {
+        const ai::ToolResult failed = harness.Call(
+            "lua.script_write", json{{"path", "Assets/catatan.txt"}, {"text", "-- kosong"}});
+        CHECK(failed.isError);
+    }
+
+    SUBCASE("tidak menimpa tanpa diminta") {
+        const json arguments{{"path", "Assets/Scripts/sama.lua"}, {"text", "return {}"}};
+        harness.CallOk("lua.script_write", arguments);
+        CHECK(harness.Call("lua.script_write", arguments).isError);
+
+        json overwrite = arguments;
+        overwrite["overwrite"] = true;
+        CHECK(harness.CallOk("lua.script_write", overwrite).at("replaced") == true);
+    }
+
+    SUBCASE("jalur di luar project ditolak") {
+        CHECK(harness
+                  .Call("lua.script_write",
+                        json{{"path", "../../tmp/curian.lua"}, {"text", "return {}"}})
+                  .isError);
+    }
+}
+
+TEST_CASE("material.graph_get dan graph_set bolak-balik tanpa merusak") {
+    Harness harness;
+    const json created =
+        harness.CallOk("asset.create", json{{"type", "material"}, {"path", "Assets/Emas"}});
+    const std::string guid = created.at("guid").get<std::string>();
+
+    const json read = harness.CallOk("material.graph_get", json{{"asset", guid}});
+    CHECK(read.at("path") == "Emas.simmat");
+    REQUIRE(read.at("graph").is_object());
+    const std::size_t nodes = read.at("summary").at("nodes").get<std::size_t>();
+    CHECK(nodes > 0);
+
+    SUBCASE("menulis kembali apa yang dibaca tetap sah") {
+        const json written =
+            harness.CallOk("material.graph_set", json{{"asset", guid}, {"graph", read.at("graph")}});
+        CHECK(written.at("ok") == true);
+        CHECK(written.at("summary").at("nodes") == nodes);
+
+        // Dan yang dibaca sesudahnya masih graph yang sama, bukan berkas yang
+        // sah tapi kosong.
+        CHECK(harness.CallOk("material.graph_get", json{{"asset", guid}})
+                  .at("summary")
+                  .at("nodes") == nodes);
+    }
+
+    SUBCASE("JSON yang tidak terurai ditolak di tahap parse") {
+        const ai::ToolResult failed =
+            harness.Call("material.graph_set", json{{"asset", guid}, {"text", "{ bukan json"}});
+        REQUIRE(failed.isError);
+        const json body = json::parse(failed.text, nullptr, false);
+        REQUIRE_FALSE(body.is_discarded());
+        CHECK(body.at("stage") == "parse");
+    }
+
+    SUBCASE("graph tanpa keluaran ditolak di tahap validasi, dan berkasnya utuh") {
+        json empty = read.at("graph");
+        empty["nodes"] = json::array();
+        empty["links"] = json::array();
+        const ai::ToolResult failed =
+            harness.Call("material.graph_set", json{{"asset", guid}, {"graph", empty}});
+        REQUIRE(failed.isError);
+        const json body = json::parse(failed.text, nullptr, false);
+        REQUIRE_FALSE(body.is_discarded());
+        CHECK(body.at("stage") == "validate");
+        REQUIRE(body.at("issues").size() > 0);
+
+        // **Yang ditolak tidak boleh setengah tertulis.** Ini kelas bug yang
+        // sama dengan yang lolos di A1: tool melapor sesuatu yang tidak sesuai
+        // dengan keadaan sebenarnya.
+        CHECK(harness.CallOk("material.graph_get", json{{"asset", guid}})
+                  .at("summary")
+                  .at("nodes") == nodes);
+    }
+
+    SUBCASE("aset yang bukan material ditolak") {
+        harness.CallOk("asset.create",
+                       json{{"type", "script"}, {"path", "Assets/bukan"}, {"text", "return {}"}});
+        CHECK(harness.Call("material.graph_get", json{{"asset", "bukan.lua"}}).isError);
     }
 }
