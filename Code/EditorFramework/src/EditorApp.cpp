@@ -384,32 +384,6 @@ namespace {
 /// GUID-nya disimpan, bukan dibuat ulang saat redo: kalau berubah, semua yang
 /// merujuk entity itu — prefab, referensi antar-komponen nanti — akan menunjuk
 /// objek yang sudah tidak ada setelah satu kali undo lalu redo.
-class CreateEntityCommand final : public ICommand {
-public:
-    CreateEntityCommand(scene::World* world, Selection* selection, scene::Entity parent)
-        : world_(world), selection_(selection), parent_(parent), guid_(Uuid::Generate()) {}
-
-    void Do() override {
-        entity_ = world_->CreateWithGuid(guid_, "Entity", parent_);
-        if (selection_ != nullptr) {
-            selection_->SelectOnly(ToSelectionId(entity_));
-        }
-    }
-    void Undo() override {
-        world_->Destroy(entity_);
-        if (selection_ != nullptr) {
-            selection_->Clear();
-        }
-    }
-    std::string Name() const override { return "Create Entity"; }
-
-private:
-    scene::World* world_;
-    Selection* selection_;
-    scene::Entity parent_;
-    Uuid guid_;
-    scene::Entity entity_ = scene::kNullEntity;
-};
 
 
 }  // namespace

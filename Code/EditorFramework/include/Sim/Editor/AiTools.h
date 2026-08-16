@@ -49,4 +49,12 @@ void RegisterEditorTools(ai::ToolRegistry& tools, ai::ResourceRegistry& resource
 void RegisterSceneTools(ai::ToolRegistry& tools, ai::ResourceRegistry& resources,
                         EditorApp& app);
 
+/// Tool yang mengubah entity (track AI, A1).
+///
+/// Semuanya lewat `CommandHistory`, dan setiap panggilan dibungkus satu transaksi
+/// bernama `AI: <tool>` — satu tool call jadi tepat satu entri undo, dan panel
+/// History menyebutkan asalnya. Itu yang membuat "batalkan semua yang dilakukan
+/// agen" bisa ditulis nanti tanpa mesin baru.
+void RegisterEntityTools(ai::ToolRegistry& tools, EditorApp& app);
+
 }  // namespace sim::editor

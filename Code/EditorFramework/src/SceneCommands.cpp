@@ -116,6 +116,71 @@ bool SetComponentsCommand::MergeWith(const ICommand& next) {
     return true;
 }
 
+AddComponentCommand::AddComponentCommand(scene::World* world, Uuid guid,
+                                         const scene::ComponentOps* ops)
+    : world_(world), guid_(guid), ops_(ops) {}
+
+void AddComponentCommand::Do() {
+    const scene::Entity entity = Resolve(*world_, guid_);
+    if (scene::IsValid(entity)) {
+        ops_->emplace(world_->Registry(), scene::World::ToEntt(entity));
+    }
+}
+
+void AddComponentCommand::Undo() {
+    const scene::Entity entity = Resolve(*world_, guid_);
+    if (scene::IsValid(entity)) {
+        ops_->remove(world_->Registry(), scene::World::ToEntt(entity));
+    }
+}
+
+RemoveComponentCommand::RemoveComponentCommand(scene::World* world, Uuid guid,
+                                               const scene::ComponentOps* ops,
+                                               std::string snapshot)
+    : world_(world), guid_(guid), ops_(ops), snapshot_(std::move(snapshot)) {}
+
+void RemoveComponentCommand::Do() {
+    const scene::Entity entity = Resolve(*world_, guid_);
+    if (scene::IsValid(entity)) {
+        ops_->remove(world_->Registry(), scene::World::ToEntt(entity));
+    }
+}
+
+void RemoveComponentCommand::Undo() {
+    const scene::Entity entity = Resolve(*world_, guid_);
+    if (!scene::IsValid(entity)) {
+        return;
+    }
+    void* data = ops_->emplace(world_->Registry(), scene::World::ToEntt(entity));
+    scene::DeserializeComponent(*ops_->type, data, snapshot_);
+}
+
+std::size_t RemoveComponentCommand::MemoryCost() const {
+    return sizeof(*this) + snapshot_.size();
+}
+
+CreateEntityCommand::CreateEntityCommand(scene::World* world, Selection* selection,
+                                         scene::Entity parent, std::string name)
+    : world_(world),
+      selection_(selection),
+      parent_(parent),
+      name_(std::move(name)),
+      guid_(Uuid::Generate()) {}
+
+void CreateEntityCommand::Do() {
+    entity_ = world_->CreateWithGuid(guid_, name_, parent_);
+    if (selection_ != nullptr) {
+        selection_->SelectOnly(ToSelectionId(entity_));
+    }
+}
+
+void CreateEntityCommand::Undo() {
+    world_->Destroy(entity_);
+    if (selection_ != nullptr) {
+        selection_->Clear();
+    }
+}
+
 std::string SetComponentsCommand::Name() const {
     if (items_.size() == 1) {
         const scene::Entity entity = Resolve(*world_, items_.front().guid);
