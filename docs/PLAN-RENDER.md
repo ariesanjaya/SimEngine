@@ -2752,9 +2752,38 @@ tersisa hanya menyambungkan sumbernya.
 
 ## E9 — Runtime & distribusi
 
-- **SimRuntime**: player tanpa editor yang memuat level + menjalankan Lua.
-- **Cook/packaging**: konversi aset ke format biner siap-pakai, pak arsip,
-  pemangkasan aset yang tidak terpakai lewat graf ketergantungan dari E5.
+**Keadaan · 17 Agustus 2026.** `SimRuntime` dan `SimCook` sudah ada dan
+terverifikasi ujung-ke-ujung: cook sebuah project, lalu mainkan hasilnya.
+
+- ✅ **SimRuntime**: player tanpa editor yang memuat level + menjalankan Lua.
+  Jendela, fisika, perender yang sama persis dengan viewport editor, dan
+  `render::Presenter` — segitiga penutup layar yang memindahkan target render ke
+  swapchain. Sampai pass itu ada, satu-satunya yang bisa memindahkannya adalah
+  ImGui, jadi tidak ada player yang mungkin. `--screenshot` membuat player
+  memotret dirinya sendiri, yang membuat regresi visual bisa jalan di CI.
+
+  **Utang lapisan yang harus dibayar sebelum E9 selesai:** terjemahan `World` →
+  `ViewportScene` tinggal di `SceneView`, yang ada di `EditorFramework` — jadi
+  player menautkan ImGui, riwayat undo, dan PanelManager yang tidak dipakainya.
+  Yang benar adalah memindahkannya ke modul yang dipakai bersama editor.
+
+- ◐ **Cook/packaging**: pemangkasan aset lewat graf ketergantungan E5 sudah ada
+  (`assets::PlanCook` + `SimCook`), ditelusuri dari level yang benar-benar
+  dimainkan, dengan `--dry-run` yang jalurnya sama persis dan berhenti sebelum
+  langkah terakhir. Diverifikasi: FarmSim 11 MB menjadi 24 KB untuk satu level,
+  dan hasilnya dimainkan identik.
+
+  Yang belum: konversi aset ke format biner siap-pakai dan pak arsip. Keduanya
+  optimasi muat, bukan syarat berjalan — hasil cook sekarang sudah bisa
+  dimainkan apa adanya.
+
+  **Laporan referensi menggantung sengaja tidak ada.** Dua percobaan gagal
+  karena sebab yang sama: tidak ada satu pun tempat di engine ini yang tahu
+  *field mana* pada sebuah aset berarti "referensi ke aset lain". GUID entity di
+  berkas level dan GUID node di dalam material bentuknya sama persis dengan
+  referensi aset, dan `AssetRecord::dependencies` ternyata juga hasil
+  penyapuan GUID atas seluruh JSON, bukan penguraian per format. Ini menunggu
+  skema referensi per tipe aset, bukan menunggu kode yang lebih pintar.
 - **PhysX 5** (`/home/arie/SDK/PhysX-main`): rigid body, collider, character
   controller, raycast, dengan komponen dan visualisasi debug di editor.
 - **Audio** (OpenAL Soft di `/home/arie/SDK/openal-soft-1.25.2`): sumber suara 3D,

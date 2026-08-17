@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 
 #include "Sim/Assets/AssetDatabase.h"
+#include "Sim/Assets/Cook.h"
 #include "Sim/Assets/Importer.h"
 #include "Sim/Assets/MaterialImport.h"
 #include "Sim/Assets/BlockCompress.h"
@@ -27,6 +28,8 @@
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
+#include <cctype>
+#include <unistd.h>
 #include <fstream>
 #include <string>
 #include <thread>
@@ -2234,4 +2237,140 @@ TEST_CASE("T3: BC7 memakai seperempat VRAM RGBA8, dan angkanya diukur") {
     // format yang diam-diam kembali ke RGBA8, tanpa terikat pada digit terakhir
     // hasil sebuah versi encoder.
     CHECK(static_cast<double>(block) <= static_cast<double>(plain) * 0.30);
+}
+
+// --- cook: memangkas yang tidak terjangkau -------------------------------------
+
+TEST_CASE("GuidsIn menemukan yang berbentuk GUID dan menolak yang mirip") {
+    // Dicari sebagai teks karena setiap aset di engine ini JSON dan menyebut
+    // aset lain lewat GUID. Yang harus dijaga adalah batasnya: teks yang
+    // *hampir* GUID tidak boleh ikut, karena setiap yang ikut adalah satu aset
+    // yang dikirim tanpa alasan.
+    const std::string guid = "3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+
+    SUBCASE("di dalam JSON") {
+        const std::vector<Uuid> found =
+            assets::GuidsIn(R"({"mesh":")" + guid + R"(","name":"Kubus"})");
+        REQUIRE(found.size() == 1);
+        CHECK(found[0].ToString() == guid);
+    }
+
+    SUBCASE("huruf besar diterima dan dinormalkan") {
+        std::string upper = guid;
+        std::transform(upper.begin(), upper.end(), upper.begin(),
+                       [](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+        const std::vector<Uuid> found = assets::GuidsIn(upper);
+        REQUIRE(found.size() == 1);
+        CHECK(found[0].ToString() == guid);
+    }
+
+    SUBCASE("duplikat hanya sekali") {
+        CHECK(assets::GuidsIn(guid + " " + guid + " " + guid).size() == 1);
+    }
+
+    SUBCASE("yang mirip tapi bukan ditolak") {
+        // Kelompok yang panjangnya salah, huruf non-heksadesimal, dan hash yang
+        // lebih panjang: ketiganya pernah lolos pemeriksa yang lebih longgar.
+        CHECK(assets::GuidsIn("3f2504e0-4f89-41d3-9a0c-0305e82c33").empty());
+        CHECK(assets::GuidsIn("3f2504e0-4f89-41d3-9a0c-0305e82c330g").empty());
+        CHECK(assets::GuidsIn("3f2504e04f8941d39a0c0305e82c3301").empty());
+        // Diikuti heksadesimal lagi: ini bagian dari sesuatu yang lebih panjang.
+        CHECK(assets::GuidsIn(guid + "ab").empty());
+    }
+
+    SUBCASE("dua GUID berturut-turut keduanya terbaca") {
+        const std::string second = "11111111-2222-4333-8444-555555555555";
+        const std::vector<Uuid> found = assets::GuidsIn(guid + "\n" + second);
+        REQUIRE(found.size() == 2);
+    }
+}
+
+TEST_CASE("PlanCook menelusuri dari level dan memisahkan yang tidak terjangkau") {
+    // Aset dibuat sungguhan di disk lalu diindeks: yang diuji adalah
+    // penelusuran atas indeks yang sama yang dipakai editor, bukan atas struct
+    // yang dikarang uji.
+    const std::filesystem::path root =
+        std::filesystem::temp_directory_path() /
+        ("simcook_" + std::to_string(::getpid()));
+    std::filesystem::remove_all(root);
+    std::filesystem::create_directories(root / "Assets");
+    std::filesystem::create_directories(root / "Levels");
+
+    const auto write = [](const std::filesystem::path& path, const std::string& text) {
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
+        file << text;
+    };
+
+    // Rantai: level -> material -> tekstur. Ditambah satu tekstur yatim yang
+    // tidak dirujuk siapa pun.
+    write(root / "Assets" / "batu.png", "\x89PNG fake");
+    write(root / "Assets" / "yatim.png", "\x89PNG fake");
+
+    assets::AssetDatabase database;
+    assets::AssetDatabase::Config config;
+    config.root = root / "Assets";
+    REQUIRE(database.Initialize(config));
+    database.ScanNow();
+
+    const assets::AssetRecord* stone = database.FindByRelativePath("batu.png");
+    const assets::AssetRecord* orphan = database.FindByRelativePath("yatim.png");
+    REQUIRE(stone != nullptr);
+    REQUIRE(orphan != nullptr);
+
+    write(root / "Assets" / "batu.simmat",
+          R"({"version":1,"nodes":[{"type":"input.texture","pins":{"texture":")" +
+              stone->guid.ToString() + R"("}}]})");
+    database.ScanNow();
+    const assets::AssetRecord* material = database.FindByRelativePath("batu.simmat");
+    REQUIRE(material != nullptr);
+
+    const std::filesystem::path level = root / "Levels" / "utama.simlevel";
+    write(level, R"({"entities":[{"material":")" + material->guid.ToString() + R"("}]})");
+
+    const assets::CookPlan plan = assets::PlanCook(database, {level});
+
+    SUBCASE("terjangkau transitif lewat material") {
+        // Level menyebut materialnya saja; teksturnya ikut karena material
+        // menyebutnya. Tanpa penelusuran transitif, permainan kehilangan
+        // teksturnya dan yang terlihat adalah material putih.
+        std::vector<std::string> paths;
+        for (const Uuid& guid : plan.reachable) {
+            paths.push_back(database.Find(guid)->relativePath);
+        }
+        CHECK(std::find(paths.begin(), paths.end(), "batu.simmat") != paths.end());
+        CHECK(std::find(paths.begin(), paths.end(), "batu.png") != paths.end());
+        CHECK(std::find(paths.begin(), paths.end(), "yatim.png") == paths.end());
+    }
+
+    SUBCASE("yang yatim masuk daftar tidak terjangkau, beserta ukurannya") {
+        std::vector<std::string> paths;
+        for (const Uuid& guid : plan.unreachable) {
+            paths.push_back(database.Find(guid)->relativePath);
+        }
+        CHECK(std::find(paths.begin(), paths.end(), "yatim.png") != paths.end());
+        CHECK(plan.unreachableBytes > 0);
+    }
+
+    SUBCASE("GUID entity di level tidak menyeret apa pun") {
+        // **Regresi.** Setiap entity di berkas level punya GUID sendiri,
+        // bentuknya sama persis dengan GUID aset. Yang tidak ada di indeks
+        // dilewati diam-diam; percobaan pertama melaporkannya sebagai referensi
+        // menggantung, dan sebelas dari sebelas laporannya salah.
+        const std::filesystem::path withEntities = root / "Levels" / "berentity.simlevel";
+        write(withEntities,
+              R"({"entities":[{"guid":"00000000-0000-0000-0000-00000000000a"},)"
+              R"({"guid":"00000000-0000-0000-0000-00000000000b"}]})");
+        const assets::CookPlan onlyEntities = assets::PlanCook(database, {withEntities});
+        CHECK(onlyEntities.reachable.empty());
+    }
+
+    SUBCASE("hasilnya stabil antar-jalan") {
+        const assets::CookPlan again = assets::PlanCook(database, {level});
+        CHECK(again.reachable == plan.reachable);
+        CHECK(again.unreachable == plan.unreachable);
+    }
+
+    database.Shutdown();
+    std::error_code ec;
+    std::filesystem::remove_all(root, ec);
 }

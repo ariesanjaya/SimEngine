@@ -31,7 +31,8 @@ SimEngine/
 ├── Apps/
 │   ├── SimEditor/            # entry point editor
 │   ├── SimHeadless/          # editor tanpa GUI + MCP server, untuk agen di CI (A4)
-│   └── SimRuntime/           # entry point player (E9)
+│   ├── SimRuntime/           # entry point player (E9)
+│   └── SimCook/              # memangkas aset tak terpakai untuk dikirim (E9)
 ├── Resources/                # font, ikon, tema, layout dock bawaan
 ├── Shaders/
 ├── Scripts/                  # modul Lua: API engine + ekstensi editor

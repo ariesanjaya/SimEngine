@@ -327,6 +327,7 @@ bool Swapchain::BeginFrame(Frame& outFrame) {
 
     outFrame.commandBuffer = sync.commandBuffer;
     outFrame.imageIndex = imageIndex;
+    currentFrame_ = outFrame;
     return true;
 }
 
