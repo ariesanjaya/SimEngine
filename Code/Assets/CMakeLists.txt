@@ -1,6 +1,7 @@
 sim_add_library(Assets
     SOURCES
         src/AssetDatabase.cpp
+        src/Cook.cpp
         src/AssetTypes.cpp
         src/BlockCompress.cpp
         src/Importer.cpp

@@ -117,6 +117,9 @@ if(SIM_BUILD_EDITOR)
     add_subdirectory(Apps/SimRuntime)
 endif()
 
+# Alat berkas: tidak menuntut GPU, jadi ia dibangun juga di build tanpa editor.
+add_subdirectory(Apps/SimCook)
+
 if(SIM_BUILD_TESTS)
     enable_testing()
     add_subdirectory(Tests)

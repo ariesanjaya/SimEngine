@@ -89,11 +89,15 @@ void Log::Init(const std::filesystem::path& logFile) {
     console->set_pattern(kPattern);
     state.sinks.push_back(std::move(console));
 
+    // **Jalur kosong berarti konsol saja.** Bentuk sebelumnya tetap mencoba
+    // membuka berkas bernama kosong, dan spdlog melempar — jadi setiap alat yang
+    // tidak menginginkan berkas log mati sebelum baris pertamanya. Konvensi yang
+    // sama dengan `advertisePath` di McpServer: kosong berarti tidak ditulis.
     std::error_code ec;
-    if (!logFile.parent_path().empty()) {
+    if (!logFile.empty() && !logFile.parent_path().empty()) {
         std::filesystem::create_directories(logFile.parent_path(), ec);
     }
-    if (!ec) {
+    if (!logFile.empty() && !ec) {
         auto file = std::make_shared<spdlog::sinks::basic_file_sink_mt>(logFile.string(), true);
         file->set_pattern(kPattern);
         state.sinks.push_back(std::move(file));
