@@ -2773,9 +2773,27 @@ terverifikasi ujung-ke-ujung: cook sebuah project, lalu mainkan hasilnya.
   langkah terakhir. Diverifikasi: FarmSim 11 MB menjadi 24 KB untuk satu level,
   dan hasilnya dimainkan identik.
 
-  Yang belum: konversi aset ke format biner siap-pakai dan pak arsip. Keduanya
-  optimasi muat, bukan syarat berjalan — hasil cook sekarang sudah bisa
-  dimainkan apa adanya.
+  **Konversi tekstur sudah ada.** Cook memanggang tekstur ke `.ktx2` dan tidak
+  mengirim sumbernya; `.ktx2` masuk tabel tipe aset sebagai `Texture`, dan
+  `SceneView::UploadedTexture` meneruskan yang sudah `.ktx2` langsung ke
+  perender alih-alih memanggilkan baker. `.meta` mengikuti nama berkas yang
+  benar-benar ditulis — `batu.png.meta` di sebelah `batu.ktx2` tidak dilihat
+  indeks mana pun, dan teksturnya lalu mendapat GUID baru. Diverifikasi: hasil
+  cook dirender **identik piksel-per-piksel** dengan project aslinya.
+
+  **Hasilnya lebih besar di disk, dan itu setengah cerita yang belum selesai.**
+  1,39 MB JPG menjadi 10,67 MB `.ktx2`: BC7 dengan rantai mip memang lebih besar
+  daripada JPG. Yang ditukar adalah ukuran unduh dengan waktu muat dan VRAM yang
+  bisa diperkirakan. Separuh yang hilang adalah **supercompression KTX2 (Zstd)**,
+  yang belum ditulis baker — libktx mendukungnya. Sampai itu ada, `--no-bake`
+  untuk yang lebih memilih unduhan kecil.
+
+  Yang belum: **format mesh biner**. Tanpanya build yang dikirim tetap membawa
+  `.glb`/`.fbx` beserta importirnya. Ini menuntut format yang dirancang —
+  versi, endianness, rangka bersarang — dan format berkas yang dikirim tidak
+  layak diburu-buru.
+
+  Yang belum: pak arsip.
 
   **Laporan referensi menggantung sengaja tidak ada.** Dua percobaan gagal
   karena sebab yang sama: tidak ada satu pun tempat di engine ini yang tahu
@@ -2788,8 +2806,18 @@ terverifikasi ujung-ke-ujung: cook sebuah project, lalu mainkan hasilnya.
   controller, raycast, dengan komponen dan visualisasi debug di editor.
 - **Audio** (OpenAL Soft di `/home/arie/SDK/openal-soft-1.25.2`): sumber suara 3D,
   bus, mixing.
-- **Play-in-Editor** yang sesungguhnya: menjalankan world sungguhan dalam proses
+- ✅ **Play-in-Editor** yang sesungguhnya: menjalankan world sungguhan dalam proses
   editor, dengan pemisahan state agar Stop mengembalikan scene ke keadaan awal.
+
+  Sudah ada sejak sebelumnya — `Play()` mengambil cuplikan sebelum satu baris
+  skrip berjalan, `Stop()` membangun ulang dunia dan seleksi dari cuplikan itu —
+  tapi tidak ada satu uji pun yang membuktikannya. Sekarang ada tujuh: entity
+  yang dibuat saat Play hilang, yang dihapus kembali, transform yang digeser
+  kembali, seleksi kembali ke tempat orang meninggalkannya, Play dua kali
+  berturut-turut tetap benar, dan Stop tanpa Play tidak mengubah apa pun.
+  Perbandingannya byte-per-byte, bukan jumlah entity: dunia yang jumlahnya sama
+  tapi transform-nya bergeser adalah dunia yang tidak dikembalikan. Diperiksa
+  bisa merah — melepas restore-nya menggagalkan tujuh assertion.
 - Profiler (Tracy), build Windows, dan skrip rilis.
 
 ## Keputusan yang sudah dikunci sejak fase editor

@@ -61,7 +61,7 @@ AssetType TypeFromExtension(std::string_view extension) {
         return AssetType::Volume;
     }
 
-    static const std::array<std::pair<const char*, AssetType>, 23> kTable{{
+    static const std::array<std::pair<const char*, AssetType>, 24> kTable{{
         {".obj", AssetType::Mesh},
         {".fbx", AssetType::Mesh},
         {".gltf", AssetType::Mesh},
@@ -73,6 +73,11 @@ AssetType TypeFromExtension(std::string_view extension) {
         {".usda", AssetType::Mesh},
         {".usdc", AssetType::Mesh},
         {".usdz", AssetType::Mesh},
+        // Tekstur yang **sudah dipanggang**: keluaran cook, dan satu-satunya
+        // bentuk tekstur di project yang sudah dikirim. Ia tetap AssetType
+        // ::Texture supaya setiap referensi material yang menunjuknya tetap
+        // berarti hal yang sama seperti sebelum dipanggang.
+        {".ktx2", AssetType::Texture},
         {".simmat", AssetType::Material},
         {".simmatinst", AssetType::Material},
         {".simfx", AssetType::Particle},

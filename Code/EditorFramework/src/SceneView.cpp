@@ -425,8 +425,15 @@ render::TextureHandle SceneView::UploadedTexture(const assets::AssetDatabase* as
     if (!found) {
         return render::kInvalidTexture;
     }
-    const assets::BakedTextureRef baked =
-        bakery_->Request(found.database->AbsolutePath(*found.record));
+    // **Yang sudah `.ktx2` diteruskan apa adanya.** Itulah bentuk tekstur di
+    // project hasil cook: sumbernya sengaja tidak ikut dikirim, jadi memanggang
+    // ulang bukan sekadar sia-sia — tidak ada yang bisa dipanggang. Bakery tetap
+    // jalur untuk project yang sedang disunting, di mana sumbernya memang ada.
+    const std::filesystem::path resolved = found.database->AbsolutePath(*found.record);
+    if (resolved.extension() == ".ktx2") {
+        return renderer->AcquireTexture(resolved.string());
+    }
+    const assets::BakedTextureRef baked = bakery_->Request(resolved);
     switch (baked.state) {
         case assets::BakeState::Ready:
             return renderer->AcquireTexture(baked.path.string());

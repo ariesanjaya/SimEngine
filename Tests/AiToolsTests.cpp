@@ -1441,3 +1441,100 @@ TEST_CASE("Yang menentukan viewport.capture didaftarkan adalah perendernya, buka
     CHECK(be32(16) == 4);
     CHECK(be32(20) == 2);
 }
+
+// --- E9: Play-in-Editor, pemisahan state --------------------------------------
+
+TEST_CASE("Stop mengembalikan scene persis ke keadaan sebelum Play") {
+    // **Kriteria E9.** Play mengambil cuplikan sebelum satu baris skrip pun
+    // berjalan, dan Stop membangun ulang dunia dari cuplikan itu. Yang belum ada
+    // sampai sekarang adalah sesuatu yang membuktikannya: sebuah Stop yang
+    // mengembalikan *hampir* semuanya terlihat benar sampai seseorang kehilangan
+    // pekerjaan setengah jam.
+    Harness harness;
+    const std::string before = scene::SaveLevelToString(harness.World());
+    const std::size_t baseline = harness.World().Count();
+
+    SUBCASE("entity yang dibuat saat Play hilang") {
+        harness.app.Play();
+        CHECK(harness.app.IsPlaying());
+        harness.CreateEntity("DibuatSaatPlay");
+        CHECK(harness.World().Count() == baseline + 1);
+
+        harness.app.Stop();
+        CHECK_FALSE(harness.app.IsPlaying());
+        CHECK(harness.World().Count() == baseline);
+        // Byte-per-byte, bukan sekadar jumlahnya. Dunia yang jumlah entity-nya
+        // sama tapi transform-nya bergeser adalah dunia yang tidak dikembalikan.
+        CHECK(scene::SaveLevelToString(harness.World()) == before);
+    }
+
+    SUBCASE("entity yang dihapus saat Play kembali") {
+        const std::string guid = harness.CreateEntity("AkanDihapus");
+        const std::string withExtra = scene::SaveLevelToString(harness.World());
+
+        harness.app.Play();
+        harness.CallOk("entity.delete", json{{"entities", json::array({guid})}});
+        CHECK(harness.World().Count() == baseline);
+
+        harness.app.Stop();
+        CHECK(scene::SaveLevelToString(harness.World()) == withExtra);
+    }
+
+    SUBCASE("transform yang digeser saat Play kembali") {
+        const std::string guid = harness.CreateEntity("Bergeser");
+        const std::string withEntity = scene::SaveLevelToString(harness.World());
+
+        harness.app.Play();
+        harness.CallOk("entity.modify",
+                       json{{"entity", guid},
+                            {"component", "Transform"},
+                            {"values", json{{"position", json::array({5.0, 6.0, 7.0})}}}});
+        CHECK(scene::SaveLevelToString(harness.World()) != withEntity);
+
+        harness.app.Stop();
+        CHECK(scene::SaveLevelToString(harness.World()) == withEntity);
+    }
+
+    SUBCASE("seleksi kembali ke tempat orang meninggalkannya") {
+        // Pengguna menekan Play untuk melihat sesuatu berjalan, bukan untuk
+        // kehilangan tempat ia sedang bekerja.
+        const std::string guid = harness.CreateEntity("Terpilih");
+        harness.CallOk("selection.set", json{{"entities", json::array({guid})}});
+        const json chosen = harness.CallOk("selection.get");
+        REQUIRE(chosen.at("entities").size() == 1);
+
+        harness.app.Play();
+        harness.CallOk("selection.set", json{{"entities", json::array()}});
+        harness.app.Stop();
+
+        const json after = harness.CallOk("selection.get");
+        REQUIRE(after.at("entities").size() == 1);
+        CHECK(after.at("entities")[0].at("guid") == guid);
+    }
+
+    SUBCASE("Play dua kali berturut-turut tetap mengembalikan yang benar") {
+        for (int round = 0; round < 2; ++round) {
+            harness.app.Play();
+            harness.CreateEntity("Sementara" + std::to_string(round));
+            harness.app.Stop();
+            CHECK(scene::SaveLevelToString(harness.World()) == before);
+        }
+    }
+
+    SUBCASE("Stop tanpa Play tidak mengubah apa pun") {
+        harness.app.Stop();
+        CHECK_FALSE(harness.app.IsPlaying());
+        CHECK(scene::SaveLevelToString(harness.World()) == before);
+    }
+
+    SUBCASE("Play dua kali tanpa Stop di antaranya tidak menimpa cuplikannya") {
+        // **Cuplikan yang tertimpa adalah cuplikan dunia yang sudah berubah.**
+        // Play kedua yang mengambil cuplikan baru berarti Stop mengembalikan ke
+        // tengah permainan, bukan ke keadaan sebelum Play.
+        harness.app.Play();
+        harness.CreateEntity("Sementara");
+        harness.app.Play();  // diabaikan
+        harness.app.Stop();
+        CHECK(scene::SaveLevelToString(harness.World()) == before);
+    }
+}

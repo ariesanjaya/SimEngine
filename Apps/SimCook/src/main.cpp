@@ -10,7 +10,9 @@
 /// menuntut GPU adalah alat yang tidak bisa dijalankan di CI.
 
 #include "Sim/Assets/AssetDatabase.h"
+#include "Sim/Assets/AssetTypes.h"
 #include "Sim/Assets/Cook.h"
+#include "Sim/Assets/TextureBakery.h"
 #include "Sim/Core/Log.h"
 #include "Sim/Core/TaskPool.h"
 #include "Sim/Scene/Project.h"
@@ -61,7 +63,8 @@ void PrintUsage() {
         "  --project <path>   wajib\n"
         "  --out <dir>        folder keluaran; wajib kecuali --dry-run\n"
         "  --level <name>     boleh diulang; bawaan seluruh level project\n"
-        "  --dry-run          hanya laporkan rencananya, jangan tulis apa pun\n",
+        "  --dry-run          hanya laporkan rencananya, jangan tulis apa pun\n"
+        "  --no-bake          salin tekstur apa adanya, jangan panggang ke .ktx2\n",
         stderr);
 }
 
@@ -159,25 +162,68 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    // **Bake di tempat, bukan di TaskPool.** Cook adalah proses yang keluar
+    // begitu selesai; pekerjaan yang diantrekan ke kolam adalah pekerjaan yang
+    // bisa belum selesai saat berkasnya hendak disalin.
+    assets::TextureBakery bakery(out / ".cook-cache", nullptr);
+    const bool bakeTextures = !HasFlag(argc, argv, "--no-bake");
+
     std::uintmax_t copied = 0;
+    std::uintmax_t bakedCount = 0;
+    std::uintmax_t bakedBytes = 0;
+    std::uintmax_t sourceBytes = 0;
     for (const Uuid& guid : plan.reachable) {
         const assets::AssetRecord* record = database.Find(guid);
         if (record == nullptr) {
             continue;
         }
         const std::filesystem::path source = database.AbsolutePath(*record);
-        const std::filesystem::path destination = out / "Assets" / record->relativePath;
+        std::filesystem::path destination = out / "Assets" / record->relativePath;
         std::filesystem::create_directories(destination.parent_path(), ec);
-        std::filesystem::copy_file(source, destination,
-                                   std::filesystem::copy_options::overwrite_existing, ec);
+
+        // **Tekstur dikirim sebagai `.ktx2`, sumbernya tidak ikut.** Itu arti
+        // "siap-pakai": yang di tangan pemain tidak perlu decoder PNG maupun
+        // encoder BC7, dan tidak menghabiskan detik pertama permainan untuk
+        // memanggang sesuatu yang bisa dipanggang sekali di sini.
+        bool wroteBaked = false;
+        if (bakeTextures && record->type == assets::AssetType::Texture &&
+            source.extension() != ".ktx2") {
+            const assets::BakedTextureRef baked = bakery.Request(source);
+            if (baked.state == assets::BakeState::Ready) {
+                destination.replace_extension(".ktx2");
+                std::filesystem::copy_file(baked.path, destination,
+                                           std::filesystem::copy_options::overwrite_existing,
+                                           ec);
+                if (!ec) {
+                    wroteBaked = true;
+                    ++bakedCount;
+                    sourceBytes += record->fileSize;
+                    bakedBytes += std::filesystem::file_size(destination, ec);
+                }
+            } else {
+                // Dikatakan, bukan didiamkan: tekstur yang gagal dipanggang tetap
+                // ikut sebagai sumbernya, dan yang membacanya berhak tahu kenapa
+                // hasil cook-nya lebih besar dari yang ia harapkan.
+                SIM_WARN("Cook", "cannot bake {}, shipping the source", record->relativePath);
+            }
+        }
+        if (!wroteBaked) {
+            std::filesystem::copy_file(source, destination,
+                                       std::filesystem::copy_options::overwrite_existing, ec);
+        }
         if (ec) {
-            SIM_ERROR("Cook", "cannot copy {}: {}", record->relativePath, ec.message());
+            SIM_ERROR("Cook", "cannot write {}: {}", record->relativePath, ec.message());
             return 1;
         }
         ++copied;
         // **`.meta` ikut, dan itu bukan kerapian.** GUID sebuah aset tersimpan
         // di sana; tanpanya, indeks di sisi pemain memberi GUID baru dan setiap
         // referensi di setiap level menunjuk ke tempat yang tidak ada lagi.
+        //
+        // Namanya mengikuti berkas yang benar-benar ditulis, bukan sumbernya:
+        // `batu.png.meta` di sebelah `batu.ktx2` tidak dilihat indeks mana pun,
+        // dan teksturnya lalu mendapat GUID baru — yang berarti setiap material
+        // yang menunjuknya menunjuk ke tempat yang tidak ada lagi.
         const std::filesystem::path meta = source.string() + ".meta";
         if (std::filesystem::exists(meta, ec)) {
             std::filesystem::copy_file(meta, destination.string() + ".meta",
@@ -200,6 +246,23 @@ int main(int argc, char** argv) {
                                    std::filesystem::copy_options::overwrite_existing, ec);
     }
 
+    // Cache bake tidak ikut dikirim: ia hanya perantara.
+    std::filesystem::remove_all(out / ".cook-cache", ec);
+
+    if (bakedCount > 0) {
+        // **Angkanya sering naik, dan itu bukan kesalahan.** BC7 dengan rantai
+        // mip lebih besar di disk daripada JPG; yang ditukar adalah ukuran unduh
+        // dengan waktu muat dan VRAM yang bisa diperkirakan — pemain tidak lagi
+        // menunggu decoder dan encoder bekerja di detik pertama. Separuh yang
+        // hilang adalah supercompression KTX2 (Zstd), yang belum ditulis baker.
+        // `--no-bake` untuk yang lebih memilih unduhan kecil.
+        std::printf("baked     %ju textures, %s of sources became %s of .ktx2\n", bakedCount,
+                    Megabytes(sourceBytes).c_str(), Megabytes(bakedBytes).c_str());
+        if (bakedBytes > sourceBytes) {
+            std::printf("          (larger on disk, faster to load; KTX2 supercompression "
+                        "would close the gap)\n");
+        }
+    }
     std::printf("wrote     %ju assets and %zu levels to %s\n",
                 static_cast<std::uintmax_t>(copied), plan.levels.size(), out.string().c_str());
     return 0;

@@ -2374,3 +2374,11 @@ TEST_CASE("PlanCook menelusuri dari level dan memisahkan yang tidak terjangkau")
     std::error_code ec;
     std::filesystem::remove_all(root, ec);
 }
+
+TEST_CASE("Tekstur yang sudah dipanggang tetap bertipe Texture") {
+    // Keluaran cook adalah `.ktx2`, dan ia harus berarti hal yang sama seperti
+    // sumbernya — kalau tidak, setiap referensi material yang menunjuknya
+    // berubah arti begitu project-nya dikirim.
+    CHECK(assets::TypeFromExtension(".ktx2") == assets::AssetType::Texture);
+    CHECK(assets::TypeFromExtension(".png") == assets::AssetType::Texture);
+}
