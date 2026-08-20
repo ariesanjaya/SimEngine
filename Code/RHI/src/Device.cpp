@@ -487,6 +487,11 @@ bool Device::CreateLogicalDevice() {
     // yang tidak mendukungnya adalah galat validation layer di setiap tekstur,
     // bukan gambar yang jelek.
     features.textureCompressionBC = VK_TRUE;
+    // Statistik pipeline (G6). **Diminta walau hanya alat ukur yang memakainya:**
+    // jumlah primitif per pass adalah satu-satunya angka yang membuktikan
+    // occlusion culling benar-benar membuang pekerjaan, dan bukan sekadar
+    // memindahkannya.
+    features.pipelineStatisticsQuery = VK_TRUE;
 
     VkPhysicalDeviceFeatures supported{};
     vkGetPhysicalDeviceFeatures(physicalDevice_, &supported);
@@ -494,6 +499,7 @@ bool Device::CreateLogicalDevice() {
     features.wideLines &= supported.wideLines;
     features.fragmentStoresAndAtomics &= supported.fragmentStoresAndAtomics;
     features.textureCompressionBC &= supported.textureCompressionBC;
+    features.pipelineStatisticsQuery &= supported.pipelineStatisticsQuery;
     supportsBlockCompression_ = features.textureCompressionBC == VK_TRUE;
 
     // **Ketiadaannya dicatat, bukan didiamkan.** Perangkat tanpa BC tetap
@@ -673,6 +679,7 @@ bool Device::CreateLogicalDevice() {
     capabilities_.drawIndirectCount = supported12.drawIndirectCount != 0;
     capabilities_.shaderFloat16 = supported12.shaderFloat16 != 0;
     capabilities_.multiDrawIndirect = supported.multiDrawIndirect != 0;
+    capabilities_.pipelineStatisticsQuery = features.pipelineStatisticsQuery != 0;
 
     // Satu baris untuk yang dipakai sekarang, satu untuk yang menentukan jalur
     // di depan. Dipisah karena keduanya dibaca oleh orang yang berbeda: yang

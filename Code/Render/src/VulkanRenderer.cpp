@@ -1766,7 +1766,8 @@ public:
     std::span<const PassTiming> PassTimings() const override {
         timings_.clear();
         for (const rhi::GpuProfiler::Scope& scope : profiler_.Results()) {
-            timings_.push_back(PassTiming{scope.name, static_cast<float>(scope.milliseconds)});
+            timings_.push_back(PassTiming{scope.name, static_cast<float>(scope.milliseconds),
+                                          scope.primitives});
         }
         return timings_;
     }

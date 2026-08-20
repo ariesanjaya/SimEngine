@@ -91,6 +91,9 @@ struct DeviceCapabilities {
     /// Setengah presisi di shader. Turing ke atas menjalankannya dua kali lipat,
     /// dan matematika GI adalah tempat yang paling diuntungkan.
     bool shaderFloat16 = false;
+    /// Query statistik pipeline. Dipakai profiler untuk menghitung primitif per
+    /// pass — satu-satunya angka yang bisa membuktikan culling bekerja.
+    bool pipelineStatisticsQuery = false;
     /// Ada keluarga antrean compute yang **terpisah** dari antrean grafis.
     /// Prasyarat G7; antreannya sendiri sudah dibuat sejak sekarang.
     bool asyncCompute = false;

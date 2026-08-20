@@ -24,6 +24,13 @@ namespace sim::render {
 struct PassTiming {
     std::string_view name;
     float milliseconds = 0.0f;
+    /// Primitif yang diserahkan ke GPU selama pass ini. Nol untuk pass compute,
+    /// dan nol untuk tahap CPU — `CpuTimings()` memakai struct yang sama.
+    ///
+    /// **Ini angka yang diturunkan culling.** Waktu pass ikut turun juga, tetapi
+    /// waktu bergerak karena banyak hal; jumlah primitif hanya bergerak karena
+    /// ada yang berhenti digambar.
+    uint64_t primitives = 0;
 };
 
 /// Hitungan yang menjelaskan angka waktu di sebelahnya.

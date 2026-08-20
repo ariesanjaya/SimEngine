@@ -47,6 +47,28 @@ bool GpuProfiler::Create(Device& device, uint32_t maxScopesPerFrame) {
         return false;
     }
     readback_.assign(maxScopes_ * 2, 0);
+
+    // Pool kedua: satu query statistik per lingkup.
+    //
+    // **Pool terpisah, dan wajib terpisah.** Sebuah query pool punya satu
+    // `queryType`; timestamp dan statistik pipeline tidak bisa berbagi. Yang
+    // dihitung hanya `INPUT_ASSEMBLY_PRIMITIVES` — yaitu segitiga yang
+    // diserahkan, bukan yang lolos clipping. Culling menurunkan yang pertama;
+    // yang kedua ikut turun karena alasan lain juga, dan itu membuatnya tidak
+    // bisa dipakai membuktikan apa pun.
+    if (device.Capabilities().pipelineStatisticsQuery) {
+        VkQueryPoolCreateInfo statsInfo{};
+        statsInfo.sType = VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO;
+        statsInfo.queryType = VK_QUERY_TYPE_PIPELINE_STATISTICS;
+        statsInfo.pipelineStatistics = VK_QUERY_PIPELINE_STATISTIC_INPUT_ASSEMBLY_PRIMITIVES_BIT;
+        statsInfo.queryCount = maxScopes_ * kFrameCount;
+        if (vkCreateQueryPool(device.Handle(), &statsInfo, nullptr, &statsPool_) != VK_SUCCESS) {
+            SIM_WARN("RHI", "cannot create the pipeline statistics query pool");
+            statsPool_ = VK_NULL_HANDLE;
+        } else {
+            statsReadback_.assign(maxScopes_, 0);
+        }
+    }
     return true;
 }
 
@@ -54,7 +76,11 @@ void GpuProfiler::Destroy() {
     if (device_ != nullptr && pool_ != VK_NULL_HANDLE) {
         vkDestroyQueryPool(device_->Handle(), pool_, nullptr);
     }
+    if (device_ != nullptr && statsPool_ != VK_NULL_HANDLE) {
+        vkDestroyQueryPool(device_->Handle(), statsPool_, nullptr);
+    }
     pool_ = VK_NULL_HANDLE;
+    statsPool_ = VK_NULL_HANDLE;
     device_ = nullptr;
     frames_ = {};
     results_.clear();
@@ -84,6 +110,9 @@ void GpuProfiler::BeginFrame(VkCommandBuffer cmd) {
     // yang tidak terdefinisi, bukan galat — dan yang terlihat adalah angka yang
     // kadang benar dan kadang mustahil.
     vkCmdResetQueryPool(cmd, pool_, frame.first, maxScopes_ * 2);
+    if (statsPool_ != VK_NULL_HANDLE) {
+        vkCmdResetQueryPool(cmd, statsPool_, frameIndex_ * maxScopes_, maxScopes_);
+    }
 }
 
 void GpuProfiler::BeginScope(VkCommandBuffer cmd, std::string_view name) {
@@ -100,6 +129,9 @@ void GpuProfiler::BeginScope(VkCommandBuffer cmd, std::string_view name) {
     // sampai di awal pipeline, yang paling dekat dengan "pass ini mulai".
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, pool_,
                         frame.first + frame.count * 2);
+    if (statsPool_ != VK_NULL_HANDLE) {
+        vkCmdBeginQuery(cmd, statsPool_, frameIndex_ * maxScopes_ + frame.count, 0);
+    }
 }
 
 void GpuProfiler::EndScope(VkCommandBuffer cmd) {
@@ -111,6 +143,10 @@ void GpuProfiler::EndScope(VkCommandBuffer cmd) {
     // pass ini selesai. Memakai TOP di kedua ujung mengukur jarak antar-perintah
     // di CPU, bukan waktu kerja GPU — dan hasilnya mendekati nol untuk pass
     // yang justru paling berat.
+    if (statsPool_ != VK_NULL_HANDLE) {
+        vkCmdEndQuery(cmd, statsPool_,
+                      frameIndex_ * maxScopes_ + static_cast<uint32_t>(openScope_));
+    }
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, pool_,
                         frame.first + static_cast<uint32_t>(openScope_) * 2 + 1);
     frame.count = static_cast<uint32_t>(frame.names.size());
@@ -141,18 +177,39 @@ void GpuProfiler::Collect(uint32_t frame) {
         return;
     }
 
+    // **Statistik dipungut terpisah, dan kegagalannya tidak menjatuhkan
+    // waktunya.** Keduanya milik pool yang berbeda dan bisa siap pada saat yang
+    // berbeda; tabel waktu yang hilang seluruhnya karena kolom primitifnya belum
+    // siap adalah harga yang tidak sebanding.
+    bool haveStats = false;
+    if (statsPool_ != VK_NULL_HANDLE) {
+        haveStats = vkGetQueryPoolResults(device_->Handle(), statsPool_, frame * maxScopes_,
+                                          entry.count, entry.count * sizeof(uint64_t),
+                                          statsReadback_.data(), sizeof(uint64_t),
+                                          VK_QUERY_RESULT_64_BIT) == VK_SUCCESS;
+    }
+
     results_.clear();
     results_.reserve(entry.count);
     for (uint32_t i = 0; i < entry.count; ++i) {
         const uint64_t begin = readback_[i * 2];
         const uint64_t end = readback_[i * 2 + 1];
         const double ticks = end >= begin ? static_cast<double>(end - begin) : 0.0;
-        results_.push_back(Scope{entry.names[i], ticks * nanosecondsPerTick_ * 1e-6});
+        results_.push_back(Scope{entry.names[i], ticks * nanosecondsPerTick_ * 1e-6,
+                                 haveStats ? statsReadback_[i] : 0});
     }
     // Di sini, bukan di awal `Collect`: yang kembali lebih awal karena hasilnya
     // belum siap tidak mengganti apa pun, dan serial yang naik untuk isi yang
     // sama persis meniadakan gunanya.
     ++resultsSerial_;
+}
+
+uint64_t GpuProfiler::TotalPrimitives() const {
+    uint64_t total = 0;
+    for (const Scope& scope : results_) {
+        total += scope.primitives;
+    }
+    return total;
 }
 
 double GpuProfiler::TotalMilliseconds() const {

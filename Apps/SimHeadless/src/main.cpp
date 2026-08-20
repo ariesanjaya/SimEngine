@@ -109,6 +109,21 @@ void PrintUsage() {
 struct Samples {
     std::string name;
     std::vector<float> milliseconds;
+    /// Primitif yang diserahkan pass ini, per frame. Kosong untuk tahap CPU.
+    std::vector<uint64_t> primitives;
+
+    /// Median primitif. **Median dan bukan rata-rata, alasan yang sama dengan
+    /// waktu** — dan di sini alasannya lebih tajam lagi: satu frame yang
+    /// hasilnya belum siap dipungut sebagai nol, dan satu nol menyeret
+    /// rata-rata sementara median tidak bergerak sama sekali.
+    uint64_t MedianPrimitives() const {
+        if (primitives.empty()) {
+            return 0;
+        }
+        std::vector<uint64_t> sorted = primitives;
+        std::sort(sorted.begin(), sorted.end());
+        return sorted[sorted.size() / 2];
+    }
 
     double Mean() const {
         if (milliseconds.empty()) {
@@ -155,14 +170,15 @@ struct Samples {
 /// dengan mata.
 class SampleTable {
 public:
-    void Add(std::string_view name, float milliseconds) {
+    void Add(std::string_view name, float milliseconds, uint64_t primitives = 0) {
         for (Samples& entry : entries_) {
             if (entry.name == name) {
                 entry.milliseconds.push_back(milliseconds);
+                entry.primitives.push_back(primitives);
                 return;
             }
         }
-        entries_.push_back(Samples{std::string(name), {milliseconds}});
+        entries_.push_back(Samples{std::string(name), {milliseconds}, {primitives}});
     }
 
     const std::vector<Samples>& Entries() const { return entries_; }
@@ -178,14 +194,31 @@ std::string FormatTable(std::string_view title, const SampleTable& table) {
     }
     std::string out = "### ";
     out += title;
-    out += "\n\n| Pass | Median | Rata-rata | Puncak |\n|---|---:|---:|---:|\n";
+    // **Kolom primitif hanya muncul kalau ada yang mengisinya.** Tabel CPU
+    // tidak punya angka itu, dan kolom kosong di sebelah angka yang berarti
+    // adalah kolom yang membuat pembacanya mengira ada yang hilang.
+    bool anyPrimitives = false;
+    for (const Samples& entry : table.Entries()) {
+        anyPrimitives = anyPrimitives || entry.MedianPrimitives() > 0;
+    }
+    out += anyPrimitives ? "\n\n| Pass | Median | Rata-rata | Puncak | Primitif |\n"
+                           "|---|---:|---:|---:|---:|\n"
+                         : "\n\n| Pass | Median | Rata-rata | Puncak |\n|---|---:|---:|---:|\n";
     double medianTotal = 0.0;
     double meanTotal = 0.0;
+    uint64_t primitiveTotal = 0;
     for (const Samples& entry : table.Entries()) {
         char line[256];
-        std::snprintf(line, sizeof(line), "| `%s` | %.3f | %.3f | %.3f |\n", entry.name.c_str(),
-                      entry.Median(), entry.Mean(), entry.Max());
+        if (anyPrimitives) {
+            std::snprintf(line, sizeof(line), "| `%s` | %.3f | %.3f | %.3f | %llu |\n",
+                          entry.name.c_str(), entry.Median(), entry.Mean(), entry.Max(),
+                          static_cast<unsigned long long>(entry.MedianPrimitives()));
+        } else {
+            std::snprintf(line, sizeof(line), "| `%s` | %.3f | %.3f | %.3f |\n",
+                          entry.name.c_str(), entry.Median(), entry.Mean(), entry.Max());
+        }
         out += line;
+        primitiveTotal += entry.MedianPrimitives();
         // **Lingkup yang namanya berakhiran `-total` tidak ikut dijumlahkan.**
         // `cpu-total` membungkus seluruh baris lain; memasukkannya ke dalam
         // jumlah berarti menghitung frame yang sama dua kali dan menghasilkan
@@ -198,9 +231,17 @@ std::string FormatTable(std::string_view title, const SampleTable& table) {
         medianTotal += entry.Median();
         meanTotal += entry.Mean();
     }
-    char total[128];
-    std::snprintf(total, sizeof(total), "| **jumlah baris di atas** | **%.3f** | **%.3f** | |\n",
-                  medianTotal, meanTotal);
+    char total[192];
+    if (anyPrimitives) {
+        std::snprintf(total, sizeof(total),
+                      "| **jumlah baris di atas** | **%.3f** | **%.3f** | | **%llu** |\n",
+                      medianTotal, meanTotal,
+                      static_cast<unsigned long long>(primitiveTotal));
+    } else {
+        std::snprintf(total, sizeof(total),
+                      "| **jumlah baris di atas** | **%.3f** | **%.3f** | |\n", medianTotal,
+                      meanTotal);
+    }
     out += total;
     return out;
 }
@@ -629,7 +670,7 @@ int main(int argc, char** argv) {
             if (serial != lastSerial) {
                 lastSerial = serial;
                 for (const render::PassTiming& timing : renderer->PassTimings()) {
-                    gpu.Add(timing.name, timing.milliseconds);
+                    gpu.Add(timing.name, timing.milliseconds, timing.primitives);
                 }
                 ++gpuSamples;
             }
