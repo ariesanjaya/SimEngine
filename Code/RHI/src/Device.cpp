@@ -7,6 +7,9 @@
 
 #include <algorithm>
 #include <cstring>
+#include <fstream>
+#include <iterator>
+#include <system_error>
 
 namespace sim::rhi {
 namespace {
@@ -45,6 +48,18 @@ bool HasInstanceExtension(const char* name) {
     vkEnumerateInstanceExtensionProperties(nullptr, &count, nullptr);
     std::vector<VkExtensionProperties> extensions(count);
     vkEnumerateInstanceExtensionProperties(nullptr, &count, extensions.data());
+    return std::any_of(extensions.begin(), extensions.end(),
+                       [name](const VkExtensionProperties& extension) {
+                           return std::strcmp(extension.extensionName, name) == 0;
+                       });
+}
+
+/// Sama, untuk ekstensi yang disediakan sebuah lapisan alih-alih implementasi.
+bool HasLayerExtension(const char* layer, const char* name) {
+    uint32_t count = 0;
+    vkEnumerateInstanceExtensionProperties(layer, &count, nullptr);
+    std::vector<VkExtensionProperties> extensions(count);
+    vkEnumerateInstanceExtensionProperties(layer, &count, extensions.data());
     return std::any_of(extensions.begin(), extensions.end(),
                        [name](const VkExtensionProperties& extension) {
                            return std::strcmp(extension.extensionName, name) == 0;
@@ -115,11 +130,112 @@ bool Device::Create(const DeviceDesc& desc) {
     poolInfo.queueFamilyIndex = graphicsQueueFamily_;
     SIM_VK_CHECK(vkCreateCommandPool(device_, &poolInfo, nullptr, &oneShotPool_));
 
-    VkPipelineCacheCreateInfo cacheInfo{};
-    cacheInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
-    SIM_VK_CHECK(vkCreatePipelineCache(device_, &cacheInfo, nullptr, &pipelineCache_));
+    pipelineCachePath_ = desc.pipelineCachePath;
+    CreatePipelineCache();
 
     return true;
+}
+
+void Device::CreatePipelineCache() {
+    std::vector<uint8_t> initial;
+    if (!pipelineCachePath_.empty()) {
+        std::ifstream file(pipelineCachePath_, std::ios::binary);
+        if (file) {
+            initial.assign(std::istreambuf_iterator<char>(file),
+                           std::istreambuf_iterator<char>());
+        }
+    }
+
+    // **Isinya diperiksa, bukan dipercaya.** Cache pipeline terikat pada
+    // vendor, model kartu, dan versi driver; menyerahkan cache milik salah
+    // satunya yang lain kepada `vkCreatePipelineCache` adalah perilaku tak
+    // terdefinisi menurut spesifikasi — bukan cache yang lambat, melainkan
+    // apa pun. Driver *boleh* menolaknya sendiri, dan sebagian memang begitu,
+    // tapi "boleh" bukan jaminan yang layak dipakai pada berkas yang isinya
+    // bisa berasal dari mesin lain lewat folder yang disinkronkan.
+    //
+    // Kepalanya sudah cukup untuk memeriksa: panjang, versi, vendorID,
+    // deviceID, lalu UUID cache milik driver.
+    bool usable = false;
+    if (initial.size() > 32) {
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(physicalDevice_, &properties);
+        uint32_t headerLength = 0;
+        uint32_t headerVersion = 0;
+        uint32_t vendorId = 0;
+        uint32_t deviceId = 0;
+        std::memcpy(&headerLength, initial.data(), sizeof(uint32_t));
+        std::memcpy(&headerVersion, initial.data() + 4, sizeof(uint32_t));
+        std::memcpy(&vendorId, initial.data() + 8, sizeof(uint32_t));
+        std::memcpy(&deviceId, initial.data() + 12, sizeof(uint32_t));
+        usable = headerLength > 0 && headerLength <= initial.size() &&
+                 headerVersion == VK_PIPELINE_CACHE_HEADER_VERSION_ONE &&
+                 vendorId == properties.vendorID && deviceId == properties.deviceID &&
+                 std::memcmp(initial.data() + 16, properties.pipelineCacheUUID,
+                             VK_UUID_SIZE) == 0;
+        if (!usable) {
+            // Dicatat, bukan didiamkan: cache yang selalu ditolak berarti setiap
+            // peluncuran membayar kompilasi penuh, dan yang mengalaminya tidak
+            // punya cara menebak sebabnya.
+            SIM_INFO("RHI", "pipeline cache on disk belongs to another device or driver; "
+                            "starting empty");
+        }
+    }
+
+    VkPipelineCacheCreateInfo cacheInfo{};
+    cacheInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
+    if (usable) {
+        cacheInfo.initialDataSize = initial.size();
+        cacheInfo.pInitialData = initial.data();
+    }
+    SIM_VK_CHECK(vkCreatePipelineCache(device_, &cacheInfo, nullptr, &pipelineCache_));
+    if (usable) {
+        SIM_INFO("RHI", "pipeline cache loaded ({} KB) from {}", initial.size() / 1024,
+                 pipelineCachePath_.string());
+    }
+}
+
+void Device::SavePipelineCache() const {
+    if (pipelineCache_ == VK_NULL_HANDLE || pipelineCachePath_.empty()) {
+        return;
+    }
+    std::size_t size = 0;
+    if (vkGetPipelineCacheData(device_, pipelineCache_, &size, nullptr) != VK_SUCCESS ||
+        size == 0) {
+        return;
+    }
+    std::vector<uint8_t> data(size);
+    if (vkGetPipelineCacheData(device_, pipelineCache_, &size, data.data()) != VK_SUCCESS) {
+        return;
+    }
+
+    std::error_code error;
+    std::filesystem::create_directories(pipelineCachePath_.parent_path(), error);
+
+    // **Ditulis ke berkas sementara lalu dipindah.** Menulis langsung ke
+    // tempatnya berarti sebuah proses yang mati di tengah penulisan meninggalkan
+    // cache setengah jadi — yang kepalanya sah, isinya tidak, dan yang
+    // membacanya besok menyerahkannya ke driver. `rename` di dalam satu
+    // filesystem bersifat atomik; itulah yang membuat berkasnya selalu utuh
+    // atau tidak ada sama sekali.
+    std::filesystem::path temporary = pipelineCachePath_;
+    temporary += ".tmp";
+    {
+        std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
+        if (!file) {
+            SIM_WARN("RHI", "cannot write pipeline cache to {}", temporary.string());
+            return;
+        }
+        file.write(reinterpret_cast<const char*>(data.data()),
+                   static_cast<std::streamsize>(data.size()));
+    }
+    std::filesystem::rename(temporary, pipelineCachePath_, error);
+    if (error) {
+        SIM_WARN("RHI", "cannot move pipeline cache into place: {}", error.message());
+        std::filesystem::remove(temporary, error);
+        return;
+    }
+    SIM_INFO("RHI", "pipeline cache saved ({} KB)", data.size() / 1024);
 }
 
 bool Device::CreateInstance(const DeviceDesc& desc) {
@@ -155,6 +271,26 @@ bool Device::CreateInstance(const DeviceDesc& desc) {
         layers.push_back(kValidationLayer);
         extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
     }
+    // `VkValidationFeaturesEXT` di pNext hanya dibaca bila ekstensi ini ikut
+    // diminta. Tanpanya struktur itu diabaikan **diam-diam** — dan diamnya
+    // sempurna: validasi sinkronisasi yang tidak menyala melaporkan persis
+    // sebanyak yang menyala dan tidak menemukan apa-apa, yaitu nol.
+    //
+    // Ditanyakan dengan nama lapisannya, bukan dengan `nullptr`: ekstensi ini
+    // datang **dari** lapisan validasi, jadi daftar ekstensi implementasi —
+    // yang dikembalikan `vkEnumerateInstanceExtensionProperties(nullptr, ...)`
+    // — tidak pernah menyebutkannya. Menanyakannya di sana selalu menjawab
+    // "tidak ada", pada mesin yang sebenarnya punya.
+    const bool syncValidationRequested =
+        validationEnabled_ && desc.enableSyncValidation &&
+        HasLayerExtension(kValidationLayer, VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME);
+    if (validationEnabled_ && desc.enableSyncValidation && !syncValidationRequested) {
+        SIM_WARN("RHI", "sync validation requested but {} is missing",
+                 VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME);
+    }
+    if (syncValidationRequested) {
+        extensions.push_back(VK_EXT_VALIDATION_FEATURES_EXTENSION_NAME);
+    }
     if (HasInstanceExtension(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME)) {
         extensions.push_back(VK_KHR_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXTENSION_NAME);
     }
@@ -174,6 +310,23 @@ bool Device::CreateInstance(const DeviceDesc& desc) {
         instanceInfo.pNext = &debugInfo;
     }
 
+    // Dinyalakan dari sini, bukan lewat variabel lingkungan: nama setelan
+    // lapisan berganti antar-versi SDK — `VK_LAYER_ENABLES` yang lama sudah
+    // dilaporkan usang oleh lapisan 1.4 — dan cara yang bergantung pada nama
+    // yang berganti adalah cara yang suatu hari berhenti menyala tanpa memberi
+    // tahu siapa pun.
+    const VkValidationFeatureEnableEXT syncFeature =
+        VK_VALIDATION_FEATURE_ENABLE_SYNCHRONIZATION_VALIDATION_EXT;
+    VkValidationFeaturesEXT validationFeatures{};
+    validationFeatures.sType = VK_STRUCTURE_TYPE_VALIDATION_FEATURES_EXT;
+    validationFeatures.enabledValidationFeatureCount = 1;
+    validationFeatures.pEnabledValidationFeatures = &syncFeature;
+    if (syncValidationRequested) {
+        validationFeatures.pNext = instanceInfo.pNext;
+        instanceInfo.pNext = &validationFeatures;
+        syncValidationEnabled_ = true;
+    }
+
     const VkResult result = vkCreateInstance(&instanceInfo, nullptr, &instance_);
     if (result != VK_SUCCESS) {
         SIM_CRITICAL("RHI", "vkCreateInstance failed: {}", ResultToString(result));
@@ -188,9 +341,10 @@ bool Device::CreateInstance(const DeviceDesc& desc) {
         }
     }
 
-    SIM_INFO("RHI", "Vulkan instance {}.{}.{}{}", VK_VERSION_MAJOR(apiVersion_),
+    SIM_INFO("RHI", "Vulkan instance {}.{}.{}{}{}", VK_VERSION_MAJOR(apiVersion_),
              VK_VERSION_MINOR(apiVersion_), VK_VERSION_PATCH(apiVersion_),
-             validationEnabled_ ? " (validation on)" : "");
+             validationEnabled_ ? " (validation on" : "",
+             validationEnabled_ ? (syncValidationEnabled_ ? ", sync)" : ")") : "");
     return true;
 }
 
@@ -243,16 +397,44 @@ bool Device::SelectPhysicalDevice() {
         SIM_CRITICAL("RHI", "No graphics-capable queue family");
         return false;
     }
+
+    // **Antrean compute yang dicari adalah yang TIDAK bisa menggambar.** Sebuah
+    // keluarga yang punya kedua bit hampir selalu keluarga grafis itu sendiri,
+    // dan menjalankan dua antrean di atasnya tidak membeli tumpang tindih apa
+    // pun — pekerjaannya tetap mengantre di perangkat keras yang sama. Yang
+    // memberi tumpang tindih adalah keluarga terpisah, yang pada kartu modern
+    // memang ada justru untuk itu.
+    for (uint32_t i = 0; i < familyCount; ++i) {
+        const bool compute = (families[i].queueFlags & VK_QUEUE_COMPUTE_BIT) != 0;
+        const bool graphics = (families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
+        if (compute && !graphics) {
+            computeQueueFamily_ = i;
+            break;
+        }
+    }
+    capabilities_.asyncCompute = computeQueueFamily_ != UINT32_MAX;
     return true;
 }
 
 bool Device::CreateLogicalDevice() {
     const float priority = 1.0f;
-    VkDeviceQueueCreateInfo queueInfo{};
-    queueInfo.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
-    queueInfo.queueFamilyIndex = graphicsQueueFamily_;
-    queueInfo.queueCount = 1;
-    queueInfo.pQueuePriorities = &priority;
+    std::vector<VkDeviceQueueCreateInfo> queueInfos;
+    {
+        VkDeviceQueueCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        info.queueFamilyIndex = graphicsQueueFamily_;
+        info.queueCount = 1;
+        info.pQueuePriorities = &priority;
+        queueInfos.push_back(info);
+    }
+    if (computeQueueFamily_ != UINT32_MAX) {
+        VkDeviceQueueCreateInfo info{};
+        info.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO;
+        info.queueFamilyIndex = computeQueueFamily_;
+        info.queueCount = 1;
+        info.pQueuePriorities = &priority;
+        queueInfos.push_back(info);
+    }
 
     // Ray query hanya **dideteksi** di sini, tidak diaktifkan. Mengaktifkannya
     // menuntut acceleration structure beserta seluruh rantai pembangunannya, dan
@@ -338,9 +520,17 @@ bool Device::CreateLogicalDevice() {
     //     Ditemukan validation layer, bukan dengan membaca kode.
     VkPhysicalDeviceVulkan11Features supported11{};
     supported11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
+    // **Ditanyakan sekarang walau belum dinyalakan.** Yang dibutuhkan sekarang
+    // bukan fiturnya melainkan jawabannya: G5 sampai G7 masing-masing berdiri
+    // atau jatuh di atas salah satu dari medan-medan ini, dan jawaban yang baru
+    // dicari pada hari milestone-nya dimulai adalah jawaban yang datang setelah
+    // rencananya terlanjur disusun.
+    VkPhysicalDeviceVulkan12Features supported12{};
+    supported12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    supported12.pNext = &supported11;
     VkPhysicalDeviceVulkan13Features supported13{};
     supported13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-    supported13.pNext = &supported11;
+    supported13.pNext = &supported12;
     VkPhysicalDeviceFeatures2 supported2{};
     supported2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2;
     supported2.pNext = &supported13;
@@ -366,8 +556,8 @@ bool Device::CreateLogicalDevice() {
 
     VkDeviceCreateInfo deviceInfo{};
     deviceInfo.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
-    deviceInfo.queueCreateInfoCount = 1;
-    deviceInfo.pQueueCreateInfos = &queueInfo;
+    deviceInfo.queueCreateInfoCount = static_cast<uint32_t>(queueInfos.size());
+    deviceInfo.pQueueCreateInfos = queueInfos.data();
     deviceInfo.enabledExtensionCount = static_cast<uint32_t>(deviceExtensions.size());
     deviceInfo.ppEnabledExtensionNames = deviceExtensions.data();
     // Fitur diberikan lewat pNext (features2) atau lewat pEnabledFeatures —
@@ -384,9 +574,42 @@ bool Device::CreateLogicalDevice() {
         return false;
     }
     vkGetDeviceQueue(device_, graphicsQueueFamily_, 0, &graphicsQueue_);
-    SIM_INFO("RHI", "Device ready (Vulkan 1.3: {}, dynamic rendering: {}, sync2: {})",
-             supportsVulkan13_ ? "yes" : "no", enable13.dynamicRendering != 0 ? "yes" : "no",
-             enable13.synchronization2 != 0 ? "yes" : "no");
+    if (computeQueueFamily_ != UINT32_MAX) {
+        vkGetDeviceQueue(device_, computeQueueFamily_, 0, &computeQueue_);
+    }
+
+    capabilities_.vulkan13 = supportsVulkan13_;
+    capabilities_.dynamicRendering = enable13.dynamicRendering != 0;
+    capabilities_.synchronization2 = enable13.synchronization2 != 0;
+    capabilities_.blockCompression = supportsBlockCompression_;
+    capabilities_.rayQuery = supportsRayQuery_;
+    capabilities_.descriptorIndexing = supported12.descriptorIndexing != 0;
+    capabilities_.bufferDeviceAddress = supported12.bufferDeviceAddress != 0;
+    capabilities_.timelineSemaphore = supported12.timelineSemaphore != 0;
+    capabilities_.drawIndirectCount = supported12.drawIndirectCount != 0;
+    capabilities_.shaderFloat16 = supported12.shaderFloat16 != 0;
+    capabilities_.multiDrawIndirect = supported.multiDrawIndirect != 0;
+
+    // Satu baris untuk yang dipakai sekarang, satu untuk yang menentukan jalur
+    // di depan. Dipisah karena keduanya dibaca oleh orang yang berbeda: yang
+    // pertama saat sesuatu tidak tergambar, yang kedua saat memutuskan apakah
+    // sebuah milestone bisa dikerjakan di mesin ini sama sekali.
+    SIM_INFO("RHI", "Device ready (Vulkan 1.3: {}, dynamic rendering: {}, sync2: {}, BC: {})",
+             capabilities_.vulkan13 ? "yes" : "no",
+             capabilities_.dynamicRendering ? "yes" : "no",
+             capabilities_.synchronization2 ? "yes" : "no",
+             capabilities_.blockCompression ? "yes" : "no");
+    SIM_INFO("RHI",
+             "Capabilities: bindless {}, buffer address {}, timeline {}, indirect {}/{}, "
+             "fp16 {}, async compute {}, ray query {}",
+             capabilities_.descriptorIndexing ? "yes" : "no",
+             capabilities_.bufferDeviceAddress ? "yes" : "no",
+             capabilities_.timelineSemaphore ? "yes" : "no",
+             capabilities_.multiDrawIndirect ? "yes" : "no",
+             capabilities_.drawIndirectCount ? "yes" : "no",
+             capabilities_.shaderFloat16 ? "yes" : "no",
+             capabilities_.asyncCompute ? "yes" : "no",
+             capabilities_.rayQuery ? "yes" : "no");
     return true;
 }
 
@@ -394,6 +617,10 @@ void Device::Destroy() {
     if (device_ != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device_);
     }
+    // Sebelum cache-nya dihancurkan, dan sesudah GPU diam: isi yang dipungut
+    // dari cache yang masih dipakai pipeline yang sedang berjalan tidak dijamin
+    // lengkap.
+    SavePipelineCache();
     for (TransientSubmit& slot : transients_) {
         vkDestroyFence(device_, slot.fence, nullptr);
         vkDestroyCommandPool(device_, slot.pool, nullptr);

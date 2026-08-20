@@ -4,6 +4,7 @@ sim_add_library(RHI
         src/Device.cpp
         src/GpuProfiler.cpp
         src/Ktx2.cpp
+        src/Pipeline.cpp
         src/RenderTarget.cpp
         src/Swapchain.cpp
         src/Texture.cpp

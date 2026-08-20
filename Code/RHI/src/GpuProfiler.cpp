@@ -149,6 +149,10 @@ void GpuProfiler::Collect(uint32_t frame) {
         const double ticks = end >= begin ? static_cast<double>(end - begin) : 0.0;
         results_.push_back(Scope{entry.names[i], ticks * nanosecondsPerTick_ * 1e-6});
     }
+    // Di sini, bukan di awal `Collect`: yang kembali lebih awal karena hasilnya
+    // belum siap tidak mengganti apa pun, dan serial yang naik untuk isi yang
+    // sama persis meniadakan gunanya.
+    ++resultsSerial_;
 }
 
 double GpuProfiler::TotalMilliseconds() const {
