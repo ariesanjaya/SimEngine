@@ -1096,36 +1096,170 @@ beserta jalur mundur ke putih — bukan descriptor tak sah.
 
 ---
 
-## G6 — GPU-driven: indirect draw dan occlusion culling dua fase
+## G6 — GPU-driven: indirect draw dan occlusion culling dua fase · ⏳ sebagian
 
 Ini bagian yang benar-benar "terinspirasi CryEngine", dan satu-satunya yang tidak
 boleh dikerjakan sebelum lima milestone di atasnya selesai.
 
-**Sekarang CPU memutuskan setiap frame apa yang digambar.** `Gather` menyalin,
-memfrustum-cull, dan `stable_sort` seluruh instance setiap frame
-(`VulkanRenderer.cpp:1694-1826`). Biayanya tumbuh linear terhadap isi adegan, dan
-ia dibayar di thread yang juga harus merekam command buffer.
+**Yang sudah mendarat: alat ukurnya, satuan gambarnya, dan mesin
+indirect-draw-nya. Yang belum: occlusion culling, dan alasannya sebuah angka.**
 
-- Frustum culling pindah ke compute, menghasilkan buffer perintah untuk
-  `vkCmdDrawIndexedIndirectCount`. Butuh `multiDrawIndirect` dan
-  `drawIndirectCount` — dua fitur di baris tabel G2.
-- Occlusion culling dua fase memakai `hiz_` yang **sudah dibangun tiap frame dan
-  belum ada yang memakainya untuk ini**: fase satu menggambar yang terlihat frame
-  lalu, piramida dibangun dari hasilnya, fase dua menguji sisanya terhadap
-  piramida itu dan menggambar yang lolos. Dua fase, bukan satu, karena piramida
-  dari frame lalu salah persis di tempat yang paling merugikan — saat kamera
-  berputar cepat, benda yang baru masuk pandangan dianggap tertutup dan berkedip
-  masuk satu frame terlambat.
-- Sortir per material hilang dengan sendirinya begitu material diindeks
-  (G5). Yang tersisa adalah sortir tembus pandang, dan itu memang harus tetap
-  berurutan jarak — alasannya sudah tertulis di `Gather` dan tidak berubah.
-- **Yang tidak ikut:** transparan, dan objek yang jumlahnya sedikit tapi
-  materialnya unik. GPU-driven menang pada ribuan draw yang seragam, dan kalah
-  pada belasan draw yang tiap satunya berbeda karena biaya penyiapannya tetap.
+### Alat ukur lebih dulu, karena kriterianya tidak bisa diperiksa tanpanya
+
+Kriteria selesai G6 berbunyi "menggambar jumlah segitiga yang lebih sedikit". Dua
+hal yang dibutuhkannya sama-sama tidak ada: tidak ada yang menghitung segitiga,
+dan adegan uji G0 hanya berisi 260 entity.
+
+- **Penghitung primitif per pass** menumpang lingkup yang sudah dibuka
+  `GpuProfiler` untuk timestamp: pool kedua bertipe `PIPELINE_STATISTICS`,
+  menghitung `INPUT_ASSEMBLY_PRIMITIVES`. Segitiga yang **diserahkan**, bukan
+  yang lolos clipping — culling menurunkan yang pertama, sementara yang kedua
+  ikut turun karena alasan lain juga.
+- **`Resources/Levels/bench-dense.simlevel`** — 3.020 entity, 2,79 juta segitiga.
+  Adegan G0 tidak disentuh: garis dasar yang berubah adalah garis dasar yang
+  tidak berguna.
+
+Apa yang dikatakan adegan padat sebelum satu baris pun G6 dikerjakan: **7.586
+draw call per frame**, `cpu-record` 7,840 ms, dan prepass maupun forward
+menyerahkan **seluruh** 2,79 juta segitiga adegan — dua kali.
+
+### Satuan gambar: dari entity menjadi permukaan
+
+**Setiap entity adalah satu panggilan gambar, dan penyebabnya bukan geometri.**
+`AppendRun` memakai `partColorFirst` sebagai kunci ruas, dan slot itu milik tiap
+entity sendiri — jadi dua prop bermesh sama tidak pernah bisa digabung walaupun
+seluruh isinya identik.
+
+Yang mengunci kunci itu adalah tiga hal yang dikirim lewat push constant per
+panggilan: warna ruas, slot material, slot tekstur. Ketiganya sekarang data per
+instance, dan **yang membuatnya bisa pindah adalah G5** — sebelum material
+terindeks, "material ruas ini" bukan sebuah nomor melainkan sebuah descriptor
+set. Satuan daftar gambar ikut berubah menjadi **permukaan**: sepasang (entity,
+ruas mesh), yaitu satuan yang benar-benar punya satu warna, satu material, dan
+satu tekstur.
+
+### Perintah gambar dibangkitkan GPU
+
+`DrawCull` — satu dispatch, satu thread per permukaan, keluarannya buffer
+`VkDrawIndexedIndirectCommand`. **Yang tersaring tidak dihapus dari mana pun, ia
+mendapat `instanceCount` nol.** Itu yang membuat keluarannya tidak bergantung
+pada urutan thread: tiap permukaan menulis slot tetapnya, tanpa satu pun atomic.
+Memadatkannya akan menghemat perintah yang dilewati GPU — dan menukarnya dengan
+urutan gambar yang berubah tiap frame, yaitu perbandingan gambar yang tidak bisa
+dipakai lagi.
+
+Basis instance ikut pindah ke draw-nya sendiri: `SV_StartInstanceLocation`
+menggantikan `push.instanceBase`, dan `BoxPush` tinggal satu matriks. Angkanya
+selalu sama persis dengan `firstInstance` panggilan itu, jadi yang hilang adalah
+salinan kedua dari satu angka — dan indirect draw menutup pilihan lain, karena
+perintahnya dibangkitkan GPU.
+
+Fitur yang dinyalakan: `multiDrawIndirect` dan **`drawIndirectFirstInstance`**.
+Yang kedua paling mudah terlupa — jalur ini memakai `firstInstance` sebagai nomor
+permukaan.
+
+### Hasil
+
+RTX 2060, 1280×720, GI menyala, 120 frame pemanasan + 240 diukur,
+`Resources/Levels/bench-dense.simlevel`.
+
+| | sebelum G6 | sesudah |
+|---|---:|---:|
+| draw / frame | 7.586 | **2.232** |
+| **total GPU** | 34,511 | **14,421** |
+| **total CPU** | 32,634 | **11,269** |
+| `forward-opaque` | 13,174 | 3,638 |
+| `sdf-fill` | 17,375 | 8,433 |
+| `shadow-cascades` | 2,397 | 0,727 |
+| `depth-prepass` | 0,561 | 0,480 |
+| `cpu-record` | 7,840 | 4,261 |
+| `cpu-gather` | 1,498 | 1,919 |
+| primitif, seluruh pass | 13.211.816 | 13.200.456 |
+
+**GPU 2,4× lebih cepat dan CPU 2,9× lebih cepat, tanpa satu pun segitiga
+dibuang.** Yang turun bukan pekerjaan menggambar melainkan biaya menyuruhnya:
+7.586 panggilan menjadi 2.232, dan tiap panggilan yang hilang membawa serta
+pengikatan buffer, push constant, dan penyiapan keadaan di driver.
+
+`cpu-gather` justru **naik**, dan itu memang yang diharapkan: yang diurutkan
+sekarang permukaan, bukan entity, dan jumlahnya lebih banyak. Ia belum tersentuh
+G6 — lihat di bawah.
+
+Gambar dengan GI mati pada adegan G0: **jalur GPU dan jalur CPU identik byte demi
+byte** — 0 dari 2.764.800. Sakelarnya `--bench-cpu-cull`. Jalur CPU bukan sekadar
+pembanding di sini: ia satu-satunya yang bisa dipakai perangkat tanpa
+`multiDrawIndirect`.
+
+**Pada adegan padat perbandingannya tidak lagi eksak, dan sebabnya bukan
+culling.** Dua jalan dari binary yang sama pada jalur yang sama berselisih
+1.480.215 byte; dua jalur yang berbeda berselisih 47.503. Keduanya berselisih
+**1 dari 255**, dan yang antar-jalur justru tiga puluh kali lebih kecil daripada
+yang antar-jalan. Yang bergerak adalah eksposur otomatis: ia mereduksi seluruh
+layar, dan urutan penjumlahan floating-point sebuah reduksi paralel tidak
+dijanjikan sama. Adegan G0 kebetulan mendarat di angka yang sama dua kali;
+adegan padat tidak. **Perbandingan gambar karena itu dilakukan di adegan G0**,
+dan angka adegan padat dicatat di sini supaya yang menemukannya nanti tidak
+mencarinya di jalur culling.
+
+### Dua cacat yang lebih tua ikut terangkat
+
+**`firstIndex` dan `vertexOffset` tertukar di `vkCmdDrawIndexed`.**
+`SubMesh::firstIndex` adalah offset ke dalam buffer indeks; menyerahkannya
+sebagai `vertexOffset` berarti ruas kedua sebuah mesh membaca indeks milik ruas
+pertama lalu menggeser vertexnya sejauh itu. Mesh berruas satu punya `firstIndex`
+nol, jadi keduanya menghasilkan gambar yang sama — dan itu hampir seluruh isi
+adegan. Yang menemukannya jalur indirect, yang menuliskan kedua medan itu dengan
+namanya masing-masing dan karena itu menghasilkan gambar yang berbeda. **Shader
+ball di adegan uji sekarang tergambar utuh.**
+
+**Descriptor SDF ditulis ulang seluruhnya di tengah frame.**
+`SdfClipmapResource` menumbuhkan buffer entri satu slot lalu menulis ulang set
+tiap kaskade dan set entri tiap slot — termasuk slot yang masih dibaca command
+buffer yang belum selesai. Tidak pernah muncul selama adegan ujinya kecil: buffer
+entri cukup untuk 64 kotak, dan adegan yang tidak melewatinya tidak pernah
+menumbuhkannya. Adegan padat melewatinya, dan validation layer melaporkannya
+enam belas kali per jalan.
+
+### Yang belum dikerjakan, dan angkanya
+
+**Occlusion culling belum ada, dan yang menahannya bukan kesulitan melainkan
+sebuah pengukuran.** Adegan padat sekarang:
+
+- `depth-prepass` 0,480 ms untuk 2,79 juta segitiga. Itu batas atas seluruh
+  penghematan occlusion culling di pass ini.
+- `forward-opaque` 3,638 ms untuk segitiga yang sama — tetapi fragmen yang
+  tertutup **sudah** ditolak uji depth `EQUAL` sejak prepass ada. Yang bisa
+  dihemat di sini hanya tahap vertex dan rasterisasi, bukan shading; dan
+  shading-lah yang mengisi 3,6 ms itu.
+- Yang sebenarnya menguasai frame adalah **`sdf-fill`, 8,433 ms** — komposit
+  clipmap SDF, milik jalur GI, dan tidak tersentuh G6 sama sekali.
+
+Menambahkannya juga menuntut piramida depth kedua: yang ada sekarang meringkas
+dengan **maksimum** (permukaan terdekat, untuk penelusuran sinar), sementara uji
+occlusion menuntut **minimum** (permukaan terjauh). Dua piramida, dua pass
+pembangunan, satu image lagi.
+
+Jadi ia ditunda, dengan angkanya tercatat — bukan dikerjakan atas dugaan bahwa
+"culling pasti membantu". Yang membuatnya berharga adalah adegan yang
+prepass-nya mahal: geometri berat yang saling menutupi, bukan tiga ribu prop
+kecil di atas lantai datar.
+
+**`Gather` juga belum mendekati nol** (1,919 ms). Yang tersisa di sana:
+mentransformasikan kotak tiap entity, `stable_sort` seluruh permukaan, dan
+menyusun ruas bayangan. Yang pertama bisa pindah ke compute bersama culling-nya;
+yang kedua hilang kalau ruas disusun dari tabel yang dipelihara antar-frame
+alih-alih dibangun ulang; yang ketiga menunggu pass bayangan ikut GPU-driven.
+Ketiganya pekerjaan tersendiri, dan ketiganya menunggu adegan yang membuktikan
+harganya.
 
 **Kriteria selesai:** adegan uji dengan ribuan instance menggambar jumlah segitiga
 yang lebih sedikit dengan gambar yang sama; waktu CPU `Gather` mendekati nol;
 memutar kamera cepat tidak menghasilkan benda yang berkedip masuk.
+
+**Yang sudah lulus:** tidak satu pun dari ketiganya — dan itu disebutkan, bukan
+dikaburkan. Yang lulus adalah kriteria yang tidak tertulis di sana: gambar yang
+sama dengan panggilan gambar tiga kali lebih sedikit, dan waktu frame yang
+setengahnya.
 
 ---
 
@@ -1236,7 +1370,7 @@ kembali ke daftar.
 | G3 | Fondasi compute: build, RHI, pass di frame graph | G2 | ✅ |
 | G4 | Clipmap SDF, Hi-Z, dan penetapan cluster pindah ke compute | G3 | ✅ (Hi-Z diukur lalu dikembalikan — lihat catatannya) |
 | G5 | Bindless (`descriptorIndexing`) + material terindeks | G2 | ✅ |
-| G6 | Indirect draw + occlusion culling dua fase | G3, G5 | ⏳ |
+| G6 | Indirect draw + occlusion culling dua fase | G3, G5 | ⏳ indirect draw ✅, occlusion belum |
 | G7 | Async compute lewat timeline semaphore | G4, G6 | ⏳ |
 | G8 | Resolusi dinamis | E8.8 (TAA), G0 | ⏳ |
 
