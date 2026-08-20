@@ -3,6 +3,7 @@
 #include "ClusterAssign.h"
 #include "ComputeGradient.h"
 #include "DepthPyramid.h"
+#include "DrawCull.h"
 #include "PostProcess.h"
 #include "SkyAtmosphere.h"
 #include "VolumePass.h"
@@ -41,15 +42,6 @@ namespace {
 /// Harus sama persis dengan blok push_constant di Shaders/box.vert.
 struct BoxPush {
     Mat4 viewProj;
-    /// `firstInstance` panggilan gambar ini.
-    ///
-    /// **Ada karena `SV_InstanceID` dimulai dari nol pada setiap draw**, bukan
-    /// dari `firstInstance` — slangc menerjemahkannya menjadi
-    /// `gl_InstanceIndex - gl_BaseInstance`. Atribut instance di sebelahnya
-    /// justru diambil menurut `gl_InstanceIndex`. Tanpa basis ini, setiap ruas
-    /// sesudah yang pertama memakai transform milik ruas pertama sambil memakai
-    /// warna miliknya sendiri.
-    uint32_t instanceBase = 0;
 };
 
 /// Tahap yang boleh membaca `BoxPush`.
@@ -594,6 +586,16 @@ public:
         // dipetakan operator nada.
         // Penetapan cluster di GPU. Gagal membuatnya bukan kegagalan renderer:
         // jalur CPU-nya masih ada dan masih benar.
+        // Culling GPU. **Gagal dibuat bukan kegagalan fatal**: jalur CPU tetap
+        // ada, dan ia memang harus tetap ada — lihat catatan di `DrawCull`.
+        if (device_.Capabilities().multiDrawIndirect) {
+            if (!drawCull_.Create(device_, shaderDirectory_)) {
+                SIM_WARN("Render", "GPU draw culling unavailable; culling stays on the CPU");
+            }
+        } else {
+            SIM_INFO("Render",
+                     "this GPU has no multi-draw indirect; culling stays on the CPU");
+        }
         if (clusterAssign_.Create(device_, shaderDirectory_)) {
             clusterGrid_.Build(clusterSettings_, 1.0f, 1.0f, 0.1f, kClusterFar);
             clusterAssign_.Adopt(clusterGrid_.ClusterCount(),
@@ -746,6 +748,19 @@ public:
         {
             const CpuScope scope(cpuTimings_, "cpu-gather");
             Gather(desc, scene, viewProj);
+        }
+
+        // **Culling pindah ke GPU, dan CPU berhenti memutuskan apa yang
+        // digambar.** Yang diunggah adalah kotak tiap permukaan dan rentang
+        // indeksnya; yang kembali sebuah buffer perintah gambar. Jalur CPU tetap
+        // ada di sebelahnya — ia jalur mundur untuk perangkat tanpa indirect
+        // draw, dan ia pembanding: dua implementasi yang harus sepakat adalah
+        // cara termurah menemukan yang mana yang salah.
+        gpuCullActive_ = desc.gpuCull && drawCull_.IsValid() && !cullSurfaces_.empty();
+        if (gpuCullActive_) {
+            const CpuScope scope(cpuTimings_, "cpu-draw-cull");
+            gpuCullActive_ = drawCull_.Upload(static_cast<uint32_t>(slotIndex_), Frustum(viewProj),
+                                              cullBounds_, cullSurfaces_);
         }
 
         // Cascade dihitung dari kamera yang sama dengan yang dipakai menggambar.
@@ -1070,7 +1085,8 @@ public:
             probes_.RecordNormalBegin(command);
             BeginPrepassRendering(command, desc);
             if (slotReady && opaqueCount > 0) {
-                DrawInstances(command, prepassPipelines_, push, slot, visibleOpaqueRuns_, 0);
+                DrawInstances(command, prepassPipelines_, push, slot, MainViewRuns(), 0,
+                              /*materialVariant=*/-1, gpuCullActive_);
             }
             vkCmdEndRendering(command);
             probes_.RecordNormalEnd(command);
@@ -1079,8 +1095,8 @@ public:
             BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/true,
                            /*writeColor=*/true);
             if (slotReady && opaqueCount > 0) {
-                DrawInstances(command, opaquePipelines_, push, slot, visibleOpaqueRuns_, 0,
-                              /*materialVariant=*/0);
+                DrawInstances(command, opaquePipelines_, push, slot, MainViewRuns(), 0,
+                              /*materialVariant=*/0, gpuCullActive_);
             }
             vkCmdEndRendering(command);
         };
@@ -1210,6 +1226,15 @@ public:
                 BeginDisplayRendering(command);
                 post_.RecordResolve(command, desc.post.enabled, desc.post.bloom);
                 vkCmdEndRendering(command);
+            };
+        }
+
+        if (drawCullPassId_ != kInvalidPass) {
+            const auto cullSlot = static_cast<uint32_t>(slotIndex_);
+            executor_.Bind(drawCommandId_,
+                           BoundBuffer{drawCull_.CommandBuffer(cullSlot), 0, VK_WHOLE_SIZE});
+            recorders[drawCullPassId_] = [this, cullSlot](VkCommandBuffer command) {
+                drawCull_.Record(command, cullSlot);
             };
         }
 
@@ -1854,6 +1879,18 @@ private:
             graph_.Write(clusterPassId_, clusterIndexId_, Access::ShaderWrite);
         }
 
+        // **Culling lebih dulu daripada apa pun yang menggambar geometri.**
+        // Yang dihasilkannya dibaca tahap `DRAW_INDIRECT`, yaitu sebelum tahap
+        // vertex — jadi barrier-nya harus sudah selesai sebelum draw pertama,
+        // bukan sebelum shader pertama.
+        drawCommandId_ = kInvalidResource;
+        drawCullPassId_ = kInvalidPass;
+        if (gpuCullActive_) {
+            drawCommandId_ = graph_.Import("draw-commands", Access::IndirectRead);
+            drawCullPassId_ = graph_.AddPass("draw-cull");
+            graph_.Write(drawCullPassId_, drawCommandId_, Access::ShaderWrite);
+        }
+
         shadowPassId_ = graph_.AddPass("shadow-cascades");
         graph_.Write(shadowPassId_, shadowId_, Access::DepthWrite);
 
@@ -1878,6 +1915,9 @@ private:
 
         prepassId_ = graph_.AddPass("depth-prepass");
         graph_.Write(prepassId_, depthId_, Access::DepthWrite);
+        if (drawCullPassId_ != kInvalidPass) {
+            graph_.Read(prepassId_, drawCommandId_, Access::IndirectRead);
+        }
 
         // Piramida dibangun dari depth prepass, bukan dari depth akhir. Yang
         // ditelusuri lapis screen-space adalah permukaan buram; yang tembus
@@ -1901,6 +1941,9 @@ private:
         if (clusterPassId_ != kInvalidPass) {
             graph_.Read(opaqueId_, clusterRangeId_, Access::ShaderRead);
             graph_.Read(opaqueId_, clusterIndexId_, Access::ShaderRead);
+        }
+        if (drawCullPassId_ != kInvalidPass) {
+            graph_.Read(opaqueId_, drawCommandId_, Access::IndirectRead);
         }
         graph_.Read(opaqueId_, depthId_, Access::DepthWrite);
         graph_.Read(opaqueId_, shadowId_, Access::ShaderRead);
@@ -2274,6 +2317,10 @@ private:
         opaqueTransforms_.reserve(gathered_.size());
         instanceBounds_.reserve(gathered_.size());
         instanceVisible_.reserve(gathered_.size());
+        cullBounds_.clear();
+        cullSurfaces_.clear();
+        cullBounds_.reserve(gathered_.size());
+        cullSurfaces_.reserve(gathered_.size());
         for (const SurfaceEntry& entry : gathered_) {
             if (entry.caster) {
                 ++casterCount_;
@@ -2283,6 +2330,15 @@ private:
             opaqueTransforms_.push_back(entry.transform);
             instanceBounds_.push_back(entry.bounds);
             instanceVisible_.push_back(entry.cameraVisible ? 1u : 0u);
+            // Bahan untuk pass culling. **Pusat dan setengah-lebar dihitung di
+            // sini, sekali**, bukan di shader dari min/max: `Frustum::Intersects`
+            // memakai keduanya, dan dua pembagian yang seharusnya menghasilkan
+            // angka yang sama adalah dua angka yang suatu saat berbeda satu ULP.
+            cullBounds_.push_back(DrawCull::GpuBounds{Vec4(entry.bounds.Centre(), 0.0f),
+                                                      Vec4(entry.bounds.Extent(), 0.0f)});
+            const GpuMesh::Part& part =
+                meshes_[static_cast<std::size_t>(entry.mesh)]->parts[entry.part];
+            cullSurfaces_.push_back(DrawCull::GpuSurface{part.indexCount, part.firstIndex});
         }
 
         // Ruas untuk pandangan utama. Dipecah, bukan disaring saat menggambar:
@@ -2375,6 +2431,18 @@ private:
         /// Jarak ke kamera. Dibaca hanya jalur tembus pandang.
         float distance = 0.0f;
     };
+    /// Ruas yang digambar pandangan utama — prepass dan forward buram.
+    ///
+    /// **Dua daftar, dan yang membedakan siapa yang menyaring.** Jalur CPU
+    /// memakai daftar yang sudah dipecah `SplitRuns` sehingga hanya memuat yang
+    /// terlihat; jalur GPU memakai daftar utuh, karena yang menyaring adalah
+    /// `instanceCount` di dalam perintah gambarnya. Daftar utuh juga lebih
+    /// pendek: ia tidak terpecah oleh batas terlihat/tidak.
+    std::span<const DrawRun> MainViewRuns() const {
+        return gpuCullActive_ ? std::span<const DrawRun>(opaqueRuns_)
+                              : std::span<const DrawRun>(visibleOpaqueRuns_);
+    }
+
     /// Menyambung sebuah permukaan ke ruas terakhir, atau membuka ruas baru.
     ///
     /// **Kuncinya adalah segala sesuatu yang tidak bisa berubah di tengah satu
@@ -2569,7 +2637,7 @@ private:
 
     void DrawInstances(VkCommandBuffer cmd, const PipelineVariants& pipelines, const BoxPush& push,
                        InstanceSlot& slot, std::span<const DrawRun> runs, uint32_t instanceBase,
-                       int materialVariant = -1) {
+                       int materialVariant = -1, bool indirect = false) {
         // Descriptor set diikat untuk setiap pipeline forward, termasuk prepass.
         // Prepass tidak membacanya, tapi layout-nya mendeklarasikannya — dan
         // set yang dideklarasikan tapi tidak terikat adalah pelanggaran meski
@@ -2590,8 +2658,8 @@ private:
         BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, bindless_ ? 3u : 2u,
                  sets.data(), 0, nullptr);
         vkCmdPushConstants(cmd, pipelineLayout_, kBoxPushStages, 0, sizeof(BoxPush), &push);
-        DrawRuns(cmd, slot, runs, instanceBase, pipelines, pipelineLayout_, push,
-                 /*bindsMaterial=*/true, materialVariant);
+        DrawRuns(cmd, slot, runs, instanceBase, pipelines, pipelineLayout_,
+                 /*bindsMaterial=*/true, materialVariant, indirect);
     }
 
     /// Mengikat geometri tiap ruas lalu menggambarnya. Dipakai bersama pass
@@ -2611,8 +2679,8 @@ private:
     /// selesai dimuat, jauh dari sebabnya.
     void DrawRuns(VkCommandBuffer cmd, InstanceSlot& slot, std::span<const DrawRun> runs,
                   uint32_t instanceBase, const PipelineVariants& pipelines,
-                  VkPipelineLayout layout, const BoxPush& push, bool bindsMaterial,
-                  int materialVariant = -1) {
+                  VkPipelineLayout layout, bool bindsMaterial, int materialVariant = -1,
+                  bool indirect = false) {
         VkPipeline bound = VK_NULL_HANDLE;
         // **Bukan sebuah handle sentinel**: nol adalah kubus satuan, yaitu mesh
         // yang sah dan yang paling sering muncul. Bendera terpisah karena itu,
@@ -2706,14 +2774,33 @@ private:
                 }
             }
 
-            // Basis instance ruas ini. Lihat catatannya di `BoxPush`:
-            // `SV_InstanceID` mulai dari nol tiap draw, sementara atribut
-            // instance di sebelahnya tidak.
-            BoxPush runPush = push;
-            runPush.instanceBase = instanceBase + run.first;
-            vkCmdPushConstants(cmd, partLayout, kBoxPushStages, 0, sizeof(BoxPush), &runPush);
-            vkCmdDrawIndexed(cmd, part.indexCount, run.count, static_cast<int32_t>(0),
-                             static_cast<int32_t>(part.firstIndex), instanceBase + run.first);
+            // **Basis instance tidak dikirim lagi, ia sudah ada di draw-nya.**
+            // `firstInstance` adalah `SV_StartInstanceLocation` yang dibaca tahap
+            // vertex; mengirimnya lagi lewat push constant berarti dua salinan
+            // dari satu angka — dan indirect draw menutup pilihan itu
+            // seluruhnya, karena perintahnya dibangkitkan GPU.
+            if (indirect) {
+                // Satu panggilan untuk seluruh permukaan ruas ini, berapa pun
+                // banyaknya. Yang tersaring ada di sana juga, dengan
+                // `instanceCount` nol — lihat catatan di `DrawCull`.
+                vkCmdDrawIndexedIndirect(
+                    cmd, drawCull_.CommandBuffer(static_cast<uint32_t>(slotIndex_)),
+                    static_cast<VkDeviceSize>(run.first) * sizeof(VkDrawIndexedIndirectCommand),
+                    run.count, sizeof(VkDrawIndexedIndirectCommand));
+            } else {
+                // **`firstIndex` lalu `vertexOffset`, dan urutan itu sempat
+                // tertukar.** `SubMesh::firstIndex` adalah offset ke dalam
+                // buffer indeks; menyerahkannya sebagai `vertexOffset` berarti
+                // ruas kedua sebuah mesh membaca indeks milik ruas pertama lalu
+                // menggeser vertexnya sejauh itu. Mesh berruas satu — yaitu
+                // hampir semuanya — punya `firstIndex` nol, jadi keduanya
+                // menghasilkan gambar yang sama dan tidak ada yang menemukannya.
+                // Yang menemukannya jalur indirect, yang menuliskan kedua medan
+                // itu dengan namanya masing-masing.
+                vkCmdDrawIndexed(cmd, part.indexCount, run.count,
+                                 /*firstIndex=*/part.firstIndex, /*vertexOffset=*/0,
+                                 instanceBase + run.first);
+            }
             ++stats_.drawCalls;
         }
     }
@@ -3969,7 +4056,7 @@ private:
                 const BoxPush push{entry.viewProjection};
                 vkCmdPushConstants(cmd, shadowLayout_, kBoxPushStages, 0,
                                    sizeof(BoxPush), &push);
-                DrawRuns(cmd, slot, shadowRuns_, 0, shadowPipelines_, shadowLayout_, push,
+                DrawRuns(cmd, slot, shadowRuns_, 0, shadowPipelines_, shadowLayout_,
                          /*bindsMaterial=*/false);
             }
         }
@@ -4723,7 +4810,7 @@ private:
                              &slot.skinSet, 0, nullptr);
                     vkCmdPushConstants(cmd, shadowLayout_, kBoxPushStages, 0,
                                        sizeof(BoxPush), &push);
-                    DrawRuns(cmd, slot, shadowRuns_, 0, shadowPipelines_, shadowLayout_, push,
+                    DrawRuns(cmd, slot, shadowRuns_, 0, shadowPipelines_, shadowLayout_,
                              /*bindsMaterial=*/false);
                 }
             }
@@ -4818,6 +4905,15 @@ private:
     PostProcess post_;
     ComputeGradient gradient_;
     ClusterAssign clusterAssign_;
+    /// Culling di GPU yang menghasilkan perintah gambar (G6). Lihat `DrawCull`.
+    DrawCull drawCull_;
+    /// Jalur GPU-driven yang benar-benar dipakai frame ini.
+    bool gpuCullActive_ = false;
+    /// Kotak dan rentang indeks tiap permukaan, dipakai ulang tiap frame.
+    std::vector<DrawCull::GpuBounds> cullBounds_;
+    std::vector<DrawCull::GpuSurface> cullSurfaces_;
+    ResourceId drawCommandId_ = kInvalidResource;
+    PassId drawCullPassId_ = kInvalidPass;
     /// Jalur yang benar-benar dipakai frame ini. Berubahnya menuntut descriptor
     /// ditulis ulang, jadi ia disimpan alih-alih dibaca dari `desc` tiap kali.
     bool gpuClustersActive_ = false;

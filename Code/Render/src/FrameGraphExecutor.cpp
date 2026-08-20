@@ -75,6 +75,12 @@ FrameGraphExecutor::Stage FrameGraphExecutor::Translate(Access access) {
         case Access::TransferWrite:
             return {VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
                     VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL};
+        case Access::IndirectRead:
+            // Layout `UNDEFINED`: yang memakainya selalu buffer, dan buffer
+            // tidak punya layout. Menyebut layout apa pun di sini akan membuat
+            // barrier image yang tidak pernah ada pemakainya.
+            return {VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT, VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT,
+                    VK_IMAGE_LAYOUT_UNDEFINED};
         case Access::Present:
             // "Present" di sini berarti diserahkan ke ImGui sebagai tekstur,
             // bukan ke swapchain: yang membacanya adalah fragment shader UI.

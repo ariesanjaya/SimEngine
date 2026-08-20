@@ -100,6 +100,7 @@ void PrintUsage() {
         "  --validate-sync               nyalakan validasi sinkronisasi; lambat, sengaja\n"
         "  --bench-cpu-clusters          penetapan cluster di CPU, bukan GPU (G4)\n"
         "  --bench-cpu-sdf               komposit clipmap SDF di CPU, bukan GPU (G4)\n"
+        "  --bench-cpu-cull              culling dan perintah gambar di CPU (G6)\n"
         "  --no-bindless                 material lewat set per ruas, bukan bindless (G5)\n"
         "  --bench-dump-sdf <path>       simpan isi voxel kaskade SDF; untuk dibandingkan\n",
         stderr);
@@ -497,6 +498,7 @@ int main(int argc, char** argv) {
         // bisa dijalankan dari satu perintah, bukan dari dua build.
         bool cpuClusters = false;
         bool cpuSdf = false;
+        bool cpuCull = false;
         for (int at = 1; at < argc; ++at) {
             if (argv[at] == nullptr) {
                 continue;
@@ -508,6 +510,8 @@ int main(int argc, char** argv) {
                 cpuClusters = true;
             } else if (flag == "--bench-cpu-sdf") {
                 cpuSdf = true;
+            } else if (flag == "--bench-cpu-cull") {
+                cpuCull = true;
             }
         }
 
@@ -648,6 +652,7 @@ int main(int argc, char** argv) {
             desc.computeGradient = computeGradient;
             desc.gpuClusters = !cpuClusters;
             desc.gpuSdf = !cpuSdf;
+            desc.gpuCull = !cpuCull;
             // Delta yang sama dengan yang diberikan ke `app.Tick`, dan karena
             // alasan yang sama: yang maju menurut waktu — eksposur, awan,
             // akumulasi temporal — harus maju sama jauhnya di tiap jalan, kalau

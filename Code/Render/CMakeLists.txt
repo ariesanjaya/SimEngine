@@ -14,6 +14,7 @@ sim_add_library(Render
         src/ClusterAssign.cpp
         src/ComputeGradient.cpp
         src/DepthPyramid.cpp
+        src/DrawCull.cpp
         src/Denoise.cpp
         src/PostProcess.cpp
         src/ProbeField.cpp
@@ -92,6 +93,7 @@ sim_compile_shaders(SimShadersGrid
         # akhirannya, dan itu berlaku sama untuk `.vert`, `.frag`, dan `.comp`.
         ${CMAKE_SOURCE_DIR}/Shaders/debug_gradient.comp.slang
         ${CMAKE_SOURCE_DIR}/Shaders/cluster_assign.comp.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/draw_cull.comp.slang
         ${CMAKE_SOURCE_DIR}/Shaders/sdf_fill.comp.slang)
 # openpbr.slang sengaja tidak ada di daftar ini. Ia modul pustaka tanpa entry
 # point — yang mengompilasinya adalah `AssembleMaterialModule`, yang menanamnya

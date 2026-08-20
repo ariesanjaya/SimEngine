@@ -20,11 +20,12 @@
 #include "skin_common.slang"
 
 [shader("vertex")]
-float4 main(BoxVertex vertex, uint instanceId : SV_InstanceID) : SV_Position {
+float4 main(BoxVertex vertex, uint instanceId : SV_InstanceID,
+                uint instanceBase : SV_StartInstanceLocation) : SV_Position {
     // Kulit ikut di sini, dan itu wajib bukan tambahan: bayangan yang tetap
     // berdiri di bind pose sementara karakternya bergerak adalah bayangan yang
     // lepas dari pemiliknya — cacat yang jauh lebih mencolok daripada tidak ada
     // bayangan sama sekali.
-    float4x4 model = instanceModel(push.instanceBase + instanceId);
+    float4x4 model = instanceModel(instanceBase + instanceId);
     return mul(push.viewProj, mul(model, float4(skinPosition(vertex), 1.0)));
 }

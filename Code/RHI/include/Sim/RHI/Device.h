@@ -86,6 +86,9 @@ struct DeviceCapabilities {
     /// Sinkronisasi lintas-antrean G7. Semaphore biner memaksa satu penunggu per
     /// sinyal, dan ketergantungan yang berbentuk graf harus dipaksa jadi rantai.
     bool timelineSemaphore = false;
+    /// Indirect draw dengan banyak perintah **dan** `firstInstance` bukan nol.
+    /// Keduanya dituntut jalur GPU-driven, jadi keduanya dijawab satu medan:
+    /// yang punya salah satunya saja tetap tidak bisa memakainya.
     bool multiDrawIndirect = false;
     bool drawIndirectCount = false;
     /// Setengah presisi di shader. Turing ke atas menjalankannya dua kali lipat,

@@ -10,7 +10,8 @@
 #include "skin_common.slang"
 
 [shader("vertex")]
-BoxVarying main(BoxVertex vertex, uint instanceId : SV_InstanceID) {
+BoxVarying main(BoxVertex vertex, uint instanceId : SV_InstanceID,
+                uint instanceBase : SV_StartInstanceLocation) {
     // **Kulit lebih dulu, transform instance sesudahnya.** Palet memetakan ruang
     // bind ke ruang lokal mesh, jadi ia berada di dalam transform dunia
     // entity-nya — bukan menggantikannya. Urutan yang terbalik membuat karakter
@@ -20,7 +21,7 @@ BoxVarying main(BoxVertex vertex, uint instanceId : SV_InstanceID) {
     float3 localTangent;
     applySkinTangent(vertex, localPosition, localNormal, localTangent);
 
-    float4x4 model = instanceModel(push.instanceBase + instanceId);
+    float4x4 model = instanceModel(instanceBase + instanceId);
     float4 world = mul(model, float4(localPosition, 1.0));
 
     BoxVarying output;

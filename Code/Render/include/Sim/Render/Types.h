@@ -406,6 +406,15 @@ struct ViewportDesc {
     /// ada yang bisa menilai "sedikit berbeda" dengan mata. Yang menilainya
     /// perbandingan isi voxel antara kedua jalur.
     bool gpuSdf = true;
+
+    /// Frustum culling dan pembangkitan perintah gambar dijalankan di GPU (G6).
+    ///
+    /// Sakelarnya ada karena alasan yang sama dengan `gpuClusters`, ditambah
+    /// satu yang khusus: jalur CPU adalah satu-satunya yang bisa dipakai
+    /// perangkat tanpa `multiDrawIndirect`, jadi ia bukan sekadar pembanding
+    /// melainkan jalur yang benar-benar dipakai orang. Yang berhenti dijalankan
+    /// siapa pun adalah yang diam-diam rusak.
+    bool gpuCull = true;
 };
 
 /// Satu objek yang bisa digambar, sudah dalam ruang dunia.

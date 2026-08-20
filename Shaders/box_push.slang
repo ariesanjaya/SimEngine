@@ -18,8 +18,6 @@ struct BoxPush {
     /// bayangan. Satu medan, karena yang dilakukan keduanya sama: memindahkan
     /// ruang dunia ke ruang klip milik pengamatnya masing-masing.
     float4x4 viewProj;
-    /// `firstInstance` draw ini. Lihat catatannya di instance_common.slang.
-    uint instanceBase;
 };
 
 [[vk::push_constant]] ConstantBuffer<BoxPush> push;

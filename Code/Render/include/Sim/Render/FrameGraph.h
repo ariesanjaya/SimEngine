@@ -27,6 +27,13 @@ enum class Access : uint8_t {
     ShaderWrite,
     TransferRead,
     TransferWrite,
+    /// Dibaca `vkCmdDraw*Indirect` sebagai perintah gambar.
+    ///
+    /// **Tahapnya `DRAW_INDIRECT`, bukan tahap shader mana pun**, dan itu yang
+    /// membuatnya harus punya nilai sendiri: perintah dibaca sebelum tahap
+    /// vertex berjalan, jadi barrier yang menunggu tahap vertex terlambat satu
+    /// tahap penuh — dan yang terbaca adalah perintah frame sebelumnya.
+    IndirectRead,
     /// Dibaca sebagai hasil akhir — dipakai target yang diserahkan ke ImGui.
     Present,
 };

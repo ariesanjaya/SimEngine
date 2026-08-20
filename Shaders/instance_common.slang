@@ -84,10 +84,16 @@ struct BoxVertex {
 /// **Indeksnya bukan `SV_InstanceID` apa adanya.** slangc menerjemahkan
 /// `SV_InstanceID` menjadi `gl_InstanceIndex - gl_BaseInstance`, jadi ia mulai
 /// dari nol pada setiap draw — sementara atribut instance di sebelahnya diambil
-/// menurut `gl_InstanceIndex`, yaitu **termasuk** `firstInstance`. Pemanggil
-/// menambahkan basisnya lewat push constant supaya keduanya menunjuk instance
-/// yang sama; tanpa itu, setiap ruas sesudah yang pertama memakai transform
-/// milik ruas pertama.
+/// menurut `gl_InstanceIndex`, yaitu **termasuk** `firstInstance`. Basisnya
+/// karena itu harus ditambahkan kembali.
+///
+/// **Basisnya datang dari draw-nya sendiri (`SV_StartInstanceLocation`), bukan
+/// dari push constant.** Sampai G6 pemanggil mengirimnya lewat push constant,
+/// dan angkanya selalu sama persis dengan `firstInstance` panggilan itu — dua
+/// salinan dari satu angka, yang salah satunya harus diingat untuk diperbarui.
+/// Yang menutup pilihan itu adalah indirect draw: perintahnya dibangkitkan GPU,
+/// jadi tidak ada satu pun tempat di CPU yang bisa menuliskan push constant per
+/// panggilan.
 float4x4 instanceModel(uint index) {
     return instanceTransforms[index];
 }
