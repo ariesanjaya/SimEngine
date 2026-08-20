@@ -17,6 +17,20 @@ struct BoundImage {
     VkImageAspectFlags aspect = VK_IMAGE_ASPECT_COLOR_BIT;
 };
 
+/// Buffer sungguhan di balik sebuah resource graph.
+///
+/// **Terpisah dari `BoundImage` karena barrier-nya jenis yang berbeda, bukan
+/// karena kerapian.** Buffer tidak punya layout: yang berpindah hanyalah
+/// ketampakan tulisannya, jadi `VkBufferMemoryBarrier2` menyebut stage dan
+/// akses tanpa `oldLayout`/`newLayout`. Memaksa keduanya lewat satu jalur
+/// berarti buffer ikut membawa layout yang tidak berarti apa-apa — dan layout
+/// yang tidak berarti apa-apa adalah layout yang suatu saat dipakai.
+struct BoundBuffer {
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceSize offset = 0;
+    VkDeviceSize size = VK_WHOLE_SIZE;
+};
+
 /// Menjalankan hasil kompilasi frame graph sebagai perintah Vulkan.
 ///
 /// **Eksekutor tidak tahu apa pun tentang pass yang dijalankannya.** Ia hanya
@@ -39,6 +53,14 @@ public:
     /// Memasangkan sebuah resource graph ke image sungguhan. Wajib untuk setiap
     /// resource yang benar-benar dipakai pass yang hidup.
     void Bind(ResourceId resource, const BoundImage& image);
+    /// Sama, untuk resource yang isinya buffer.
+    ///
+    /// Belum ada pass yang memakainya: pemakai pertamanya adalah penetapan lampu
+    /// ke cluster di G4, yang menulis hasilnya ke storage buffer. Ada sejak
+    /// sekarang dengan alasan yang sama seperti antrean compute di G2 — jalur
+    /// yang ditambahkan bersama pemakai pertamanya adalah jalur yang dirancang
+    /// untuk satu pemakai.
+    void Bind(ResourceId resource, const BoundBuffer& buffer);
     void Clear();
 
     /// Menjalankan graph. `recorders` diindeks `PassId`; entri kosong berarti
@@ -66,7 +88,11 @@ private:
 
     static Stage Translate(Access access);
 
+    /// Memastikan ketiga larik di bawah muat untuk `resource`.
+    void Reserve(ResourceId resource);
+
     std::vector<BoundImage> bound_;
+    std::vector<BoundBuffer> buffers_;
     std::vector<VkImageLayout> layout_;
 };
 

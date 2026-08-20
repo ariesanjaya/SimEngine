@@ -252,11 +252,22 @@ AssetDatabase::ScanResult AssetDatabase::Scan(const std::filesystem::path& root,
         return result;
     }
 
+    // **Yang ditelusuri adalah akar yang sudah dinormalkan, bukan akar apa
+    // adanya.** Pemotongan awalan di `ToRelativeString` membandingkan string
+    // mentah, jadi kedua sisi harus berasal dari bentuk yang sama. Akar
+    // `./Resources` menormalkan diri menjadi `Resources` sementara iterasi atas
+    // akar aslinya menghasilkan `./Resources/Meshes/...`; awalannya lalu tidak
+    // pernah cocok, jalur "relatif" yang tersimpan justru jalur utuh, dan
+    // `AbsolutePath` menempelkan akarnya sekali lagi menjadi
+    // `./Resources/./Resources/...`. Yang terlihat bukan galat indeks melainkan
+    // setiap mesh bawaan gagal dimuat — dan hanya ketika programnya dijalankan
+    // lewat jalur relatif, yaitu persis cara ia dijalankan dari folder build.
+    const std::filesystem::path normalizedRoot = root.lexically_normal();
     // Dihitung sekali di luar gelung: dipakai 10.000 kali per pemindaian.
-    const std::string rootText = root.lexically_normal().string();
+    const std::string rootText = normalizedRoot.string();
 
     const ImporterRegistry& importers = ImporterRegistry::Get();
-    for (std::filesystem::recursive_directory_iterator it(root, error), end; it != end;
+    for (std::filesystem::recursive_directory_iterator it(normalizedRoot, error), end; it != end;
          it.increment(error)) {
         if (error) {
             SIM_WARN("Assets", "Scan error under {}: {}", root.string(), error.message());

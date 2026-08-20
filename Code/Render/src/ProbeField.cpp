@@ -163,7 +163,7 @@ bool ProbeField::CreateTracePipeline(const std::filesystem::path& shaderDirector
     info.pDynamicState = &state.dynamic;
     info.layout = traceLayout_;
 
-    const VkResult result = vkCreateGraphicsPipelines(device_->Handle(), VK_NULL_HANDLE, 1, &info,
+    const VkResult result = vkCreateGraphicsPipelines(device_->Handle(), device_->PipelineCache(), 1, &info,
                                                       nullptr, &tracePipeline_);
     vkDestroyShaderModule(device_->Handle(), vertex, nullptr);
     vkDestroyShaderModule(device_->Handle(), fragment, nullptr);
@@ -268,7 +268,7 @@ bool ProbeField::CreateFilterPipeline(const std::filesystem::path& shaderDirecto
     info.pDynamicState = &state.dynamic;
     info.layout = filterLayout_;
 
-    const VkResult result = vkCreateGraphicsPipelines(device_->Handle(), VK_NULL_HANDLE, 1, &info,
+    const VkResult result = vkCreateGraphicsPipelines(device_->Handle(), device_->PipelineCache(), 1, &info,
                                                       nullptr, &filterPipeline_);
     vkDestroyShaderModule(device_->Handle(), vertex, nullptr);
     vkDestroyShaderModule(device_->Handle(), fragment, nullptr);

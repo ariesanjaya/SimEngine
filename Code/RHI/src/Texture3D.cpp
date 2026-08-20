@@ -1,5 +1,7 @@
 #include "Sim/RHI/Texture3D.h"
 
+#include <cstring>
+
 #include "Sim/Core/Log.h"
 #include "Sim/RHI/Buffer.h"
 
@@ -9,8 +11,14 @@ Texture3D::~Texture3D() {
     Destroy();
 }
 
+bool Texture3D::SupportsStorage(const Device& device, VkFormat format) {
+    VkFormatProperties properties{};
+    vkGetPhysicalDeviceFormatProperties(device.PhysicalDevice(), format, &properties);
+    return (properties.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT) != 0;
+}
+
 bool Texture3D::Create(Device& device, const glm::uvec3& extent, VkFormat format,
-                       uint32_t bytesPerTexel) {
+                       uint32_t bytesPerTexel, bool storage) {
     if (extent.x == 0 || extent.y == 0 || extent.z == 0 || bytesPerTexel == 0) {
         return false;
     }
@@ -28,7 +36,14 @@ bool Texture3D::Create(Device& device, const glm::uvec3& extent, VkFormat format
     imageInfo.arrayLayers = 1;
     imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
-    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    // TRANSFER_SRC selalu ada: `Readback` adalah alat verifikasi yang harus
+    // bisa dijalankan tanpa membuat ulang teksturnya dengan usage lain — dan
+    // sebuah bit usage yang tidak dipakai tidak berharga apa pun.
+    imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                      VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (storage) {
+        imageInfo.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    }
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     VmaAllocationCreateInfo allocationInfo{};
@@ -76,22 +91,48 @@ bool Texture3D::Create(Device& device, const glm::uvec3& extent, VkFormat format
     return true;
 }
 
+namespace {
+
+/// Tahap dan akses yang berlaku untuk sebuah layout.
+///
+/// **Diturunkan dari layout, bukan dari arah perpindahannya.** Bentuk sebelumnya
+/// menyimpulkan keduanya dari satu pertanyaan — "apakah tujuannya TRANSFER_DST"
+/// — dan itu benar selama hanya ada dua layout. Kaskade SDF yang diisi compute
+/// menambahkan yang ketiga, dan sebuah `if` yang menjawab pertanyaan biner
+/// tentang tiga kemungkinan akan selalu salah pada salah satunya.
+struct LayoutStage {
+    VkPipelineStageFlags2 stage = VK_PIPELINE_STAGE_2_NONE;
+    VkAccessFlags2 access = VK_ACCESS_2_NONE;
+};
+
+LayoutStage StageOf(VkImageLayout layout) {
+    switch (layout) {
+        case VK_IMAGE_LAYOUT_UNDEFINED:
+            return {VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT, VK_ACCESS_2_NONE};
+        case VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL:
+            return {VK_PIPELINE_STAGE_2_COPY_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT};
+        case VK_IMAGE_LAYOUT_GENERAL:
+            return {VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT};
+        default:
+            // SHADER_READ_ONLY: yang membacanya penelusur GI di fragment shader.
+            return {VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+                        VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT,
+                    VK_ACCESS_2_SHADER_SAMPLED_READ_BIT};
+    }
+}
+
+}  // namespace
+
 void Texture3D::RecordTransition(VkCommandBuffer cmd, VkImageLayout from, VkImageLayout to) {
-    const bool toTransfer = to == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    const LayoutStage source = StageOf(from);
+    const LayoutStage destination = StageOf(to);
     VkImageMemoryBarrier2 barrier{};
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
-    barrier.srcStageMask = toTransfer ? VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT
-                                      : VK_PIPELINE_STAGE_2_COPY_BIT;
-    barrier.srcAccessMask = toTransfer ? VK_ACCESS_2_SHADER_SAMPLED_READ_BIT
-                                       : VK_ACCESS_2_TRANSFER_WRITE_BIT;
-    barrier.dstStageMask = toTransfer ? VK_PIPELINE_STAGE_2_COPY_BIT
-                                      : VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
-    barrier.dstAccessMask = toTransfer ? VK_ACCESS_2_TRANSFER_WRITE_BIT
-                                       : VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
-    if (from == VK_IMAGE_LAYOUT_UNDEFINED) {
-        barrier.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
-        barrier.srcAccessMask = VK_ACCESS_2_NONE;
-    }
+    barrier.srcStageMask = source.stage;
+    barrier.srcAccessMask = source.access;
+    barrier.dstStageMask = destination.stage;
+    barrier.dstAccessMask = destination.access;
     barrier.oldLayout = from;
     barrier.newLayout = to;
     barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -183,6 +224,74 @@ void Texture3D::Destroy() {
         allocation_ = VK_NULL_HANDLE;
     }
     extent_ = glm::uvec3(0);
+}
+
+bool Texture3D::Readback(std::vector<uint8_t>& out) const {
+    if (device_ == nullptr || image_ == VK_NULL_HANDLE) {
+        return false;
+    }
+    const VkDeviceSize bytes = static_cast<VkDeviceSize>(extent_.x) * extent_.y * extent_.z *
+                               bytesPerTexel_;
+
+    VkBufferCreateInfo bufferInfo{};
+    bufferInfo.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    bufferInfo.size = bytes;
+    bufferInfo.usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT;
+    VmaAllocationCreateInfo allocationInfo{};
+    allocationInfo.usage = VMA_MEMORY_USAGE_AUTO;
+    allocationInfo.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_RANDOM_BIT |
+                           VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    VkBuffer staging = VK_NULL_HANDLE;
+    VmaAllocation allocation = VK_NULL_HANDLE;
+    VmaAllocationInfo mapped{};
+    if (vmaCreateBuffer(device_->Allocator(), &bufferInfo, &allocationInfo, &staging, &allocation,
+                        &mapped) != VK_SUCCESS) {
+        SIM_ERROR("RHI", "cannot allocate the volume readback buffer");
+        return false;
+    }
+
+    VkCommandBuffer cmd = device_->BeginOneShot();
+    // Dari SHADER_READ_ONLY, karena itulah keadaan tekstur ini di luar
+    // pembaruan — dan `Readback` memang hanya dipanggil di antara frame.
+    VkImageMemoryBarrier2 barrier{};
+    barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    barrier.oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    barrier.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    barrier.image = image_;
+    barrier.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    barrier.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
+    barrier.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
+    VkDependencyInfo dependency{};
+    dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+    dependency.imageMemoryBarrierCount = 1;
+    dependency.pImageMemoryBarriers = &barrier;
+    vkCmdPipelineBarrier2(cmd, &dependency);
+
+    VkBufferImageCopy region{};
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1;
+    region.imageExtent = {extent_.x, extent_.y, extent_.z};
+    vkCmdCopyImageToBuffer(cmd, image_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, staging, 1,
+                           &region);
+
+    std::swap(barrier.oldLayout, barrier.newLayout);
+    barrier.srcStageMask = VK_PIPELINE_STAGE_2_COPY_BIT;
+    barrier.srcAccessMask = VK_ACCESS_2_TRANSFER_READ_BIT;
+    barrier.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    barrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
+    vkCmdPipelineBarrier2(cmd, &dependency);
+    device_->EndOneShot(cmd);
+
+    out.resize(static_cast<std::size_t>(bytes));
+    std::memcpy(out.data(), mapped.pMappedData, static_cast<std::size_t>(bytes));
+    vmaDestroyBuffer(device_->Allocator(), staging, allocation);
+    return true;
 }
 
 }  // namespace sim::rhi

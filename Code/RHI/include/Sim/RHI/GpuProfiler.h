@@ -51,6 +51,16 @@ public:
     /// Hasil frame terakhir yang sudah selesai di GPU. Kosong sampai beberapa
     /// frame pertama lewat.
     std::span<const Scope> Results() const { return results_; }
+    /// Naik tepat sekali setiap kali `Results()` benar-benar berganti isi.
+    ///
+    /// **Ada karena pemungutan boleh gagal, dan gagalnya diam.** `Collect`
+    /// melewati hasil yang belum siap alih-alih menunggunya, jadi dua frame
+    /// berturut-turut bisa membaca angka yang sama persis. Untuk angka yang
+    /// dibaca manusia itu tidak berarti apa-apa; untuk yang merata-ratakan
+    /// ratusan frame, itu berarti satu frame ikut berhitung dua kali dan
+    /// bobotnya berlipat tanpa ada yang menyadarinya. Yang mengukur karena itu
+    /// mencatat sampel hanya saat angka ini berpindah.
+    uint64_t ResultsSerial() const { return resultsSerial_; }
     /// Jumlah seluruh lingkup, milidetik.
     double TotalMilliseconds() const;
 
@@ -77,6 +87,7 @@ private:
     std::array<Frame, kFrameCount> frames_{};
     std::vector<uint64_t> readback_;
     std::vector<Scope> results_;
+    uint64_t resultsSerial_ = 0;
     int openScope_ = -1;
 };
 

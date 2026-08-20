@@ -68,6 +68,19 @@ public:
         return (slice * settings_.tilesY + y) * settings_.tilesX + x;
     }
 
+    /// Angka yang sudah dijepit `Build`, untuk sisi yang harus memakai angka
+    /// yang sama persis — yaitu shader penetapan cluster.
+    ///
+    /// **Yang dikembalikan bukan yang diberikan pemanggil.** `Build` menjepit
+    /// fov, aspect, dan kedua bidang; jalur GPU yang membaca angka sebelum
+    /// penjepitan akan menghitung kotak cluster yang berbeda dari jalur CPU
+    /// pada kamera yang ekstrem, dan selisihnya muncul sebagai lampu yang
+    /// hilang hanya pada fov tertentu.
+    float TanHalfX() const { return tanHalfX_; }
+    float TanHalfY() const { return tanHalfY_; }
+    float NearZ() const { return nearZ_; }
+    float FarZ() const { return farZ_; }
+
     /// Irisan kedalaman untuk sebuah jarak pandang. Dijepit ke rentang yang sah.
     uint32_t SliceOf(float viewDepth) const;
     /// Batas dekat dan jauh sebuah irisan, meter.

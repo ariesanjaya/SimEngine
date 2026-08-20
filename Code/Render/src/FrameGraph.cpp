@@ -265,7 +265,23 @@ CompiledGraph FrameGraph::Compile() const {
         compiled.pass = pass;
         compiled.name = passes_[pass].name;
         for (const Use& use : passes_[pass].uses) {
-            if (state[use.resource] != use.access) {
+            // **Tulisan storage menuntut barrier walaupun keadaannya tidak
+            // berpindah.** Vulkan tidak menjanjikan urutan apa pun antara dua
+            // perintah pada antrean yang sama, dan dispatch tidak melewati tahap
+            // fungsi-tetap yang punya urutannya sendiri seperti lampiran warna.
+            // Dua dispatch berurutan yang menulis image atau buffer yang sama
+            // karena itu bisa berjalan berbarengan: yang kedua membaca sebagian
+            // tulisan yang pertama, dan hasilnya berubah-ubah antar-jalan tanpa
+            // satu pun galat. Barrier "dari ShaderWrite ke ShaderWrite" tampak
+            // kosong dan justru satu-satunya yang menutup lubang itu.
+            //
+            // Hanya untuk `ShaderWrite`. Lampiran warna dan depth beruntun —
+            // langit, grid, opaque, transparan — memang tidak dipisahkan apa pun
+            // di sini, dan itu keputusan yang berdiri sendiri: menambahkan
+            // barrier di antara setiap pass adegan adalah perubahan biaya yang
+            // harus diukur, bukan efek samping dari milestone compute.
+            const bool moved = state[use.resource] != use.access;
+            if (moved || use.access == Access::ShaderWrite) {
                 compiled.barriers.push_back(Barrier{use.resource, state[use.resource], use.access});
                 state[use.resource] = use.access;
             }

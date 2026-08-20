@@ -198,7 +198,7 @@ bool PostProcess::CreatePipeline(const std::filesystem::path& shaderDirectory,
     info.pDynamicState = &dynamic;
     info.layout = outLayout;
 
-    const VkResult result = vkCreateGraphicsPipelines(device_->Handle(), VK_NULL_HANDLE, 1, &info,
+    const VkResult result = vkCreateGraphicsPipelines(device_->Handle(), device_->PipelineCache(), 1, &info,
                                                       nullptr, &outPipeline);
     vkDestroyShaderModule(device_->Handle(), fragment, nullptr);
     if (result != VK_SUCCESS) {

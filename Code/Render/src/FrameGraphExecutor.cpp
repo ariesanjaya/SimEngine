@@ -4,16 +4,28 @@
 
 namespace sim::render {
 
-void FrameGraphExecutor::Bind(ResourceId resource, const BoundImage& image) {
-    if (resource >= bound_.size()) {
-        bound_.resize(resource + 1);
-        layout_.resize(resource + 1, VK_IMAGE_LAYOUT_UNDEFINED);
+void FrameGraphExecutor::Reserve(ResourceId resource) {
+    if (resource < bound_.size()) {
+        return;
     }
+    bound_.resize(resource + 1);
+    buffers_.resize(resource + 1);
+    layout_.resize(resource + 1, VK_IMAGE_LAYOUT_UNDEFINED);
+}
+
+void FrameGraphExecutor::Bind(ResourceId resource, const BoundImage& image) {
+    Reserve(resource);
     bound_[resource] = image;
+}
+
+void FrameGraphExecutor::Bind(ResourceId resource, const BoundBuffer& buffer) {
+    Reserve(resource);
+    buffers_[resource] = buffer;
 }
 
 void FrameGraphExecutor::Clear() {
     bound_.clear();
+    buffers_.clear();
     layout_.clear();
 }
 
@@ -80,18 +92,37 @@ bool FrameGraphExecutor::Execute(const CompiledGraph& compiled, VkCommandBuffer 
     }
 
     std::vector<VkImageMemoryBarrier2> barriers;
+    std::vector<VkBufferMemoryBarrier2> bufferBarriers;
     const auto flush = [&](const std::vector<Barrier>& list) -> bool {
         barriers.clear();
+        bufferBarriers.clear();
         for (const Barrier& barrier : list) {
-            if (barrier.resource >= bound_.size() ||
-                bound_[barrier.resource].image == VK_NULL_HANDLE) {
-                SIM_ERROR("Render", "frame graph resource {} has no image bound",
-                          barrier.resource);
+            const bool known = barrier.resource < bound_.size();
+            const VkBuffer buffer = known ? buffers_[barrier.resource].buffer : VK_NULL_HANDLE;
+            const VkImage image = known ? bound_[barrier.resource].image : VK_NULL_HANDLE;
+            if (buffer == VK_NULL_HANDLE && image == VK_NULL_HANDLE) {
+                SIM_ERROR("Render", "frame graph resource {} has nothing bound", barrier.resource);
                 return false;
             }
             const Stage from = Translate(barrier.from);
             const Stage to = Translate(barrier.to);
-            const BoundImage& image = bound_[barrier.resource];
+
+            if (buffer != VK_NULL_HANDLE) {
+                const BoundBuffer& bound = buffers_[barrier.resource];
+                VkBufferMemoryBarrier2 vk{};
+                vk.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER_2;
+                vk.srcStageMask = from.stage;
+                vk.srcAccessMask = from.access;
+                vk.dstStageMask = to.stage;
+                vk.dstAccessMask = to.access;
+                vk.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                vk.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                vk.buffer = bound.buffer;
+                vk.offset = bound.offset;
+                vk.size = bound.size;
+                bufferBarriers.push_back(vk);
+                continue;
+            }
 
             VkImageMemoryBarrier2 vk{};
             vk.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
@@ -103,14 +134,14 @@ bool FrameGraphExecutor::Execute(const CompiledGraph& compiled, VkCommandBuffer 
             vk.newLayout = to.layout;
             vk.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
             vk.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            vk.image = image.image;
-            vk.subresourceRange.aspectMask = image.aspect;
+            vk.image = image;
+            vk.subresourceRange.aspectMask = bound_[barrier.resource].aspect;
             vk.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
             vk.subresourceRange.layerCount = VK_REMAINING_ARRAY_LAYERS;
             barriers.push_back(vk);
             layout_[barrier.resource] = to.layout;
         }
-        if (barriers.empty()) {
+        if (barriers.empty() && bufferBarriers.empty()) {
             return true;
         }
         // Seluruh barrier sebuah pass dipancarkan dalam satu panggilan. Satu
@@ -118,6 +149,8 @@ bool FrameGraphExecutor::Execute(const CompiledGraph& compiled, VkCommandBuffer 
         // sinkronisasi berurutan padahal semuanya bisa dipenuhi sekaligus.
         VkDependencyInfo dependency{};
         dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dependency.bufferMemoryBarrierCount = static_cast<uint32_t>(bufferBarriers.size());
+        dependency.pBufferMemoryBarriers = bufferBarriers.data();
         dependency.imageMemoryBarrierCount = static_cast<uint32_t>(barriers.size());
         dependency.pImageMemoryBarriers = barriers.data();
         vkCmdPipelineBarrier2(cmd, &dependency);

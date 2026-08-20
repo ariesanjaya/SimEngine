@@ -3,6 +3,7 @@
 #include "Sim/RHI/Vulkan.h"
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,74 @@ struct DeviceDesc {
     /// ditambahkan sendiri oleh Device saat validasi aktif.
     std::vector<const char*> instanceExtensions;
     bool enableValidation = SIM_DEBUG != 0;
+
+    /// Validasi sinkronisasi: apakah setiap barrier benar-benar menutup lubang
+    /// yang seharusnya ia tutup.
+    ///
+    /// **Terpisah dari `enableValidation`, dan matinya secara bawaan bukan
+    /// kelalaian.** Yang diperiksa lapisan ini adalah setiap pasangan
+    /// baca/tulis atas setiap resource sepanjang command buffer, dan harganya
+    /// beberapa kali lipat waktu frame — memakainya terus-menerus berarti
+    /// editor yang tidak bisa dipakai. Ia dinyalakan pada satu jalan yang
+    /// disengaja, sesudah pass baru ditambahkan, lalu dimatikan lagi.
+    ///
+    /// **Dan ia satu-satunya yang bisa menjawab pertanyaan G3.** Validasi biasa
+    /// memeriksa layout: sebuah descriptor yang menjanjikan `GENERAL` atas
+    /// image yang sedang `SHADER_READ_ONLY` dilaporkannya. Barrier yang
+    /// *hilang* di antara dua dispatch tidak melanggar satu pun aturan layout —
+    /// yang dilanggarnya adalah urutan — dan tanpa lapisan ini ia hanya terlihat
+    /// sebagai hasil yang berubah-ubah antar-jalan di mesin orang lain.
+    bool enableSyncValidation = false;
+
+    /// Berkas tempat isi `VkPipelineCache` disimpan antar-jalan. Kosong berarti
+    /// tidak disimpan sama sekali.
+    ///
+    /// **Cache yang hidup hanya selama satu proses hampir tidak ada gunanya.**
+    /// Yang mahal bukan pipeline kedua yang bentuknya sama dengan yang pertama,
+    /// melainkan pipeline pertama — dan itu dibayar ulang setiap kali program
+    /// dijalankan. Yang terlihat adalah tersendat beberapa ratus milidetik saat
+    /// material pertama muncul di viewport, dan besok ia terjadi lagi.
+    std::filesystem::path pipelineCachePath;
+};
+
+/// Apa yang perangkat ini sanggup lakukan, dalam nama yang berarti bagi kode di
+/// atasnya.
+///
+/// **Satu tempat, dan jawabannya bisa ditanyakan.** Sebelum ini setiap fitur
+/// dinyalakan dengan menempelkan satu baris di tengah `CreateLogicalDevice`, dan
+/// tidak ada satu pun yang bisa menjawab "apa yang sebenarnya aktif di mesin
+/// ini" tanpa membaca kode. Empat milestone berikutnya masing-masing menambah
+/// satu fitur; tanpa tempat yang jelas, keempatnya akan menaruhnya di empat
+/// tempat berbeda.
+///
+/// **Didukung tidak sama dengan dipakai.** Sebagian medan di sini dilaporkan
+/// jauh sebelum ada yang memakainya — justru itu gunanya: keputusan "jalur mana
+/// yang akan ditempuh di mesin ini" bisa dilihat sebelum jalurnya ditulis.
+struct DeviceCapabilities {
+    bool vulkan13 = false;
+    bool dynamicRendering = false;
+    bool synchronization2 = false;
+    bool blockCompression = false;
+    /// Ray query untuk backend GI tier atas (M7 rencana GI). Dideteksi, belum
+    /// diaktifkan.
+    bool rayQuery = false;
+
+    // --- Yang dituntut milestone di depan (docs/PLAN-GPU-OPTIM.md) ---
+    /// Bindless. Dituntut G5.
+    bool descriptorIndexing = false;
+    /// Dituntut G6 bersama indirect draw.
+    bool bufferDeviceAddress = false;
+    /// Sinkronisasi lintas-antrean G7. Semaphore biner memaksa satu penunggu per
+    /// sinyal, dan ketergantungan yang berbentuk graf harus dipaksa jadi rantai.
+    bool timelineSemaphore = false;
+    bool multiDrawIndirect = false;
+    bool drawIndirectCount = false;
+    /// Setengah presisi di shader. Turing ke atas menjalankannya dua kali lipat,
+    /// dan matematika GI adalah tempat yang paling diuntungkan.
+    bool shaderFloat16 = false;
+    /// Ada keluarga antrean compute yang **terpisah** dari antrean grafis.
+    /// Prasyarat G7; antreannya sendiri sudah dibuat sejak sekarang.
+    bool asyncCompute = false;
 };
 
 /// Instance + physical device + logical device + queue + allocator.
@@ -85,8 +154,21 @@ public:
     VkDevice Handle() const { return device_; }
     VkQueue GraphicsQueue() const { return graphicsQueue_; }
     uint32_t GraphicsQueueFamily() const { return graphicsQueueFamily_; }
+    /// Antrean compute khusus, atau `VK_NULL_HANDLE` bila perangkat ini tidak
+    /// punya keluarga antrean compute yang terpisah dari grafis.
+    ///
+    /// **Dibuat sekarang, dipakai G7.** Alasannya sama dengan `dynamicRendering`
+    /// yang dinyalakan di E1 padahal baru dipakai di E8: pembuatan device adalah
+    /// tempat yang tidak enak disentuh ulang, dan yang menyentuhnya belakangan
+    /// harus menguji ulang setiap perangkat.
+    VkQueue ComputeQueue() const { return computeQueue_; }
+    uint32_t ComputeQueueFamily() const { return computeQueueFamily_; }
     VmaAllocator Allocator() const { return allocator_; }
     uint32_t ApiVersion() const { return apiVersion_; }
+
+    /// Kemampuan perangkat ini, satu tempat untuk seluruh pertanyaan "boleh
+    /// tidak jalur ini dipakai di sini".
+    const DeviceCapabilities& Capabilities() const { return capabilities_; }
 
     /// Apakah perangkat ini **bisa** memakai ray query. Belum diaktifkan —
     /// aktivasinya bersama acceleration structure di M7 rencana GI.
@@ -108,6 +190,11 @@ private:
     bool CreateInstance(const DeviceDesc& desc);
     bool SelectPhysicalDevice();
     bool CreateLogicalDevice();
+    /// Membuat pipeline cache, diisi dari berkas bila isinya memang milik
+    /// perangkat ini.
+    void CreatePipelineCache();
+    /// Menulis isi cache ke berkasnya. Dipanggil sekali, dari `Destroy`.
+    void SavePipelineCache() const;
 
     /// Satu slot command buffer sekali pakai beserta fence penandanya.
     struct TransientSubmit {
@@ -132,6 +219,10 @@ private:
     VkDevice device_ = VK_NULL_HANDLE;
     VkQueue graphicsQueue_ = VK_NULL_HANDLE;
     uint32_t graphicsQueueFamily_ = UINT32_MAX;
+    VkQueue computeQueue_ = VK_NULL_HANDLE;
+    uint32_t computeQueueFamily_ = UINT32_MAX;
+    DeviceCapabilities capabilities_;
+    std::filesystem::path pipelineCachePath_;
     VmaAllocator allocator_ = VK_NULL_HANDLE;
     VkCommandPool oneShotPool_ = VK_NULL_HANDLE;
     VkPipelineCache pipelineCache_ = VK_NULL_HANDLE;
@@ -141,6 +232,7 @@ private:
     bool headless_ = false;
     std::string deviceName_;
     bool validationEnabled_ = false;
+    bool syncValidationEnabled_ = false;
     bool supportsVulkan13_ = false;
     bool supportsBlockCompression_ = false;
 };

@@ -180,6 +180,11 @@ int main(int argc, char** argv) {
 
     rhi::DeviceDesc deviceDesc;
     deviceDesc.applicationName = "SimEditor";
+    // Cache pipeline bertahan antar-jalan. Di folder konfigurasi, bukan di
+    // dalam project: isinya milik kartu grafis mesin ini, bukan milik project —
+    // dan project yang dibawa ke mesin lain tidak boleh membawa serta cache
+    // yang akan ditolak di sana.
+    deviceDesc.pipelineCachePath = configDir / "Cache" / "pipeline.bin";
     {
         uint32_t count = 0;
         const char* const* names = SDL_Vulkan_GetInstanceExtensions(&count);

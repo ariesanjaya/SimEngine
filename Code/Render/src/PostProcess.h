@@ -22,12 +22,14 @@ namespace sim::render {
 /// selesai. Sekarang adegan menggambar ke `R16G16B16A16_SFLOAT` dengan radiance
 /// apa adanya, dan pass ini yang memetakannya ke layar.
 ///
-/// **Pengukurannya rantai reduksi grafis, bukan histogram compute.** Bukan
-/// karena histogram lebih buruk melainkan karena tidak ada satu pun compute
-/// pipeline di engine ini: yang pertama akan membawa serta storage buffer,
-/// barrier compute, dan seluruh jalur yang belum pernah dijalankan sekali pun.
-/// Rantai reduksi memakai bentuk yang sudah berjalan di `DepthPyramid`, dan
-/// rata-rata geometrik yang dihasilkannya justru yang diinginkan.
+/// **Pengukurannya rantai reduksi grafis, bukan histogram compute.** Saat ini
+/// ditulis, belum ada satu pun compute pipeline di engine — yang pertama akan
+/// membawa serta storage buffer, barrier compute, dan seluruh jalur yang belum
+/// pernah dijalankan sekali pun. Fondasi itu sudah ada sekarang (G3), jadi
+/// alasannya berubah: rantai reduksi memakai bentuk yang sudah berjalan di
+/// `DepthPyramid`, rata-rata geometrik yang dihasilkannya justru yang
+/// diinginkan, dan menukarnya dengan histogram compute adalah pekerjaan yang
+/// harus dibuka dengan angka — bukan dengan ketersediaan jalurnya.
 class PostProcess {
 public:
     /// Sisi petak awal pengukuran. Sama dengan `LogLuminanceReducer::kSeedSize`.

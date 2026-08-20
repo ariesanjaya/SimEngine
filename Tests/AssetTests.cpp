@@ -187,6 +187,33 @@ TEST_CASE("ketergantungan antar-aset ditemukan dan disaring ke GUID yang dikenal
     CHECK(users.front() == levelRecord->guid);
 }
 
+TEST_CASE("akar relatif ber-\"./\" tetap menghasilkan jalur yang bisa dibuka") {
+    // **Bukan kasus buatan.** Sebuah program yang dijalankan dengan `./Program`
+    // menurunkan folder asetnya dari `argv[0]`, jadi akar yang diterimanya
+    // memang berbentuk `./Resources` — dan itu cara setiap executable di folder
+    // build dijalankan. Bug-nya: awalan akar dipotong dengan perbandingan
+    // string, akarnya dinormalkan lebih dulu sementara jalur hasil iterasi
+    // tidak, dan yang tersimpan sebagai "relatif" justru jalur utuhnya.
+    // `AbsolutePath` lalu menempelkan akarnya untuk kedua kalinya.
+    TempDir temp;
+    WriteFile(temp.Path() / "Meshes" / "cube.obj", "o");
+
+    const std::filesystem::path previous = std::filesystem::current_path();
+    std::filesystem::current_path(temp.Path().parent_path());
+    const std::filesystem::path relativeRoot =
+        std::filesystem::path(".") / temp.Path().filename();
+
+    AssetDatabase db;
+    REQUIRE(db.Initialize({relativeRoot, nullptr, 1.0f}));
+    const AssetRecord* record = db.FindByRelativePath("Meshes/cube.obj");
+    REQUIRE(record != nullptr);
+    // Yang dikunci bukan bentuk stringnya melainkan kontraknya: jalur yang
+    // dikembalikan indeks harus benar-benar bisa dibuka.
+    CHECK(std::filesystem::exists(db.AbsolutePath(*record)));
+
+    std::filesystem::current_path(previous);
+}
+
 TEST_CASE("isi folder bisa diambil bertingkat maupun langsung") {
     TempDir temp;
     WriteFile(temp.Path() / "Textures" / "a.png", "a");

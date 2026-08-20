@@ -146,6 +146,19 @@ float BoxSceneField::Distance(const Vec3& world) const {
     return nearest;
 }
 
+void BoxSceneField::WriteGpuEntries(std::vector<GpuEntry>& out) const {
+    out.clear();
+    out.reserve(entries_.size());
+    for (const Entry& entry : entries_) {
+        GpuEntry gpu;
+        gpu.inverse = entry.inverse;
+        gpu.scaleAnisotropy = Vec4(entry.scale, entry.anisotropy, 0.0f, 0.0f);
+        gpu.boundsMin = Vec4(entry.boundsMin, 0.0f);
+        gpu.boundsMax = Vec4(entry.boundsMax, 0.0f);
+        out.push_back(gpu);
+    }
+}
+
 void BoxSceneField::BeginBox(const Vec3& origin, const Vec3& rowStep, const Vec3& outerStep,
                             const Vec3& planeStep, uint32_t count, float band) {
     boxOrigin_ = origin;

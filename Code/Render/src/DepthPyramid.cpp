@@ -182,7 +182,7 @@ bool DepthPyramid::Create(rhi::Device& device, const std::filesystem::path& shad
     info.pDynamicState = &dynamic;
     info.layout = pipelineLayout_;
 
-    const VkResult result = vkCreateGraphicsPipelines(device_->Handle(), VK_NULL_HANDLE, 1, &info,
+    const VkResult result = vkCreateGraphicsPipelines(device_->Handle(), device_->PipelineCache(), 1, &info,
                                                       nullptr, &pipeline_);
     vkDestroyShaderModule(device_->Handle(), vertex, nullptr);
     vkDestroyShaderModule(device_->Handle(), fragment, nullptr);

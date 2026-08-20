@@ -26,6 +26,33 @@ struct PassTiming {
     float milliseconds = 0.0f;
 };
 
+/// Hitungan yang menjelaskan angka waktu di sebelahnya.
+///
+/// **Waktu saja tidak bisa dipakai mengambil keputusan.** Sebuah pass bayangan
+/// yang mahal bisa berarti terlalu banyak caster, terlalu banyak muka, atau
+/// keduanya — dan ketiga jawaban itu menuntut pekerjaan yang berbeda. Angka di
+/// sini yang memisahkannya.
+struct RenderStats {
+    /// Instance buram yang ada di dalam buffer frame ini. Lebih besar daripada
+    /// `opaqueDrawn` karena caster di luar pandangan ikut diunggah — bayangannya
+    /// dibutuhkan walaupun bendanya tidak terlihat.
+    uint32_t opaqueInstances = 0;
+    /// Yang benar-benar digambar pandangan utama.
+    uint32_t opaqueDrawn = 0;
+    uint32_t transparentDrawn = 0;
+    /// Instance yang menjatuhkan bayangan, sebelum penyaringan per muka.
+    uint32_t shadowCasters = 0;
+    /// Muka bayangan yang kebagian tempat di atlas frame ini.
+    uint32_t shadowFaces = 0;
+    /// Lampu yang meminta bayangan dan tidak kebagian.
+    ///
+    /// **Nol bukan sesuatu yang bisa diandaikan.** Atlas yang penuh membuang
+    /// lampu menurut kepentingannya, dan itu keputusan yang benar — tetapi yang
+    /// menyalakan lampu keenam belas lalu tidak mendapat bayangan tanpa satu pun
+    /// petunjuk kenapa.
+    uint32_t shadowLightsDropped = 0;
+};
+
 /// Batas antara editor dan rendering (seam #1 di docs/ARCHITECTURE.md).
 ///
 /// Panel Viewport hanya melihat antarmuka ini. Sampai E8 implementasinya adalah
@@ -163,6 +190,23 @@ public:
     /// Bawaannya menolak: perender uji dan perender masa depan tidak wajib
     /// bisa, dan yang tidak bisa harus mengatakannya alih-alih mengembalikan
     /// gambar kosong.
+    /// Menyalin seluruh isi kaskade clipmap SDF ke memori host, kaskade demi
+    /// kaskade, untuk dibandingkan.
+    ///
+    /// **Alat verifikasi, bukan alat produksi.** Ia menunggu queue idle. Yang
+    /// membutuhkannya: memeriksa bahwa komposit compute menghasilkan voxel yang
+    /// sama persis dengan komposit CPU. Perbandingan gambar tidak bisa menjawab
+    /// itu — satu-satunya pembaca kaskade SDF adalah penelusuran GI, dan GI
+    /// tidak deterministik, jadi selisih apa pun tenggelam dalam derau yang
+    /// besarnya tidak diketahui.
+    ///
+    /// Bawaannya menolak, alasan yang sama dengan `CapturePixels`.
+    virtual bool CaptureSdf(std::vector<uint8_t>& out, std::string& error) {
+        (void)out;
+        error = "this renderer has no SDF clipmap";
+        return false;
+    }
+
     virtual bool CapturePixels(std::vector<uint8_t>& outRgba, uint32_t& outWidth,
                                uint32_t& outHeight, std::string& error) {
         (void)outRgba;
@@ -193,6 +237,28 @@ public:
     /// Waktu GPU per pass frame yang terakhir selesai. Kosong bila perangkatnya
     /// tidak mendukung timestamp, atau selama beberapa frame pertama.
     virtual std::span<const PassTiming> PassTimings() const { return {}; }
+
+    /// Naik setiap kali `PassTimings()` berganti isi; tetap saat angkanya
+    /// terulang karena pemungutan sebuah frame terlewat. Yang merata-ratakan
+    /// banyak frame memakai ini untuk tidak menghitung satu frame dua kali.
+    virtual uint64_t TimingSerial() const { return 0; }
+
+    /// Waktu CPU per tahap frame terakhir, dalam bentuk yang sama dengan
+    /// `PassTimings`.
+    ///
+    /// **Terpisah dari yang GPU dan memang harus terpisah.** Keduanya mengukur
+    /// hal yang berbeda pada frame yang berbeda: angka GPU datang beberapa
+    /// frame terlambat karena pemungutannya tidak pernah menunggu, sementara
+    /// angka CPU adalah frame yang baru saja lewat. Menjumlahkannya menjadi satu
+    /// tabel menghasilkan total yang tidak pernah menjadi waktu frame mana pun.
+    ///
+    /// Alasan keberadaannya sama dengan `SdfUpdateMilliseconds` di bawah, dan
+    /// suatu saat menelannya: biaya yang tidak muncul di tabel mana pun adalah
+    /// biaya yang tidak ada yang mengawasinya.
+    virtual std::span<const PassTiming> CpuTimings() const { return {}; }
+
+    /// Hitungan frame terakhir. Nol semua bila perendernya tidak melacaknya.
+    virtual RenderStats Stats() const { return {}; }
 
     /// Biaya pembaruan clipmap SDF di CPU, milidetik, beserta jumlah voxel
     /// yang ditulis frame terakhir.
