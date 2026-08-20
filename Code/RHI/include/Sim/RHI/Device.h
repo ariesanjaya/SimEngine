@@ -70,8 +70,17 @@ struct DeviceCapabilities {
     bool rayQuery = false;
 
     // --- Yang dituntut milestone di depan (docs/PLAN-GPU-OPTIM.md) ---
-    /// Bindless. Dituntut G5.
+    /// Bindless, dan **sudah dinyalakan** — bukan sekadar didukung.
+    ///
+    /// Ia benar hanya kalau seluruh sub-fitur yang dituntut jalur bindless ikut
+    /// ada: larik tak berbatas, indeks non-uniform, penulisan sesudah pengikatan,
+    /// dan pengikatan sebagian. `descriptorIndexing` sendirian tidak menjamin
+    /// satu pun di antaranya — ia hanya berarti ekstensinya dipromosikan ke
+    /// inti, dan perangkat boleh menjawab "ya" untuknya sambil menolak
+    /// keempatnya.
     bool descriptorIndexing = false;
+    /// Banyaknya slot di larik tekstur bindless. Nol saat bindless mati.
+    uint32_t bindlessTextureCapacity = 0;
     /// Dituntut G6 bersama indirect draw.
     bool bufferDeviceAddress = false;
     /// Sinkronisasi lintas-antrean G7. Semaphore biner memaksa satu penunggu per
