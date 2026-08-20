@@ -1331,6 +1331,12 @@ dari 160 satuan dari kamera, dan depth buffer tetap berisi angka yang berarti
 0,6 satuan. Salah satu dari ketiga pengukuran itu berbohong, dan ketiganya sudah
 diperiksa dengan cara yang berbeda.
 
+Satu pemeriksaan lagi ikut mendarat sebagai penjaga tetap, dan ia bersih:
+**simpul tiap mesh diperiksa terhadap kotak batas yang dilaporkannya saat
+diunggah.** Kotak yang berbohong tidak menghasilkan satu pun galat — ia dipakai
+frustum culling, occlusion culling, dan lintasan kamera alat ukur — jadi ia layak
+diperiksa sekali, bukan dipercaya. Ketiga mesh adegan padat lolos.
+
 **Langkah berikutnya yang jelas, dan bukan tebakan:** prepass sudah menulis
 lampiran kedua — normal oktahedral untuk screen probe. Menuliskan nomor permukaan
 ke sana alih-alih normal, lalu membacanya di texel yang kedalamannya ganjil,

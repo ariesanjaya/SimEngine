@@ -2996,6 +2996,31 @@ private:
         }
         mesh->boundsMin = data.boundsMin;
         mesh->boundsMax = data.boundsMax;
+        // **Kotak batas yang berbohong tidak menghasilkan satu pun galat.** Ia
+        // dipakai frustum culling, occlusion culling, dan lintasan kamera alat
+        // ukur; simpul yang menonjol keluar darinya berarti benda yang dibuang
+        // padahal terlihat, atau — lebih buruk — tergambar di tempat yang tidak
+        // diperhitungkan siapa pun. Diperiksa sekali saat unggah, bukan
+        // dipercaya.
+        if (!data.vertices.empty()) {
+            Vec3 low = data.vertices[0].position;
+            Vec3 high = low;
+            for (const assets::MeshVertex& vertex : data.vertices) {
+                low = glm::min(low, vertex.position);
+                high = glm::max(high, vertex.position);
+            }
+            const Vec3 slack = glm::max(data.boundsMax - data.boundsMin, Vec3(1.0f)) * 1e-3f;
+            if (glm::any(glm::lessThan(low, data.boundsMin - slack)) ||
+                glm::any(glm::greaterThan(high, data.boundsMax + slack))) {
+                SIM_WARN("Render",
+                         "a mesh has vertices outside the bounds it reports: "
+                         "[{:.3f} {:.3f} {:.3f}]..[{:.3f} {:.3f} {:.3f}] vs "
+                         "[{:.3f} {:.3f} {:.3f}]..[{:.3f} {:.3f} {:.3f}]",
+                         low.x, low.y, low.z, high.x, high.y, high.z, data.boundsMin.x,
+                         data.boundsMin.y, data.boundsMin.z, data.boundsMax.x, data.boundsMax.y,
+                         data.boundsMax.z);
+            }
+        }
         meshes_.push_back(std::move(mesh));
         return static_cast<MeshHandle>(meshes_.size() - 1);
     }
