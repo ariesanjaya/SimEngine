@@ -10,17 +10,8 @@
 // layout yang sama, dan set 0 di sana milik keadaan bayangan per-frame.
 #define SKIN_SET 1
 
+#include "box_push.slang"
 #include "skin_common.slang"
-
-struct PrepassPush {
-    float4x4 viewProj;
-    // Tidak dibaca di sini, tapi tata letaknya harus sama dengan `BoxPush` di
-    // sisi C++: ketiga pass memakai struct push constant yang sama.
-    float4 partColor;
-    uint instanceBase;
-};
-
-[[vk::push_constant]] ConstantBuffer<PrepassPush> push;
 
 struct PrepassVarying {
     float4 position : SV_Position;

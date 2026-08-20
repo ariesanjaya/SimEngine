@@ -51,6 +51,31 @@ struct RenderStats {
     /// menyalakan lampu keenam belas lalu tidak mendapat bayangan tanpa satu pun
     /// petunjuk kenapa.
     uint32_t shadowLightsDropped = 0;
+    /// Panggilan `vkCmdBindDescriptorSets` selama perekaman frame ini.
+    ///
+    /// **Kriteria selesai G5 berbunyi "dihitung, bukan ditaksir".** Sebelum
+    /// bindless angkanya tumbuh sebanding jumlah ruas yang digambar, dan
+    /// sesudahnya sebanding jumlah pass — dan itu perbedaan yang tidak terlihat
+    /// sama sekali pada waktu frame sebuah adegan kecil.
+    uint32_t descriptorSetBinds = 0;
+    /// Panggilan `vkCmdDrawIndexed`, seluruh pass frame ini.
+    uint32_t drawCalls = 0;
+};
+
+/// Apa yang diminta pengguna soal jalur material, bukan apa yang akhirnya
+/// dipakai.
+///
+/// **Ada karena tanpanya jalur mundur berhenti dijalankan siapa pun.** Pada
+/// setiap mesin pengembangan yang mampu bindless, jalur set-per-ruas tidak akan
+/// pernah tersentuh lagi sejak hari G5 mendarat — dan justru jalur itu yang
+/// harus tetap bekerja di GPU yang tidak mampu. Alasan yang sama dengan pemilih
+/// backend GI, dan konsekuensinya sama: ia dipakai membandingkan dua gambar yang
+/// harus identik.
+enum class MaterialBindingPreference : uint8_t {
+    /// Bindless kalau perangkatnya mampu, set-per-ruas kalau tidak.
+    Auto,
+    /// Paksa set-per-ruas walaupun perangkatnya mampu.
+    ForceClassic,
 };
 
 /// Batas antara editor dan rendering (seam #1 di docs/ARCHITECTURE.md).
@@ -149,6 +174,15 @@ public:
         /// Tekstur tiap slot, urutannya sama dengan deklarasi materialnya.
         /// Slot yang kosong diisi tekstur putih 1x1 oleh renderer.
         std::span<const TextureHandle> textures;
+        /// SPIR-V ini ditulis untuk jalur bindless.
+        ///
+        /// **Ikut supaya ketidakcocokan menjadi galat, bukan gambar yang
+        /// salah.** Kedua jalur menghasilkan modul yang sama sahnya dan sama
+        /// bentuk entry point-nya; yang berbeda hanya descriptor set layout yang
+        /// diharapkannya. Menyerahkan modul jalur mundur ke renderer bindless
+        /// menghasilkan pipeline yang dibangun tanpa keluhan lalu menyampel
+        /// descriptor yang tidak pernah ditulis.
+        bool bindless = false;
     };
 
     /// Membangun (atau mengambil kembali) pipeline sebuah material.
@@ -166,6 +200,13 @@ public:
         (void)program;
         return kInvalidMaterial;
     }
+
+    /// Renderer ini menggambar material lewat larik descriptor bindless.
+    ///
+    /// Ditanya **sebelum** materialnya dikompilasi: yang membedakan kedua jalur
+    /// adalah bentuk SPIR-V-nya, jadi keputusannya harus sudah diambil saat
+    /// slangc dipanggil. Lihat G5 di docs/PLAN-GPU-OPTIM.md.
+    virtual bool UsesBindlessMaterials() const { return false; }
 
     /// Byte tekstur material yang sedang berada di GPU.
     ///

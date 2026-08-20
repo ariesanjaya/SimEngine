@@ -2198,3 +2198,155 @@ TEST_CASE("E8.4: setiap shader yang ditanam modul material ikut disalin ke sebel
         CHECK(list.find(name) != std::string::npos);
     }
 }
+
+TEST_CASE("G5: jalur bindless mengubah dari mana datanya datang, bukan bentuk materialnya") {
+    // **Yang diuji di sini ABI-nya, bukan sintaksnya.** Kedua jalur menghasilkan
+    // modul yang sama sahnya, jadi tidak ada satu pun galat yang muncul ketika
+    // salah satunya salah — yang muncul hanya material yang parameternya
+    // bergeser atau teksturnya milik benda lain.
+    const std::filesystem::path path = std::filesystem::path(SIM_BUILTIN_DIR) / "Materials" /
+                                       "Sistem" / "Material Impor.simmat";
+    REQUIRE_MESSAGE(std::filesystem::exists(path), path.string());
+
+    MaterialGraph graph;
+    REQUIRE(LoadMaterialFromFile(graph, path).ok);
+
+    MaterialCompileOptions classicOptions;
+    classicOptions.moduleName = "Material Impor.simmat";
+    MaterialCompileOptions bindlessOptions = classicOptions;
+    bindlessOptions.bindless = true;
+
+    const MaterialCompileResult classic = CompileMaterial(graph, classicOptions);
+    const MaterialCompileResult bindless = CompileMaterial(graph, bindlessOptions);
+    REQUIRE(classic.ok);
+    REQUIRE(bindless.ok);
+    REQUIRE(classic.textures.size() == 1);
+    REQUIRE(bindless.textures.size() == classic.textures.size());
+
+    // Jalur mundur tidak berubah satu huruf pun: satu set per material, blok
+    // parameter di binding 0, tekstur dan sampler berselang mulai binding 1.
+    INFO(classic.slang);
+    CHECK(classic.slang.find("[[vk::binding(0, 2)]]\ncbuffer MaterialParams") !=
+          std::string::npos);
+    CHECK(classic.slang.find("[[vk::binding(1, 2)]]\nTexture2D<float4> " +
+                             classic.textures[0].name) != std::string::npos);
+    CHECK(classic.slang.find("gBindlessTextures") == std::string::npos);
+
+    // Bindless: larik bersama, nomor binding yang sama persis. Nomor yang sama
+    // itulah yang membuat `box.frag` dan `box_bindless.frag` berbeda satu baris.
+    INFO(bindless.slang);
+    CHECK(bindless.slang.find("[[vk::binding(0, 2)]]\nConstantBuffer<MaterialParams> "
+                              "gMaterialParams[];") != std::string::npos);
+    CHECK(bindless.slang.find("[[vk::binding(1, 2)]]\nTexture2D<float4> gBindlessTextures[];") !=
+          std::string::npos);
+    CHECK(bindless.slang.find("[[vk::binding(2, 2)]]\nSamplerState gBindlessSamplers[];") !=
+          std::string::npos);
+    CHECK(bindless.slang.find("cbuffer MaterialParams") == std::string::npos);
+
+    // Tabel slot tekstur: `uint4`, empat slot per baris, dan satu baris untuk
+    // satu tekstur. Lihat catatannya di `MaterialCompiler` — `uint` satu-satu
+    // akan mengisi celah sisipan di dalam blok parameter alih-alih jatuh di
+    // ujungnya.
+    CHECK(bindless.slang.find("uint4 gTextureSlots[1];") != std::string::npos);
+
+    // Prolognya menghidupkan kembali nama yang dipakai badan: itu yang membuat
+    // emisi badan **sama persis** di kedua jalur, dan yang membuat jalur mundur
+    // tidak bisa diam-diam berhenti diuji karena hanya salah satunya punya kode.
+    CHECK(bindless.slang.find("const MaterialParams gMat = gMaterialParams[push.materialSlot];") !=
+          std::string::npos);
+    CHECK(bindless.slang.find("Texture2D<float4> " + bindless.textures[0].name +
+                              " = gBindlessTextures[slot0];") != std::string::npos);
+    CHECK(bindless.slang.find("NonUniformResourceIndex(gMat.gTextureSlots[0][0])") !=
+          std::string::npos);
+
+    // Dan badannya memang tidak berubah: kedua jalur menyampel lewat nama yang
+    // sama, dari baris yang sama.
+    const std::string sample = bindless.textures[0].name + ".Sample";
+    CHECK(classic.slang.find(sample) != std::string::npos);
+    CHECK(bindless.slang.find(sample) != std::string::npos);
+}
+
+TEST_CASE("G5: tabel slot tekstur jatuh tepat di ujung blok parameter") {
+    // **Ini kesepakatan antara dua berkas yang tidak saling melihat.**
+    // `AcquireMaterial` menempelkan tabel slot sesudah blok parameter yang
+    // sudah dibulatkan ke 16, sementara yang menentukan letaknya di sisi shader
+    // adalah aturan penjajaran std140 atas `uint4`. Keduanya bertemu hanya
+    // kalau ukuran blok itu memang kelipatan 16 — dan kalau tidak, yang terjadi
+    // bukan galat melainkan tekstur yang terbaca dari angka sembarang.
+    MaterialParameterBlock block;
+
+    // Kasus yang paling mudah salah: `float3` di akhir. Ia berukuran 12 dan
+    // berjajar 16, jadi bloknya berakhir di offset 12 sementara ukurannya 16 —
+    // dan sebuah `uint` yang menyusulnya akan mengisi celah di +12, bukan
+    // memulai baris berikutnya.
+    std::vector<MaterialParameter> parameters;
+    MaterialParameter colour;
+    colour.name = "warna";
+    colour.kind = ValueKind::Float3;
+    colour.defaultValue = "1 1 1";
+    parameters.push_back(colour);
+    block.Build(parameters);
+    CHECK(block.Slots().size() == 1);
+    CHECK(block.Slot(0).offset == 0);
+    CHECK(block.Slot(0).size == 12);
+    CHECK(block.Bytes() == 16);
+    CHECK(block.Bytes() % 16 == 0);
+
+    // Beberapa bentuk lain, semuanya harus berakhir di kelipatan 16.
+    for (const ValueKind kind :
+         {ValueKind::Float, ValueKind::Float2, ValueKind::Float3, ValueKind::Float4}) {
+        MaterialParameter extra;
+        extra.name = "tambahan";
+        extra.kind = kind;
+        extra.defaultValue = "0";
+        std::vector<MaterialParameter> mixed = parameters;
+        mixed.push_back(extra);
+        block.Build(mixed);
+        INFO("kind = " << static_cast<int>(kind));
+        CHECK(block.Bytes() % 16 == 0);
+        CHECK(block.Bytes() >= block.Slot(block.SlotCount() - 1).offset +
+                                   block.Slot(block.SlotCount() - 1).size);
+    }
+}
+
+TEST_CASE("G5: modul material bindless dikompilasi slangc sungguhan") {
+    const std::string identity = SlangCompilerIdentity();
+    if (identity.empty()) {
+        MESSAGE("slangc tidak ditemukan — bagian integrasi dilewati");
+        return;
+    }
+
+    ForwardMaterialOptions options;
+    options.prelude = LoadOpenPbrPrelude(SIM_SHADER_DIR);
+    // **`box_push.slang` ikut, dan ia yang membawa `push.materialSlot`.**
+    // Tanpanya modul bindless tidak punya nomor slotnya, dan yang muncul bukan
+    // gambar yang salah melainkan galat preprocessor — yaitu bentuk kegagalan
+    // yang benar.
+    options.frameDeclarations =
+        InlineShaderIncludes(SIM_SHADER_DIR, {"box_push.slang", "box_varyings.slang",
+                                              "cluster_common.slang", "gi_resolve.slang"});
+    REQUIRE(!options.prelude.empty());
+    REQUIRE(!options.frameDeclarations.empty());
+
+    const std::filesystem::path path = std::filesystem::path(SIM_BUILTIN_DIR) / "Materials" /
+                                       "Sistem" / "Material Impor.simmat";
+    REQUIRE_MESSAGE(std::filesystem::exists(path), path.string());
+    MaterialGraph graph;
+    REQUIRE(LoadMaterialFromFile(graph, path).ok);
+
+    MaterialCompileOptions compileOptions;
+    compileOptions.bindless = true;
+    const MaterialCompileResult compiled = CompileMaterial(graph, compileOptions);
+    REQUIRE(compiled.ok);
+    options.lobes = compiled.lobes;
+
+    TempCacheDir dir("bindless");
+    ShaderCache cache;
+    cache.Configure(dir.path, identity);
+    cache.SetCompiler(MakeSlangCompiler());
+
+    const CompileOutput out = cache.Get(MakeForwardMaterialRequest(compiled.slang, options));
+    INFO("slangc: ", out.error);
+    REQUIRE(out.ok);
+    CHECK(LooksLikeSpirv(out.spirv));
+}

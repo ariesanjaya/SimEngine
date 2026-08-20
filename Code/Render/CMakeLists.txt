@@ -57,6 +57,7 @@ sim_compile_shaders(SimShadersGrid
         ${CMAKE_SOURCE_DIR}/Shaders/line.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/box.vert.slang
         ${CMAKE_SOURCE_DIR}/Shaders/box.frag.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/box_bindless.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/shadow.vert.slang
         ${CMAKE_SOURCE_DIR}/Shaders/prepass.vert.slang
         ${CMAKE_SOURCE_DIR}/Shaders/prepass.frag.slang
@@ -113,6 +114,7 @@ add_dependencies(SimRender SimShadersGrid)
 # folder sumber.
 set(SIM_SHADER_SOURCES_COPIED
     openpbr.slang
+    box_push.slang
     box_varyings.slang
     cluster_common.slang
     shadow_common.slang

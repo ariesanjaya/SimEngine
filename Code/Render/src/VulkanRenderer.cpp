@@ -58,7 +58,34 @@ struct BoxPush {
     /// sesudah yang pertama memakai transform milik ruas pertama sambil memakai
     /// warna miliknya sendiri.
     uint32_t instanceBase = 0;
+    /// Slot material ruas ini di larik bindless. Lihat Shaders/box_push.slang.
+    uint32_t materialSlot = 0;
+    /// Slot tekstur albedo ruas ini di larik bindless, dibaca jalur mundur.
+    uint32_t textureSlot = 0;
 };
+
+/// Tahap yang boleh membaca `BoxPush`.
+///
+/// **Fragment ikut, dan ia wajib ikut di ketiga layout sekaligus.** Dua pipeline
+/// layout bersifat *compatible* — yang membuat set 0..1 bertahan saat pipeline
+/// material diikat di tengah gelung ruas — hanya kalau push constant range-nya
+/// sama persis, `stageFlags` termasuk. Menambahkannya di layout forward saja
+/// membuat pass bayangan diam-diam melepas set yang sudah diikat.
+constexpr VkShaderStageFlags kBoxPushStages =
+    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+
+/// Slot material di larik bindless.
+///
+/// **Disebut angka, bukan dibiarkan tumbuh** — aturan yang sama dengan
+/// `kMaxMaterialSets` di jalur mundur. Larik yang dibuat ulang saat penuh
+/// berarti descriptor set yang ditulis ulang sementara frame sebelumnya masih
+/// membacanya, dan itu kerusakan yang muncul beberapa detik sesudah sebabnya.
+constexpr uint32_t kMaxBindlessMaterials = 1024;
+
+/// Membulatkan ke kelipatan 16, penjajaran minimum sebuah constant buffer.
+constexpr std::size_t AlignUp16(std::size_t bytes) {
+    return (bytes + 15) & ~static_cast<std::size_t>(15);
+}
 
 /// Harus sama persis dengan blok push_constant di Shaders/sdf_debug.{vert,frag}.
 struct SdfDebugPush {
@@ -462,6 +489,7 @@ public:
             return false;
         }
         shaderDirectory_ = desc.shaderDirectory;
+        SelectMaterialBinding(desc.materialBinding);
         if (!CreateCube() || !CreateShadowMap() || !CreateShadowAtlas() ||
             !CreatePipelines(desc.shaderDirectory) ||
             !CreateOverlayPipelines(desc.shaderDirectory)) {
@@ -694,6 +722,12 @@ public:
         // angka terakhir yang benar — tabel yang berkedip kosong setiap kali
         // panel diubah ukurannya tidak bisa dibaca siapa pun.
         cpuTimings_.clear();
+        // **Dinolkan sebelum perekaman, bukan bersama angka yang lain.** Sisa
+        // isi `stats_` diisi di ujung `Render`, sesudah frame graph selesai
+        // merekam; kedua hitungan ini justru dijumlahkan *selama* perekaman itu,
+        // jadi menolkannya di sana berarti menolkan hasilnya sendiri.
+        stats_.descriptorSetBinds = 0;
+        stats_.drawCalls = 0;
         const CpuScope totalScope(cpuTimings_, "cpu-total");
         const float aspect =
             static_cast<float>(target_.Width()) / static_cast<float>(target_.Height());
@@ -1087,8 +1121,8 @@ public:
                         static_cast<float>(probeGrid_.Settings().tileSize), 0.0f);
                     vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                       sdfDebugPipeline_);
-                    vkCmdBindDescriptorSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                            sdfDebugLayout_, 0, 1, &slot.shadowSet, 0, nullptr);
+                    BindSets(command, VK_PIPELINE_BIND_POINT_GRAPHICS, sdfDebugLayout_, 0, 1,
+                             &slot.shadowSet, 0, nullptr);
                     vkCmdPushConstants(command, sdfDebugLayout_,
                                        VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                        0, sizeof(SdfDebugPush), &push);
@@ -1317,17 +1351,36 @@ public:
             textureByPath_.emplace(key, kInvalidTexture);
             return kInvalidTexture;
         }
-        entry->set = AllocateMaterialSet(entry->texture);
-        if (entry->set == VK_NULL_HANDLE) {
+        if (!bindless_) {
+            entry->set = AllocateMaterialSet(entry->texture);
+            if (entry->set == VK_NULL_HANDLE) {
+                textureByPath_.emplace(key, kInvalidTexture);
+                return kInvalidTexture;
+            }
+        }
+
+        // Handle-nya indeks + 1: nol tetap berarti "tidak ada", sehingga
+        // pemanggil tidak perlu membedakan "belum diminta" dari "gagal". Nomor
+        // itu **sekaligus** slot bindless-nya, dan slot nol putih 1x1 — jadi
+        // `kInvalidTexture` menunjuk nilai satuan perkalian tanpa dipetakan.
+        const TextureHandle handle = static_cast<TextureHandle>(materialTextures_.size() + 1);
+        if (bindless_ && handle >= bindlessCapacity_) {
+            // Batasnya disebut, bukan dilampaui diam-diam: menulis melewati
+            // ujung larik adalah descriptor tak sah yang muncul sebagai tekstur
+            // acak pada benda lain, jauh dari tekstur yang menyebabkannya.
+            SIM_WARN("Render",
+                     "the bindless texture array is full ({} slots); {} falls back to white",
+                     bindlessCapacity_, key);
+            entry->texture.Destroy();
             textureByPath_.emplace(key, kInvalidTexture);
             return kInvalidTexture;
         }
 
         textureBytes_ += entry->texture.GpuBytes();
+        if (bindless_) {
+            WriteBindlessTexture(static_cast<uint32_t>(handle), entry->texture);
+        }
         materialTextures_.push_back(std::move(entry));
-        // Handle-nya indeks + 1: nol tetap berarti "tidak ada", sehingga
-        // pemanggil tidak perlu membedakan "belum diminta" dari "gagal".
-        const TextureHandle handle = static_cast<TextureHandle>(materialTextures_.size());
         textureByPath_.emplace(key, handle);
         SIM_INFO("Render", "texture ready: {} ({}x{}, {} level, format {}, {} KB)", key,
                  image.width, image.height, image.levels.size(), image.format,
@@ -1342,10 +1395,16 @@ public:
 
     /// Material yang pipeline-nya sudah dibangun. Indeks + 1 menjadi handle-nya.
     struct GpuMaterial {
+        /// Ketiganya kosong pada jalur bindless: di sana tidak ada satu pun
+        /// objek descriptor milik sebuah material sendiri.
         VkDescriptorSetLayout setLayout = VK_NULL_HANDLE;
-        VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
         VkDescriptorPool pool = VK_NULL_HANDLE;
         VkDescriptorSet set = VK_NULL_HANDLE;
+        /// Layout bersama pada jalur bindless, milik sendiri pada jalur mundur.
+        /// `DestroyMaterial` membedakannya dengan membandingkannya.
+        VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+        /// Nomor material ini di larik bindless. Nol pada jalur mundur.
+        uint32_t slot = 0;
         rhi::DynamicBuffer parameters;
         /// [transparan][ber-kulit].
         std::array<PipelineVariants, 2> pipelines{};
@@ -1364,6 +1423,16 @@ public:
         if (key.empty() || program.fragmentSpirv.empty() || boxVertexModule_ == VK_NULL_HANDLE) {
             return kInvalidMaterial;
         }
+        if (program.bindless != bindless_) {
+            // **Ditolak, bukan dibangun.** Kedua jalur menghasilkan modul yang
+            // sama sahnya dan sama bentuk entry point-nya; yang berbeda hanya
+            // descriptor set layout yang diharapkannya. Pipeline-nya akan
+            // terbangun tanpa satu pun keluhan, lalu menyampel descriptor yang
+            // tidak pernah ditulis siapa pun.
+            SIM_WARN("Render", "material {} was compiled for the {} path", key,
+                     program.bindless ? "bindless" : "per-part set");
+            return kInvalidMaterial;
+        }
         const std::string cacheKey(key);
         if (const auto found = materialByKey_.find(cacheKey); found != materialByKey_.end()) {
             return found->second;
@@ -1376,44 +1445,61 @@ public:
         auto material = std::make_unique<GpuMaterial>();
         const uint32_t textureCount = static_cast<uint32_t>(program.textures.size());
 
-        // Binding 0 blok parameter, lalu tekstur dan sampler berselang mulai 1 —
-        // konvensi kompiler graph, dan yang menuliskannya di sisi shader adalah
-        // kompiler itu sendiri.
-        std::vector<VkDescriptorSetLayoutBinding> bindings;
-        bindings.push_back({0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
-                            VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
-        for (uint32_t i = 0; i < textureCount; ++i) {
-            bindings.push_back({1 + i * 2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1,
+        if (bindless_) {
+            // **Tidak ada satu pun objek descriptor milik material ini.** Set 2
+            // sudah berupa larik bersama yang diikat sekali per pass, dan
+            // layout-nya sudah ikut ke dalam `pipelineLayout_` — jadi pipeline
+            // material memakainya kembali apa adanya, bukan membangun kembarnya.
+            //
+            // Itu pula yang membuat pergantian pipeline per ruas tidak lagi
+            // menyeret pergantian layout: ketiga set-nya benda yang sama persis.
+            if (materials_.size() >= kMaxBindlessMaterials) {
+                SIM_WARN("Render", "the bindless material array is full ({} slots); {} falls back",
+                         kMaxBindlessMaterials, cacheKey);
+                return kInvalidMaterial;
+            }
+            material->pipelineLayout = pipelineLayout_;
+            material->slot = static_cast<uint32_t>(materials_.size());
+        } else {
+            // Binding 0 blok parameter, lalu tekstur dan sampler berselang mulai
+            // 1 — konvensi kompiler graph, dan yang menuliskannya di sisi shader
+            // adalah kompiler itu sendiri.
+            std::vector<VkDescriptorSetLayoutBinding> bindings;
+            bindings.push_back({0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
                                 VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
-            bindings.push_back({2 + i * 2, VK_DESCRIPTOR_TYPE_SAMPLER, 1,
-                                VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
-        }
-        VkDescriptorSetLayoutCreateInfo layoutInfo{};
-        layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
-        layoutInfo.pBindings = bindings.data();
-        if (vkCreateDescriptorSetLayout(device_.Handle(), &layoutInfo, nullptr,
-                                        &material->setLayout) != VK_SUCCESS) {
-            SIM_WARN("Render", "cannot create descriptor layout for material {}", cacheKey);
-            return kInvalidMaterial;
-        }
+            for (uint32_t i = 0; i < textureCount; ++i) {
+                bindings.push_back({1 + i * 2, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1,
+                                    VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+                bindings.push_back({2 + i * 2, VK_DESCRIPTOR_TYPE_SAMPLER, 1,
+                                    VK_SHADER_STAGE_FRAGMENT_BIT, nullptr});
+            }
+            VkDescriptorSetLayoutCreateInfo layoutInfo{};
+            layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+            layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+            layoutInfo.pBindings = bindings.data();
+            if (vkCreateDescriptorSetLayout(device_.Handle(), &layoutInfo, nullptr,
+                                            &material->setLayout) != VK_SUCCESS) {
+                SIM_WARN("Render", "cannot create descriptor layout for material {}", cacheKey);
+                return kInvalidMaterial;
+            }
 
-        VkPushConstantRange range{};
-        range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
-        range.size = sizeof(BoxPush);
-        const std::array<VkDescriptorSetLayout, 3> sets{shadowSetLayout_, skinSetLayout_,
-                                                        material->setLayout};
-        VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
-        pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-        pipelineLayoutInfo.pushConstantRangeCount = 1;
-        pipelineLayoutInfo.pPushConstantRanges = &range;
-        pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(sets.size());
-        pipelineLayoutInfo.pSetLayouts = sets.data();
-        if (vkCreatePipelineLayout(device_.Handle(), &pipelineLayoutInfo, nullptr,
-                                   &material->pipelineLayout) != VK_SUCCESS) {
-            SIM_WARN("Render", "cannot create pipeline layout for material {}", cacheKey);
-            DestroyMaterial(*material);
-            return kInvalidMaterial;
+            VkPushConstantRange range{};
+            range.stageFlags = kBoxPushStages;
+            range.size = sizeof(BoxPush);
+            const std::array<VkDescriptorSetLayout, 3> sets{shadowSetLayout_, skinSetLayout_,
+                                                            material->setLayout};
+            VkPipelineLayoutCreateInfo pipelineLayoutInfo{};
+            pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+            pipelineLayoutInfo.pushConstantRangeCount = 1;
+            pipelineLayoutInfo.pPushConstantRanges = &range;
+            pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(sets.size());
+            pipelineLayoutInfo.pSetLayouts = sets.data();
+            if (vkCreatePipelineLayout(device_.Handle(), &pipelineLayoutInfo, nullptr,
+                                       &material->pipelineLayout) != VK_SUCCESS) {
+                SIM_WARN("Render", "cannot create pipeline layout for material {}", cacheKey);
+                DestroyMaterial(*material);
+                return kInvalidMaterial;
+            }
         }
 
         VkShaderModuleCreateInfo moduleInfo{};
@@ -1455,8 +1541,18 @@ public:
         // Blok parameter. **Minimal satu byte**: buffer berukuran nol tidak sah,
         // dan material tanpa satu pun parameter tetap mendeklarasikan
         // `cbuffer`-nya.
+        //
+        // **Pada jalur bindless ia membawa satu hal lagi: nomor slot tiap
+        // teksturnya.** Tabel itu ditempel sesudah blok parameter yang sudah
+        // dibulatkan ke 16, dan di sisi shader ia dideklarasikan `uint4` —
+        // std140 menjajarkan `uint4` ke 16, jadi tabelnya jatuh tepat di ujung
+        // blok. Dideklarasikan `uint` satu-satu, ia justru akan mengisi celah
+        // sisipan di dalamnya: sebuah `float3` di akhir blok berakhir di offset
+        // +12, dan `uint` berjajar 4.
+        const std::size_t slotBytes = bindless_ ? 16 * ((textureCount + 3) / 4) : 0;
+        const std::size_t blockBytes = AlignUp16(program.parameters.size());
         const VkDeviceSize parameterBytes =
-            std::max<VkDeviceSize>(program.parameters.size(), 16);
+            std::max<VkDeviceSize>(blockBytes + slotBytes, 16);
         if (!material->parameters.Create(device_, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT,
                                          parameterBytes)) {
             DestroyMaterial(*material);
@@ -1464,7 +1560,31 @@ public:
         }
         std::vector<uint8_t> padded(static_cast<std::size_t>(parameterBytes), 0);
         std::copy(program.parameters.begin(), program.parameters.end(), padded.begin());
+        if (bindless_) {
+            for (uint32_t i = 0; i < textureCount; ++i) {
+                // Slot tekstur = handle-nya, dan nol putih 1x1. Sama persis
+                // dengan jalur mundur di bawah, yang memilih `fallbackTexture_`
+                // untuk slot yang kosong.
+                const TextureHandle texture = program.textures[i];
+                const uint32_t slot = texture != kInvalidTexture &&
+                                              texture <= materialTextures_.size()
+                                          ? static_cast<uint32_t>(texture)
+                                          : 0u;
+                std::memcpy(padded.data() + blockBytes + i * sizeof(uint32_t), &slot,
+                            sizeof(slot));
+            }
+        }
         material->parameters.Write(padded.data(), parameterBytes);
+
+        if (bindless_) {
+            WriteBindlessMaterial(material->slot, material->parameters);
+            materials_.push_back(std::move(material));
+            const MaterialHandle handle = static_cast<MaterialHandle>(materials_.size());
+            materialByKey_[cacheKey] = handle;
+            SIM_INFO("Render", "material ready: {} ({} texture, bindless slot {})", cacheKey,
+                     textureCount, handle - 1);
+            return handle;
+        }
 
         std::vector<VkDescriptorPoolSize> poolSizes{
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1}};
@@ -1559,7 +1679,9 @@ public:
             vkDestroyDescriptorPool(device_.Handle(), material.pool, nullptr);
             material.pool = VK_NULL_HANDLE;
         }
-        if (material.pipelineLayout != VK_NULL_HANDLE) {
+        // Layout bersama tidak ikut dihancurkan bersama salah satu pemakainya.
+        if (material.pipelineLayout != VK_NULL_HANDLE &&
+            material.pipelineLayout != pipelineLayout_) {
             vkDestroyPipelineLayout(device_.Handle(), material.pipelineLayout, nullptr);
             material.pipelineLayout = VK_NULL_HANDLE;
         }
@@ -1654,6 +1776,8 @@ public:
     std::span<const PassTiming> CpuTimings() const override { return cpuTimings_; }
 
     RenderStats Stats() const override { return stats_; }
+
+    bool UsesBindlessMaterials() const override { return bindless_; }
 
 private:
     struct InstanceSlot {
@@ -2276,6 +2400,45 @@ private:
         (void)desc;
     }
 
+    /// Memutuskan jalur material, dan **menyebutkan alasannya**.
+    ///
+    /// Alasannya ikut karena jalur yang dipilih diam-diam adalah jalur yang
+    /// tidak ada yang tahu sedang berjalan — persis alasan pemilih backend GI
+    /// menuliskan alasannya. Di sini akibatnya lebih tajam: pada mesin yang
+    /// mampu bindless, jalur mundur berhenti dijalankan siapa pun pada hari ini
+    /// mendarat, sementara justru jalur itu yang harus tetap bekerja di GPU yang
+    /// tidak mampu.
+    void SelectMaterialBinding(MaterialBindingPreference preference) {
+        const rhi::DeviceCapabilities& caps = device_.Capabilities();
+        if (!caps.descriptorIndexing) {
+            SIM_INFO("Render",
+                     "material binding: per-part sets (this GPU has no descriptor indexing)");
+            return;
+        }
+        if (preference == MaterialBindingPreference::ForceClassic) {
+            SIM_INFO("Render", "material binding: per-part sets (forced)");
+            return;
+        }
+        bindless_ = true;
+        bindlessCapacity_ = caps.bindlessTextureCapacity;
+        SIM_INFO("Render", "material binding: bindless ({} texture slots, {} material slots)",
+                 bindlessCapacity_, kMaxBindlessMaterials);
+    }
+
+    /// `vkCmdBindDescriptorSets` yang ikut terhitung.
+    ///
+    /// **Setiap pengikatan lewat sini, termasuk yang bukan milik material.**
+    /// Angka yang hanya menghitung sebagian adalah angka yang menjawab
+    /// pertanyaan lain daripada yang ditanyakan kriteria selesai G5 — dan yang
+    /// membacanya tidak punya cara mengetahuinya.
+    void BindSets(VkCommandBuffer cmd, VkPipelineBindPoint bindPoint, VkPipelineLayout layout,
+                  uint32_t firstSet, uint32_t count, const VkDescriptorSet* sets,
+                  uint32_t dynamicCount, const uint32_t* dynamicOffsets) {
+        vkCmdBindDescriptorSets(cmd, bindPoint, layout, firstSet, count, sets, dynamicCount,
+                                dynamicOffsets);
+        ++stats_.descriptorSetBinds;
+    }
+
     void DrawInstances(VkCommandBuffer cmd, const PipelineVariants& pipelines, const BoxPush& push,
                        InstanceSlot& slot, std::span<const DrawRun> runs, uint32_t instanceBase,
                        int materialVariant = -1) {
@@ -2290,11 +2453,15 @@ private:
         // yang menentukan sebuah descriptor "terpakai" adalah modul SPIR-V, dan
         // di sana cabang `kSkinned` masih ada — spesialisasi baru menilainya
         // sesudah itu.
-        const std::array<VkDescriptorSet, 2> sets{slot.shadowSet, slot.skinSet};
-        vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0,
-                                static_cast<uint32_t>(sets.size()), sets.data(), 0, nullptr);
-        vkCmdPushConstants(cmd, pipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(BoxPush),
-                           &push);
+        //
+        // **Set 2 ikut di sini pada jalur bindless, dan hanya di sini.** Itulah
+        // seluruh isi G5: satu ikatan di awal pass menggantikan satu ikatan per
+        // ruas. Pada jalur mundur ia tetap diikat di dalam gelung, karena di
+        // sana setiap material adalah set yang berbeda.
+        const std::array<VkDescriptorSet, 3> sets{slot.shadowSet, slot.skinSet, bindlessSet_};
+        BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, bindless_ ? 3u : 2u,
+                 sets.data(), 0, nullptr);
+        vkCmdPushConstants(cmd, pipelineLayout_, kBoxPushStages, 0, sizeof(BoxPush), &push);
         DrawRuns(cmd, slot, runs, instanceBase, pipelines, pipelineLayout_, push,
                  /*bindsMaterial=*/true, materialVariant);
     }
@@ -2385,6 +2552,9 @@ private:
 
                 const VkPipelineLayout partLayout =
                     material != nullptr ? material->pipelineLayout : layout;
+                // Slot material ruas ini. Nol pada jalur mundur, dan tidak
+                // pernah dibaca di sana — `box.frag` membaca `textureSlot`.
+                partPush.materialSlot = material != nullptr ? material->slot : 0;
                 const VkPipeline partPipeline =
                     material != nullptr
                         ? material->pipelines[static_cast<std::size_t>(materialVariant)]
@@ -2403,29 +2573,50 @@ private:
                     bound = partPipeline;
                 }
 
-                VkDescriptorSet materialSet = VK_NULL_HANDLE;
-                if (material != nullptr) {
-                    materialSet = material->set;
-                } else if (bindsMaterial) {
-                    materialSet = fallbackSet_;
-                    if (partIndex < run.partColorCount &&
-                        run.partColorFirst + partIndex < partTextures_.size()) {
-                        const TextureHandle handle = partTextures_[run.partColorFirst + partIndex];
-                        if (handle != kInvalidTexture && handle <= materialTextures_.size()) {
-                            materialSet =
-                                materialTextures_[static_cast<std::size_t>(handle) - 1]->set;
-                        }
+                // Tekstur ruas ini, untuk ruas yang digambar jalur mundur.
+                //
+                // **Dicari di kedua jalur, dipakai berbeda.** Bindless
+                // membawanya sebagai nomor slot di push constant; jalur mundur
+                // membawanya sebagai descriptor set yang diikat di sini. Yang
+                // sama persis adalah cara menemukannya, dan itu tetap satu
+                // salinan kode.
+                TextureHandle partTexture = kInvalidTexture;
+                if (material == nullptr && bindsMaterial &&
+                    partIndex < run.partColorCount &&
+                    run.partColorFirst + partIndex < partTextures_.size()) {
+                    const TextureHandle handle = partTextures_[run.partColorFirst + partIndex];
+                    if (handle != kInvalidTexture && handle <= materialTextures_.size()) {
+                        partTexture = handle;
                     }
                 }
-                if (materialSet != VK_NULL_HANDLE) {
-                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, partLayout, 2,
-                                            1, &materialSet, 0, nullptr);
+
+                if (bindless_) {
+                    // Slot nol adalah putih 1x1, jadi ruas tanpa tekstur tidak
+                    // menuntut satu pun cabang di shader.
+                    partPush.textureSlot =
+                        partTexture == kInvalidTexture ? 0u : static_cast<uint32_t>(partTexture);
+                } else {
+                    VkDescriptorSet materialSet = VK_NULL_HANDLE;
+                    if (material != nullptr) {
+                        materialSet = material->set;
+                    } else if (bindsMaterial) {
+                        materialSet =
+                            partTexture == kInvalidTexture
+                                ? fallbackSet_
+                                : materialTextures_[static_cast<std::size_t>(partTexture) - 1]
+                                      ->set;
+                    }
+                    if (materialSet != VK_NULL_HANDLE) {
+                        BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, partLayout, 2, 1,
+                                 &materialSet, 0, nullptr);
+                    }
                 }
-                vkCmdPushConstants(cmd, partLayout, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                vkCmdPushConstants(cmd, partLayout, kBoxPushStages, 0,
                                    sizeof(BoxPush), &partPush);
                 vkCmdDrawIndexed(cmd, part.indexCount, run.count, static_cast<int32_t>(0),
                                  static_cast<int32_t>(part.firstIndex),
                                  instanceBase + run.first);
+                ++stats_.drawCalls;
             }
         }
     }
@@ -2667,19 +2858,24 @@ private:
 
     bool CreatePipelines(const std::filesystem::path& shaderDirectory) {
         VkShaderModule vertex = CreateShaderModule(device_.Handle(), shaderDirectory / "box.vert.spv");
-        VkShaderModule fragment =
-            CreateShaderModule(device_.Handle(), shaderDirectory / "box.frag.spv");
+        // Dua modul, bukan satu modul dengan konstanta spesialisasi: yang
+        // berbeda antara keduanya bukan sebuah nilai melainkan bentuk descriptor
+        // set layout-nya, dan itu sudah ditetapkan sebelum spesialisasi dinilai.
+        VkShaderModule fragment = CreateShaderModule(
+            device_.Handle(),
+            shaderDirectory / (bindless_ ? "box_bindless.frag.spv" : "box.frag.spv"));
         if (vertex == VK_NULL_HANDLE || fragment == VK_NULL_HANDLE) {
             return false;
         }
 
         VkPushConstantRange range{};
-        range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        range.stageFlags = kBoxPushStages;
         range.size = sizeof(BoxPush);
         // Set 0 keadaan bayangan per-frame, set 1 palet kulit. Nomornya harus
         // sama dengan `SKIN_SET` di box.vert dan prepass.vert.
-        const std::array<VkDescriptorSetLayout, 3> forwardSets{shadowSetLayout_, skinSetLayout_,
-                                                               materialSetLayout_};
+        const std::array<VkDescriptorSetLayout, 3> forwardSets{
+            shadowSetLayout_, skinSetLayout_,
+            bindless_ ? bindlessSetLayout_ : materialSetLayout_};
         VkPipelineLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
         layoutInfo.pushConstantRangeCount = 1;
@@ -3169,7 +3365,8 @@ private:
         poolInfo.pPoolSizes = sizes.data();
         SIM_VK_CHECK(
             vkCreateDescriptorPool(device_.Handle(), &poolInfo, nullptr, &shadowPool_));
-        return CreateSkinDescriptors() && CreateMaterialDescriptors();
+        return CreateSkinDescriptors() && CreateMaterialDescriptors() &&
+               CreateBindlessDescriptors();
     }
 
     /// Set descriptor material: parameter, tekstur, sampler — **nomor binding
@@ -3230,9 +3427,11 @@ private:
             SIM_ERROR("Render", "cannot create fallback texture");
             return false;
         }
-        fallbackSet_ = AllocateMaterialSet(fallbackTexture_);
-        if (fallbackSet_ == VK_NULL_HANDLE) {
-            return false;
+        if (!bindless_) {
+            fallbackSet_ = AllocateMaterialSet(fallbackTexture_);
+            if (fallbackSet_ == VK_NULL_HANDLE) {
+                return false;
+            }
         }
 
         // **Magenta, dan bukan putih maupun hitam.** Ini yang tergambar untuk
@@ -3250,9 +3449,11 @@ private:
             SIM_ERROR("Render", "cannot create pending texture");
             return false;
         }
-        pending->set = AllocateMaterialSet(pending->texture);
-        if (pending->set == VK_NULL_HANDLE) {
-            return false;
+        if (!bindless_) {
+            pending->set = AllocateMaterialSet(pending->texture);
+            if (pending->set == VK_NULL_HANDLE) {
+                return false;
+            }
         }
         materialTextures_.push_back(std::move(pending));
         // Ia menempati slot pertama supaya handle-nya seperti tekstur lain, dan
@@ -3299,6 +3500,144 @@ private:
         vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
         return set;
+    }
+
+    /// Larik descriptor bindless: satu set untuk seluruh material dan seluruh
+    /// tekstur adegan, diikat sekali per pass.
+    ///
+    /// **Nomor binding-nya sama persis dengan set material jalur mundur** —
+    /// 0 parameter, 1 tekstur, 2 sampler — dan yang berbeda hanya larik atau
+    /// bukan larik. Itu yang membuat `box.frag` dan `box_bindless.frag` berbeda
+    /// satu baris, bukan satu berkas.
+    ///
+    /// `UPDATE_AFTER_BIND` wajib, dan alasannya masa hidup: tekstur baru selesai
+    /// di-bake di tengah adegan yang sedang berjalan, dan slotnya ditulis
+    /// sementara dua frame sebelumnya masih terbang. Tanpa medan itu, penulisan
+    /// tersebut adalah pelanggaran — yang muncul sebagai kerusakan acak, bukan
+    /// sebagai galat.
+    ///
+    /// `PARTIALLY_BOUND` juga wajib, dan alasannya berbeda: larik dialokasikan
+    /// sepenuh kapasitasnya sejak awal, sementara yang terisi hanya sebanyak
+    /// tekstur yang sudah dimuat. Tanpa medan itu seluruh slot harus sah pada
+    /// setiap draw, termasuk yang tidak pernah dibaca siapa pun.
+    bool CreateBindlessDescriptors() {
+        if (!bindless_) {
+            return true;
+        }
+        const std::array<VkDescriptorSetLayoutBinding, 3> bindings{
+            VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
+                                         kMaxBindlessMaterials, VK_SHADER_STAGE_FRAGMENT_BIT,
+                                         nullptr},
+            VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, bindlessCapacity_,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{2, VK_DESCRIPTOR_TYPE_SAMPLER, bindlessCapacity_,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+        };
+        constexpr VkDescriptorBindingFlags kFlags =
+            VK_DESCRIPTOR_BINDING_PARTIALLY_BOUND_BIT | VK_DESCRIPTOR_BINDING_UPDATE_AFTER_BIND_BIT;
+        const std::array<VkDescriptorBindingFlags, 3> bindingFlags{kFlags, kFlags, kFlags};
+        VkDescriptorSetLayoutBindingFlagsCreateInfo flagsInfo{};
+        flagsInfo.sType =
+            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_BINDING_FLAGS_CREATE_INFO;
+        flagsInfo.bindingCount = static_cast<uint32_t>(bindingFlags.size());
+        flagsInfo.pBindingFlags = bindingFlags.data();
+
+        VkDescriptorSetLayoutCreateInfo layoutInfo{};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layoutInfo.pNext = &flagsInfo;
+        layoutInfo.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_UPDATE_AFTER_BIND_POOL_BIT;
+        layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+        layoutInfo.pBindings = bindings.data();
+        if (vkCreateDescriptorSetLayout(device_.Handle(), &layoutInfo, nullptr,
+                                        &bindlessSetLayout_) != VK_SUCCESS) {
+            SIM_ERROR("Render", "cannot create bindless descriptor layout");
+            return false;
+        }
+
+        const std::array<VkDescriptorPoolSize, 3> sizes{
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kMaxBindlessMaterials},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, bindlessCapacity_},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLER, bindlessCapacity_},
+        };
+        VkDescriptorPoolCreateInfo poolInfo{};
+        poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+        poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_UPDATE_AFTER_BIND_BIT;
+        poolInfo.maxSets = 1;
+        poolInfo.poolSizeCount = static_cast<uint32_t>(sizes.size());
+        poolInfo.pPoolSizes = sizes.data();
+        if (vkCreateDescriptorPool(device_.Handle(), &poolInfo, nullptr, &bindlessPool_) !=
+            VK_SUCCESS) {
+            SIM_ERROR("Render", "cannot create bindless descriptor pool");
+            return false;
+        }
+
+        VkDescriptorSetAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+        allocateInfo.descriptorPool = bindlessPool_;
+        allocateInfo.descriptorSetCount = 1;
+        allocateInfo.pSetLayouts = &bindlessSetLayout_;
+        if (vkAllocateDescriptorSets(device_.Handle(), &allocateInfo, &bindlessSet_) !=
+            VK_SUCCESS) {
+            SIM_ERROR("Render", "cannot allocate the bindless descriptor set");
+            return false;
+        }
+
+        // Slot nol putih 1x1. **Ditulis sekarang, bukan saat ruas pertama tanpa
+        // tekstur digambar**: ia yang membuat "tidak punya tekstur" tidak
+        // menuntut satu pun cabang, dan cabang yang tidak ada tidak bisa lupa
+        // dijalankan.
+        WriteBindlessTexture(0, fallbackTexture_);
+        for (std::size_t i = 0; i < materialTextures_.size(); ++i) {
+            WriteBindlessTexture(static_cast<uint32_t>(i + 1), materialTextures_[i]->texture);
+        }
+        return true;
+    }
+
+    /// Menaruh sebuah tekstur di slot bindless-nya. Slot = handle tekstur, dan
+    /// nol adalah putih 1x1 — jadi `kInvalidTexture` menunjuk tempat yang benar
+    /// tanpa dipetakan.
+    void WriteBindlessTexture(uint32_t slot, const rhi::Texture2D& texture) {
+        if (bindlessSet_ == VK_NULL_HANDLE || slot >= bindlessCapacity_) {
+            return;
+        }
+        VkDescriptorImageInfo image{};
+        image.imageView = texture.View();
+        image.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkDescriptorImageInfo sampler{};
+        sampler.sampler = texture.Sampler();
+
+        std::array<VkWriteDescriptorSet, 2> writes{};
+        for (VkWriteDescriptorSet& write : writes) {
+            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet = bindlessSet_;
+            write.dstArrayElement = slot;
+            write.descriptorCount = 1;
+        }
+        writes[0].dstBinding = 1;
+        writes[0].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        writes[0].pImageInfo = &image;
+        writes[1].dstBinding = 2;
+        writes[1].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+        writes[1].pImageInfo = &sampler;
+        vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
+                               writes.data(), 0, nullptr);
+    }
+
+    /// Menaruh blok parameter sebuah material di slot bindless-nya.
+    void WriteBindlessMaterial(uint32_t slot, const rhi::DynamicBuffer& parameters) {
+        if (bindlessSet_ == VK_NULL_HANDLE || slot >= kMaxBindlessMaterials) {
+            return;
+        }
+        const VkDescriptorBufferInfo info{parameters.Handle(), 0, VK_WHOLE_SIZE};
+        VkWriteDescriptorSet write{};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = bindlessSet_;
+        write.dstBinding = 0;
+        write.dstArrayElement = slot;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+        write.pBufferInfo = &info;
+        vkUpdateDescriptorSets(device_.Handle(), 1, &write, 0, nullptr);
     }
 
     /// Set descriptor palet kulit: satu storage buffer, tahap vertex.
@@ -3483,8 +3822,8 @@ private:
             // Pengikatan geometri dan pipeline pindah ke dalam `DrawRuns`: sejak
             // ada lebih dari satu mesh, buffer yang diikat berbeda per ruas —
             // dan sejak ada jalur berkulit, pipeline-nya juga.
-            vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowLayout_, 0, 1,
-                                    &slot.skinSet, 0, nullptr);
+            BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowLayout_, 0, 1, &slot.skinSet,
+                     0, nullptr);
 
             for (const ShadowAtlasEntry& entry : atlasAllocation_.entries) {
                 // **Tiap muka menyaring terhadap volumenya sendiri.** Sebuah
@@ -3524,7 +3863,7 @@ private:
                 vkCmdSetViewport(cmd, 0, 1, &viewport);
                 vkCmdSetScissor(cmd, 0, 1, &scissor);
                 const BoxPush push{entry.viewProjection};
-                vkCmdPushConstants(cmd, shadowLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                vkCmdPushConstants(cmd, shadowLayout_, kBoxPushStages, 0,
                                    sizeof(BoxPush), &push);
                 DrawRuns(cmd, slot, shadowRuns_, 0, shadowPipelines_, shadowLayout_, push,
                          /*bindsMaterial=*/false);
@@ -3914,6 +4253,15 @@ private:
             vkDestroyDescriptorSetLayout(device_.Handle(), materialSetLayout_, nullptr);
             materialSetLayout_ = VK_NULL_HANDLE;
         }
+        if (bindlessPool_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(device_.Handle(), bindlessPool_, nullptr);
+            bindlessPool_ = VK_NULL_HANDLE;
+            bindlessSet_ = VK_NULL_HANDLE;
+        }
+        if (bindlessSetLayout_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(device_.Handle(), bindlessSetLayout_, nullptr);
+            bindlessSetLayout_ = VK_NULL_HANDLE;
+        }
         if (skinSetLayout_ != VK_NULL_HANDLE) {
             vkDestroyDescriptorSetLayout(device_.Handle(), skinSetLayout_, nullptr);
             skinSetLayout_ = VK_NULL_HANDLE;
@@ -4267,9 +4615,9 @@ private:
                           shadowRuns_);
                 const BoxPush push{cascade.viewProjection};
                 if (!shadowRuns_.empty()) {
-                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowLayout_,
-                                            0, 1, &slot.skinSet, 0, nullptr);
-                    vkCmdPushConstants(cmd, shadowLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                    BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowLayout_, 0, 1,
+                             &slot.skinSet, 0, nullptr);
+                    vkCmdPushConstants(cmd, shadowLayout_, kBoxPushStages, 0,
                                        sizeof(BoxPush), &push);
                     DrawRuns(cmd, slot, shadowRuns_, 0, shadowPipelines_, shadowLayout_, push,
                              /*bindsMaterial=*/false);
@@ -4662,6 +5010,14 @@ private:
     /// sungguh diunggah — bukan dari dimensi dikali tebakan bytes-per-texel.
     uint64_t textureBytes_ = 0;
     VkDescriptorSetLayout materialSetLayout_ = VK_NULL_HANDLE;
+
+    /// Jalur material yang benar-benar dipakai. Lihat `SelectMaterialBinding`.
+    bool bindless_ = false;
+    uint32_t bindlessCapacity_ = 0;
+    VkDescriptorSetLayout bindlessSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool bindlessPool_ = VK_NULL_HANDLE;
+    /// Satu set untuk seluruh adegan, diikat sekali per pass.
+    VkDescriptorSet bindlessSet_ = VK_NULL_HANDLE;
     VkDescriptorPool materialPool_ = VK_NULL_HANDLE;
     rhi::DynamicBuffer materialParams_;
     rhi::Texture2D fallbackTexture_;

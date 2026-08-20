@@ -127,6 +127,12 @@ private:
         std::filesystem::path graphPath;
         material::MaterialInstance instance;
         bool hasInstance = false;
+        /// Jalur yang diminta renderer, dibaca sekali di `Request`.
+        ///
+        /// **Ikut di dalam job, bukan disimpan sebagai keadaan kelas ini.**
+        /// Worker mengompilasi di thread lain; renderer yang ditanya di
+        /// tengah-tengahnya adalah renderer yang boleh saja sudah dihancurkan.
+        bool bindless = false;
     };
 
     /// Hasil worker, menunggu diambil main thread.
@@ -135,6 +141,8 @@ private:
         std::vector<uint8_t> parameters;
         /// Aset tekstur tiap slot, urutannya urutan deklarasi kompiler.
         std::vector<Uuid> textures;
+        /// Jalur yang dipakai saat SPIR-V ini dihasilkan.
+        bool bindless = false;
     };
 
     struct Entry {

@@ -34,7 +34,8 @@ MaterialPrograms::MaterialPrograms(std::filesystem::path shaderCacheDir,
     // Berkas yang sama persis yang di-`#include` `box.frag`. Lihat catatannya di
     // `AssembleForwardMaterialModule`.
     frameDeclarations_ = material::InlineShaderIncludes(
-        shaderDir_, {"box_varyings.slang", "cluster_common.slang", "gi_resolve.slang"});
+        shaderDir_,
+        {"box_push.slang", "box_varyings.slang", "cluster_common.slang", "gi_resolve.slang"});
     if (frameDeclarations_.empty()) {
         SIM_WARN("Editor", "renderer shader headers not found in {}", shaderDir_.string());
         return;
@@ -102,6 +103,7 @@ MaterialProgramRef MaterialPrograms::Request(const assets::AssetDatabase& assets
             } else {
                 job.graphPath = path;
             }
+            job.bindless = renderer.UsesBindlessMaterials();
             needsCompile = true;
         }
     }
@@ -180,6 +182,7 @@ MaterialProgramRef MaterialPrograms::Request(const assets::AssetDatabase& assets
     program.fragmentSpirv = ready.spirv;
     program.parameters = ready.parameters;
     program.textures = textures;
+    program.bindless = ready.bindless;
     const render::MaterialHandle handle =
         renderer.AcquireMaterial(guid.ToString() + ":" + std::to_string(hash), program);
 
@@ -198,7 +201,9 @@ void MaterialPrograms::Compile(Uuid guid, Job job) {
 
     material::MaterialCompileResult compiled;
     if (ok) {
-        compiled = material::CompileMaterial(graph);
+        material::MaterialCompileOptions options;
+        options.bindless = job.bindless;
+        compiled = material::CompileMaterial(graph, options);
         ok = compiled.ok;
     }
 
@@ -246,6 +251,7 @@ void MaterialPrograms::Compile(Uuid guid, Job job) {
         entry.result.textures.push_back(image);
     }
     entry.result.spirv = std::move(fragment.spirv);
+    entry.result.bindless = job.bindless;
     entry.state = MaterialProgramState::Pending;
     entry.compiled = true;
 

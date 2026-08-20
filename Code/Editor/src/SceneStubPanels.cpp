@@ -67,6 +67,15 @@ public:
                         stats.opaqueInstances);
             ImGui::Text("Casters : %u over %u shadow faces", stats.shadowCasters,
                         stats.shadowFaces);
+            // **Ikatan descriptor di sebelah jumlah draw, dan jalur materialnya
+            // di sebelah keduanya.** Ketiganya satu cerita: yang menentukan
+            // berapa kali descriptor diikat bukan jumlah benda melainkan cara
+            // material diikat, dan angka yang berdiri sendiri tidak
+            // mengatakannya. Lihat G5 di docs/PLAN-GPU-OPTIM.md.
+            ImGui::Text("Binds   : %u sets / %u draws (%s)", stats.descriptorSetBinds,
+                        stats.drawCalls,
+                        context.viewportRenderer->UsesBindlessMaterials() ? "bindless"
+                                                                         : "per-part sets");
             // **Berwarna, dan hanya saat ada yang terbuang.** Sebuah angka nol
             // yang selalu ada di sana berhenti dibaca dalam sehari; yang muncul
             // hanya ketika ia berarti sesuatu masih terbaca setahun kemudian.

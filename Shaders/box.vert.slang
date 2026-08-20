@@ -5,19 +5,9 @@
 // Set 1 untuk palet kulit: set 0 sudah dipakai keadaan bayangan per-frame.
 #define SKIN_SET 1
 
+#include "box_push.slang"
 #include "box_varyings.slang"
 #include "skin_common.slang"
-
-struct BoxPush {
-    float4x4 viewProj;
-    // Warna dasar ruas yang sedang digambar; `w` nol berarti ruas ini tidak
-    // punya material di berkasnya.
-    float4 partColor;
-    // `firstInstance` draw ini. Lihat catatannya di instance_common.slang.
-    uint instanceBase;
-};
-
-[[vk::push_constant]] ConstantBuffer<BoxPush> push;
 
 [shader("vertex")]
 BoxVarying main(BoxVertex vertex, uint instanceId : SV_InstanceID) {
