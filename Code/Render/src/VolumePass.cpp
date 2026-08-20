@@ -170,7 +170,7 @@ bool VolumePass::Create(rhi::Device& device, const std::filesystem::path& shader
     info.layout = layout_;
 
     const VkResult created =
-        vkCreateGraphicsPipelines(device.Handle(), VK_NULL_HANDLE, 1, &info, nullptr, &pipeline_);
+        vkCreateGraphicsPipelines(device.Handle(), device.PipelineCache(), 1, &info, nullptr, &pipeline_);
     vkDestroyShaderModule(device.Handle(), fragment, nullptr);
     if (created != VK_SUCCESS) {
         Destroy();

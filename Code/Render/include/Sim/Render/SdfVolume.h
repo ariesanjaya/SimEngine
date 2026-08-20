@@ -55,6 +55,26 @@ public:
 
     bool Empty() const { return entries_.empty(); }
 
+    /// Bentuk sebuah entri seperti yang dibaca shader komposit.
+    ///
+    /// **Dipisah dari `Entry` alih-alih diserahkan apa adanya.** Yang di dalam
+    /// diatur demi jalur CPU — `Vec3` yang rapat, tanpa padding — sementara
+    /// std430 menuntut setiap vektor sejajar enam belas byte. Menyerahkan yang
+    /// pertama sebagai yang kedua adalah bug yang tidak menghasilkan galat
+    /// apa pun, hanya jarak yang salah pada mesh kedua dan seterusnya.
+    struct GpuEntry {
+        Mat4 inverse{1.0f};
+        /// x skala terkecil di antara tiga sumbu, y min(skala)/maks(skala)
+        Vec4 scaleAnisotropy{1.0f, 1.0f, 0.0f, 0.0f};
+        Vec4 boundsMin{0.0f};
+        Vec4 boundsMax{0.0f};
+    };
+
+    /// Menyalin entri ke bentuk yang dibaca shader. Dipakai jalur compute.
+    void WriteGpuEntries(std::vector<GpuEntry>& out) const;
+
+    std::size_t EntryCount() const { return entries_.size(); }
+
 private:
     struct Entry {
         Mat4 inverse{1.0f};

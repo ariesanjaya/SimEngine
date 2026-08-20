@@ -1,10 +1,12 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 
 #include "Sim/RHI/Ktx2.h"
+#include "Sim/RHI/Pipeline.h"
 
 #include <cstring>
 #include <fstream>
 #include "Sim/Render/FrameGraph.h"
+#include "Sim/Render/DrawRun.h"
 #include "Sim/Render/Frustum.h"
 #include "Sim/Render/Ibl.h"
 #include "Sim/Render/LightCluster.h"
@@ -78,6 +80,104 @@ Aabb Box(const Vec3& centre, float half) {
 }  // namespace
 
 // --- frame graph: pembuangan --------------------------------------------------
+
+// --- SplitRuns (G1) ----------------------------------------------------------
+//
+// Yang diuji di sini adalah satu-satunya hal yang membuat penyaringan per muka
+// bayangan mungkin tanpa mengunggah ulang apa pun. Salahnya tidak muncul sebagai
+// galat melainkan sebagai instance yang digambar di tempat instance lain — sebab
+// `first` sebuah ruas adalah indeks ke dalam buffer bersama.
+
+namespace {
+
+std::vector<sim::render::DrawRun> SplitWith(std::span<const sim::render::DrawRun> source,
+                                            const std::vector<bool>& keep) {
+    std::vector<sim::render::DrawRun> out;
+    sim::render::SplitRuns(source, [&keep](uint32_t index) {
+        return index < keep.size() && keep[index];
+    }, out);
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("SplitRuns memecah satu ruas menjadi rentang yang bersambung saja") {
+    using sim::render::DrawRun;
+    // Satu ruas berisi enam instance, indeks 0..5. Yang lolos: 0,1, lalu 4.
+    const std::vector<DrawRun> source{DrawRun{7, 2, 3, false, 0, 6}};
+    const std::vector<bool> keep{true, true, false, false, true, false};
+
+    const std::vector<DrawRun> out = SplitWith(source, keep);
+    REQUIRE(out.size() == 2);
+    CHECK(out[0].first == 0);
+    CHECK(out[0].count == 2);
+    CHECK(out[1].first == 4);
+    CHECK(out[1].count == 1);
+
+    // Kunci ruas ikut apa adanya. Kalau tidak, pecahan sebuah ruas akan
+    // digambar lewat pipeline atau material milik ruas lain.
+    for (const DrawRun& piece : out) {
+        CHECK(piece.mesh == 7);
+        CHECK(piece.partColorFirst == 2);
+        CHECK(piece.partColorCount == 3);
+        CHECK(piece.skinned == false);
+    }
+}
+
+TEST_CASE("SplitRuns menghormati offset ruas asal") {
+    using sim::render::DrawRun;
+    // **Ruas kedua tidak mulai dari nol**, dan inilah kesalahan yang paling
+    // mudah dibuat: memakai offset di dalam ruas sebagai indeks instance.
+    // Hasilnya instance milik ruas pertama yang digambar dengan material ruas
+    // kedua — tanpa satu pun galat validation layer.
+    const std::vector<DrawRun> source{DrawRun{1, 0, 1, false, 0, 3},
+                                      DrawRun{2, 1, 1, true, 3, 3}};
+    const std::vector<bool> keep{false, false, false, false, true, true};
+
+    const std::vector<DrawRun> out = SplitWith(source, keep);
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].mesh == 2);
+    CHECK(out[0].skinned == true);
+    CHECK(out[0].first == 4);
+    CHECK(out[0].count == 2);
+}
+
+TEST_CASE("SplitRuns menjatuhkan ruas yang seluruh isinya tersaring") {
+    using sim::render::DrawRun;
+    const std::vector<DrawRun> source{DrawRun{1, 0, 1, false, 0, 2},
+                                      DrawRun{2, 0, 1, false, 2, 2}};
+    const std::vector<bool> keep{false, false, true, true};
+
+    const std::vector<DrawRun> out = SplitWith(source, keep);
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].mesh == 2);
+    CHECK(out[0].first == 2);
+    CHECK(out[0].count == 2);
+}
+
+TEST_CASE("SplitRuns yang meloloskan semuanya mengembalikan daftar yang setara") {
+    using sim::render::DrawRun;
+    // Bukan sekadar kelengkapan: inilah jalur yang berlaku saat tidak ada yang
+    // tersaring, dan ia harus tetap satu panggilan gambar per ruas — bukan satu
+    // per instance, yang akan menukar penghematan GPU dengan biaya CPU yang
+    // lebih besar daripada yang dihemat.
+    const std::vector<DrawRun> source{DrawRun{1, 0, 1, false, 0, 4}};
+    const std::vector<bool> keep{true, true, true, true};
+
+    const std::vector<DrawRun> out = SplitWith(source, keep);
+    REQUIRE(out.size() == 1);
+    CHECK(out[0].first == 0);
+    CHECK(out[0].count == 4);
+}
+
+TEST_CASE("SplitRuns atas daftar kosong menghasilkan daftar kosong") {
+    std::vector<sim::render::DrawRun> out{sim::render::DrawRun{}};
+    sim::render::SplitRuns(std::span<const sim::render::DrawRun>{},
+                           [](uint32_t) { return true; }, out);
+    // Dikosongkan, bukan dibiarkan berisi sisa pemanggilan sebelumnya — vektor
+    // ini memang dipakai ulang antar-muka bayangan.
+    CHECK(out.empty());
+}
 
 TEST_CASE("Pass yang hasilnya tidak dibaca siapa pun dibuang") {
     FrameGraph graph;
@@ -247,6 +347,154 @@ TEST_CASE("Barrier hanya muncul saat keadaan benar-benar berpindah") {
     CHECK(HasBarrier(compiled.order[0], depth, Access::None, Access::DepthWrite));
     CHECK(HasBarrier(compiled.order[1], depth, Access::DepthWrite, Access::DepthRead));
     CHECK(compiled.order[2].barriers.empty());
+}
+
+// --- frame graph: barrier compute (G3) ------------------------------------------
+//
+// Bagian yang paling mudah salah di seluruh fondasi compute, dan yang paling
+// layak diuji tanpa GPU: salahnya tidak muncul sebagai galat melainkan sebagai
+// hasil yang berubah-ubah antar-jalan pada mesin orang lain.
+
+TEST_CASE("Tulisan compute lalu pembacaan tekstur menghasilkan satu transisi") {
+    FrameGraph graph;
+    const ResourceId target = graph.Import("target", Access::None);
+    const ResourceId storage = graph.Import("gradient", Access::ShaderRead);
+
+    const PassId fill = graph.AddPass("compute-gradient");
+    graph.Write(fill, storage, Access::ShaderWrite);
+    const PassId blit = graph.AddPass("compute-gradient-blit");
+    graph.Read(blit, storage, Access::ShaderRead);
+    graph.Write(blit, target, Access::ColorWrite);
+    graph.SetOutput(target, Access::Present);
+
+    const CompiledGraph compiled = graph.Compile();
+    REQUIRE(compiled.ok);
+    REQUIRE(compiled.order.size() == 2);
+    // Masuk ke GENERAL sebelum dispatch, keluar lagi sebelum yang membacanya
+    // sebagai tekstur. Dua-duanya, bukan salah satu: descriptor storage image
+    // dan descriptor tekstur menjanjikan layout yang berbeda, dan yang
+    // menjanjikan layout selain yang sedang berlaku sedang membaca dengan cara
+    // yang tidak sah.
+    CHECK(HasBarrier(compiled.order[0], storage, Access::ShaderRead, Access::ShaderWrite));
+    CHECK(HasBarrier(compiled.order[1], storage, Access::ShaderWrite, Access::ShaderRead));
+}
+
+TEST_CASE("Dua dispatch yang menulis storage yang sama tetap dipisahkan barrier") {
+    // Keadaannya tidak berpindah — ShaderWrite lalu ShaderWrite — jadi aturan
+    // "barrier hanya saat keadaan berpindah" akan melewatkannya. Dan justru di
+    // sini ia tidak boleh dilewatkan: Vulkan tidak menjanjikan urutan apa pun
+    // antara dua perintah, jadi dispatch kedua bisa berjalan berbarengan dengan
+    // yang pertama dan membaca sebagian tulisannya.
+    FrameGraph graph;
+    const ResourceId target = graph.Import("target", Access::None);
+    const ResourceId storage = graph.Import("scratch", Access::None);
+
+    const PassId first = graph.AddPass("clear");
+    graph.Write(first, storage, Access::ShaderWrite);
+    const PassId second = graph.AddPass("accumulate");
+    graph.Write(second, storage, Access::ShaderWrite);
+    const PassId reader = graph.AddPass("resolve");
+    graph.Read(reader, storage, Access::ShaderRead);
+    graph.Write(reader, target, Access::ColorWrite);
+    graph.SetOutput(target, Access::Present);
+
+    const CompiledGraph compiled = graph.Compile();
+    REQUIRE(compiled.ok);
+    REQUIRE(compiled.order.size() == 3);
+    CHECK(HasBarrier(compiled.order[0], storage, Access::None, Access::ShaderWrite));
+    CHECK(HasBarrier(compiled.order[1], storage, Access::ShaderWrite, Access::ShaderWrite));
+    CHECK(HasBarrier(compiled.order[2], storage, Access::ShaderWrite, Access::ShaderRead));
+}
+
+TEST_CASE("Dua dispatch yang hanya membaca tidak dipisahkan apa pun") {
+    // Pasangan uji di atas. Tanpa yang ini, "selalu pancarkan barrier" akan
+    // lulus keduanya — dan barrier di antara dua pembacaan adalah dua pass yang
+    // dipaksa berurutan tanpa ada yang menuntutnya.
+    FrameGraph graph;
+    const ResourceId target = graph.Import("target", Access::None);
+    const ResourceId source = graph.Import("hiz", Access::ShaderRead);
+
+    const PassId first = graph.AddPass("trace-a");
+    graph.Read(first, source, Access::ShaderRead);
+    graph.Write(first, target, Access::ColorWrite);
+    const PassId second = graph.AddPass("trace-b");
+    graph.Read(second, source, Access::ShaderRead);
+    graph.Write(second, target, Access::ColorWrite);
+    graph.SetOutput(target, Access::Present);
+
+    const CompiledGraph compiled = graph.Compile();
+    REQUIRE(compiled.ok);
+    REQUIRE(compiled.order.size() == 2);
+    CHECK(compiled.order[1].barriers.empty());
+}
+
+TEST_CASE("Pass compute yang keluarannya tidak dibaca siapa pun tetap dibuang") {
+    // Pass compute adalah pass biasa, dan itu termasuk soal pembuangan. Kalau
+    // tidak, setiap fitur berbasis compute yang dimatikan tetap membayar
+    // dispatch-nya.
+    FrameGraph graph;
+    const ResourceId target = graph.Import("target", Access::None);
+    const ResourceId storage = graph.CreateTexture("scratch", Colour(64, 64));
+
+    const PassId dispatch = graph.AddPass("compute");
+    graph.Write(dispatch, storage, Access::ShaderWrite);
+    const PassId draw = graph.AddPass("draw");
+    graph.Write(draw, target, Access::ColorWrite);
+    graph.SetOutput(target, Access::Present);
+
+    const CompiledGraph compiled = graph.Compile();
+    REQUIRE(compiled.ok);
+    CHECK(Order(graph, compiled) == std::vector<std::string>{"draw"});
+    REQUIRE(compiled.culled.size() == 1);
+    CHECK(compiled.culled[0] == dispatch);
+}
+
+TEST_CASE("Kisi cluster melaporkan angka yang sudah dijepit, bukan yang diberikan") {
+    // Jalur GPU membangun kotak cluster dari angka-angka ini, jalur CPU dari
+    // yang tersimpan di dalam kisi. Selisih di antara keduanya menghasilkan
+    // lampu yang hilang hanya pada kamera yang ekstrem — bentuk kesalahan yang
+    // tidak pernah muncul di adegan uji mana pun.
+    ClusterGridSettings settings;
+    ClusterGrid grid;
+    // Nilai yang seluruhnya di luar rentang: fov nol, aspect nol, near nol, dan
+    // far yang lebih kecil daripada near.
+    grid.Build(settings, 0.0f, 0.0f, 0.0f, -5.0f);
+
+    CHECK(grid.NearZ() > 0.0f);
+    CHECK(grid.FarZ() > grid.NearZ());
+    CHECK(grid.TanHalfX() > 0.0f);
+    CHECK(grid.TanHalfY() > 0.0f);
+
+    // Dan pada kamera biasa, angkanya memang angka kamera itu.
+    grid.Build(settings, 1.0f, 16.0f / 9.0f, 0.1f, 300.0f);
+    CHECK(grid.NearZ() == doctest::Approx(0.1f));
+    CHECK(grid.FarZ() == doctest::Approx(300.0f));
+    CHECK(grid.TanHalfY() == doctest::Approx(std::tan(0.5f)));
+    CHECK(grid.TanHalfX() == doctest::Approx(std::tan(0.5f) * 16.0f / 9.0f));
+    // Batas irisan pertama dan terakhir harus bersandar pada angka yang sama —
+    // shader menurunkan kotak clusternya dari keduanya.
+    CHECK(grid.SliceBounds(0).x == doctest::Approx(grid.NearZ()));
+    CHECK(grid.SliceBounds(grid.Slices() - 1).y == doctest::Approx(grid.FarZ()));
+}
+
+// --- RHI: pembagian kerja dispatch (G3) ------------------------------------------
+
+TEST_CASE("GroupCount membulatkan ke atas dan tidak pernah meluap") {
+    using sim::rhi::GroupCount;
+    // Kelipatan pas: tidak ada grup tambahan.
+    CHECK(GroupCount(64, 8) == 8);
+    // Sisa satu piksel tetap menuntut satu grup penuh — dan itu sebabnya setiap
+    // kernel harus membuang invocation di luar batas.
+    CHECK(GroupCount(65, 8) == 9);
+    CHECK(GroupCount(1, 8) == 1);
+    // Nol elemen berarti nol grup, bukan satu. `vkCmdDispatch(0, ...)` sah dan
+    // tidak mengerjakan apa pun; satu grup atas data kosong adalah pembacaan di
+    // luar batas.
+    CHECK(GroupCount(0, 8) == 0);
+    // Bentuk `(count + groupSize - 1) / groupSize` meluap di sini dan
+    // menghasilkan nol grup — yaitu dispatch yang diam-diam tidak mengerjakan
+    // apa pun.
+    CHECK(GroupCount(0xFFFFFFFFu, 8) == 0x20000000u);
 }
 
 TEST_CASE("Keluaran dikembalikan ke keadaan yang dijanjikannya") {

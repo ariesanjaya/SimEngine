@@ -184,7 +184,7 @@ bool Presenter::Create(rhi::Device& device, rhi::Swapchain& swapchain,
     info.renderPass = swapchain.RenderPass();
     info.subpass = 0;
 
-    const VkResult created = vkCreateGraphicsPipelines(device.Handle(), VK_NULL_HANDLE, 1, &info,
+    const VkResult created = vkCreateGraphicsPipelines(device.Handle(), device.PipelineCache(), 1, &info,
                                                        nullptr, &impl_->pipeline);
     vkDestroyShaderModule(device.Handle(), vertex, nullptr);
     vkDestroyShaderModule(device.Handle(), fragment, nullptr);

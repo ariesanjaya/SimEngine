@@ -494,7 +494,7 @@ private:
         info.pDynamicState = &dynamic;
         info.layout = pipelineLayout_;
 
-        return vkCreateGraphicsPipelines(device_.Handle(), VK_NULL_HANDLE, 1, &info, nullptr,
+        return vkCreateGraphicsPipelines(device_.Handle(), device_.PipelineCache(), 1, &info, nullptr,
                                          &pipeline_) == VK_SUCCESS;
     }
 

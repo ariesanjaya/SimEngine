@@ -20,6 +20,7 @@
 #include "Sim/Editor/EditorContext.h"
 #include "Sim/Editor/SceneView.h"
 #include "Sim/Editor/Selection.h"
+#include "Sim/ImageIO/ImageIO.h"
 #include "Sim/RHI/Device.h"
 #include "Sim/RHI/TextureRegistry.h"
 #include "Sim/Render/RendererFactory.h"
@@ -30,14 +31,18 @@
 
 #include <glm/gtx/quaternion.hpp>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <string>
 #include <string_view>
 #include <thread>
+#include <vector>
 
 namespace {
 
@@ -77,12 +82,154 @@ void PrintUsage() {
         "\n"
         "  --project <path>              wajib\n"
         "  --level <name>                level yang dibuka saat start\n"
+        "  --level-file <path>           level dari jalur berkas, di luar project\n"
         "  --mcp-port <port>             bawaan 7777\n"
         "  --mcp-permission <mode>       read-only | ask | auto (bawaan auto)\n"
         "  --render <width>x<height>     ukuran viewport offscreen, bawaan 1280x720\n"
         "  --no-render                   tanpa perender; viewport.capture tidak didaftarkan\n"
-        "  --headless                    diterima dan diabaikan; program ini selalu headless\n",
+        "  --headless                    diterima dan diabaikan; program ini selalu headless\n"
+        "\n"
+        "Mode ukur (G0, docs/PLAN-GPU-OPTIM.md) — tanpa server MCP:\n"
+        "  --bench                       jalankan lintasan kamera terkunci lalu keluar\n"
+        "  --bench-frames <n>            frame yang diukur, bawaan 240\n"
+        "  --bench-warmup <n>            frame pemanasan yang dibuang, bawaan 90\n"
+        "  --bench-out <path>            tulis tabelnya sebagai Markdown\n"
+        "  --bench-gi <on|off>           paksa GI; bawaannya mengikuti level\n"
+        "  --bench-capture <path.png>    simpan frame terakhir; kameranya deterministik\n"
+        "  --bench-compute               ganti gambarnya dengan pass compute uji (G3)\n"
+        "  --validate-sync               nyalakan validasi sinkronisasi; lambat, sengaja\n"
+        "  --bench-cpu-clusters          penetapan cluster di CPU, bukan GPU (G4)\n"
+        "  --bench-cpu-sdf               komposit clipmap SDF di CPU, bukan GPU (G4)\n"
+        "  --bench-dump-sdf <path>       simpan isi voxel kaskade SDF; untuk dibandingkan\n",
         stderr);
+}
+
+/// Satu deret angka milidetik untuk satu nama pass.
+struct Samples {
+    std::string name;
+    std::vector<float> milliseconds;
+
+    double Mean() const {
+        if (milliseconds.empty()) {
+            return 0.0;
+        }
+        double total = 0.0;
+        for (const float value : milliseconds) {
+            total += static_cast<double>(value);
+        }
+        return total / static_cast<double>(milliseconds.size());
+    }
+
+    /// **Median, bukan hanya rata-rata.** Satu frame yang tersendat karena
+    /// kompilasi pipeline atau penjadwal OS menggeser rata-rata dan tidak
+    /// menggeser median; dua angka yang berjauhan adalah tanda bahwa yang
+    /// diukur belum stabil, dan itu informasi yang justru dibutuhkan.
+    double Median() const {
+        if (milliseconds.empty()) {
+            return 0.0;
+        }
+        std::vector<float> sorted = milliseconds;
+        std::sort(sorted.begin(), sorted.end());
+        const std::size_t middle = sorted.size() / 2;
+        if (sorted.size() % 2 == 1) {
+            return static_cast<double>(sorted[middle]);
+        }
+        return 0.5 * (static_cast<double>(sorted[middle - 1]) +
+                      static_cast<double>(sorted[middle]));
+    }
+
+    double Max() const {
+        double peak = 0.0;
+        for (const float value : milliseconds) {
+            peak = std::max(peak, static_cast<double>(value));
+        }
+        return peak;
+    }
+};
+
+/// Kumpulan deret yang urutannya adalah urutan kemunculan pertama.
+///
+/// Peta ber-hash akan mengurutkannya sesuka hash-nya, dan tabel yang barisnya
+/// berpindah tempat antar-jalan adalah tabel yang tidak bisa dibandingkan
+/// dengan mata.
+class SampleTable {
+public:
+    void Add(std::string_view name, float milliseconds) {
+        for (Samples& entry : entries_) {
+            if (entry.name == name) {
+                entry.milliseconds.push_back(milliseconds);
+                return;
+            }
+        }
+        entries_.push_back(Samples{std::string(name), {milliseconds}});
+    }
+
+    const std::vector<Samples>& Entries() const { return entries_; }
+    bool Empty() const { return entries_.empty(); }
+
+private:
+    std::vector<Samples> entries_;
+};
+
+std::string FormatTable(std::string_view title, const SampleTable& table) {
+    if (table.Empty()) {
+        return std::string("### ") + std::string(title) + "\n\n(tidak ada angka)\n";
+    }
+    std::string out = "### ";
+    out += title;
+    out += "\n\n| Pass | Median | Rata-rata | Puncak |\n|---|---:|---:|---:|\n";
+    double medianTotal = 0.0;
+    double meanTotal = 0.0;
+    for (const Samples& entry : table.Entries()) {
+        char line[256];
+        std::snprintf(line, sizeof(line), "| `%s` | %.3f | %.3f | %.3f |\n", entry.name.c_str(),
+                      entry.Median(), entry.Mean(), entry.Max());
+        out += line;
+        // **Lingkup yang namanya berakhiran `-total` tidak ikut dijumlahkan.**
+        // `cpu-total` membungkus seluruh baris lain; memasukkannya ke dalam
+        // jumlah berarti menghitung frame yang sama dua kali dan menghasilkan
+        // angka yang tidak berarti apa-apa — dan angka yang tidak berarti
+        // apa-apa di baris paling tebal adalah angka yang paling sering dikutip.
+        if (entry.name.size() >= 6 &&
+            entry.name.compare(entry.name.size() - 6, 6, "-total") == 0) {
+            continue;
+        }
+        medianTotal += entry.Median();
+        meanTotal += entry.Mean();
+    }
+    char total[128];
+    std::snprintf(total, sizeof(total), "| **jumlah baris di atas** | **%.3f** | **%.3f** | |\n",
+                  medianTotal, meanTotal);
+    out += total;
+    return out;
+}
+
+/// Kotak batas seluruh mesh yang benar-benar dikirim ke perender.
+///
+/// Dipakai menurunkan lintasan kamera dari adegannya sendiri, supaya satu
+/// perintah yang sama bekerja untuk level mana pun tanpa ada yang perlu
+/// mengarang koordinat. Dihitung **sekali**, dari frame pertama: menghitungnya
+/// ulang tiap frame membuat lintasannya bergantung pada apa yang kebetulan
+/// terlihat, dan lintasan yang berubah adalah pengukuran yang tidak bisa
+/// diulang.
+bool SceneBounds(const sim::render::ViewportScene& scene, sim::Vec3& outMin,
+                 sim::Vec3& outMax) {
+    bool any = false;
+    for (const sim::render::MeshInstance& mesh : scene.meshes) {
+        // Delapan sudut, bukan dua titik yang ikut ditransformasi: kotak yang
+        // diputar punya sudut yang tidak lagi menjadi min/max-nya.
+        for (int corner = 0; corner < 8; ++corner) {
+            const sim::Vec3 local((corner & 1) != 0 ? mesh.boundsMax.x : mesh.boundsMin.x,
+                                  (corner & 2) != 0 ? mesh.boundsMax.y : mesh.boundsMin.y,
+                                  (corner & 4) != 0 ? mesh.boundsMax.z : mesh.boundsMin.z);
+            const sim::Vec4 world = mesh.transform * sim::Vec4(local, 1.0f);
+            const sim::Vec3 point(world.x, world.y, world.z);
+            outMin = any ? glm::min(outMin, point) : point;
+            outMax = any ? glm::max(outMax, point) : point;
+            any = true;
+        }
+    }
+    return any;
 }
 
 }  // namespace
@@ -150,6 +297,17 @@ int main(int argc, char** argv) {
     std::unique_ptr<render::IViewportRenderer> renderer;
     if (wantRenderer) {
         rhi::DeviceDesc deviceDesc;
+        deviceDesc.pipelineCachePath = configDir / "Cache" / "pipeline-headless.bin";
+        // Validasi sinkronisasi: mahal, jadi diminta sendiri. Dipakai sesudah
+        // sebuah pass baru ditambahkan — barrier yang hilang tidak melanggar
+        // satu pun aturan layout, dan tanpa lapisan ini ia hanya terlihat
+        // sebagai hasil yang berubah-ubah di mesin orang lain.
+        for (int at = 1; at < argc; ++at) {
+            if (argv[at] != nullptr && std::string_view(argv[at]) == "--validate-sync") {
+                deviceDesc.enableValidation = true;
+                deviceDesc.enableSyncValidation = true;
+            }
+        }
         if (!device.Create(deviceDesc)) {
             SIM_WARN("Headless", "no Vulkan device; running without a renderer");
             wantRenderer = false;
@@ -207,6 +365,297 @@ int main(int argc, char** argv) {
             return 1;
         }
     }
+    // **Level dari jalur berkas, bukan dari nama di dalam project.** Adegan uji
+    // G0 hidup di `Resources/Levels` — isi bawaan yang sama untuk setiap project
+    // — supaya garis dasarnya tidak bergantung pada project siapa pun yang
+    // kebetulan ada di mesin yang mengukur. Asetnya tetap terjangkau:
+    // `SceneView` mencari GUID yang tidak ada di project ke indeks bawaan.
+    if (const std::string_view file = FlagValue(argc, argv, "--level-file"); !file.empty()) {
+        if (!app.LoadLevel(std::filesystem::path(file))) {
+            SIM_ERROR("Headless", "cannot open level file {}", std::string(file));
+            app.Shutdown();
+            return 1;
+        }
+    }
+
+    editor::Selection selection;
+    editor::SceneView sceneView;
+    // Kamera milik kedua loop di bawah, bukan milik panel — tidak ada panel. Di
+    // mode MCP ia hanya berpindah kalau agen memintanya lewat
+    // `viewport.capture`; di mode ukur ia mengikuti lintasan terkunci.
+    render::Camera camera;
+
+    // --- Mode ukur (G0) ------------------------------------------------------
+    //
+    // **Sebelum server MCP dinyalakan, dan keluar tanpa pernah menyalakannya.**
+    // Yang mengukur tidak boleh berbagi proses dengan yang menunggu soket:
+    // permintaan yang datang di tengah lintasan mengubah adegan yang sedang
+    // diukur, dan angkanya lalu menjelaskan frame yang berbeda dari yang
+    // dijelaskan judul tabelnya.
+    bool bench = false;
+    for (int at = 1; at < argc; ++at) {
+        if (argv[at] != nullptr && std::string_view(argv[at]) == "--bench") {
+            bench = true;
+        }
+    }
+    if (bench) {
+        if (renderer == nullptr) {
+            SIM_ERROR("Bench", "--bench needs a renderer; --no-render was given or Vulkan is absent");
+            app.Shutdown();
+            return 1;
+        }
+
+        uint32_t measured = 240;
+        uint32_t warmup = 90;
+        if (const std::string_view value = FlagValue(argc, argv, "--bench-frames");
+            !value.empty()) {
+            measured = static_cast<uint32_t>(std::atoi(std::string(value).c_str()));
+        }
+        if (const std::string_view value = FlagValue(argc, argv, "--bench-warmup");
+            !value.empty()) {
+            warmup = static_cast<uint32_t>(std::atoi(std::string(value).c_str()));
+        }
+        if (measured == 0) {
+            SIM_ERROR("Bench", "--bench-frames must be at least 1");
+            app.Shutdown();
+            return 2;
+        }
+
+        // Pemeriksa jalur compute (G3). Sebuah bendera dan bukan hanya sakelar
+        // di editor, karena yang harus lulus adalah dua hal yang tidak bisa
+        // dilihat dari editor tanpa dibaca satu per satu: pass-nya muncul di
+        // tabel waktu GPU, dan validation layer tidak mengeluh sekali pun.
+        // Keduanya diperiksa dari satu perintah di sini.
+        bool computeGradient = false;
+        // Jalur CPU penetapan cluster, untuk membandingkan gambarnya dengan
+        // jalur GPU (G4). Dua implementasi yang harus sepakat adalah cara
+        // termurah menemukan yang mana yang salah — dan perbandingannya harus
+        // bisa dijalankan dari satu perintah, bukan dari dua build.
+        bool cpuClusters = false;
+        bool cpuSdf = false;
+        for (int at = 1; at < argc; ++at) {
+            if (argv[at] == nullptr) {
+                continue;
+            }
+            const std::string_view flag(argv[at]);
+            if (flag == "--bench-compute") {
+                computeGradient = true;
+            } else if (flag == "--bench-cpu-clusters") {
+                cpuClusters = true;
+            } else if (flag == "--bench-cpu-sdf") {
+                cpuSdf = true;
+            }
+        }
+
+        // **GI dipaksa dari baris perintah, bukan hanya dari level.** Anggaran
+        // GI adalah 3,0 ms dari 16,6 ms — sepertiga dari seluruh pekerjaan yang
+        // G0 ingin ukur — jadi garis dasar yang diam-diam mengukur adegan tanpa
+        // GI adalah garis dasar yang menjawab pertanyaan lain. Levelnya sendiri
+        // tetap yang menentukan bila benderanya tidak ada.
+        if (const std::string_view value = FlagValue(argc, argv, "--bench-gi"); !value.empty()) {
+            if (value == "on") {
+                app.Context().gi.enabled = true;
+            } else if (value == "off") {
+                app.Context().gi.enabled = false;
+            } else {
+                SIM_ERROR("Bench", "--bench-gi wants on or off, got \"{}\"", std::string(value));
+                app.Shutdown();
+                return 2;
+            }
+        }
+
+        const uint32_t total = warmup + measured;
+        // **Delta tetap, bukan jam dinding.** Animasi, fisika, dan adaptasi
+        // eksposur semuanya maju menurut delta; memberi mereka waktu sungguhan
+        // berarti mesin yang lebih cepat mensimulasikan adegan yang berbeda,
+        // dan dua jalan di mesin yang sama tidak pernah mengukur hal yang sama.
+        constexpr float kFixedDelta = 1.0f / 60.0f;
+
+        SampleTable gpu;
+        SampleTable cpu;
+        uint64_t lastSerial = 0;
+        bool haveBounds = false;
+        Vec3 boundsMin(0.0f);
+        Vec3 boundsMax(0.0f);
+        uint32_t gpuSamples = 0;
+
+        SIM_INFO("Bench", "{} ({}x{}), {} warmup + {} measured frames", device.DeviceName(),
+                 renderWidth, renderHeight, warmup, measured);
+
+        const auto wallStart = std::chrono::steady_clock::now();
+        for (uint32_t frame = 0; frame < total && !gStopping.load(); ++frame) {
+            app.Tick(kFixedDelta);
+            MainThreadQueue::Get().Drain();
+            if (app.Context().world == nullptr) {
+                SIM_ERROR("Bench", "no world to render");
+                app.Shutdown();
+                return 1;
+            }
+
+            sceneView.Build(*app.Context().world, selection, app.Context().assets, renderer.get(),
+                            app.Context().animation, app.Context().builtinAssets,
+                            app.Context().whiteboxes);
+
+            if (!haveBounds) {
+                haveBounds = SceneBounds(sceneView.Scene(), boundsMin, boundsMax);
+                if (!haveBounds) {
+                    // Adegan tanpa satu pun mesh tetap bisa diukur — langit,
+                    // grid, dan post-process punya biayanya sendiri — jadi ini
+                    // bukan kegagalan, hanya lintasan bawaan.
+                    boundsMin = Vec3(-5.0f);
+                    boundsMax = Vec3(5.0f);
+                    haveBounds = true;
+                    SIM_WARN("Bench", "scene has no meshes; using a default camera orbit");
+                }
+                SIM_INFO("Bench", "scene bounds [{:.2f} {:.2f} {:.2f}]..[{:.2f} {:.2f} {:.2f}]",
+                         boundsMin.x, boundsMin.y, boundsMin.z, boundsMax.x, boundsMax.y,
+                         boundsMax.z);
+            }
+
+            // Lintasan: satu putaran penuh sepanjang seluruh jalan, diturunkan
+            // dari nomor frame dan bukan dari waktu. Satu putaran penuh supaya
+            // tiap sudut pandang ikut terukur — biaya culling dan kaskade
+            // bayangan sangat bergantung arah, dan mengukur satu sudut saja
+            // menghasilkan angka yang benar untuk satu sudut itu saja.
+            const Vec3 centre = (boundsMin + boundsMax) * 0.5f;
+            const Vec3 extent = glm::max(boundsMax - boundsMin, Vec3(1.0f));
+            const float radius = glm::length(Vec2(extent.x, extent.z)) * 0.9f + 2.0f;
+            const float angle = 6.2831853f * static_cast<float>(frame) / static_cast<float>(total);
+            const Vec3 eye(centre.x + radius * std::cos(angle),
+                           centre.y + extent.y * 0.55f,
+                           centre.z + radius * std::sin(angle));
+            const Vec3 forward = centre - eye;
+
+            render::ViewportDesc desc;
+            desc.width = renderWidth;
+            desc.height = renderHeight;
+            desc.gi = app.Context().gi;
+            desc.computeGradient = computeGradient;
+            desc.gpuClusters = !cpuClusters;
+            desc.gpuSdf = !cpuSdf;
+            // Delta yang sama dengan yang diberikan ke `app.Tick`, dan karena
+            // alasan yang sama: yang maju menurut waktu — eksposur, awan,
+            // akumulasi temporal — harus maju sama jauhnya di tiap jalan, kalau
+            // tidak dua gambar dari binary yang identik pun berbeda.
+            desc.fixedDeltaSeconds = kFixedDelta;
+            camera.position = eye;
+            camera.rotation = glm::quatLookAt(glm::normalize(forward), Vec3(0.0f, 1.0f, 0.0f));
+            desc.camera = camera;
+            renderer->Render(desc, sceneView.Scene());
+
+            if (frame < warmup) {
+                continue;
+            }
+
+            // **Angka GPU dicatat hanya saat serialnya berpindah.** Pemungutan
+            // timestamp melewati hasil yang belum siap alih-alih menunggunya,
+            // jadi dua frame berturut-turut bisa membaca angka yang sama persis
+            // — dan yang merata-ratakan akan menghitung frame itu dua kali.
+            const uint64_t serial = renderer->TimingSerial();
+            if (serial != lastSerial) {
+                lastSerial = serial;
+                for (const render::PassTiming& timing : renderer->PassTimings()) {
+                    gpu.Add(timing.name, timing.milliseconds);
+                }
+                ++gpuSamples;
+            }
+            // Yang CPU segar tiap frame; tidak ada yang perlu ditunggu.
+            for (const render::PassTiming& timing : renderer->CpuTimings()) {
+                cpu.Add(timing.name, timing.milliseconds);
+            }
+        }
+        const double wallSeconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - wallStart).count();
+
+        // **Gambar frame terakhir, dan itu bukan pelengkap.** Setiap milestone
+        // sesudah G0 mengklaim "lebih cepat dengan gambar yang sama", dan klaim
+        // separuhnya tidak bisa dibuktikan angka. Lintasan kameranya
+        // deterministik, jadi frame terakhir dua jalan yang berbeda adalah sudut
+        // pandang yang sama persis dan bisa dibandingkan piksel per piksel.
+        // **Isi voxelnya, bukan gambarnya.** Satu-satunya pembaca kaskade SDF
+        // adalah penelusuran GI, dan GI tidak deterministik — jadi dua jalur
+        // komposit tidak bisa dibandingkan lewat piksel. Yang bisa: kedua jalan
+        // dijalankan dengan lintasan kamera yang sama, lalu berkas ini
+        // dibandingkan byte demi byte.
+        if (const std::string_view dump = FlagValue(argc, argv, "--bench-dump-sdf");
+            !dump.empty()) {
+            std::vector<uint8_t> voxels;
+            std::string dumpError;
+            if (!renderer->CaptureSdf(voxels, dumpError)) {
+                SIM_ERROR("Bench", "cannot read back the SDF clipmap: {}", dumpError);
+            } else {
+                std::ofstream file(std::filesystem::path(dump), std::ios::binary);
+                if (!file) {
+                    SIM_ERROR("Bench", "cannot write {}", std::string(dump));
+                } else {
+                    file.write(reinterpret_cast<const char*>(voxels.data()),
+                               static_cast<std::streamsize>(voxels.size()));
+                    SIM_INFO("Bench", "{} SDF voxels written to {}", voxels.size(),
+                             std::string(dump));
+                }
+            }
+        }
+
+        if (const std::string_view shot = FlagValue(argc, argv, "--bench-capture");
+            !shot.empty()) {
+            std::vector<uint8_t> rgba;
+            uint32_t width = 0;
+            uint32_t height = 0;
+            std::string readbackError;
+            if (!renderer->CapturePixels(rgba, width, height, readbackError)) {
+                SIM_ERROR("Bench", "cannot read back the render target: {}", readbackError);
+            } else {
+                imageio::Image image;
+                image.desc.width = width;
+                image.desc.height = height;
+                image.desc.channels = 4;
+                image.desc.type = imageio::PixelType::UInt8;
+                image.bytes = std::move(rgba);
+                const imageio::ImageIoResult written =
+                    imageio::Write(std::filesystem::path(shot), image);
+                if (!written.ok) {
+                    SIM_ERROR("Bench", "cannot write {}: {}", std::string(shot), written.error);
+                } else {
+                    SIM_INFO("Bench", "last frame written to {}", std::string(shot));
+                }
+            }
+        }
+
+        std::string report = "# Garis dasar G0\n\n";
+        report += "- Perangkat: " + device.DeviceName() + "\n";
+        report += "- Perender: " + std::string(renderer->Name()) + "\n";
+        {
+            char line[256];
+            std::snprintf(line, sizeof(line), "- Viewport: %ux%u\n", renderWidth, renderHeight);
+            report += line;
+            std::snprintf(line, sizeof(line),
+                          "- Frame: %u pemanasan + %u diukur (%u sampel GPU)\n", warmup,
+                          measured, gpuSamples);
+            report += line;
+            std::snprintf(line, sizeof(line), "- GI: %s\n",
+                          app.Context().gi.enabled ? "menyala" : "mati");
+            report += line;
+            std::snprintf(line, sizeof(line), "- Jalan selesai dalam %.2f s\n\n", wallSeconds);
+            report += line;
+        }
+        report += FormatTable("Waktu GPU per pass (ms)", gpu);
+        report += "\n";
+        report += FormatTable("Waktu CPU per tahap (ms)", cpu);
+
+        std::fputs(report.c_str(), stdout);
+        if (const std::string_view out = FlagValue(argc, argv, "--bench-out"); !out.empty()) {
+            std::ofstream file{std::filesystem::path(out)};
+            if (!file) {
+                SIM_ERROR("Bench", "cannot write {}", std::string(out));
+            } else {
+                file << report;
+                SIM_INFO("Bench", "report written to {}", std::string(out));
+            }
+        }
+
+        app.Shutdown();
+        return 0;
+    }
 
     ai::ToolRegistry mcpTools;
     ai::ResourceRegistry mcpResources;
@@ -238,12 +687,6 @@ int main(int argc, char** argv) {
 
     std::signal(SIGINT, OnSignal);
     std::signal(SIGTERM, OnSignal);
-
-    editor::Selection selection;
-    editor::SceneView sceneView;
-    // Kamera milik loop ini, bukan milik panel — tidak ada panel. Ia hanya
-    // berpindah kalau agen memintanya lewat `viewport.capture`.
-    render::Camera camera;
 
     // Loop tetap, bukan menunggu peristiwa. Yang harus maju tiap detak bukan
     // hanya permintaan MCP: pemindaian aset, animasi, skrip, dan fisika juga —

@@ -239,6 +239,9 @@ public:
         desc.showGrid = showGrid_;
         desc.gi = context.gi;
         desc.post = context.post;
+        desc.computeGradient = context.computeGradient;
+        desc.gpuClusters = context.gpuClusters;
+        desc.gpuSdf = context.gpuSdf;
         // **Langit datang dari scene, bukan dari sakelar viewport.** Level tanpa
         // entity ber-SkyComponent tidak menggambar langit sama sekali — itu yang
         // membuat adegan interior berhenti membayar empat pass LUT untuk sesuatu

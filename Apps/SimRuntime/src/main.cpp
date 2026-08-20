@@ -193,6 +193,10 @@ int main(int argc, char** argv) {
 
     rhi::DeviceDesc deviceDesc;
     deviceDesc.applicationName = "SimRuntime";
+    // Di sebelah executable, mengikuti letak log runtime: sebuah build yang
+    // dikirim ke pemain tidak punya folder konfigurasi editor, dan yang
+    // dituliskannya harus tetap berada di dalam yang dikirim.
+    deviceDesc.pipelineCachePath = exeDir / "Cache" / "pipeline.bin";
     {
         uint32_t count = 0;
         const char* const* names = SDL_Vulkan_GetInstanceExtensions(&count);

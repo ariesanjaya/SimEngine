@@ -11,6 +11,8 @@ sim_add_library(Render
         src/Atmosphere.cpp
         src/Bloom.cpp
         src/CloudNoise.cpp
+        src/ClusterAssign.cpp
+        src/ComputeGradient.cpp
         src/DepthPyramid.cpp
         src/Denoise.cpp
         src/PostProcess.cpp
@@ -83,7 +85,13 @@ sim_compile_shaders(SimShadersGrid
         ${CMAKE_SOURCE_DIR}/Shaders/sky_hdri.frag.slang
         # Raymarch volume .vdb. Acuan CPU-nya di Code/Volume/src/VolumeRaymarch.cpp,
         # dan rumus keduanya harus sama persis.
-        ${CMAKE_SOURCE_DIR}/Shaders/volume_raymarch.frag.slang)
+        ${CMAKE_SOURCE_DIR}/Shaders/volume_raymarch.frag.slang
+        # Pass compute pertama di engine ini (G3). Akhiran `.comp` tidak
+        # menuntut aturan build sendiri: yang menentukan tahap shader adalah
+        # akhirannya, dan itu berlaku sama untuk `.vert`, `.frag`, dan `.comp`.
+        ${CMAKE_SOURCE_DIR}/Shaders/debug_gradient.comp.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/cluster_assign.comp.slang
+        ${CMAKE_SOURCE_DIR}/Shaders/sdf_fill.comp.slang)
 # openpbr.slang sengaja tidak ada di daftar ini. Ia modul pustaka tanpa entry
 # point — yang mengompilasinya adalah `AssembleMaterialModule`, yang menanamnya
 # ke dalam modul material lalu menyerahkannya ke ShaderCache. Menambahkannya di

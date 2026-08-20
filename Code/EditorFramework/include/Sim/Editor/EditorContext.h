@@ -135,6 +135,18 @@ struct EditorContext {
     /// dimiliki salah satu panel akan hilang begitu panel itu ditutup.
     render::GiSettings gi;
 
+    /// Debug view pemeriksa jalur compute (G3). Di sini karena alasan yang sama
+    /// dengan `gi`: panel Statistics yang menyalakannya, panel Viewport yang
+    /// meneruskannya ke renderer.
+    bool computeGradient = false;
+
+    /// Penetapan lampu ke cluster di GPU (G4). Mematikannya mengembalikan jalur
+    /// CPU — yang ada bukan sebagai peninggalan melainkan sebagai pembanding.
+    bool gpuClusters = true;
+
+    /// Komposit clipmap SDF di GPU (G4). Sama alasannya.
+    bool gpuSdf = true;
+
     /// Permintaan menempatkan kamera viewport dari luar panel.
     ///
     /// **Sebuah permintaan, bukan nilai kamera.** Kamera itu sendiri milik panel

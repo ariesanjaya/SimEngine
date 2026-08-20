@@ -61,6 +61,22 @@ public:
                                         ? context.viewportRenderer->Name()
                                         : "(none)");
 
+        if (context.viewportRenderer != nullptr) {
+            const render::RenderStats stats = context.viewportRenderer->Stats();
+            ImGui::Text("Opaque  : %u drawn / %u in buffer", stats.opaqueDrawn,
+                        stats.opaqueInstances);
+            ImGui::Text("Casters : %u over %u shadow faces", stats.shadowCasters,
+                        stats.shadowFaces);
+            // **Berwarna, dan hanya saat ada yang terbuang.** Sebuah angka nol
+            // yang selalu ada di sana berhenti dibaca dalam sehari; yang muncul
+            // hanya ketika ia berarti sesuatu masih terbaca setahun kemudian.
+            if (stats.shadowLightsDropped > 0) {
+                ImGui::TextColored(ImVec4(1.0f, 0.65f, 0.25f, 1.0f),
+                                   "%u shadow lights dropped (atlas full)",
+                                   stats.shadowLightsDropped);
+            }
+        }
+
         // Waktu GPU per pass. **Ini alat diagnostik yang paling sering dipakai**
         // begitu ada pass yang anggarannya harus dijaga — dan yang pertama
         // menuntutnya adalah GI, yang seluruh rencananya disusun sekitar angka
@@ -81,6 +97,30 @@ public:
                                       ImGuiTableFlags_SizingStretchProp |
                                           ImGuiTableFlags_RowBg)) {
                     for (const render::PassTiming& timing : timings) {
+                        ImGui::TableNextRow();
+                        ImGui::TableNextColumn();
+                        ImGui::TextUnformatted(timing.name.data(),
+                                               timing.name.data() + timing.name.size());
+                        ImGui::TableNextColumn();
+                        ImGui::Text("%.3f ms", static_cast<double>(timing.milliseconds));
+                    }
+                    ImGui::EndTable();
+                }
+            }
+
+            // **Tabel kedua, bukan baris tambahan di tabel pertama.** Angka GPU
+            // datang beberapa frame terlambat karena pemungutannya tidak pernah
+            // menunggu, sementara angka CPU adalah frame yang baru saja lewat.
+            // Menjumlahkan keduanya menghasilkan total yang tidak pernah menjadi
+            // waktu frame mana pun.
+            const std::span<const render::PassTiming> cpuTimings =
+                context.viewportRenderer->CpuTimings();
+            if (!cpuTimings.empty()) {
+                ImGui::Separator();
+                if (ImGui::BeginTable("##cpupasses", 2,
+                                      ImGuiTableFlags_SizingStretchProp |
+                                          ImGuiTableFlags_RowBg)) {
+                    for (const render::PassTiming& timing : cpuTimings) {
                         ImGui::TableNextRow();
                         ImGui::TableNextColumn();
                         ImGui::TextUnformatted(timing.name.data(),
@@ -238,6 +278,29 @@ public:
         if (ImGui::Combo("Debug view", &view, views, IM_ARRAYSIZE(views))) {
             context.gi.debugView = static_cast<render::GiDebugView>(view);
         }
+
+        // --- Jalur compute (G3) ---
+        //
+        // **Sakelar diagnostik, bukan sebuah tampilan.** Yang dijawabnya satu
+        // pertanyaan saja: apakah compute berjalan di mesin ini. Pertanyaan itu
+        // tidak punya jawaban lain yang murah — pipeline yang gagal dibuat,
+        // shader yang ditolak driver, dan barrier yang salah semuanya terlihat
+        // sama dari luar, yaitu sebagai fitur yang "tidak muncul". Barisnya di
+        // tabel waktu GPU di atas — `compute-gradient` — adalah separuh lain
+        // jawabannya.
+        ImGui::Separator();
+        ImGui::Checkbox("Compute path (gradient)", &context.computeGradient);
+        // **Sakelar pembanding, bukan sakelar kualitas.** Kedua jalur harus
+        // menghasilkan gambar yang sama persis; kalau tidak, salah satunya
+        // salah — dan menemukan yang mana jauh lebih murah dengan sakelar ini
+        // daripada dengan membaca dua implementasi berdampingan. Selisih
+        // biayanya terbaca sebagai `cpu-clusters` di tabel CPU melawan
+        // `cluster-assign` di tabel GPU.
+        ImGui::Checkbox("GPU cluster assignment", &context.gpuClusters);
+        // Sakelar yang paling terasa di seluruh tabel. Mematikannya
+        // mengembalikan evaluasi medan jarak per voxel ke satu core, dan
+        // `cpu-sdf` melompat dari puluhan mikrodetik ke beberapa milidetik.
+        ImGui::Checkbox("GPU SDF composite", &context.gpuSdf);
 
         if (context.viewportRenderer != nullptr) {
             const render::TraceBackendSelection selection =

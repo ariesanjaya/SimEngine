@@ -1,5 +1,7 @@
 #include "Sim/Render/RendererFactory.h"
 
+#include "ClusterAssign.h"
+#include "ComputeGradient.h"
 #include "DepthPyramid.h"
 #include "PostProcess.h"
 #include "SkyAtmosphere.h"
@@ -16,6 +18,7 @@
 #include "PresentSource.h"
 #include "Sim/RHI/TextureRegistry.h"
 #include "Sim/Render/FrameGraph.h"
+#include "Sim/Render/DrawRun.h"
 #include "Sim/Render/Frustum.h"
 #include "Sim/Render/LightCluster.h"
 #include "Sim/Render/RadianceCache.h"
@@ -25,6 +28,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <tuple>
 #include <array>
 #include <limits>
 #include <cstddef>
@@ -264,22 +268,6 @@ struct BoxInstance {
 /// sama digambar dengan satu `vkCmdDrawIndexed` ber-`instanceCount` — bentuk
 /// yang sama dengan sebelum importir mesh ada, hanya kini ada lebih dari satu
 /// geometri untuk dikelompokkan.
-struct DrawRun {
-    MeshHandle mesh = kUnitCubeMesh;
-    /// Awal warna ruas milik instance-instance ini di `ViewportScene::partColors`,
-    /// atau `kNoPartColors`. **Ikut menjadi kunci ruas**: dua entity bermesh sama
-    /// dengan material berbeda tidak boleh digambar dalam satu panggilan.
-    uint32_t partColorFirst = 0;
-    uint32_t partColorCount = 0;
-    /// Digambar lewat pipeline ber-kulit. **Ikut menjadi kunci ruas**, karena ia
-    /// menentukan pipeline dan vertex buffer yang diikat: mesh ber-rig yang satu
-    /// instance-nya dipasok pose dan satu lagi tidak adalah dua ruas, bukan satu
-    /// ruas dengan cabang di dalamnya.
-    bool skinned = false;
-    uint32_t first = 0;
-    uint32_t count = 0;
-};
-
 /// Bit 0 dari `BoxInstance::flags`. Harus sama dengan `kReceiveShadows` di
 /// Shaders/box.frag.
 constexpr uint32_t kInstanceReceiveShadows = 1u;
@@ -411,6 +399,38 @@ Mat4 InstanceTransform(const Mat4& model) {
     return model;
 }
 
+/// Pengukur waktu CPU yang menuliskan hasilnya saat ia keluar dari lingkup.
+///
+/// **Bukan profiler, dan tidak berniat menjadi profiler.** Tidak bersarang,
+/// tidak berpohon, dan namanya ditulis tangan di beberapa tempat saja. Itu
+/// cukup untuk pertanyaan yang sedang ditanyakan G0 — tahap CPU mana yang mahal
+/// sebelum ada yang dipindahkan ke GPU — dan alat yang lebih besar daripada
+/// pertanyaannya adalah alat yang harus dirawat sebelum ada yang memakainya.
+///
+/// Namanya `string_view` ke literal, sama dengan `PassTiming` di sisi GPU:
+/// menyalin string per lingkup per frame adalah alokasi yang diperkenalkan oleh
+/// alat ukur ke dalam hal yang sedang diukurnya.
+class CpuScope {
+public:
+    CpuScope(std::vector<PassTiming>& into, std::string_view name)
+        : into_(into), name_(name), start_(std::chrono::steady_clock::now()) {}
+
+    ~CpuScope() {
+        const double milliseconds =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start_)
+                .count();
+        into_.push_back(PassTiming{name_, static_cast<float>(milliseconds)});
+    }
+
+    CpuScope(const CpuScope&) = delete;
+    CpuScope& operator=(const CpuScope&) = delete;
+
+private:
+    std::vector<PassTiming>& into_;
+    std::string_view name_;
+    std::chrono::steady_clock::time_point start_;
+};
+
 /// Renderer Vulkan E8.1.
 ///
 /// **Yang digambar masih kotak, dan itu bukan penambal sementara yang malas.**
@@ -486,11 +506,13 @@ public:
         // Profiler boleh gagal dibuat; renderer tetap jalan tanpa tabel waktu.
         profiler_.Create(device_);
 
-        // 64³ dan bukan 128³ yang diminta rencana. Batasnya bukan memori
-        // melainkan komposit CPU: medan jaraknya dievaluasi per voxel di sini,
-        // dan 128³ berarti delapan kali pekerjaan itu. 128³ menunggu komposit
-        // compute — dan biayanya sekarang terukur, jadi keputusan itu punya
-        // angka untuk bersandar.
+        // 64³ dan bukan 128³ yang diminta rencana. Batasnya dulu komposit CPU:
+        // medan jaraknya dievaluasi per voxel, dan 128³ berarti delapan kali
+        // pekerjaan itu. **Batas itu sudah hilang di G4** — kompositnya
+        // sekarang dispatch, dan `cpu-sdf` tinggal 0,079 ms melawan anggaran
+        // 0,4 ms. Angkanya dibiarkan 64³ di sini karena menaikkannya adalah
+        // keputusan kualitas GI yang harus dibuka dengan pengukurannya sendiri,
+        // bukan efek samping milestone yang membuka jalannya.
         SdfClipmapSettings sdf;
         sdf.resolution = 64;
         sdf.cascadeCount = 3;
@@ -509,7 +531,15 @@ public:
                     return false;
                 }
             }
+            // Komposit clipmap di compute. Gagal menyiapkannya bukan kegagalan
+            // renderer: jalur CPU-nya masih ada dan masih benar, hanya jauh
+            // lebih mahal.
+            if (!sdfClipmap_.CreateGpuFill(shaderDirectory_)) {
+                SIM_WARN("Render", "GPU SDF composite unavailable; staying on the CPU path");
+            }
         }
+        static_assert(std::tuple_size_v<decltype(slots_)> == SdfClipmapResource::kSlots,
+                      "SdfClipmapResource::kSlots harus sama dengan banyaknya slot frame");
         // Piramida depth dibuat sebelum descriptor ditulis, alasan yang sama
         // dengan clipmap: descriptor yang menunjuk tekstur pengganti tidak
         // menghasilkan galat apa pun, hanya penelusuran yang membaca peta
@@ -525,6 +555,31 @@ public:
         if (post_.Create(device_, shaderDirectory_, target_.ColorFormat())) {
             post_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight());
             post_.AdoptLayouts();
+        }
+        // Format target tampilan, bukan format gambar HDR: pemeriksa jalur
+        // compute menggambar **sesudah** tone mapping, supaya yang terlihat
+        // adalah warna yang ditulis dispatch dan bukan warna itu setelah
+        // dipetakan operator nada.
+        // Penetapan cluster di GPU. Gagal membuatnya bukan kegagalan renderer:
+        // jalur CPU-nya masih ada dan masih benar.
+        if (clusterAssign_.Create(device_, shaderDirectory_)) {
+            clusterGrid_.Build(clusterSettings_, 1.0f, 1.0f, 0.1f, kClusterFar);
+            clusterAssign_.Adopt(clusterGrid_.ClusterCount(),
+                                 clusterSettings_.maxLightsPerCluster);
+        } else {
+            SIM_WARN("Render", "GPU cluster assignment unavailable; staying on the CPU path");
+        }
+        if (gradient_.Create(device_, shaderDirectory_, target_.ColorFormat())) {
+            gradient_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight());
+            gradient_.AdoptLayout(device_);
+        } else {
+            // Dikatakan sekarang, bukan dibiarkan sebagai sakelar yang tidak
+            // melakukan apa-apa. Yang gagal di sini adalah alat yang gunanya
+            // justru menjelaskan kegagalan, dan alat semacam itu yang diam
+            // adalah yang paling menyesatkan: sakelarnya menyala, layarnya
+            // tidak berubah, dan tidak ada satu pun petunjuk kenapa.
+            SIM_WARN("Render",
+                     "compute path unavailable; the gradient debug view will do nothing");
         }
         if (sky_.Create(device_, shaderDirectory_, PostProcess::kSceneFormat)) {
             sky_.AdoptLayouts();
@@ -611,6 +666,9 @@ public:
         if (postChanged) {
             post_.AdoptLayouts();
         }
+        if (gradient_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight())) {
+            gradient_.AdoptLayout(device_);
+        }
         // Warna target juga berpindah image saat dialokasi ulang, dan binding 12
         // menunjuknya — jadi descriptor GI ditulis ulang walaupun probe sendiri
         // tidak berubah ukuran.
@@ -631,6 +689,12 @@ public:
         if (!target_.IsValid()) {
             return;
         }
+        // **Dikosongkan di sini, bukan di akhir frame sebelumnya.** Frame yang
+        // keluar lebih awal karena targetnya belum sah tidak boleh menghapus
+        // angka terakhir yang benar — tabel yang berkedip kosong setiap kali
+        // panel diubah ukurannya tidak bisa dibaca siapa pun.
+        cpuTimings_.clear();
+        const CpuScope totalScope(cpuTimings_, "cpu-total");
         const float aspect =
             static_cast<float>(target_.Width()) / static_cast<float>(target_.Height());
         // Reversed-Z: near di 1, far di 0. Konsekuensinya depth di-clear ke 0 dan
@@ -641,7 +705,10 @@ public:
                                  desc.camera.farZ);
         const Mat4 viewProj = projection * desc.camera.View();
 
-        Gather(desc, scene, viewProj);
+        {
+            const CpuScope scope(cpuTimings_, "cpu-gather");
+            Gather(desc, scene, viewProj);
+        }
 
         // Cascade dihitung dari kamera yang sama dengan yang dipakai menggambar.
         // Menghitungnya dari kamera frame sebelumnya menghemat satu ketergantungan
@@ -780,22 +847,41 @@ public:
         // beradaptasi. Dijepit ke 0,25 detik: satu hentakan panjang — memuat
         // level, membangun pipeline — akan menjadi satu langkah adaptasi raksasa,
         // dan yang terlihat adalah kilatan terang tepat sesudah level terbuka.
+        //
+        // Kecuali bila pemanggil memaksakan angkanya lewat
+        // `ViewportDesc::fixedDeltaSeconds`. Yang melakukannya hanya mode ukur,
+        // dan yang dibelinya adalah frame yang bisa diulang: dua jalan dengan
+        // binary yang sama menghasilkan gambar yang sama persis, sehingga
+        // perbedaan piksel benar-benar berarti perubahan kode.
         {
-            const auto now = std::chrono::steady_clock::now();
-            deltaSeconds_ =
-                hasLastFrameTime_
-                    ? std::min(std::chrono::duration<float>(now - lastFrameTime_).count(), 0.25f)
-                    : 0.0f;
-            lastFrameTime_ = now;
-            hasLastFrameTime_ = true;
+            if (desc.fixedDeltaSeconds >= 0.0f) {
+                deltaSeconds_ = std::min(desc.fixedDeltaSeconds, 0.25f);
+            } else {
+                const auto now = std::chrono::steady_clock::now();
+                deltaSeconds_ =
+                    hasLastFrameTime_
+                        ? std::min(std::chrono::duration<float>(now - lastFrameTime_).count(),
+                                   0.25f)
+                        : 0.0f;
+                lastFrameTime_ = now;
+                hasLastFrameTime_ = true;
+            }
             cloudTimeSeconds_ += deltaSeconds_;
         }
         sdfVoxelsWritten_ = 0;
         sdfUpdateMs_ = 0.0f;
         if (desc.gi.enabled && sdfClipmap_.IsValid()) {
+            // Dua pengukur untuk satu blok, dan keduanya punya pembacanya
+            // sendiri: `sdfUpdateMs_` sudah dipakai panel GI terhadap anggaran
+            // 0,4 ms rencana GI, sementara lingkup CPU membuatnya muncul di
+            // tabel yang sama dengan tahap lain — tanpa itu, tahap termahal
+            // frame ini tidak ada di tabel mana pun.
+            sdfClipmap_.SetGpuFill(desc.gpuSdf);
+            const CpuScope scope(cpuTimings_, "cpu-sdf");
             const auto started = std::chrono::steady_clock::now();
             sdfVoxelsWritten_ =
-                sdfClipmap_.Update(desc.camera.position, scene.meshes, slot.sdfStaging);
+                sdfClipmap_.Update(desc.camera.position, scene.meshes, slot.sdfStaging,
+                                   static_cast<uint32_t>(slotIndex_));
             sdfUpdateMs_ = std::chrono::duration<float, std::milli>(
                                std::chrono::steady_clock::now() - started)
                                .count();
@@ -826,16 +912,48 @@ public:
             }
         }
 
-        UpdateClusters(desc, scene, aspect, slot);
+        // **Berpindah jalur menuntut device menganggur.** Yang berubah bukan
+        // sebuah angka melainkan buffer yang ditunjuk descriptor set, dan
+        // menulis ulang descriptor yang masih dipakai command buffer yang belum
+        // selesai adalah perilaku tak terdefinisi. Harganya satu hentakan pada
+        // frame tempat sakelarnya ditekan — dan sakelar itu ditekan seseorang
+        // yang sedang membandingkan dua jalur, bukan enam puluh kali sedetik.
+        const bool wantGpuClusters = desc.gpuClusters && clusterAssign_.IsValid();
+        if (wantGpuClusters != gpuClustersActive_) {
+            device_.WaitIdle();
+            gpuClustersActive_ = wantGpuClusters;
+            UpdateClusterDescriptors();
+            SIM_INFO("Render", "cluster assignment now runs on the {}",
+                     gpuClustersActive_ ? "GPU" : "CPU");
+        }
+
+        {
+            const CpuScope scope(cpuTimings_, "cpu-clusters");
+            UpdateClusters(desc, scene, aspect, slot);
+        }
         UpdateShadowUniforms(desc, viewProj, slot);
         BuildGraph(desc);
 
+        // Perekaman dan submit dihitung satu lingkup. Memisahkan keduanya
+        // terdengar lebih rinci dan tidak: `vkQueueSubmit` adalah biaya CPU yang
+        // besarnya ditentukan oleh berapa banyak yang direkam sebelumnya, jadi
+        // dua angka yang bergerak bersama hanya menambah satu baris tabel.
+        const CpuScope recordScope(cpuTimings_, "cpu-record");
         VkCommandBuffer cmd = device_.BeginTransient();
         profiler_.BeginFrame(cmd);
         // Sebelum pass mana pun, supaya kaskade yang dibaca `gi-sdf-debug` dan
         // nanti pass GI adalah kaskade posisi kamera frame ini — bukan posisi
         // frame sebelumnya.
+        // Dibungkus lingkup ukur sendiri, di luar frame graph. Ia bukan pass
+        // graph — graph melacak resource sebagai satu kesatuan, sementara ini
+        // menulis potongan toroidal sebuah tekstur yang layout-nya diurus
+        // `SdfClipmapResource` — tetapi biayanya harus tetap terlihat. Sejak
+        // kompositnya pindah ke compute (G4), yang direkam di sini bukan lagi
+        // salinan melainkan pekerjaan sungguhan, dan pekerjaan yang tidak
+        // muncul di tabel mana pun adalah pekerjaan yang dianggap gratis.
+        profiler_.BeginScope(cmd, "sdf-fill");
         sdfClipmap_.RecordUploads(cmd);
+        profiler_.EndScope(cmd);
         executor_.Clear();
         executor_.Bind(colorId_, BoundImage{target_.ColorImage(), target_.ColorView(),
                                             VK_IMAGE_ASPECT_COLOR_BIT});
@@ -914,7 +1032,7 @@ public:
             probes_.RecordNormalBegin(command);
             BeginPrepassRendering(command, desc);
             if (slotReady && opaqueCount > 0) {
-                DrawInstances(command, prepassPipelines_, push, slot, opaqueRuns_, 0);
+                DrawInstances(command, prepassPipelines_, push, slot, visibleOpaqueRuns_, 0);
             }
             vkCmdEndRendering(command);
             probes_.RecordNormalEnd(command);
@@ -923,7 +1041,7 @@ public:
             BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/true,
                            /*writeColor=*/true);
             if (slotReady && opaqueCount > 0) {
-                DrawInstances(command, opaquePipelines_, push, slot, opaqueRuns_, 0,
+                DrawInstances(command, opaquePipelines_, push, slot, visibleOpaqueRuns_, 0,
                               /*materialVariant=*/0);
             }
             vkCmdEndRendering(command);
@@ -1057,6 +1175,33 @@ public:
             };
         }
 
+        if (clusterPassId_ != kInvalidPass) {
+            const auto clusterSlot = static_cast<uint32_t>(slotIndex_);
+            executor_.Bind(clusterRangeId_,
+                           BoundBuffer{clusterAssign_.RangeBuffer(clusterSlot), 0, VK_WHOLE_SIZE});
+            executor_.Bind(clusterIndexId_,
+                           BoundBuffer{clusterAssign_.IndexBuffer(clusterSlot), 0, VK_WHOLE_SIZE});
+            recorders[clusterPassId_] = [this, clusterSlot](VkCommandBuffer command) {
+                clusterAssign_.Record(command, clusterSlot);
+            };
+        }
+
+        if (gradientFillId_ != kInvalidPass) {
+            // Tanpa view: eksekutor hanya memasang barrier, dan barrier image
+            // menyebut image-nya, bukan view-nya. Yang membutuhkan view adalah
+            // descriptor, dan itu urusan `ComputeGradient` sendiri.
+            executor_.Bind(gradientId_, BoundImage{gradient_.Image(), VK_NULL_HANDLE,
+                                                   VK_IMAGE_ASPECT_COLOR_BIT});
+            recorders[gradientFillId_] = [&](VkCommandBuffer command) {
+                gradient_.RecordFill(command, target_.Width(), target_.Height());
+            };
+            recorders[gradientBlitId_] = [&](VkCommandBuffer command) {
+                BeginDisplayRendering(command);
+                gradient_.RecordBlit(command, target_.Width(), target_.Height());
+                vkCmdEndRendering(command);
+            };
+        }
+
         if (!executor_.Execute(compiled_, cmd, recorders, &profiler_)) {
             SIM_ERROR("Render", "frame graph execution failed: {}", compiled_.error);
         }
@@ -1065,6 +1210,36 @@ public:
         slotIndex_ = (slotIndex_ + 1) % slots_.size();
         drawnOpaque_ = opaqueCount;
         drawnTransparent_ = transparentCount;
+
+        stats_.opaqueInstances = opaqueCount;
+        stats_.opaqueDrawn = 0;
+        for (const DrawRun& run : visibleOpaqueRuns_) {
+            stats_.opaqueDrawn += run.count;
+        }
+        stats_.transparentDrawn = transparentCount;
+        stats_.shadowCasters = casterCount_;
+        stats_.shadowFaces = static_cast<uint32_t>(atlasAllocation_.entries.size());
+        stats_.shadowLightsDropped = atlasAllocation_.dropped;
+    }
+
+    bool CaptureSdf(std::vector<uint8_t>& out, std::string& error) override {
+        if (!sdfClipmap_.IsValid()) {
+            error = "the SDF clipmap is not available";
+            return false;
+        }
+        // Menunggu seluruh frame selesai lebih dulu: yang dibaca adalah isi
+        // tekstur sesudah pembaruan terakhir, bukan isi yang sedang ditulis.
+        device_.WaitIdle();
+        out.clear();
+        std::vector<uint8_t> cascade;
+        for (uint32_t at = 0; at < sdfClipmap_.CascadeCount(); ++at) {
+            if (!sdfClipmap_.Texture(at).Readback(cascade)) {
+                error = "cannot read back SDF cascade " + std::to_string(at);
+                return false;
+            }
+            out.insert(out.end(), cascade.begin(), cascade.end());
+        }
+        return true;
     }
 
     MeshAsset AcquireMeshData(std::string_view key, const assets::MeshData& data,
@@ -1474,6 +1649,12 @@ public:
         return timings_;
     }
 
+    uint64_t TimingSerial() const override { return profiler_.ResultsSerial(); }
+
+    std::span<const PassTiming> CpuTimings() const override { return cpuTimings_; }
+
+    RenderStats Stats() const override { return stats_; }
+
 private:
     struct InstanceSlot {
         rhi::DynamicBuffer buffer;
@@ -1526,6 +1707,24 @@ private:
         shadowId_ = graph_.Import("shadow-cascades", Access::ShaderRead);
         atlasId_ = graph_.Import("shadow-atlas", Access::ShaderRead);
 
+        // Penetapan lampu ke cluster, paling awal: yang membacanya adalah pass
+        // forward, dan hasilnya tidak bergantung pada apa pun yang digambar.
+        // **Ini pemakai pertama barrier buffer di eksekutor** — yang ditulis
+        // dispatch adalah storage buffer, bukan lampiran, dan buffer tidak
+        // punya layout untuk dipindahkan.
+        clusterRangeId_ = kInvalidResource;
+        clusterIndexId_ = kInvalidResource;
+        clusterPassId_ = kInvalidPass;
+        if (gpuClustersActive_ && clusterAssign_.IsValid()) {
+            // ShaderRead sebagai keadaan awal: itulah keadaan yang ditinggalkan
+            // pass forward frame sebelumnya atas slot yang sama.
+            clusterRangeId_ = graph_.Import("cluster-ranges", Access::ShaderRead);
+            clusterIndexId_ = graph_.Import("cluster-indices", Access::ShaderRead);
+            clusterPassId_ = graph_.AddPass("cluster-assign");
+            graph_.Write(clusterPassId_, clusterRangeId_, Access::ShaderWrite);
+            graph_.Write(clusterPassId_, clusterIndexId_, Access::ShaderWrite);
+        }
+
         shadowPassId_ = graph_.AddPass("shadow-cascades");
         graph_.Write(shadowPassId_, shadowId_, Access::DepthWrite);
 
@@ -1570,12 +1769,20 @@ private:
         }
 
         opaqueId_ = graph_.AddPass("forward-opaque");
+        if (clusterPassId_ != kInvalidPass) {
+            graph_.Read(opaqueId_, clusterRangeId_, Access::ShaderRead);
+            graph_.Read(opaqueId_, clusterIndexId_, Access::ShaderRead);
+        }
         graph_.Read(opaqueId_, depthId_, Access::DepthWrite);
         graph_.Read(opaqueId_, shadowId_, Access::ShaderRead);
         graph_.Read(opaqueId_, atlasId_, Access::ShaderRead);
         graph_.Write(opaqueId_, sceneId_, Access::ColorWrite);
 
         transparentId_ = graph_.AddPass("forward-transparent");
+        if (clusterPassId_ != kInvalidPass) {
+            graph_.Read(transparentId_, clusterRangeId_, Access::ShaderRead);
+            graph_.Read(transparentId_, clusterIndexId_, Access::ShaderRead);
+        }
         graph_.Read(transparentId_, depthId_, Access::DepthWrite);
         graph_.Read(transparentId_, shadowId_, Access::ShaderRead);
         graph_.Read(transparentId_, atlasId_, Access::ShaderRead);
@@ -1680,6 +1887,35 @@ private:
             graph_.Write(tonemapId_, colorId_, Access::ColorWrite);
         }
 
+        // --- Pemeriksa jalur compute (G3) ---
+        //
+        // Paling akhir, dan menulis ke target tampilan langsung. Yang diperiksa
+        // gambar ini adalah dispatch-nya sendiri, jadi apa pun yang berdiri di
+        // antara storage image dan layar — tone mapping, bloom, eksposur —
+        // hanya menambah hal yang bisa disalahkan ketika hasilnya tidak muncul.
+        //
+        // **Dua pass, dan yang penting justru barrier di antaranya.** Yang
+        // pertama menulis storage image dalam layout `GENERAL`, yang kedua
+        // membacanya sebagai tekstur; perpindahan itulah yang dituntut setiap
+        // pemakai compute berikutnya, dan graph menyimpulkannya dari dua baris
+        // deklarasi di bawah tanpa satu pun barrier yang ditulis tangan.
+        gradientId_ = kInvalidResource;
+        gradientFillId_ = kInvalidPass;
+        gradientBlitId_ = kInvalidPass;
+        if (desc.computeGradient && gradient_.IsValid()) {
+            // `ShaderRead` sebagai keadaan awal, bukan `None`: itulah keadaan
+            // yang ditinggalkan pass blit pada frame sebelumnya. `None` berarti
+            // "tidak ada yang perlu ditunggu", dan yang tidak ditunggu di sini
+            // adalah pembacaan frame sebelumnya atas image yang sedang ditimpa.
+            gradientId_ = graph_.Import("compute-gradient", Access::ShaderRead);
+            gradientFillId_ = graph_.AddPass("compute-gradient");
+            graph_.Write(gradientFillId_, gradientId_, Access::ShaderWrite);
+
+            gradientBlitId_ = graph_.AddPass("compute-gradient-blit");
+            graph_.Read(gradientBlitId_, gradientId_, Access::ShaderRead);
+            graph_.Write(gradientBlitId_, colorId_, Access::ColorWrite);
+        }
+
         graph_.SetOutput(colorId_, Access::Present);
         graph_.SetOutput(sceneId_, Access::ShaderRead);
         // Peta bayangan harus kembali ke keadaan awalnya, karena itulah keadaan
@@ -1699,6 +1935,9 @@ private:
         opaqueRuns_.clear();
         casterRuns_.clear();
         transparentRuns_.clear();
+        visibleOpaqueRuns_.clear();
+        instanceBounds_.clear();
+        instanceVisible_.clear();
         gathered_.clear();
         sorted_.clear();
         casterCount_ = 0;
@@ -1708,7 +1947,20 @@ private:
         for (const MeshInstance& mesh : scene.meshes) {
             const Aabb local{mesh.boundsMin, mesh.boundsMax};
             const Aabb world = TransformAabb(local, mesh.transform);
-            if (!frustum.Intersects(world)) {
+            const bool cameraVisible = frustum.Intersects(world);
+            // **Yang di luar pandangan tetap masuk daftar bila ia menjatuhkan
+            // bayangan.** Membuangnya di sini — yang berlaku sejak E8.1 —
+            // berarti bayangan sebuah benda ikut hilang begitu bendanya sendiri
+            // keluar layar: pohon di sebelah kiri layar berhenti membayangi
+            // jalan di tengahnya, dan yang terlihat bukan bayangan yang
+            // menghilang melainkan bayangan yang "berkedip saat menengok".
+            // Cacat itu tidak pernah terlihat selama adegan ujinya kosong.
+            //
+            // Yang menggantikan penyaringan ini bukan ketiadaan penyaringan
+            // melainkan penyaringan yang lebih tepat, satu per pass: pandangan
+            // utama menyaring terhadap frustum kamera, tiap muka bayangan
+            // terhadap volumenya sendiri. Lihat `SplitRuns`.
+            if (!cameraVisible && !mesh.castShadows) {
                 continue;
             }
 
@@ -1744,7 +1996,12 @@ private:
             if (color.a >= 0.999f) {
                 gathered_.push_back(GatherEntry{mesh.mesh, skinned, colorFirst, colorCount,
                                                 instance, InstanceTransform(model),
-                                                mesh.castShadows});
+                                                mesh.castShadows, world, cameraVisible});
+                continue;
+            }
+            // Tembus pandang tidak pernah menjatuhkan bayangan, jadi yang di
+            // luar pandangan memang tidak punya alasan ikut.
+            if (!cameraVisible) {
                 continue;
             }
             const float distance = glm::length(world.Centre() - eye);
@@ -1767,6 +2024,21 @@ private:
                              if (a.caster != b.caster) {
                                  return a.caster;
                              }
+                             // **Kunci kedua: yang terlihat kamera lebih dulu.**
+                             // Sejak caster di luar pandangan ikut didaftar,
+                             // mencampurnya di antara yang terlihat memecah ruas
+                             // pandangan utama menjadi potongan-potongan pendek —
+                             // dan yang dibayar adalah draw call tambahan di
+                             // prepass dan forward, yaitu dua pass yang justru
+                             // tidak punya urusan dengan bayangan. Dengan kunci
+                             // ini, yang terlihat menjadi satu awalan bersambung
+                             // di dalam ruas caster, dan pass bayangan tidak
+                             // kehilangan apa pun: ia toh menyaring ulang per
+                             // muka.
+                             if (a.cameraVisible != b.cameraVisible) {
+                                 return static_cast<int>(a.cameraVisible) >
+                                        static_cast<int>(b.cameraVisible);
+                             }
                              if (a.mesh != b.mesh) {
                                  return a.mesh < b.mesh;
                              }
@@ -1784,6 +2056,8 @@ private:
 
         opaque_.reserve(gathered_.size());
         opaqueTransforms_.reserve(gathered_.size());
+        instanceBounds_.reserve(gathered_.size());
+        instanceVisible_.reserve(gathered_.size());
         for (const GatherEntry& entry : gathered_) {
             if (entry.caster) {
                 ++casterCount_;
@@ -1792,7 +2066,17 @@ private:
                       static_cast<uint32_t>(opaque_.size()));
             opaque_.push_back(entry.instance);
             opaqueTransforms_.push_back(entry.transform);
+            instanceBounds_.push_back(entry.bounds);
+            instanceVisible_.push_back(entry.cameraVisible ? 1u : 0u);
         }
+
+        // Ruas untuk pandangan utama. Dipecah, bukan disaring saat menggambar:
+        // yang tidak terlihat kamera tetap ada di dalam buffer karena bayangannya
+        // dibutuhkan, dan menggambarnya di prepass maupun forward berarti
+        // membayar shading untuk piksel yang tidak ada.
+        const std::vector<uint8_t>& visible = instanceVisible_;
+        SplitRuns(opaqueRuns_, [&visible](uint32_t index) { return visible[index] != 0; },
+                  visibleOpaqueRuns_);
         // Ruas bayangan adalah awalan daftar yang sama, dipotong di
         // `casterCount_`. Dipotong, bukan dibangun ulang: dua daftar yang harus
         // sepakat adalah dua daftar yang suatu saat tidak sepakat.
@@ -2376,7 +2660,7 @@ private:
         info.layout = layout;
 
         VkPipeline pipeline = VK_NULL_HANDLE;
-        SIM_VK_CHECK(vkCreateGraphicsPipelines(device_.Handle(), VK_NULL_HANDLE, 1, &info, nullptr,
+        SIM_VK_CHECK(vkCreateGraphicsPipelines(device_.Handle(), device_.PipelineCache(), 1, &info, nullptr,
                                                &pipeline));
         return pipeline;
     }
@@ -2744,7 +3028,7 @@ private:
         info.layout = layout != VK_NULL_HANDLE ? layout : pipelineLayout_;
 
         VkPipeline pipeline = VK_NULL_HANDLE;
-        SIM_VK_CHECK(vkCreateGraphicsPipelines(device_.Handle(), VK_NULL_HANDLE, 1, &info, nullptr,
+        SIM_VK_CHECK(vkCreateGraphicsPipelines(device_.Handle(), device_.PipelineCache(), 1, &info, nullptr,
                                                &pipeline));
         return pipeline;
     }
@@ -3203,6 +3487,31 @@ private:
                                     &slot.skinSet, 0, nullptr);
 
             for (const ShadowAtlasEntry& entry : atlasAllocation_.entries) {
+                // **Tiap muka menyaring terhadap volumenya sendiri.** Sebuah
+                // lampu berjangkauan 16 meter tidak bisa dibayangi oleh benda
+                // yang berada 60 meter darinya, dan menggambarnya ke dalam
+                // ubinnya adalah pekerjaan yang seluruh hasilnya dibuang oleh
+                // clip. Sampai G1 daftar yang digambar ke setiap muka adalah
+                // daftar caster utuh — dikali sampai 32 muka.
+                //
+                // Frustum diturunkan dari matriks muka itu apa adanya. Untuk
+                // lampu punctual itu tepat dan tidak perlu diperlebar: apa pun
+                // yang bayangannya jatuh di dalam muka ini pasti berada di
+                // antara lampu dan bidang jauhnya, yaitu di dalam frustumnya.
+                // (Kaskade directional berbeda, dan perbedaannya ditangani
+                // `casterPullback`. Lihat `RecordShadowPass`.)
+                const Frustum faceFrustum(entry.viewProjection);
+                const std::vector<Aabb>& bounds = instanceBounds_;
+                SplitRuns(casterRuns_,
+                          [&faceFrustum, &bounds](uint32_t index) {
+                              return faceFrustum.Intersects(bounds[index]);
+                          },
+                          shadowRuns_);
+                if (shadowRuns_.empty()) {
+                    // Ubin yang tidak berisi apa pun tetap benar: ia sudah
+                    // di-clear oleh `loadOp` satu kali untuk seluruh atlas.
+                    continue;
+                }
                 const VkViewport viewport{static_cast<float>(entry.x),
                                           static_cast<float>(entry.y),
                                           static_cast<float>(entry.size),
@@ -3217,7 +3526,7 @@ private:
                 const BoxPush push{entry.viewProjection};
                 vkCmdPushConstants(cmd, shadowLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
                                    sizeof(BoxPush), &push);
-                DrawRuns(cmd, slot, casterRuns_, 0, shadowPipelines_, shadowLayout_, push,
+                DrawRuns(cmd, slot, shadowRuns_, 0, shadowPipelines_, shadowLayout_, push,
                          /*bindsMaterial=*/false);
             }
         }
@@ -3280,8 +3589,17 @@ private:
             const std::size_t base = i * 5;
             buffers[base] = {slots_[i].shadowUniform.Handle(), 0, sizeof(ShadowUniforms)};
             buffers[base + 1] = {slots_[i].lightBuffer.Handle(), 0, VK_WHOLE_SIZE};
-            buffers[base + 2] = {slots_[i].clusterRangeBuffer.Handle(), 0, VK_WHOLE_SIZE};
-            buffers[base + 3] = {slots_[i].clusterIndexBuffer.Handle(), 0, VK_WHOLE_SIZE};
+            // Jalur GPU menulis ke buffer device-local miliknya sendiri; jalur
+            // CPU tetap memakai buffer host-visible yang dipetakan. Yang
+            // membedakan keduanya hanya dua baris ini — sisi pembacanya,
+            // `cluster_common.slang`, tidak tahu jalur mana yang mengisinya.
+            const bool gpu = gpuClustersActive_ && clusterAssign_.IsValid();
+            buffers[base + 2] = {gpu ? clusterAssign_.RangeBuffer(static_cast<uint32_t>(i))
+                                     : slots_[i].clusterRangeBuffer.Handle(),
+                                 0, VK_WHOLE_SIZE};
+            buffers[base + 3] = {gpu ? clusterAssign_.IndexBuffer(static_cast<uint32_t>(i))
+                                     : slots_[i].clusterIndexBuffer.Handle(),
+                                 0, VK_WHOLE_SIZE};
             buffers[base + 4] = {slots_[i].shadowFaceBuffer.Handle(), 0, VK_WHOLE_SIZE};
 
             VkWriteDescriptorSet uniform{};
@@ -3347,6 +3665,41 @@ private:
         vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
         return true;
+    }
+
+    /// Menulis ulang binding rentang dan indeks cluster saja.
+    ///
+    /// Alasannya sama dengan `UpdateHizDescriptors`: `WriteShadowDescriptors`
+    /// mengalokasi set baru dari pool yang hanya cukup untuk satu putaran, jadi
+    /// memanggilnya kedua kali kehabisan pool — dan kegagalannya muncul sebagai
+    /// pass forward yang membaca daftar lampu milik jalur yang sudah tidak
+    /// dipakai, bukan sebagai galat di tempat yang benar.
+    void UpdateClusterDescriptors() {
+        const bool gpu = gpuClustersActive_ && clusterAssign_.IsValid();
+        std::vector<VkDescriptorBufferInfo> buffers(slots_.size() * 2);
+        std::vector<VkWriteDescriptorSet> writes;
+        writes.reserve(slots_.size() * 2);
+        for (std::size_t i = 0; i < slots_.size(); ++i) {
+            const auto index = static_cast<uint32_t>(i);
+            buffers[i * 2] = {gpu ? clusterAssign_.RangeBuffer(index)
+                                  : slots_[i].clusterRangeBuffer.Handle(),
+                              0, VK_WHOLE_SIZE};
+            buffers[i * 2 + 1] = {gpu ? clusterAssign_.IndexBuffer(index)
+                                      : slots_[i].clusterIndexBuffer.Handle(),
+                                  0, VK_WHOLE_SIZE};
+            for (uint32_t at = 0; at < 2; ++at) {
+                VkWriteDescriptorSet write{};
+                write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+                write.dstSet = slots_[i].shadowSet;
+                write.dstBinding = 3 + at;
+                write.descriptorCount = 1;
+                write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+                write.pBufferInfo = &buffers[i * 2 + at];
+                writes.push_back(write);
+            }
+        }
+        vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
+                               writes.data(), 0, nullptr);
     }
 
     /// Menulis ulang binding piramida saja.
@@ -3662,11 +4015,24 @@ private:
         // Atlas dialokasikan dari daftar lampu yang sama, sebelum entri GPU
         // ditulis: `kind.z` tiap lampu menunjuk entri pertamanya, dan nomor itu
         // baru ada setelah pembagian atlasnya selesai.
-        atlasAllocation_ = AllocateShadowAtlas(scene.lights, desc.camera.position,
-                                               atlasSettings_);
-        if (atlasAllocation_.dropped > 0) {
-            SIM_WARN("Render", "{} shadow-casting lights did not fit the atlas",
-                     atlasAllocation_.dropped);
+        {
+            const CpuScope scope(cpuTimings_, "cpu-shadow-atlas");
+            atlasAllocation_ = AllocateShadowAtlas(scene.lights, desc.camera.position,
+                                                   atlasSettings_);
+        }
+        // **Diperingatkan saat angkanya berubah, bukan tiap frame.** Enam puluh
+        // baris identik per detik bukan peringatan melainkan derau, dan derau
+        // yang menenggelamkan peringatan lain adalah cara terbaik membuat log
+        // berhenti dibaca. Angka yang sebenarnya hidup di `Stats()`, tempat ia
+        // bisa dilihat kapan saja tanpa ada yang perlu menggulung log.
+        if (atlasAllocation_.dropped != reportedShadowDrop_) {
+            reportedShadowDrop_ = atlasAllocation_.dropped;
+            if (atlasAllocation_.dropped > 0) {
+                SIM_WARN("Render", "{} shadow-casting lights did not fit the atlas",
+                         atlasAllocation_.dropped);
+            } else {
+                SIM_INFO("Render", "every shadow-casting light fits the atlas again");
+            }
         }
 
         gpuFaces_.clear();
@@ -3691,14 +4057,35 @@ private:
 
         clusterGrid_.Build(clusterSettings_, desc.camera.fovYRadians, aspect, desc.camera.nearZ,
                            std::min(desc.camera.farZ, kClusterFar));
-        clusterAssignment_ =
-            AssignLights(clusterGrid_, desc.camera.View(), clusterLights_, clusterSettings_);
-        if (clusterAssignment_.overflowed > 0) {
-            // Dilaporkan, tidak didiamkan. Pemotongan yang diam-diam terlihat
-            // sebagai lampu yang hilang di sudut tertentu saja, dan tidak ada
-            // yang akan menghubungkannya dengan batas per-cluster.
-            SIM_WARN("Render", "{} clusters exceeded {} lights and were truncated",
-                     clusterAssignment_.overflowed, clusterSettings_.maxLightsPerCluster);
+        // **Satu dari dua jalur, dan yang tidak dipakai tidak dibayar.** Yang di
+        // GPU menetapkan 3.456 cluster dalam satu dispatch; yang di CPU
+        // mengerjakannya satu per satu dan tetap ada sebagai jalur mundur dan
+        // sebagai pembanding — dua implementasi yang harus sepakat adalah cara
+        // termurah menemukan yang mana yang salah.
+        uint32_t overflowed = 0;
+        if (gpuClustersActive_) {
+            const CpuScope scope(cpuTimings_, "cpu-cluster-assign");
+            // Angkanya dari jalan terakhir slot ini, yang fence-nya sudah
+            // ditunggu — dibaca sebelum `Upload` mengosongkannya kembali.
+            overflowed = clusterAssign_.Overflowed(static_cast<uint32_t>(slotIndex_));
+            clusterAssign_.Upload(static_cast<uint32_t>(slotIndex_), clusterGrid_,
+                                  desc.camera.View(), clusterLights_,
+                                  clusterSettings_.maxLightsPerCluster);
+        } else {
+            const CpuScope scope(cpuTimings_, "cpu-cluster-assign");
+            clusterAssignment_ =
+                AssignLights(clusterGrid_, desc.camera.View(), clusterLights_, clusterSettings_);
+            overflowed = clusterAssignment_.overflowed;
+        }
+        // **Diperingatkan saat angkanya berubah, bukan tiap frame.** Alasannya
+        // sama dengan lampu yang tidak muat atlas: enam puluh baris identik per
+        // detik bukan peringatan melainkan derau.
+        if (overflowed != reportedClusterOverflow_) {
+            reportedClusterOverflow_ = overflowed;
+            if (overflowed > 0) {
+                SIM_WARN("Render", "{} clusters exceeded {} lights and were truncated",
+                         overflowed, clusterSettings_.maxLightsPerCluster);
+            }
         }
 
         // Buffer kosong tidak sah, jadi keduanya selalu berisi minimal satu
@@ -3709,14 +4096,23 @@ private:
         if (clusterAssignment_.indices.empty()) {
             clusterAssignment_.indices.push_back(0);
         }
+        if (clusterAssignment_.ranges.empty()) {
+            clusterAssignment_.ranges.push_back(ClusterAssignment::Range{});
+        }
 
         const VkDeviceSize lightBytes = sizeof(GpuLight) * gpuLights_.size();
         const VkDeviceSize rangeBytes =
             sizeof(ClusterAssignment::Range) * clusterAssignment_.ranges.size();
         const VkDeviceSize indexBytes = sizeof(uint32_t) * clusterAssignment_.indices.size();
-        if (slot.lightBuffer.Reserve(lightBytes) && slot.clusterRangeBuffer.Reserve(rangeBytes) &&
-            slot.clusterIndexBuffer.Reserve(indexBytes)) {
+        const CpuScope uploadScope(cpuTimings_, "cpu-cluster-upload");
+        // Buffer lampu diunggah pada kedua jalur — yang dibacanya fragment
+        // shader, bukan penetapan. Rentang dan indeks hanya pada jalur CPU:
+        // pada jalur GPU keduanya device-local dan ditulis dispatch.
+        if (slot.lightBuffer.Reserve(lightBytes)) {
             slot.lightBuffer.Write(gpuLights_.data(), lightBytes);
+        }
+        if (!gpuClustersActive_ && slot.clusterRangeBuffer.Reserve(rangeBytes) &&
+            slot.clusterIndexBuffer.Reserve(indexBytes)) {
             slot.clusterRangeBuffer.Write(clusterAssignment_.ranges.data(), rangeBytes);
             slot.clusterIndexBuffer.Write(clusterAssignment_.indices.data(), indexBytes);
         }
@@ -3849,13 +4245,35 @@ private:
             // Awalan daftar buram, yaitu yang benar-benar menjatuhkan bayangan.
             if (casterCount > 0 && slot.buffer.IsValid()) {
                 const Cascade& cascade = cascades_.cascades[static_cast<size_t>(i)];
+                // **Tiap kaskade menyaring terhadap ortografiknya sendiri.**
+                // Kaskade nol mencakup beberapa meter pertama; menggambar
+                // seluruh caster sejauh batas pandang ke dalamnya berarti
+                // membayar tiga kali untuk satu peta yang hampir seluruhnya
+                // kosong.
+                //
+                // Menyaring dengan frustum kaskade ini **tepat, bukan terlalu
+                // ketat**, dan alasannya `CascadeSettings::casterPullback`:
+                // bidang dekat cahaya sudah ditarik mundur 200 meter justru
+                // supaya caster yang berada di antara matahari dan irisannya
+                // ikut termuat. Volume yang diuji karena itu sudah volume yang
+                // benar; tanpa tarikan mundur itu, uji ini akan memotong pohon
+                // dan bangunan yang bayangannya paling diperhatikan.
+                const Frustum cascadeFrustum(cascade.viewProjection);
+                const std::vector<Aabb>& bounds = instanceBounds_;
+                SplitRuns(casterRuns_,
+                          [&cascadeFrustum, &bounds](uint32_t index) {
+                              return cascadeFrustum.Intersects(bounds[index]);
+                          },
+                          shadowRuns_);
                 const BoxPush push{cascade.viewProjection};
-                vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowLayout_, 0, 1,
-                                        &slot.skinSet, 0, nullptr);
-                vkCmdPushConstants(cmd, shadowLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
-                                   sizeof(BoxPush), &push);
-                DrawRuns(cmd, slot, casterRuns_, 0, shadowPipelines_, shadowLayout_, push,
-                         /*bindsMaterial=*/false);
+                if (!shadowRuns_.empty()) {
+                    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowLayout_,
+                                            0, 1, &slot.skinSet, 0, nullptr);
+                    vkCmdPushConstants(cmd, shadowLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                                       sizeof(BoxPush), &push);
+                    DrawRuns(cmd, slot, shadowRuns_, 0, shadowPipelines_, shadowLayout_, push,
+                             /*bindsMaterial=*/false);
+                }
             }
             vkCmdEndRendering(cmd);
         }
@@ -3887,6 +4305,13 @@ private:
             slot.instanceBuffer.Destroy();
         }
         dummySkin_.Destroy();
+        // **Ditambahkan di G4, dan ia menutup kebocoran yang sudah ada
+        // sebelumnya.** Kaskade SDF tidak pernah ikut dibongkar di sini; yang
+        // dilaporkan `vkDestroyDevice` sebagai tujuh objek bocor sebagian
+        // adalah ketiga teksturnya. Komposit compute menambah pipeline,
+        // descriptor pool, dan buffer entrinya ke tumpukan yang sama — dan
+        // tumpukan yang sudah bocor adalah tempat kebocoran baru bersembunyi.
+        sdfClipmap_.Destroy();
         hiz_.Destroy();
         post_.Destroy();
         sky_.Destroy();
@@ -3932,10 +4357,18 @@ private:
     /// biasanya tertutup, dan menyusun daftar yang tidak ada yang membacanya
     /// adalah pekerjaan yang dibuang setiap frame.
     mutable std::vector<PassTiming> timings_;
+    /// Tahap CPU frame terakhir. Tidak `mutable`: yang mengisinya adalah
+    /// `Render`, bukan pembacanya.
+    std::vector<PassTiming> cpuTimings_;
     TraceBackendSelection giBackend_;
     SdfClipmapResource sdfClipmap_;
     DepthPyramid hiz_;
     PostProcess post_;
+    ComputeGradient gradient_;
+    ClusterAssign clusterAssign_;
+    /// Jalur yang benar-benar dipakai frame ini. Berubahnya menuntut descriptor
+    /// ditulis ulang, jadi ia disimpan alih-alih dibaca dari `desc` tiap kali.
+    bool gpuClustersActive_ = false;
     SkyAtmosphere sky_;
     VolumePass volumePass_;
     /// Revisi volume yang sedang terunggah. Unggahannya berharga puluhan
@@ -3998,6 +4431,15 @@ private:
     PassId tonemapId_ = kInvalidPass;
     PassId gridId_ = kInvalidPass;
     PassId prepassId_ = kInvalidPass;
+    /// Pemeriksa jalur compute (G3). Ketiganya `kInvalid` kecuali saat debug
+    /// view-nya menyala — pass yang tidak didaftarkan tidak membayar apa pun.
+    ResourceId gradientId_ = kInvalidResource;
+    PassId gradientFillId_ = kInvalidPass;
+    PassId gradientBlitId_ = kInvalidPass;
+    /// Penetapan lampu ke cluster di GPU (G4). `kInvalid` saat jalur CPU aktif.
+    ResourceId clusterRangeId_ = kInvalidResource;
+    ResourceId clusterIndexId_ = kInvalidResource;
+    PassId clusterPassId_ = kInvalidPass;
     PassId linesId_ = kInvalidPass;
     PassId opaqueId_ = kInvalidPass;
     PassId transparentId_ = kInvalidPass;
@@ -4026,6 +4468,7 @@ private:
     ClusterGridSettings clusterSettings_;
     ClusterGrid clusterGrid_;
     ClusterAssignment clusterAssignment_;
+    uint32_t reportedClusterOverflow_ = 0;
     std::vector<GpuLight> gpuLights_;
     std::vector<ClusterLight> clusterLights_;
 
@@ -4088,6 +4531,12 @@ private:
     PipelineVariants transparentPipelines_{};
 
     std::array<InstanceSlot, 3> slots_;
+    // Penetapan cluster di GPU memegang buffer keluarannya sendiri, satu per
+    // slot. Selisih di antara kedua angka itu tidak menghasilkan galat apa pun,
+    // hanya pembacaan di luar batas yang muncul sebagai device lost beberapa
+    // frame kemudian.
+    static_assert(std::tuple_size_v<decltype(slots_)> == ClusterAssign::kSlots,
+                  "ClusterAssign::kSlots harus sama dengan banyaknya slot frame");
     std::size_t slotIndex_ = 0;
     std::vector<BoxInstance> opaque_;
     std::vector<BoxInstance> transparent_;
@@ -4126,12 +4575,33 @@ private:
         BoxInstance instance;
         Mat4 transform{1.0f};
         bool caster = false;
+        /// Kotak dunia instance ini, disimpan supaya tiap pass bayangan bisa
+        /// mengujinya terhadap volumenya sendiri. Tanpa ini setiap pass harus
+        /// mentransformasikan ulang kotak lokalnya — 32 muka atlas dikali
+        /// ratusan instance berarti ribuan transformasi kotak per frame untuk
+        /// jawaban yang tidak berubah di antara keduanya.
+        Aabb bounds;
+        /// Terlihat kamera. **Bukan lagi syarat untuk ikut didaftar**: caster
+        /// yang berada di luar pandangan tetap harus menjatuhkan bayangan ke
+        /// dalamnya.
+        bool cameraVisible = true;
     };
     std::vector<GatherEntry> gathered_;
     /// Ruas draw: satu panggilan gambar per mesh yang berurutan.
     std::vector<DrawRun> opaqueRuns_;
     std::vector<DrawRun> casterRuns_;
     std::vector<DrawRun> transparentRuns_;
+    /// Ruas buram yang benar-benar terlihat kamera — awalan `opaqueRuns_` yang
+    /// sudah dipecah membuang instance yang hanya ada di daftar karena ia
+    /// menjatuhkan bayangan.
+    std::vector<DrawRun> visibleOpaqueRuns_;
+    /// Kotak dunia dan keterlihatan tiap instance di `opaque_`, sejajar indeks.
+    std::vector<Aabb> instanceBounds_;
+    std::vector<uint8_t> instanceVisible_;
+    /// Papan tulis untuk ruas per muka bayangan. Satu, dipakai ulang: 32 muka
+    /// atlas dikali satu vektor baru per muka adalah 32 alokasi per frame untuk
+    /// data yang umurnya satu panggilan gambar.
+    std::vector<DrawRun> shadowRuns_;
     /// Banyaknya entri di awal `opaque_` yang menjatuhkan bayangan.
     uint32_t casterCount_ = 0;
 
@@ -4207,6 +4677,10 @@ private:
     };
     std::unordered_map<std::string, GeneratedMesh> meshDataVersion_;
     uint32_t drawnOpaque_ = 0;
+    RenderStats stats_;
+    /// Jumlah lampu terbuang yang terakhir dilaporkan ke log. Ada supaya
+    /// laporannya hanya keluar saat angkanya berpindah.
+    uint32_t reportedShadowDrop_ = 0;
     uint32_t drawnTransparent_ = 0;
 };
 

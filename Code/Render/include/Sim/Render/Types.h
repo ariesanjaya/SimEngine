@@ -271,6 +271,23 @@ struct ViewportDesc {
     uint32_t width = 0;
     uint32_t height = 0;
     Camera camera;
+
+    /// Langkah waktu yang dipaksakan, detik. Negatif berarti "ukur sendiri".
+    ///
+    /// **Bawaannya negatif, dan itu yang membuat medan ini bukan beban.**
+    /// Perender mengukur waktunya sendiri justru supaya tidak ada pemanggil yang
+    /// perlu tahu bahwa eksposur beradaptasi dan awan bergerak — lihat
+    /// catatannya di `VulkanRenderer::Render`. Yang berubah di sini hanyalah
+    /// bahwa satu pemanggil boleh berkata "pakai angka ini", dan hanya satu yang
+    /// melakukannya: mode ukur.
+    ///
+    /// Alasannya bukan kerapian melainkan syarat. Sebuah frame yang waktunya
+    /// datang dari jam dinding tidak pernah sama dua kali, jadi dua gambar dari
+    /// binary yang identik pun berbeda — dan setiap milestone optimisasi
+    /// mengklaim "lebih cepat dengan gambar yang sama". Separuh klaim itu tidak
+    /// bisa diperiksa selama perbandingannya tenggelam dalam derau yang
+    /// besarnya tidak diketahui.
+    float fixedDeltaSeconds = -1.0f;
     DrawMode mode = DrawMode::Lit;
     Vec4 clearColor{0.13f, 0.14f, 0.16f, 1.0f};
     bool showGrid = true;
@@ -358,6 +375,37 @@ struct ViewportDesc {
     /// `IViewportRenderer::GiBackend()` — permintaan dan hasil sengaja dua hal
     /// yang berbeda, karena permintaan bisa tidak terpenuhi.
     GiSettings gi;
+
+    /// Debug view yang menggantikan seluruh gambar dengan keluaran satu pass
+    /// compute (G3).
+    ///
+    /// **Sebuah pemeriksaan jalur, bukan sebuah tampilan diagnostik atas
+    /// adegan.** Yang dijawabnya cuma satu pertanyaan — apakah compute berjalan
+    /// di mesin ini — dan pertanyaan itu tidak punya jawaban lain yang murah:
+    /// pass compute yang gagal dibuat, shader yang ditolak driver, dan barrier
+    /// yang salah semuanya terlihat sebagai fitur yang "tidak muncul", pada
+    /// mesin yang bukan mesin tempat fiturnya ditulis.
+    bool computeGradient = false;
+
+    /// Penetapan lampu ke cluster dijalankan di GPU (G4).
+    ///
+    /// **Sakelarnya ada karena jalur CPU-nya masih ada, dan jalur CPU-nya masih
+    /// ada karena ia pembanding.** Dua implementasi dari aturan yang sama —
+    /// satu diuji tanpa GPU, satu dijalankan GPU — adalah cara termurah
+    /// menemukan yang mana yang salah ketika lampu mulai hilang di sudut
+    /// tertentu. Yang mahal bukan memelihara keduanya melainkan mencari selisih
+    /// di antara satu implementasi dan harapan.
+    bool gpuClusters = true;
+
+    /// Komposit clipmap SDF dijalankan di GPU (G4).
+    ///
+    /// Sakelarnya ada karena alasan yang sama dengan `gpuClusters`, dan di sini
+    /// alasan itu lebih kuat: satu-satunya pembaca kaskade SDF adalah
+    /// penelusuran GI, jadi jalur yang salah tidak terlihat sebagai gambar yang
+    /// salah melainkan sebagai cahaya pantul yang sedikit berbeda — dan tidak
+    /// ada yang bisa menilai "sedikit berbeda" dengan mata. Yang menilainya
+    /// perbandingan isi voxel antara kedua jalur.
+    bool gpuSdf = true;
 };
 
 /// Satu objek yang bisa digambar, sudah dalam ruang dunia.

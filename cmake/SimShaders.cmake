@@ -4,6 +4,13 @@
 #     SOURCES Shaders/grid.vert Shaders/grid.frag
 #     OUTPUT_DIR ${CMAKE_BINARY_DIR}/bin/Shaders)
 #
+# Tahap shader ditentukan akhiran berkas, dan **tidak ada satu pun daftar
+# akhiran di berkas ini**. glslc menyimpulkannya sendiri dari `.vert`/`.frag`/
+# `.comp`, dan Slang dari atribut `[shader("...")]` di entry point-nya. Karena
+# itu compute (G3) tidak menuntut cabang baru di sini: `foo.comp.slang` menjadi
+# `foo.comp.spv` lewat jalur yang sama persis. Yang menambahkan tahap berikutnya
+# — mesh, task, ray tracing — juga tidak perlu menyentuh berkas ini.
+#
 # Menghasilkan target custom yang ikut dependency tracking, sehingga mengedit
 # shader memicu rebuild. -MD membuat #include di dalam shader ikut terlacak.
 include_guard(GLOBAL)
