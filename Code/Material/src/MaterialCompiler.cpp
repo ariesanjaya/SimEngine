@@ -1,5 +1,7 @@
 #include "Sim/Material/MaterialCompiler.h"
 
+#include "Sim/Material/MaterialParameterBlock.h"
+
 #include "Sim/Material/MaterialNodeCatalog.h"
 
 #include <algorithm>
@@ -474,6 +476,20 @@ MaterialCompileResult Emitter::Run() {
     head << "// Nilai permukaan mengikuti OpenPBR Surface v1.1 (openpbr.slang).\n";
     head << "import openpbr;\n\n";
 
+    // **Yang masuk blok parameter adalah yang punya ukuran di dalamnya.**
+    // Parameter bertipe `Texture` dideklarasikan di daftar yang sama dengan yang
+    // skalar — itu bentuk yang benar untuk penulis material — tetapi ia tidak
+    // tinggal di blok uniform melainkan punya binding-nya sendiri.
+    // `MaterialParameterBlock::Build` sudah melewatinya dengan aturan yang sama
+    // persis, dan berkas ini memanggil aturan itu alih-alih menyalinnya.
+    //
+    // Sampai G5 ia justru ikut ditulis, dan hasilnya sebuah `Texture2D` di dalam
+    // `cbuffer`: Slang menerimanya sambil memperingatkan lalu memindahkannya ke
+    // slot binding lain — yaitu slot yang tidak pernah diikat siapa pun. Tidak
+    // pernah terlihat karena anggota itu tidak pernah dibaca; yang membuatnya
+    // muncul adalah jalur bindless, di mana blok yang sama menjadi elemen
+    // `ConstantBuffer`, dan resource di dalam constant buffer tidak sah.
+    //
     // Binding ditulis eksplisit, tidak diserahkan ke penomoran otomatis Slang.
     //
     // Otomatis menomori menurut urutan deklarasi *yang bertahan*: parameter yang
@@ -484,30 +500,83 @@ MaterialCompileResult Emitter::Run() {
     //
     // Set 2 adalah wilayah material. Set 0 milik per-frame dan set 1 per-objek,
     // keduanya ditulis `AssembleMaterialModule`.
-    if (!graph_.parameters.empty()) {
-        head << "[[vk::binding(0, 2)]]\n";
-        head << "cbuffer MaterialParams\n{\n";
-        for (const MaterialParameter& parameter : graph_.parameters) {
-            head << "    " << SlangType(parameter.kind) << " "
-                 << SanitizeIdentifier(parameter.name, "p") << ";\n";
+    //
+    // **Jalur bindless mengubah dari mana datanya datang, bukan bentuknya.**
+    // Blok parameter tetap std140 dengan urutan yang sama persis, jadi sisi C++
+    // yang menyusunnya (`MaterialParameterBlock`) tidak ikut bercabang — dan
+    // tata letak yang dihitung di dua tempat adalah tata letak yang suatu saat
+    // berselisih tanpa menghasilkan galat.
+    const std::size_t textureCount = result_.textures.size();
+    // Empat slot per `uint4`. **`uint4`, bukan `uint`, dan itu yang membuat
+    // tabelnya jatuh tepat di ujung blok parameter.** std140 menjajarkan `uint`
+    // ke 4, jadi sebuah `uint` yang menyusul `float3` akan mengisi celah di
+    // offset +12 — sementara sisi C++ menempelkan tabelnya sesudah blok yang
+    // sudah dibulatkan ke 16. `uint4` berjajar 16, dan selisih itu hilang.
+    const std::size_t slotGroups = (textureCount + 3) / 4;
+    // Yang dihitung parameter *yang tinggal di blok*, bukan yang dideklarasikan.
+    // Sebuah material yang seluruh parameternya bertipe `Texture` punya blok
+    // kosong — dan struct tanpa satu pun anggota bukan blok parameter melainkan
+    // sesuatu yang tidak perlu ada.
+    const std::size_t blockParameters = static_cast<std::size_t>(std::count_if(
+        graph_.parameters.begin(), graph_.parameters.end(),
+        [](const MaterialParameter& parameter) { return ValueSize(parameter.kind) != 0; }));
+    if (options_.bindless) {
+        if (blockParameters > 0 || textureCount > 0) {
+            head << "struct MaterialParams\n{\n";
+            for (const MaterialParameter& parameter : graph_.parameters) {
+                if (ValueSize(parameter.kind) == 0) {
+                    continue;
+                }
+                head << "    " << SlangType(parameter.kind) << " "
+                     << SanitizeIdentifier(parameter.name, "p") << ";\n";
+            }
+            if (slotGroups > 0) {
+                head << "    /// Slot tiap tekstur di larik bindless, empat per baris.\n";
+                head << "    uint4 gTextureSlots[" << slotGroups << "];\n";
+            }
+            head << "};\n\n";
+            head << "[[vk::binding(0, 2)]]\n";
+            head << "ConstantBuffer<MaterialParams> gMaterialParams[];\n";
         }
-        head << "}\n\n";
-    }
-    {
-        // Tekstur dan sampler-nya berselang-seling mulai binding 1, jadi tekstur
-        // ke-i selalu di 1 + 2i berapa pun banyaknya. Menaruh semua tekstur dulu
-        // lalu semua sampler akan membuat nomor sampler bergantung pada jumlah
-        // tekstur — dan jumlah itu berubah setiap kali graph disunting.
-        uint32_t binding = 1;
-        for (const TextureBinding& texture : result_.textures) {
-            head << "[[vk::binding(" << binding++ << ", 2)]]\n";
-            head << "Texture2D<float4> " << texture.name << ";\n";
-            head << "[[vk::binding(" << binding++ << ", 2)]]\n";
-            head << "SamplerState s" << texture.name.substr(1) << ";\n";
+        if (textureCount > 0) {
+            // Larik yang sama yang dipakai `box_bindless.frag`, dan nomor
+            // binding yang sama — lihat Shaders/bindless_common.slang.
+            head << "[[vk::binding(1, 2)]]\n";
+            head << "Texture2D<float4> gBindlessTextures[];\n";
+            head << "[[vk::binding(2, 2)]]\n";
+            head << "SamplerState gBindlessSamplers[];\n";
         }
-    }
-    if (!result_.textures.empty()) {
         head << '\n';
+    } else {
+        if (blockParameters > 0) {
+            head << "[[vk::binding(0, 2)]]\n";
+            head << "cbuffer MaterialParams\n{\n";
+            for (const MaterialParameter& parameter : graph_.parameters) {
+                if (ValueSize(parameter.kind) == 0) {
+                    continue;
+                }
+                head << "    " << SlangType(parameter.kind) << " "
+                     << SanitizeIdentifier(parameter.name, "p") << ";\n";
+            }
+            head << "}\n\n";
+        }
+        {
+            // Tekstur dan sampler-nya berselang-seling mulai binding 1, jadi
+            // tekstur ke-i selalu di 1 + 2i berapa pun banyaknya. Menaruh semua
+            // tekstur dulu lalu semua sampler akan membuat nomor sampler
+            // bergantung pada jumlah tekstur — dan jumlah itu berubah setiap
+            // kali graph disunting.
+            uint32_t binding = 1;
+            for (const TextureBinding& texture : result_.textures) {
+                head << "[[vk::binding(" << binding++ << ", 2)]]\n";
+                head << "Texture2D<float4> " << texture.name << ";\n";
+                head << "[[vk::binding(" << binding++ << ", 2)]]\n";
+                head << "SamplerState s" << texture.name.substr(1) << ";\n";
+            }
+        }
+        if (textureCount > 0) {
+            head << '\n';
+        }
     }
 
     head << "struct MaterialInputs\n{\n";
@@ -526,6 +595,36 @@ MaterialCompileResult Emitter::Run() {
     head << "};\n\n";
 
     head << "MaterialSurface evalMaterial(MaterialInputs inputs)\n{\n";
+
+    // Prolog bindless: menyalin blok parameter dan menghidupkan nama tekstur.
+    //
+    // **Badan yang dihasilkan graph tidak ikut berubah satu baris pun.** Ia
+    // menyebut parameter dengan namanya dan tekstur dengan namanya, dan di sini
+    // nama-nama itu dihidupkan kembali sebagai variabel lokal — jadi kedua jalur
+    // memakai emisi badan yang sama persis, dan tidak ada jalur yang bisa
+    // diam-diam berhenti diuji karena hanya salah satunya yang punya kode.
+    if (options_.bindless && (blockParameters > 0 || textureCount > 0)) {
+        head << "    const MaterialParams gMat = gMaterialParams[push.materialSlot];\n";
+        for (const MaterialParameter& parameter : graph_.parameters) {
+            if (ValueSize(parameter.kind) == 0) {
+                continue;
+            }
+            const std::string name = SanitizeIdentifier(parameter.name, "p");
+            head << "    const " << SlangType(parameter.kind) << " " << name << " = gMat."
+                 << name << ";\n";
+        }
+        for (std::size_t i = 0; i < textureCount; ++i) {
+            const TextureBinding& texture = result_.textures[i];
+            const std::string slot = "slot" + std::to_string(i);
+            head << "    const uint " << slot << " = NonUniformResourceIndex(gMat.gTextureSlots["
+                 << (i / 4) << "][" << (i % 4) << "]);\n";
+            head << "    Texture2D<float4> " << texture.name << " = gBindlessTextures[" << slot
+                 << "];\n";
+            head << "    SamplerState s" << texture.name.substr(1) << " = gBindlessSamplers["
+                 << slot << "];\n";
+        }
+        head << '\n';
+    }
 
     // Peta sumber dihitung ulang terhadap berkas utuh: `line_` selama emisi
     // hanya menghitung baris di dalam badan fungsi.

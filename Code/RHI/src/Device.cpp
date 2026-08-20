@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <cstring>
+#include <format>
 #include <fstream>
 #include <iterator>
 #include <system_error>
@@ -542,9 +543,90 @@ bool Device::CreateLogicalDevice() {
     enable11.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES;
     enable11.shaderDrawParameters = supported11.shaderDrawParameters;
 
+    // Bindless (G5). **Tujuh medan, dan ketujuhnya wajib bersama-sama** — jalur
+    // material memakai semuanya sekaligus, jadi menyalakan sebagiannya
+    // menghasilkan device yang mengaku bindless lalu gagal di pembuatan
+    // descriptor set layout, bukan di sini:
+    //
+    //   - `runtimeDescriptorArray` — larik `Texture2D t[]` tanpa batas yang
+    //     ditulis di shader.
+    //   - `shaderSampledImageArrayNonUniformIndexing` — indeksnya datang dari
+    //     data material, jadi ia berbeda antar-fragmen dalam satu warp.
+    //   - `descriptorBindingSampledImageUpdateAfterBind` dan
+    //     `descriptorBindingUniformBufferUpdateAfterBind` — tekstur dan material
+    //     baru masuk ke slotnya sementara frame sebelumnya masih terbang.
+    //     Keduanya wajib, dan yang kedua ditemukan validation layer: blok
+    //     parameter material tinggal di binding uniform buffer, dan medan
+    //     tekstur tidak menutupinya.
+    //   - `descriptorBindingPartiallyBound` — hanya slot yang sudah terisi yang
+    //     ditulis; sisanya tidak pernah dibaca siapa pun, dan tanpa medan ini
+    //     mereka tetap harus sah.
+    //   - dua medan `...ArrayDynamicIndexing` inti 1.0 — indeks larik datang
+    //     dari push constant dan dari blok parameter, yaitu nilai yang baru
+    //     diketahui saat menggambar.
+    //
+    // `descriptorBindingVariableDescriptorCount` **tidak** ada di daftar ini,
+    // dan itu disengaja: kapasitas larik ditetapkan descriptor set layout, jadi
+    // yang dibutuhkan hanya larik tak berbatas di sisi shader. Menuntut medan
+    // yang tidak dipakai berarti menolak bindless di perangkat yang sebenarnya
+    // mampu.
+    const bool bindlessSupported =
+        supported12.descriptorIndexing != 0 && supported12.runtimeDescriptorArray != 0 &&
+        supported12.shaderSampledImageArrayNonUniformIndexing != 0 &&
+        supported12.descriptorBindingSampledImageUpdateAfterBind != 0 &&
+        supported12.descriptorBindingUniformBufferUpdateAfterBind != 0 &&
+        supported12.descriptorBindingPartiallyBound != 0 &&
+        supported.shaderSampledImageArrayDynamicIndexing != 0 &&
+        supported.shaderUniformBufferArrayDynamicIndexing != 0;
+
+    // Kapasitas larik bindless diambil dari perangkat, bukan ditulis mati.
+    //
+    // **Dua batas, dan yang mengikat adalah yang per-tahap.** Batas per-set
+    // hampir selalu jauh lebih besar; yang menolak descriptor set layout pada
+    // GPU 6 GB justru batas per-tahap. Keduanya diambil minimumnya, lalu
+    // dibatasi lagi ke `kBindlessCeiling` — sebuah adegan yang butuh lebih dari
+    // itu punya masalah yang tidak diselesaikan larik yang lebih besar, dan
+    // larik sebesar batas driver (sebagian melaporkan jutaan) membuat pool
+    // descriptor menuntut memori yang tidak pernah dipakai.
+    constexpr uint32_t kBindlessCeiling = 4096;
+    uint32_t bindlessCapacity = 0;
+    if (supportsVulkan13_) {
+        VkPhysicalDeviceDescriptorIndexingProperties indexingProperties{};
+        indexingProperties.sType =
+            VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_PROPERTIES;
+        VkPhysicalDeviceProperties2 properties2{};
+        properties2.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+        properties2.pNext = &indexingProperties;
+        vkGetPhysicalDeviceProperties2(physicalDevice_, &properties2);
+        bindlessCapacity =
+            std::min({kBindlessCeiling,
+                      indexingProperties.maxDescriptorSetUpdateAfterBindSampledImages,
+                      indexingProperties.maxPerStageDescriptorUpdateAfterBindSampledImages,
+                      indexingProperties.maxPerStageDescriptorUpdateAfterBindSamplers,
+                      indexingProperties.maxDescriptorSetUpdateAfterBindSamplers});
+    }
+
+    VkPhysicalDeviceVulkan12Features enable12{};
+    enable12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
+    enable12.pNext = &enable11;
+    // Kapasitas nol berarti pertanyaannya tidak pernah sampai ke driver
+    // (perangkat pra-1.3). Menyalakan fiturnya tetap sah di sana, tetapi larik
+    // berkapasitas nol bukan jalur bindless melainkan jalur yang gagal pada
+    // tekstur pertama — jadi ia dihitung tidak didukung, sekarang, bukan nanti.
+    if (bindlessSupported && bindlessCapacity > 0) {
+        enable12.descriptorIndexing = VK_TRUE;
+        enable12.runtimeDescriptorArray = VK_TRUE;
+        enable12.shaderSampledImageArrayNonUniformIndexing = VK_TRUE;
+        enable12.descriptorBindingSampledImageUpdateAfterBind = VK_TRUE;
+        enable12.descriptorBindingUniformBufferUpdateAfterBind = VK_TRUE;
+        enable12.descriptorBindingPartiallyBound = VK_TRUE;
+        features.shaderSampledImageArrayDynamicIndexing = VK_TRUE;
+        features.shaderUniformBufferArrayDynamicIndexing = VK_TRUE;
+    }
+
     VkPhysicalDeviceVulkan13Features enable13{};
     enable13.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES;
-    enable13.pNext = &enable11;
+    enable13.pNext = &enable12;
     enable13.shaderDemoteToHelperInvocation = supported13.shaderDemoteToHelperInvocation;
     enable13.dynamicRendering = supported13.dynamicRendering;
     enable13.synchronization2 = supported13.synchronization2;
@@ -583,7 +665,9 @@ bool Device::CreateLogicalDevice() {
     capabilities_.synchronization2 = enable13.synchronization2 != 0;
     capabilities_.blockCompression = supportsBlockCompression_;
     capabilities_.rayQuery = supportsRayQuery_;
-    capabilities_.descriptorIndexing = supported12.descriptorIndexing != 0;
+    capabilities_.descriptorIndexing = enable12.descriptorIndexing != 0;
+    capabilities_.bindlessTextureCapacity =
+        capabilities_.descriptorIndexing ? bindlessCapacity : 0;
     capabilities_.bufferDeviceAddress = supported12.bufferDeviceAddress != 0;
     capabilities_.timelineSemaphore = supported12.timelineSemaphore != 0;
     capabilities_.drawIndirectCount = supported12.drawIndirectCount != 0;
@@ -602,7 +686,9 @@ bool Device::CreateLogicalDevice() {
     SIM_INFO("RHI",
              "Capabilities: bindless {}, buffer address {}, timeline {}, indirect {}/{}, "
              "fp16 {}, async compute {}, ray query {}",
-             capabilities_.descriptorIndexing ? "yes" : "no",
+             capabilities_.descriptorIndexing
+                 ? std::format("yes ({} slots)", capabilities_.bindlessTextureCapacity)
+                 : std::string("no"),
              capabilities_.bufferDeviceAddress ? "yes" : "no",
              capabilities_.timelineSemaphore ? "yes" : "no",
              capabilities_.multiDrawIndirect ? "yes" : "no",

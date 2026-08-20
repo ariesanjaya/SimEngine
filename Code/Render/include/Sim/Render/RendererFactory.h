@@ -20,6 +20,9 @@ struct StubRendererDesc {
     std::filesystem::path shaderDirectory;
     uint32_t initialWidth = 1280;
     uint32_t initialHeight = 720;
+    /// Jalur material. Diabaikan `CreateStubRenderer`, yang tidak menggambar
+    /// material sama sekali.
+    MaterialBindingPreference materialBinding = MaterialBindingPreference::Auto;
 };
 
 /// Renderer sementara untuk fase editor (E1..E7): clear color + grid

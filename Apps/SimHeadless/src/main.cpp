@@ -100,6 +100,7 @@ void PrintUsage() {
         "  --validate-sync               nyalakan validasi sinkronisasi; lambat, sengaja\n"
         "  --bench-cpu-clusters          penetapan cluster di CPU, bukan GPU (G4)\n"
         "  --bench-cpu-sdf               komposit clipmap SDF di CPU, bukan GPU (G4)\n"
+        "  --no-bindless                 material lewat set per ruas, bukan bindless (G5)\n"
         "  --bench-dump-sdf <path>       simpan isi voxel kaskade SDF; untuk dibandingkan\n",
         stderr);
 }
@@ -317,6 +318,16 @@ int main(int argc, char** argv) {
                 std::filesystem::path(argv[0]).parent_path() / "Shaders";
             rendererDesc.initialWidth = renderWidth;
             rendererDesc.initialHeight = renderHeight;
+            // **Sakelar yang menjaga jalur mundur tetap dijalankan.** Kriteria
+            // selesai G5 menuntut kedua jalur menghasilkan gambar yang sama,
+            // dan perbandingan itu hanya bisa dilakukan kalau keduanya bisa
+            // diminta pada mesin yang sama, pada adegan yang sama.
+            for (int at = 1; at < argc; ++at) {
+                if (argv[at] != nullptr && std::string_view(argv[at]) == "--no-bindless") {
+                    rendererDesc.materialBinding =
+                        render::MaterialBindingPreference::ForceClassic;
+                }
+            }
             renderer = render::CreateVulkanRenderer(device, textures, rendererDesc);
             if (renderer == nullptr) {
                 // Jatuh kembali, alasan yang sama dengan editor: yang menolak
@@ -380,6 +391,18 @@ int main(int argc, char** argv) {
 
     editor::Selection selection;
     editor::SceneView sceneView;
+    // **Material sungguhan ikut diukur, bukan hanya jalur mundur.**
+    //
+    // Sampai G5 sambungan ini hanya dipasang `ViewportPanel`, dan SimHeadless
+    // tidak punya panel — jadi seluruh adegan uji digambar `box.frag` dan
+    // pipeline material tidak pernah tersentuh alat ukurnya sendiri. Itu
+    // menyembunyikan persis apa yang G5 urus: ikatan descriptor per ruas datang
+    // dari keragaman material, dan adegan yang seluruhnya memakai satu shader
+    // jalur mundur tidak punya keragaman itu.
+    //
+    // Akibatnya angka G5 tidak sebanding dengan baris "sesudah" G4 — dan itu
+    // disebutkan di dokumen rencananya, bukan didiamkan.
+    sceneView.SetMaterialPrograms(app.Context().materialPrograms);
     // Kamera milik kedua loop di bawah, bukan milik panel — tidak ada panel. Di
     // mode MCP ia hanya berpindah kalau agen memintanya lewat
     // `viewport.capture`; di mode ukur ia mengikuti lintasan terkunci.
@@ -481,6 +504,57 @@ int main(int argc, char** argv) {
 
         SIM_INFO("Bench", "{} ({}x{}), {} warmup + {} measured frames", device.DeviceName(),
                  renderWidth, renderHeight, warmup, measured);
+
+        // **Material harus selesai dikompilasi sebelum frame pertama diukur.**
+        //
+        // slangc berjalan di `TaskPool` dan memakan detik, sementara seluruh
+        // jalan — pemanasan sekaligus pengukuran — selesai dalam waktu yang jauh
+        // lebih pendek. Tanpa menunggu di sini, sebagian frame digambar jalur
+        // mundur `box.frag` dan sebagian lagi lewat pipeline material, dan
+        // pembagiannya bergantung pada berapa cepat mesinnya mengompilasi. Dua
+        // jalan berturut-turut lalu tidak akan pernah sepakat — yaitu justru
+        // kriteria selesai G0.
+        //
+        // Frame di sini tidak digambar, hanya disusun: yang menerbitkan
+        // permintaan kompilasi adalah `SceneView::Build`, dan yang mengambil
+        // hasilnya juga ia.
+        if (app.Context().materialPrograms != nullptr) {
+            constexpr uint32_t kMaxSettleFrames = 3000;
+            uint32_t settle = 0;
+            for (; settle < kMaxSettleFrames && !gStopping.load(); ++settle) {
+                // **Delta nol, dan itu bukan detail.** Berapa banyak frame yang
+                // dibutuhkan di sini bergantung pada apakah `slangc` menjawab
+                // dari cache atau harus benar-benar berjalan — jadi ia berbeda
+                // antara jalan pertama dan jalan kedua di mesin yang sama.
+                // Memajukan waktu dunia sebanyak itu berarti frame yang diukur
+                // mulai dari keadaan yang berbeda, dan dua jalan dari binary
+                // yang identik menghasilkan gambar yang berbeda. Ditemukan
+                // begitu: dua tangkapan yang seharusnya sama byte demi byte
+                // ternyata tidak.
+                app.Tick(0.0f);
+                MainThreadQueue::Get().Drain();
+                if (app.Context().world == nullptr) {
+                    break;
+                }
+                sceneView.Build(*app.Context().world, selection, app.Context().assets,
+                                renderer.get(), app.Context().animation,
+                                app.Context().builtinAssets, app.Context().whiteboxes);
+                if (settle > 0 && app.Context().materialPrograms->PendingCount() == 0) {
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            const std::size_t pending = app.Context().materialPrograms->PendingCount();
+            if (pending > 0) {
+                // Disebutkan, bukan didiamkan: angka dari jalan yang materialnya
+                // belum siap adalah angka untuk adegan yang lain.
+                SIM_WARN("Bench", "{} materials are still compiling after {} frames", pending,
+                         settle);
+            } else {
+                SIM_INFO("Bench", "materials ready after {} settle frames ({} compiled)", settle,
+                         app.Context().materialPrograms->CompileCount());
+            }
+        }
 
         const auto wallStart = std::chrono::steady_clock::now();
         for (uint32_t frame = 0; frame < total && !gStopping.load(); ++frame) {
@@ -634,6 +708,16 @@ int main(int argc, char** argv) {
             report += line;
             std::snprintf(line, sizeof(line), "- GI: %s\n",
                           app.Context().gi.enabled ? "menyala" : "mati");
+            report += line;
+            // **Jalur material dan harganya, di baris yang sama.** Kriteria
+            // selesai G5 adalah sebuah hitungan, bukan sebuah waktu — dan
+            // hitungan yang tidak ikut tercetak di laporan adalah hitungan yang
+            // harus dicari ulang setiap kali seseorang bertanya.
+            const render::RenderStats stats = renderer->Stats();
+            std::snprintf(line, sizeof(line),
+                          "- Material: %s — %u ikatan descriptor, %u draw per frame\n",
+                          renderer->UsesBindlessMaterials() ? "bindless" : "set per ruas",
+                          stats.descriptorSetBinds, stats.drawCalls);
             report += line;
             std::snprintf(line, sizeof(line), "- Jalan selesai dalam %.2f s\n\n", wallSeconds);
             report += line;

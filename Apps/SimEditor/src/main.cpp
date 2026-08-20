@@ -236,6 +236,15 @@ int main(int argc, char** argv) {
 
     render::StubRendererDesc rendererDesc;
     rendererDesc.shaderDirectory = ExecutableDirectory() / "Shaders";
+    // Sakelar paksa jalur material. Ada di sini dan bukan hanya di SimHeadless
+    // karena yang membandingkan dua gambar dengan mata adalah editor — dan
+    // jalur mundur yang hanya bisa dijalankan alat ukur adalah jalur yang tidak
+    // pernah dilihat siapa pun.
+    for (int at = 1; at < argc; ++at) {
+        if (argv[at] != nullptr && std::string_view(argv[at]) == "--no-bindless") {
+            rendererDesc.materialBinding = render::MaterialBindingPreference::ForceClassic;
+        }
+    }
     // Renderer sungguhan lebih dulu; stub adalah jalur mundurnya, bukan
     // sebaliknya. `CreateVulkanRenderer` mengembalikan nullptr kalau perangkatnya
     // tidak memenuhi syarat — dan editor yang menolak jalan di mesin lama tidak
