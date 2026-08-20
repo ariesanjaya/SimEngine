@@ -589,8 +589,21 @@ public:
         // Culling GPU. **Gagal dibuat bukan kegagalan fatal**: jalur CPU tetap
         // ada, dan ia memang harus tetap ada — lihat catatan di `DrawCull`.
         if (device_.Capabilities().multiDrawIndirect) {
-            if (!drawCull_.Create(device_, shaderDirectory_)) {
+            if (!drawCull_.Create(device_, shaderDirectory_) ||
+                !occlusion_.Create(device_, shaderDirectory_, DepthReduce::Farthest)) {
                 SIM_WARN("Render", "GPU draw culling unavailable; culling stays on the CPU");
+                drawCull_.Destroy();
+                occlusion_.Destroy();
+            } else {
+                // Piramidanya diadopsi di sini, sesudah keduanya ada — bukan di
+                // sebelah `hiz_`, yang dibuat lebih dulu. Descriptor culling
+                // menunjuk piramida ini, dan yang belum ditulis membuat dispatch
+                // tidak pernah berjalan: buffer perintahnya lalu berisi sampah,
+                // dan yang terlihat adalah adegan yang kosong sama sekali.
+                occlusion_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(),
+                                 target_.DepthView(), target_.Sampler());
+                occlusion_.AdoptLayouts();
+                drawCull_.AdoptPyramid(occlusion_.View(), occlusion_.Sampler());
             }
         } else {
             SIM_INFO("Render",
@@ -693,6 +706,12 @@ public:
         // mengalokasi ulang, jadi tidak ada frame yang masih memakainya.
         const bool hizChanged = hiz_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(),
                                            target_.DepthView(), target_.Sampler());
+        if (occlusion_.IsValid() &&
+            occlusion_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(),
+                             target_.DepthView(), target_.Sampler())) {
+            occlusion_.AdoptLayouts();
+            drawCull_.AdoptPyramid(occlusion_.View(), occlusion_.Sampler());
+        }
         const bool probesChanged =
             probes_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(), kNormalFormat);
         const bool postChanged =
@@ -757,10 +776,13 @@ public:
         // draw, dan ia pembanding: dua implementasi yang harus sepakat adalah
         // cara termurah menemukan yang mana yang salah.
         gpuCullActive_ = desc.gpuCull && drawCull_.IsValid() && !cullSurfaces_.empty();
+        gpuOcclusionActive_ = gpuCullActive_ && desc.gpuOcclusion && occlusion_.IsValid();
         if (gpuCullActive_) {
             const CpuScope scope(cpuTimings_, "cpu-draw-cull");
-            gpuCullActive_ = drawCull_.Upload(static_cast<uint32_t>(slotIndex_), Frustum(viewProj),
-                                              cullBounds_, cullSurfaces_);
+            gpuCullActive_ = drawCull_.Upload(
+                static_cast<uint32_t>(slotIndex_), Frustum(viewProj), viewProj, target_.Width(),
+                target_.Height(), DepthPyramid::LevelsFor(target_.Width(), target_.Height()),
+                cullBounds_, cullSurfaces_);
         }
 
         // Cascade dihitung dari kamera yang sama dengan yang dipakai menggambar.
@@ -1085,8 +1107,15 @@ public:
             probes_.RecordNormalBegin(command);
             BeginPrepassRendering(command, desc);
             if (slotReady && opaqueCount > 0) {
+                // **Prepass memakai perintah fase frustum, forward memakai fase
+                // occlusion.** Prepass yang ikut menyaring occlusion akan
+                // menyaring dirinya sendiri: piramidanya dibangun dari depth
+                // yang baru saja ditulis prepass itu.
                 DrawInstances(command, prepassPipelines_, push, slot, MainViewRuns(), 0,
-                              /*materialVariant=*/-1, gpuCullActive_);
+                              /*materialVariant=*/-1,
+                              gpuCullActive_
+                                  ? drawCull_.CommandBuffer(static_cast<uint32_t>(slotIndex_))
+                                  : VK_NULL_HANDLE);
             }
             vkCmdEndRendering(command);
             probes_.RecordNormalEnd(command);
@@ -1096,7 +1125,7 @@ public:
                            /*writeColor=*/true);
             if (slotReady && opaqueCount > 0) {
                 DrawInstances(command, opaquePipelines_, push, slot, MainViewRuns(), 0,
-                              /*materialVariant=*/0, gpuCullActive_);
+                              /*materialVariant=*/0, OpaqueCommandBuffer());
             }
             vkCmdEndRendering(command);
         };
@@ -1234,8 +1263,19 @@ public:
             executor_.Bind(drawCommandId_,
                            BoundBuffer{drawCull_.CommandBuffer(cullSlot), 0, VK_WHOLE_SIZE});
             recorders[drawCullPassId_] = [this, cullSlot](VkCommandBuffer command) {
-                drawCull_.Record(command, cullSlot);
+                drawCull_.Record(command, cullSlot, DrawCull::Phase::Frustum);
             };
+            if (drawCullLatePassId_ != kInvalidPass) {
+                executor_.Bind(visibleCommandId_,
+                               BoundBuffer{drawCull_.VisibleCommandBuffer(cullSlot), 0,
+                                           VK_WHOLE_SIZE});
+                recorders[occlusionPyramidPassId_] = [this](VkCommandBuffer command) {
+                    occlusion_.Record(command, target_.Width(), target_.Height());
+                };
+                recorders[drawCullLatePassId_] = [this, cullSlot](VkCommandBuffer command) {
+                    drawCull_.Record(command, cullSlot, DrawCull::Phase::Occlusion);
+                };
+            }
         }
 
         if (clusterPassId_ != kInvalidPass) {
@@ -1885,8 +1925,12 @@ private:
         // bukan sebelum shader pertama.
         drawCommandId_ = kInvalidResource;
         drawCullPassId_ = kInvalidPass;
+        visibleCommandId_ = kInvalidResource;
+        occlusionPyramidPassId_ = kInvalidPass;
+        drawCullLatePassId_ = kInvalidPass;
         if (gpuCullActive_) {
             drawCommandId_ = graph_.Import("draw-commands", Access::IndirectRead);
+            visibleCommandId_ = graph_.Import("visible-commands", Access::IndirectRead);
             drawCullPassId_ = graph_.AddPass("draw-cull");
             graph_.Write(drawCullPassId_, drawCommandId_, Access::ShaderWrite);
         }
@@ -1919,6 +1963,22 @@ private:
             graph_.Read(prepassId_, drawCommandId_, Access::IndirectRead);
         }
 
+        // **Piramida occlusion dibangun dari depth frame ini sendiri, bukan
+        // dari frame lalu.** Itu yang membuat tidak ada benda yang bisa berkedip
+        // masuk satu frame terlambat: yang diuji fase kedua adalah kedalaman
+        // yang benar-benar tergambar, bukan tebakan.
+        if (gpuOcclusionActive_) {
+            occlusionPyramidPassId_ = graph_.AddPass("occlusion-pyramid");
+            graph_.Read(occlusionPyramidPassId_, depthId_, Access::ShaderRead);
+            // Efek samping, alasan yang sama dengan `hiz-build`: keluarannya
+            // bukan resource graph — piramida mengurus perpindahan layout tiap
+            // mip-nya sendiri.
+            graph_.SetSideEffect(occlusionPyramidPassId_);
+
+            drawCullLatePassId_ = graph_.AddPass("draw-cull-late");
+            graph_.Write(drawCullLatePassId_, visibleCommandId_, Access::ShaderWrite);
+        }
+
         // Piramida dibangun dari depth prepass, bukan dari depth akhir. Yang
         // ditelusuri lapis screen-space adalah permukaan buram; yang tembus
         // pandang tidak menghalangi cahaya dan tidak menulis depth yang berarti
@@ -1942,8 +2002,8 @@ private:
             graph_.Read(opaqueId_, clusterRangeId_, Access::ShaderRead);
             graph_.Read(opaqueId_, clusterIndexId_, Access::ShaderRead);
         }
-        if (drawCullPassId_ != kInvalidPass) {
-            graph_.Read(opaqueId_, drawCommandId_, Access::IndirectRead);
+        if (drawCullLatePassId_ != kInvalidPass) {
+            graph_.Read(opaqueId_, visibleCommandId_, Access::IndirectRead);
         }
         graph_.Read(opaqueId_, depthId_, Access::DepthWrite);
         graph_.Read(opaqueId_, shadowId_, Access::ShaderRead);
@@ -2431,6 +2491,21 @@ private:
         /// Jarak ke kamera. Dibaca hanya jalur tembus pandang.
         float distance = 0.0f;
     };
+    /// Buffer perintah pass forward.
+    ///
+    /// **Dua buffer, dan yang membedakannya siapa yang menyaring.** Tanpa
+    /// occlusion culling, forward menggambar himpunan yang sama dengan prepass —
+    /// yaitu isi frustum. Dengan occlusion, ia menggambar yang lolos uji
+    /// terhadap piramida depth yang baru saja dibangun dari prepass itu.
+    VkBuffer OpaqueCommandBuffer() const {
+        if (!gpuCullActive_) {
+            return VK_NULL_HANDLE;
+        }
+        const auto slot = static_cast<uint32_t>(slotIndex_);
+        return gpuOcclusionActive_ ? drawCull_.VisibleCommandBuffer(slot)
+                                   : drawCull_.CommandBuffer(slot);
+    }
+
     /// Ruas yang digambar pandangan utama — prepass dan forward buram.
     ///
     /// **Dua daftar, dan yang membedakan siapa yang menyaring.** Jalur CPU
@@ -2637,7 +2712,8 @@ private:
 
     void DrawInstances(VkCommandBuffer cmd, const PipelineVariants& pipelines, const BoxPush& push,
                        InstanceSlot& slot, std::span<const DrawRun> runs, uint32_t instanceBase,
-                       int materialVariant = -1, bool indirect = false) {
+                       int materialVariant = -1,
+                       VkBuffer indirectCommands = VK_NULL_HANDLE) {
         // Descriptor set diikat untuk setiap pipeline forward, termasuk prepass.
         // Prepass tidak membacanya, tapi layout-nya mendeklarasikannya — dan
         // set yang dideklarasikan tapi tidak terikat adalah pelanggaran meski
@@ -2659,7 +2735,7 @@ private:
                  sets.data(), 0, nullptr);
         vkCmdPushConstants(cmd, pipelineLayout_, kBoxPushStages, 0, sizeof(BoxPush), &push);
         DrawRuns(cmd, slot, runs, instanceBase, pipelines, pipelineLayout_,
-                 /*bindsMaterial=*/true, materialVariant, indirect);
+                 /*bindsMaterial=*/true, materialVariant, indirectCommands);
     }
 
     /// Mengikat geometri tiap ruas lalu menggambarnya. Dipakai bersama pass
@@ -2680,7 +2756,7 @@ private:
     void DrawRuns(VkCommandBuffer cmd, InstanceSlot& slot, std::span<const DrawRun> runs,
                   uint32_t instanceBase, const PipelineVariants& pipelines,
                   VkPipelineLayout layout, bool bindsMaterial, int materialVariant = -1,
-                  bool indirect = false) {
+                  VkBuffer indirectCommands = VK_NULL_HANDLE) {
         VkPipeline bound = VK_NULL_HANDLE;
         // **Bukan sebuah handle sentinel**: nol adalah kubus satuan, yaitu mesh
         // yang sah dan yang paling sering muncul. Bendera terpisah karena itu,
@@ -2779,12 +2855,12 @@ private:
             // vertex; mengirimnya lagi lewat push constant berarti dua salinan
             // dari satu angka — dan indirect draw menutup pilihan itu
             // seluruhnya, karena perintahnya dibangkitkan GPU.
-            if (indirect) {
+            if (indirectCommands != VK_NULL_HANDLE) {
                 // Satu panggilan untuk seluruh permukaan ruas ini, berapa pun
                 // banyaknya. Yang tersaring ada di sana juga, dengan
                 // `instanceCount` nol — lihat catatan di `DrawCull`.
                 vkCmdDrawIndexedIndirect(
-                    cmd, drawCull_.CommandBuffer(static_cast<uint32_t>(slotIndex_)),
+                    cmd, indirectCommands,
                     static_cast<VkDeviceSize>(run.first) * sizeof(VkDrawIndexedIndirectCommand),
                     run.count, sizeof(VkDrawIndexedIndirectCommand));
             } else {
@@ -4852,6 +4928,7 @@ private:
         // tumpukan yang sudah bocor adalah tempat kebocoran baru bersembunyi.
         sdfClipmap_.Destroy();
         hiz_.Destroy();
+        occlusion_.Destroy();
         post_.Destroy();
         sky_.Destroy();
         probes_.Destroy();
@@ -4909,11 +4986,21 @@ private:
     DrawCull drawCull_;
     /// Jalur GPU-driven yang benar-benar dipakai frame ini.
     bool gpuCullActive_ = false;
+    /// Occlusion culling yang benar-benar dipakai frame ini. Lihat
+    /// `ViewportDesc::gpuOcclusion` — bawaannya mati.
+    bool gpuOcclusionActive_ = false;
     /// Kotak dan rentang indeks tiap permukaan, dipakai ulang tiap frame.
     std::vector<DrawCull::GpuBounds> cullBounds_;
     std::vector<DrawCull::GpuSurface> cullSurfaces_;
     ResourceId drawCommandId_ = kInvalidResource;
+    ResourceId visibleCommandId_ = kInvalidResource;
     PassId drawCullPassId_ = kInvalidPass;
+    PassId occlusionPyramidPassId_ = kInvalidPass;
+    PassId drawCullLatePassId_ = kInvalidPass;
+    /// Piramida depth yang meringkas dengan **minimum** — permukaan terjauh.
+    /// Terpisah dari `hiz_`, yang meringkas dengan maksimum untuk penelusuran
+    /// GI. Lihat `DepthReduce`.
+    DepthPyramid occlusion_;
     /// Jalur yang benar-benar dipakai frame ini. Berubahnya menuntut descriptor
     /// ditulis ulang, jadi ia disimpan alih-alih dibaca dari `desc` tiap kali.
     bool gpuClustersActive_ = false;

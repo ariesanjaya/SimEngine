@@ -53,6 +53,14 @@ public:
         uint32_t firstIndex = 0;
     };
 
+    /// Fase culling. Keduanya menjalankan shader yang sama.
+    enum class Phase : uint32_t {
+        /// Sebelum depth prepass: frustum saja.
+        Frustum = 0,
+        /// Sesudah prepass dan piramida occlusion: frustum dan occlusion.
+        Occlusion = 1,
+    };
+
     /// Sisi grup kerja. Sama dengan `numthreads` di shader.
     static constexpr uint32_t kGroupSize = 64;
     /// Sama dengan banyaknya slot frame `VulkanRenderer`. Dikunci
@@ -76,14 +84,26 @@ public:
     ///
     /// `bounds` dan `surfaces` harus sama panjang: keduanya diindeks nomor
     /// permukaan yang sama.
-    bool Upload(uint32_t slot, const Frustum& frustum, std::span<const GpuBounds> bounds,
-                std::span<const GpuSurface> surfaces);
+    bool Upload(uint32_t slot, const Frustum& frustum, const Mat4& viewProjection,
+                uint32_t viewportWidth, uint32_t viewportHeight, uint32_t pyramidLevels,
+                std::span<const GpuBounds> bounds, std::span<const GpuSurface> surfaces);
+
+    /// Menunjuk ulang binding piramida occlusion tiap slot.
+    ///
+    /// Dipanggil ulang setiap kali piramidanya dibuat ulang — yaitu setiap kali
+    /// target render melewati ambang alokasinya. Descriptor yang masih menunjuk
+    /// image lama menunjuk memori yang sudah dibebaskan.
+    void AdoptPyramid(VkImageView view, VkSampler sampler);
 
     /// Dispatch-nya. Barrier ke dan dari pass ini disimpulkan frame graph.
-    void Record(VkCommandBuffer cmd, uint32_t slot) const;
+    void Record(VkCommandBuffer cmd, uint32_t slot, Phase phase) const;
 
-    /// Buffer perintah slot ini, siap diserahkan ke `vkCmdDrawIndexedIndirect`.
+    /// Buffer perintah fase frustum, dipakai depth prepass.
     VkBuffer CommandBuffer(uint32_t slot) const { return slots_[slot].commands.buffer; }
+    /// Buffer perintah fase occlusion, dipakai pass forward.
+    VkBuffer VisibleCommandBuffer(uint32_t slot) const {
+        return slots_[slot].visibleCommands.buffer;
+    }
     /// Banyaknya permukaan yang perintahnya sah di slot ini.
     uint32_t SurfaceCount(uint32_t slot) const { return slots_[slot].surfaceCount; }
 
@@ -101,6 +121,7 @@ private:
         rhi::DynamicBuffer bounds;
         rhi::DynamicBuffer surfaces;
         DeviceBuffer commands;
+        DeviceBuffer visibleCommands;
         VkDescriptorSet set = VK_NULL_HANDLE;
         uint32_t surfaceCount = 0;
     };
@@ -114,6 +135,10 @@ private:
 
     rhi::Device* device_ = nullptr;
     rhi::ComputePipeline pipeline_;
+    /// Piramida occlusion. **Bukan milik kelas ini** — ia hidup di renderer,
+    /// dan yang disimpan hanya cara menunjuknya.
+    VkImageView pyramidView_ = VK_NULL_HANDLE;
+    VkSampler pyramidSampler_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout setLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool pool_ = VK_NULL_HANDLE;
     std::array<Slot, kSlots> slots_;

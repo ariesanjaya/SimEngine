@@ -1220,29 +1220,98 @@ entri cukup untuk 64 kotak, dan adegan yang tidak melewatinya tidak pernah
 menumbuhkannya. Adegan padat melewatinya, dan validation layer melaporkannya
 enam belas kali per jalan.
 
-### Yang belum dikerjakan, dan angkanya
+### Occlusion culling: ada, terukur, dan **belum tepat**
 
-**Occlusion culling belum ada, dan yang menahannya bukan kesulitan melainkan
-sebuah pengukuran.** Adegan padat sekarang:
+Ia mendarat sebagai jalur kedua yang bisa diminta — `desc.gpuOcclusion`,
+`--bench-occlusion` — dan **mati secara bawaan**. Bukan kehati-hatian melainkan
+keadaan yang sebenarnya: ia bekerja, tetapi masih membuang sebagian permukaan
+yang mestinya terlihat.
 
-- `depth-prepass` 0,480 ms untuk 2,79 juta segitiga. Itu batas atas seluruh
-  penghematan occlusion culling di pass ini.
-- `forward-opaque` 3,638 ms untuk segitiga yang sama — tetapi fragmen yang
-  tertutup **sudah** ditolak uji depth `EQUAL` sejak prepass ada. Yang bisa
-  dihemat di sini hanya tahap vertex dan rasterisasi, bukan shading; dan
-  shading-lah yang mengisi 3,6 ms itu.
-- Yang sebenarnya menguasai frame adalah **`sdf-fill`, 8,433 ms** — komposit
-  clipmap SDF, milik jalur GI, dan tidak tersentuh G6 sama sekali.
+**Bentuknya bukan dua fase klasik.** Yang klasik memakai himpunan terlihat frame
+lalu untuk memurahkan prepass-nya juga, dan karena itu bisa salah persis saat
+kamera berputar cepat. Renderer ini **sudah** punya prepass penuh, jadi
+piramidanya dibangun dari depth frame ini sendiri: prepass menggambar seluruh isi
+frustum, piramida diringkas darinya, lalu pass forward hanya menggambar yang
+lolos. Hasilnya tepat menurut konstruksi dan tidak ada benda yang bisa berkedip
+masuk satu frame terlambat — kriteria ketiga G6 lulus dengan sendirinya.
 
-Menambahkannya juga menuntut piramida depth kedua: yang ada sekarang meringkas
-dengan **maksimum** (permukaan terdekat, untuk penelusuran sinar), sementara uji
-occlusion menuntut **minimum** (permukaan terjauh). Dua piramida, dua pass
-pembangunan, satu image lagi.
+Yang ikut mendarat: **piramida depth kedua**. Yang ada meringkas dengan maksimum
+— permukaan terdekat, untuk penelusuran sinar; uji occlusion menuntut minimum —
+permukaan terjauh. Satu shader, satu medan push constant, dua instance.
 
-Jadi ia ditunda, dengan angkanya tercatat — bukan dikerjakan atas dugaan bahwa
-"culling pasti membantu". Yang membuatnya berharga adalah adegan yang
-prepass-nya mahal: geometri berat yang saling menutupi, bukan tiga ribu prop
-kecil di atas lantai datar.
+Angkanya, adegan padat, GI mati:
+
+| | tanpa occlusion | dengan occlusion |
+|---|---:|---:|
+| primitif `depth-prepass` | 2.791.556 | 2.791.556 |
+| primitif `forward-opaque` | 2.791.556 | **2.268.236** |
+| `occlusion-pyramid` | — | 0,055 ms |
+| `draw-cull-late` | — | 0,010 ms |
+
+**19% segitiga lebih sedikit diserahkan pass forward.** Yang tidak ikut turun
+adalah waktunya: fragmen yang tertutup **sudah** ditolak uji depth `EQUAL` sejak
+prepass ada, jadi yang dihemat hanya tahap vertex dan rasterisasi — sementara
+3,6 ms `forward-opaque` di adegan ini adalah shading piksel yang **terlihat**.
+
+**Dan ia masih salah.** Pada frame yang sama, gambar jalur occlusion berselisih
+4.166 piksel dari jalur tanpa occlusion — sebuah permukaan besar yang mestinya
+terlihat ikut terbuang. Yang sudah dipastikan **bukan** sebabnya, masing-masing
+dengan percobaannya sendiri:
+
+- **Bukan jalur indirect-nya.** Dengan uji occlusion dimatikan di dalam shader,
+  gambarnya identik byte demi byte dengan jalur CPU.
+- **Bukan `nearest`.** Membuang hanya permukaan ber-`nearest` nol tidak membuang
+  apa pun.
+- **Bukan cakupan sampel.** Mengambil minimum atas **seluruh** texel yang
+  disentuh petak, alih-alih empat sudutnya, menghasilkan selisih yang sama.
+- **Bukan pemilihan tingkat.** Satu tingkat lebih kasar: selisih yang sama. Pada
+  tingkat terkasar — satu texel untuk seluruh layar — tidak ada yang terbuang dan
+  gambarnya identik, yang membuktikan isi piramidanya benar di puncak.
+- **Bukan lantai.** Membuang lantai saja mengubah 121 piksel; yang hilang sesuatu
+  yang lain.
+- **Bukan piramida yang basi.** Dengan kamera yang bergerak sangat lambat —
+  1.800 frame untuk satu putaran — selisihnya tetap ada.
+- **Bukan tata letak matriks.** Mentransposnya justru memperbesar selisih.
+- **Bukan kotak batas yang terlalu kecil.** Menggelembungkannya empat kali —
+  yang membuat sudut terdekatnya lebih dekat **dan** petaknya lebih lebar,
+  dua-duanya ke arah "jangan buang" — menyisakan permukaan yang sama.
+- **Bukan cakupan texel yang meleset satu.** Melebarkan petak satu texel ke
+  segala arah: selisih yang sama.
+
+Yang tersisa sebagai teori: uji ini **seharusnya tidak bisa** membuang permukaan
+yang menang di satu piksel pun, karena depth yang dimenangkannya ikut masuk ke
+piramida dan menarik minimumnya ke bawah. Bahwa ia tetap terjadi berarti ada satu
+langkah yang menyimpang dari uraian itu — dan langkah itu belum ketemu. Ditulis
+di sini seluruhnya supaya percobaan berikutnya mulai dari sini, bukan dari nol.
+
+**Dua cacat sungguhan ikut terangkat sepanjang perburuan itu**, dan keduanya
+tetap diperbaiki:
+
+- **Barrier piramida hanya menyebut tahap fragment.** Penelusuran GI membacanya
+  dari fragment; occlusion culling dari compute. Barrier yang tidak menyebut
+  compute tidak memberi satu pun jaminan kepada dispatch yang membacanya —
+  validation layer tidak melaporkannya, dan yang terlihat hanyalah gambar yang
+  berbeda di sebagian frame.
+- **Eksposur otomatis membuat setiap perbandingan gambar tidak bisa dipakai.** Ia
+  gelung umpan balik: selisih sekecil apa pun di satu frame menggeser eksposur
+  frame berikutnya, dan geseran itu menumpuk sampai **seluruh** gambar berbeda.
+  Perbandingan adegan padat yang tadinya melaporkan dua juta byte berselisih
+  ternyata nol begitu eksposurnya dikunci. Sakelarnya `--bench-fixed-exposure`,
+  dan setiap perbandingan gambar sesudah ini memakainya.
+
+**Satu lubang alat ukur ikut tertutup.** Lintasan kamera menutup satu putaran
+penuh, jadi frame terakhir selalu berdiri di tempat yang sama dengan frame
+pertama — dan pada adegan padat tempat itu tidak memperlihatkan apa pun.
+Perbandingan gambar selama ini karena itu hanya menguji satu sudut, dan sudut
+yang kosong. Sekarang ada `--bench-capture-frame`.
+
+### `Gather` juga belum mendekati nol
+
+1,919 ms. Yang tersisa di sana: mentransformasikan kotak tiap entity,
+`stable_sort` seluruh permukaan, dan menyusun ruas bayangan. Yang pertama bisa
+pindah ke compute bersama culling-nya; yang kedua hilang kalau ruas disusun dari
+tabel yang dipelihara antar-frame alih-alih dibangun ulang; yang ketiga menunggu
+pass bayangan ikut GPU-driven. Ketiganya pekerjaan tersendiri.
 
 **`Gather` juga belum mendekati nol** (1,919 ms). Yang tersisa di sana:
 mentransformasikan kotak tiap entity, `stable_sort` seluruh permukaan, dan
@@ -1256,10 +1325,14 @@ harganya.
 yang lebih sedikit dengan gambar yang sama; waktu CPU `Gather` mendekati nol;
 memutar kamera cepat tidak menghasilkan benda yang berkedip masuk.
 
-**Yang sudah lulus:** tidak satu pun dari ketiganya — dan itu disebutkan, bukan
-dikaburkan. Yang lulus adalah kriteria yang tidak tertulis di sana: gambar yang
-sama dengan panggilan gambar tiga kali lebih sedikit, dan waktu frame yang
-setengahnya.
+**Yang sudah lulus:** yang ketiga, dengan sendirinya — piramidanya dibangun dari
+depth frame ini, jadi tidak ada benda yang bisa berkedip masuk terlambat. Yang
+pertama lulus dalam hitungan segitiganya (2,79 juta menjadi 2,27 juta) tetapi
+**gagal dalam "dengan gambar yang sama"**, dan karena itu jalurnya mati secara
+bawaan. Yang kedua belum.
+
+Yang lulus di luar daftar itu: gambar yang sama persis dengan panggilan gambar
+tiga kali lebih sedikit, dan waktu frame yang setengahnya.
 
 ---
 
@@ -1370,7 +1443,7 @@ kembali ke daftar.
 | G3 | Fondasi compute: build, RHI, pass di frame graph | G2 | ✅ |
 | G4 | Clipmap SDF, Hi-Z, dan penetapan cluster pindah ke compute | G3 | ✅ (Hi-Z diukur lalu dikembalikan — lihat catatannya) |
 | G5 | Bindless (`descriptorIndexing`) + material terindeks | G2 | ✅ |
-| G6 | Indirect draw + occlusion culling dua fase | G3, G5 | ⏳ indirect draw ✅, occlusion belum |
+| G6 | Indirect draw + occlusion culling dua fase | G3, G5 | ⏳ indirect draw ✅, occlusion ada tapi belum tepat |
 | G7 | Async compute lewat timeline semaphore | G4, G6 | ⏳ |
 | G8 | Resolusi dinamis | E8.8 (TAA), G0 | ⏳ |
 

@@ -415,6 +415,18 @@ struct ViewportDesc {
     /// melainkan jalur yang benar-benar dipakai orang. Yang berhenti dijalankan
     /// siapa pun adalah yang diam-diam rusak.
     bool gpuCull = true;
+
+    /// Occlusion culling terhadap piramida depth frame ini (G6).
+    ///
+    /// **Mati secara bawaan, dan itu bukan kehati-hatian melainkan keadaan yang
+    /// sebenarnya:** ia menurunkan jumlah segitiga yang diserahkan pass forward
+    /// — 2,79 juta menjadi 2,27 juta pada adegan padat — tetapi ia juga masih
+    /// membuang sebagian permukaan yang mestinya terlihat. Sebabnya belum
+    /// ditemukan; bukti yang sudah terkumpul tercatat di G6 pada
+    /// docs/PLAN-GPU-OPTIM.md.
+    ///
+    /// Menyalakannya menuntut `gpuCull`.
+    bool gpuOcclusion = false;
 };
 
 /// Satu objek yang bisa digambar, sudah dalam ruang dunia.

@@ -8,6 +8,23 @@
 
 namespace sim::render {
 
+/// Apa yang diringkas tiap texel piramida.
+///
+/// **Dua pertanyaan yang berlawanan, dan karena itu dua piramida.**
+/// Penelusuran sinar menanyakan permukaan **terdekat** di sebuah sel: sinar
+/// boleh melompatinya hanya kalau ia masih di depan yang terdekat. Occlusion
+/// culling menanyakan yang **terjauh**: sebuah benda tertutup hanya kalau
+/// seluruh petaknya sudah terisi sesuatu yang lebih dekat, dan yang menentukan
+/// adalah texel yang paling jauh di antaranya. Satu piramida tidak bisa
+/// menjawab keduanya — meringkas dua kali dari satu depth buffer jauh lebih
+/// murah daripada menjawab salah satunya dengan angka yang salah.
+enum class DepthReduce : uint8_t {
+    /// Maksimum pada reversed-Z. Dipakai penelusuran GI.
+    Nearest,
+    /// Minimum pada reversed-Z. Dipakai occlusion culling.
+    Farthest,
+};
+
 /// Piramida depth hierarkis di GPU, dibangun ulang tiap frame dari depth buffer
 /// viewport.
 ///
@@ -26,7 +43,8 @@ namespace sim::render {
 /// dalam dua layout sekaligus.
 class DepthPyramid {
 public:
-    bool Create(rhi::Device& device, const std::filesystem::path& shaderDirectory);
+    bool Create(rhi::Device& device, const std::filesystem::path& shaderDirectory,
+                DepthReduce reduce = DepthReduce::Nearest);
     void Destroy();
 
     /// Menyesuaikan diri dengan image depth target. Mengembalikan true bila
@@ -57,6 +75,7 @@ private:
     void DestroyImage();
 
     rhi::Device* device_ = nullptr;
+    DepthReduce reduce_ = DepthReduce::Nearest;
     VkImage image_ = VK_NULL_HANDLE;
     VmaAllocation allocation_ = VK_NULL_HANDLE;
     /// Seluruh mip, dipakai penelusur.

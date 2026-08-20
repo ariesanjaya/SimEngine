@@ -95,12 +95,15 @@ void PrintUsage() {
         "  --bench-warmup <n>            frame pemanasan yang dibuang, bawaan 90\n"
         "  --bench-out <path>            tulis tabelnya sebagai Markdown\n"
         "  --bench-gi <on|off>           paksa GI; bawaannya mengikuti level\n"
-        "  --bench-capture <path.png>    simpan frame terakhir; kameranya deterministik\n"
+        "  --bench-capture <path.png>    simpan sebuah frame; kameranya deterministik\n"
+        "  --bench-capture-frame <n>     frame mana yang disimpan, bawaan yang terakhir\n"
+        "  --bench-fixed-exposure        eksposur manual; wajib untuk membandingkan gambar\n"
         "  --bench-compute               ganti gambarnya dengan pass compute uji (G3)\n"
         "  --validate-sync               nyalakan validasi sinkronisasi; lambat, sengaja\n"
         "  --bench-cpu-clusters          penetapan cluster di CPU, bukan GPU (G4)\n"
         "  --bench-cpu-sdf               komposit clipmap SDF di CPU, bukan GPU (G4)\n"
         "  --bench-cpu-cull              culling dan perintah gambar di CPU (G6)\n"
+        "  --bench-occlusion             nyalakan occlusion culling; belum tepat, lihat G6\n"
         "  --no-bindless                 material lewat set per ruas, bukan bindless (G5)\n"
         "  --bench-dump-sdf <path>       simpan isi voxel kaskade SDF; untuk dibandingkan\n",
         stderr);
@@ -450,6 +453,32 @@ int main(int argc, char** argv) {
     // `viewport.capture`; di mode ukur ia mengikuti lintasan terkunci.
     render::Camera camera;
 
+    // Menyimpan isi target render ke berkas. Dipakai mode ukur, dan dipisah
+    // supaya frame di tengah lintasan dan frame terakhir memakai jalur yang sama.
+    const auto writeCapture = [](render::IViewportRenderer& target, std::string_view path) {
+        std::vector<uint8_t> rgba;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        std::string readbackError;
+        if (!target.CapturePixels(rgba, width, height, readbackError)) {
+            SIM_ERROR("Bench", "cannot read back the render target: {}", readbackError);
+            return;
+        }
+        imageio::Image image;
+        image.desc.width = width;
+        image.desc.height = height;
+        image.desc.channels = 4;
+        image.desc.type = imageio::PixelType::UInt8;
+        image.bytes = std::move(rgba);
+        const imageio::ImageIoResult written =
+            imageio::Write(std::filesystem::path(path), image);
+        if (!written.ok) {
+            SIM_ERROR("Bench", "cannot write {}: {}", std::string(path), written.error);
+        } else {
+            SIM_INFO("Bench", "frame written to {}", std::string(path));
+        }
+    };
+
     // --- Mode ukur (G0) ------------------------------------------------------
     //
     // **Sebelum server MCP dinyalakan, dan keluar tanpa pernah menyalakannya.**
@@ -499,6 +528,23 @@ int main(int argc, char** argv) {
         bool cpuClusters = false;
         bool cpuSdf = false;
         bool cpuCull = false;
+        bool occlusion = false;
+        // Frame mana yang ditangkap. **Bawaannya yang terakhir, dan itu tidak
+        // selalu berguna:** lintasan kamera menutup satu putaran penuh, jadi
+        // frame terakhir selalu berdiri di tempat yang sama dengan frame
+        // pertama — dan pada sebagian adegan tempat itu tidak memperlihatkan
+        // apa pun. Perbandingan gambar yang hanya bisa dilakukan dari satu sudut
+        // adalah perbandingan yang mudah lulus tanpa berarti.
+        uint32_t captureFrame = 0;
+        bool captureFrameSet = false;
+        // **Eksposur otomatis adalah gelung umpan balik, dan itu merusak setiap
+        // perbandingan gambar.** Ia mengukur adegan lalu beradaptasi terhadap
+        // waktu, jadi selisih sekecil apa pun di sebuah frame — satu benda di
+        // tepi frustum yang lolos di satu jalur dan tidak di jalur lain —
+        // menggeser eksposur frame berikutnya, dan geseran itu menumpuk. Yang
+        // terlihat di ujung bukan selisih isinya melainkan seluruh gambar yang
+        // lebih terang. Dengan eksposur manual, yang dibandingkan kembali isinya.
+        bool fixedExposure = false;
         for (int at = 1; at < argc; ++at) {
             if (argv[at] == nullptr) {
                 continue;
@@ -512,6 +558,10 @@ int main(int argc, char** argv) {
                 cpuSdf = true;
             } else if (flag == "--bench-cpu-cull") {
                 cpuCull = true;
+            } else if (flag == "--bench-occlusion") {
+                occlusion = true;
+            } else if (flag == "--bench-fixed-exposure") {
+                fixedExposure = true;
             }
         }
 
@@ -520,6 +570,11 @@ int main(int argc, char** argv) {
         // G0 ingin ukur — jadi garis dasar yang diam-diam mengukur adegan tanpa
         // GI adalah garis dasar yang menjawab pertanyaan lain. Levelnya sendiri
         // tetap yang menentukan bila benderanya tidak ada.
+        if (const std::string_view value = FlagValue(argc, argv, "--bench-capture-frame");
+            !value.empty()) {
+            captureFrame = static_cast<uint32_t>(std::strtoul(std::string(value).c_str(), nullptr, 10));
+            captureFrameSet = true;
+        }
         if (const std::string_view value = FlagValue(argc, argv, "--bench-gi"); !value.empty()) {
             if (value == "on") {
                 app.Context().gi.enabled = true;
@@ -653,6 +708,10 @@ int main(int argc, char** argv) {
             desc.gpuClusters = !cpuClusters;
             desc.gpuSdf = !cpuSdf;
             desc.gpuCull = !cpuCull;
+            desc.gpuOcclusion = occlusion;
+            if (fixedExposure) {
+                desc.post.exposureMode = render::ExposureMode::Manual;
+            }
             // Delta yang sama dengan yang diberikan ke `app.Tick`, dan karena
             // alasan yang sama: yang maju menurut waktu — eksposur, awan,
             // akumulasi temporal — harus maju sama jauhnya di tiap jalan, kalau
@@ -662,6 +721,13 @@ int main(int argc, char** argv) {
             camera.rotation = glm::quatLookAt(glm::normalize(forward), Vec3(0.0f, 1.0f, 0.0f));
             desc.camera = camera;
             renderer->Render(desc, sceneView.Scene());
+
+            if (captureFrameSet && frame == captureFrame) {
+                if (const std::string_view shot = FlagValue(argc, argv, "--bench-capture");
+                    !shot.empty()) {
+                    writeCapture(*renderer, shot);
+                }
+            }
 
             if (frame < warmup) {
                 continue;
@@ -717,28 +783,8 @@ int main(int argc, char** argv) {
         }
 
         if (const std::string_view shot = FlagValue(argc, argv, "--bench-capture");
-            !shot.empty()) {
-            std::vector<uint8_t> rgba;
-            uint32_t width = 0;
-            uint32_t height = 0;
-            std::string readbackError;
-            if (!renderer->CapturePixels(rgba, width, height, readbackError)) {
-                SIM_ERROR("Bench", "cannot read back the render target: {}", readbackError);
-            } else {
-                imageio::Image image;
-                image.desc.width = width;
-                image.desc.height = height;
-                image.desc.channels = 4;
-                image.desc.type = imageio::PixelType::UInt8;
-                image.bytes = std::move(rgba);
-                const imageio::ImageIoResult written =
-                    imageio::Write(std::filesystem::path(shot), image);
-                if (!written.ok) {
-                    SIM_ERROR("Bench", "cannot write {}: {}", std::string(shot), written.error);
-                } else {
-                    SIM_INFO("Bench", "last frame written to {}", std::string(shot));
-                }
-            }
+            !shot.empty() && !captureFrameSet) {
+            writeCapture(*renderer, shot);
         }
 
         std::string report = "# Garis dasar G0\n\n";
