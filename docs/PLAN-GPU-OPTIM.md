@@ -1278,11 +1278,45 @@ dengan percobaannya sendiri:
 - **Bukan cakupan texel yang meleset satu.** Melebarkan petak satu texel ke
   segala arah: selisih yang sama.
 
-Yang tersisa sebagai teori: uji ini **seharusnya tidak bisa** membuang permukaan
-yang menang di satu piksel pun, karena depth yang dimenangkannya ikut masuk ke
-piramida dan menarik minimumnya ke bawah. Bahwa ia tetap terjadi berarti ada satu
-langkah yang menyimpang dari uraian itu — dan langkah itu belum ketemu. Ditulis
-di sini seluruhnya supaya percobaan berikutnya mulai dari sini, bukan dari nol.
+Sesudah sembilan tebakan itu habis, yang dibangun berikutnya bukan tebakan
+kesepuluh melainkan **alat**: `--bench-dump-cull` menuliskan angka antara uji
+occlusion tiap permukaan — petak layar, kedalaman terdekat kotaknya, nilai yang
+dibaca dari piramida, tingkat yang dipakai, dan hasilnya — beserta matriks
+view-projection frame itu. Yang dijawabnya, berurutan:
+
+1. **Masukan ujinya tepat.** Proyeksi, petak layar, dan kedalaman terdekat
+   dihitung ulang di Python dari kotak dan matriks yang sama: 3.129 permukaan,
+   selisih terbesar 7·10⁻⁷. Bukan matriks, bukan petak, bukan `nearest`.
+2. **Piramidanya salinan yang setia.** Shader yang sama menyampel depth buffer
+   langsung dan tingkat nol piramida di texel yang sama: **3.129 dari 3.129 sama
+   persis**. Bukan reduksinya, bukan penyalinannya, bukan barrier-nya.
+3. **Angkanya sendiri yang mustahil.** Piramida melaporkan kedalaman 0,065–0,085
+   di petak-petak yang membuang permukaan. Dengan `near` 0,05 dan `far` 2000 —
+   keduanya diturunkan dari matriks yang sama — itu berarti permukaan **0,6
+   sampai 0,8 satuan dari kamera**. Tidak ada satu pun permukaan di adegan yang
+   lebih dekat dari 50 satuan: `nearest` terbesar dari 3.129 permukaan adalah
+   9,9·10⁻⁴.
+4. **Dan ia datang dari prepass.** Disampel sebelum prepass: nol di mana-mana.
+   Sesudahnya: sebagian besar layar terisi angka dekat itu, termasuk petak yang
+   di gambar akhirnya langit. Tidak berubah ketika lantai tidak digambar, dan
+   tidak berubah antara prepass yang menggambar lewat indirect draw dan yang
+   langsung.
+
+**Jadi yang salah bukan uji occlusion-nya melainkan apa yang dibacanya.** Depth
+buffer — dibaca dari compute shader sesudah depth prepass — berisi kedalaman yang
+tidak mungkin dihasilkan geometri adegan ini. Uji occlusion adalah pemakai
+pertama yang membacanya dari compute, dan karena itu pemakai pertama yang
+melihatnya; pass forward tidak pernah terganggu karena uji depth `EQUAL`-nya
+hanya diam di petak yang isinya tidak cocok.
+
+**Itu berarti ada pembaca kedua yang perlu diperiksa.** Piramida penelusuran GI
+membaca depth buffer yang sama, dari tahap fragment. Kalau angka yang terbaca
+compute juga yang terbaca fragment, penelusuran screen-space selama ini bekerja
+di atas kedalaman yang salah — dan itu pertanyaan untuk milestone GI, bukan G6.
+
+Yang tersisa dikerjakan karena itu: menemukan kenapa pembacaan depth buffer dari
+luar pass yang menulisnya mengembalikan angka yang bukan miliknya. Alatnya sudah
+ada, dan angkanya sudah tercatat.
 
 **Dua cacat sungguhan ikut terangkat sepanjang perburuan itu**, dan keduanya
 tetap diperbaiki:

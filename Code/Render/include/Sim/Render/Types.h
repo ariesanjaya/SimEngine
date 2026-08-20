@@ -427,6 +427,15 @@ struct ViewportDesc {
     ///
     /// Menyalakannya menuntut `gpuCull`.
     bool gpuOcclusion = false;
+
+    /// Menuliskan angka antara uji occlusion tiap permukaan ke buffer yang bisa
+    /// dibaca CPU (G6).
+    ///
+    /// **Alat diagnostik, dan ia ada karena menebak sudah kehabisan giliran.**
+    /// Tanpa ini satu-satunya cara memeriksa uji occlusion adalah
+    /// membandingkan gambar — yang hanya bisa menjawab "ada yang salah", tidak
+    /// pernah "yang mana".
+    bool cullDebug = false;
 };
 
 /// Satu objek yang bisa digambar, sudah dalam ruang dunia.

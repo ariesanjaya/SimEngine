@@ -67,6 +67,13 @@ struct DrawCommand {
 struct Push {
     /// 0: frustum saja. 1: frustum dan occlusion.
     uint phase;
+    /// Bukan nol: tulis angka antara tiap permukaan ke `debug`.
+    ///
+    /// **Ada karena menebak sudah kehabisan giliran.** Sembilan hipotesis soal
+    /// kenapa uji occlusion membuang permukaan yang terlihat sudah dicoba dan
+    /// dipatahkan satu per satu, semuanya dengan membandingkan gambar. Yang
+    /// belum pernah dilihat adalah angkanya sendiri.
+    uint debug;
 };
 
 [[vk::push_constant]] ConstantBuffer<Push> pc;
@@ -80,6 +87,23 @@ struct Push {
 /// `DepthReduce` di DepthPyramid.h.
 [[vk::binding(4, 0)]] Sampler2D occlusionPyramid;
 [[vk::binding(5, 0)]] RWStructuredBuffer<DrawCommand> visibleCommands;
+
+/// Angka antara uji occlusion, satu entri per permukaan. Harus sama persis
+/// dengan `GpuCullDebug` di DrawCull.h.
+struct CullDebug {
+    /// uvMin.xy, uvMax.xy
+    float4 rect;
+    /// nearest, farthest, tingkat, hasil (1 terlihat, 0 dibuang)
+    float4 result;
+    /// Pusat kotak dunia, w tidak dipakai.
+    float4 centre;
+    /// Setengah-lebar kotak dunia, w tidak dipakai.
+    float4 extent;
+};
+[[vk::binding(6, 0)]] RWStructuredBuffer<CullDebug> debug;
+/// Depth buffer viewport apa adanya. **Hanya untuk membandingkan**: ia dan
+/// tingkat nol piramida seharusnya berisi angka yang sama persis.
+[[vk::binding(7, 0)]] Sampler2D viewportDepth;
 
 /// Ukuran sepetak yang sah pada sebuah tingkat, dengan pembagian dibulatkan ke
 /// bawah — aturan mip Vulkan, sama dengan `hizLevelSize` di gi_trace.slang.
@@ -103,7 +127,7 @@ float pyramidLoad(int level, float2 uv) {
 /// dekat, petak yang keluar layar, piramida yang belum ada — dijawab "tidak
 /// tertutup". Benda yang sesekali digambar padahal tidak terlihat hanya
 /// membuang waktu; benda yang sesekali hilang adalah cacat gambar.
-bool occluded(Bounds box) {
+bool occluded(Bounds box, uint index) {
     const float3 lo = box.centre.xyz - box.extent.xyz;
     const float3 hi = box.centre.xyz + box.extent.xyz;
 
@@ -120,6 +144,16 @@ bool occluded(Bounds box) {
         // punya arti, dan kotak yang menyentuh bidang dekat adalah kotak yang
         // menyelimuti kamera. Keduanya dijawab "terlihat".
         if (clip.w <= 1e-6) {
+            if (pc.debug != 0u) {
+                CullDebug entry;
+                entry.rect = float4(0.0, 0.0, 0.0, 0.0);
+                // Tingkat -1 berarti "tidak sampai diuji": ada sudut di
+                // belakang kamera.
+                entry.result = float4(0.0, 0.0, -1.0, 1.0);
+                entry.centre = box.centre;
+                entry.extent = box.extent;
+                debug[index] = entry;
+            }
             return false;
         }
         const float3 ndc = clip.xyz / clip.w;
@@ -155,6 +189,23 @@ bool occluded(Bounds box) {
             farthest = min(farthest, occlusionPyramid.Load(int3(tx, ty, level)).r);
         }
     }
+    if (pc.debug != 0u) {
+        CullDebug entry;
+        entry.rect = float4(uvMin, uvMax);
+        entry.result = float4(nearest, farthest, float(level), farthest > nearest ? 0.0 : 1.0);
+        // `w` keduanya dipakai membandingkan tingkat: nilai mentah di tengah
+        // petak pada tingkat nol — yaitu salinan depth buffer apa adanya — dan
+        // pada tingkat yang benar-benar dipakai.
+        const float2 mid = (uvMin + uvMax) * 0.5;
+        // Depth buffer apa adanya di tengah petak, dan tingkat nol piramida di
+        // titik yang sama. **Keduanya harus sama persis** — dan itulah yang
+        // membuktikan piramidanya salinan yang setia, bukan sumber kesalahan.
+        const int2 midTexel = clamp(int2(floor(mid * float2(params.counts.zw))), int2(0),
+                                    int2(params.counts.zw) - int2(1));
+        entry.centre = float4(box.centre.xyz, viewportDepth.Load(int3(midTexel, 0)).r);
+        entry.extent = float4(box.extent.xyz, pyramidLoad(0, mid));
+        debug[index] = entry;
+    }
     return farthest > nearest;
 }
 
@@ -181,7 +232,17 @@ void main(uint3 id: SV_DispatchThreadID) {
         }
     }
     if (visible && pc.phase != 0u) {
-        visible = !occluded(box);
+        visible = !occluded(box, index);
+    } else if (pc.debug != 0u && pc.phase != 0u) {
+        // Yang sudah gugur di frustum tetap mendapat entri, supaya nomor baris
+        // berkas dump selalu nomor permukaan.
+        CullDebug entry;
+        entry.rect = float4(0.0, 0.0, 0.0, 0.0);
+        // Tingkat -2: gugur di frustum, tidak pernah sampai ke uji occlusion.
+        entry.result = float4(0.0, 0.0, -2.0, 0.0);
+        entry.centre = box.centre;
+        entry.extent = box.extent;
+        debug[index] = entry;
     }
 
     const Surface surface = surfaces[index];

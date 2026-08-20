@@ -53,6 +53,24 @@ public:
         uint32_t firstIndex = 0;
     };
 
+    /// Angka antara uji occlusion untuk satu permukaan. Harus sama persis
+    /// dengan `CullDebug` di `Shaders/draw_cull.comp.slang`.
+    ///
+    /// **Ada karena menebak sudah kehabisan giliran.** Sembilan hipotesis soal
+    /// kenapa uji occlusion membuang permukaan yang terlihat sudah dipatahkan
+    /// satu per satu, semuanya dengan membandingkan gambar. Yang belum pernah
+    /// dilihat adalah angkanya sendiri: petak layar yang dipakai, kedalaman
+    /// terdekat kotaknya, dan nilai yang dibaca dari piramida.
+    struct GpuCullDebug {
+        /// uvMin.xy, uvMax.xy
+        Vec4 rect{0.0f};
+        /// nearest, farthest, tingkat, hasil. Tingkat -1 berarti ada sudut di
+        /// belakang kamera; -2 berarti gugur di frustum.
+        Vec4 result{0.0f};
+        Vec4 centre{0.0f};
+        Vec4 extent{0.0f};
+    };
+
     /// Fase culling. Keduanya menjalankan shader yang sama.
     enum class Phase : uint32_t {
         /// Sebelum depth prepass: frustum saja.
@@ -93,10 +111,18 @@ public:
     /// Dipanggil ulang setiap kali piramidanya dibuat ulang — yaitu setiap kali
     /// target render melewati ambang alokasinya. Descriptor yang masih menunjuk
     /// image lama menunjuk memori yang sudah dibebaskan.
-    void AdoptPyramid(VkImageView view, VkSampler sampler);
+    void AdoptPyramid(VkImageView view, VkSampler sampler, VkImageView depthView,
+                      VkSampler depthSampler);
 
     /// Dispatch-nya. Barrier ke dan dari pass ini disimpulkan frame graph.
-    void Record(VkCommandBuffer cmd, uint32_t slot, Phase phase) const;
+    ///
+    /// `debug` bukan nol menuliskan angka antara tiap permukaan; ia hanya
+    /// dipakai alat diagnostik, dan tanpa itu satu pun byte tidak ditulis.
+    void Record(VkCommandBuffer cmd, uint32_t slot, Phase phase, bool debug) const;
+
+    /// Menyalin angka antara slot ini ke `out`. Sah hanya sesudah submit slot
+    /// itu selesai — pemanggil yang menunggunya.
+    void ReadDebug(uint32_t slot, std::vector<GpuCullDebug>& out) const;
 
     /// Buffer perintah fase frustum, dipakai depth prepass.
     VkBuffer CommandBuffer(uint32_t slot) const { return slots_[slot].commands.buffer; }
@@ -122,6 +148,8 @@ private:
         rhi::DynamicBuffer surfaces;
         DeviceBuffer commands;
         DeviceBuffer visibleCommands;
+        /// Host-visible: yang membacanya CPU, dan hanya saat diminta.
+        rhi::DynamicBuffer debug;
         VkDescriptorSet set = VK_NULL_HANDLE;
         uint32_t surfaceCount = 0;
     };
@@ -139,6 +167,9 @@ private:
     /// dan yang disimpan hanya cara menunjuknya.
     VkImageView pyramidView_ = VK_NULL_HANDLE;
     VkSampler pyramidSampler_ = VK_NULL_HANDLE;
+    /// Depth buffer viewport, dipakai membandingkan piramida dengan sumbernya.
+    VkImageView depthView_ = VK_NULL_HANDLE;
+    VkSampler depthSampler_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout setLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool pool_ = VK_NULL_HANDLE;
     std::array<Slot, kSlots> slots_;

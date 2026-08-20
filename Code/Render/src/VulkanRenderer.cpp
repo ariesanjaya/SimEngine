@@ -4,6 +4,8 @@
 #include "ComputeGradient.h"
 #include "DepthPyramid.h"
 #include "DrawCull.h"
+
+#include <format>
 #include "PostProcess.h"
 #include "SkyAtmosphere.h"
 #include "VolumePass.h"
@@ -603,7 +605,8 @@ public:
                 occlusion_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(),
                                  target_.DepthView(), target_.Sampler());
                 occlusion_.AdoptLayouts();
-                drawCull_.AdoptPyramid(occlusion_.View(), occlusion_.Sampler());
+                drawCull_.AdoptPyramid(occlusion_.View(), occlusion_.Sampler(),
+                                       target_.DepthView(), target_.Sampler());
             }
         } else {
             SIM_INFO("Render",
@@ -710,7 +713,8 @@ public:
             occlusion_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(),
                              target_.DepthView(), target_.Sampler())) {
             occlusion_.AdoptLayouts();
-            drawCull_.AdoptPyramid(occlusion_.View(), occlusion_.Sampler());
+            drawCull_.AdoptPyramid(occlusion_.View(), occlusion_.Sampler(), target_.DepthView(),
+                                   target_.Sampler());
         }
         const bool probesChanged =
             probes_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(), kNormalFormat);
@@ -777,6 +781,19 @@ public:
         // cara termurah menemukan yang mana yang salah.
         gpuCullActive_ = desc.gpuCull && drawCull_.IsValid() && !cullSurfaces_.empty();
         gpuOcclusionActive_ = gpuCullActive_ && desc.gpuOcclusion && occlusion_.IsValid();
+        cullDebugActive_ = gpuOcclusionActive_ && desc.cullDebug;
+        if (gpuOcclusionActive_) {
+            // **Tiap frame, dan ia berhenti sendiri kalau tidak ada yang
+            // berubah.** Piramida dan depth buffer dibuat ulang setiap kali
+            // target render dialokasi ulang — dan `DepthPyramid::Adopt` menjawab
+            // "tidak berubah" saat ukurannya sama walaupun image-nya baru, jadi
+            // menyandarkan penulisan descriptor pada jawabannya berarti
+            // descriptor yang menunjuk image yang sudah dibebaskan.
+            drawCull_.AdoptPyramid(occlusion_.View(), occlusion_.Sampler(), target_.DepthView(),
+                                   target_.Sampler());
+        }
+        lastCullSlot_ = static_cast<uint32_t>(slotIndex_);
+        lastViewProjection_ = viewProj;
         if (gpuCullActive_) {
             const CpuScope scope(cpuTimings_, "cpu-draw-cull");
             gpuCullActive_ = drawCull_.Upload(
@@ -1263,7 +1280,7 @@ public:
             executor_.Bind(drawCommandId_,
                            BoundBuffer{drawCull_.CommandBuffer(cullSlot), 0, VK_WHOLE_SIZE});
             recorders[drawCullPassId_] = [this, cullSlot](VkCommandBuffer command) {
-                drawCull_.Record(command, cullSlot, DrawCull::Phase::Frustum);
+                drawCull_.Record(command, cullSlot, DrawCull::Phase::Frustum, false);
             };
             if (drawCullLatePassId_ != kInvalidPass) {
                 executor_.Bind(visibleCommandId_,
@@ -1273,7 +1290,8 @@ public:
                     occlusion_.Record(command, target_.Width(), target_.Height());
                 };
                 recorders[drawCullLatePassId_] = [this, cullSlot](VkCommandBuffer command) {
-                    drawCull_.Record(command, cullSlot, DrawCull::Phase::Occlusion);
+                    drawCull_.Record(command, cullSlot, DrawCull::Phase::Occlusion,
+                                     cullDebugActive_);
                 };
             }
         }
@@ -1849,6 +1867,50 @@ public:
 
     bool UsesBindlessMaterials() const override { return bindless_; }
 
+    /// **Menunggu GPU diam lebih dulu.** Angka yang dibaca sementara dispatch
+    /// yang menulisnya masih berjalan adalah angka setengah frame ini dan
+    /// setengah frame lalu — yaitu tepat jenis bukti yang menyesatkan.
+    bool CaptureCullDebug(std::string& out, std::string& error) override {
+        if (!gpuCullActive_ || !drawCull_.IsValid()) {
+            error = "GPU culling is off";
+            return false;
+        }
+        if (!cullDebugActive_) {
+            error = "cull debug was not on when the last frame was drawn";
+            return false;
+        }
+        device_.WaitIdle();
+        std::vector<DrawCull::GpuCullDebug> entries;
+        drawCull_.ReadDebug(lastCullSlot_, entries);
+        if (entries.empty()) {
+            error = "no cull data was written";
+            return false;
+        }
+        // Matriksnya ikut supaya yang memeriksa bisa menghitung ulang petak dan
+        // kedalamannya sendiri, dari kotak yang sama — dua implementasi yang
+        // harus sepakat, aturan yang sama dengan yang lain.
+        out = "# viewProj kolom demi kolom\n";
+        for (int column = 0; column < 4; ++column) {
+            for (int row = 0; row < 4; ++row) {
+                out += std::format("{}{:.9g}", (column == 0 && row == 0) ? "# " : " ",
+                                   lastViewProjection_[column][row]);
+            }
+        }
+        out += "\n# index centre.xyz extent.xyz uvMin.xy uvMax.xy nearest farthest level visible "
+               "level0 levelN\n";
+        for (std::size_t i = 0; i < entries.size(); ++i) {
+            const DrawCull::GpuCullDebug& entry = entries[i];
+            out += std::format(
+                "{} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} "
+                "{:.9g} {:.9g} {:g} {:g} {:.9g} {:.9g}\n",
+                i, entry.centre.x, entry.centre.y, entry.centre.z, entry.extent.x, entry.extent.y,
+                entry.extent.z, entry.rect.x, entry.rect.y, entry.rect.z, entry.rect.w,
+                entry.result.x, entry.result.y, entry.result.z, entry.result.w, entry.centre.w,
+                entry.extent.w);
+        }
+        return true;
+    }
+
 private:
     struct InstanceSlot {
         rhi::DynamicBuffer buffer;
@@ -1977,6 +2039,8 @@ private:
 
             drawCullLatePassId_ = graph_.AddPass("draw-cull-late");
             graph_.Write(drawCullLatePassId_, visibleCommandId_, Access::ShaderWrite);
+            // Depth-nya ikut dibaca — untuk dibandingkan dengan piramidanya.
+            graph_.Read(drawCullLatePassId_, depthId_, Access::ShaderRead);
         }
 
         // Piramida dibangun dari depth prepass, bukan dari depth akhir. Yang
@@ -4989,6 +5053,13 @@ private:
     /// Occlusion culling yang benar-benar dipakai frame ini. Lihat
     /// `ViewportDesc::gpuOcclusion` — bawaannya mati.
     bool gpuOcclusionActive_ = false;
+    /// Menulis angka antara uji occlusion. Alat diagnostik; lihat
+    /// `ViewportDesc::cullDebug`.
+    bool cullDebugActive_ = false;
+    /// Slot yang perintahnya terakhir disubmit, dan viewProj-nya. Dipakai
+    /// pembaca angka antara supaya ia membaca frame yang benar.
+    uint32_t lastCullSlot_ = 0;
+    Mat4 lastViewProjection_{1.0f};
     /// Kotak dan rentang indeks tiap permukaan, dipakai ulang tiap frame.
     std::vector<DrawCull::GpuBounds> cullBounds_;
     std::vector<DrawCull::GpuSurface> cullSurfaces_;

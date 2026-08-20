@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 
 namespace sim::render {
 namespace {
@@ -18,6 +19,7 @@ struct GpuParams {
 /// Harus sama persis dengan `Push` di shader.
 struct GpuPush {
     uint32_t phase = 0;
+    uint32_t debug = 0;
 };
 
 /// Harus sama persis dengan `VkDrawIndexedIndirectCommand` — dan ia memang
@@ -31,7 +33,7 @@ bool DrawCull::Create(rhi::Device& device, const std::filesystem::path& shaderDi
     Destroy();
     device_ = &device;
 
-    const std::array<VkDescriptorSetLayoutBinding, 6> bindings{
+    const std::array<VkDescriptorSetLayoutBinding, 8> bindings{
         VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
                                      VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
@@ -43,6 +45,10 @@ bool DrawCull::Create(rhi::Device& device, const std::filesystem::path& shaderDi
         VkDescriptorSetLayoutBinding{4, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                                      VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
         VkDescriptorSetLayoutBinding{5, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                     VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        VkDescriptorSetLayoutBinding{6, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                     VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        VkDescriptorSetLayoutBinding{7, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                                      VK_SHADER_STAGE_COMPUTE_BIT, nullptr}};
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -56,8 +62,8 @@ bool DrawCull::Create(rhi::Device& device, const std::filesystem::path& shaderDi
 
     const std::array<VkDescriptorPoolSize, 3> sizes{
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kSlots},
-        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kSlots * 4},
-        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kSlots}};
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kSlots * 5},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, kSlots * 2}};
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
     poolInfo.maxSets = kSlots;
@@ -91,7 +97,9 @@ bool DrawCull::Create(rhi::Device& device, const std::filesystem::path& shaderDi
             !slot.surfaces.Create(device, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                   sizeof(GpuSurface)) ||
             !CreateCommandBuffer(slot.commands, kCommandStride) ||
-            !CreateCommandBuffer(slot.visibleCommands, kCommandStride)) {
+            !CreateCommandBuffer(slot.visibleCommands, kCommandStride) ||
+            !slot.debug.Create(device, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                               sizeof(GpuCullDebug))) {
             Destroy();
             return false;
         }
@@ -121,6 +129,7 @@ void DrawCull::Destroy() {
         slot.params.Destroy();
         slot.bounds.Destroy();
         slot.surfaces.Destroy();
+        slot.debug.Destroy();
         slot.set = VK_NULL_HANDLE;
         slot.surfaceCount = 0;
     }
@@ -176,42 +185,49 @@ void DrawCull::WriteSlotDescriptors(uint32_t slot) {
     // Piramida belum ada berarti descriptor-nya belum bisa ditulis, dan
     // descriptor yang dibiarkan kosong adalah pelanggaran pada setiap dispatch —
     // bahkan dispatch fase frustum yang tidak menyentuhnya.
-    if (pyramidView_ == VK_NULL_HANDLE) {
+    if (pyramidView_ == VK_NULL_HANDLE || depthView_ == VK_NULL_HANDLE) {
         return;
     }
-    const std::array<VkDescriptorBufferInfo, 5> infos{
+    const std::array<VkDescriptorBufferInfo, 6> infos{
         VkDescriptorBufferInfo{target.params.Handle(), 0, sizeof(GpuParams)},
         VkDescriptorBufferInfo{target.bounds.Handle(), 0, VK_WHOLE_SIZE},
         VkDescriptorBufferInfo{target.surfaces.Handle(), 0, VK_WHOLE_SIZE},
         VkDescriptorBufferInfo{target.commands.buffer, 0, VK_WHOLE_SIZE},
-        VkDescriptorBufferInfo{target.visibleCommands.buffer, 0, VK_WHOLE_SIZE}};
+        VkDescriptorBufferInfo{target.visibleCommands.buffer, 0, VK_WHOLE_SIZE},
+        VkDescriptorBufferInfo{target.debug.Handle(), 0, VK_WHOLE_SIZE}};
     const VkDescriptorImageInfo pyramid{pyramidSampler_, pyramidView_,
                                         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    std::array<VkWriteDescriptorSet, 6> writes{};
+    const VkDescriptorImageInfo depth{depthSampler_, depthView_,
+                                      VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    std::array<VkWriteDescriptorSet, 8> writes{};
     for (uint32_t binding = 0; binding < writes.size(); ++binding) {
         writes[binding].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
         writes[binding].dstSet = target.set;
         writes[binding].dstBinding = binding;
         writes[binding].descriptorCount = 1;
-        if (binding == 4) {
+        if (binding == 4 || binding == 7) {
             writes[binding].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-            writes[binding].pImageInfo = &pyramid;
+            writes[binding].pImageInfo = binding == 4 ? &pyramid : &depth;
             continue;
         }
         writes[binding].descriptorType = binding == 0 ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
                                                       : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        writes[binding].pBufferInfo = &infos[binding < 4 ? binding : 4];
+        writes[binding].pBufferInfo = &infos[binding < 4 ? binding : binding - 1];
     }
     vkUpdateDescriptorSets(device_->Handle(), static_cast<uint32_t>(writes.size()), writes.data(),
                            0, nullptr);
 }
 
-void DrawCull::AdoptPyramid(VkImageView view, VkSampler sampler) {
-    if (device_ == nullptr || (view == pyramidView_ && sampler == pyramidSampler_)) {
+void DrawCull::AdoptPyramid(VkImageView view, VkSampler sampler, VkImageView depthView,
+                            VkSampler depthSampler) {
+    if (device_ == nullptr || (view == pyramidView_ && sampler == pyramidSampler_ &&
+                               depthView == depthView_ && depthSampler == depthSampler_)) {
         return;
     }
     pyramidView_ = view;
     pyramidSampler_ = sampler;
+    depthView_ = depthView;
+    depthSampler_ = depthSampler;
     // Seluruh slot sekaligus, dan di sini itu aman: piramida hanya dibuat ulang
     // saat target render dibuat ulang, dan pemanggilnya sudah menunggu device
     // menganggur sebelum sampai ke sini.
@@ -259,6 +275,13 @@ bool DrawCull::Upload(uint32_t slot, const Frustum& frustum, const Mat4& viewPro
     target.surfaces.Write(surfaces.data(), surfaceBytes);
     moved = moved || target.surfaces.Handle() != beforeSurfaces;
 
+    const VkDeviceSize debugBytes = sizeof(GpuCullDebug) * surfaces.size();
+    const VkBuffer beforeDebug = target.debug.Handle();
+    if (!target.debug.Reserve(debugBytes)) {
+        return false;
+    }
+    moved = moved || target.debug.Handle() != beforeDebug;
+
     const VkDeviceSize commandBytes = kCommandStride * surfaces.size();
     if (target.visibleCommands.bytes < commandBytes) {
         if (!CreateCommandBuffer(target.visibleCommands, commandBytes + commandBytes / 2)) {
@@ -285,7 +308,21 @@ bool DrawCull::Upload(uint32_t slot, const Frustum& frustum, const Mat4& viewPro
     return true;
 }
 
-void DrawCull::Record(VkCommandBuffer cmd, uint32_t slot, Phase phase) const {
+void DrawCull::ReadDebug(uint32_t slot, std::vector<GpuCullDebug>& out) const {
+    out.clear();
+    if (slot >= kSlots) {
+        return;
+    }
+    const Slot& target = slots_[slot];
+    const void* mapped = target.debug.Mapped();
+    if (mapped == nullptr || target.surfaceCount == 0) {
+        return;
+    }
+    out.resize(target.surfaceCount);
+    std::memcpy(out.data(), mapped, sizeof(GpuCullDebug) * out.size());
+}
+
+void DrawCull::Record(VkCommandBuffer cmd, uint32_t slot, Phase phase, bool debug) const {
     if (!IsValid() || slot >= kSlots || pyramidView_ == VK_NULL_HANDLE) {
         return;
     }
@@ -293,7 +330,7 @@ void DrawCull::Record(VkCommandBuffer cmd, uint32_t slot, Phase phase) const {
     if (target.surfaceCount == 0 || target.set == VK_NULL_HANDLE) {
         return;
     }
-    const GpuPush push{static_cast<uint32_t>(phase)};
+    const GpuPush push{static_cast<uint32_t>(phase), debug ? 1u : 0u};
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_.Handle());
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_.Layout(), 0, 1,
                             &target.set, 0, nullptr);

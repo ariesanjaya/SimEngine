@@ -208,6 +208,18 @@ public:
         return kInvalidMaterial;
     }
 
+    /// Menyalin angka antara uji occlusion frame terakhir ke `out`, sebagai
+    /// baris teks: satu permukaan per baris.
+    ///
+    /// Berguna hanya bila `ViewportDesc::cullDebug` menyala saat frame itu
+    /// digambar. Mengembalikan false beserta alasannya bila tidak ada apa-apa
+    /// untuk dibaca.
+    virtual bool CaptureCullDebug(std::string& out, std::string& error) {
+        (void)out;
+        error = "this renderer has no GPU culling";
+        return false;
+    }
+
     /// Renderer ini menggambar material lewat larik descriptor bindless.
     ///
     /// Ditanya **sebelum** materialnya dikompilasi: yang membedakan kedua jalur

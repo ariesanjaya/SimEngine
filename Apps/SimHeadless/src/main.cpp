@@ -104,6 +104,7 @@ void PrintUsage() {
         "  --bench-cpu-sdf               komposit clipmap SDF di CPU, bukan GPU (G4)\n"
         "  --bench-cpu-cull              culling dan perintah gambar di CPU (G6)\n"
         "  --bench-occlusion             nyalakan occlusion culling; belum tepat, lihat G6\n"
+        "  --bench-dump-cull <path>      angka antara uji occlusion tiap permukaan\n"
         "  --no-bindless                 material lewat set per ruas, bukan bindless (G5)\n"
         "  --bench-dump-sdf <path>       simpan isi voxel kaskade SDF; untuk dibandingkan\n",
         stderr);
@@ -479,6 +480,25 @@ int main(int argc, char** argv) {
         }
     };
 
+    // Menyimpan angka antara uji occlusion. Dipisah karena alasan yang sama
+    // dengan `writeCapture`: frame di tengah lintasan dan frame terakhir harus
+    // memakai jalur yang sama.
+    const auto writeCullDump = [](render::IViewportRenderer& target, std::string_view path) {
+        std::string text;
+        std::string dumpError;
+        if (!target.CaptureCullDebug(text, dumpError)) {
+            SIM_ERROR("Bench", "cannot read the cull data: {}", dumpError);
+            return;
+        }
+        std::ofstream file{std::filesystem::path(path)};
+        if (!file) {
+            SIM_ERROR("Bench", "cannot write {}", std::string(path));
+            return;
+        }
+        file << text;
+        SIM_INFO("Bench", "cull data written to {}", std::string(path));
+    };
+
     // --- Mode ukur (G0) ------------------------------------------------------
     //
     // **Sebelum server MCP dinyalakan, dan keluar tanpa pernah menyalakannya.**
@@ -709,6 +729,7 @@ int main(int argc, char** argv) {
             desc.gpuSdf = !cpuSdf;
             desc.gpuCull = !cpuCull;
             desc.gpuOcclusion = occlusion;
+            desc.cullDebug = !FlagValue(argc, argv, "--bench-dump-cull").empty();
             if (fixedExposure) {
                 desc.post.exposureMode = render::ExposureMode::Manual;
             }
@@ -726,6 +747,10 @@ int main(int argc, char** argv) {
                 if (const std::string_view shot = FlagValue(argc, argv, "--bench-capture");
                     !shot.empty()) {
                     writeCapture(*renderer, shot);
+                }
+                if (const std::string_view dump = FlagValue(argc, argv, "--bench-dump-cull");
+                    !dump.empty()) {
+                    writeCullDump(*renderer, dump);
                 }
             }
 
@@ -785,6 +810,11 @@ int main(int argc, char** argv) {
         if (const std::string_view shot = FlagValue(argc, argv, "--bench-capture");
             !shot.empty() && !captureFrameSet) {
             writeCapture(*renderer, shot);
+        }
+
+        if (const std::string_view dump = FlagValue(argc, argv, "--bench-dump-cull");
+            !dump.empty() && !captureFrameSet) {
+            writeCullDump(*renderer, dump);
         }
 
         std::string report = "# Garis dasar G0\n\n";
