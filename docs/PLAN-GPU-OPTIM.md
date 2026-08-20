@@ -1314,9 +1314,28 @@ membaca depth buffer yang sama, dari tahap fragment. Kalau angka yang terbaca
 compute juga yang terbaca fragment, penelusuran screen-space selama ini bekerja
 di atas kedalaman yang salah — dan itu pertanyaan untuk milestone GI, bukan G6.
 
-Yang tersisa dikerjakan karena itu: menemukan kenapa pembacaan depth buffer dari
-luar pass yang menulisnya mengembalikan angka yang bukan miliknya. Alatnya sudah
-ada, dan angkanya sudah tercatat.
+Empat percobaan berikutnya mempersempitnya lagi, dan semuanya lewat alat yang
+sama:
+
+- **Yang menulisnya benar-benar geometri prepass.** Dengan prepass menggambar nol
+  primitif, seluruh 3.129 sampel depth-nya nol.
+- **Bukan lantai** (dibuang: peta depth tidak berubah satu huruf pun), dan
+  **bukan benda besar** (seluruh kotak ber-setengah-lebar di atas 1,2 dibuang —
+  1,64 juta primitif alih-alih 2,79 juta — dan sampel dekat itu tetap ada).
+- **Transform tiap permukaan cocok dengan kotaknya.** Translasi matriks yang
+  diunggah dibandingkan dengan pusat kotak yang diunggah, ketiganya per
+  permukaan: **0 dari 3.129 meleset**.
+
+Jadi geometri digambar di tempat yang dikatakan kotaknya, kotaknya tidak lebih
+dari 160 satuan dari kamera, dan depth buffer tetap berisi angka yang berarti
+0,6 satuan. Salah satu dari ketiga pengukuran itu berbohong, dan ketiganya sudah
+diperiksa dengan cara yang berbeda.
+
+**Langkah berikutnya yang jelas, dan bukan tebakan:** prepass sudah menulis
+lampiran kedua — normal oktahedral untuk screen probe. Menuliskan nomor permukaan
+ke sana alih-alih normal, lalu membacanya di texel yang kedalamannya ganjil,
+menjawab "permukaan mana" dengan satu jalan — dan itu pertanyaan terakhir yang
+tersisa.
 
 **Dua cacat sungguhan ikut terangkat sepanjang perburuan itu**, dan keduanya
 tetap diperbaiki:

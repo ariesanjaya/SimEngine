@@ -1897,16 +1897,19 @@ public:
             }
         }
         out += "\n# index centre.xyz extent.xyz uvMin.xy uvMax.xy nearest farthest level visible "
-               "level0 levelN\n";
+               "depth pyramid0 translate.xyz\n";
         for (std::size_t i = 0; i < entries.size(); ++i) {
             const DrawCull::GpuCullDebug& entry = entries[i];
             out += std::format(
                 "{} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} "
-                "{:.9g} {:.9g} {:g} {:g} {:.9g} {:.9g}\n",
+                "{:.9g} {:.9g} {:g} {:g} {:.9g} {:.9g} {:.6g} {:.6g} {:.6g}\n",
                 i, entry.centre.x, entry.centre.y, entry.centre.z, entry.extent.x, entry.extent.y,
                 entry.extent.z, entry.rect.x, entry.rect.y, entry.rect.z, entry.rect.w,
                 entry.result.x, entry.result.y, entry.result.z, entry.result.w, entry.centre.w,
-                entry.extent.w);
+                entry.extent.w,
+                i < opaqueTransforms_.size() ? opaqueTransforms_[i][3][0] : 0.0f,
+                i < opaqueTransforms_.size() ? opaqueTransforms_[i][3][1] : 0.0f,
+                i < opaqueTransforms_.size() ? opaqueTransforms_[i][3][2] : 0.0f);
         }
         return true;
     }
