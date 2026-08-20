@@ -85,6 +85,20 @@ struct MaterialCompileOptions {
     /// menyebut berkas yang tidak ada adalah petunjuk yang menyesatkan tepat
     /// ketika seseorang mencarinya.
     std::string moduleName = "material.simmat";
+
+    /// Menulis jalur bindless: satu larik descriptor bersama, bukan satu set
+    /// per material.
+    ///
+    /// **Yang berubah bukan isi material melainkan dari mana datanya diambil.**
+    /// Blok parameter tetap `cbuffer` dengan tata letak std140 yang sama persis,
+    /// tekstur tetap dirujuk dengan nama yang sama, dan badan `evalMaterial`
+    /// tidak berubah satu baris pun — yang bertambah hanya prolog yang menyalin
+    /// keduanya dari larik ke nama-nama lokal itu.
+    ///
+    /// Salah satu dari keduanya harus dipilih sebelum `slangc` dipanggil, karena
+    /// yang berbeda adalah bentuk descriptor set layout-nya. Lihat G5 di
+    /// docs/PLAN-GPU-OPTIM.md.
+    bool bindless = false;
 };
 
 /// Mengompilasi graph material menjadi sumber Slang.
