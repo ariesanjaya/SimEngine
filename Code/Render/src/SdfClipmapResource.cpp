@@ -126,6 +126,21 @@ bool SdfClipmapResource::CreateGpuFill(const std::filesystem::path& shaderDirect
     return WriteFillDescriptors();
 }
 
+void SdfClipmapResource::WriteEntryDescriptor(uint32_t slot) {
+    if (slot >= kSlots) {
+        return;
+    }
+    const VkDescriptorBufferInfo buffer{entryBuffers_[slot].Handle(), 0, VK_WHOLE_SIZE};
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = entrySets_[slot];
+    write.dstBinding = 0;
+    write.descriptorCount = 1;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+    write.pBufferInfo = &buffer;
+    vkUpdateDescriptorSets(device_->Handle(), 1, &write, 0, nullptr);
+}
+
 bool SdfClipmapResource::WriteFillDescriptors() {
     std::vector<VkDescriptorImageInfo> images(kMaxSdfCascades);
     std::vector<VkDescriptorBufferInfo> buffers(kSlots);
@@ -238,7 +253,19 @@ uint64_t SdfClipmapResource::Update(const Vec3& cameraPosition,
         }
         entryBuffers_[slot].Write(gpuEntries_.data(), entryBytes);
         if (entryBuffers_[slot].Handle() != before) {
-            WriteFillDescriptors();
+            // **Hanya set slot ini, bukan seluruhnya.** `WriteFillDescriptors`
+            // menulis ulang set tiap kaskade **dan** set entri tiap slot; yang
+            // berpindah di sini hanya buffer satu slot. Slot lain bisa saja
+            // masih dibaca command buffer yang belum selesai, dan menulisi
+            // descriptor yang sedang dipakai adalah pelanggaran — dilaporkan
+            // validation layer sebagai "in use by VkCommandBuffer", dan terlihat
+            // sebagai kerusakan pada frame yang salah.
+            //
+            // Tidak pernah muncul selama adegan ujinya kecil: buffer entri
+            // dibuat cukup untuk 64 kotak, dan adegan yang tidak pernah
+            // melewatinya tidak pernah menumbuhkannya. Yang menemukannya adegan
+            // padat G6.
+            WriteEntryDescriptor(slot);
         }
 
         uint64_t written = 0;
