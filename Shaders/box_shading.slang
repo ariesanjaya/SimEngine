@@ -4,10 +4,14 @@
 // baris bukan alasan yang cukup untuk dua salinan seluruh pencahayaan. Yang
 // menyertakan berkas ini wajib sudah mendeklarasikan:
 //
-//     float4 boxBaseColor(float2 uv)
+//     float4 boxBaseColor(BoxVarying input)
 //
 // yaitu albedo ruas ini — dari descriptor set material pada jalur mundur, dan
 // dari larik tekstur bindless pada jalur bindless.
+//
+// Seluruh varying diserahkan, bukan hanya uv-nya: jalur bindless mengambil nomor
+// slot teksturnya dari sana, dan jalur mundur tidak memakainya sama sekali —
+// perbedaan yang memang harus tinggal di dalam fungsi itu.
 //
 // Sengaja tanpa include guard: ia memang badan sebuah entry point, dan menyertakannya
 // dua kali dalam satu modul adalah dua `main` — yang harus menjadi galat, bukan
@@ -61,7 +65,7 @@ float4 main(BoxVarying input) : SV_Target {
     // **Dikalikan, bukan menggantikan.** Ruas tanpa tekstur membawa putih, dan
     // putih tidak mengubah apa pun — jadi setiap mesh yang sudah ada tergambar
     // persis seperti sebelum jalur ini ada.
-    float4 albedo = boxBaseColor(input.uv);
+    float4 albedo = boxBaseColor(input);
     float3 surface = input.color.rgb * albedo.rgb;
     float3 lit = surface *
                  (indirect + shadowParams.sunRadiance.rgb * (ndotl * shadow) + punctual);

@@ -41,14 +41,6 @@ namespace {
 /// Harus sama persis dengan blok push_constant di Shaders/box.vert.
 struct BoxPush {
     Mat4 viewProj;
-    /// Warna dasar ruas yang sedang digambar. `w` nol berarti ruas ini tidak
-    /// punya material di berkasnya, dan yang berlaku adalah warna instance.
-    ///
-    /// **Push constant, bukan atribut instance.** Warnanya milik ruas — bagian
-    /// dari mesh — sedangkan atribut instance milik entity; menaruhnya di sana
-    /// berarti satu entry instance per ruas per entity, yaitu menyalin seluruh
-    /// matriks model sebanyak jumlah materialnya.
-    Vec4 partColor{0.0f};
     /// `firstInstance` panggilan gambar ini.
     ///
     /// **Ada karena `SV_InstanceID` dimulai dari nol pada setiap draw**, bukan
@@ -58,10 +50,6 @@ struct BoxPush {
     /// sesudah yang pertama memakai transform milik ruas pertama sambil memakai
     /// warna miliknya sendiri.
     uint32_t instanceBase = 0;
-    /// Slot material ruas ini di larik bindless. Lihat Shaders/box_push.slang.
-    uint32_t materialSlot = 0;
-    /// Slot tekstur albedo ruas ini di larik bindless, dibaca jalur mundur.
-    uint32_t textureSlot = 0;
 };
 
 /// Tahap yang boleh membaca `BoxPush`.
@@ -287,6 +275,19 @@ struct BoxInstance {
     /// dengan pergeseran yang salah — tanpa satu pun galat, hanya karakter yang
     /// memakai pose karakter lain.
     uint32_t skinBase;
+    /// Slot material dan slot tekstur ruas ini di larik bindless.
+    ///
+    /// **Di sini, bukan di push constant, dan itu yang mengembalikan
+    /// instancing.** Sampai G6 keduanya dikirim per panggilan gambar bersama
+    /// warna ruas, jadi dua entity bermesh sama dengan material berbeda adalah
+    /// dua draw. Karena `partColorFirst` milik tiap entity sendiri, kenyataannya
+    /// lebih buruk: **setiap** entity menjadi satu draw, dan adegan tiga ribu
+    /// prop dari empat mesh menghasilkan tiga ribu panggilan.
+    ///
+    /// Yang membuatnya bisa pindah adalah G5: sebelum material terindeks,
+    /// "material ruas ini" bukan sebuah nomor melainkan sebuah descriptor set.
+    uint32_t materialSlot;
+    uint32_t textureSlot;
 };
 
 /// Satu panggilan gambar: sebuah mesh dan ruas instance yang memakainya.
@@ -298,10 +299,12 @@ struct BoxInstance {
 /// Bit 0 dari `BoxInstance::flags`. Harus sama dengan `kReceiveShadows` di
 /// Shaders/box.frag.
 constexpr uint32_t kInstanceReceiveShadows = 1u;
-/// Bit 1: warna instance mengalahkan warna material ruas. Dipakai sorotan
-/// seleksi — objek terpilih harus berubah warna seluruhnya, dan material
-/// berkasnya justru yang paling tidak boleh menutupinya.
-constexpr uint32_t kInstanceForceColor = 2u;
+/// Bit 1 dulu berarti "warna instance mengalahkan warna material ruas", dipakai
+/// sorotan seleksi. **Ia hilang di G6**: warna ruas diselesaikan CPU sebelum
+/// diunggah, jadi yang sampai ke shader satu warna dan tidak ada lagi dua warna
+/// yang harus dipilih di sana. Nomor bitnya sengaja tidak dipakai ulang —
+/// bendera yang berpindah arti adalah bendera yang salah terbaca oleh kode yang
+/// belum ikut berubah.
 
 /// Dua varian dari satu pasang shader: tanpa kulit dan dengan kulit.
 ///
@@ -396,13 +399,14 @@ std::vector<BoxVertex> BuildUnitCube() {
     return vertices;
 }
 
-BoxInstance MakeInstance(const Vec4& color, bool receiveShadows, bool forceColor,
-                         uint32_t skinBase) {
+BoxInstance MakeInstance(const Vec4& color, bool receiveShadows, uint32_t skinBase,
+                         uint32_t materialSlot, uint32_t textureSlot) {
     BoxInstance instance;
     instance.color = color;
-    instance.flags = (receiveShadows ? kInstanceReceiveShadows : 0u) |
-                     (forceColor ? kInstanceForceColor : 0u);
+    instance.flags = receiveShadows ? kInstanceReceiveShadows : 0u;
     instance.skinBase = skinBase;
+    instance.materialSlot = materialSlot;
+    instance.textureSlot = textureSlot;
     return instance;
 }
 
@@ -2052,6 +2056,15 @@ private:
 
     /// Menyaring instance yang terlihat, memisahkan tembus pandang, lalu
     /// mengurutkannya dari belakang ke depan.
+    /// Menyusun daftar permukaan yang bisa digambar frame ini.
+    ///
+    /// **Satuannya permukaan, bukan entity, dan itu berubah di G6.** Sebuah
+    /// permukaan adalah sepasang (entity, ruas mesh): ia yang punya satu warna,
+    /// satu material, dan satu tekstur. Sampai G6 ketiganya dikirim lewat push
+    /// constant per panggilan gambar, jadi setiap entity — bahkan yang bermesh
+    /// sama — menjadi panggilannya sendiri. Sejak ketiganya menjadi data
+    /// instance, seluruh permukaan yang sepakat soal mesh, ruas, material, dan
+    /// pipeline digambar sekali.
     void Gather(const ViewportDesc& desc, const ViewportScene& scene, const Mat4& viewProj) {
         opaque_.clear();
         transparent_.clear();
@@ -2079,13 +2092,22 @@ private:
             // keluar layar: pohon di sebelah kiri layar berhenti membayangi
             // jalan di tengahnya, dan yang terlihat bukan bayangan yang
             // menghilang melainkan bayangan yang "berkedip saat menengok".
-            // Cacat itu tidak pernah terlihat selama adegan ujinya kosong.
             //
             // Yang menggantikan penyaringan ini bukan ketiadaan penyaringan
             // melainkan penyaringan yang lebih tepat, satu per pass: pandangan
             // utama menyaring terhadap frustum kamera, tiap muka bayangan
             // terhadap volumenya sendiri. Lihat `SplitRuns`.
             if (!cameraVisible && !mesh.castShadows) {
+                continue;
+            }
+            // Mesh yang belum ada geometrinya tidak menghasilkan satu pun
+            // permukaan. Diperiksa di sini, bukan saat menggambar: daftar ruas
+            // yang memuat mesh yang tidak bisa digambar adalah daftar yang
+            // panjangnya berbohong.
+            const GpuMesh* geometry = mesh.mesh < meshes_.size()
+                                          ? meshes_[static_cast<std::size_t>(mesh.mesh)].get()
+                                          : nullptr;
+            if (geometry == nullptr || geometry->indexCount == 0 || geometry->parts.empty()) {
                 continue;
             }
 
@@ -2115,37 +2137,100 @@ private:
                 colorFirst = mesh.partFirst;
                 colorCount = mesh.partCount;
             }
-            const Vec4 color = mesh.selected ? kSelectedColor : mesh.color;
-            const BoxInstance instance = MakeInstance(color, mesh.receiveShadows, mesh.selected,
-                                                      skinned ? mesh.skinFirst : 0u);
-            if (color.a >= 0.999f) {
-                gathered_.push_back(GatherEntry{mesh.mesh, skinned, colorFirst, colorCount,
-                                                instance, InstanceTransform(model),
-                                                mesh.castShadows, world, cameraVisible});
-                continue;
-            }
-            // Tembus pandang tidak pernah menjatuhkan bayangan, jadi yang di
-            // luar pandangan memang tidak punya alasan ikut.
-            if (!cameraVisible) {
+            const Vec4 instanceColor = mesh.selected ? kSelectedColor : mesh.color;
+            // **Buram atau tembus pandang diputuskan warna entity, bukan warna
+            // ruas.** Aturan yang sama dengan sebelum G6, dan mempertahankannya
+            // disengaja: alpha ruas tetap sampai ke target seperti dulu, dan
+            // memindahkan keputusannya ke per-ruas akan memindahkan sebagian
+            // benda ke pass lain tanpa ada yang memintanya.
+            const bool opaqueInstance = instanceColor.a >= 0.999f;
+            // Tembus pandang tidak pernah menjatuhkan bayangan — kaca yang
+            // menghitamkan lantai di bawahnya adalah kesalahan yang lebih
+            // mencolok daripada kaca yang tidak berbayang sama sekali. Jadi yang
+            // di luar pandangan memang tidak punya alasan ikut.
+            if (!opaqueInstance && !cameraVisible) {
                 continue;
             }
             const float distance = glm::length(world.Centre() - eye);
-            // Tembus pandang tidak pernah menjatuhkan bayangan — kaca yang
-            // menghitamkan lantai di bawahnya adalah kesalahan yang lebih
-            // mencolok daripada kaca yang tidak berbayang sama sekali.
-            sorted_.push_back(SortedEntry{distance, mesh.mesh, skinned, colorFirst, colorCount,
-                                          instance, InstanceTransform(model)});
+            const Mat4 transform = InstanceTransform(model);
+
+            for (std::size_t partIndex = 0; partIndex < geometry->parts.size(); ++partIndex) {
+                const GpuMesh::Part& part = geometry->parts[partIndex];
+                if (part.indexCount == 0) {
+                    continue;
+                }
+                const std::size_t slot = colorFirst + partIndex;
+                const bool hasSlot = partIndex < colorCount;
+
+                // **Yang ditetapkan editor menang atas yang tertulis di berkas
+                // mesh.** Berkasnya adalah bagaimana model itu diekspor; slot
+                // material entity adalah keputusan orang yang menyusun adegan.
+                // Sorotan seleksi menang atas keduanya: objek terpilih harus
+                // berubah warna seluruhnya.
+                Vec4 color = instanceColor;
+                if (!mesh.selected) {
+                    if (part.baseColor.a > 0.0f) {
+                        color = part.baseColor;
+                    }
+                    if (hasSlot && slot < partColors_.size() && partColors_[slot].a > 0.0f) {
+                        color = partColors_[slot];
+                    }
+                }
+
+                MaterialHandle material = kInvalidMaterial;
+                if (hasSlot && slot < partMaterials_.size()) {
+                    const MaterialHandle handle = partMaterials_[slot];
+                    if (handle != kInvalidMaterial && handle <= materials_.size()) {
+                        material = handle;
+                    }
+                }
+                // Tekstur jalur mundur hanya berlaku untuk ruas yang **tidak**
+                // punya material: material membawa teksturnya sendiri.
+                TextureHandle texture = kInvalidTexture;
+                if (material == kInvalidMaterial && hasSlot && slot < partTextures_.size()) {
+                    const TextureHandle handle = partTextures_[slot];
+                    if (handle != kInvalidTexture && handle <= materialTextures_.size()) {
+                        texture = handle;
+                    }
+                }
+
+                const uint32_t materialSlot =
+                    material == kInvalidMaterial
+                        ? 0u
+                        : materials_[static_cast<std::size_t>(material) - 1]->slot;
+                const BoxInstance instance =
+                    MakeInstance(color, mesh.receiveShadows, skinned ? mesh.skinFirst : 0u,
+                                 materialSlot, static_cast<uint32_t>(texture));
+
+                SurfaceEntry entry{mesh.mesh,
+                                   static_cast<uint32_t>(partIndex),
+                                   material,
+                                   texture,
+                                   skinned,
+                                   instance,
+                                   transform,
+                                   mesh.castShadows,
+                                   world,
+                                   cameraVisible,
+                                   distance};
+                if (opaqueInstance) {
+                    gathered_.push_back(entry);
+                } else {
+                    sorted_.push_back(entry);
+                }
+            }
         }
 
-        // **Yang menjatuhkan bayangan lebih dulu, lalu dikelompokkan per mesh.**
-        // Kunci pertama menjaga sifat lama: pass bayangan menggambar awalan
-        // daftarnya tanpa atribut tambahan dan tanpa cabang di shader. Kunci
-        // kedua yang baru: satu draw per mesh, bukan satu draw per instance.
-        // `stable_sort`, bukan `sort` — urutan di antara instance bermesh sama
-        // memang tidak berarti apa-apa, tapi urutan yang berubah-ubah tiap frame
-        // membuat setiap perbandingan gambar menjadi tidak bisa dipakai.
+        // **Yang menjatuhkan bayangan lebih dulu, lalu dikelompokkan.** Kunci
+        // pertama menjaga sifat lama: pass bayangan menggambar awalan daftarnya
+        // tanpa atribut tambahan dan tanpa cabang di shader.
+        //
+        // `stable_sort`, bukan `sort` — urutan di antara permukaan yang seluruh
+        // kuncinya sama memang tidak berarti apa-apa, tapi urutan yang
+        // berubah-ubah tiap frame membuat setiap perbandingan gambar menjadi
+        // tidak bisa dipakai.
         std::stable_sort(gathered_.begin(), gathered_.end(),
-                         [](const GatherEntry& a, const GatherEntry& b) {
+                         [](const SurfaceEntry& a, const SurfaceEntry& b) {
                              if (a.caster != b.caster) {
                                  return a.caster;
                              }
@@ -2167,28 +2252,33 @@ private:
                              if (a.mesh != b.mesh) {
                                  return a.mesh < b.mesh;
                              }
-                             // Kunci ketiga: yang berkulit dan yang tidak
-                             // memakai pipeline yang berbeda, jadi mencampurnya
-                             // di dalam satu ruas berarti sebagian instance
-                             // digambar lewat pipeline yang bukan miliknya.
+                             // Yang berkulit dan yang tidak memakai pipeline yang
+                             // berbeda, jadi mencampurnya di dalam satu ruas
+                             // berarti sebagian permukaan digambar lewat pipeline
+                             // yang bukan miliknya.
                              if (a.skinned != b.skinned) {
                                  return static_cast<int>(a.skinned) > static_cast<int>(b.skinned);
                              }
-                             // Kunci keempat: material yang berbeda adalah ruas
-                             // yang berbeda, karena warnanya dikirim per ruas.
-                             return a.colorFirst < b.colorFirst;
+                             if (a.part != b.part) {
+                                 return a.part < b.part;
+                             }
+                             // Material menentukan pipeline, tekstur menentukan
+                             // descriptor set jalur mundur. Keduanya kunci ruas.
+                             if (a.material != b.material) {
+                                 return a.material < b.material;
+                             }
+                             return a.texture < b.texture;
                          });
 
         opaque_.reserve(gathered_.size());
         opaqueTransforms_.reserve(gathered_.size());
         instanceBounds_.reserve(gathered_.size());
         instanceVisible_.reserve(gathered_.size());
-        for (const GatherEntry& entry : gathered_) {
+        for (const SurfaceEntry& entry : gathered_) {
             if (entry.caster) {
                 ++casterCount_;
             }
-            AppendRun(opaqueRuns_, entry.mesh, entry.skinned, entry.colorFirst, entry.colorCount,
-                      static_cast<uint32_t>(opaque_.size()));
+            AppendRun(opaqueRuns_, entry, static_cast<uint32_t>(opaque_.size()));
             opaque_.push_back(entry.instance);
             opaqueTransforms_.push_back(entry.transform);
             instanceBounds_.push_back(entry.bounds);
@@ -2224,12 +2314,13 @@ private:
         // luar urutan jaraknya, dan yang didapat — beberapa draw call lebih
         // sedikit — jauh lebih murah daripada yang hilang.
         std::stable_sort(sorted_.begin(), sorted_.end(),
-                  [](const SortedEntry& a, const SortedEntry& b) { return a.distance > b.distance; });
+                         [](const SurfaceEntry& a, const SurfaceEntry& b) {
+                             return a.distance > b.distance;
+                         });
         transparent_.reserve(sorted_.size());
         transparentTransforms_.reserve(sorted_.size());
-        for (const SortedEntry& entry : sorted_) {
-            AppendRun(transparentRuns_, entry.mesh, entry.skinned, entry.colorFirst,
-                      entry.colorCount, static_cast<uint32_t>(transparent_.size()));
+        for (const SurfaceEntry& entry : sorted_) {
+            AppendRun(transparentRuns_, entry, static_cast<uint32_t>(transparent_.size()));
             transparent_.push_back(entry.instance);
             transparentTransforms_.push_back(entry.transform);
         }
@@ -2257,15 +2348,51 @@ private:
 
     /// Menambah instance ke ruas terakhir bila mesh dan jalurnya sama, atau
     /// membuka ruas baru.
-    static void AppendRun(std::vector<DrawRun>& runs, MeshHandle mesh, bool skinned,
-                          uint32_t colorFirst, uint32_t colorCount, uint32_t index) {
-        if (!runs.empty() && runs.back().mesh == mesh && runs.back().skinned == skinned &&
-            runs.back().partColorFirst == colorFirst &&
-            runs.back().partColorCount == colorCount) {
+    /// Sepasang (entity, ruas mesh) sebelum diurutkan menjadi ruas draw.
+    ///
+    /// **Satu bentuk untuk buram dan tembus pandang.** Sampai G6 keduanya punya
+    /// struct sendiri yang isinya nyaris sama; satu-satunya yang benar-benar
+    /// hanya milik tembus pandang adalah jaraknya, dan sebuah medan yang tidak
+    /// dibaca lebih murah daripada dua struct yang harus dijaga sepakat.
+    struct SurfaceEntry {
+        MeshHandle mesh = kUnitCubeMesh;
+        uint32_t part = 0;
+        MaterialHandle material = kInvalidMaterial;
+        TextureHandle texture = kInvalidTexture;
+        bool skinned = false;
+        BoxInstance instance;
+        Mat4 transform{1.0f};
+        bool caster = false;
+        /// Kotak dunia entity ini, disimpan supaya tiap pass bayangan bisa
+        /// mengujinya terhadap volumenya sendiri. Tanpa ini setiap pass harus
+        /// mentransformasikan ulang kotak lokalnya — 32 muka atlas dikali
+        /// ribuan permukaan berarti puluhan ribu transformasi kotak per frame
+        /// untuk jawaban yang tidak berubah di antara keduanya.
+        Aabb bounds;
+        /// Terlihat kamera. **Bukan syarat untuk ikut didaftar**: caster yang
+        /// berada di luar pandangan tetap harus menjatuhkan bayangan ke dalamnya.
+        bool cameraVisible = true;
+        /// Jarak ke kamera. Dibaca hanya jalur tembus pandang.
+        float distance = 0.0f;
+    };
+    /// Menyambung sebuah permukaan ke ruas terakhir, atau membuka ruas baru.
+    ///
+    /// **Kuncinya adalah segala sesuatu yang tidak bisa berubah di tengah satu
+    /// panggilan gambar**: mesh dan ruasnya menentukan buffer dan rentang
+    /// indeksnya, material menentukan pipeline-nya, tekstur menentukan
+    /// descriptor set jalur mundur, dan kulit menentukan keduanya sekaligus.
+    /// Warna, slot material, dan slot tekstur **tidak** ada di sini — ketiganya
+    /// data instance sejak G6, dan itulah yang membuat ribuan entity menjadi
+    /// puluhan panggilan.
+    static void AppendRun(std::vector<DrawRun>& runs, const SurfaceEntry& entry, uint32_t index) {
+        if (!runs.empty() && runs.back().mesh == entry.mesh && runs.back().part == entry.part &&
+            runs.back().material == entry.material && runs.back().texture == entry.texture &&
+            runs.back().skinned == entry.skinned) {
             ++runs.back().count;
             return;
         }
-        runs.push_back(DrawRun{mesh, colorFirst, colorCount, skinned, index, 1});
+        runs.push_back(DrawRun{entry.mesh, entry.part, entry.material, entry.texture,
+                               entry.skinned, index, 1});
     }
 
     /// `useDepth` false berarti depth tidak dipasang sama sekali.
@@ -2487,12 +2614,22 @@ private:
                   VkPipelineLayout layout, const BoxPush& push, bool bindsMaterial,
                   int materialVariant = -1) {
         VkPipeline bound = VK_NULL_HANDLE;
+        // **Bukan sebuah handle sentinel**: nol adalah kubus satuan, yaitu mesh
+        // yang sah dan yang paling sering muncul. Bendera terpisah karena itu,
+        // bukan nilai ajaib.
+        bool boundGeometry = false;
+        MeshHandle boundMesh = kUnitCubeMesh;
+        bool boundSkinned = false;
         for (const DrawRun& run : runs) {
             if (run.count == 0 || run.mesh >= meshes_.size()) {
                 continue;
             }
             const GpuMesh& mesh = *meshes_[static_cast<std::size_t>(run.mesh)];
-            if (mesh.indexCount == 0) {
+            if (run.part >= mesh.parts.size()) {
+                continue;
+            }
+            const GpuMesh::Part& part = mesh.parts[static_cast<std::size_t>(run.part)];
+            if (part.indexCount == 0) {
                 continue;
             }
             // Ruas berkulit yang mesh-nya ternyata tidak punya bobot digambar
@@ -2504,121 +2641,80 @@ private:
             if (fallbackPipeline == VK_NULL_HANDLE) {
                 continue;
             }
-            const std::array<VkBuffer, 3> buffers{
-                mesh.vertices.Handle(), slot.buffer.Handle(),
-                skinned ? mesh.skin.Handle() : dummySkin_.Handle()};
-            const std::array<VkDeviceSize, 3> offsets{0, 0, 0};
-            vkCmdBindVertexBuffers(cmd, 0, 3, buffers.data(), offsets.data());
-            vkCmdBindIndexBuffer(cmd, mesh.indices.Handle(), 0, VK_INDEX_TYPE_UINT32);
-            // Satu panggilan per ruas. Mesh yang berkasnya tidak menyebut
-            // material punya tepat satu ruas, jadi ini tetap satu panggilan
-            // untuk seluruh adegan statis yang sudah ada.
-            for (std::size_t partIndex = 0; partIndex < mesh.parts.size(); ++partIndex) {
-                const GpuMesh::Part& part = mesh.parts[partIndex];
-                if (part.indexCount == 0) {
-                    continue;
-                }
-                BoxPush partPush = push;
-                // **Yang ditetapkan editor menang atas yang tertulis di berkas
-                // mesh.** Berkasnya adalah bagaimana model itu diekspor; slot
-                // material entity adalah keputusan orang yang menyusun adegan,
-                // dan keputusan itu tidak boleh dikalahkan oleh berkasnya.
-                partPush.partColor = part.baseColor;
-                // Basis instance ruas ini. Lihat catatannya di `BoxPush`:
-                // `SV_InstanceID` mulai dari nol tiap draw, sementara atribut
-                // instance di sebelahnya tidak.
-                partPush.instanceBase = instanceBase + run.first;
-                if (partIndex < run.partColorCount) {
-                    const Vec4& assigned = partColors_[run.partColorFirst + partIndex];
-                    if (assigned.a > 0.0f) {
-                        partPush.partColor = assigned;
-                    }
-                }
-                // Set material ruas ini. Yang tidak punya tekstur mendapat yang
-                // putih — nilai satuan perkalian, jadi ia tergambar persis
-                // seperti sebelum jalur tekstur ada.
-                // **Material ruas ini kalau ada, jalur mundur `box.frag` kalau
-                // tidak.** Keduanya hidup berdampingan dengan sengaja: ruas yang
-                // materialnya belum dikompilasi, gagal dikompilasi, atau memang
-                // tidak punya material tetap tergambar — dan viewport tidak
-                // pernah kosong hanya karena satu material bermasalah.
-                const GpuMaterial* material = nullptr;
-                if (materialVariant >= 0 && partIndex < run.partColorCount &&
-                    run.partColorFirst + partIndex < partMaterials_.size()) {
-                    const MaterialHandle handle = partMaterials_[run.partColorFirst + partIndex];
-                    if (handle != kInvalidMaterial && handle <= materials_.size()) {
-                        material = materials_[static_cast<std::size_t>(handle) - 1].get();
-                    }
-                }
 
-                const VkPipelineLayout partLayout =
-                    material != nullptr ? material->pipelineLayout : layout;
-                // Slot material ruas ini. Nol pada jalur mundur, dan tidak
-                // pernah dibaca di sana — `box.frag` membaca `textureSlot`.
-                partPush.materialSlot = material != nullptr ? material->slot : 0;
-                const VkPipeline partPipeline =
-                    material != nullptr
-                        ? material->pipelines[static_cast<std::size_t>(materialVariant)]
-                                             [skinned ? 1u : 0u]
-                        : fallbackPipeline;
-                if (partPipeline == VK_NULL_HANDLE) {
-                    continue;
-                }
-                // **Pipeline diikat di dalam gelung ruas, bukan di luarnya.**
-                // Dua ruas berturut-turut dari mesh yang sama bisa memakai
-                // material yang berbeda, dan yang mengikatnya sekali per mesh
-                // akan menggambar sebagiannya lewat pipeline yang bukan miliknya
-                // — tanpa satu pun galat.
-                if (partPipeline != bound) {
-                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, partPipeline);
-                    bound = partPipeline;
-                }
-
-                // Tekstur ruas ini, untuk ruas yang digambar jalur mundur.
-                //
-                // **Dicari di kedua jalur, dipakai berbeda.** Bindless
-                // membawanya sebagai nomor slot di push constant; jalur mundur
-                // membawanya sebagai descriptor set yang diikat di sini. Yang
-                // sama persis adalah cara menemukannya, dan itu tetap satu
-                // salinan kode.
-                TextureHandle partTexture = kInvalidTexture;
-                if (material == nullptr && bindsMaterial &&
-                    partIndex < run.partColorCount &&
-                    run.partColorFirst + partIndex < partTextures_.size()) {
-                    const TextureHandle handle = partTextures_[run.partColorFirst + partIndex];
-                    if (handle != kInvalidTexture && handle <= materialTextures_.size()) {
-                        partTexture = handle;
-                    }
-                }
-
-                if (bindless_) {
-                    // Slot nol adalah putih 1x1, jadi ruas tanpa tekstur tidak
-                    // menuntut satu pun cabang di shader.
-                    partPush.textureSlot =
-                        partTexture == kInvalidTexture ? 0u : static_cast<uint32_t>(partTexture);
-                } else {
-                    VkDescriptorSet materialSet = VK_NULL_HANDLE;
-                    if (material != nullptr) {
-                        materialSet = material->set;
-                    } else if (bindsMaterial) {
-                        materialSet =
-                            partTexture == kInvalidTexture
-                                ? fallbackSet_
-                                : materialTextures_[static_cast<std::size_t>(partTexture) - 1]
-                                      ->set;
-                    }
-                    if (materialSet != VK_NULL_HANDLE) {
-                        BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, partLayout, 2, 1,
-                                 &materialSet, 0, nullptr);
-                    }
-                }
-                vkCmdPushConstants(cmd, partLayout, kBoxPushStages, 0,
-                                   sizeof(BoxPush), &partPush);
-                vkCmdDrawIndexed(cmd, part.indexCount, run.count, static_cast<int32_t>(0),
-                                 static_cast<int32_t>(part.firstIndex),
-                                 instanceBase + run.first);
-                ++stats_.drawCalls;
+            // **Material ruas ini kalau ada, jalur mundur `box.frag` kalau
+            // tidak.** Keduanya hidup berdampingan dengan sengaja: ruas yang
+            // materialnya belum dikompilasi, gagal dikompilasi, atau memang
+            // tidak punya material tetap tergambar — dan viewport tidak pernah
+            // kosong hanya karena satu material bermasalah.
+            const GpuMaterial* material = nullptr;
+            if (materialVariant >= 0 && run.material != kInvalidMaterial &&
+                run.material <= materials_.size()) {
+                material = materials_[static_cast<std::size_t>(run.material) - 1].get();
             }
+
+            const VkPipelineLayout partLayout =
+                material != nullptr ? material->pipelineLayout : layout;
+            const VkPipeline partPipeline =
+                material != nullptr
+                    ? material->pipelines[static_cast<std::size_t>(materialVariant)]
+                                         [skinned ? 1u : 0u]
+                    : fallbackPipeline;
+            if (partPipeline == VK_NULL_HANDLE) {
+                continue;
+            }
+
+            // **Geometri diikat hanya saat mesh-nya benar-benar berganti.**
+            // Sejak ruas mesh menjadi kunci ruas draw, dua ruas berturut-turut
+            // dari mesh yang sama adalah hal yang biasa — dan mengikat ulang
+            // vertex buffer yang sama persis untuk masing-masingnya adalah
+            // pekerjaan CPU yang dibayar ribuan kali per frame.
+            if (!boundGeometry || run.mesh != boundMesh || skinned != boundSkinned) {
+                const std::array<VkBuffer, 3> buffers{
+                    mesh.vertices.Handle(), slot.buffer.Handle(),
+                    skinned ? mesh.skin.Handle() : dummySkin_.Handle()};
+                const std::array<VkDeviceSize, 3> offsets{0, 0, 0};
+                vkCmdBindVertexBuffers(cmd, 0, 3, buffers.data(), offsets.data());
+                vkCmdBindIndexBuffer(cmd, mesh.indices.Handle(), 0, VK_INDEX_TYPE_UINT32);
+                boundGeometry = true;
+                boundMesh = run.mesh;
+                boundSkinned = skinned;
+            }
+
+            // **Pipeline diikat di dalam gelung, bukan di luarnya.** Dua ruas
+            // berturut-turut bisa memakai material yang berbeda, dan yang
+            // mengikatnya sekali di awal akan menggambar sebagiannya lewat
+            // pipeline yang bukan miliknya — tanpa satu pun galat.
+            if (partPipeline != bound) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, partPipeline);
+                bound = partPipeline;
+            }
+
+            if (!bindless_) {
+                VkDescriptorSet materialSet = VK_NULL_HANDLE;
+                if (material != nullptr) {
+                    materialSet = material->set;
+                } else if (bindsMaterial) {
+                    materialSet =
+                        run.texture == kInvalidTexture
+                            ? fallbackSet_
+                            : materialTextures_[static_cast<std::size_t>(run.texture) - 1]->set;
+                }
+                if (materialSet != VK_NULL_HANDLE) {
+                    BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, partLayout, 2, 1, &materialSet,
+                             0, nullptr);
+                }
+            }
+
+            // Basis instance ruas ini. Lihat catatannya di `BoxPush`:
+            // `SV_InstanceID` mulai dari nol tiap draw, sementara atribut
+            // instance di sebelahnya tidak.
+            BoxPush runPush = push;
+            runPush.instanceBase = instanceBase + run.first;
+            vkCmdPushConstants(cmd, partLayout, kBoxPushStages, 0, sizeof(BoxPush), &runPush);
+            vkCmdDrawIndexed(cmd, part.indexCount, run.count, static_cast<int32_t>(0),
+                             static_cast<int32_t>(part.firstIndex), instanceBase + run.first);
+            ++stats_.drawCalls;
         }
     }
 
@@ -3026,7 +3122,7 @@ private:
                              bool skinned = false, VkPipelineLayout layout = VK_NULL_HANDLE,
                              VkFormat depthFormat = VK_FORMAT_UNDEFINED,
                              VkFormat colorAttachment = VK_FORMAT_UNDEFINED,
-                             uint32_t attributeMask = 0x3FC3u) {
+                             uint32_t attributeMask = 0xFFC3u) {
         // `kSkinned`, konstanta spesialisasi 0 di `Shaders/skin_common.slang`.
         // Ukurannya empat byte walaupun tipenya bool: Vulkan menyatakan
         // konstanta spesialisasi boolean berukuran `VkBool32`, dan ukuran yang
@@ -3071,7 +3167,7 @@ private:
                 2, skinned ? static_cast<uint32_t>(sizeof(assets::SkinInfluence)) : 0u,
                 VK_VERTEX_INPUT_RATE_VERTEX},
         };
-        const std::array<VkVertexInputAttributeDescription, 10> attributes{
+        const std::array<VkVertexInputAttributeDescription, 12> attributes{
             VkVertexInputAttributeDescription{0, 0, VK_FORMAT_R32G32B32_SFLOAT,
                                               offsetof(BoxVertex, position)},
             VkVertexInputAttributeDescription{1, 0, VK_FORMAT_R32G32B32_SFLOAT,
@@ -3104,6 +3200,13 @@ private:
             // dibiarkan supaya tidak ada satu pun atribut yang bergeser.
             VkVertexInputAttributeDescription{13, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
                                               offsetof(BoxVertex, tangent)},
+            // Slot material dan tekstur, di binding 1 bersama warna dan bendera:
+            // keduanya milik permukaan, bukan milik simpul. Lihat catatannya di
+            // `BoxInstance`.
+            VkVertexInputAttributeDescription{14, 1, VK_FORMAT_R32_UINT,
+                                              offsetof(BoxInstance, materialSlot)},
+            VkVertexInputAttributeDescription{15, 1, VK_FORMAT_R32_UINT,
+                                              offsetof(BoxInstance, textureSlot)},
 };
         // Tiap pipeline menyebutkan atribut mana yang benar-benar dibacanya.
         // Buffer-nya sama dan stride-nya sama; yang berbeda hanya atribut yang
@@ -3117,7 +3220,7 @@ private:
         // adalah peringatan validasi di setiap pembuatan pipeline. Menyaringnya
         // di sini bukan sekadar meredam peringatan: atribut yang tidak diambil
         // memang tidak perlu diambil.
-        std::array<VkVertexInputAttributeDescription, 10> used{};
+        std::array<VkVertexInputAttributeDescription, 12> used{};
         uint32_t usedCount = 0;
         for (const VkVertexInputAttributeDescription& attribute : attributes) {
             if ((attributeMask & (1u << attribute.location)) != 0u) {
@@ -4905,37 +5008,8 @@ private:
     /// sementara perekaman command buffer membacanya di dalam recorder yang
     /// dijalankan frame graph.
     std::vector<Vec4> partColors_;
-    struct SortedEntry {
-        float distance = 0.0f;
-        MeshHandle mesh = kUnitCubeMesh;
-        bool skinned = false;
-        uint32_t colorFirst = 0;
-        uint32_t colorCount = 0;
-        BoxInstance instance;
-        Mat4 transform{1.0f};
-    };
-    std::vector<SortedEntry> sorted_;
-    /// Instance buram sebelum diurutkan menjadi ruas.
-    struct GatherEntry {
-        MeshHandle mesh = kUnitCubeMesh;
-        bool skinned = false;
-        uint32_t colorFirst = 0;
-        uint32_t colorCount = 0;
-        BoxInstance instance;
-        Mat4 transform{1.0f};
-        bool caster = false;
-        /// Kotak dunia instance ini, disimpan supaya tiap pass bayangan bisa
-        /// mengujinya terhadap volumenya sendiri. Tanpa ini setiap pass harus
-        /// mentransformasikan ulang kotak lokalnya — 32 muka atlas dikali
-        /// ratusan instance berarti ribuan transformasi kotak per frame untuk
-        /// jawaban yang tidak berubah di antara keduanya.
-        Aabb bounds;
-        /// Terlihat kamera. **Bukan lagi syarat untuk ikut didaftar**: caster
-        /// yang berada di luar pandangan tetap harus menjatuhkan bayangan ke
-        /// dalamnya.
-        bool cameraVisible = true;
-    };
-    std::vector<GatherEntry> gathered_;
+    std::vector<SurfaceEntry> sorted_;
+    std::vector<SurfaceEntry> gathered_;
     /// Ruas draw: satu panggilan gambar per mesh yang berurutan.
     std::vector<DrawRun> opaqueRuns_;
     std::vector<DrawRun> casterRuns_;

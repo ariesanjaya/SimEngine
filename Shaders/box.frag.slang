@@ -20,8 +20,8 @@ static const float kFallbackAmbient = 0.25;
 [[vk::binding(1, 2)]] Texture2D<float4> baseColorTexture;
 [[vk::binding(2, 2)]] SamplerState baseColorSampler;
 
-float4 boxBaseColor(float2 uv) {
-    return baseColorTexture.Sample(baseColorSampler, uv);
+float4 boxBaseColor(BoxVarying input) {
+    return baseColorTexture.Sample(baseColorSampler, input.uv);
 }
 
 #include "box_shading.slang"

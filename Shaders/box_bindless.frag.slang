@@ -9,7 +9,6 @@
 // itu ditetapkan sebelum spesialisasi dinilai — satu modul tidak bisa memenuhi
 // keduanya.
 
-#include "box_push.slang"
 #include "box_varyings.slang"
 #include "cluster_common.slang"
 #include "gi_resolve.slang"
@@ -18,10 +17,10 @@
 /// Dipakai saat GI mati. Lihat catatannya di `box.frag`.
 static const float kFallbackAmbient = 0.25;
 
-float4 boxBaseColor(float2 uv) {
+float4 boxBaseColor(BoxVarying input) {
     // Slot nol adalah putih 1x1, jadi ruas tanpa tekstur tidak perlu satu pun
     // cabang di sini — ia mengalikan dengan nilai satuan.
-    return sampleBindless(push.textureSlot, uv);
+    return sampleBindless(input.slots.y, input.uv);
 }
 
 #include "box_shading.slang"
