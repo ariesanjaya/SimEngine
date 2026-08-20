@@ -31,7 +31,7 @@ terhadap kode, bukan diingat:
 | Yang tidak ada | Bukti |
 |---|---|
 | Compute pipeline — satu pun tidak ada di seluruh engine | Tidak ada `vkCreateComputePipelines`; tidak ada berkas shader bertahap compute. Bagian ketiga baris ini — "`cmake/SimShaders.cmake` hanya mengenali akhiran `.vert`/`.frag`" — **salah**, dan itu baru ketahuan saat dikerjakan: lihat G3 |
-| Bindless / `descriptorIndexing` | `Device.cpp:351-360` hanya menyalakan `shaderDrawParameters`, `shaderDemoteToHelperInvocation`, `dynamicRendering`, `synchronization2` |
+| Bindless / `descriptorIndexing` | `Device.cpp:351-360` hanya menyalakan `shaderDrawParameters`, `shaderDemoteToHelperInvocation`, `dynamicRendering`, `synchronization2`. **Sudah tidak berlaku sejak G5** — dan yang perlu ditambahkan ternyata bukan satu medan melainkan tujuh |
 | Indirect draw | `multiDrawIndirect` dan `drawIndirectFirstInstance` tidak diminta (`Device.cpp:293-306`) |
 | Antrean kedua (async compute / transfer) | `deviceInfo.queueCreateInfoCount = 1` |
 | Timeline semaphore, buffer device address | Tidak diminta di mana pun |
@@ -198,6 +198,11 @@ tercatat akan dikutip seolah-olah ia mengukur semuanya.
   justru keragaman set material yang menjadi alasan G5 ada. Angka G5 akan
   terlihat lebih kecil daripada seharusnya sampai adegannya punya material
   bertekstur sungguhan.
+
+  **Dan ternyata lebih dalam daripada itu.** Sampai G5, adegan ini tidak
+  menggambar satu pun material — bukan hanya material bertekstur. Lihat catatan
+  di G5; sambungannya sudah dipasang, tetapi kedelapan materialnya masih tanpa
+  tekstur, jadi baris ini belum lunas.
 - **Karakter berkulit.** Tidak ada satu pun rig di dalam repo — yang dipakai
   menguji skinning selama ini adalah berkas Mixamo di luar repo. Jadi varian
   pipeline berkulit, unggahan buffer skin, dan biaya `ComputeSkinning` tidak ikut
@@ -913,34 +918,181 @@ perekaman, harus dibaca ulang dengan angka ini di tangan.
 
 ---
 
-## G5 — Bindless
+## G5 — Bindless · ✅ selesai
 
 Prasyarat G6, dan berdiri sendiri sebagai kemenangan CPU.
 
-**Sekarang setiap ruas mesh mengikat descriptor set-nya sendiri.** `DrawRuns`
-(`VulkanRenderer.cpp:2033-2145`) memanggil `vkCmdBindDescriptorSets` untuk set 2
-dan `vkCmdPushConstants` di dalam gelung ruas, dan `vkCmdBindVertexBuffers` di
-dalam gelung run. Untuk adegan berisi itu berarti ribuan ikatan per frame — dan
-ketiga kaskade bayangan mengulangi sebagiannya.
+**Sebelumnya setiap ruas mesh mengikat descriptor set-nya sendiri.** `DrawRuns`
+memanggil `vkCmdBindDescriptorSets` untuk set 2 di dalam gelung ruas, sekali
+untuk depth prepass dan sekali lagi untuk forward. Pada adegan uji itu **847
+ikatan per frame**, dihitung bukan ditaksir.
 
-- `VK_EXT_descriptor_indexing` (inti sejak Vulkan 1.2): satu larik tekstur besar
-  yang tidak berbatas, diindeks dari data material. Set material per ruas hilang;
-  yang tersisa satu ikatan di awal pass.
-- Data material pindah ke storage buffer yang diindeks, bukan ke push constant
-  per ruas. Push constant lalu hanya membawa apa yang benar-benar berubah per
-  draw, atau hilang sama sekali begitu G6 mendarat.
-- **Jalur mundur wajib dan wajib diuji.** Perangkat tanpa `descriptorIndexing`
-  memakai jalur set-per-ruas yang sekarang. Sakelar paksa yang terlihat, dengan
-  alasan yang sama dengan pemilih backend GI: tanpa itu, jalur mundur berhenti
-  dijalankan siapa pun pada hari bindless menyala.
-- Umur descriptor tetap masalah lama yang sama — pembebasan ditunda sebanyak
-  frame in-flight (`kFramesInFlight = 2`). Larik bindless membuatnya lebih mudah
-  salah, bukan lebih mudah benar: slot yang dipakai ulang terlalu cepat
-  menampilkan tekstur milik benda lain, dan tidak ada galat yang menyertainya.
+**Sesudahnya set 2 adalah satu larik bersama, diikat sekali per pass: 5.**
 
-**Kriteria selesai:** jumlah `vkCmdBindDescriptorSets` per frame pada adegan uji
-turun dari ribuan ke puluhan (dihitung, bukan ditaksir); waktu CPU perekaman
-turun; kedua jalur menghasilkan gambar yang sama.
+### Bentuknya
+
+- `descriptorIndexing` dinyalakan beserta empat sub-fiturnya, bukan sendirian
+  (`Device.cpp`). Perangkat boleh menjawab "ya" untuk yang induk sambil menolak
+  keempatnya, dan yang menemukannya adalah kegagalan pembuatan descriptor set
+  layout — bukan pertanyaan yang sudah dijawab di tempat fiturnya diminta.
+- Set 2 tetap bernomor binding sama dengan jalur mundur: 0 blok parameter,
+  1 tekstur, 2 sampler. Yang berubah hanya larik atau bukan larik. Itu yang
+  membuat `box.frag` dan `box_bindless.frag` berbeda satu baris — sebuah fungsi
+  `boxBaseColor` — dan bukan satu berkas.
+- **Blok parameter tetap `cbuffer` std140 dengan urutan yang sama persis.** Yang
+  dipertimbangkan dan ditolak adalah memindahkannya ke storage buffer bersama:
+  tata letak std430 memang sama dengan std140 untuk parameter material yang ada
+  hari ini, tetapi keduanya berpisah begitu ada satu parameter berbentuk larik —
+  dan perbedaannya tidak menghasilkan galat, hanya material yang nilainya
+  bergeser. Yang dipakai: larik `ConstantBuffer<MaterialParams>`, satu slot per
+  material, sehingga `MaterialParameterBlock` tidak ikut bercabang sama sekali.
+  Batas `maxPerStageDescriptorUpdateAfterBindUniformBuffers` diperiksa di mesin
+  ini sebelum diputuskan — 1.048.576, bukan 15; yang 15 adalah batas untuk
+  uniform buffer *dinamis*, dan mengiranya batas yang sama akan membuang jalur
+  yang benar.
+- Slot tekstur material ikut di dalam blok itu, sebagai `uint4 gTextureSlots[]`
+  sesudah parameter terakhir. **`uint4`, bukan `uint`.** std140 menjajarkan
+  `uint` ke 4, jadi sebuah `uint` yang menyusul `float3` mengisi celah sisipan di
+  offset +12 — sementara sisi C++ menempelkan tabelnya sesudah blok yang sudah
+  dibulatkan ke 16. `uint4` berjajar 16, dan selisih itu hilang tanpa ada yang
+  harus menghitung offset di dua tempat.
+- Nomor slot tekstur **adalah** handle teksturnya, dan slot nol putih 1×1. Ruas
+  tanpa tekstur karena itu tidak menuntut satu pun cabang di shader: ia
+  mengalikan dengan nilai satuan.
+- `BoxPush` bertambah dua medan — `materialSlot` dan `textureSlot` — dan push
+  constant-nya kini dibaca tahap fragment. `stageFlags` karena itu berubah di
+  **ketiga** pipeline layout sekaligus: dua layout hanya *compatible* kalau
+  push constant range-nya sama persis, dan mengubahnya di satu tempat saja
+  membuat pass bayangan diam-diam melepas set yang sudah diikat.
+- Keempat salinan struct push constant digabung jadi satu berkas
+  (`Shaders/box_push.slang`). Tiga salinan beserta komentar yang saling menunjuk
+  masih bisa dijaga; salinan keempat, di tahap fragment, tidak.
+- **Sakelar paksa yang terlihat: `--no-bindless`**, di SimHeadless dan di
+  SimEditor. Alasan yang sama dengan pemilih backend GI, dan di sini ia langsung
+  terpakai: perbandingan dua gambar di bawah tidak mungkin ada tanpanya.
+
+### Yang ditemukan sambil mengerjakannya
+
+**Alat ukurnya sendiri tidak pernah menggambar satu pun material.**
+`SetMaterialPrograms` hanya dipasang `ViewportPanel`, dan SimHeadless tidak
+punya panel — jadi seluruh adegan uji G0 digambar jalur mundur `box.frag`, dan
+pipeline material tidak pernah tersentuh oleh alat yang seharusnya mengukurnya.
+Itu menyembunyikan persis apa yang G5 urus. Sambungannya dipasang, dan bersama
+itu sebuah fase tunggu sebelum frame pertama diukur: `slangc` berjalan di
+`TaskPool` dan memakan detik, sementara seluruh jalan selesai jauh lebih cepat —
+tanpa menunggu, sebagian frame digambar jalur mundur dan sebagian lewat pipeline
+material, dan pembagiannya bergantung pada kecepatan mesin. Itu melanggar
+kriteria selesai G0 sendiri.
+
+**Konsekuensinya: angka G5 tidak sebanding dengan baris "sesudah" G4.** Adegan
+yang diukur sekarang menggambar delapan material sungguhan, bukan delapan kali
+`box.frag`. Yang bisa dibandingkan hanyalah dua kolom di bawah, dan keduanya
+diambil dari binary yang sama pada adegan yang sama.
+
+**Sebuah parameter bertipe `Texture` ikut ditulis ke dalam blok uniform**
+(`MaterialCompiler.cpp`). `MaterialParameterBlock::Build` sudah melewatinya sejak
+awal — tekstur tidak tinggal di blok uniform — tetapi kompiler graph menulis
+`cbuffer`-nya dari daftar deklarasi apa adanya. Hasilnya sebuah `Texture2D` di
+dalam `cbuffer`: Slang menerimanya sambil memperingatkan, lalu memindahkannya ke
+slot binding yang tidak pernah diikat siapa pun. Tidak pernah terlihat, karena
+anggota itu tidak pernah dibaca. Yang membuatnya muncul adalah jalur bindless —
+blok yang sama menjadi elemen `ConstantBuffer`, dan resource di dalam constant
+buffer tidak sah. Diperbaiki di kedua jalur, dengan memanggil aturan yang sama
+alih-alih menyalinnya.
+
+**`descriptorBindingUniformBufferUpdateAfterBind` ditemukan validation layer,
+bukan dengan membaca kode.** Medan tekstur sudah dinyalakan; blok parameter
+material tinggal di binding uniform buffer, dan medan itu tidak menutupinya.
+
+**Fase tunggu yang baru itu sempat merusak determinisme yang ia datang untuk
+menjaga.** Ia memajukan waktu dunia satu frame per putaran, dan berapa putaran
+yang dibutuhkan bergantung pada apakah `slangc` menjawab dari cache atau harus
+benar-benar berjalan. Frame yang diukur karena itu mulai dari keadaan yang
+berbeda antara jalan pertama dan jalan kedua. Deltanya sekarang nol: menunggu
+bukan menjalankan waktu.
+
+### Hasil
+
+RTX 2060, 1920×1080 → 1280×720, GI menyala, 120 frame pemanasan + 240 diukur,
+`Resources/Levels/bench.simlevel`. Median dari lima jalan tiap kolom.
+
+| | set per ruas | bindless |
+|---|---:|---:|
+| **ikatan descriptor / frame** | **847** | **5** |
+| draw / frame | 1.988 | 1.988 |
+| `cpu-record` | **1,815** | **1,709** |
+| `cpu-total` | 3,388 | 3,326 |
+| total GPU | 3,315 | 3,309 |
+
+**Ikatan turun 169×, dan waktu perekaman turun 0,106 ms (5,8%).** Kedua angka itu
+harus dibaca bersama: 847 ikatan berharga sepersepuluh milidetik pada driver ini,
+jadi yang didapat G5 sebagai kemenangan CPU langsung memang kecil. Yang besar
+adalah yang tidak terlihat di tabel — set material per ruas adalah penghalang
+G6, karena `vkCmdDrawIndexedIndirect` tidak bisa mengganti descriptor set di
+antara draw yang digabungnya.
+
+Total GPU tidak berubah, dan memang tidak seharusnya: tidak satu pun pekerjaan
+GPU berpindah. Selisih 0,006 ms adalah derau.
+
+**Kedua jalur menghasilkan gambar yang identik byte demi byte** — 1280×720 RGB,
+**0 dari 2.764.800 byte** berbeda, pada frame terakhir lintasan terkunci yang
+sama, dengan GI mati. Bukan "mirip": nol.
+
+**Dengan GI menyala perbandingannya tidak lagi eksak — dan itu aturan yang sudah
+tertulis sejak G1**, di catatan "gambar frame terakhir tidak deterministik" di
+atas. Diperiksa ulang di sini karena kriteria G5 bergantung padanya: dua jalan
+dari binary yang sama pada jalur yang sama berselisih 19 byte (bindless) dan 28
+byte (set per ruas), keduanya 1 dari 255. Selisih antar-jalur tidak lebih besar
+daripada selisih antar-jalan pada satu jalur, jadi ia bukan milik jalur material.
+
+### Yang mendarat
+
+- **`Device.cpp`** — `descriptorIndexing` beserta `runtimeDescriptorArray`,
+  `shaderSampledImageArrayNonUniformIndexing`, dua medan `...UpdateAfterBind`,
+  `descriptorBindingPartiallyBound`, dan dua medan `...ArrayDynamicIndexing` inti
+  1.0. Kapasitas larik diturunkan dari batas perangkat, dibatasi 4096.
+  `descriptorBindingVariableDescriptorCount` sengaja **tidak** dituntut: kapasitas
+  ditetapkan descriptor set layout, dan menuntut medan yang tidak dipakai berarti
+  menolak bindless di perangkat yang sebenarnya mampu.
+- **`VulkanRenderer.cpp`** — `SelectMaterialBinding` (memilih dan menyebutkan
+  alasannya), `CreateBindlessDescriptors`, `WriteBindlessTexture`,
+  `WriteBindlessMaterial`, dan `BindSets` yang menghitung setiap ikatan. Pada
+  jalur bindless sebuah material tidak lagi memiliki satu pun objek descriptor
+  sendiri: layout, pool, dan set-nya hilang, dan `pipelineLayout_` dipakai
+  bersama.
+- **`MaterialCompiler.cpp`** — `MaterialCompileOptions::bindless`. Badan yang
+  dihasilkan graph **tidak berubah satu baris pun**; yang bertambah hanya prolog
+  di awal `evalMaterial` yang menghidupkan kembali nama parameter dan nama
+  tekstur dari larik. Itu yang membuat kedua jalur memakai emisi badan yang sama
+  persis, dan yang membuat jalur mundur tidak bisa diam-diam berhenti diuji.
+- **`Shaders/`** — `box_push.slang`, `bindless_common.slang`,
+  `box_shading.slang` (badan bersama), dan `box_bindless.frag.slang`.
+- **`RenderStats::descriptorSetBinds` dan `drawCalls`**, terlihat di Statistics
+  Panel beserta nama jalur materialnya, dan tercetak di laporan `--bench`.
+  Kriteria selesai ini sebuah hitungan, bukan sebuah waktu — dan hitungan yang
+  tidak ikut tercetak adalah hitungan yang harus dicari ulang setiap kali
+  seseorang bertanya.
+- **`MaterialProgram::bindless`** — SPIR-V yang ditulis untuk jalur yang salah
+  **ditolak**, bukan dibangun. Kedua jalur menghasilkan modul yang sama sahnya
+  dan sama bentuk entry point-nya; pipeline-nya akan terbangun tanpa satu pun
+  keluhan, lalu menyampel descriptor yang tidak pernah ditulis.
+- **Tiga test di `Tests/MaterialTests.cpp`** — ABI blok parameter, bentuk kedua
+  emisi, dan modul bindless yang benar-benar dikompilasi `slangc`.
+
+### Yang sengaja belum dikerjakan
+
+**Umur descriptor.** Slot tekstur tidak pernah dipakai ulang: `materialTextures_`
+hanya tumbuh, dan isinya baru dilepas saat renderer dihancurkan. Jadi bahaya yang
+ditulis rencana ini sejak awal — slot yang dipakai ulang terlalu cepat
+menampilkan tekstur milik benda lain — belum bisa terjadi. Ia menjadi nyata pada
+hari tekstur bisa dibongkar saat adegan berjalan, dan pada hari itu yang
+dibutuhkan adalah penundaan sebanyak frame in-flight, bukan larik yang berbeda.
+Ditulis di sini supaya yang menambahkan pembongkaran tekstur menemukannya
+sebelum menulisnya.
+
+**Batasnya disebut angka:** 4096 slot tekstur dan 1024 slot material. Keduanya
+melaporkan diri ke log saat dipilih, dan yang melampauinya mendapat peringatan
+beserta jalur mundur ke putih — bukan descriptor tak sah.
 
 ---
 
@@ -1083,7 +1235,7 @@ kembali ke daftar.
 | G2 | Pipeline cache ke disk, deklarasi fitur, antrean kedua | — | ✅ |
 | G3 | Fondasi compute: build, RHI, pass di frame graph | G2 | ✅ |
 | G4 | Clipmap SDF, Hi-Z, dan penetapan cluster pindah ke compute | G3 | ✅ (Hi-Z diukur lalu dikembalikan — lihat catatannya) |
-| G5 | Bindless (`descriptorIndexing`) + material terindeks | G2 | ⏳ |
+| G5 | Bindless (`descriptorIndexing`) + material terindeks | G2 | ✅ |
 | G6 | Indirect draw + occlusion culling dua fase | G3, G5 | ⏳ |
 | G7 | Async compute lewat timeline semaphore | G4, G6 | ⏳ |
 | G8 | Resolusi dinamis | E8.8 (TAA), G0 | ⏳ |
