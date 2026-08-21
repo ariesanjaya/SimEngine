@@ -110,6 +110,31 @@ pembaginya harus bekerja di ruang yang sama. Membalik urutannya menghasilkan
 tepi yang salah terang pada setiap tekstur beralfa — dan itu, sekali lagi,
 kesalahan yang tidak muncul sebagai galat.
 
+### Tiga mode, dan material yang menentukannya
+
+Alfa sebuah tekstur belum menyatakan apa yang harus dilakukan dengannya. Yang
+menyatakannya adalah `alphaMode` di node `output.surface` material:
+
+| Mode | Yang terjadi | Jalur gambarnya |
+| --- | --- | --- |
+| *(tidak disetel)* | alfa diabaikan; permukaan pejal | daftar buram |
+| `mask` | fragmen di bawah `alphaCutoff` **dibuang** | daftar buram, keluar dari prepass dan bayangan |
+| `blend` | warnanya **dicampur** menurut alfanya | daftar tersortir, belakang ke depan |
+
+**Ketiganya berangkat dari alfa yang sama dan berakhir sangat berbeda, jadi
+memilih yang salah bukan soal selera.** Yang dibuang kehilangan seluruh
+gradasinya menjadi tepi biner; yang dipadu mempertahankannya. Untuk kotoran,
+noda, dan sapuan tipis bedanya menentukan: yang dipadu mencampur *sedikit*
+warnanya ke permukaan di belakangnya, sedangkan yang ditopeng **menggantikan**
+warna permukaan itu dengan warnanya sendiri. Sponza pernah dipasang dengan
+decal `BLEND`-nya diciutkan menjadi `mask`, dan hasilnya bercak bertepi keras
+yang hampir hitam: 80,7% piksel yang lebih gelap dari 70 di potongan lengkung
+kamera acuan adalah kuad decal itu. Sesudah dipadu, angkanya 12,9% → 6,1%.
+
+Pagar kawat, dedaunan, dan huruf berlubang justru sebaliknya — `mask` yang
+benar untuk mereka. Yang dibuang tidak menuntut urutan gambar apa pun, tetap
+menulis kedalamannya, dan karena itu jauh lebih murah.
+
 ---
 
 ## Asal UV: kiri atas

@@ -147,6 +147,7 @@ private:
         /// renderer harus menggambarnya di luar prepass. Lihat
         /// `MaterialCompileResult::alphaTest`.
         bool masked = false;
+        bool blended = false;
     };
 
     struct Entry {

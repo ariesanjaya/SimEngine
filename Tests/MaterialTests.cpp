@@ -2245,15 +2245,26 @@ TEST_CASE("T-mask: mode alfa dibaca dari node keluaran, dan uji buangnya masuk m
         CHECK(at < frame);
     }
 
-    SUBCASE("mode lain tidak menyalakannya") {
+    SUBCASE("blend menyalakan padu, dan justru tidak boleh menyalakan topeng") {
         auto& output = graph.nodes[0];
         output.settings["alphaMode"] = "blend";
         const MaterialCompileResult compiled = CompileMaterial(graph);
         REQUIRE(compiled.ok);
-        // Yang dipadu diputuskan per objek di renderer ini, bukan per material —
-        // dan material yang diam-diam berpindah ke jalur topeng akan kehilangan
-        // gradasinya tanpa ada yang memintanya.
+        CHECK(compiled.alphaBlend);
+        // **Dan `alphaTest` tetap mati.** Keduanya berangkat dari opasitas yang
+        // sama dan berakhir sangat berbeda: yang dibuang kehilangan seluruh
+        // gradasinya menjadi tepi biner. Material yang diam-diam berpindah ke
+        // jalur topeng terlihat sebagai kotoran yang bertepi keras alih-alih
+        // membaur — cacat yang mudah disangka salah aset.
         CHECK_FALSE(compiled.alphaTest);
+
+        ForwardMaterialOptions options;
+        options.alphaTest = compiled.alphaTest;
+        const std::string module = AssembleForwardMaterialModule(compiled.slang, options);
+        CHECK(module.find("discard") == std::string::npos);
+        // Opasitasnya harus sampai ke alfa keluaran; padu tanpa alfa adalah
+        // permukaan pejal yang pipeline-nya kebetulan menyalakan blending.
+        CHECK(module.find("m.opacity") != std::string::npos);
     }
 }
 

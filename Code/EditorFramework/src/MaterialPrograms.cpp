@@ -184,6 +184,7 @@ MaterialProgramRef MaterialPrograms::Request(const assets::AssetDatabase& assets
     program.textures = textures;
     program.bindless = ready.bindless;
     program.masked = ready.masked;
+    program.blended = ready.blended;
     const render::MaterialHandle handle =
         renderer.AcquireMaterial(guid.ToString() + ":" + std::to_string(hash), program);
 
@@ -235,6 +236,7 @@ void MaterialPrograms::Compile(Uuid guid, Job job) {
     }
 
     entry.result.masked = compiled.alphaTest;
+    entry.result.blended = compiled.alphaBlend;
 
     material::MaterialParameterBlock block;
     block.Build(graph.parameters);

@@ -148,13 +148,16 @@ def main() -> int:
         # mengecat bercak hitam pekat di dinding dan pilar. Yang membacanya di
         # sisi engine `MaterialCompileResult::alphaTest`.
         #
-        # `BLEND` ikut menjadi `mask`, dan itu penyederhanaan yang disebutkan:
-        # engine memutuskan pemaduan per objek, bukan per material, sementara
-        # Sponza satu objek dengan 28 ruas. Untuk decal kotoran bedanya tepi
-        # yang tegas alih-alih berangsur — jauh lebih kecil daripada bedanya
-        # dengan kuad hitam.
+        # `BLEND` diteruskan sebagai `blend`, bukan diciutkan menjadi `mask`.
+        # Ia sempat diciutkan sewaktu engine belum punya jalur mesh berpadu,
+        # dan harganya ternyata jauh lebih besar daripada "tepi yang tegas
+        # alih-alih berangsur": kotoran yang dipadu mencampur sedikit warnanya
+        # ke dinding, sedangkan yang ditopeng **menggantikan** warna dindingnya
+        # dengan warna kotorannya sendiri. Terukur di potongan lengkung kamera
+        # acuan: 80,7% piksel yang lebih gelap dari 70 adalah kuad decal.
         alpha_mode = material.get("alphaMode", "OPAQUE")
-        masked = alpha_mode in ("MASK", "BLEND")
+        masked = alpha_mode == "MASK"
+        blended = alpha_mode == "BLEND"
 
         base_color = named(pbr.get("baseColorTexture"))
         if base_color:
@@ -162,7 +165,7 @@ def main() -> int:
             links.append(
                 {"guid": guid("link/base", name), "from": [node, "rgb"], "to": [output, "baseColor"]}
             )
-            if masked:
+            if masked or blended:
                 links.append(
                     {
                         "guid": guid("link/opacity", name),
@@ -209,6 +212,8 @@ def main() -> int:
         if masked:
             cutoff = material.get("alphaCutoff", 0.5)
             surface["settings"] = {"alphaMode": "mask", "alphaCutoff": f"{cutoff:.4f}"}
+        elif blended:
+            surface["settings"] = {"alphaMode": "blend"}
         if pins:
             surface["pins"] = pins
         nodes.insert(0, surface)

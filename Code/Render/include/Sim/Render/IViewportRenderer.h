@@ -223,6 +223,17 @@ public:
         /// dikeluarkan dari prepass dan digambar dengan uji kedalaman yang
         /// menerima sama-dalam.
         bool masked = false;
+        /// Material dipadu: warnanya dicampur dengan apa yang sudah ada di
+        /// belakangnya, menurut opasitasnya.
+        ///
+        /// **Renderer harus tahu, dan taruhannya lebih besar daripada yang
+        /// bertopeng.** Yang dipadu menuntut urutan gambar dari belakang ke
+        /// depan — alpha blending tidak komutatif — jadi ruasnya harus pindah
+        /// ke daftar tersortir. Yang tetap tinggal di daftar buram digambar
+        /// dalam urutan pengelompokan material, dan yang terlihat adalah
+        /// permukaan tembus yang saling menutupi dengan urutan yang berubah
+        /// tiap kali kameranya bergerak.
+        bool blended = false;
     };
 
     /// Membangun (atau mengambil kembali) pipeline sebuah material.

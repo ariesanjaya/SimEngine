@@ -84,6 +84,16 @@ struct MaterialCompileResult {
     /// Ambang buang. Nilai glTF bawaan, dan alasannya sama: 0,5 adalah tengah.
     float alphaCutoff = 0.5f;
 
+    /// Material dipadu: opasitasnya mencampur warnanya dengan apa yang sudah
+    /// ada di belakangnya, bukan membuangnya.
+    ///
+    /// **Diputuskan per material, dijalankan per objek.** Yang dipadu menuntut
+    /// urutan gambar dari belakang ke depan, jadi ruasnya keluar dari daftar
+    /// buram dan masuk ke daftar tersortir — dan dengan itu keluar pula dari
+    /// prepass dan dari pass bayangan, keduanya karena alasan yang sama:
+    /// permukaan yang setengah tembus tidak boleh menghalangi apa pun.
+    bool alphaBlend = false;
+
     /// Node yang bertanggung jawab atas sebuah baris. Inilah yang mengubah
     /// "error di baris 42" menjadi node yang menyala merah di kanvas.
     Uuid NodeAtLine(int line) const;
