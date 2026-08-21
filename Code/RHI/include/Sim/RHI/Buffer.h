@@ -47,6 +47,16 @@ public:
 
     VkBuffer Handle() const { return buffer_; }
     VkDeviceSize Capacity() const { return capacity_; }
+
+    /// Naik setiap kali buffernya benar-benar dibuat ulang.
+    ///
+    /// **Yang membandingkan `Handle()` untuk tahu apakah descriptor perlu
+    /// ditulis ulang akan sesekali salah**, dan diamnya total: `VkBuffer` adalah
+    /// handle yang boleh dipakai ulang, dan buffer baru yang dibuat tepat
+    /// sesudah yang lama dimusnahkan lazimnya mendapat angka yang sama persis.
+    /// Descriptor lalu dibiarkan menunjuk memori yang sudah dibebaskan — dan
+    /// yang keluar bukan galat melainkan matriks berisi sampah.
+    uint64_t Generation() const { return generation_; }
     bool IsValid() const { return buffer_ != VK_NULL_HANDLE; }
 
 private:
@@ -56,6 +66,7 @@ private:
     VmaAllocation allocation_ = VK_NULL_HANDLE;
     void* mapped_ = nullptr;
     VkDeviceSize capacity_ = 0;
+    uint64_t generation_ = 0;
 };
 
 }  // namespace sim::rhi

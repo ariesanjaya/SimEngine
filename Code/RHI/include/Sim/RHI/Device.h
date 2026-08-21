@@ -86,11 +86,17 @@ struct DeviceCapabilities {
     /// Sinkronisasi lintas-antrean G7. Semaphore biner memaksa satu penunggu per
     /// sinyal, dan ketergantungan yang berbentuk graf harus dipaksa jadi rantai.
     bool timelineSemaphore = false;
+    /// Indirect draw dengan banyak perintah **dan** `firstInstance` bukan nol.
+    /// Keduanya dituntut jalur GPU-driven, jadi keduanya dijawab satu medan:
+    /// yang punya salah satunya saja tetap tidak bisa memakainya.
     bool multiDrawIndirect = false;
     bool drawIndirectCount = false;
     /// Setengah presisi di shader. Turing ke atas menjalankannya dua kali lipat,
     /// dan matematika GI adalah tempat yang paling diuntungkan.
     bool shaderFloat16 = false;
+    /// Query statistik pipeline. Dipakai profiler untuk menghitung primitif per
+    /// pass — satu-satunya angka yang bisa membuktikan culling bekerja.
+    bool pipelineStatisticsQuery = false;
     /// Ada keluarga antrean compute yang **terpisah** dari antrean grafis.
     /// Prasyarat G7; antreannya sendiri sudah dibuat sejak sekarang.
     bool asyncCompute = false;

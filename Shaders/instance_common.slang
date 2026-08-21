@@ -59,6 +59,17 @@ struct BoxVertex {
     // Dibutuhkan normal map — dan hanya normal map. Pass bayangan dan prepass
     // tidak menyebutnya, jadi keduanya tidak membayar pengambilannya.
     [[vk::location(13)]] float4 tangent;
+    // Slot material dan slot tekstur ruas ini di larik bindless, per instance.
+    //
+    // **Per instance dan bukan push constant, dan itu yang mengembalikan
+    // instancing.** Sampai G6 keduanya dikirim lewat push constant, jadi dua
+    // entity bermesh sama dengan material berbeda adalah dua panggilan gambar —
+    // dan karena warna ruas ikut di sana, dua entity bermesh sama dengan warna
+    // berbeda pun begitu. Adegan berisi tiga ribu prop karena itu menghasilkan
+    // tiga ribu draw call, satu per entity, walaupun seluruhnya memakai empat
+    // mesh saja.
+    [[vk::location(14)]] uint materialSlot;
+    [[vk::location(15)]] uint textureSlot;
 };
 
 #ifndef INSTANCE_SET
@@ -73,10 +84,16 @@ struct BoxVertex {
 /// **Indeksnya bukan `SV_InstanceID` apa adanya.** slangc menerjemahkan
 /// `SV_InstanceID` menjadi `gl_InstanceIndex - gl_BaseInstance`, jadi ia mulai
 /// dari nol pada setiap draw — sementara atribut instance di sebelahnya diambil
-/// menurut `gl_InstanceIndex`, yaitu **termasuk** `firstInstance`. Pemanggil
-/// menambahkan basisnya lewat push constant supaya keduanya menunjuk instance
-/// yang sama; tanpa itu, setiap ruas sesudah yang pertama memakai transform
-/// milik ruas pertama.
+/// menurut `gl_InstanceIndex`, yaitu **termasuk** `firstInstance`. Basisnya
+/// karena itu harus ditambahkan kembali.
+///
+/// **Basisnya datang dari draw-nya sendiri (`SV_StartInstanceLocation`), bukan
+/// dari push constant.** Sampai G6 pemanggil mengirimnya lewat push constant,
+/// dan angkanya selalu sama persis dengan `firstInstance` panggilan itu — dua
+/// salinan dari satu angka, yang salah satunya harus diingat untuk diperbarui.
+/// Yang menutup pilihan itu adalah indirect draw: perintahnya dibangkitkan GPU,
+/// jadi tidak ada satu pun tempat di CPU yang bisa menuliskan push constant per
+/// panggilan.
 float4x4 instanceModel(uint index) {
     return instanceTransforms[index];
 }

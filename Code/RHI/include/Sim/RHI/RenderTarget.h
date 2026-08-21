@@ -77,6 +77,20 @@ public:
     bool ReadPixels(std::vector<uint8_t>& outRgba, uint32_t& outWidth, uint32_t& outHeight,
                     std::string& error);
 
+    /// Menyalin depth buffer ini apa adanya — float per texel, reversed-Z.
+    ///
+    /// **Ada karena menebak isinya sudah kehabisan giliran.** Occlusion culling
+    /// membaca depth buffer dari compute, dan setiap perkiraan soal apa yang
+    /// ada di dalamnya selama ini diturunkan dari sampel yang alatnya sendiri
+    /// belum terbukti. Yang ini menyerahkan seluruh petaknya sekaligus, dalam
+    /// bentuk yang bisa diperiksa di luar program.
+    /// `currentLayout` adalah tata letak depth image saat ini — yang melacaknya
+    /// frame graph, bukan kelas ini. **Menebaknya berarti membaca isi yang tak
+    /// terdefinisi**, dan yang keluar adalah peta kedalaman yang meyakinkan
+    /// tetapi bukan milik frame ini.
+    bool ReadDepth(std::vector<float>& out, uint32_t& outWidth, uint32_t& outHeight,
+                   VkImageLayout currentLayout, std::string& error);
+
 private:
     static constexpr VkFormat kColorFormat = VK_FORMAT_R8G8B8A8_UNORM;
 

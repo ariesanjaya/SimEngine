@@ -104,7 +104,7 @@ std::vector<sim::render::DrawRun> SplitWith(std::span<const sim::render::DrawRun
 TEST_CASE("SplitRuns memecah satu ruas menjadi rentang yang bersambung saja") {
     using sim::render::DrawRun;
     // Satu ruas berisi enam instance, indeks 0..5. Yang lolos: 0,1, lalu 4.
-    const std::vector<DrawRun> source{DrawRun{7, 2, 3, false, 0, 6}};
+    const std::vector<DrawRun> source{DrawRun{7, 2, 3, 0, false, 0, 6}};
     const std::vector<bool> keep{true, true, false, false, true, false};
 
     const std::vector<DrawRun> out = SplitWith(source, keep);
@@ -118,8 +118,8 @@ TEST_CASE("SplitRuns memecah satu ruas menjadi rentang yang bersambung saja") {
     // digambar lewat pipeline atau material milik ruas lain.
     for (const DrawRun& piece : out) {
         CHECK(piece.mesh == 7);
-        CHECK(piece.partColorFirst == 2);
-        CHECK(piece.partColorCount == 3);
+        CHECK(piece.part == 2);
+        CHECK(piece.material == 3);
         CHECK(piece.skinned == false);
     }
 }
@@ -130,8 +130,8 @@ TEST_CASE("SplitRuns menghormati offset ruas asal") {
     // mudah dibuat: memakai offset di dalam ruas sebagai indeks instance.
     // Hasilnya instance milik ruas pertama yang digambar dengan material ruas
     // kedua — tanpa satu pun galat validation layer.
-    const std::vector<DrawRun> source{DrawRun{1, 0, 1, false, 0, 3},
-                                      DrawRun{2, 1, 1, true, 3, 3}};
+    const std::vector<DrawRun> source{DrawRun{1, 0, 1, 0, false, 0, 3},
+                                      DrawRun{2, 1, 1, 0, true, 3, 3}};
     const std::vector<bool> keep{false, false, false, false, true, true};
 
     const std::vector<DrawRun> out = SplitWith(source, keep);
@@ -144,8 +144,8 @@ TEST_CASE("SplitRuns menghormati offset ruas asal") {
 
 TEST_CASE("SplitRuns menjatuhkan ruas yang seluruh isinya tersaring") {
     using sim::render::DrawRun;
-    const std::vector<DrawRun> source{DrawRun{1, 0, 1, false, 0, 2},
-                                      DrawRun{2, 0, 1, false, 2, 2}};
+    const std::vector<DrawRun> source{DrawRun{1, 0, 1, 0, false, 0, 2},
+                                      DrawRun{2, 0, 1, 0, false, 2, 2}};
     const std::vector<bool> keep{false, false, true, true};
 
     const std::vector<DrawRun> out = SplitWith(source, keep);
@@ -161,7 +161,7 @@ TEST_CASE("SplitRuns yang meloloskan semuanya mengembalikan daftar yang setara")
     // tersaring, dan ia harus tetap satu panggilan gambar per ruas — bukan satu
     // per instance, yang akan menukar penghematan GPU dengan biaya CPU yang
     // lebih besar daripada yang dihemat.
-    const std::vector<DrawRun> source{DrawRun{1, 0, 1, false, 0, 4}};
+    const std::vector<DrawRun> source{DrawRun{1, 0, 1, 0, false, 0, 4}};
     const std::vector<bool> keep{true, true, true, true};
 
     const std::vector<DrawRun> out = SplitWith(source, keep);

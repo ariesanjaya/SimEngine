@@ -24,6 +24,13 @@ namespace sim::render {
 struct PassTiming {
     std::string_view name;
     float milliseconds = 0.0f;
+    /// Primitif yang diserahkan ke GPU selama pass ini. Nol untuk pass compute,
+    /// dan nol untuk tahap CPU — `CpuTimings()` memakai struct yang sama.
+    ///
+    /// **Ini angka yang diturunkan culling.** Waktu pass ikut turun juga, tetapi
+    /// waktu bergerak karena banyak hal; jumlah primitif hanya bergerak karena
+    /// ada yang berhenti digambar.
+    uint64_t primitives = 0;
 };
 
 /// Hitungan yang menjelaskan angka waktu di sebelahnya.
@@ -201,6 +208,18 @@ public:
         return kInvalidMaterial;
     }
 
+    /// Menyalin angka antara uji occlusion frame terakhir ke `out`, sebagai
+    /// baris teks: satu permukaan per baris.
+    ///
+    /// Berguna hanya bila `ViewportDesc::cullDebug` menyala saat frame itu
+    /// digambar. Mengembalikan false beserta alasannya bila tidak ada apa-apa
+    /// untuk dibaca.
+    virtual bool CaptureCullDebug(std::string& out, std::string& error) {
+        (void)out;
+        error = "this renderer has no GPU culling";
+        return false;
+    }
+
     /// Renderer ini menggambar material lewat larik descriptor bindless.
     ///
     /// Ditanya **sebelum** materialnya dikompilasi: yang membedakan kedua jalur
@@ -254,6 +273,17 @@ public:
         (void)outWidth;
         (void)outHeight;
         error = "this renderer cannot read its pixels back";
+        return false;
+    }
+
+    /// Depth buffer frame terakhir, float per texel. Alat diagnostik; lihat
+    /// `rhi::RenderTarget::ReadDepth`.
+    virtual bool CaptureDepth(std::vector<float>& out, uint32_t& outWidth, uint32_t& outHeight,
+                              std::string& error) {
+        (void)out;
+        (void)outWidth;
+        (void)outHeight;
+        error = "this renderer cannot read its depth buffer back";
         return false;
     }
 

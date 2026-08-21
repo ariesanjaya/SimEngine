@@ -406,6 +406,45 @@ struct ViewportDesc {
     /// ada yang bisa menilai "sedikit berbeda" dengan mata. Yang menilainya
     /// perbandingan isi voxel antara kedua jalur.
     bool gpuSdf = true;
+
+    /// Frustum culling dan pembangkitan perintah gambar dijalankan di GPU (G6).
+    ///
+    /// Sakelarnya ada karena alasan yang sama dengan `gpuClusters`, ditambah
+    /// satu yang khusus: jalur CPU adalah satu-satunya yang bisa dipakai
+    /// perangkat tanpa `multiDrawIndirect`, jadi ia bukan sekadar pembanding
+    /// melainkan jalur yang benar-benar dipakai orang. Yang berhenti dijalankan
+    /// siapa pun adalah yang diam-diam rusak.
+    bool gpuCull = true;
+
+    /// Occlusion culling terhadap piramida depth frame ini (G6).
+    ///
+    /// **Tepat, dan tetap mati secara bawaan — sekarang karena angkanya.** Ia
+    /// menghasilkan gambar yang sama persis byte demi byte dengan jalur tanpa
+    /// occlusion pada kedua adegan uji, dan menurunkan segitiga yang diserahkan
+    /// pass forward dari 2,79 menjadi 2,65 juta pada adegan padat. Yang tidak
+    /// ikut turun adalah waktunya: dua pass yang ditambahkannya berharga 0,059
+    /// ms sementara yang dihemat pass forward sekitar 0,03 ms. Ia baru menang
+    /// pada adegan yang benar-benar berlapis; sampai ada yang seperti itu di
+    /// repo ini, ia sebuah sakelar.
+    ///
+    /// Menyalakannya menuntut `gpuCull`.
+    bool gpuOcclusion = false;
+
+    /// Menuliskan angka antara uji occlusion tiap permukaan ke buffer yang bisa
+    /// dibaca CPU (G6).
+    ///
+    /// **Alat diagnostik, dan ia ada karena menebak sudah kehabisan giliran.**
+    /// Tanpa ini satu-satunya cara memeriksa uji occlusion adalah
+    /// membandingkan gambar — yang hanya bisa menjawab "ada yang salah", tidak
+    /// pernah "yang mana".
+    bool cullDebug = false;
+    /// Nomor permukaan tertinggi yang boleh diuji occlusion, eksklusif.
+    ///
+    /// Alat bisect: menaikkannya setengah-setengah menemukan permukaan mana
+    /// yang hilang dari gambar saat occlusion menyala. Bawaannya "semua".
+    uint32_t cullLimit = 0xffffffffu;
+    /// Nomor permukaan terendah yang digambar. Pasangan `cullLimit`.
+    uint32_t cullFirst = 0;
 };
 
 /// Satu objek yang bisa digambar, sudah dalam ruang dunia.

@@ -487,6 +487,19 @@ bool Device::CreateLogicalDevice() {
     // yang tidak mendukungnya adalah galat validation layer di setiap tekstur,
     // bukan gambar yang jelek.
     features.textureCompressionBC = VK_TRUE;
+    // Statistik pipeline (G6). **Diminta walau hanya alat ukur yang memakainya:**
+    // jumlah primitif per pass adalah satu-satunya angka yang membuktikan
+    // occlusion culling benar-benar membuang pekerjaan, dan bukan sekadar
+    // memindahkannya.
+    features.pipelineStatisticsQuery = VK_TRUE;
+    // Indirect draw (G6). **Dua medan, dan yang kedua paling mudah terlupa:**
+    // `multiDrawIndirect` membuat satu panggilan menggambar banyak perintah,
+    // dan `drawIndirectFirstInstance` membuat perintah itu boleh menyebut
+    // `firstInstance` bukan nol. Jalur GPU-driven memakai `firstInstance`
+    // sebagai nomor permukaan — tanpa medan kedua, setiap perintahnya melanggar
+    // aturan, dan yang menemukannya validation layer.
+    features.multiDrawIndirect = VK_TRUE;
+    features.drawIndirectFirstInstance = VK_TRUE;
 
     VkPhysicalDeviceFeatures supported{};
     vkGetPhysicalDeviceFeatures(physicalDevice_, &supported);
@@ -494,6 +507,9 @@ bool Device::CreateLogicalDevice() {
     features.wideLines &= supported.wideLines;
     features.fragmentStoresAndAtomics &= supported.fragmentStoresAndAtomics;
     features.textureCompressionBC &= supported.textureCompressionBC;
+    features.pipelineStatisticsQuery &= supported.pipelineStatisticsQuery;
+    features.multiDrawIndirect &= supported.multiDrawIndirect;
+    features.drawIndirectFirstInstance &= supported.drawIndirectFirstInstance;
     supportsBlockCompression_ = features.textureCompressionBC == VK_TRUE;
 
     // **Ketiadaannya dicatat, bukan didiamkan.** Perangkat tanpa BC tetap
@@ -672,7 +688,9 @@ bool Device::CreateLogicalDevice() {
     capabilities_.timelineSemaphore = supported12.timelineSemaphore != 0;
     capabilities_.drawIndirectCount = supported12.drawIndirectCount != 0;
     capabilities_.shaderFloat16 = supported12.shaderFloat16 != 0;
-    capabilities_.multiDrawIndirect = supported.multiDrawIndirect != 0;
+    capabilities_.multiDrawIndirect =
+        features.multiDrawIndirect != 0 && features.drawIndirectFirstInstance != 0;
+    capabilities_.pipelineStatisticsQuery = features.pipelineStatisticsQuery != 0;
 
     // Satu baris untuk yang dipakai sekarang, satu untuk yang menentukan jalur
     // di depan. Dipisah karena keduanya dibaca oleh orang yang berbeda: yang

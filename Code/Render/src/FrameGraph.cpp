@@ -6,9 +6,9 @@
 namespace sim::render {
 namespace {
 
-constexpr std::array<const char*, 9> kAccessNames{
-    "None",        "ColorWrite",   "DepthWrite",    "DepthRead", "ShaderRead",
-    "ShaderWrite", "TransferRead", "TransferWrite", "Present",
+constexpr std::array<const char*, 10> kAccessNames{
+    "None",        "ColorWrite",   "DepthWrite",    "DepthRead",    "ShaderRead",
+    "ShaderWrite", "TransferRead", "TransferWrite", "IndirectRead", "Present",
 };
 
 }  // namespace
@@ -23,6 +23,7 @@ bool IsReadOnly(Access access) {
         case Access::DepthRead:
         case Access::ShaderRead:
         case Access::TransferRead:
+        case Access::IndirectRead:
         case Access::Present:
             return true;
         default:

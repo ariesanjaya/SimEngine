@@ -3,6 +3,9 @@
 #include "ClusterAssign.h"
 #include "ComputeGradient.h"
 #include "DepthPyramid.h"
+#include "DrawCull.h"
+
+#include <format>
 #include "PostProcess.h"
 #include "SkyAtmosphere.h"
 #include "VolumePass.h"
@@ -41,27 +44,6 @@ namespace {
 /// Harus sama persis dengan blok push_constant di Shaders/box.vert.
 struct BoxPush {
     Mat4 viewProj;
-    /// Warna dasar ruas yang sedang digambar. `w` nol berarti ruas ini tidak
-    /// punya material di berkasnya, dan yang berlaku adalah warna instance.
-    ///
-    /// **Push constant, bukan atribut instance.** Warnanya milik ruas — bagian
-    /// dari mesh — sedangkan atribut instance milik entity; menaruhnya di sana
-    /// berarti satu entry instance per ruas per entity, yaitu menyalin seluruh
-    /// matriks model sebanyak jumlah materialnya.
-    Vec4 partColor{0.0f};
-    /// `firstInstance` panggilan gambar ini.
-    ///
-    /// **Ada karena `SV_InstanceID` dimulai dari nol pada setiap draw**, bukan
-    /// dari `firstInstance` — slangc menerjemahkannya menjadi
-    /// `gl_InstanceIndex - gl_BaseInstance`. Atribut instance di sebelahnya
-    /// justru diambil menurut `gl_InstanceIndex`. Tanpa basis ini, setiap ruas
-    /// sesudah yang pertama memakai transform milik ruas pertama sambil memakai
-    /// warna miliknya sendiri.
-    uint32_t instanceBase = 0;
-    /// Slot material ruas ini di larik bindless. Lihat Shaders/box_push.slang.
-    uint32_t materialSlot = 0;
-    /// Slot tekstur albedo ruas ini di larik bindless, dibaca jalur mundur.
-    uint32_t textureSlot = 0;
 };
 
 /// Tahap yang boleh membaca `BoxPush`.
@@ -287,6 +269,19 @@ struct BoxInstance {
     /// dengan pergeseran yang salah — tanpa satu pun galat, hanya karakter yang
     /// memakai pose karakter lain.
     uint32_t skinBase;
+    /// Slot material dan slot tekstur ruas ini di larik bindless.
+    ///
+    /// **Di sini, bukan di push constant, dan itu yang mengembalikan
+    /// instancing.** Sampai G6 keduanya dikirim per panggilan gambar bersama
+    /// warna ruas, jadi dua entity bermesh sama dengan material berbeda adalah
+    /// dua draw. Karena `partColorFirst` milik tiap entity sendiri, kenyataannya
+    /// lebih buruk: **setiap** entity menjadi satu draw, dan adegan tiga ribu
+    /// prop dari empat mesh menghasilkan tiga ribu panggilan.
+    ///
+    /// Yang membuatnya bisa pindah adalah G5: sebelum material terindeks,
+    /// "material ruas ini" bukan sebuah nomor melainkan sebuah descriptor set.
+    uint32_t materialSlot;
+    uint32_t textureSlot;
 };
 
 /// Satu panggilan gambar: sebuah mesh dan ruas instance yang memakainya.
@@ -298,10 +293,12 @@ struct BoxInstance {
 /// Bit 0 dari `BoxInstance::flags`. Harus sama dengan `kReceiveShadows` di
 /// Shaders/box.frag.
 constexpr uint32_t kInstanceReceiveShadows = 1u;
-/// Bit 1: warna instance mengalahkan warna material ruas. Dipakai sorotan
-/// seleksi — objek terpilih harus berubah warna seluruhnya, dan material
-/// berkasnya justru yang paling tidak boleh menutupinya.
-constexpr uint32_t kInstanceForceColor = 2u;
+/// Bit 1 dulu berarti "warna instance mengalahkan warna material ruas", dipakai
+/// sorotan seleksi. **Ia hilang di G6**: warna ruas diselesaikan CPU sebelum
+/// diunggah, jadi yang sampai ke shader satu warna dan tidak ada lagi dua warna
+/// yang harus dipilih di sana. Nomor bitnya sengaja tidak dipakai ulang —
+/// bendera yang berpindah arti adalah bendera yang salah terbaca oleh kode yang
+/// belum ikut berubah.
 
 /// Dua varian dari satu pasang shader: tanpa kulit dan dengan kulit.
 ///
@@ -396,13 +393,14 @@ std::vector<BoxVertex> BuildUnitCube() {
     return vertices;
 }
 
-BoxInstance MakeInstance(const Vec4& color, bool receiveShadows, bool forceColor,
-                         uint32_t skinBase) {
+BoxInstance MakeInstance(const Vec4& color, bool receiveShadows, uint32_t skinBase,
+                         uint32_t materialSlot, uint32_t textureSlot) {
     BoxInstance instance;
     instance.color = color;
-    instance.flags = (receiveShadows ? kInstanceReceiveShadows : 0u) |
-                     (forceColor ? kInstanceForceColor : 0u);
+    instance.flags = receiveShadows ? kInstanceReceiveShadows : 0u;
     instance.skinBase = skinBase;
+    instance.materialSlot = materialSlot;
+    instance.textureSlot = textureSlot;
     return instance;
 }
 
@@ -590,6 +588,30 @@ public:
         // dipetakan operator nada.
         // Penetapan cluster di GPU. Gagal membuatnya bukan kegagalan renderer:
         // jalur CPU-nya masih ada dan masih benar.
+        // Culling GPU. **Gagal dibuat bukan kegagalan fatal**: jalur CPU tetap
+        // ada, dan ia memang harus tetap ada — lihat catatan di `DrawCull`.
+        if (device_.Capabilities().multiDrawIndirect) {
+            if (!drawCull_.Create(device_, shaderDirectory_) ||
+                !occlusion_.Create(device_, shaderDirectory_, DepthReduce::Farthest)) {
+                SIM_WARN("Render", "GPU draw culling unavailable; culling stays on the CPU");
+                drawCull_.Destroy();
+                occlusion_.Destroy();
+            } else {
+                // Piramidanya diadopsi di sini, sesudah keduanya ada — bukan di
+                // sebelah `hiz_`, yang dibuat lebih dulu. Descriptor culling
+                // menunjuk piramida ini, dan yang belum ditulis membuat dispatch
+                // tidak pernah berjalan: buffer perintahnya lalu berisi sampah,
+                // dan yang terlihat adalah adegan yang kosong sama sekali.
+                occlusion_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(),
+                                 target_.DepthView(), target_.Sampler());
+                occlusion_.AdoptLayouts();
+                drawCull_.AdoptPyramid(occlusion_.View(), occlusion_.Sampler(),
+                                       target_.DepthView(), target_.Sampler());
+            }
+        } else {
+            SIM_INFO("Render",
+                     "this GPU has no multi-draw indirect; culling stays on the CPU");
+        }
         if (clusterAssign_.Create(device_, shaderDirectory_)) {
             clusterGrid_.Build(clusterSettings_, 1.0f, 1.0f, 0.1f, kClusterFar);
             clusterAssign_.Adopt(clusterGrid_.ClusterCount(),
@@ -687,6 +709,13 @@ public:
         // mengalokasi ulang, jadi tidak ada frame yang masih memakainya.
         const bool hizChanged = hiz_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(),
                                            target_.DepthView(), target_.Sampler());
+        if (occlusion_.IsValid() &&
+            occlusion_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(),
+                             target_.DepthView(), target_.Sampler())) {
+            occlusion_.AdoptLayouts();
+            drawCull_.AdoptPyramid(occlusion_.View(), occlusion_.Sampler(),
+                                   target_.DepthView(), target_.Sampler());
+        }
         const bool probesChanged =
             probes_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(), kNormalFormat);
         const bool postChanged =
@@ -744,6 +773,43 @@ public:
             Gather(desc, scene, viewProj);
         }
 
+        // **Culling pindah ke GPU, dan CPU berhenti memutuskan apa yang
+        // digambar.** Yang diunggah adalah kotak tiap permukaan dan rentang
+        // indeksnya; yang kembali sebuah buffer perintah gambar. Jalur CPU tetap
+        // ada di sebelahnya — ia jalur mundur untuk perangkat tanpa indirect
+        // draw, dan ia pembanding: dua implementasi yang harus sepakat adalah
+        // cara termurah menemukan yang mana yang salah.
+        gpuCullActive_ = desc.gpuCull && drawCull_.IsValid() && !cullSurfaces_.empty();
+        gpuOcclusionActive_ = gpuCullActive_ && desc.gpuOcclusion && occlusion_.IsValid();
+        cullDebugActive_ = gpuOcclusionActive_ && desc.cullDebug;
+        cullLimit_ = desc.cullLimit;
+        cullFirst_ = desc.cullFirst;
+        // **Tiap frame, dan tanpa syarat.** Ia berhenti sendiri kalau tidak ada
+        // yang berubah, dan itu yang membuatnya murah — sementara menggantungkan
+        // penulisan descriptor pada sebuah syarat adalah cara paling mudah
+        // membuatnya tidak pernah ditulis sama sekali.
+        //
+        // **Pernah begitu, dan akibatnya diam:** binding piramida baru sah
+        // sesudah `occlusion_` ada, yang terjadi belakangan daripada
+        // `DrawCull::Create`. Penulisan descriptor yang menunggunya lalu tidak
+        // pernah kejadian pada jalur yang occlusion-nya mati — dan dispatch
+        // membaca descriptor tak terdefinisi, yaitu perintah gambar berisi
+        // sampah. Validation layer melaporkannya dengan jelas; yang tidak
+        // melaporkannya adalah gambarnya, yang cuma sedikit berbeda.
+        if (gpuCullActive_) {
+            drawCull_.AdoptPyramid(occlusion_.View(), occlusion_.Sampler(),
+                                   target_.DepthView(), target_.Sampler());
+        }
+        lastCullSlot_ = static_cast<uint32_t>(slotIndex_);
+        lastViewProjection_ = viewProj;
+        if (gpuCullActive_) {
+            const CpuScope scope(cpuTimings_, "cpu-draw-cull");
+            gpuCullActive_ = drawCull_.Upload(
+                static_cast<uint32_t>(slotIndex_), Frustum(viewProj), viewProj, target_.Width(),
+                target_.Height(), DepthPyramid::LevelsFor(target_.Width(), target_.Height()),
+                cullBounds_, cullSurfaces_);
+        }
+
         // Cascade dihitung dari kamera yang sama dengan yang dipakai menggambar.
         // Menghitungnya dari kamera frame sebelumnya menghemat satu ketergantungan
         // dan menukarnya dengan bayangan yang tertinggal satu frame — terlihat
@@ -794,15 +860,19 @@ public:
             transformUpload_.insert(transformUpload_.end(), transparentTransforms_.begin(),
                                     transparentTransforms_.end());
             const VkDeviceSize transformBytes = sizeof(Mat4) * transformUpload_.size();
-            const VkBuffer beforeTransforms = slot.instanceBuffer.Handle();
+            const uint64_t beforeTransforms = slot.instanceBuffer.Generation();
             slotReady =
                 slot.buffer.Reserve(sizeof(BoxInstance) * upload_.size()) &&
                 slot.buffer.Write(upload_.data(), sizeof(BoxInstance) * upload_.size()) &&
                 slot.instanceBuffer.Reserve(transformBytes) &&
                 slot.instanceBuffer.Write(transformUpload_.data(), transformBytes);
-            if (slot.instanceBuffer.Handle() != beforeTransforms) {
-                // Buffer yang tumbuh adalah `VkBuffer` yang lain — alasan yang
-                // sama persis dengan palet kulit di bawah.
+            if (slot.instanceBuffer.Generation() != beforeTransforms) {
+                // **Generasi, bukan handle.** Buffer yang dibuat ulang lazimnya
+                // mendapat `VkBuffer` dengan angka yang sama persis dengan yang
+                // baru saja dimusnahkan, dan penjaga yang membandingkan handle
+                // lalu tidak melihat apa-apa — descriptor dibiarkan menunjuk
+                // memori yang sudah dibebaskan. Lihat catatan di
+                // `DynamicBuffer::Generation`.
                 WriteSkinDescriptor(slot);
             }
         }
@@ -815,11 +885,11 @@ public:
         // adalah harga yang jauh lebih murah daripada pemetaan ulang yang salah.
         if (!scene.skinMatrices.empty()) {
             const VkDeviceSize bytes = sizeof(Mat4) * scene.skinMatrices.size();
-            const VkBuffer before = slot.skinBuffer.Handle();
+            const uint64_t before = slot.skinBuffer.Generation();
             if (!slot.skinBuffer.Reserve(bytes) ||
                 !slot.skinBuffer.Write(scene.skinMatrices.data(), bytes)) {
                 SIM_WARN("Render", "cannot upload {} skin matrices", scene.skinMatrices.size());
-            } else if (slot.skinBuffer.Handle() != before) {
+            } else if (slot.skinBuffer.Generation() != before) {
                 // Buffer yang tumbuh adalah `VkBuffer` yang lain. Descriptor yang
                 // masih menunjuk yang lama membaca memori yang sudah dibebaskan.
                 // Hanya set slot ini yang ditulis ulang — slot lain punya buffer
@@ -1066,7 +1136,15 @@ public:
             probes_.RecordNormalBegin(command);
             BeginPrepassRendering(command, desc);
             if (slotReady && opaqueCount > 0) {
-                DrawInstances(command, prepassPipelines_, push, slot, visibleOpaqueRuns_, 0);
+                // **Prepass memakai perintah fase frustum, forward memakai fase
+                // occlusion.** Prepass yang ikut menyaring occlusion akan
+                // menyaring dirinya sendiri: piramidanya dibangun dari depth
+                // yang baru saja ditulis prepass itu.
+                DrawInstances(command, prepassPipelines_, push, slot, MainViewRuns(), 0,
+                              /*materialVariant=*/-1,
+                              gpuCullActive_
+                                  ? drawCull_.CommandBuffer(static_cast<uint32_t>(slotIndex_))
+                                  : VK_NULL_HANDLE);
             }
             vkCmdEndRendering(command);
             probes_.RecordNormalEnd(command);
@@ -1075,8 +1153,8 @@ public:
             BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/true,
                            /*writeColor=*/true);
             if (slotReady && opaqueCount > 0) {
-                DrawInstances(command, opaquePipelines_, push, slot, visibleOpaqueRuns_, 0,
-                              /*materialVariant=*/0);
+                DrawInstances(command, opaquePipelines_, push, slot, MainViewRuns(), 0,
+                              /*materialVariant=*/0, OpaqueCommandBuffer());
             }
             vkCmdEndRendering(command);
         };
@@ -1207,6 +1285,28 @@ public:
                 post_.RecordResolve(command, desc.post.enabled, desc.post.bloom);
                 vkCmdEndRendering(command);
             };
+        }
+
+        if (drawCullPassId_ != kInvalidPass) {
+            const auto cullSlot = static_cast<uint32_t>(slotIndex_);
+            executor_.Bind(drawCommandId_,
+                           BoundBuffer{drawCull_.CommandBuffer(cullSlot), 0, VK_WHOLE_SIZE});
+            recorders[drawCullPassId_] = [this, cullSlot](VkCommandBuffer command) {
+                drawCull_.Record(command, cullSlot, DrawCull::Phase::Frustum, false, cullLimit_,
+                                 cullFirst_);
+            };
+            if (drawCullLatePassId_ != kInvalidPass) {
+                executor_.Bind(visibleCommandId_,
+                               BoundBuffer{drawCull_.VisibleCommandBuffer(cullSlot), 0,
+                                           VK_WHOLE_SIZE});
+                recorders[occlusionPyramidPassId_] = [this](VkCommandBuffer command) {
+                    occlusion_.Record(command, target_.Width(), target_.Height());
+                };
+                recorders[drawCullLatePassId_] = [this, cullSlot](VkCommandBuffer command) {
+                    drawCull_.Record(command, cullSlot, DrawCull::Phase::Occlusion,
+                                     cullDebugActive_, cullLimit_, cullFirst_);
+                };
+            }
         }
 
         if (clusterPassId_ != kInvalidPass) {
@@ -1766,7 +1866,8 @@ public:
     std::span<const PassTiming> PassTimings() const override {
         timings_.clear();
         for (const rhi::GpuProfiler::Scope& scope : profiler_.Results()) {
-            timings_.push_back(PassTiming{scope.name, static_cast<float>(scope.milliseconds)});
+            timings_.push_back(PassTiming{scope.name, static_cast<float>(scope.milliseconds),
+                                          scope.primitives});
         }
         return timings_;
     }
@@ -1778,6 +1879,60 @@ public:
     RenderStats Stats() const override { return stats_; }
 
     bool UsesBindlessMaterials() const override { return bindless_; }
+
+    /// **Menunggu GPU diam lebih dulu.** Angka yang dibaca sementara dispatch
+    /// yang menulisnya masih berjalan adalah angka setengah frame ini dan
+    /// setengah frame lalu — yaitu tepat jenis bukti yang menyesatkan.
+    bool CaptureDepth(std::vector<float>& out, uint32_t& outWidth, uint32_t& outHeight,
+                      std::string& error) override {
+        return target_.ReadDepth(out, outWidth, outHeight, executor_.LayoutOf(depthId_), error);
+    }
+
+    bool CaptureCullDebug(std::string& out, std::string& error) override {
+        if (!gpuCullActive_ || !drawCull_.IsValid()) {
+            error = "GPU culling is off";
+            return false;
+        }
+        if (!cullDebugActive_) {
+            error = "cull debug was not on when the last frame was drawn";
+            return false;
+        }
+        device_.WaitIdle();
+        std::vector<DrawCull::GpuCullDebug> entries;
+        drawCull_.ReadDebug(lastCullSlot_, entries);
+        if (entries.empty()) {
+            error = "no cull data was written";
+            return false;
+        }
+        // Matriksnya ikut supaya yang memeriksa bisa menghitung ulang petak dan
+        // kedalamannya sendiri, dari kotak yang sama — dua implementasi yang
+        // harus sepakat, aturan yang sama dengan yang lain.
+        out = "# viewProj kolom demi kolom\n";
+        for (int column = 0; column < 4; ++column) {
+            for (int row = 0; row < 4; ++row) {
+                out += std::format("{}{:.9g}", (column == 0 && row == 0) ? "# " : " ",
+                                   lastViewProjection_[column][row]);
+            }
+        }
+        out += "\n# index centre.xyz extent.xyz uvMin.xy uvMax.xy nearest farthest level visible "
+               "depth surfaceId translate.xyz indexCount firstIndex\n";
+        for (std::size_t i = 0; i < entries.size(); ++i) {
+            const DrawCull::GpuCullDebug& entry = entries[i];
+            out += std::format(
+                "{} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} "
+                "{:.9g} {:.9g} {:g} {:g} {:.9g} {:.9g} {:.6g} {:.6g} {:.6g} {} {}\n",
+                i, entry.centre.x, entry.centre.y, entry.centre.z, entry.extent.x, entry.extent.y,
+                entry.extent.z, entry.rect.x, entry.rect.y, entry.rect.z, entry.rect.w,
+                entry.result.x, entry.result.y, entry.result.z, entry.result.w, entry.centre.w,
+                entry.extent.w,
+                i < opaqueTransforms_.size() ? opaqueTransforms_[i][3][0] : 0.0f,
+                i < opaqueTransforms_.size() ? opaqueTransforms_[i][3][1] : 0.0f,
+                i < opaqueTransforms_.size() ? opaqueTransforms_[i][3][2] : 0.0f,
+                i < cullSurfaces_.size() ? cullSurfaces_[i].indexCount : 0u,
+                i < cullSurfaces_.size() ? cullSurfaces_[i].firstIndex : 0u);
+        }
+        return true;
+    }
 
 private:
     struct InstanceSlot {
@@ -1849,6 +2004,22 @@ private:
             graph_.Write(clusterPassId_, clusterIndexId_, Access::ShaderWrite);
         }
 
+        // **Culling lebih dulu daripada apa pun yang menggambar geometri.**
+        // Yang dihasilkannya dibaca tahap `DRAW_INDIRECT`, yaitu sebelum tahap
+        // vertex — jadi barrier-nya harus sudah selesai sebelum draw pertama,
+        // bukan sebelum shader pertama.
+        drawCommandId_ = kInvalidResource;
+        drawCullPassId_ = kInvalidPass;
+        visibleCommandId_ = kInvalidResource;
+        occlusionPyramidPassId_ = kInvalidPass;
+        drawCullLatePassId_ = kInvalidPass;
+        if (gpuCullActive_) {
+            drawCommandId_ = graph_.Import("draw-commands", Access::IndirectRead);
+            visibleCommandId_ = graph_.Import("visible-commands", Access::IndirectRead);
+            drawCullPassId_ = graph_.AddPass("draw-cull");
+            graph_.Write(drawCullPassId_, drawCommandId_, Access::ShaderWrite);
+        }
+
         shadowPassId_ = graph_.AddPass("shadow-cascades");
         graph_.Write(shadowPassId_, shadowId_, Access::DepthWrite);
 
@@ -1873,6 +2044,27 @@ private:
 
         prepassId_ = graph_.AddPass("depth-prepass");
         graph_.Write(prepassId_, depthId_, Access::DepthWrite);
+        if (drawCullPassId_ != kInvalidPass) {
+            graph_.Read(prepassId_, drawCommandId_, Access::IndirectRead);
+        }
+
+        // **Piramida occlusion dibangun dari depth frame ini sendiri, bukan
+        // dari frame lalu.** Itu yang membuat tidak ada benda yang bisa berkedip
+        // masuk satu frame terlambat: yang diuji fase kedua adalah kedalaman
+        // yang benar-benar tergambar, bukan tebakan.
+        if (gpuOcclusionActive_) {
+            occlusionPyramidPassId_ = graph_.AddPass("occlusion-pyramid");
+            graph_.Read(occlusionPyramidPassId_, depthId_, Access::ShaderRead);
+            // Efek samping, alasan yang sama dengan `hiz-build`: keluarannya
+            // bukan resource graph — piramida mengurus perpindahan layout tiap
+            // mip-nya sendiri.
+            graph_.SetSideEffect(occlusionPyramidPassId_);
+
+            drawCullLatePassId_ = graph_.AddPass("draw-cull-late");
+            graph_.Write(drawCullLatePassId_, visibleCommandId_, Access::ShaderWrite);
+            // Depth-nya ikut dibaca — untuk dibandingkan dengan piramidanya.
+            graph_.Read(drawCullLatePassId_, depthId_, Access::ShaderRead);
+        }
 
         // Piramida dibangun dari depth prepass, bukan dari depth akhir. Yang
         // ditelusuri lapis screen-space adalah permukaan buram; yang tembus
@@ -1896,6 +2088,9 @@ private:
         if (clusterPassId_ != kInvalidPass) {
             graph_.Read(opaqueId_, clusterRangeId_, Access::ShaderRead);
             graph_.Read(opaqueId_, clusterIndexId_, Access::ShaderRead);
+        }
+        if (drawCullLatePassId_ != kInvalidPass) {
+            graph_.Read(opaqueId_, visibleCommandId_, Access::IndirectRead);
         }
         graph_.Read(opaqueId_, depthId_, Access::DepthWrite);
         graph_.Read(opaqueId_, shadowId_, Access::ShaderRead);
@@ -2051,6 +2246,15 @@ private:
 
     /// Menyaring instance yang terlihat, memisahkan tembus pandang, lalu
     /// mengurutkannya dari belakang ke depan.
+    /// Menyusun daftar permukaan yang bisa digambar frame ini.
+    ///
+    /// **Satuannya permukaan, bukan entity, dan itu berubah di G6.** Sebuah
+    /// permukaan adalah sepasang (entity, ruas mesh): ia yang punya satu warna,
+    /// satu material, dan satu tekstur. Sampai G6 ketiganya dikirim lewat push
+    /// constant per panggilan gambar, jadi setiap entity — bahkan yang bermesh
+    /// sama — menjadi panggilannya sendiri. Sejak ketiganya menjadi data
+    /// instance, seluruh permukaan yang sepakat soal mesh, ruas, material, dan
+    /// pipeline digambar sekali.
     void Gather(const ViewportDesc& desc, const ViewportScene& scene, const Mat4& viewProj) {
         opaque_.clear();
         transparent_.clear();
@@ -2078,13 +2282,22 @@ private:
             // keluar layar: pohon di sebelah kiri layar berhenti membayangi
             // jalan di tengahnya, dan yang terlihat bukan bayangan yang
             // menghilang melainkan bayangan yang "berkedip saat menengok".
-            // Cacat itu tidak pernah terlihat selama adegan ujinya kosong.
             //
             // Yang menggantikan penyaringan ini bukan ketiadaan penyaringan
             // melainkan penyaringan yang lebih tepat, satu per pass: pandangan
             // utama menyaring terhadap frustum kamera, tiap muka bayangan
             // terhadap volumenya sendiri. Lihat `SplitRuns`.
             if (!cameraVisible && !mesh.castShadows) {
+                continue;
+            }
+            // Mesh yang belum ada geometrinya tidak menghasilkan satu pun
+            // permukaan. Diperiksa di sini, bukan saat menggambar: daftar ruas
+            // yang memuat mesh yang tidak bisa digambar adalah daftar yang
+            // panjangnya berbohong.
+            const GpuMesh* geometry = mesh.mesh < meshes_.size()
+                                          ? meshes_[static_cast<std::size_t>(mesh.mesh)].get()
+                                          : nullptr;
+            if (geometry == nullptr || geometry->indexCount == 0 || geometry->parts.empty()) {
                 continue;
             }
 
@@ -2114,37 +2327,100 @@ private:
                 colorFirst = mesh.partFirst;
                 colorCount = mesh.partCount;
             }
-            const Vec4 color = mesh.selected ? kSelectedColor : mesh.color;
-            const BoxInstance instance = MakeInstance(color, mesh.receiveShadows, mesh.selected,
-                                                      skinned ? mesh.skinFirst : 0u);
-            if (color.a >= 0.999f) {
-                gathered_.push_back(GatherEntry{mesh.mesh, skinned, colorFirst, colorCount,
-                                                instance, InstanceTransform(model),
-                                                mesh.castShadows, world, cameraVisible});
-                continue;
-            }
-            // Tembus pandang tidak pernah menjatuhkan bayangan, jadi yang di
-            // luar pandangan memang tidak punya alasan ikut.
-            if (!cameraVisible) {
+            const Vec4 instanceColor = mesh.selected ? kSelectedColor : mesh.color;
+            // **Buram atau tembus pandang diputuskan warna entity, bukan warna
+            // ruas.** Aturan yang sama dengan sebelum G6, dan mempertahankannya
+            // disengaja: alpha ruas tetap sampai ke target seperti dulu, dan
+            // memindahkan keputusannya ke per-ruas akan memindahkan sebagian
+            // benda ke pass lain tanpa ada yang memintanya.
+            const bool opaqueInstance = instanceColor.a >= 0.999f;
+            // Tembus pandang tidak pernah menjatuhkan bayangan — kaca yang
+            // menghitamkan lantai di bawahnya adalah kesalahan yang lebih
+            // mencolok daripada kaca yang tidak berbayang sama sekali. Jadi yang
+            // di luar pandangan memang tidak punya alasan ikut.
+            if (!opaqueInstance && !cameraVisible) {
                 continue;
             }
             const float distance = glm::length(world.Centre() - eye);
-            // Tembus pandang tidak pernah menjatuhkan bayangan — kaca yang
-            // menghitamkan lantai di bawahnya adalah kesalahan yang lebih
-            // mencolok daripada kaca yang tidak berbayang sama sekali.
-            sorted_.push_back(SortedEntry{distance, mesh.mesh, skinned, colorFirst, colorCount,
-                                          instance, InstanceTransform(model)});
+            const Mat4 transform = InstanceTransform(model);
+
+            for (std::size_t partIndex = 0; partIndex < geometry->parts.size(); ++partIndex) {
+                const GpuMesh::Part& part = geometry->parts[partIndex];
+                if (part.indexCount == 0) {
+                    continue;
+                }
+                const std::size_t slot = colorFirst + partIndex;
+                const bool hasSlot = partIndex < colorCount;
+
+                // **Yang ditetapkan editor menang atas yang tertulis di berkas
+                // mesh.** Berkasnya adalah bagaimana model itu diekspor; slot
+                // material entity adalah keputusan orang yang menyusun adegan.
+                // Sorotan seleksi menang atas keduanya: objek terpilih harus
+                // berubah warna seluruhnya.
+                Vec4 color = instanceColor;
+                if (!mesh.selected) {
+                    if (part.baseColor.a > 0.0f) {
+                        color = part.baseColor;
+                    }
+                    if (hasSlot && slot < partColors_.size() && partColors_[slot].a > 0.0f) {
+                        color = partColors_[slot];
+                    }
+                }
+
+                MaterialHandle material = kInvalidMaterial;
+                if (hasSlot && slot < partMaterials_.size()) {
+                    const MaterialHandle handle = partMaterials_[slot];
+                    if (handle != kInvalidMaterial && handle <= materials_.size()) {
+                        material = handle;
+                    }
+                }
+                // Tekstur jalur mundur hanya berlaku untuk ruas yang **tidak**
+                // punya material: material membawa teksturnya sendiri.
+                TextureHandle texture = kInvalidTexture;
+                if (material == kInvalidMaterial && hasSlot && slot < partTextures_.size()) {
+                    const TextureHandle handle = partTextures_[slot];
+                    if (handle != kInvalidTexture && handle <= materialTextures_.size()) {
+                        texture = handle;
+                    }
+                }
+
+                const uint32_t materialSlot =
+                    material == kInvalidMaterial
+                        ? 0u
+                        : materials_[static_cast<std::size_t>(material) - 1]->slot;
+                const BoxInstance instance =
+                    MakeInstance(color, mesh.receiveShadows, skinned ? mesh.skinFirst : 0u,
+                                 materialSlot, static_cast<uint32_t>(texture));
+
+                SurfaceEntry entry{mesh.mesh,
+                                   static_cast<uint32_t>(partIndex),
+                                   material,
+                                   texture,
+                                   skinned,
+                                   instance,
+                                   transform,
+                                   mesh.castShadows,
+                                   world,
+                                   cameraVisible,
+                                   distance};
+                if (opaqueInstance) {
+                    gathered_.push_back(entry);
+                } else {
+                    sorted_.push_back(entry);
+                }
+            }
         }
 
-        // **Yang menjatuhkan bayangan lebih dulu, lalu dikelompokkan per mesh.**
-        // Kunci pertama menjaga sifat lama: pass bayangan menggambar awalan
-        // daftarnya tanpa atribut tambahan dan tanpa cabang di shader. Kunci
-        // kedua yang baru: satu draw per mesh, bukan satu draw per instance.
-        // `stable_sort`, bukan `sort` — urutan di antara instance bermesh sama
-        // memang tidak berarti apa-apa, tapi urutan yang berubah-ubah tiap frame
-        // membuat setiap perbandingan gambar menjadi tidak bisa dipakai.
+        // **Yang menjatuhkan bayangan lebih dulu, lalu dikelompokkan.** Kunci
+        // pertama menjaga sifat lama: pass bayangan menggambar awalan daftarnya
+        // tanpa atribut tambahan dan tanpa cabang di shader.
+        //
+        // `stable_sort`, bukan `sort` — urutan di antara permukaan yang seluruh
+        // kuncinya sama memang tidak berarti apa-apa, tapi urutan yang
+        // berubah-ubah tiap frame membuat setiap perbandingan gambar menjadi
+        // tidak bisa dipakai.
         std::stable_sort(gathered_.begin(), gathered_.end(),
-                         [](const GatherEntry& a, const GatherEntry& b) {
+                         [](const SurfaceEntry& a, const SurfaceEntry& b) {
                              if (a.caster != b.caster) {
                                  return a.caster;
                              }
@@ -2166,32 +2442,50 @@ private:
                              if (a.mesh != b.mesh) {
                                  return a.mesh < b.mesh;
                              }
-                             // Kunci ketiga: yang berkulit dan yang tidak
-                             // memakai pipeline yang berbeda, jadi mencampurnya
-                             // di dalam satu ruas berarti sebagian instance
-                             // digambar lewat pipeline yang bukan miliknya.
+                             // Yang berkulit dan yang tidak memakai pipeline yang
+                             // berbeda, jadi mencampurnya di dalam satu ruas
+                             // berarti sebagian permukaan digambar lewat pipeline
+                             // yang bukan miliknya.
                              if (a.skinned != b.skinned) {
                                  return static_cast<int>(a.skinned) > static_cast<int>(b.skinned);
                              }
-                             // Kunci keempat: material yang berbeda adalah ruas
-                             // yang berbeda, karena warnanya dikirim per ruas.
-                             return a.colorFirst < b.colorFirst;
+                             if (a.part != b.part) {
+                                 return a.part < b.part;
+                             }
+                             // Material menentukan pipeline, tekstur menentukan
+                             // descriptor set jalur mundur. Keduanya kunci ruas.
+                             if (a.material != b.material) {
+                                 return a.material < b.material;
+                             }
+                             return a.texture < b.texture;
                          });
 
         opaque_.reserve(gathered_.size());
         opaqueTransforms_.reserve(gathered_.size());
         instanceBounds_.reserve(gathered_.size());
         instanceVisible_.reserve(gathered_.size());
-        for (const GatherEntry& entry : gathered_) {
+        cullBounds_.clear();
+        cullSurfaces_.clear();
+        cullBounds_.reserve(gathered_.size());
+        cullSurfaces_.reserve(gathered_.size());
+        for (const SurfaceEntry& entry : gathered_) {
             if (entry.caster) {
                 ++casterCount_;
             }
-            AppendRun(opaqueRuns_, entry.mesh, entry.skinned, entry.colorFirst, entry.colorCount,
-                      static_cast<uint32_t>(opaque_.size()));
+            AppendRun(opaqueRuns_, entry, static_cast<uint32_t>(opaque_.size()));
             opaque_.push_back(entry.instance);
             opaqueTransforms_.push_back(entry.transform);
             instanceBounds_.push_back(entry.bounds);
             instanceVisible_.push_back(entry.cameraVisible ? 1u : 0u);
+            // Bahan untuk pass culling. **Pusat dan setengah-lebar dihitung di
+            // sini, sekali**, bukan di shader dari min/max: `Frustum::Intersects`
+            // memakai keduanya, dan dua pembagian yang seharusnya menghasilkan
+            // angka yang sama adalah dua angka yang suatu saat berbeda satu ULP.
+            cullBounds_.push_back(DrawCull::GpuBounds{Vec4(entry.bounds.Centre(), 0.0f),
+                                                      Vec4(entry.bounds.Extent(), 0.0f)});
+            const GpuMesh::Part& part =
+                meshes_[static_cast<std::size_t>(entry.mesh)]->parts[entry.part];
+            cullSurfaces_.push_back(DrawCull::GpuSurface{part.indexCount, part.firstIndex});
         }
 
         // Ruas untuk pandangan utama. Dipecah, bukan disaring saat menggambar:
@@ -2223,12 +2517,13 @@ private:
         // luar urutan jaraknya, dan yang didapat — beberapa draw call lebih
         // sedikit — jauh lebih murah daripada yang hilang.
         std::stable_sort(sorted_.begin(), sorted_.end(),
-                  [](const SortedEntry& a, const SortedEntry& b) { return a.distance > b.distance; });
+                         [](const SurfaceEntry& a, const SurfaceEntry& b) {
+                             return a.distance > b.distance;
+                         });
         transparent_.reserve(sorted_.size());
         transparentTransforms_.reserve(sorted_.size());
-        for (const SortedEntry& entry : sorted_) {
-            AppendRun(transparentRuns_, entry.mesh, entry.skinned, entry.colorFirst,
-                      entry.colorCount, static_cast<uint32_t>(transparent_.size()));
+        for (const SurfaceEntry& entry : sorted_) {
+            AppendRun(transparentRuns_, entry, static_cast<uint32_t>(transparent_.size()));
             transparent_.push_back(entry.instance);
             transparentTransforms_.push_back(entry.transform);
         }
@@ -2256,15 +2551,78 @@ private:
 
     /// Menambah instance ke ruas terakhir bila mesh dan jalurnya sama, atau
     /// membuka ruas baru.
-    static void AppendRun(std::vector<DrawRun>& runs, MeshHandle mesh, bool skinned,
-                          uint32_t colorFirst, uint32_t colorCount, uint32_t index) {
-        if (!runs.empty() && runs.back().mesh == mesh && runs.back().skinned == skinned &&
-            runs.back().partColorFirst == colorFirst &&
-            runs.back().partColorCount == colorCount) {
+    /// Sepasang (entity, ruas mesh) sebelum diurutkan menjadi ruas draw.
+    ///
+    /// **Satu bentuk untuk buram dan tembus pandang.** Sampai G6 keduanya punya
+    /// struct sendiri yang isinya nyaris sama; satu-satunya yang benar-benar
+    /// hanya milik tembus pandang adalah jaraknya, dan sebuah medan yang tidak
+    /// dibaca lebih murah daripada dua struct yang harus dijaga sepakat.
+    struct SurfaceEntry {
+        MeshHandle mesh = kUnitCubeMesh;
+        uint32_t part = 0;
+        MaterialHandle material = kInvalidMaterial;
+        TextureHandle texture = kInvalidTexture;
+        bool skinned = false;
+        BoxInstance instance;
+        Mat4 transform{1.0f};
+        bool caster = false;
+        /// Kotak dunia entity ini, disimpan supaya tiap pass bayangan bisa
+        /// mengujinya terhadap volumenya sendiri. Tanpa ini setiap pass harus
+        /// mentransformasikan ulang kotak lokalnya — 32 muka atlas dikali
+        /// ribuan permukaan berarti puluhan ribu transformasi kotak per frame
+        /// untuk jawaban yang tidak berubah di antara keduanya.
+        Aabb bounds;
+        /// Terlihat kamera. **Bukan syarat untuk ikut didaftar**: caster yang
+        /// berada di luar pandangan tetap harus menjatuhkan bayangan ke dalamnya.
+        bool cameraVisible = true;
+        /// Jarak ke kamera. Dibaca hanya jalur tembus pandang.
+        float distance = 0.0f;
+    };
+    /// Buffer perintah pass forward.
+    ///
+    /// **Dua buffer, dan yang membedakannya siapa yang menyaring.** Tanpa
+    /// occlusion culling, forward menggambar himpunan yang sama dengan prepass —
+    /// yaitu isi frustum. Dengan occlusion, ia menggambar yang lolos uji
+    /// terhadap piramida depth yang baru saja dibangun dari prepass itu.
+    VkBuffer OpaqueCommandBuffer() const {
+        if (!gpuCullActive_) {
+            return VK_NULL_HANDLE;
+        }
+        const auto slot = static_cast<uint32_t>(slotIndex_);
+        return gpuOcclusionActive_ ? drawCull_.VisibleCommandBuffer(slot)
+                                   : drawCull_.CommandBuffer(slot);
+    }
+
+    /// Ruas yang digambar pandangan utama — prepass dan forward buram.
+    ///
+    /// **Dua daftar, dan yang membedakan siapa yang menyaring.** Jalur CPU
+    /// memakai daftar yang sudah dipecah `SplitRuns` sehingga hanya memuat yang
+    /// terlihat; jalur GPU memakai daftar utuh, karena yang menyaring adalah
+    /// `instanceCount` di dalam perintah gambarnya. Daftar utuh juga lebih
+    /// pendek: ia tidak terpecah oleh batas terlihat/tidak.
+    std::span<const DrawRun> MainViewRuns() const {
+        return gpuCullActive_ ? std::span<const DrawRun>(opaqueRuns_)
+                              : std::span<const DrawRun>(visibleOpaqueRuns_);
+    }
+
+    /// Menyambung sebuah permukaan ke ruas terakhir, atau membuka ruas baru.
+    ///
+    /// **Kuncinya adalah segala sesuatu yang tidak bisa berubah di tengah satu
+    /// panggilan gambar**: mesh dan ruasnya menentukan buffer dan rentang
+    /// indeksnya, material menentukan pipeline-nya, tekstur menentukan
+    /// descriptor set jalur mundur, dan kulit menentukan keduanya sekaligus.
+    /// Warna, slot material, dan slot tekstur **tidak** ada di sini — ketiganya
+    /// data instance sejak G6, dan itulah yang membuat ribuan entity menjadi
+    /// puluhan panggilan.
+    static void AppendRun(std::vector<DrawRun>& runs, const SurfaceEntry& entry, uint32_t index) {
+        if (!runs.empty() && runs.back().mesh == entry.mesh && runs.back().part == entry.part &&
+            runs.back().material == entry.material && runs.back().texture == entry.texture &&
+            runs.back().skinned == entry.skinned) {
             ++runs.back().count;
             return;
         }
-        runs.push_back(DrawRun{mesh, colorFirst, colorCount, skinned, index, 1});
+        runs.push_back(DrawRun{entry.mesh, entry.part, entry.material, entry.texture,
+                               entry.skinned, index, 1});
     }
 
     /// `useDepth` false berarti depth tidak dipasang sama sekali.
@@ -2441,7 +2799,8 @@ private:
 
     void DrawInstances(VkCommandBuffer cmd, const PipelineVariants& pipelines, const BoxPush& push,
                        InstanceSlot& slot, std::span<const DrawRun> runs, uint32_t instanceBase,
-                       int materialVariant = -1) {
+                       int materialVariant = -1,
+                       VkBuffer indirectCommands = VK_NULL_HANDLE) {
         // Descriptor set diikat untuk setiap pipeline forward, termasuk prepass.
         // Prepass tidak membacanya, tapi layout-nya mendeklarasikannya — dan
         // set yang dideklarasikan tapi tidak terikat adalah pelanggaran meski
@@ -2462,8 +2821,8 @@ private:
         BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, bindless_ ? 3u : 2u,
                  sets.data(), 0, nullptr);
         vkCmdPushConstants(cmd, pipelineLayout_, kBoxPushStages, 0, sizeof(BoxPush), &push);
-        DrawRuns(cmd, slot, runs, instanceBase, pipelines, pipelineLayout_, push,
-                 /*bindsMaterial=*/true, materialVariant);
+        DrawRuns(cmd, slot, runs, instanceBase, pipelines, pipelineLayout_,
+                 /*bindsMaterial=*/true, materialVariant, indirectCommands);
     }
 
     /// Mengikat geometri tiap ruas lalu menggambarnya. Dipakai bersama pass
@@ -2483,15 +2842,25 @@ private:
     /// selesai dimuat, jauh dari sebabnya.
     void DrawRuns(VkCommandBuffer cmd, InstanceSlot& slot, std::span<const DrawRun> runs,
                   uint32_t instanceBase, const PipelineVariants& pipelines,
-                  VkPipelineLayout layout, const BoxPush& push, bool bindsMaterial,
-                  int materialVariant = -1) {
+                  VkPipelineLayout layout, bool bindsMaterial, int materialVariant = -1,
+                  VkBuffer indirectCommands = VK_NULL_HANDLE) {
         VkPipeline bound = VK_NULL_HANDLE;
+        // **Bukan sebuah handle sentinel**: nol adalah kubus satuan, yaitu mesh
+        // yang sah dan yang paling sering muncul. Bendera terpisah karena itu,
+        // bukan nilai ajaib.
+        bool boundGeometry = false;
+        MeshHandle boundMesh = kUnitCubeMesh;
+        bool boundSkinned = false;
         for (const DrawRun& run : runs) {
             if (run.count == 0 || run.mesh >= meshes_.size()) {
                 continue;
             }
             const GpuMesh& mesh = *meshes_[static_cast<std::size_t>(run.mesh)];
-            if (mesh.indexCount == 0) {
+            if (run.part >= mesh.parts.size()) {
+                continue;
+            }
+            const GpuMesh::Part& part = mesh.parts[static_cast<std::size_t>(run.part)];
+            if (part.indexCount == 0) {
                 continue;
             }
             // Ruas berkulit yang mesh-nya ternyata tidak punya bobot digambar
@@ -2503,121 +2872,99 @@ private:
             if (fallbackPipeline == VK_NULL_HANDLE) {
                 continue;
             }
-            const std::array<VkBuffer, 3> buffers{
-                mesh.vertices.Handle(), slot.buffer.Handle(),
-                skinned ? mesh.skin.Handle() : dummySkin_.Handle()};
-            const std::array<VkDeviceSize, 3> offsets{0, 0, 0};
-            vkCmdBindVertexBuffers(cmd, 0, 3, buffers.data(), offsets.data());
-            vkCmdBindIndexBuffer(cmd, mesh.indices.Handle(), 0, VK_INDEX_TYPE_UINT32);
-            // Satu panggilan per ruas. Mesh yang berkasnya tidak menyebut
-            // material punya tepat satu ruas, jadi ini tetap satu panggilan
-            // untuk seluruh adegan statis yang sudah ada.
-            for (std::size_t partIndex = 0; partIndex < mesh.parts.size(); ++partIndex) {
-                const GpuMesh::Part& part = mesh.parts[partIndex];
-                if (part.indexCount == 0) {
-                    continue;
-                }
-                BoxPush partPush = push;
-                // **Yang ditetapkan editor menang atas yang tertulis di berkas
-                // mesh.** Berkasnya adalah bagaimana model itu diekspor; slot
-                // material entity adalah keputusan orang yang menyusun adegan,
-                // dan keputusan itu tidak boleh dikalahkan oleh berkasnya.
-                partPush.partColor = part.baseColor;
-                // Basis instance ruas ini. Lihat catatannya di `BoxPush`:
-                // `SV_InstanceID` mulai dari nol tiap draw, sementara atribut
-                // instance di sebelahnya tidak.
-                partPush.instanceBase = instanceBase + run.first;
-                if (partIndex < run.partColorCount) {
-                    const Vec4& assigned = partColors_[run.partColorFirst + partIndex];
-                    if (assigned.a > 0.0f) {
-                        partPush.partColor = assigned;
-                    }
-                }
-                // Set material ruas ini. Yang tidak punya tekstur mendapat yang
-                // putih — nilai satuan perkalian, jadi ia tergambar persis
-                // seperti sebelum jalur tekstur ada.
-                // **Material ruas ini kalau ada, jalur mundur `box.frag` kalau
-                // tidak.** Keduanya hidup berdampingan dengan sengaja: ruas yang
-                // materialnya belum dikompilasi, gagal dikompilasi, atau memang
-                // tidak punya material tetap tergambar — dan viewport tidak
-                // pernah kosong hanya karena satu material bermasalah.
-                const GpuMaterial* material = nullptr;
-                if (materialVariant >= 0 && partIndex < run.partColorCount &&
-                    run.partColorFirst + partIndex < partMaterials_.size()) {
-                    const MaterialHandle handle = partMaterials_[run.partColorFirst + partIndex];
-                    if (handle != kInvalidMaterial && handle <= materials_.size()) {
-                        material = materials_[static_cast<std::size_t>(handle) - 1].get();
-                    }
-                }
 
-                const VkPipelineLayout partLayout =
-                    material != nullptr ? material->pipelineLayout : layout;
-                // Slot material ruas ini. Nol pada jalur mundur, dan tidak
-                // pernah dibaca di sana — `box.frag` membaca `textureSlot`.
-                partPush.materialSlot = material != nullptr ? material->slot : 0;
-                const VkPipeline partPipeline =
-                    material != nullptr
-                        ? material->pipelines[static_cast<std::size_t>(materialVariant)]
-                                             [skinned ? 1u : 0u]
-                        : fallbackPipeline;
-                if (partPipeline == VK_NULL_HANDLE) {
-                    continue;
-                }
-                // **Pipeline diikat di dalam gelung ruas, bukan di luarnya.**
-                // Dua ruas berturut-turut dari mesh yang sama bisa memakai
-                // material yang berbeda, dan yang mengikatnya sekali per mesh
-                // akan menggambar sebagiannya lewat pipeline yang bukan miliknya
-                // — tanpa satu pun galat.
-                if (partPipeline != bound) {
-                    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, partPipeline);
-                    bound = partPipeline;
-                }
-
-                // Tekstur ruas ini, untuk ruas yang digambar jalur mundur.
-                //
-                // **Dicari di kedua jalur, dipakai berbeda.** Bindless
-                // membawanya sebagai nomor slot di push constant; jalur mundur
-                // membawanya sebagai descriptor set yang diikat di sini. Yang
-                // sama persis adalah cara menemukannya, dan itu tetap satu
-                // salinan kode.
-                TextureHandle partTexture = kInvalidTexture;
-                if (material == nullptr && bindsMaterial &&
-                    partIndex < run.partColorCount &&
-                    run.partColorFirst + partIndex < partTextures_.size()) {
-                    const TextureHandle handle = partTextures_[run.partColorFirst + partIndex];
-                    if (handle != kInvalidTexture && handle <= materialTextures_.size()) {
-                        partTexture = handle;
-                    }
-                }
-
-                if (bindless_) {
-                    // Slot nol adalah putih 1x1, jadi ruas tanpa tekstur tidak
-                    // menuntut satu pun cabang di shader.
-                    partPush.textureSlot =
-                        partTexture == kInvalidTexture ? 0u : static_cast<uint32_t>(partTexture);
-                } else {
-                    VkDescriptorSet materialSet = VK_NULL_HANDLE;
-                    if (material != nullptr) {
-                        materialSet = material->set;
-                    } else if (bindsMaterial) {
-                        materialSet =
-                            partTexture == kInvalidTexture
-                                ? fallbackSet_
-                                : materialTextures_[static_cast<std::size_t>(partTexture) - 1]
-                                      ->set;
-                    }
-                    if (materialSet != VK_NULL_HANDLE) {
-                        BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, partLayout, 2, 1,
-                                 &materialSet, 0, nullptr);
-                    }
-                }
-                vkCmdPushConstants(cmd, partLayout, kBoxPushStages, 0,
-                                   sizeof(BoxPush), &partPush);
-                vkCmdDrawIndexed(cmd, part.indexCount, run.count, static_cast<int32_t>(0),
-                                 static_cast<int32_t>(part.firstIndex),
-                                 instanceBase + run.first);
-                ++stats_.drawCalls;
+            // **Material ruas ini kalau ada, jalur mundur `box.frag` kalau
+            // tidak.** Keduanya hidup berdampingan dengan sengaja: ruas yang
+            // materialnya belum dikompilasi, gagal dikompilasi, atau memang
+            // tidak punya material tetap tergambar — dan viewport tidak pernah
+            // kosong hanya karena satu material bermasalah.
+            const GpuMaterial* material = nullptr;
+            if (materialVariant >= 0 && run.material != kInvalidMaterial &&
+                run.material <= materials_.size()) {
+                material = materials_[static_cast<std::size_t>(run.material) - 1].get();
             }
+
+            const VkPipelineLayout partLayout =
+                material != nullptr ? material->pipelineLayout : layout;
+            const VkPipeline partPipeline =
+                material != nullptr
+                    ? material->pipelines[static_cast<std::size_t>(materialVariant)]
+                                         [skinned ? 1u : 0u]
+                    : fallbackPipeline;
+            if (partPipeline == VK_NULL_HANDLE) {
+                continue;
+            }
+
+            // **Geometri diikat hanya saat mesh-nya benar-benar berganti.**
+            // Sejak ruas mesh menjadi kunci ruas draw, dua ruas berturut-turut
+            // dari mesh yang sama adalah hal yang biasa — dan mengikat ulang
+            // vertex buffer yang sama persis untuk masing-masingnya adalah
+            // pekerjaan CPU yang dibayar ribuan kali per frame.
+            if (!boundGeometry || run.mesh != boundMesh || skinned != boundSkinned) {
+                const std::array<VkBuffer, 3> buffers{
+                    mesh.vertices.Handle(), slot.buffer.Handle(),
+                    skinned ? mesh.skin.Handle() : dummySkin_.Handle()};
+                const std::array<VkDeviceSize, 3> offsets{0, 0, 0};
+                vkCmdBindVertexBuffers(cmd, 0, 3, buffers.data(), offsets.data());
+                vkCmdBindIndexBuffer(cmd, mesh.indices.Handle(), 0, VK_INDEX_TYPE_UINT32);
+                boundGeometry = true;
+                boundMesh = run.mesh;
+                boundSkinned = skinned;
+            }
+
+            // **Pipeline diikat di dalam gelung, bukan di luarnya.** Dua ruas
+            // berturut-turut bisa memakai material yang berbeda, dan yang
+            // mengikatnya sekali di awal akan menggambar sebagiannya lewat
+            // pipeline yang bukan miliknya — tanpa satu pun galat.
+            if (partPipeline != bound) {
+                vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, partPipeline);
+                bound = partPipeline;
+            }
+
+            if (!bindless_) {
+                VkDescriptorSet materialSet = VK_NULL_HANDLE;
+                if (material != nullptr) {
+                    materialSet = material->set;
+                } else if (bindsMaterial) {
+                    materialSet =
+                        run.texture == kInvalidTexture
+                            ? fallbackSet_
+                            : materialTextures_[static_cast<std::size_t>(run.texture) - 1]->set;
+                }
+                if (materialSet != VK_NULL_HANDLE) {
+                    BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, partLayout, 2, 1, &materialSet,
+                             0, nullptr);
+                }
+            }
+
+            // **Basis instance tidak dikirim lagi, ia sudah ada di draw-nya.**
+            // `firstInstance` adalah `SV_StartInstanceLocation` yang dibaca tahap
+            // vertex; mengirimnya lagi lewat push constant berarti dua salinan
+            // dari satu angka — dan indirect draw menutup pilihan itu
+            // seluruhnya, karena perintahnya dibangkitkan GPU.
+            if (indirectCommands != VK_NULL_HANDLE) {
+                // Satu panggilan untuk seluruh permukaan ruas ini, berapa pun
+                // banyaknya. Yang tersaring ada di sana juga, dengan
+                // `instanceCount` nol — lihat catatan di `DrawCull`.
+                vkCmdDrawIndexedIndirect(
+                    cmd, indirectCommands,
+                    static_cast<VkDeviceSize>(run.first) * sizeof(VkDrawIndexedIndirectCommand),
+                    run.count, sizeof(VkDrawIndexedIndirectCommand));
+            } else {
+                // **`firstIndex` lalu `vertexOffset`, dan urutan itu sempat
+                // tertukar.** `SubMesh::firstIndex` adalah offset ke dalam
+                // buffer indeks; menyerahkannya sebagai `vertexOffset` berarti
+                // ruas kedua sebuah mesh membaca indeks milik ruas pertama lalu
+                // menggeser vertexnya sejauh itu. Mesh berruas satu — yaitu
+                // hampir semuanya — punya `firstIndex` nol, jadi keduanya
+                // menghasilkan gambar yang sama dan tidak ada yang menemukannya.
+                // Yang menemukannya jalur indirect, yang menuliskan kedua medan
+                // itu dengan namanya masing-masing.
+                vkCmdDrawIndexed(cmd, part.indexCount, run.count,
+                                 /*firstIndex=*/part.firstIndex, /*vertexOffset=*/0,
+                                 instanceBase + run.first);
+            }
+            ++stats_.drawCalls;
         }
     }
 
@@ -2669,6 +3016,58 @@ private:
         }
         mesh->boundsMin = data.boundsMin;
         mesh->boundsMax = data.boundsMax;
+        // **Kotak batas yang berbohong tidak menghasilkan satu pun galat.** Ia
+        // dipakai frustum culling, occlusion culling, dan lintasan kamera alat
+        // ukur; simpul yang menonjol keluar darinya berarti benda yang dibuang
+        // padahal terlihat, atau — lebih buruk — tergambar di tempat yang tidak
+        // diperhitungkan siapa pun. Diperiksa sekali saat unggah, bukan
+        // dipercaya.
+        if (!data.vertices.empty()) {
+            Vec3 low = data.vertices[0].position;
+            Vec3 high = low;
+            for (const assets::MeshVertex& vertex : data.vertices) {
+                low = glm::min(low, vertex.position);
+                high = glm::max(high, vertex.position);
+            }
+            const Vec3 slack = glm::max(data.boundsMax - data.boundsMin, Vec3(1.0f)) * 1e-3f;
+            if (glm::any(glm::lessThan(low, data.boundsMin - slack)) ||
+                glm::any(glm::greaterThan(high, data.boundsMax + slack))) {
+                SIM_WARN("Render",
+                         "a mesh has vertices outside the bounds it reports: "
+                         "[{:.3f} {:.3f} {:.3f}]..[{:.3f} {:.3f} {:.3f}] vs "
+                         "[{:.3f} {:.3f} {:.3f}]..[{:.3f} {:.3f} {:.3f}]",
+                         low.x, low.y, low.z, high.x, high.y, high.z, data.boundsMin.x,
+                         data.boundsMin.y, data.boundsMin.z, data.boundsMax.x, data.boundsMax.y,
+                         data.boundsMax.z);
+            }
+        }
+        // **Indeks yang menunjuk ke luar buffer simpul tidak menghasilkan satu
+        // pun galat.** Vulkan menyebutnya perilaku tak terdefinisi, dan yang
+        // keluar dari driver ini adalah simpul berisi sampah. Diperiksa sekali
+        // saat unggah, alasan yang sama persis dengan pemeriksaan kotak batas
+        // di atas.
+        {
+            uint32_t highest = 0;
+            for (uint32_t value : data.indices) {
+                highest = std::max(highest, value);
+            }
+            if (!data.indices.empty() &&
+                static_cast<std::size_t>(highest) >= data.vertices.size()) {
+                SIM_WARN("Render",
+                         "a mesh has indices past its vertex buffer: highest {} of {} vertices",
+                         highest, data.vertices.size());
+            }
+            for (std::size_t at = 0; at < mesh->parts.size(); ++at) {
+                const GpuMesh::Part& part = mesh->parts[at];
+                if (static_cast<std::size_t>(part.firstIndex) + part.indexCount >
+                    data.indices.size()) {
+                    SIM_WARN("Render",
+                             "mesh part {} runs past the index buffer: [{}, {}) of {} indices", at,
+                             part.firstIndex, part.firstIndex + part.indexCount,
+                             data.indices.size());
+                }
+            }
+        }
         meshes_.push_back(std::move(mesh));
         return static_cast<MeshHandle>(meshes_.size() - 1);
     }
@@ -3025,7 +3424,7 @@ private:
                              bool skinned = false, VkPipelineLayout layout = VK_NULL_HANDLE,
                              VkFormat depthFormat = VK_FORMAT_UNDEFINED,
                              VkFormat colorAttachment = VK_FORMAT_UNDEFINED,
-                             uint32_t attributeMask = 0x3FC3u) {
+                             uint32_t attributeMask = 0xFFC3u) {
         // `kSkinned`, konstanta spesialisasi 0 di `Shaders/skin_common.slang`.
         // Ukurannya empat byte walaupun tipenya bool: Vulkan menyatakan
         // konstanta spesialisasi boolean berukuran `VkBool32`, dan ukuran yang
@@ -3070,7 +3469,7 @@ private:
                 2, skinned ? static_cast<uint32_t>(sizeof(assets::SkinInfluence)) : 0u,
                 VK_VERTEX_INPUT_RATE_VERTEX},
         };
-        const std::array<VkVertexInputAttributeDescription, 10> attributes{
+        const std::array<VkVertexInputAttributeDescription, 12> attributes{
             VkVertexInputAttributeDescription{0, 0, VK_FORMAT_R32G32B32_SFLOAT,
                                               offsetof(BoxVertex, position)},
             VkVertexInputAttributeDescription{1, 0, VK_FORMAT_R32G32B32_SFLOAT,
@@ -3103,6 +3502,13 @@ private:
             // dibiarkan supaya tidak ada satu pun atribut yang bergeser.
             VkVertexInputAttributeDescription{13, 0, VK_FORMAT_R32G32B32A32_SFLOAT,
                                               offsetof(BoxVertex, tangent)},
+            // Slot material dan tekstur, di binding 1 bersama warna dan bendera:
+            // keduanya milik permukaan, bukan milik simpul. Lihat catatannya di
+            // `BoxInstance`.
+            VkVertexInputAttributeDescription{14, 1, VK_FORMAT_R32_UINT,
+                                              offsetof(BoxInstance, materialSlot)},
+            VkVertexInputAttributeDescription{15, 1, VK_FORMAT_R32_UINT,
+                                              offsetof(BoxInstance, textureSlot)},
 };
         // Tiap pipeline menyebutkan atribut mana yang benar-benar dibacanya.
         // Buffer-nya sama dan stride-nya sama; yang berbeda hanya atribut yang
@@ -3116,7 +3522,7 @@ private:
         // adalah peringatan validasi di setiap pembuatan pipeline. Menyaringnya
         // di sini bukan sekadar meredam peringatan: atribut yang tidak diambil
         // memang tidak perlu diambil.
-        std::array<VkVertexInputAttributeDescription, 10> used{};
+        std::array<VkVertexInputAttributeDescription, 12> used{};
         uint32_t usedCount = 0;
         for (const VkVertexInputAttributeDescription& attribute : attributes) {
             if ((attributeMask & (1u << attribute.location)) != 0u) {
@@ -3865,7 +4271,7 @@ private:
                 const BoxPush push{entry.viewProjection};
                 vkCmdPushConstants(cmd, shadowLayout_, kBoxPushStages, 0,
                                    sizeof(BoxPush), &push);
-                DrawRuns(cmd, slot, shadowRuns_, 0, shadowPipelines_, shadowLayout_, push,
+                DrawRuns(cmd, slot, shadowRuns_, 0, shadowPipelines_, shadowLayout_,
                          /*bindsMaterial=*/false);
             }
         }
@@ -4619,7 +5025,7 @@ private:
                              &slot.skinSet, 0, nullptr);
                     vkCmdPushConstants(cmd, shadowLayout_, kBoxPushStages, 0,
                                        sizeof(BoxPush), &push);
-                    DrawRuns(cmd, slot, shadowRuns_, 0, shadowPipelines_, shadowLayout_, push,
+                    DrawRuns(cmd, slot, shadowRuns_, 0, shadowPipelines_, shadowLayout_,
                              /*bindsMaterial=*/false);
                 }
             }
@@ -4661,6 +5067,7 @@ private:
         // tumpukan yang sudah bocor adalah tempat kebocoran baru bersembunyi.
         sdfClipmap_.Destroy();
         hiz_.Destroy();
+        occlusion_.Destroy();
         post_.Destroy();
         sky_.Destroy();
         probes_.Destroy();
@@ -4714,6 +5121,35 @@ private:
     PostProcess post_;
     ComputeGradient gradient_;
     ClusterAssign clusterAssign_;
+    /// Culling di GPU yang menghasilkan perintah gambar (G6). Lihat `DrawCull`.
+    DrawCull drawCull_;
+    /// Jalur GPU-driven yang benar-benar dipakai frame ini.
+    bool gpuCullActive_ = false;
+    /// Occlusion culling yang benar-benar dipakai frame ini. Lihat
+    /// `ViewportDesc::gpuOcclusion` — bawaannya mati.
+    bool gpuOcclusionActive_ = false;
+    /// Menulis angka antara uji occlusion. Alat diagnostik; lihat
+    /// `ViewportDesc::cullDebug`.
+    bool cullDebugActive_ = false;
+    /// Batas bisect uji occlusion; lihat `ViewportDesc::cullLimit`.
+    uint32_t cullLimit_ = 0xffffffffu;
+    uint32_t cullFirst_ = 0;
+    /// Slot yang perintahnya terakhir disubmit, dan viewProj-nya. Dipakai
+    /// pembaca angka antara supaya ia membaca frame yang benar.
+    uint32_t lastCullSlot_ = 0;
+    Mat4 lastViewProjection_{1.0f};
+    /// Kotak dan rentang indeks tiap permukaan, dipakai ulang tiap frame.
+    std::vector<DrawCull::GpuBounds> cullBounds_;
+    std::vector<DrawCull::GpuSurface> cullSurfaces_;
+    ResourceId drawCommandId_ = kInvalidResource;
+    ResourceId visibleCommandId_ = kInvalidResource;
+    PassId drawCullPassId_ = kInvalidPass;
+    PassId occlusionPyramidPassId_ = kInvalidPass;
+    PassId drawCullLatePassId_ = kInvalidPass;
+    /// Piramida depth yang meringkas dengan **minimum** — permukaan terjauh.
+    /// Terpisah dari `hiz_`, yang meringkas dengan maksimum untuk penelusuran
+    /// GI. Lihat `DepthReduce`.
+    DepthPyramid occlusion_;
     /// Jalur yang benar-benar dipakai frame ini. Berubahnya menuntut descriptor
     /// ditulis ulang, jadi ia disimpan alih-alih dibaca dari `desc` tiap kali.
     bool gpuClustersActive_ = false;
@@ -4904,37 +5340,8 @@ private:
     /// sementara perekaman command buffer membacanya di dalam recorder yang
     /// dijalankan frame graph.
     std::vector<Vec4> partColors_;
-    struct SortedEntry {
-        float distance = 0.0f;
-        MeshHandle mesh = kUnitCubeMesh;
-        bool skinned = false;
-        uint32_t colorFirst = 0;
-        uint32_t colorCount = 0;
-        BoxInstance instance;
-        Mat4 transform{1.0f};
-    };
-    std::vector<SortedEntry> sorted_;
-    /// Instance buram sebelum diurutkan menjadi ruas.
-    struct GatherEntry {
-        MeshHandle mesh = kUnitCubeMesh;
-        bool skinned = false;
-        uint32_t colorFirst = 0;
-        uint32_t colorCount = 0;
-        BoxInstance instance;
-        Mat4 transform{1.0f};
-        bool caster = false;
-        /// Kotak dunia instance ini, disimpan supaya tiap pass bayangan bisa
-        /// mengujinya terhadap volumenya sendiri. Tanpa ini setiap pass harus
-        /// mentransformasikan ulang kotak lokalnya — 32 muka atlas dikali
-        /// ratusan instance berarti ribuan transformasi kotak per frame untuk
-        /// jawaban yang tidak berubah di antara keduanya.
-        Aabb bounds;
-        /// Terlihat kamera. **Bukan lagi syarat untuk ikut didaftar**: caster
-        /// yang berada di luar pandangan tetap harus menjatuhkan bayangan ke
-        /// dalamnya.
-        bool cameraVisible = true;
-    };
-    std::vector<GatherEntry> gathered_;
+    std::vector<SurfaceEntry> sorted_;
+    std::vector<SurfaceEntry> gathered_;
     /// Ruas draw: satu panggilan gambar per mesh yang berurutan.
     std::vector<DrawRun> opaqueRuns_;
     std::vector<DrawRun> casterRuns_;

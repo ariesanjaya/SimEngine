@@ -580,6 +580,12 @@ MaterialCompileResult Emitter::Run() {
     }
 
     head << "struct MaterialInputs\n{\n";
+    // **Slot material ikut di sini, bukan diambil dari push constant.** Sampai
+    // G6 prolog bindless membaca `push.materialSlot`, dan itu mengunci sebuah
+    // material ke satu panggilan gambar: dua entity bermaterial berbeda tidak
+    // bisa berbagi draw. Sejak slotnya menjadi data per instance, yang
+    // mengetahuinya adalah tahap vertex — dan ia meneruskannya ke sini.
+    head << "    uint   materialSlot;\n";
     head << "    float2 uv0;\n";
     head << "    float4 vertexColor;\n";
     head << "    float3 worldNormal;\n";
@@ -604,7 +610,7 @@ MaterialCompileResult Emitter::Run() {
     // memakai emisi badan yang sama persis, dan tidak ada jalur yang bisa
     // diam-diam berhenti diuji karena hanya salah satunya yang punya kode.
     if (options_.bindless && (blockParameters > 0 || textureCount > 0)) {
-        head << "    const MaterialParams gMat = gMaterialParams[push.materialSlot];\n";
+        head << "    const MaterialParams gMat = gMaterialParams[inputs.materialSlot];\n";
         for (const MaterialParameter& parameter : graph_.parameters) {
             if (ValueSize(parameter.kind) == 0) {
                 continue;

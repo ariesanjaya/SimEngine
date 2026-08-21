@@ -19,12 +19,13 @@ struct PrepassVarying {
 };
 
 [shader("vertex")]
-PrepassVarying main(BoxVertex vertex, uint instanceId : SV_InstanceID) {
+PrepassVarying main(BoxVertex vertex, uint instanceId : SV_InstanceID,
+                uint instanceBase : SV_StartInstanceLocation) {
     float3 localPosition;
     float3 localNormal;
     applySkin(vertex, localPosition, localNormal);
 
-    float4x4 model = instanceModel(push.instanceBase + instanceId);
+    float4x4 model = instanceModel(instanceBase + instanceId);
     float4 world = mul(model, float4(localPosition, 1.0));
 
     PrepassVarying output;

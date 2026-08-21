@@ -2252,7 +2252,8 @@ TEST_CASE("G5: jalur bindless mengubah dari mana datanya datang, bukan bentuk ma
     // Prolognya menghidupkan kembali nama yang dipakai badan: itu yang membuat
     // emisi badan **sama persis** di kedua jalur, dan yang membuat jalur mundur
     // tidak bisa diam-diam berhenti diuji karena hanya salah satunya punya kode.
-    CHECK(bindless.slang.find("const MaterialParams gMat = gMaterialParams[push.materialSlot];") !=
+    CHECK(bindless.slang.find(
+              "const MaterialParams gMat = gMaterialParams[inputs.materialSlot];") !=
           std::string::npos);
     CHECK(bindless.slang.find("Texture2D<float4> " + bindless.textures[0].name +
                               " = gBindlessTextures[slot0];") != std::string::npos);
@@ -2349,4 +2350,12 @@ TEST_CASE("G5: modul material bindless dikompilasi slangc sungguhan") {
     INFO("slangc: ", out.error);
     REQUIRE(out.ok);
     CHECK(LooksLikeSpirv(out.spirv));
+
+    // **Nomor slotnya datang dari varying, dan itu kesepakatan dengan
+    // `box.vert`.** Sejak G6 ia data per instance, bukan push constant — itulah
+    // yang membuat dua entity bermaterial berbeda bisa berbagi satu panggilan
+    // gambar. Yang menuliskannya `box.vert` ke `slots.x`; yang membacanya baris
+    // ini. Keduanya tidak saling melihat, jadi yang menjaganya adalah uji ini.
+    const std::string module = AssembleForwardMaterialModule(compiled.slang, options);
+    CHECK(module.find("inputs.materialSlot = input.slots.x;") != std::string::npos);
 }

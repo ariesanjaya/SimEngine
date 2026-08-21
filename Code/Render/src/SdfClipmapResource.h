@@ -108,6 +108,13 @@ private:
     };
 
     bool WriteFillDescriptors();
+    /// Menunjuk ulang set entri **satu slot** ke buffer barunya.
+    ///
+    /// Terpisah dari `WriteFillDescriptors` karena keduanya dipanggil pada saat
+    /// yang sangat berbeda: yang itu saat start, ketika belum ada satu pun
+    /// command buffer yang berjalan; yang ini di tengah frame, ketika slot lain
+    /// bisa saja masih dibaca GPU.
+    void WriteEntryDescriptor(uint32_t slot);
     void RecordFills(VkCommandBuffer cmd);
 
     rhi::Device* device_ = nullptr;

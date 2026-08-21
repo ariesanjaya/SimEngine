@@ -28,7 +28,28 @@ public:
     struct Scope {
         std::string name;
         double milliseconds = 0.0;
+        /// Primitif yang masuk input assembly selama lingkup ini — yaitu
+        /// segitiga yang benar-benar diserahkan ke GPU, sebelum clipping dan
+        /// sebelum backface.
+        ///
+        /// **Ini angka yang diturunkan culling, dan satu-satunya yang bisa
+        /// membuktikannya.** Waktu pass ikut turun juga, tetapi waktu bergerak
+        /// karena banyak hal; jumlah primitif hanya bergerak karena ada yang
+        /// berhenti digambar. Nol pada pass compute, dan nol pada perangkat
+        /// tanpa `pipelineStatisticsQuery`.
+        uint64_t primitives = 0;
     };
+
+    GpuProfiler() = default;
+    /// **Ada supaya query pool-nya tidak menggantung.** Tidak ada satu pun
+    /// pemanggil yang memanggil `Destroy` sendiri — profiler hidup sebagai
+    /// anggota renderer dan mati bersamanya — jadi tanpa destruktor ini pool-nya
+    /// menjadi objek yang bocor di `vkDestroyDevice`, dilaporkan validation
+    /// layer sebagai angka tanpa nama.
+    ~GpuProfiler() { Destroy(); }
+
+    GpuProfiler(const GpuProfiler&) = delete;
+    GpuProfiler& operator=(const GpuProfiler&) = delete;
 
     /// Mengembalikan false bila perangkatnya tidak mendukung timestamp pada
     /// antrean grafis. Bukan kegagalan fatal — profiler yang mati hanya
@@ -63,6 +84,8 @@ public:
     uint64_t ResultsSerial() const { return resultsSerial_; }
     /// Jumlah seluruh lingkup, milidetik.
     double TotalMilliseconds() const;
+    /// Jumlah primitif seluruh lingkup frame yang terakhir dipungut.
+    uint64_t TotalPrimitives() const;
 
 private:
     static constexpr uint32_t kFrameCount = 3;
@@ -78,6 +101,10 @@ private:
 
     Device* device_ = nullptr;
     VkQueryPool pool_ = VK_NULL_HANDLE;
+    /// Pool kedua, satu query per lingkup. `VK_NULL_HANDLE` bila perangkatnya
+    /// tidak mendukung `pipelineStatisticsQuery` — profiler tetap bekerja,
+    /// kolom primitifnya saja yang nol.
+    VkQueryPool statsPool_ = VK_NULL_HANDLE;
     uint32_t maxScopes_ = 0;
     /// Nanodetik per tik timestamp. **Wajib dipakai.** Tanpa mengalikannya,
     /// angkanya terlihat masuk akal di satu GPU dan meleset ratusan kali lipat
@@ -86,6 +113,7 @@ private:
     uint32_t frameIndex_ = 0;
     std::array<Frame, kFrameCount> frames_{};
     std::vector<uint64_t> readback_;
+    std::vector<uint64_t> statsReadback_;
     std::vector<Scope> results_;
     uint64_t resultsSerial_ = 0;
     int openScope_ = -1;

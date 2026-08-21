@@ -218,6 +218,9 @@ std::string AssembleMaterialModule(const std::string& generatedSlang,
     out << "[shader(\"fragment\")]\n";
     out << "float4 " << entry << "(MaterialVarying varying) : SV_Target\n{\n";
     out << "    MaterialInputs inputs;\n";
+    // Preview menggambar satu material saja, dan jalurnya tidak pernah
+    // bindless — slotnya karena itu nol dan tidak pernah dibaca.
+    out << "    inputs.materialSlot = 0;\n";
     out << "    inputs.uv0 = varying.uv0;\n";
     out << "    inputs.vertexColor = varying.vertexColor;\n";
     out << "    inputs.worldNormal = normalize(varying.worldNormal);\n";
@@ -375,6 +378,7 @@ std::string AssembleForwardMaterialModule(const std::string& generatedSlang,
     out << "[shader(\"fragment\")]\n";
     out << "float4 " << entry << "(BoxVarying input) : SV_Target\n{\n";
     out << "    MaterialInputs inputs;\n";
+    out << "    inputs.materialSlot = input.slots.x;\n";
     out << "    inputs.uv0 = input.uv;\n";
     // Warna instance dan warna simpul sudah dikalikan tahap vertex, jadi yang
     // sampai ke sini satu warna. Ia masuk sebagai warna simpul material — yang

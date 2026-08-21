@@ -16,17 +16,36 @@ namespace sim::render {
 /// yang tidak pernah diuji.
 struct DrawRun {
     MeshHandle mesh = kUnitCubeMesh;
-    /// Awal warna ruas milik instance-instance ini di `ViewportScene::partColors`.
-    /// **Ikut menjadi kunci ruas**: dua entity bermesh sama dengan material
-    /// berbeda tidak boleh digambar dalam satu panggilan.
-    uint32_t partColorFirst = 0;
-    uint32_t partColorCount = 0;
+    /// Ruas mesh yang digambar — indeks ke `GpuMesh::parts`.
+    ///
+    /// **Ikut menjadi kunci ruas**, karena ia menentukan `firstIndex` dan
+    /// `indexCount` panggilan gambarnya.
+    uint32_t part = 0;
+    /// Material ruas ini, atau `kInvalidMaterial` untuk jalur mundur.
+    ///
+    /// **Ikut menjadi kunci**, karena tiap material adalah pipeline-nya sendiri:
+    /// satu panggilan gambar tidak bisa mengganti pipeline di tengah jalan.
+    MaterialHandle material = kInvalidMaterial;
+    /// Tekstur albedo jalur mundur. **Ikut menjadi kunci hanya karena jalur
+    /// mundur mengikatnya sebagai descriptor set**; pada jalur bindless ia
+    /// tinggal di data instance dan tidak memecah apa pun — tetapi kuncinya
+    /// tetap dipegang kedua jalur, karena aturan yang berbeda antar-jalur adalah
+    /// dua daftar ruas yang suatu saat tidak sepakat.
+    ///
+    /// Selalu `kInvalidTexture` bila `material` sah: material membawa teksturnya
+    /// sendiri.
+    TextureHandle texture = kInvalidTexture;
     /// Digambar lewat pipeline ber-kulit. **Ikut menjadi kunci ruas**, karena ia
     /// menentukan pipeline dan vertex buffer yang diikat: mesh ber-rig yang satu
     /// instance-nya dipasok pose dan satu lagi tidak adalah dua ruas, bukan satu
     /// ruas dengan cabang di dalamnya.
     bool skinned = false;
-    /// Indeks instance pertama di dalam buffer instance frame ini.
+    /// Indeks permukaan pertama di dalam buffer instance frame ini.
+    ///
+    /// **Permukaan, bukan entity.** Satu entity bermesh berruas tiga menempati
+    /// tiga entri berurutan: warna, material, dan tekstur tiap ruas tinggal di
+    /// data instance sejak G6, dan itu satu-satunya cara ketiganya bisa berbeda
+    /// di dalam satu panggilan gambar.
     uint32_t first = 0;
     uint32_t count = 0;
 };

@@ -1096,36 +1096,558 @@ beserta jalur mundur ke putih — bukan descriptor tak sah.
 
 ---
 
-## G6 — GPU-driven: indirect draw dan occlusion culling dua fase
+## G6 — GPU-driven: indirect draw dan occlusion culling dua fase · ✅ selesai
 
 Ini bagian yang benar-benar "terinspirasi CryEngine", dan satu-satunya yang tidak
 boleh dikerjakan sebelum lima milestone di atasnya selesai.
 
-**Sekarang CPU memutuskan setiap frame apa yang digambar.** `Gather` menyalin,
-memfrustum-cull, dan `stable_sort` seluruh instance setiap frame
-(`VulkanRenderer.cpp:1694-1826`). Biayanya tumbuh linear terhadap isi adegan, dan
-ia dibayar di thread yang juga harus merekam command buffer.
+**Semuanya mendarat: alat ukurnya, satuan gambarnya, mesin indirect-draw-nya,
+dan occlusion culling yang tepat.** Yang menahan occlusion culling selama ini
+ternyata cacat yang jauh lebih tua: descriptor yang dibiarkan menunjuk alokasi
+yang sudah dibebaskan, karena `VkBuffer` yang dibuat ulang mendapat handle yang
+sama persis. Lihat "Akarnya: `VkBuffer` yang dipakai ulang" di bawah. Yang
+tersisa hanya mengukur ulang tabel waktunya.
 
-- Frustum culling pindah ke compute, menghasilkan buffer perintah untuk
-  `vkCmdDrawIndexedIndirectCount`. Butuh `multiDrawIndirect` dan
-  `drawIndirectCount` — dua fitur di baris tabel G2.
-- Occlusion culling dua fase memakai `hiz_` yang **sudah dibangun tiap frame dan
-  belum ada yang memakainya untuk ini**: fase satu menggambar yang terlihat frame
-  lalu, piramida dibangun dari hasilnya, fase dua menguji sisanya terhadap
-  piramida itu dan menggambar yang lolos. Dua fase, bukan satu, karena piramida
-  dari frame lalu salah persis di tempat yang paling merugikan — saat kamera
-  berputar cepat, benda yang baru masuk pandangan dianggap tertutup dan berkedip
-  masuk satu frame terlambat.
-- Sortir per material hilang dengan sendirinya begitu material diindeks
-  (G5). Yang tersisa adalah sortir tembus pandang, dan itu memang harus tetap
-  berurutan jarak — alasannya sudah tertulis di `Gather` dan tidak berubah.
-- **Yang tidak ikut:** transparan, dan objek yang jumlahnya sedikit tapi
-  materialnya unik. GPU-driven menang pada ribuan draw yang seragam, dan kalah
-  pada belasan draw yang tiap satunya berbeda karena biaya penyiapannya tetap.
+### Alat ukur lebih dulu, karena kriterianya tidak bisa diperiksa tanpanya
+
+Kriteria selesai G6 berbunyi "menggambar jumlah segitiga yang lebih sedikit". Dua
+hal yang dibutuhkannya sama-sama tidak ada: tidak ada yang menghitung segitiga,
+dan adegan uji G0 hanya berisi 260 entity.
+
+- **Penghitung primitif per pass** menumpang lingkup yang sudah dibuka
+  `GpuProfiler` untuk timestamp: pool kedua bertipe `PIPELINE_STATISTICS`,
+  menghitung `INPUT_ASSEMBLY_PRIMITIVES`. Segitiga yang **diserahkan**, bukan
+  yang lolos clipping — culling menurunkan yang pertama, sementara yang kedua
+  ikut turun karena alasan lain juga.
+- **`Resources/Levels/bench-dense.simlevel`** — 3.020 entity, 2,79 juta segitiga.
+  Adegan G0 tidak disentuh: garis dasar yang berubah adalah garis dasar yang
+  tidak berguna.
+
+Apa yang dikatakan adegan padat sebelum satu baris pun G6 dikerjakan: **7.586
+draw call per frame**, `cpu-record` 7,840 ms, dan prepass maupun forward
+menyerahkan **seluruh** 2,79 juta segitiga adegan — dua kali.
+
+### Satuan gambar: dari entity menjadi permukaan
+
+**Setiap entity adalah satu panggilan gambar, dan penyebabnya bukan geometri.**
+`AppendRun` memakai `partColorFirst` sebagai kunci ruas, dan slot itu milik tiap
+entity sendiri — jadi dua prop bermesh sama tidak pernah bisa digabung walaupun
+seluruh isinya identik.
+
+Yang mengunci kunci itu adalah tiga hal yang dikirim lewat push constant per
+panggilan: warna ruas, slot material, slot tekstur. Ketiganya sekarang data per
+instance, dan **yang membuatnya bisa pindah adalah G5** — sebelum material
+terindeks, "material ruas ini" bukan sebuah nomor melainkan sebuah descriptor
+set. Satuan daftar gambar ikut berubah menjadi **permukaan**: sepasang (entity,
+ruas mesh), yaitu satuan yang benar-benar punya satu warna, satu material, dan
+satu tekstur.
+
+### Perintah gambar dibangkitkan GPU
+
+`DrawCull` — satu dispatch, satu thread per permukaan, keluarannya buffer
+`VkDrawIndexedIndirectCommand`. **Yang tersaring tidak dihapus dari mana pun, ia
+mendapat `instanceCount` nol.** Itu yang membuat keluarannya tidak bergantung
+pada urutan thread: tiap permukaan menulis slot tetapnya, tanpa satu pun atomic.
+Memadatkannya akan menghemat perintah yang dilewati GPU — dan menukarnya dengan
+urutan gambar yang berubah tiap frame, yaitu perbandingan gambar yang tidak bisa
+dipakai lagi.
+
+Basis instance ikut pindah ke draw-nya sendiri: `SV_StartInstanceLocation`
+menggantikan `push.instanceBase`, dan `BoxPush` tinggal satu matriks. Angkanya
+selalu sama persis dengan `firstInstance` panggilan itu, jadi yang hilang adalah
+salinan kedua dari satu angka — dan indirect draw menutup pilihan lain, karena
+perintahnya dibangkitkan GPU.
+
+Fitur yang dinyalakan: `multiDrawIndirect` dan **`drawIndirectFirstInstance`**.
+Yang kedua paling mudah terlupa — jalur ini memakai `firstInstance` sebagai nomor
+permukaan.
+
+### Hasil
+
+> **Tabel pertama di sini ditarik.** Ia melaporkan GPU 2,4× dan CPU 2,9× lebih
+> cepat, dan kedua kolomnya diukur di atas adegan yang setiap framenya menggambar
+> sebuah permukaan hantu seluas layar — lihat "Akarnya: `VkBuffer` yang dipakai
+> ulang" di bawah. Yang di bawah ini menggantikannya.
+
+RTX 2060, 1280×720, 120 frame pemanasan + 240 diukur,
+`Resources/Levels/bench-dense.simlevel`, median dari empat jalan.
+
+**Garis dasarnya G5 (`3b23d8a`) dengan `DynamicBuffer::Generation` di-backport ke
+sana.** Tanpa itu yang terbandingkan dua hal sekaligus: G6, dan sebuah cacat yang
+sudah ada sejak sebelumnya. Levelnya ikut disalin ke sana — ia baru mendarat
+bersama G6.
+
+Dengan GI mati, yang memisahkan sumbangan G6 dari biaya SDF fill yang mendominasi
+frame:
+
+| | sebelum G6 | sesudah | |
+|---|---:|---:|---|
+| draw / frame | 7.585 | **2.232** | −71% |
+| **total CPU** | 3,796 | **2,804** | **−26%** |
+| `cpu-record` | 2,996 | **1,834** | **−39%** |
+| `cpu-gather` | 0,697 | 0,831 | +19% |
+| **total GPU** | 2,356 | 2,609 | +11% |
+| `forward-opaque` | 0,565 | 0,500 | −12% |
+| `depth-prepass` | 0,408 | 0,492 | +21% |
+| `shadow-cascades` | 0,678 | 0,802 | +18% |
+| `shadow-atlas` | 0,405 | 0,506 | +25% |
+
+Dengan GI menyala, yaitu frame yang sebenarnya:
+
+| | sebelum G6 | sesudah |
+|---|---:|---:|
+| draw / frame | 7.585 | **2.232** |
+| total CPU | 5,643 | 5,679 |
+| `cpu-record` | 3,112 | **2,335** |
+| total GPU | 7,067 | 7,436 |
+| `sdf-fill` | 4,372 | 4,447 |
+
+**Yang dibeli G6 adalah waktu CPU menyuruh menggambar, dan hanya itu.**
+`cpu-record` turun 39% dan total CPU 26% dengan GI mati; 7.585 panggilan menjadi
+2.232, dan tiap panggilan yang hilang membawa serta pengikatan buffer, push
+constant, dan penyiapan keadaan di driver. Dengan GI menyala keuntungan itu
+tenggelam: `sdf-fill` sendirian berharga 4,4 ms, dan CPU-nya menunggu GPU.
+
+`cpu-gather` **naik**, dan itu memang yang diharapkan: yang diurutkan sekarang
+permukaan, bukan entity, dan jumlahnya lebih banyak. Ia belum tersentuh G6 —
+lihat di bawah.
+
+**Sisi GPU justru sedikit lebih lambat, dan sebagian besarnya harga kebenaran.**
+G6 memperbaiki `firstIndex`/`vertexOffset` yang tertukar (lihat di bawah), jadi
+mesh berruas banyak sekarang menggambar geometrinya sendiri alih-alih mengulang
+ruas pertamanya. Jumlah segitiganya sama; bentuknya tidak, dan shader ball yang
+utuh lebih mahal dirasterisasi daripada satu ruas yang diulang. Itu terlihat di
+pass yang menggambar geometri yang sama tanpa memakai indirect draw sama sekali —
+`shadow-cascades` +18% dan `shadow-atlas` +25%. Sisanya biaya indirect draw itu
+sendiri: `depth-prepass` +21%.
+
+**Dan yang paling besar bukan G6.** Memperbaiki cacat descriptor itu saja
+memangkas frame adegan padat kira-kira separuh: 14,4 → 7,4 ms GPU dan 11,3 → 5,7
+ms CPU, terhadap angka "sesudah" yang lama.
+
+Gambar dengan GI mati pada adegan G0: **jalur GPU dan jalur CPU identik byte demi
+byte** — 0 dari 2.764.800. Sakelarnya `--bench-cpu-cull`. Jalur CPU bukan sekadar
+pembanding di sini: ia satu-satunya yang bisa dipakai perangkat tanpa
+`multiDrawIndirect`.
+
+**Pada adegan padat perbandingannya tidak lagi eksak, dan sebabnya bukan
+culling.** Dua jalan dari binary yang sama pada jalur yang sama berselisih
+1.480.215 byte; dua jalur yang berbeda berselisih 47.503. Keduanya berselisih
+**1 dari 255**, dan yang antar-jalur justru tiga puluh kali lebih kecil daripada
+yang antar-jalan. Yang bergerak adalah eksposur otomatis: ia mereduksi seluruh
+layar, dan urutan penjumlahan floating-point sebuah reduksi paralel tidak
+dijanjikan sama. Adegan G0 kebetulan mendarat di angka yang sama dua kali;
+adegan padat tidak. **Perbandingan gambar karena itu dilakukan di adegan G0**,
+dan angka adegan padat dicatat di sini supaya yang menemukannya nanti tidak
+mencarinya di jalur culling.
+
+### Dua cacat yang lebih tua ikut terangkat
+
+**`firstIndex` dan `vertexOffset` tertukar di `vkCmdDrawIndexed`.**
+`SubMesh::firstIndex` adalah offset ke dalam buffer indeks; menyerahkannya
+sebagai `vertexOffset` berarti ruas kedua sebuah mesh membaca indeks milik ruas
+pertama lalu menggeser vertexnya sejauh itu. Mesh berruas satu punya `firstIndex`
+nol, jadi keduanya menghasilkan gambar yang sama — dan itu hampir seluruh isi
+adegan. Yang menemukannya jalur indirect, yang menuliskan kedua medan itu dengan
+namanya masing-masing dan karena itu menghasilkan gambar yang berbeda. **Shader
+ball di adegan uji sekarang tergambar utuh.**
+
+**Descriptor SDF ditulis ulang seluruhnya di tengah frame.**
+`SdfClipmapResource` menumbuhkan buffer entri satu slot lalu menulis ulang set
+tiap kaskade dan set entri tiap slot — termasuk slot yang masih dibaca command
+buffer yang belum selesai. Tidak pernah muncul selama adegan ujinya kecil: buffer
+entri cukup untuk 64 kotak, dan adegan yang tidak melewatinya tidak pernah
+menumbuhkannya. Adegan padat melewatinya, dan validation layer melaporkannya
+enam belas kali per jalan.
+
+### Occlusion culling: ada, terukur, dan **belum tepat**
+
+Ia mendarat sebagai jalur kedua yang bisa diminta — `desc.gpuOcclusion`,
+`--bench-occlusion` — dan **mati secara bawaan**. Bukan kehati-hatian melainkan
+keadaan yang sebenarnya: ia bekerja, tetapi masih membuang sebagian permukaan
+yang mestinya terlihat.
+
+**Bentuknya bukan dua fase klasik.** Yang klasik memakai himpunan terlihat frame
+lalu untuk memurahkan prepass-nya juga, dan karena itu bisa salah persis saat
+kamera berputar cepat. Renderer ini **sudah** punya prepass penuh, jadi
+piramidanya dibangun dari depth frame ini sendiri: prepass menggambar seluruh isi
+frustum, piramida diringkas darinya, lalu pass forward hanya menggambar yang
+lolos. Hasilnya tepat menurut konstruksi dan tidak ada benda yang bisa berkedip
+masuk satu frame terlambat — kriteria ketiga G6 lulus dengan sendirinya.
+
+Yang ikut mendarat: **piramida depth kedua**. Yang ada meringkas dengan maksimum
+— permukaan terdekat, untuk penelusuran sinar; uji occlusion menuntut minimum —
+permukaan terjauh. Satu shader, satu medan push constant, dua instance.
+
+Angkanya, adegan padat, GI mati:
+
+| | tanpa occlusion | dengan occlusion |
+|---|---:|---:|
+| primitif `depth-prepass` | 2.791.556 | 2.791.556 |
+| primitif `forward-opaque` | 2.791.556 | **2.268.236** |
+| `occlusion-pyramid` | — | 0,055 ms |
+| `draw-cull-late` | — | 0,010 ms |
+
+**19% segitiga lebih sedikit diserahkan pass forward.** Yang tidak ikut turun
+adalah waktunya: fragmen yang tertutup **sudah** ditolak uji depth `EQUAL` sejak
+prepass ada, jadi yang dihemat hanya tahap vertex dan rasterisasi — sementara
+3,6 ms `forward-opaque` di adegan ini adalah shading piksel yang **terlihat**.
+
+**Dan ia masih salah.** Pada frame yang sama, gambar jalur occlusion berselisih
+4.166 piksel dari jalur tanpa occlusion — sebuah permukaan besar yang mestinya
+terlihat ikut terbuang. Yang sudah dipastikan **bukan** sebabnya, masing-masing
+dengan percobaannya sendiri:
+
+- **Bukan jalur indirect-nya.** Dengan uji occlusion dimatikan di dalam shader,
+  gambarnya identik byte demi byte dengan jalur CPU.
+- **Bukan `nearest`.** Membuang hanya permukaan ber-`nearest` nol tidak membuang
+  apa pun.
+- **Bukan cakupan sampel.** Mengambil minimum atas **seluruh** texel yang
+  disentuh petak, alih-alih empat sudutnya, menghasilkan selisih yang sama.
+- **Bukan pemilihan tingkat.** Satu tingkat lebih kasar: selisih yang sama. Pada
+  tingkat terkasar — satu texel untuk seluruh layar — tidak ada yang terbuang dan
+  gambarnya identik, yang membuktikan isi piramidanya benar di puncak.
+- **Bukan lantai.** Membuang lantai saja mengubah 121 piksel; yang hilang sesuatu
+  yang lain.
+- **Bukan piramida yang basi.** Dengan kamera yang bergerak sangat lambat —
+  1.800 frame untuk satu putaran — selisihnya tetap ada.
+- **Bukan tata letak matriks.** Mentransposnya justru memperbesar selisih.
+- **Bukan kotak batas yang terlalu kecil.** Menggelembungkannya empat kali —
+  yang membuat sudut terdekatnya lebih dekat **dan** petaknya lebih lebar,
+  dua-duanya ke arah "jangan buang" — menyisakan permukaan yang sama.
+- **Bukan cakupan texel yang meleset satu.** Melebarkan petak satu texel ke
+  segala arah: selisih yang sama.
+
+Sesudah sembilan tebakan itu habis, yang dibangun berikutnya bukan tebakan
+kesepuluh melainkan **alat**: `--bench-dump-cull` menuliskan angka antara uji
+occlusion tiap permukaan — petak layar, kedalaman terdekat kotaknya, nilai yang
+dibaca dari piramida, tingkat yang dipakai, dan hasilnya — beserta matriks
+view-projection frame itu. Yang dijawabnya, berurutan:
+
+1. **Masukan ujinya tepat.** Proyeksi, petak layar, dan kedalaman terdekat
+   dihitung ulang di Python dari kotak dan matriks yang sama: 3.129 permukaan,
+   selisih terbesar 7·10⁻⁷. Bukan matriks, bukan petak, bukan `nearest`.
+2. **Piramidanya salinan yang setia.** Shader yang sama menyampel depth buffer
+   langsung dan tingkat nol piramida di texel yang sama: **3.129 dari 3.129 sama
+   persis**. Bukan reduksinya, bukan penyalinannya, bukan barrier-nya.
+3. **Angkanya sendiri yang mustahil.** Piramida melaporkan kedalaman 0,065–0,085
+   di petak-petak yang membuang permukaan. Dengan `near` 0,05 dan `far` 2000 —
+   keduanya diturunkan dari matriks yang sama — itu berarti permukaan **0,6
+   sampai 0,8 satuan dari kamera**. Tidak ada satu pun permukaan di adegan yang
+   lebih dekat dari 50 satuan: `nearest` terbesar dari 3.129 permukaan adalah
+   9,9·10⁻⁴.
+4. **Dan ia datang dari prepass.** Disampel sebelum prepass: nol di mana-mana.
+   Sesudahnya: sebagian besar layar terisi angka dekat itu, termasuk petak yang
+   di gambar akhirnya langit. Tidak berubah ketika lantai tidak digambar, dan
+   tidak berubah antara prepass yang menggambar lewat indirect draw dan yang
+   langsung.
+
+**Jadi yang salah bukan uji occlusion-nya melainkan apa yang dibacanya.** Depth
+buffer — dibaca dari compute shader sesudah depth prepass — berisi kedalaman yang
+tidak mungkin dihasilkan geometri adegan ini. Uji occlusion adalah pemakai
+pertama yang membacanya dari compute, dan karena itu pemakai pertama yang
+melihatnya; pass forward tidak pernah terganggu karena uji depth `EQUAL`-nya
+hanya diam di petak yang isinya tidak cocok.
+
+**Itu berarti ada pembaca kedua yang perlu diperiksa.** Piramida penelusuran GI
+membaca depth buffer yang sama, dari tahap fragment. Kalau angka yang terbaca
+compute juga yang terbaca fragment, penelusuran screen-space selama ini bekerja
+di atas kedalaman yang salah — dan itu pertanyaan untuk milestone GI, bukan G6.
+
+Empat percobaan berikutnya mempersempitnya lagi, dan semuanya lewat alat yang
+sama:
+
+- **Yang menulisnya benar-benar geometri prepass.** Dengan prepass menggambar nol
+  primitif, seluruh 3.129 sampel depth-nya nol.
+- **Bukan lantai** (dibuang: peta depth tidak berubah satu huruf pun), dan
+  **bukan benda besar** (seluruh kotak ber-setengah-lebar di atas 1,2 dibuang —
+  1,64 juta primitif alih-alih 2,79 juta — dan sampel dekat itu tetap ada).
+- **Transform tiap permukaan cocok dengan kotaknya.** Translasi matriks yang
+  diunggah dibandingkan dengan pusat kotak yang diunggah, ketiganya per
+  permukaan: **0 dari 3.129 meleset**.
+
+Jadi geometri digambar di tempat yang dikatakan kotaknya, kotaknya tidak lebih
+dari 160 satuan dari kamera, dan depth buffer tetap berisi angka yang berarti
+0,6 satuan. Salah satu dari ketiga pengukuran itu berbohong, dan ketiganya sudah
+diperiksa dengan cara yang berbeda.
+
+Satu pemeriksaan lagi ikut mendarat sebagai penjaga tetap, dan ia bersih:
+**simpul tiap mesh diperiksa terhadap kotak batas yang dilaporkannya saat
+diunggah.** Kotak yang berbohong tidak menghasilkan satu pun galat — ia dipakai
+frustum culling, occlusion culling, dan lintasan kamera alat ukur — jadi ia layak
+diperiksa sekali, bukan dipercaya. Ketiga mesh adegan padat lolos.
+
+**Langkah berikutnya yang jelas, dan bukan tebakan:** prepass sudah menulis
+lampiran kedua — normal oktahedral untuk screen probe. Menuliskan nomor permukaan
+ke sana alih-alih normal, lalu membacanya di texel yang kedalamannya ganjil,
+menjawab "permukaan mana" dengan satu jalan — dan itu pertanyaan terakhir yang
+tersisa.
+
+#### Alat itu dicoba, dan ia mengubah yang diukurnya
+
+Nomor permukaan memang sampai ke lampiran normal. Yang ikut datang: **gambar
+jalur bawaan berubah.** Adegan padat yang sebelumnya sama persis antara jalur GPU
+dan jalur CPU mulai berselisih 28.749 byte, dan yang bergerak ternyata jalur CPU
+— yaitu jalur yang tidak menyentuh satu pun bagian G6.
+
+Sebabnya ada di catatan yang sudah lama tertulis di kepala prepass: **prepass dan
+forward wajib menghitung posisi yang sama persis**, karena forward mengujinya
+dengan `EQUAL`. Menambah satu varying `nointerpolation uint` ke tahap vertex
+prepass mengubah kode yang dihasilkan compiler untuk perhitungan posisinya, dan
+selisih satu ULP di sana sudah cukup untuk membuat sebuah permukaan gagal uji
+`EQUAL` dan hilang dari gambar.
+
+Instrumennya karena itu **dicabut, bukan diperbaiki**: sebuah alat ukur yang
+menggeser besaran yang diukurnya tidak bisa dipakai membuktikan apa pun, dan
+bentuk yang aman untuknya adalah varian shader prepass tersendiri — bukan cabang
+push constant di dalam yang dipakai jalur bawaan. Sesudah dicabut, kedua adegan
+kembali sama persis antara jalur GPU dan jalur CPU.
+
+#### Satu cacat sungguhan ditemukan sambil mencabutnya
+
+**Descriptor set pass culling tidak pernah ditulis.** `WriteSlotDescriptors`
+menunggu ketiga binding image-nya ada sebelum menulis apa pun, dan salah satunya
+baru sah belakangan daripada `DrawCull::Create`; penulisan ulangnya digantung
+pada `gpuOcclusionActive_`, yang bawaannya mati. Jalur bawaan karena itu
+men-dispatch compute shader di atas descriptor tak terdefinisi — yaitu buffer
+perintah gambar berisi sampah. Yang melaporkannya validation layer, bukan
+gambarnya. Sekarang piramidanya diadopsi ulang **tiap frame dan tanpa syarat**
+selama culling GPU menyala.
+
+#### Adegan padat ternyata tidak deterministik, dan itu bukan urusan G6
+
+Sebelum ada angka yang bisa dipercaya soal occlusion, satu hal harus dipastikan
+lebih dulu: **dua jalan dengan bendera yang sama menghasilkan gambar yang
+berbeda.** Pada adegan padat, tiga dari enam jalan berselisih 3.850 byte — sebuah
+serpih tipis sepanjang layar yang kadang ada dan kadang tidak. Yang sudah
+dipastikan bukan sebabnya:
+
+- **Bukan G6.** Ia muncul juga dengan `--bench-cpu-cull`, yaitu jalur yang tidak
+  memakai satu pun perintah gambar bangkitan GPU.
+- **Bukan simulasi.** Dengan dunia dibekukan — `Tick(0)` tiap frame — ia tetap
+  muncul.
+- **Bukan tumpang tindih CPU/GPU.** Dengan menunggu GPU menganggur di ujung
+  **setiap** frame, ia tetap muncul.
+- **Bukan frame pertama.** Frame 0 deterministik pada enam jalan; frame 105
+  tidak. Ia menumpuk sepanjang frame.
+- **Bukan adegan jarang.** `bench` deterministik pada setiap jalan yang dicoba.
+
+Selama ini ada, setiap perbandingan gambar adegan padat harus dilakukan
+**sekondisi**: jalankan beberapa kali, kelompokkan yang sama persis, lalu
+bandingkan kelompok dengan kelompok. Dengan aturan itu, jalur GPU dan jalur CPU
+adegan padat **sama persis** — nol byte.
+
+#### Ujinya benar; yang dibacanya tidak
+
+Dengan alat yang sama, dua pemeriksaan terakhir menutup pertanyaan "apakah uji
+occlusion-nya sendiri salah":
+
+1. **Piramidanya peringkasan minimum yang setia.** Shader menghitung minimum blok
+   16×16 texel tingkat nol dan membandingkannya dengan texel tingkat 4 di petak
+   yang sama: **3.129 dari 3.129 sama persis**.
+2. **Setiap keputusan buang bisa dibenarkan.** Untuk tiap permukaan yang dibuang,
+   shader menghitung minimum tingkat nol atas **petak layarnya sendiri**, texel
+   demi texel, lalu membandingkannya dengan kedalaman sudut terdekat kotaknya:
+   **0 dari 2.235 yang dibuang tanpa dasar**. Uji yang memakai tingkat kasar
+   selalu lebih longgar daripada perhitungan tepat itu, tidak pernah lebih ketat.
+
+Lalu satu sampel yang menutupnya. Di texel (10, 10) — sudut kiri atas layar,
+langit pada setiap sudut pandang lintasan ini, dan memang langit di gambar
+akhirnya — depth buffer berisi **6,5·10⁻⁴**, yaitu permukaan sejauh ~73 satuan.
+
+**Jadi urutannya begini, dan tidak ada lagi tebakan di dalamnya:** depth prepass
+menulis kedalaman di petak-petak yang pass forward tidak menggambar apa pun di
+sana. Piramida occlusion mewarisinya. Uji occlusion lalu menyimpulkan — dengan
+benar, menurut apa yang dibacanya — bahwa permukaan di belakang kedalaman itu
+tertutup, dan membuangnya. Yang hilang dari gambar adalah permukaan yang
+sesungguhnya terlihat.
+
+Selisih terakhirnya kecil dan tepat sasaran: dibandingkan sekondisi, jalur
+occlusion berselisih **4 piksel** dari jalur frustum pada adegan padat, dan
+**nol** pada adegan jarang. Empat piksel itu satu permukaan yang tertutup oleh
+geometri yang tidak pernah tergambar.
+
+**Yang harus diperbaiki karena itu bukan G6 melainkan perbedaan antara prepass
+dan forward** — dua pass yang menggambar perintah yang sama dengan transform yang
+sama dan menghasilkan kedalaman yang berbeda. Ia juga kandidat sebab untuk
+ketidak-deterministikan di atas, dan untuk pertanyaan GI yang sudah dicatat:
+piramida penelusuran membaca depth buffer yang sama.
+
+**Alat yang ikut mendarat dari perburuan ini:** `--bench-cull-first` dan
+`--bench-cull-limit` membatasi nomor permukaan yang digambar. Membelah rentangnya
+setengah-setengah menemukan permukaan yang mencat sebuah piksel dalam dua belas
+jalan — dan itulah yang menunjukkan bahwa permukaan yang hilang digambar jauh di
+luar petak kotaknya sendiri.
+
+#### Prepass dan forward ternyata sepakat — yang salah lebih besar dari itu
+
+Dugaan berikutnya yang jelas: prepass menaruh vertex di tempat yang sedikit
+berbeda dari forward, dan uji `EQUAL` menjatuhkannya. Tiga percobaan
+mematahkannya, dan ketiganya memakai satu tuas yang sama — mengganti uji depth
+pass forward:
+
+- `GREATER_OR_EQUAL` alih-alih `EQUAL`: adegan jarang **sama persis**, adegan
+  padat berselisih **3 byte**. Tidak ada satu pun fragmen forward yang lebih
+  dekat daripada apa yang ditulis prepass.
+- `ALWAYS` alih-alih `EQUAL` — yaitu setiap fragmen forward dicat tanpa syarat:
+  gambarnya **sama persis byte demi byte**. Setiap fragmen yang dihasilkan
+  forward memang sudah lolos `EQUAL`.
+
+Jadi keduanya sepakat pada setiap fragmen yang forward hasilkan. Yang berbeda
+bukan posisinya melainkan **berapa banyak** yang dihasilkan.
+
+#### Depth buffer diambil utuh, dan isinya bukan adegan ini
+
+Sesudah tiga alat probe yang masing-masing ternyata tidak bisa dipercaya —
+lampiran nomor permukaan yang menggeser posisi, kisi 56×56 yang hanya ditulis
+permukaan yang lolos frustum, dan tangkapan depth yang menebak tata letak
+image-nya — yang dibangun berikutnya adalah yang paling langsung:
+**`--bench-dump-depth` menyalin depth buffer apa adanya**, float per texel, lewat
+`rhi::RenderTarget::ReadDepth`. Tata letak lamanya diambil dari frame graph, dan
+`UNDEFINED` **ditolak** alih-alih dijawab dengan nol.
+
+Angkanya, adegan padat, frame 105:
+
+| | texel berisi kedalaman | permukaan terdekat |
+|---|---:|---:|
+| `bench` (jarang) | 1,6% | 49,5 satuan |
+| `bench-dense`, jalur GPU | **99,6%** | **0,05 satuan** |
+| `bench-dense`, jalur CPU | **99,6%** | **0,05 satuan** |
+
+**0,05 satuan adalah bidang dekat.** Titik adegan yang paling dekat ke kamera di
+frame itu berjarak 51 satuan — dihitung dari kotak lantai dan matriks yang sama.
+Dan jalur CPU menghasilkan angka yang sama persis: **ini bukan cacat G6.**
+
+Gambar akhirnya memang memuatnya. Direntang kontrasnya — rentang kecerahan
+seluruh gambar hanya 48 sampai 54 — strukturnya sama persis dengan peta
+kedalaman: sebuah permukaan raksasa yang membentang layar, tergambar hampir
+sehitam langit. Setiap perbandingan gambar adegan padat selama ini membandingkan
+dua hasil render dari benda itu.
+
+#### Yang sudah dipersempit, dan yang belum
+
+- **Bukan data mesh.** Pemeriksaan baru saat unggah — indeks terhadap banyaknya
+  simpul, dan rentang tiap ruas terhadap panjang buffer indeks — bersih untuk
+  seluruh mesh adegan ini.
+- **Bukan transform.** Buffer transform instance dibaca kembali **dari GPU**,
+  lewat binding sementara di pass culling, lalu dibandingkan dengan yang ditulis
+  CPU: translasi dan panjang ketiga kolom, **0 dari 3.129 yang meleset**.
+- **Bukan satu entity yang datanya rusak.** Seluruh 3.020 transform di level itu
+  diperiksa: kuaternion satuan, skala wajar. Yang skalanya besar hanya lantai.
+- **Bukan silinder itu sendiri.** 935 silinder tanpa prop lain: bersih. Satu
+  silinder di atas lantai: bersih.
+- **Butuh gabungan.** 869 silinder ditambah seluruh prop lain: bersih; 870:
+  meledak. 935 silinder ditambah 100 prop lain: meledak. Ambangnya bukan jumlah
+  permukaan (1.040 meledak, 2.595 tidak) dan bukan jumlah silinder saja.
+
+#### Akarnya: `VkBuffer` yang dipakai ulang
+
+Empat percobaan terakhir mempersempitnya sampai satu baris. Semuanya lewat
+prepass, dengan hantunya diisolasi ke satu permukaan:
+
+1. **Membatasi posisi lokal simpul ke ±2**: hantunya bertahan. Bukan data simpul.
+2. **Membatasi posisi dunia ke ±50** — seluruh adegan muat di dalamnya, dan
+   kamera 104 satuan jauhnya: hantunya **tetap** menyentuh bidang dekat. Yang
+   tersisa hanya `world.w`.
+3. **Memaksa `world.w = 1`**: hantunya hilang seluruhnya. Jadi baris terakhir
+   matriks instance-nya bukan (0, 0, 0, 1) — matriks itu sampah.
+4. **Menulis descriptor set kulit setiap frame** alih-alih hanya saat buffernya
+   berpindah: hantunya hilang seluruhnya.
+
+Lalu sebabnya, tercetak tiga kali dalam satu jalan begitu diperiksa:
+
+> `instance buffer reused handle 0x…940 across a rebuild`
+
+**`DynamicBuffer::Reserve` memusnahkan buffer lalu membuat yang baru, dan VMA
+mengembalikan `VkBuffer` dengan angka yang sama persis.** Penjaga yang
+membandingkan `Handle()` untuk memutuskan apakah descriptor perlu ditulis ulang
+karena itu tidak melihat apa-apa, dan descriptor dibiarkan menunjuk alokasi yang
+sudah dibebaskan. Tahap vertex lalu membaca matriks instance berisi sampah —
+satu saja sudah cukup — dan segitiga yang membentang dari bidang dekat sampai ke
+seluruh layar masuk ke depth prepass.
+
+Dari sana seluruh rantainya jelas: piramida occlusion mewarisi kedalaman itu,
+uji occlusion menyimpulkan dengan benar bahwa permukaan di belakangnya tertutup,
+dan yang hilang dari gambar adalah permukaan yang sesungguhnya terlihat. Dan
+karena isi memori yang sudah dibebaskan tidak dijanjikan siapa pun, gambarnya
+berbeda antar-jalan — itulah ketidak-deterministikan adegan padat.
+
+Perbaikannya `DynamicBuffer::Generation()`, yang naik setiap kali buffernya
+benar-benar dibuat ulang. Empat tempat membandingkan handle dan semuanya
+diperbaiki: transform instance dan palet kulit di `VulkanRenderer`, tiga buffer
+slot di `DrawCull`, daftar lampu di `ClusterAssign`, dan entri kaskade di
+`SdfClipmapResource`.
+
+#### Sesudahnya, dan inilah kriteria G6 yang tersisa
+
+| | adegan jarang | adegan padat |
+|---|---:|---:|
+| enam jalan berturut-turut | sama persis | **sama persis** |
+| jalur GPU vs jalur CPU, GI mati | 0 byte | **0 byte** |
+| jalur GPU vs jalur CPU, GI menyala | 0 byte | **0 byte** |
+| occlusion menyala vs mati | 0 byte | **0 byte** |
+| kedalaman terdekat di depth buffer | 49,50 | 49,57 satuan |
+
+**Occlusion culling tepat.** Dan sesudah adegannya digambar dengan benar,
+angkanya berubah: `forward-opaque` menyerahkan 2.791.556 primitif tanpa occlusion
+dan 2.649.124 dengan — 5%, bukan 19% seperti yang terukur di atas hantunya. Dua
+pass yang ditambahkannya berharga 0,059 ms; yang dihemat pass forward sekitar
+0,03 ms. **Ia karena itu tetap mati secara bawaan — sekarang karena angkanya,
+bukan karena ia salah.**
+
+Tabel hasil G6 sudah diukur ulang terhadap garis dasar G5 yang ikut diperbaiki;
+lihat "Hasil" di atas. Ringkasnya: yang dibeli G6 waktu CPU merekam, bukan waktu
+GPU, dan yang paling besar justru perbaikan descriptor ini sendiri.
+
+**Dua cacat sungguhan ikut terangkat sepanjang perburuan itu**, dan keduanya
+tetap diperbaiki:
+
+- **Barrier piramida hanya menyebut tahap fragment.** Penelusuran GI membacanya
+  dari fragment; occlusion culling dari compute. Barrier yang tidak menyebut
+  compute tidak memberi satu pun jaminan kepada dispatch yang membacanya —
+  validation layer tidak melaporkannya, dan yang terlihat hanyalah gambar yang
+  berbeda di sebagian frame.
+- **Eksposur otomatis membuat setiap perbandingan gambar tidak bisa dipakai.** Ia
+  gelung umpan balik: selisih sekecil apa pun di satu frame menggeser eksposur
+  frame berikutnya, dan geseran itu menumpuk sampai **seluruh** gambar berbeda.
+  Perbandingan adegan padat yang tadinya melaporkan dua juta byte berselisih
+  ternyata nol begitu eksposurnya dikunci. Sakelarnya `--bench-fixed-exposure`,
+  dan setiap perbandingan gambar sesudah ini memakainya.
+
+**Satu lubang alat ukur ikut tertutup.** Lintasan kamera menutup satu putaran
+penuh, jadi frame terakhir selalu berdiri di tempat yang sama dengan frame
+pertama — dan pada adegan padat tempat itu tidak memperlihatkan apa pun.
+Perbandingan gambar selama ini karena itu hanya menguji satu sudut, dan sudut
+yang kosong. Sekarang ada `--bench-capture-frame`.
+
+### `Gather` juga belum mendekati nol
+
+1,919 ms. Yang tersisa di sana: mentransformasikan kotak tiap entity,
+`stable_sort` seluruh permukaan, dan menyusun ruas bayangan. Yang pertama bisa
+pindah ke compute bersama culling-nya; yang kedua hilang kalau ruas disusun dari
+tabel yang dipelihara antar-frame alih-alih dibangun ulang; yang ketiga menunggu
+pass bayangan ikut GPU-driven. Ketiganya pekerjaan tersendiri.
+
+**`Gather` juga belum mendekati nol** (1,919 ms). Yang tersisa di sana:
+mentransformasikan kotak tiap entity, `stable_sort` seluruh permukaan, dan
+menyusun ruas bayangan. Yang pertama bisa pindah ke compute bersama culling-nya;
+yang kedua hilang kalau ruas disusun dari tabel yang dipelihara antar-frame
+alih-alih dibangun ulang; yang ketiga menunggu pass bayangan ikut GPU-driven.
+Ketiganya pekerjaan tersendiri, dan ketiganya menunggu adegan yang membuktikan
+harganya.
 
 **Kriteria selesai:** adegan uji dengan ribuan instance menggambar jumlah segitiga
 yang lebih sedikit dengan gambar yang sama; waktu CPU `Gather` mendekati nol;
 memutar kamera cepat tidak menghasilkan benda yang berkedip masuk.
+
+**Yang sudah lulus:** yang ketiga, dengan sendirinya — piramidanya dibangun dari
+depth frame ini, jadi tidak ada benda yang bisa berkedip masuk terlambat. Yang
+pertama lulus dalam hitungan segitiganya (2,79 juta menjadi 2,27 juta) tetapi
+**gagal dalam "dengan gambar yang sama"**, dan karena itu jalurnya mati secara
+bawaan. Yang kedua belum.
+
+Yang lulus di luar daftar itu: gambar yang sama persis dengan panggilan gambar
+tiga kali lebih sedikit, dan waktu frame yang setengahnya.
 
 ---
 
@@ -1236,7 +1758,7 @@ kembali ke daftar.
 | G3 | Fondasi compute: build, RHI, pass di frame graph | G2 | ✅ |
 | G4 | Clipmap SDF, Hi-Z, dan penetapan cluster pindah ke compute | G3 | ✅ (Hi-Z diukur lalu dikembalikan — lihat catatannya) |
 | G5 | Bindless (`descriptorIndexing`) + material terindeks | G2 | ✅ |
-| G6 | Indirect draw + occlusion culling dua fase | G3, G5 | ⏳ |
+| G6 | Indirect draw + occlusion culling dua fase | G3, G5 | ✅ keduanya tepat; occlusion mati secara bawaan karena angkanya |
 | G7 | Async compute lewat timeline semaphore | G4, G6 | ⏳ |
 | G8 | Resolusi dinamis | E8.8 (TAA), G0 | ⏳ |
 

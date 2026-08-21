@@ -11,11 +11,12 @@
 /// di VulkanRenderer.cpp.
 ///
 /// **Di sini karena inilah berkas yang dipakai bersama tahap vertex dan
-/// fragment.** `box.frag` sempat menuliskan bit pertama sendiri; bit kedua
-/// ditambahkan bersamanya supaya yang ketiga tidak menjadi tiga salinan yang
-/// harus sepakat.
+/// fragment.** `box.frag` sempat menuliskan bit pertama sendiri.
+///
+/// Bit kedua — "warna instance mengalahkan warna ruas" — hilang di G6: warna
+/// ruas sekarang diselesaikan CPU dan sampai ke sini sebagai satu warna, jadi
+/// tidak ada lagi dua warna yang harus dipilih di shader.
 static const uint kFlagReceiveShadows = 1u;
-static const uint kFlagForceInstanceColor = 2u;
 
 struct BoxVarying {
     float4 position : SV_Position;
@@ -32,6 +33,19 @@ struct BoxVarying {
     /// model shading yang memakainya — sementara shader material hasil kompilasi
     /// graph justru itu yang pertama diambilnya.
     [[vk::location(5)]] float4 worldTangent;
+    /// `x` slot material, `y` slot tekstur — keduanya diteruskan apa adanya
+    /// dari atribut instance.
+    ///
+    /// `nointerpolation` karena keduanya nomor, bukan besaran: nomor yang
+    /// diinterpolasi antar-vertex menunjuk material yang tidak ada.
+    ///
+    /// **Satu lokasi berdua, bukan satu lokasi masing-masing.** Yang membacanya
+    /// berbeda-beda: shader material mengambil `x`, `box_bindless.frag`
+    /// mengambil `y`, dan tidak ada satu pun yang mengambil keduanya. Slang
+    /// membuang varying yang tidak dibaca dari antarmuka tahap fragment, jadi
+    /// dua lokasi terpisah berarti setiap pipeline menyisakan satu keluaran
+    /// tanpa pembaca — yaitu peringatan validasi di setiap pembuatan pipeline.
+    [[vk::location(6)]] nointerpolation uint2 slots;
 };
 
 #endif

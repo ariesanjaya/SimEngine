@@ -10,7 +10,8 @@
 #include "skin_common.slang"
 
 [shader("vertex")]
-BoxVarying main(BoxVertex vertex, uint instanceId : SV_InstanceID) {
+BoxVarying main(BoxVertex vertex, uint instanceId : SV_InstanceID,
+                uint instanceBase : SV_StartInstanceLocation) {
     // **Kulit lebih dulu, transform instance sesudahnya.** Palet memetakan ruang
     // bind ke ruang lokal mesh, jadi ia berada di dalam transform dunia
     // entity-nya — bukan menggantikannya. Urutan yang terbalik membuat karakter
@@ -20,7 +21,7 @@ BoxVarying main(BoxVertex vertex, uint instanceId : SV_InstanceID) {
     float3 localTangent;
     applySkinTangent(vertex, localPosition, localNormal, localTangent);
 
-    float4x4 model = instanceModel(push.instanceBase + instanceId);
+    float4x4 model = instanceModel(instanceBase + instanceId);
     float4 world = mul(model, float4(localPosition, 1.0));
 
     BoxVarying output;
@@ -30,22 +31,19 @@ BoxVarying main(BoxVertex vertex, uint instanceId : SV_InstanceID) {
     // baru diperbaiki di E8.4 ketika mesh sungguhan masuk beserta matriks
     // normalnya sendiri.
     output.normal = normalize(mul((float3x3)model, localNormal));
-    // **Warna material ruas menang atas warna instance, kecuali saat instance
-    // memaksanya.** Yang memaksa hanyalah sorotan seleksi: objek terpilih harus
-    // berubah warna seluruhnya, dan material berkasnya justru yang paling tidak
-    // boleh menutupinya.
-    bool forceInstanceColor = (vertex.flags & kFlagForceInstanceColor) != 0u;
-    float4 tint = (push.partColor.w > 0.0 && !forceInstanceColor) ? push.partColor
-                                                                  : vertex.color;
-    // **Dikalikan, bukan menggantikan.** Warna simpul adalah pemodulasi: mesh
-    // yang tidak mengisinya membawa putih, dan putih tidak mengubah apa pun.
-    // Yang menggantikan akan membuat setiap mesh tanpa warna simpul menjadi
-    // hitam pekat pada hari atribut ini ditambahkan.
+    // **Warna ruas sudah diselesaikan CPU dan tinggal di atribut instance.**
+    // Sampai G6 ia datang lewat push constant — warna material ruas menang atas
+    // warna instance kecuali saat instance memaksanya, dan yang memaksa hanyalah
+    // sorotan seleksi — dan aturan itu tidak berubah; yang berubah hanya di mana
+    // ia dinilai. Menilainya di sini berarti dua entity bermesh sama dengan
+    // warna ruas berbeda adalah dua panggilan gambar.
     //
-    // Alpha-nya ikut dikalikan supaya sisi yang sengaja tembus pandang tetap
-    // tembus pandang; sorotan seleksi memakai jalur `forceInstanceColor` di
-    // atas dan karena itu tidak ikut teredam warna simpul.
-    output.color = tint * vertex.vertexColor;
+    // **Dikalikan dengan warna simpul, bukan menggantikannya.** Warna simpul
+    // adalah pemodulasi: mesh yang tidak mengisinya membawa putih, dan putih
+    // tidak mengubah apa pun. Alpha-nya ikut supaya sisi yang sengaja tembus
+    // pandang tetap tembus pandang.
+    output.color = vertex.color * vertex.vertexColor;
+    output.slots = uint2(vertex.materialSlot, vertex.textureSlot);
     output.uv = vertex.uv;
     // Arah tangen ikut matriks model, sama dengan normal. `w`-nya arah tangan,
     // yang tidak boleh ikut ditransformasikan — ia sebuah tanda, bukan vektor.

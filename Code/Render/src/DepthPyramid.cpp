@@ -13,11 +13,24 @@ namespace {
 
 constexpr VkFormat kFormat = VK_FORMAT_R32_SFLOAT;
 
+/// Tahap yang boleh membaca piramida sesudah ia selesai ditulis.
+///
+/// **Compute ikut, dan ia wajib ikut.** Penelusuran GI membacanya dari tahap
+/// fragment; occlusion culling membacanya dari compute. Barrier yang hanya
+/// menyebut fragment tidak memberi satu pun jaminan kepada dispatch yang
+/// membacanya sesudahnya — dan yang terjadi bukan galat melainkan piramida yang
+/// terbaca setengah jadi, yaitu benda yang hilang di sebagian frame. Validation
+/// layer tidak melaporkannya; yang menemukannya adalah dua jalur yang
+/// seharusnya menghasilkan gambar yang sama dan ternyata tidak.
+constexpr VkPipelineStageFlags2 kPyramidReaders =
+    VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+
 /// Harus sama persis dengan blok push_constant di Shaders/hiz_reduce.frag.
 struct ReducePush {
     int32_t sourceWidth = 0;
     int32_t sourceHeight = 0;
     int32_t copyOnly = 0;
+    int32_t reduceMin = 0;
 };
 
 std::vector<uint32_t> ReadSpirv(const std::filesystem::path& path) {
@@ -63,9 +76,11 @@ uint32_t DepthPyramid::LevelsFor(uint32_t width, uint32_t height) {
     return HiZPyramid::LevelsFor(width, height);
 }
 
-bool DepthPyramid::Create(rhi::Device& device, const std::filesystem::path& shaderDirectory) {
+bool DepthPyramid::Create(rhi::Device& device, const std::filesystem::path& shaderDirectory,
+                          DepthReduce reduce) {
     Destroy();
     device_ = &device;
+    reduce_ = reduce;
 
     VkDescriptorSetLayoutBinding binding{};
     binding.binding = 0;
@@ -310,7 +325,7 @@ void DepthPyramid::AdoptLayouts() {
     barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
     barrier.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
     barrier.srcAccessMask = VK_ACCESS_2_NONE;
-    barrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+    barrier.dstStageMask = kPyramidReaders;
     barrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
     barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -361,7 +376,7 @@ void DepthPyramid::Record(VkCommandBuffer cmd, uint32_t viewportWidth,
         // jadi tidak ada apa pun yang perlu dipertahankan. Menyebut layout
         // sebelumnya justru memaksa driver menyalin isi yang langsung dibuang.
         barrier.subresourceRange.baseMipLevel = level;
-        barrier.srcStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        barrier.srcStageMask = kPyramidReaders;
         barrier.srcAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
         barrier.dstStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
         barrier.dstAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
@@ -394,6 +409,7 @@ void DepthPyramid::Record(VkCommandBuffer cmd, uint32_t viewportWidth,
         push.sourceWidth = static_cast<int32_t>(sourceWidth);
         push.sourceHeight = static_cast<int32_t>(sourceHeight);
         push.copyOnly = level == 0 ? 1 : 0;
+        push.reduceMin = reduce_ == DepthReduce::Farthest ? 1 : 0;
         vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline_);
         vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, pipelineLayout_, 0, 1,
                                 &sources_[level], 0, nullptr);
@@ -407,7 +423,7 @@ void DepthPyramid::Record(VkCommandBuffer cmd, uint32_t viewportWidth,
         // yang dibaca dan yang ditulis adalah image yang sama.
         barrier.srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
         barrier.srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
-        barrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        barrier.dstStageMask = kPyramidReaders;
         barrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
         barrier.oldLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
         barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -424,7 +440,7 @@ void DepthPyramid::Record(VkCommandBuffer cmd, uint32_t viewportWidth,
         barrier.subresourceRange.baseMipLevel = level;
         barrier.srcStageMask = VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT;
         barrier.srcAccessMask = VK_ACCESS_2_NONE;
-        barrier.dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        barrier.dstStageMask = kPyramidReaders;
         barrier.dstAccessMask = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT;
         barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;

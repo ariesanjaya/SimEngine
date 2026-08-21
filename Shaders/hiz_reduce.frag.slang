@@ -13,6 +13,16 @@ struct Push {
     // aturan pengalamatan di dalam satu lingkaran, dan selisih di antara
     // keduanya muncul sebagai perpotongan yang meleset satu piksel.
     int copyOnly;
+    /// Bukan nol: ringkas dengan **minimum**, yaitu permukaan terjauh.
+    ///
+    /// **Dua piramida dari satu shader, dan keduanya menjawab pertanyaan yang
+    /// berlawanan.** Penelusuran sinar bertanya "seberapa dekat permukaan
+    /// terdekat di sel ini" — sebuah sinar boleh melompati sel hanya kalau ia
+    /// masih di depan yang terdekat. Occlusion culling bertanya "seberapa jauh
+    /// permukaan **terjauh**" — sebuah benda tertutup hanya kalau seluruh
+    /// petaknya sudah terisi sesuatu yang lebih dekat, dan yang menentukan
+    /// adalah texel yang paling jauh di antaranya.
+    int reduceMin;
 };
 
 [[vk::push_constant]] ConstantBuffer<Push> pc;
@@ -27,10 +37,9 @@ float main(float4 position : SV_Position) : SV_Target {
         return uSource.Load(int3(min(destination, last), 0)).r;
     }
 
-    // **Reversed-Z: yang diambil yang TERBESAR.** Depth terbesar adalah
-    // permukaan yang paling dekat ke kamera, dan itulah yang harus diketahui
-    // penelusur — sebuah sel boleh dilompati hanya kalau sinarnya masih di depan
-    // permukaan terdekat di dalamnya.
+    // **Reversed-Z: yang terbesar adalah yang paling dekat.** Piramida
+    // penelusuran mengambil yang terbesar; piramida occlusion mengambil yang
+    // terkecil. Lihat catatan di `Push::reduceMin`.
     //
     // Ukuran tingkat ini mengikuti aturan mip Vulkan: dibulatkan ke bawah.
     // Karena itu texel **terakhir** sebuah baris merangkum sisa barisnya — tiga
@@ -40,11 +49,14 @@ float main(float4 position : SV_Position) : SV_Target {
     int2 base = destination * 2;
     int2 high = select(destination + int2(1) == destinationSize, last, base + int2(1));
 
-    float closest = 0.0;
+    // Nilai awal yang netral untuk masing-masing: nol adalah yang terjauh pada
+    // reversed-Z, satu yang terdekat.
+    float result = pc.reduceMin != 0 ? 1.0 : 0.0;
     for (int y = base.y; y <= high.y; ++y) {
         for (int x = base.x; x <= high.x; ++x) {
-            closest = max(closest, uSource.Load(int3(x, y, 0)).r);
+            const float value = uSource.Load(int3(x, y, 0)).r;
+            result = pc.reduceMin != 0 ? min(result, value) : max(result, value);
         }
     }
-    return closest;
+    return result;
 }

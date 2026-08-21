@@ -95,11 +95,19 @@ void PrintUsage() {
         "  --bench-warmup <n>            frame pemanasan yang dibuang, bawaan 90\n"
         "  --bench-out <path>            tulis tabelnya sebagai Markdown\n"
         "  --bench-gi <on|off>           paksa GI; bawaannya mengikuti level\n"
-        "  --bench-capture <path.png>    simpan frame terakhir; kameranya deterministik\n"
+        "  --bench-capture <path.png>    simpan sebuah frame; kameranya deterministik\n"
+        "  --bench-capture-frame <n>     frame mana yang disimpan, bawaan yang terakhir\n"
+        "  --bench-cull-first <n>        gambar hanya permukaan bernomor >= n\n"
+        "  --bench-dump-depth <path>     depth buffer mentah (w, h, float per texel)\n"
+        "  --bench-cull-limit <n>        gambar hanya permukaan bernomor < n\n"
+        "  --bench-fixed-exposure        eksposur manual; wajib untuk membandingkan gambar\n"
         "  --bench-compute               ganti gambarnya dengan pass compute uji (G3)\n"
         "  --validate-sync               nyalakan validasi sinkronisasi; lambat, sengaja\n"
         "  --bench-cpu-clusters          penetapan cluster di CPU, bukan GPU (G4)\n"
         "  --bench-cpu-sdf               komposit clipmap SDF di CPU, bukan GPU (G4)\n"
+        "  --bench-cpu-cull              culling dan perintah gambar di CPU (G6)\n"
+        "  --bench-occlusion             nyalakan occlusion culling; belum tepat, lihat G6\n"
+        "  --bench-dump-cull <path>      angka antara uji occlusion tiap permukaan\n"
         "  --no-bindless                 material lewat set per ruas, bukan bindless (G5)\n"
         "  --bench-dump-sdf <path>       simpan isi voxel kaskade SDF; untuk dibandingkan\n",
         stderr);
@@ -109,6 +117,21 @@ void PrintUsage() {
 struct Samples {
     std::string name;
     std::vector<float> milliseconds;
+    /// Primitif yang diserahkan pass ini, per frame. Kosong untuk tahap CPU.
+    std::vector<uint64_t> primitives;
+
+    /// Median primitif. **Median dan bukan rata-rata, alasan yang sama dengan
+    /// waktu** — dan di sini alasannya lebih tajam lagi: satu frame yang
+    /// hasilnya belum siap dipungut sebagai nol, dan satu nol menyeret
+    /// rata-rata sementara median tidak bergerak sama sekali.
+    uint64_t MedianPrimitives() const {
+        if (primitives.empty()) {
+            return 0;
+        }
+        std::vector<uint64_t> sorted = primitives;
+        std::sort(sorted.begin(), sorted.end());
+        return sorted[sorted.size() / 2];
+    }
 
     double Mean() const {
         if (milliseconds.empty()) {
@@ -155,14 +178,15 @@ struct Samples {
 /// dengan mata.
 class SampleTable {
 public:
-    void Add(std::string_view name, float milliseconds) {
+    void Add(std::string_view name, float milliseconds, uint64_t primitives = 0) {
         for (Samples& entry : entries_) {
             if (entry.name == name) {
                 entry.milliseconds.push_back(milliseconds);
+                entry.primitives.push_back(primitives);
                 return;
             }
         }
-        entries_.push_back(Samples{std::string(name), {milliseconds}});
+        entries_.push_back(Samples{std::string(name), {milliseconds}, {primitives}});
     }
 
     const std::vector<Samples>& Entries() const { return entries_; }
@@ -178,14 +202,31 @@ std::string FormatTable(std::string_view title, const SampleTable& table) {
     }
     std::string out = "### ";
     out += title;
-    out += "\n\n| Pass | Median | Rata-rata | Puncak |\n|---|---:|---:|---:|\n";
+    // **Kolom primitif hanya muncul kalau ada yang mengisinya.** Tabel CPU
+    // tidak punya angka itu, dan kolom kosong di sebelah angka yang berarti
+    // adalah kolom yang membuat pembacanya mengira ada yang hilang.
+    bool anyPrimitives = false;
+    for (const Samples& entry : table.Entries()) {
+        anyPrimitives = anyPrimitives || entry.MedianPrimitives() > 0;
+    }
+    out += anyPrimitives ? "\n\n| Pass | Median | Rata-rata | Puncak | Primitif |\n"
+                           "|---|---:|---:|---:|---:|\n"
+                         : "\n\n| Pass | Median | Rata-rata | Puncak |\n|---|---:|---:|---:|\n";
     double medianTotal = 0.0;
     double meanTotal = 0.0;
+    uint64_t primitiveTotal = 0;
     for (const Samples& entry : table.Entries()) {
         char line[256];
-        std::snprintf(line, sizeof(line), "| `%s` | %.3f | %.3f | %.3f |\n", entry.name.c_str(),
-                      entry.Median(), entry.Mean(), entry.Max());
+        if (anyPrimitives) {
+            std::snprintf(line, sizeof(line), "| `%s` | %.3f | %.3f | %.3f | %llu |\n",
+                          entry.name.c_str(), entry.Median(), entry.Mean(), entry.Max(),
+                          static_cast<unsigned long long>(entry.MedianPrimitives()));
+        } else {
+            std::snprintf(line, sizeof(line), "| `%s` | %.3f | %.3f | %.3f |\n",
+                          entry.name.c_str(), entry.Median(), entry.Mean(), entry.Max());
+        }
         out += line;
+        primitiveTotal += entry.MedianPrimitives();
         // **Lingkup yang namanya berakhiran `-total` tidak ikut dijumlahkan.**
         // `cpu-total` membungkus seluruh baris lain; memasukkannya ke dalam
         // jumlah berarti menghitung frame yang sama dua kali dan menghasilkan
@@ -198,9 +239,17 @@ std::string FormatTable(std::string_view title, const SampleTable& table) {
         medianTotal += entry.Median();
         meanTotal += entry.Mean();
     }
-    char total[128];
-    std::snprintf(total, sizeof(total), "| **jumlah baris di atas** | **%.3f** | **%.3f** | |\n",
-                  medianTotal, meanTotal);
+    char total[192];
+    if (anyPrimitives) {
+        std::snprintf(total, sizeof(total),
+                      "| **jumlah baris di atas** | **%.3f** | **%.3f** | | **%llu** |\n",
+                      medianTotal, meanTotal,
+                      static_cast<unsigned long long>(primitiveTotal));
+    } else {
+        std::snprintf(total, sizeof(total),
+                      "| **jumlah baris di atas** | **%.3f** | **%.3f** | |\n", medianTotal,
+                      meanTotal);
+    }
     out += total;
     return out;
 }
@@ -408,6 +457,75 @@ int main(int argc, char** argv) {
     // `viewport.capture`; di mode ukur ia mengikuti lintasan terkunci.
     render::Camera camera;
 
+    // Menyimpan isi target render ke berkas. Dipakai mode ukur, dan dipisah
+    // supaya frame di tengah lintasan dan frame terakhir memakai jalur yang sama.
+    const auto writeCapture = [](render::IViewportRenderer& target, std::string_view path) {
+        std::vector<uint8_t> rgba;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        std::string readbackError;
+        if (!target.CapturePixels(rgba, width, height, readbackError)) {
+            SIM_ERROR("Bench", "cannot read back the render target: {}", readbackError);
+            return;
+        }
+        imageio::Image image;
+        image.desc.width = width;
+        image.desc.height = height;
+        image.desc.channels = 4;
+        image.desc.type = imageio::PixelType::UInt8;
+        image.bytes = std::move(rgba);
+        const imageio::ImageIoResult written =
+            imageio::Write(std::filesystem::path(path), image);
+        if (!written.ok) {
+            SIM_ERROR("Bench", "cannot write {}: {}", std::string(path), written.error);
+        } else {
+            SIM_INFO("Bench", "frame written to {}", std::string(path));
+        }
+    };
+
+    // Menyimpan angka antara uji occlusion. Dipisah karena alasan yang sama
+    // dengan `writeCapture`: frame di tengah lintasan dan frame terakhir harus
+    // memakai jalur yang sama.
+    const auto writeCullDump = [](render::IViewportRenderer& target, std::string_view path) {
+        std::string text;
+        std::string dumpError;
+        if (!target.CaptureCullDebug(text, dumpError)) {
+            SIM_ERROR("Bench", "cannot read the cull data: {}", dumpError);
+            return;
+        }
+        std::ofstream file{std::filesystem::path(path)};
+        if (!file) {
+            SIM_ERROR("Bench", "cannot write {}", std::string(path));
+            return;
+        }
+        file << text;
+        SIM_INFO("Bench", "cull data written to {}", std::string(path));
+    };
+
+    // Depth buffer mentah, float per texel. Yang membacanya skrip di luar
+    // program; menulisnya sebagai gambar akan membuang persis ketelitian yang
+    // dicari.
+    const auto writeDepthDump = [](render::IViewportRenderer& target, std::string_view path) {
+        std::vector<float> depth;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        std::string dumpError;
+        if (!target.CaptureDepth(depth, width, height, dumpError)) {
+            SIM_ERROR("Bench", "cannot read the depth buffer: {}", dumpError);
+            return;
+        }
+        std::ofstream file{std::filesystem::path(path), std::ios::binary};
+        if (!file) {
+            SIM_ERROR("Bench", "cannot write {}", std::string(path));
+            return;
+        }
+        const uint32_t header[2]{width, height};
+        file.write(reinterpret_cast<const char*>(header), sizeof(header));
+        file.write(reinterpret_cast<const char*>(depth.data()),
+                   static_cast<std::streamsize>(depth.size() * sizeof(float)));
+        SIM_INFO("Bench", "depth buffer written to {} ({}x{})", std::string(path), width, height);
+    };
+
     // --- Mode ukur (G0) ------------------------------------------------------
     //
     // **Sebelum server MCP dinyalakan, dan keluar tanpa pernah menyalakannya.**
@@ -456,6 +574,24 @@ int main(int argc, char** argv) {
         // bisa dijalankan dari satu perintah, bukan dari dua build.
         bool cpuClusters = false;
         bool cpuSdf = false;
+        bool cpuCull = false;
+        bool occlusion = false;
+        // Frame mana yang ditangkap. **Bawaannya yang terakhir, dan itu tidak
+        // selalu berguna:** lintasan kamera menutup satu putaran penuh, jadi
+        // frame terakhir selalu berdiri di tempat yang sama dengan frame
+        // pertama — dan pada sebagian adegan tempat itu tidak memperlihatkan
+        // apa pun. Perbandingan gambar yang hanya bisa dilakukan dari satu sudut
+        // adalah perbandingan yang mudah lulus tanpa berarti.
+        uint32_t captureFrame = 0;
+        bool captureFrameSet = false;
+        // **Eksposur otomatis adalah gelung umpan balik, dan itu merusak setiap
+        // perbandingan gambar.** Ia mengukur adegan lalu beradaptasi terhadap
+        // waktu, jadi selisih sekecil apa pun di sebuah frame — satu benda di
+        // tepi frustum yang lolos di satu jalur dan tidak di jalur lain —
+        // menggeser eksposur frame berikutnya, dan geseran itu menumpuk. Yang
+        // terlihat di ujung bukan selisih isinya melainkan seluruh gambar yang
+        // lebih terang. Dengan eksposur manual, yang dibandingkan kembali isinya.
+        bool fixedExposure = false;
         for (int at = 1; at < argc; ++at) {
             if (argv[at] == nullptr) {
                 continue;
@@ -467,6 +603,12 @@ int main(int argc, char** argv) {
                 cpuClusters = true;
             } else if (flag == "--bench-cpu-sdf") {
                 cpuSdf = true;
+            } else if (flag == "--bench-cpu-cull") {
+                cpuCull = true;
+            } else if (flag == "--bench-occlusion") {
+                occlusion = true;
+            } else if (flag == "--bench-fixed-exposure") {
+                fixedExposure = true;
             }
         }
 
@@ -475,6 +617,11 @@ int main(int argc, char** argv) {
         // G0 ingin ukur — jadi garis dasar yang diam-diam mengukur adegan tanpa
         // GI adalah garis dasar yang menjawab pertanyaan lain. Levelnya sendiri
         // tetap yang menentukan bila benderanya tidak ada.
+        if (const std::string_view value = FlagValue(argc, argv, "--bench-capture-frame");
+            !value.empty()) {
+            captureFrame = static_cast<uint32_t>(std::strtoul(std::string(value).c_str(), nullptr, 10));
+            captureFrameSet = true;
+        }
         if (const std::string_view value = FlagValue(argc, argv, "--bench-gi"); !value.empty()) {
             if (value == "on") {
                 app.Context().gi.enabled = true;
@@ -607,6 +754,22 @@ int main(int argc, char** argv) {
             desc.computeGradient = computeGradient;
             desc.gpuClusters = !cpuClusters;
             desc.gpuSdf = !cpuSdf;
+            desc.gpuCull = !cpuCull;
+            desc.gpuOcclusion = occlusion;
+            desc.cullDebug = !FlagValue(argc, argv, "--bench-dump-cull").empty();
+            if (const std::string_view value = FlagValue(argc, argv, "--bench-cull-first");
+                !value.empty()) {
+                desc.cullFirst =
+                    static_cast<uint32_t>(std::strtoul(std::string(value).c_str(), nullptr, 10));
+            }
+            if (const std::string_view value = FlagValue(argc, argv, "--bench-cull-limit");
+                !value.empty()) {
+                desc.cullLimit =
+                    static_cast<uint32_t>(std::strtoul(std::string(value).c_str(), nullptr, 10));
+            }
+            if (fixedExposure) {
+                desc.post.exposureMode = render::ExposureMode::Manual;
+            }
             // Delta yang sama dengan yang diberikan ke `app.Tick`, dan karena
             // alasan yang sama: yang maju menurut waktu — eksposur, awan,
             // akumulasi temporal — harus maju sama jauhnya di tiap jalan, kalau
@@ -616,6 +779,21 @@ int main(int argc, char** argv) {
             camera.rotation = glm::quatLookAt(glm::normalize(forward), Vec3(0.0f, 1.0f, 0.0f));
             desc.camera = camera;
             renderer->Render(desc, sceneView.Scene());
+
+            if (captureFrameSet && frame == captureFrame) {
+                if (const std::string_view shot = FlagValue(argc, argv, "--bench-capture");
+                    !shot.empty()) {
+                    writeCapture(*renderer, shot);
+                }
+                if (const std::string_view dump = FlagValue(argc, argv, "--bench-dump-cull");
+                    !dump.empty()) {
+                    writeCullDump(*renderer, dump);
+                }
+                if (const std::string_view dump = FlagValue(argc, argv, "--bench-dump-depth");
+                    !dump.empty()) {
+                    writeDepthDump(*renderer, dump);
+                }
+            }
 
             if (frame < warmup) {
                 continue;
@@ -629,7 +807,7 @@ int main(int argc, char** argv) {
             if (serial != lastSerial) {
                 lastSerial = serial;
                 for (const render::PassTiming& timing : renderer->PassTimings()) {
-                    gpu.Add(timing.name, timing.milliseconds);
+                    gpu.Add(timing.name, timing.milliseconds, timing.primitives);
                 }
                 ++gpuSamples;
             }
@@ -671,28 +849,13 @@ int main(int argc, char** argv) {
         }
 
         if (const std::string_view shot = FlagValue(argc, argv, "--bench-capture");
-            !shot.empty()) {
-            std::vector<uint8_t> rgba;
-            uint32_t width = 0;
-            uint32_t height = 0;
-            std::string readbackError;
-            if (!renderer->CapturePixels(rgba, width, height, readbackError)) {
-                SIM_ERROR("Bench", "cannot read back the render target: {}", readbackError);
-            } else {
-                imageio::Image image;
-                image.desc.width = width;
-                image.desc.height = height;
-                image.desc.channels = 4;
-                image.desc.type = imageio::PixelType::UInt8;
-                image.bytes = std::move(rgba);
-                const imageio::ImageIoResult written =
-                    imageio::Write(std::filesystem::path(shot), image);
-                if (!written.ok) {
-                    SIM_ERROR("Bench", "cannot write {}: {}", std::string(shot), written.error);
-                } else {
-                    SIM_INFO("Bench", "last frame written to {}", std::string(shot));
-                }
-            }
+            !shot.empty() && !captureFrameSet) {
+            writeCapture(*renderer, shot);
+        }
+
+        if (const std::string_view dump = FlagValue(argc, argv, "--bench-dump-cull");
+            !dump.empty() && !captureFrameSet) {
+            writeCullDump(*renderer, dump);
         }
 
         std::string report = "# Garis dasar G0\n\n";

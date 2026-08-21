@@ -250,10 +250,11 @@ void ClusterAssign::Upload(uint32_t slot, const ClusterGrid& grid, const Mat4& v
     // Descriptor slot ini ditulis ulang hanya kalau buffernya benar-benar
     // berpindah. Slot ini sudah menunggu fence-nya, jadi menulisnya aman; slot
     // yang lain tidak disentuh sama sekali.
-    const VkBuffer before = target.lights.Handle();
+    // **Generasi, bukan handle** — lihat catatan di `DynamicBuffer::Generation`.
+    const uint64_t before = target.lights.Generation();
     if (target.lights.Reserve(lightBytes)) {
         target.lights.Write(viewLights_.data(), lightBytes);
-        if (target.lights.Handle() != before) {
+        if (target.lights.Generation() != before) {
             WriteSlotDescriptors(slot);
         }
     }
