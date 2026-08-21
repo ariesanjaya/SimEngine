@@ -1191,7 +1191,7 @@ TEST_CASE("Setiap importir menaruh asal UV di kiri atas, apa pun konvensi berkas
         {Vec3(0.0f, 1.0f, 0.0f), Vec2(0.2f, 0.1f)},
     }};
 
-    for (const char* name : {"uvQuad.gltf", "uvQuad.obj", "uvQuad.usda"}) {
+    for (const char* name : {"uvQuad.gltf", "uvQuad.obj", "uvQuad.usda", "uvQuad.fbx"}) {
         const std::filesystem::path path = std::filesystem::path(SIM_MESH_DIR) / name;
         if (!std::filesystem::exists(path)) {
             continue;  // aset opsional
@@ -1221,6 +1221,53 @@ TEST_CASE("Setiap importir menaruh asal UV di kiri atas, apa pun konvensi berkas
             // pun beririsan, jadi importir yang lupa membalik gagal pada
             // angkanya sendiri, bukan hanya pada pasangannya.
             CHECK(found->uv.y == doctest::Approx(corner.uv.y).epsilon(1e-4f));
+        }
+    }
+}
+
+TEST_CASE("Tangent berkasnya dipakai kalau ada, dan dihitung ulang kalau tidak") {
+    using namespace sim::assets;
+
+    // **Dua berkas yang geometrinya sama persis, dan hanya satu yang membawa
+    // tangent.** Peta normal dipanggang terhadap bingkai tangent tertentu;
+    // bingkai yang dihitung ulang dari UV belum tentu bingkai yang sama, dan
+    // jahitannya lalu terlihat sebagai garis yang pencahayaannya patah.
+    //
+    // Tangent di uvQuad.fbx sengaja **+Y**, padahal UV-nya naik searah +X.
+    // Yang dihitung ulang dari UV pasti +X, jadi importir yang mengabaikan
+    // berkasnya gagal pada sumbu yang berbeda — bukan pada tanda yang halus
+    // yang bisa saja lolos karena kebetulan.
+    struct Expected {
+        const char* file;
+        Vec3 tangent;
+        float handedness;
+    };
+    const std::array<Expected, 2> cases{{
+        {"uvQuad.fbx", Vec3(0.0f, 1.0f, 0.0f), 1.0f},   // dari berkasnya
+        {"uvQuad.obj", Vec3(1.0f, 0.0f, 0.0f), -1.0f},  // dihitung ulang dari UV
+    }};
+
+    for (const Expected& expected : cases) {
+        const std::filesystem::path path =
+            std::filesystem::path(SIM_MESH_DIR) / expected.file;
+        if (!std::filesystem::exists(path)) {
+            continue;  // aset opsional
+        }
+        std::string error;
+        const MeshData mesh = LoadMesh(path, error);
+        INFO("mesh " << expected.file << " error '" << error << "'");
+        REQUIRE(mesh.IsValid());
+
+        for (const MeshVertex& vertex : mesh.vertices) {
+            INFO(expected.file << " tangent (" << vertex.tangent.x << ", " << vertex.tangent.y
+                               << ", " << vertex.tangent.z << ", " << vertex.tangent.w << ")");
+            CHECK(glm::length(Vec3(vertex.tangent) - expected.tangent) < 1e-3f);
+            // **Arah tangannya juga, dan bukan sekadar pelengkap.** Berkasnya
+            // menuliskan tangan untuk UV yang belum dibalik, sementara importir
+            // membalik `v`; bitangent adalah `dP/dv`, jadi tandanya ikut
+            // terbalik. Yang lupa membalikkannya menghasilkan peta normal yang
+            // tampak cekung di tempat yang seharusnya cembung.
+            CHECK(vertex.tangent.w == doctest::Approx(expected.handedness));
         }
     }
 }

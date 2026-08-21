@@ -138,10 +138,33 @@ hasil impor FBX hanya cocok dengan hasil impor glTF **setelah** `1 − v`, dan
 0,01% cocok apa adanya. Sesudah importirnya membalik, angkanya bertukar tempat —
 99,43% cocok apa adanya, 0,00% perlu dibalik.
 
-Yang menguncinya `uvQuad.obj`, `uvQuad.gltf`, dan `uvQuad.usda` di
-`Resources/Meshes/`: satu segi empat yang sama, ditulis tiga kali menurut
-konvensi masing-masing format, dan satu uji yang menuntut ketiganya diimpor
+Yang menguncinya `uvQuad.obj`, `uvQuad.gltf`, `uvQuad.usda`, dan `uvQuad.fbx`
+di `Resources/Meshes/`: satu segi empat yang sama, ditulis empat kali menurut
+konvensi masing-masing format, dan satu uji yang menuntut keempatnya diimpor
 menjadi UV yang sama persis.
+
+### Bingkai tangent ikut terbalik
+
+**Membalik `v` membalik arah tangan, dan tandanya harus ikut dibalik.**
+Bitangent adalah `dP/dv`; mengganti `v` dengan `1 − v` membalik arahnya, jadi
+arah tangan yang tertulis di sebuah berkas berlaku untuk UV yang **belum**
+dibalik. Yang lupa membalikkannya menghasilkan peta normal yang tampak cekung
+di tempat yang seharusnya cembung — sekali lagi, tanpa satu pun galat.
+
+**Tangent milik berkasnya dipakai kalau ada, dan hanya dihitung ulang kalau
+tidak ada.** Peta normal dipanggang terhadap bingkai tangent tertentu, dan
+bingkai yang diturunkan ulang dari UV belum tentu bingkai yang sama; jahitannya
+lalu terlihat sebagai garis yang pencahayaannya patah. Berlaku untuk glTF
+(atribut `TANGENT`) maupun FBX (`LayerElementTangent`, arah tangannya dari
+`LayerElementBinormal` bila ada). Satu sudut tanpa tangent membuat **seluruh
+mesh** dihitung ulang: mencampur kedua sumber menghasilkan jahitan tepat di
+tempat keduanya bertemu.
+
+`uvQuad.fbx` menguncinya, dan ia berkas FBX **ASCII** supaya angkanya bisa
+dibaca mata. Tangentnya sengaja `+Y` padahal UV-nya naik searah `+X`: yang
+dihitung ulang dari UV pasti `+X`, jadi importir yang mengabaikan berkasnya
+gagal pada sumbu yang berbeda — bukan pada tanda halus yang bisa lolos karena
+kebetulan.
 
 ---
 

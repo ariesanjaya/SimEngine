@@ -99,6 +99,41 @@ Vec3 ToVec3(const FbxVector4& value) {
                 static_cast<float>(value[2]));
 }
 
+/// Nilai sebuah elemen layer bervektor pada satu sudut poligon.
+///
+/// **Mode pemetaan dan mode rujukan dibaca keduanya, dan itu syarat, bukan
+/// kelengkapan.** FBX menyimpan atribut per titik kontrol atau per sudut
+/// poligon, langsung atau lewat indeks, dan keempat kombinasinya lazim di
+/// berkas sungguhan. Yang hanya membaca satu kombinasi mendapat angka milik
+/// sudut lain — bingkai tangent yang tertukar, dan bukan satu pun galat.
+template <typename Element>
+bool ReadLayerVector(const Element* element, int controlPoint, int polygonVertex,
+                     FbxVector4& out) {
+    if (element == nullptr) {
+        return false;
+    }
+    const FbxLayerElement::EMappingMode mapping = element->GetMappingMode();
+    int index = 0;
+    if (mapping == FbxGeometryElement::eByControlPoint) {
+        index = controlPoint;
+    } else if (mapping == FbxGeometryElement::eByPolygonVertex) {
+        index = polygonVertex;
+    } else {
+        return false;
+    }
+    if (element->GetReferenceMode() != FbxGeometryElement::eDirect) {
+        if (index < 0 || index >= element->GetIndexArray().GetCount()) {
+            return false;
+        }
+        index = element->GetIndexArray().GetAt(index);
+    }
+    if (index < 0 || index >= element->GetDirectArray().GetCount()) {
+        return false;
+    }
+    out = element->GetDirectArray().GetAt(index);
+    return true;
+}
+
 Vec3 ToVec3(const FbxDouble3& value) {
     return Vec3(static_cast<float>(value[0]), static_cast<float>(value[1]),
                 static_cast<float>(value[2]));
@@ -721,6 +756,11 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
     std::vector<MeshVertex> soup;
     std::vector<SkinInfluence> influenceSoup;
     bool anySkin = false;
+    // **Sekali sudut tanpa tangent, seluruh mesh dihitung ulang.** Mencampur
+    // bingkai dari berkas dengan bingkai hasil hitungan menghasilkan jahitan di
+    // tempat keduanya bertemu — persis cacat yang hendak dihindari dengan
+    // memakai tangent berkasnya.
+    bool everyCornerHasTangent = true;
     /// Material tiap segitiga di dalam `soup`, sejajar dengan soup/3.
     std::vector<int> triangleMaterial;
     /// Material scene → indeks di `mesh.materials`, supaya material yang dipakai
@@ -756,6 +796,19 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
         // terlupa.
         const Mat4 toWorld = ToMat4(node->EvaluateGlobalTransform() * geometry);
         const Mat3 normalMatrix = glm::transpose(glm::inverse(Mat3(toWorld)));
+        // Transform yang mencerminkan membalik arah tangan; tanda di berkasnya
+        // menyatakan tangan di ruang objek, bukan di ruang dunia.
+        const float mirror = glm::determinant(Mat3(toWorld)) < 0.0f ? -1.0f : 1.0f;
+
+        // **Tangent milik berkasnya dipakai kalau ada** — aturan yang sama yang
+        // sudah dipatuhi importir glTF. Peta normal dipanggang terhadap bingkai
+        // tangent tertentu, dan yang dihitung ulang dari UV belum tentu bingkai
+        // yang sama; jahitannya lalu terlihat sebagai garis yang pencahayaannya
+        // patah.
+        const FbxGeometryElementTangent* tangentElement =
+            source->GetElementTangentCount() > 0 ? source->GetElementTangent(0) : nullptr;
+        const FbxGeometryElementBinormal* binormalElement =
+            source->GetElementBinormalCount() > 0 ? source->GetElementBinormal(0) : nullptr;
 
         // Normal yang tidak ada dibangkitkan, bukan dibiarkan nol: mesh tanpa
         // normal digambar hitam pekat, dan itu terbaca sebagai kesalahan shader.
@@ -911,6 +964,47 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
                                          1.0f - static_cast<float>(uv[1]));
                     }
                 }
+
+                bool cornerHasTangent = false;
+                FbxVector4 tangent;
+                if (ReadLayerVector(tangentElement, point,
+                                    source->GetPolygonVertexIndex(polygon) + corner, tangent)) {
+                    // Tangent vektor singgung: ia ikut matriks modelnya, bukan
+                    // invers-transposnya seperti normal.
+                    const Vec3 direction = Mat3(toWorld) * ToVec3(tangent);
+                    const float length = glm::length(direction);
+                    if (length > 1e-8f) {
+                        const Vec3 unit = direction / length;
+                        float handedness = tangent[3] < 0.0 ? -1.0f : 1.0f;
+                        handedness *= mirror;
+                        FbxVector4 binormal;
+                        if (ReadLayerVector(binormalElement, point,
+                                            source->GetPolygonVertexIndex(polygon) + corner,
+                                            binormal)) {
+                            // **Bila binormalnya ada, tangannya dihitung dari
+                            // ia, di ruang dunia.** Keduanya sudah ditransform,
+                            // jadi pencerminan sudah ikut terhitung dan `mirror`
+                            // tidak boleh dipakai dua kali. Komponen keempat
+                            // tangent hanya jalur mundur: sebagian pengekspor
+                            // menaruh tangannya di sana, sebagian meninggalkannya
+                            // 1,0 apa pun keadaannya.
+                            handedness = glm::dot(glm::cross(vertex.normal, unit),
+                                                  Mat3(toWorld) * ToVec3(binormal)) < 0.0f
+                                             ? -1.0f
+                                             : 1.0f;
+                        }
+                        // **Dan dibalik, karena V-nya dibalik.** Bitangent
+                        // adalah `dP/dv`; mengganti `v` dengan `1 − v` membalik
+                        // arahnya, jadi tangan yang tertulis di berkasnya
+                        // berlaku untuk UV yang belum dibalik. Tanpa langkah ini
+                        // peta normal di seluruh berkas ber-tangent tampak
+                        // cekung di tempat yang seharusnya cembung.
+                        vertex.tangent = Vec4(unit, -handedness);
+                        cornerHasTangent = true;
+                    }
+                }
+                everyCornerHasTangent = everyCornerHasTangent && cornerHasTangent;
+
                 soup.push_back(vertex);
 
                 SkinInfluence influence;
@@ -945,7 +1039,9 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
         return mesh;
     }
     GroupByMaterial(mesh, triangleMaterial);
-    mesh.ComputeTangents();
+    if (!everyCornerHasTangent) {
+        mesh.ComputeTangents();
+    }
     return mesh;
 }
 
