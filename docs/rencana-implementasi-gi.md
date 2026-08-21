@@ -123,9 +123,12 @@ kodenya:
 **Selesai kalau:** Cornell box menunjukkan color bleeding yang benar dan stabil (tidak berdenyut) saat kamera diam.
 
 ### M4 — Hash grid radiance cache (±2 minggu)
-- Kunci: posisi terkuantisasi + arah mayor, 2²⁰ entri fixed
-- Diisi dari hit ray screen probe, di-resolve tiap frame
-- Query saat ray mengenai permukaan → memberi **multi-bounce** hampir gratis
+- ✅ Kunci: posisi terkuantisasi + arah mayor, 2²⁰ entri fixed
+- ✅ Diisi dari hit ray screen probe, di-resolve tiap frame
+- ✅ Query saat ray mengenai permukaan → memberi **multi-bounce** hampir gratis
+- ✅ Albedo per material ikut dibake bersama medan jaraknya, dan pantulan
+  membacanya dari grid mesh — bukan dari kaskade clipmap, yang voxel
+  terkasarnya 1,6 m
 
 **Selesai kalau:** furnace test — adegan albedo 1,0 di bawah pencahayaan seragam mendekati putih rata, tidak menggelap.
 
@@ -334,3 +337,47 @@ acuan datang dari matahari yang memantul di batu — dan pantulan itu menuntut
 tetap (`kBounceAlbedo` = 0,5), jadi setiap permukaan memantulkan abu-abu netral
 alih-alih warnanya sendiri. Itu langkah berikutnya, dan ia milik M4: cache
 radiansi yang tahu warna permukaan yang tidak pernah terlihat layar.
+
+### Sesudah M4 — warna, dan tiga sebab ia tidak datang bersama albedo
+
+Albedo per material mendarat tanpa mengubah warna gambarnya sama sekali. Yang
+menjelaskan kenapa bukan albedonya melainkan alat ukurnya: **74% iradiansi
+serambi datang dari sinar yang dinyatakan sampai ke langit**, di lantai yang —
+dilihat dari tempat yang sama menghadap ke atas — lubang langitnya hanya
+sepersepuluh bidang pandang. Warna yang baru masuk hanya menyentuh 27% sisanya,
+dan 28 material Sponza sendiri hampir netral: rata-rata hanya 15% lebih hangat
+di merah daripada di biru.
+
+Tiga sebab, dan yang pertama cacat yang ditulis sendiri saat memperbaiki medan
+kotak:
+
+1. **Penjaga langkah-nol menjawab "langit".** Sinar yang titik asalnya sudah
+   berada di ambang medan dilewatkan dari lapis SDF, dan "tidak mengenai apa-apa"
+   diterjemahkan menjadi langit. Sebuah probe yang terjepit di permukaan karena
+   itu menerima langit penuh dari keenam belas sinarnya.
+2. **Bias titik asal dihitung dalam meter dari kaskade terhalus**, sementara
+   ambang "mengenai" setengah voxel kaskade *setempat* — dan kaskade terkasar
+   bervoxel 1,6 m. Setiap probe yang lebih jauh dari 6,4 m dari kamera terjepit.
+3. **Probe tanpa sinar yang diketahui membuang riwayatnya** alih-alih
+   mempertahankannya.
+
+| | M1 | M4 albedo | M4 + tiga perbaikan | acuan A |
+|---|---:|---:|---:|---:|
+| Serambi R / G / B | 55/74/97 | 65/85/110 | **35/39/47** | 81/75/68 |
+| Serambi R:B | 0,57 | 0,59 | **0,73** | 1,19 |
+| Rata-rata | 56,8 | 60,5 | 64,8 | 78,7 |
+| Median | 46 | 49 | 53 | 69 |
+| Piksel hitam | 4,9% | 9,2% | 19,4% | 1,2% |
+
+Batu akhirnya terbaca abu-abu hangat alih-alih biru langit. Piksel hitam naik
+karena kecerahan sebelumnya sebagiannya palsu — langit yang diterima permukaan
+yang tidak melihat langit.
+
+**Yang tersisa: pantulan kedua.** Bayangan sekarang jujur gelap, dan yang
+mengisinya di acuan adalah cahaya yang sudah memantul dua kali atau lebih.
+Cache radiansi hanya mengenal permukaan yang pernah terlihat layar; di serambi
+itu 2% sinar. Penutup rekursinya — "setiap permukaan yang tidak dikenal melihat
+setengah langit" — memang menahan bayangan tetapi menahannya dengan warna
+langit; diuji dengan mematikannya, piksel hitam melonjak 9,2% menjadi 22,4%.
+Yang menggantinya adalah cache yang ikut mengenal permukaan di luar layar, dan
+itu M5 ke atas.
