@@ -860,15 +860,19 @@ public:
             transformUpload_.insert(transformUpload_.end(), transparentTransforms_.begin(),
                                     transparentTransforms_.end());
             const VkDeviceSize transformBytes = sizeof(Mat4) * transformUpload_.size();
-            const VkBuffer beforeTransforms = slot.instanceBuffer.Handle();
+            const uint64_t beforeTransforms = slot.instanceBuffer.Generation();
             slotReady =
                 slot.buffer.Reserve(sizeof(BoxInstance) * upload_.size()) &&
                 slot.buffer.Write(upload_.data(), sizeof(BoxInstance) * upload_.size()) &&
                 slot.instanceBuffer.Reserve(transformBytes) &&
                 slot.instanceBuffer.Write(transformUpload_.data(), transformBytes);
-            if (slot.instanceBuffer.Handle() != beforeTransforms) {
-                // Buffer yang tumbuh adalah `VkBuffer` yang lain — alasan yang
-                // sama persis dengan palet kulit di bawah.
+            if (slot.instanceBuffer.Generation() != beforeTransforms) {
+                // **Generasi, bukan handle.** Buffer yang dibuat ulang lazimnya
+                // mendapat `VkBuffer` dengan angka yang sama persis dengan yang
+                // baru saja dimusnahkan, dan penjaga yang membandingkan handle
+                // lalu tidak melihat apa-apa — descriptor dibiarkan menunjuk
+                // memori yang sudah dibebaskan. Lihat catatan di
+                // `DynamicBuffer::Generation`.
                 WriteSkinDescriptor(slot);
             }
         }
@@ -881,11 +885,11 @@ public:
         // adalah harga yang jauh lebih murah daripada pemetaan ulang yang salah.
         if (!scene.skinMatrices.empty()) {
             const VkDeviceSize bytes = sizeof(Mat4) * scene.skinMatrices.size();
-            const VkBuffer before = slot.skinBuffer.Handle();
+            const uint64_t before = slot.skinBuffer.Generation();
             if (!slot.skinBuffer.Reserve(bytes) ||
                 !slot.skinBuffer.Write(scene.skinMatrices.data(), bytes)) {
                 SIM_WARN("Render", "cannot upload {} skin matrices", scene.skinMatrices.size());
-            } else if (slot.skinBuffer.Handle() != before) {
+            } else if (slot.skinBuffer.Generation() != before) {
                 // Buffer yang tumbuh adalah `VkBuffer` yang lain. Descriptor yang
                 // masih menunjuk yang lama membaca memori yang sudah dibebaskan.
                 // Hanya set slot ini yang ditulis ulang — slot lain punya buffer

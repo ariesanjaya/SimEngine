@@ -1096,17 +1096,17 @@ beserta jalur mundur ke putih — bukan descriptor tak sah.
 
 ---
 
-## G6 — GPU-driven: indirect draw dan occlusion culling dua fase · ⏳ sebagian
+## G6 — GPU-driven: indirect draw dan occlusion culling dua fase · ✅ selesai (waktu perlu diukur ulang)
 
 Ini bagian yang benar-benar "terinspirasi CryEngine", dan satu-satunya yang tidak
 boleh dikerjakan sebelum lima milestone di atasnya selesai.
 
-**Yang sudah mendarat: alat ukurnya, satuan gambarnya, dan mesin
-indirect-draw-nya. Yang belum: occlusion culling — dan sebabnya sekarang
-diketahui, dan ia bukan di G6.** Uji occlusion-nya sudah dibuktikan benar
-permukaan demi permukaan; yang salah adalah depth buffer yang dibacanya, yang
-berisi kedalaman dari geometri yang tidak pernah tergambar. Lihat "Ujinya benar;
-yang dibacanya tidak" di bawah.
+**Semuanya mendarat: alat ukurnya, satuan gambarnya, mesin indirect-draw-nya,
+dan occlusion culling yang tepat.** Yang menahan occlusion culling selama ini
+ternyata cacat yang jauh lebih tua: descriptor yang dibiarkan menunjuk alokasi
+yang sudah dibebaskan, karena `VkBuffer` yang dibuat ulang mendapat handle yang
+sama persis. Lihat "Akarnya: `VkBuffer` yang dipakai ulang" di bawah. Yang
+tersisa hanya mengukur ulang tabel waktunya.
 
 ### Alat ukur lebih dulu, karena kriterianya tidak bisa diperiksa tanpanya
 
@@ -1504,11 +1504,65 @@ dua hasil render dari benda itu.
   meledak. 935 silinder ditambah 100 prop lain: meledak. Ambangnya bukan jumlah
   permukaan (1.040 meledak, 2.595 tidak) dan bukan jumlah silinder saja.
 
-Yang tersisa untuk dikerjakan berikutnya, dan sekarang jalannya lurus: hantunya
-**tercat**, jadi ia bisa dilacak dengan tuas yang sudah ada — `--bench-cull-first`
-dan `--bench-cull-limit` untuk mempersempit permukaannya, `--bench-dump-depth`
-untuk melihat bentuknya. Yang masih harus dijawab: apa yang berubah antara 869
-dan 870 silinder.
+#### Akarnya: `VkBuffer` yang dipakai ulang
+
+Empat percobaan terakhir mempersempitnya sampai satu baris. Semuanya lewat
+prepass, dengan hantunya diisolasi ke satu permukaan:
+
+1. **Membatasi posisi lokal simpul ke ±2**: hantunya bertahan. Bukan data simpul.
+2. **Membatasi posisi dunia ke ±50** — seluruh adegan muat di dalamnya, dan
+   kamera 104 satuan jauhnya: hantunya **tetap** menyentuh bidang dekat. Yang
+   tersisa hanya `world.w`.
+3. **Memaksa `world.w = 1`**: hantunya hilang seluruhnya. Jadi baris terakhir
+   matriks instance-nya bukan (0, 0, 0, 1) — matriks itu sampah.
+4. **Menulis descriptor set kulit setiap frame** alih-alih hanya saat buffernya
+   berpindah: hantunya hilang seluruhnya.
+
+Lalu sebabnya, tercetak tiga kali dalam satu jalan begitu diperiksa:
+
+> `instance buffer reused handle 0x…940 across a rebuild`
+
+**`DynamicBuffer::Reserve` memusnahkan buffer lalu membuat yang baru, dan VMA
+mengembalikan `VkBuffer` dengan angka yang sama persis.** Penjaga yang
+membandingkan `Handle()` untuk memutuskan apakah descriptor perlu ditulis ulang
+karena itu tidak melihat apa-apa, dan descriptor dibiarkan menunjuk alokasi yang
+sudah dibebaskan. Tahap vertex lalu membaca matriks instance berisi sampah —
+satu saja sudah cukup — dan segitiga yang membentang dari bidang dekat sampai ke
+seluruh layar masuk ke depth prepass.
+
+Dari sana seluruh rantainya jelas: piramida occlusion mewarisi kedalaman itu,
+uji occlusion menyimpulkan dengan benar bahwa permukaan di belakangnya tertutup,
+dan yang hilang dari gambar adalah permukaan yang sesungguhnya terlihat. Dan
+karena isi memori yang sudah dibebaskan tidak dijanjikan siapa pun, gambarnya
+berbeda antar-jalan — itulah ketidak-deterministikan adegan padat.
+
+Perbaikannya `DynamicBuffer::Generation()`, yang naik setiap kali buffernya
+benar-benar dibuat ulang. Empat tempat membandingkan handle dan semuanya
+diperbaiki: transform instance dan palet kulit di `VulkanRenderer`, tiga buffer
+slot di `DrawCull`, daftar lampu di `ClusterAssign`, dan entri kaskade di
+`SdfClipmapResource`.
+
+#### Sesudahnya, dan inilah kriteria G6 yang tersisa
+
+| | adegan jarang | adegan padat |
+|---|---:|---:|
+| enam jalan berturut-turut | sama persis | **sama persis** |
+| jalur GPU vs jalur CPU, GI mati | 0 byte | **0 byte** |
+| jalur GPU vs jalur CPU, GI menyala | 0 byte | **0 byte** |
+| occlusion menyala vs mati | 0 byte | **0 byte** |
+| kedalaman terdekat di depth buffer | 49,50 | 49,57 satuan |
+
+**Occlusion culling tepat.** Dan sesudah adegannya digambar dengan benar,
+angkanya berubah: `forward-opaque` menyerahkan 2.791.556 primitif tanpa occlusion
+dan 2.649.124 dengan — 5%, bukan 19% seperti yang terukur di atas hantunya. Dua
+pass yang ditambahkannya berharga 0,059 ms; yang dihemat pass forward sekitar
+0,03 ms. **Ia karena itu tetap mati secara bawaan — sekarang karena angkanya,
+bukan karena ia salah.**
+
+**Satu hal yang belum dikerjakan:** tabel hasil G6 di atas — 34,5 → 14,4 ms dan
+seterusnya — diukur saat hantunya masih ada di setiap frame. Jumlah draw-nya
+(7.586 → 2.232) struktural dan tetap berlaku, tetapi waktunya harus diukur ulang
+terhadap garis dasar sebelum G6.
 
 **Dua cacat sungguhan ikut terangkat sepanjang perburuan itu**, dan keduanya
 tetap diperbaiki:

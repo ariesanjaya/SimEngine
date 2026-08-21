@@ -263,27 +263,28 @@ bool DrawCull::Upload(uint32_t slot, const Frustum& frustum, const Mat4& viewPro
     // yang lain tidak disentuh sama sekali.
     bool moved = false;
     const VkDeviceSize boundBytes = sizeof(GpuBounds) * bounds.size();
-    const VkBuffer beforeBounds = target.bounds.Handle();
+    const uint64_t beforeBounds = target.bounds.Generation();
     if (!target.bounds.Reserve(boundBytes)) {
         return false;
     }
     target.bounds.Write(bounds.data(), boundBytes);
-    moved = moved || target.bounds.Handle() != beforeBounds;
+    // **Generasi, bukan handle** — lihat catatan di `DynamicBuffer::Generation`.
+    moved = moved || target.bounds.Generation() != beforeBounds;
 
     const VkDeviceSize surfaceBytes = sizeof(GpuSurface) * surfaces.size();
-    const VkBuffer beforeSurfaces = target.surfaces.Handle();
+    const uint64_t beforeSurfaces = target.surfaces.Generation();
     if (!target.surfaces.Reserve(surfaceBytes)) {
         return false;
     }
     target.surfaces.Write(surfaces.data(), surfaceBytes);
-    moved = moved || target.surfaces.Handle() != beforeSurfaces;
+    moved = moved || target.surfaces.Generation() != beforeSurfaces;
 
     const VkDeviceSize debugBytes = sizeof(GpuCullDebug) * surfaces.size();
-    const VkBuffer beforeDebug = target.debug.Handle();
+    const uint64_t beforeDebug = target.debug.Generation();
     if (!target.debug.Reserve(debugBytes)) {
         return false;
     }
-    moved = moved || target.debug.Handle() != beforeDebug;
+    moved = moved || target.debug.Generation() != beforeDebug;
 
     const VkDeviceSize commandBytes = kCommandStride * surfaces.size();
     if (target.visibleCommands.bytes < commandBytes) {

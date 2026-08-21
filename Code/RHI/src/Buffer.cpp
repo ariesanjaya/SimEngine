@@ -56,6 +56,7 @@ bool DynamicBuffer::Reserve(VkDeviceSize bytes) {
 
     mapped_ = mappedInfo.pMappedData;
     capacity_ = newCapacity;
+    ++generation_;
     return true;
 }
 

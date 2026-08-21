@@ -418,12 +418,14 @@ struct ViewportDesc {
 
     /// Occlusion culling terhadap piramida depth frame ini (G6).
     ///
-    /// **Mati secara bawaan, dan itu bukan kehati-hatian melainkan keadaan yang
-    /// sebenarnya:** ia menurunkan jumlah segitiga yang diserahkan pass forward
-    /// — 2,79 juta menjadi 2,27 juta pada adegan padat — tetapi ia juga masih
-    /// membuang sebagian permukaan yang mestinya terlihat. Sebabnya belum
-    /// ditemukan; bukti yang sudah terkumpul tercatat di G6 pada
-    /// docs/PLAN-GPU-OPTIM.md.
+    /// **Tepat, dan tetap mati secara bawaan — sekarang karena angkanya.** Ia
+    /// menghasilkan gambar yang sama persis byte demi byte dengan jalur tanpa
+    /// occlusion pada kedua adegan uji, dan menurunkan segitiga yang diserahkan
+    /// pass forward dari 2,79 menjadi 2,65 juta pada adegan padat. Yang tidak
+    /// ikut turun adalah waktunya: dua pass yang ditambahkannya berharga 0,059
+    /// ms sementara yang dihemat pass forward sekitar 0,03 ms. Ia baru menang
+    /// pada adegan yang benar-benar berlapis; sampai ada yang seperti itu di
+    /// repo ini, ia sebuah sakelar.
     ///
     /// Menyalakannya menuntut `gpuCull`.
     bool gpuOcclusion = false;

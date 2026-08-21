@@ -247,12 +247,14 @@ uint64_t SdfClipmapResource::Update(const Vec3& cameraPosition,
             gpuEntries_.push_back(BoxSceneField::GpuEntry{});
         }
         const VkDeviceSize entryBytes = sizeof(BoxSceneField::GpuEntry) * gpuEntries_.size();
-        const VkBuffer before = entryBuffers_[slot].Handle();
+        // **Generasi, bukan handle** — lihat catatan di
+        // `DynamicBuffer::Generation`.
+        const uint64_t before = entryBuffers_[slot].Generation();
         if (!entryBuffers_[slot].Reserve(entryBytes)) {
             return 0;
         }
         entryBuffers_[slot].Write(gpuEntries_.data(), entryBytes);
-        if (entryBuffers_[slot].Handle() != before) {
+        if (entryBuffers_[slot].Generation() != before) {
             // **Hanya set slot ini, bukan seluruhnya.** `WriteFillDescriptors`
             // menulis ulang set tiap kaskade **dan** set entri tiap slot; yang
             // berpindah di sini hanya buffer satu slot. Slot lain bisa saja
