@@ -16,7 +16,7 @@
 struct Push {
     /// xyz texel tujuan terkecil di dalam tekstur, w banyaknya entri
     int4 texelMin;
-    /// xyz voxel dunia yang bersesuaian dengan `texelMin`
+    /// xyz voxel dunia yang bersesuaian dengan `texelMin`, w banyaknya grid
     int4 worldMin;
     /// xyz ukuran kotak, voxel
     int4 extent;
@@ -37,10 +37,35 @@ struct Entry {
     float4 boundsMax;
 };
 
+/// Cermin dari `BakedSceneField::GpuGrid`. Satu medan jarak hasil bake per
+/// instance mesh yang punya satu.
+struct Grid {
+    float4x4 inverse;
+    /// x skala terkecil, y anisotropi, z pita grid (ruang lokal), w slot tekstur
+    float4 scaleBandSlot;
+    /// xyz kotak batas dunia terkecil, w sisi voxel grid
+    float4 boundsMinVoxel;
+    float4 boundsMax;
+    /// xyz pusat voxel (0,0,0) di ruang lokal
+    float4 origin;
+    /// xyz ukuran grid dalam voxel
+    float4 size;
+};
+
+/// Sama dengan `SdfClipmapResource::kMaxGrids`.
+static const int kMaxGrids = 16;
+
 [[vk::push_constant]] ConstantBuffer<Push> pc;
 [format("r8")]
 [[vk::binding(0, 0)]] RWTexture3D<float> uCascade;
 [[vk::binding(0, 1)]] StructuredBuffer<Entry> entries;
+[[vk::binding(1, 1)]] StructuredBuffer<Grid> grids;
+/// **`Texture3D` tanpa sampler, dibaca lewat `Load`.** Penyaringan perangkat
+/// keras tidak sama persis dengan tujuh `lerp` di `TrilinearSample`, dan
+/// kriteria selesai G4 menuntut kedua jalur menghasilkan byte yang sama — bukan
+/// byte yang mirip. Delapan pengambilan texel lebih mahal daripada satu
+/// cuplikan, dan pass ini hanya berjalan saat kamera menggeser sebuah kaskade.
+[[vk::binding(0, 2)]] Texture3D<float> gridTextures[kMaxGrids];
 
 /// Salinan `UnitBoxDistance`.
 float unitBoxDistance(float3 point) {
@@ -54,6 +79,56 @@ float unitBoxDistance(float3 point) {
 float pointAabbDistance(float3 point, float3 boxMin, float3 boxMax) {
     float3 gap = max(max(boxMin - point, point - boxMax), float3(0.0));
     return length(gap);
+}
+
+/// Salinan `SdfGrid::At`: di luar grid, yang bisa dikatakan hanyalah "setidaknya
+/// sejauh pita".
+float gridAt(int slot, int3 texel, int3 size, float band) {
+    if (any(texel < int3(0)) || any(texel >= size)) {
+        return band;
+    }
+    return gridTextures[NonUniformResourceIndex(slot)].Load(int4(texel, 0));
+}
+
+/// Salinan `sim::detail::TrilinearSample`, dengan urutan operasi yang sama
+/// persis — tujuh `lerp` yang ditulis sebagai `a + (b - a) * t`, bukan sebagai
+/// `lerp` intrinsik, karena keduanya boleh dikompilasi menjadi FMA yang berbeda.
+float gridSample(Grid grid, float3 local) {
+    int slot = int(grid.scaleBandSlot.w);
+    float band = grid.scaleBandSlot.z;
+    int3 size = int3(grid.size.xyz);
+    float3 position = (local - grid.origin.xyz) / grid.boundsMinVoxel.w;
+    int3 base = int3(floor(position));
+    float3 f = position - float3(base);
+
+    float c000 = gridAt(slot, base + int3(0, 0, 0), size, band);
+    float c100 = gridAt(slot, base + int3(1, 0, 0), size, band);
+    float c010 = gridAt(slot, base + int3(0, 1, 0), size, band);
+    float c110 = gridAt(slot, base + int3(1, 1, 0), size, band);
+    float c001 = gridAt(slot, base + int3(0, 0, 1), size, band);
+    float c101 = gridAt(slot, base + int3(1, 0, 1), size, band);
+    float c011 = gridAt(slot, base + int3(0, 1, 1), size, band);
+    float c111 = gridAt(slot, base + int3(1, 1, 1), size, band);
+
+    float x00 = c000 + (c100 - c000) * f.x;
+    float x10 = c010 + (c110 - c010) * f.x;
+    float x01 = c001 + (c101 - c001) * f.x;
+    float x11 = c011 + (c111 - c011) * f.x;
+    float y0v = x00 + (x10 - x00) * f.y;
+    float y1v = x01 + (x11 - x01) * f.y;
+    return y0v + (y1v - y0v) * f.z;
+}
+
+/// Salinan `GridLowerBound`. Dua batas bawah digabung dengan `max`; catatan
+/// lengkapnya ada di sisi CPU.
+float gridLowerBound(Grid grid, float3 world) {
+    float3 local = mul(grid.inverse, float4(world, 1.0)).xyz;
+    float sampled = gridSample(grid, local) * grid.scaleBandSlot.x;
+    if (sampled < 0.0) {
+        return sampled;
+    }
+    float toBox = pointAabbDistance(world, grid.boundsMinVoxel.xyz, grid.boundsMax.xyz);
+    return max(sampled, toBox);
 }
 
 // **Satu dimensi, bukan tiga.** Kotak yang harus diisi hampir selalu lempeng
@@ -94,6 +169,22 @@ void main(uint3 thread : SV_DispatchThreadID) {
         }
         float3 point = mul(entry.inverse, float4(world, 1.0)).xyz;
         nearest = min(nearest, unitBoxDistance(point) * entry.scaleAnisotropy.x);
+    }
+
+    // Lalu mesh yang sudah dibake. Urutannya sama dengan sisi CPU — kotak lebih
+    // dulu, grid disisipkan dengan `min` — dan urutan itu berarti: `min` bukan
+    // operasi yang bisa ditukar tanpa akibat pada float, dan dua jalur yang
+    // menjumlahkan hal yang sama dengan urutan berbeda menghasilkan byte yang
+    // berbeda pada voxel yang jaraknya nyaris sama dari dua benda.
+    for (int g = 0; g < pc.worldMin.w; ++g) {
+        Grid grid = grids[g];
+        // Pembuangan yang sama persis dengan jalur kotak, dan dengan alasan yang
+        // sama: batas bawah jarak dunia dikali anisotropi.
+        if (pointAabbDistance(world, grid.boundsMinVoxel.xyz, grid.boundsMax.xyz) *
+                grid.scaleBandSlot.y >= band) {
+            continue;
+        }
+        nearest = min(nearest, gridLowerBound(grid, world));
     }
 
     // Penyandiannya dijabarkan di sini, sama seperti di sisi CPU: pita

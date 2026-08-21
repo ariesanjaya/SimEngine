@@ -91,6 +91,16 @@ public:
     /// Sisi grup kerja, sama dengan `numthreads` di Shaders/sdf_fill.comp.slang.
     static constexpr uint32_t kGroupSize = 64;
 
+    /// Berapa medan jarak hasil bake yang bisa dibaca jalur compute sekaligus.
+    ///
+    /// **Larik tekstur berukuran tetap, bukan bindless.** Jumlahnya sama dengan
+    /// `kMaxGrids` di sdf_fill.comp.slang, dan yang melewatinya kembali memakai
+    /// kotak batasnya — dilaporkan, bukan didiamkan. Enam belas mesh berbeda
+    /// yang masing-masing punya medan jarak sendiri sudah jauh di atas apa pun
+    /// yang pernah diukur adegan uji ini; yang mengubahnya nanti adalah alasan
+    /// yang terukur, bukan angka yang dinaikkan berjaga-jaga.
+    static constexpr uint32_t kMaxGrids = 16;
+
     const rhi::Texture3D& Texture(uint32_t cascade) const { return textures_[cascade]; }
 
     /// Ada pekerjaan yang menunggu `RecordUploads`.
@@ -129,6 +139,11 @@ private:
     };
 
     bool WriteFillDescriptors();
+    /// Memastikan sebuah grid punya tekstur di GPU, dan menjawab slotnya.
+    /// Negatif berarti tidak ada tempat lagi, atau unggahannya gagal.
+    int EnsureGridUploaded(const SdfGrid* grid);
+    /// Menunjuk ulang larik tekstur grid sesudah ada yang bertambah.
+    void WriteGridDescriptor();
     /// Menunjuk ulang set entri **satu slot** ke buffer barunya.
     ///
     /// Terpisah dari `WriteFillDescriptors` karena keduanya dipanggil pada saat
@@ -166,10 +181,25 @@ private:
     std::array<VkDescriptorSet, kSlots> entrySets_{};
     std::array<rhi::DynamicBuffer, kSlots> entryBuffers_;
     std::vector<BoxSceneField::GpuEntry> gpuEntries_;
+    std::vector<BakedSceneField::GpuGrid> gpuGrids_;
+    /// Satu tekstur per grid yang dipakai adegan, beserta grid yang ditempatinya.
+    /// Pointer dipakai sebagai identitas: bakery memiliki gridnya untuk seluruh
+    /// sesi, jadi alamatnya stabil, dan dua instance mesh yang sama menunjuk
+    /// grid yang sama persis — satu tekstur, bukan dua.
+    std::array<rhi::Texture3D, kMaxGrids> gridTextures_;
+    std::array<const SdfGrid*, kMaxGrids> gridSources_{};
+    uint32_t gridCount_ = 0;
+    bool reportedGridLimit_ = false;
+    VkDescriptorSetLayout gridLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSet gridSet_ = VK_NULL_HANDLE;
+    std::array<rhi::DynamicBuffer, kSlots> gridBuffers_;
+    /// Isi slot tekstur yang belum terpakai. Lihat catatan di `Create`.
+    rhi::Texture3D dummyGrid_;
     std::vector<PendingFill> pendingFills_;
     uint32_t fillSlot_ = 0;
     bool storageCapable_ = false;
     uint32_t fillEntryCount_ = 0;
+    uint32_t fillGridCount_ = 0;
     bool gpuFill_ = false;
     /// Sekali saja: sebuah pesan per frame tentang keadaan yang tidak berubah
     /// adalah log yang tidak bisa dibaca.

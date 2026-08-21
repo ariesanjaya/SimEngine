@@ -434,6 +434,29 @@ float GridLowerBound(const Vec3& world, const Vec3& local, const SdfGrid& grid, 
 
 }  // namespace
 
+void BakedSceneField::WriteGpuGrids(std::vector<GpuGrid>& out,
+                                    const std::function<int(const SdfGrid*)>& slotOf) const {
+    out.clear();
+    out.reserve(entries_.size());
+    for (const Entry& entry : entries_) {
+        const int slot = slotOf(entry.grid);
+        if (slot < 0) {
+            continue;
+        }
+        GpuGrid gpu;
+        gpu.inverse = entry.inverse;
+        gpu.scaleBandSlot = Vec4(entry.scale, entry.anisotropy, entry.grid->band,
+                                 static_cast<float>(slot));
+        gpu.boundsMinVoxel = Vec4(entry.boundsMin, entry.grid->voxelSize);
+        gpu.boundsMax = Vec4(entry.boundsMax, 0.0f);
+        gpu.origin = Vec4(entry.grid->origin, 0.0f);
+        gpu.size = Vec4(static_cast<float>(entry.grid->sizeX),
+                        static_cast<float>(entry.grid->sizeY),
+                        static_cast<float>(entry.grid->sizeZ), 0.0f);
+        out.push_back(gpu);
+    }
+}
+
 float BakedSceneField::Distance(const Vec3& world) const {
     float nearest = boxes_.Empty() ? std::numeric_limits<float>::max() : boxes_.Distance(world);
     for (const Entry& entry : entries_) {

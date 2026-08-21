@@ -57,8 +57,18 @@ bool SdfClipmapResource::CreateGpuFill(const std::filesystem::path& shaderDirect
 
     const VkDescriptorSetLayoutBinding cascadeBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 1,
                                                       VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
-    const VkDescriptorSetLayoutBinding entryBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
-                                                    VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
+    // Dua buffer per slot: kotak untuk mesh yang belum dibake, grid untuk yang
+    // sudah. Satu set, karena keduanya berganti pada irama yang sama persis.
+    const std::array<VkDescriptorSetLayoutBinding, 2> entryBindings{
+        VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                     VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
+        VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                     VK_SHADER_STAGE_COMPUTE_BIT, nullptr}};
+    // Tekstur grid: satu binding berisi larik, dan **berganti jauh lebih jarang
+    // daripada entrinya** — hanya ketika sebuah mesh selesai dibake. Karena itu
+    // ia set tersendiri alih-alih ikut set per slot.
+    const VkDescriptorSetLayoutBinding gridBinding{0, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxGrids,
+                                                   VK_SHADER_STAGE_COMPUTE_BIT, nullptr};
     VkDescriptorSetLayoutCreateInfo layoutInfo{};
     layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
     layoutInfo.bindingCount = 1;
@@ -67,8 +77,15 @@ bool SdfClipmapResource::CreateGpuFill(const std::filesystem::path& shaderDirect
         VK_SUCCESS) {
         return false;
     }
-    layoutInfo.pBindings = &entryBinding;
+    layoutInfo.bindingCount = static_cast<uint32_t>(entryBindings.size());
+    layoutInfo.pBindings = entryBindings.data();
     if (vkCreateDescriptorSetLayout(device_->Handle(), &layoutInfo, nullptr, &entryLayout_) !=
+        VK_SUCCESS) {
+        return false;
+    }
+    layoutInfo.bindingCount = 1;
+    layoutInfo.pBindings = &gridBinding;
+    if (vkCreateDescriptorSetLayout(device_->Handle(), &layoutInfo, nullptr, &gridLayout_) !=
         VK_SUCCESS) {
         return false;
     }
@@ -77,12 +94,13 @@ bool SdfClipmapResource::CreateGpuFill(const std::filesystem::path& shaderDirect
     // per slot frame; menyatukannya berarti kaskade × slot kombinasi descriptor
     // yang harus dipelihara, untuk membedakan dua hal yang memang berubah pada
     // irama yang berbeda.
-    const std::array<VkDescriptorPoolSize, 2> sizes{
+    const std::array<VkDescriptorPoolSize, 3> sizes{
         VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kMaxSdfCascades},
-        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kSlots}};
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kSlots * 2},
+        VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kMaxGrids}};
     VkDescriptorPoolCreateInfo poolInfo{};
     poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
-    poolInfo.maxSets = kMaxSdfCascades + kSlots;
+    poolInfo.maxSets = kMaxSdfCascades + kSlots + 1;
     poolInfo.poolSizeCount = static_cast<uint32_t>(sizes.size());
     poolInfo.pPoolSizes = sizes.data();
     if (vkCreateDescriptorPool(device_->Handle(), &poolInfo, nullptr, &fillPool_) != VK_SUCCESS) {
@@ -108,14 +126,34 @@ bool SdfClipmapResource::CreateGpuFill(const std::filesystem::path& shaderDirect
         return false;
     }
 
+    allocate.descriptorSetCount = 1;
+    allocate.pSetLayouts = &gridLayout_;
+    if (vkAllocateDescriptorSets(device_->Handle(), &allocate, &gridSet_) != VK_SUCCESS) {
+        return false;
+    }
+
     for (rhi::DynamicBuffer& buffer : entryBuffers_) {
         if (!buffer.Create(*device_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                            sizeof(BoxSceneField::GpuEntry) * 64)) {
             return false;
         }
     }
+    for (rhi::DynamicBuffer& buffer : gridBuffers_) {
+        if (!buffer.Create(*device_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                           sizeof(BakedSceneField::GpuGrid) * kMaxGrids)) {
+            return false;
+        }
+    }
+    // **Tekstur boneka satu texel untuk slot yang belum terisi.** Descriptor
+    // yang dibiarkan kosong adalah pelanggaran pada setiap dispatch, termasuk
+    // dispatch yang tidak pernah membacanya — dan larik enam belas slot hampir
+    // selalu sebagian besar kosong.
+    if (!dummyGrid_.Create(*device_, glm::uvec3(1), VK_FORMAT_R32_SFLOAT, sizeof(float))) {
+        return false;
+    }
 
-    const std::array<VkDescriptorSetLayout, 2> setLayouts{cascadeLayout_, entryLayout_};
+    const std::array<VkDescriptorSetLayout, 3> setLayouts{cascadeLayout_, entryLayout_,
+                                                          gridLayout_};
     rhi::ComputePipelineDesc desc;
     desc.shader = shaderDirectory / "sdf_fill.comp.spv";
     desc.setLayouts = setLayouts;
@@ -130,22 +168,27 @@ void SdfClipmapResource::WriteEntryDescriptor(uint32_t slot) {
     if (slot >= kSlots) {
         return;
     }
-    const VkDescriptorBufferInfo buffer{entryBuffers_[slot].Handle(), 0, VK_WHOLE_SIZE};
-    VkWriteDescriptorSet write{};
-    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-    write.dstSet = entrySets_[slot];
-    write.dstBinding = 0;
-    write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    write.pBufferInfo = &buffer;
-    vkUpdateDescriptorSets(device_->Handle(), 1, &write, 0, nullptr);
+    const std::array<VkDescriptorBufferInfo, 2> buffers{
+        VkDescriptorBufferInfo{entryBuffers_[slot].Handle(), 0, VK_WHOLE_SIZE},
+        VkDescriptorBufferInfo{gridBuffers_[slot].Handle(), 0, VK_WHOLE_SIZE}};
+    std::array<VkWriteDescriptorSet, 2> writes{};
+    for (uint32_t i = 0; i < writes.size(); ++i) {
+        writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        writes[i].dstSet = entrySets_[slot];
+        writes[i].dstBinding = i;
+        writes[i].descriptorCount = 1;
+        writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+        writes[i].pBufferInfo = &buffers[i];
+    }
+    vkUpdateDescriptorSets(device_->Handle(), static_cast<uint32_t>(writes.size()), writes.data(),
+                           0, nullptr);
 }
 
 bool SdfClipmapResource::WriteFillDescriptors() {
     std::vector<VkDescriptorImageInfo> images(kMaxSdfCascades);
-    std::vector<VkDescriptorBufferInfo> buffers(kSlots);
+    std::vector<VkDescriptorBufferInfo> buffers(kSlots * 2);
     std::vector<VkWriteDescriptorSet> writes;
-    writes.reserve(kMaxSdfCascades + kSlots);
+    writes.reserve(kMaxSdfCascades + kSlots * 2);
 
     for (uint32_t cascade = 0; cascade < kMaxSdfCascades; ++cascade) {
         // Kaskade yang tidak dipakai adegan ini tetap harus punya descriptor
@@ -164,33 +207,119 @@ bool SdfClipmapResource::WriteFillDescriptors() {
         writes.push_back(write);
     }
     for (uint32_t slot = 0; slot < kSlots; ++slot) {
-        buffers[slot] = {entryBuffers_[slot].Handle(), 0, VK_WHOLE_SIZE};
-        VkWriteDescriptorSet write{};
-        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-        write.dstSet = entrySets_[slot];
-        write.dstBinding = 0;
-        write.descriptorCount = 1;
-        write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-        write.pBufferInfo = &buffers[slot];
-        writes.push_back(write);
+        buffers[slot * 2] = {entryBuffers_[slot].Handle(), 0, VK_WHOLE_SIZE};
+        buffers[slot * 2 + 1] = {gridBuffers_[slot].Handle(), 0, VK_WHOLE_SIZE};
+        for (uint32_t binding = 0; binding < 2; ++binding) {
+            VkWriteDescriptorSet write{};
+            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet = entrySets_[slot];
+            write.dstBinding = binding;
+            write.descriptorCount = 1;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            write.pBufferInfo = &buffers[slot * 2 + binding];
+            writes.push_back(write);
+        }
     }
     vkUpdateDescriptorSets(device_->Handle(), static_cast<uint32_t>(writes.size()), writes.data(),
                            0, nullptr);
+    WriteGridDescriptor();
     return true;
+}
+
+void SdfClipmapResource::WriteGridDescriptor() {
+    std::array<VkDescriptorImageInfo, kMaxGrids> images{};
+    for (uint32_t slot = 0; slot < kMaxGrids; ++slot) {
+        const rhi::Texture3D& texture =
+            gridTextures_[slot].IsValid() ? gridTextures_[slot] : dummyGrid_;
+        images[slot] = {VK_NULL_HANDLE, texture.View(),
+                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    }
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = gridSet_;
+    write.dstBinding = 0;
+    write.descriptorCount = kMaxGrids;
+    write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    write.pImageInfo = images.data();
+    vkUpdateDescriptorSets(device_->Handle(), 1, &write, 0, nullptr);
+}
+
+int SdfClipmapResource::EnsureGridUploaded(const SdfGrid* grid) {
+    if (grid == nullptr || grid->Empty()) {
+        return -1;
+    }
+    for (uint32_t slot = 0; slot < gridCount_; ++slot) {
+        if (gridSources_[slot] == grid) {
+            return static_cast<int>(slot);
+        }
+    }
+    if (gridCount_ >= kMaxGrids) {
+        if (!reportedGridLimit_) {
+            reportedGridLimit_ = true;
+            SIM_WARN("Render",
+                     "the SDF clipmap holds at most {} baked fields; the rest keep using their "
+                     "bounding boxes",
+                     kMaxGrids);
+        }
+        return -1;
+    }
+
+    const uint32_t slot = gridCount_;
+    const glm::uvec3 extent(grid->sizeX, grid->sizeY, grid->sizeZ);
+    // **R32_SFLOAT, dan itu bukan kemewahan.** Jalur CPU membaca float32 yang
+    // sama persis dari `SdfGrid`, dan kriteria selesai G4 menuntut kedua jalur
+    // menghasilkan byte yang sama. Format setengah presisi akan membuat sebagian
+    // voxel berbeda satu satuan pada penyandian 8-bitnya — perbedaan yang tidak
+    // salah, tapi yang membuat satu-satunya alat pembanding yang ada berhenti
+    // menjawab ya atau tidak.
+    if (!gridTextures_[slot].Create(*device_, extent, VK_FORMAT_R32_SFLOAT, sizeof(float))) {
+        SIM_WARN("Render", "cannot create a {}x{}x{} texture for a baked distance field",
+                 extent.x, extent.y, extent.z);
+        gridTextures_[slot].Destroy();
+        return -1;
+    }
+    const std::span<const std::byte> bytes{
+        reinterpret_cast<const std::byte*>(grid->distances.data()),
+        grid->distances.size() * sizeof(float)};
+    if (!gridTextures_[slot].UploadRegion(glm::uvec3(0), extent, bytes)) {
+        SIM_WARN("Render", "cannot upload a baked distance field");
+        gridTextures_[slot].Destroy();
+        return -1;
+    }
+    gridSources_[slot] = grid;
+    gridCount_ = slot + 1;
+    WriteGridDescriptor();
+    SIM_INFO("Render", "baked distance field {} uploaded ({}x{}x{}, {} KB)", slot, extent.x,
+             extent.y, extent.z, grid->distances.size() * sizeof(float) / 1024);
+    return static_cast<int>(slot);
 }
 
 void SdfClipmapResource::Destroy() {
     for (rhi::Texture3D& texture : textures_) {
         texture.Destroy();
     }
+    for (rhi::Texture3D& texture : gridTextures_) {
+        texture.Destroy();
+    }
+    dummyGrid_.Destroy();
+    gridSources_.fill(nullptr);
+    gridCount_ = 0;
+    reportedGridLimit_ = false;
     fill_.Destroy();
     for (rhi::DynamicBuffer& buffer : entryBuffers_) {
+        buffer.Destroy();
+    }
+    for (rhi::DynamicBuffer& buffer : gridBuffers_) {
         buffer.Destroy();
     }
     if (device_ != nullptr) {
         if (fillPool_ != VK_NULL_HANDLE) {
             vkDestroyDescriptorPool(device_->Handle(), fillPool_, nullptr);
             fillPool_ = VK_NULL_HANDLE;
+        }
+        if (gridLayout_ != VK_NULL_HANDLE) {
+            vkDestroyDescriptorSetLayout(device_->Handle(), gridLayout_, nullptr);
+            gridLayout_ = VK_NULL_HANDLE;
         }
         if (entryLayout_ != VK_NULL_HANDLE) {
             vkDestroyDescriptorSetLayout(device_->Handle(), entryLayout_, nullptr);
@@ -203,6 +332,7 @@ void SdfClipmapResource::Destroy() {
     }
     cascadeSets_.fill(VK_NULL_HANDLE);
     entrySets_.fill(VK_NULL_HANDLE);
+    gridSet_ = VK_NULL_HANDLE;
     gpuFill_ = false;
     storageCapable_ = false;
     device_ = nullptr;
@@ -234,19 +364,26 @@ uint64_t SdfClipmapResource::Update(const Vec3& cameraPosition,
     // tidak perlu membalik satu matriks pun.
     field_.Build(meshes, grids);
 
-    // **Jalur compute belum bisa membaca grid hasil bake.** Ia membaca larik
-    // kotak, dan larik itu memuat mesh yang belum dibake saja — menyerahkannya
-    // apa adanya berarti gedung yang sudah dibake hilang dari medannya, yang
-    // jauh lebih buruk daripada gedung yang berbentuk kotak. Selama ada yang
-    // dibake, yang dipakai jalur CPU. Yang mengembalikan jalur compute adalah
-    // tekstur grid di GPU, langkah berikutnya M1.
-    const bool gpuUsable = gpuFill_ && slot < kSlots && field_.BakedCount() == 0;
+    // Medan jarak hasil bake diunggah sekali, saat pertama kali terlihat, lalu
+    // dikenali lewat alamat gridnya. Yang tidak kebagian slot dilaporkan
+    // `WriteGpuGrids` sebagai entri yang hilang — dan medan yang kehilangan
+    // sebuah gedung jauh lebih buruk daripada gedung yang berbentuk kotak, jadi
+    // yang terjadi lalu adalah jalur CPU untuk frame itu.
+    bool gridsComplete = true;
+    if (gpuFill_ && slot < kSlots) {
+        for (const SdfGrid* grid : grids) {
+            if (grid != nullptr && !grid->Empty() && EnsureGridUploaded(grid) < 0) {
+                gridsComplete = false;
+            }
+        }
+    }
+    const bool gpuUsable = gpuFill_ && slot < kSlots && gridsComplete;
     if (gpuFill_ && !gpuUsable && !reportedCpuFallback_) {
         reportedCpuFallback_ = true;
         SIM_INFO("Render",
-                 "SDF clipmap falls back to the CPU fill: {} meshes have a baked field and the "
-                 "compute path cannot read those yet",
-                 field_.BakedCount());
+                 "SDF clipmap falls back to the CPU fill: not every baked field could be "
+                 "uploaded, and a field that is missing a building is worse than one that "
+                 "holds it as a box");
     }
     if (gpuUsable) {
         // **Yang disiapkan di sini hanya daftar kotaknya.** Evaluasi medan
@@ -257,10 +394,28 @@ uint64_t SdfClipmapResource::Update(const Vec3& cameraPosition,
         // sedang dipindahkan.
         fillSlot_ = slot;
         field_.WriteGpuEntries(gpuEntries_);
+        field_.WriteGpuGrids(gpuGrids_, [this](const SdfGrid* grid) {
+            for (uint32_t at = 0; at < gridCount_; ++at) {
+                if (gridSources_[at] == grid) {
+                    return static_cast<int>(at);
+                }
+            }
+            return -1;
+        });
         fillEntryCount_ = static_cast<uint32_t>(gpuEntries_.size());
+        fillGridCount_ = static_cast<uint32_t>(gpuGrids_.size());
         if (gpuEntries_.empty()) {
             gpuEntries_.push_back(BoxSceneField::GpuEntry{});
         }
+        if (gpuGrids_.empty()) {
+            gpuGrids_.push_back(BakedSceneField::GpuGrid{});
+        }
+        const VkDeviceSize gridBytes = sizeof(BakedSceneField::GpuGrid) * gpuGrids_.size();
+        const uint64_t gridBefore = gridBuffers_[slot].Generation();
+        if (!gridBuffers_[slot].Reserve(gridBytes)) {
+            return 0;
+        }
+        gridBuffers_[slot].Write(gpuGrids_.data(), gridBytes);
         const VkDeviceSize entryBytes = sizeof(BoxSceneField::GpuEntry) * gpuEntries_.size();
         // **Generasi, bukan handle** — lihat catatan di
         // `DynamicBuffer::Generation`.
@@ -269,7 +424,8 @@ uint64_t SdfClipmapResource::Update(const Vec3& cameraPosition,
             return 0;
         }
         entryBuffers_[slot].Write(gpuEntries_.data(), entryBytes);
-        if (entryBuffers_[slot].Generation() != before) {
+        if (entryBuffers_[slot].Generation() != before ||
+            gridBuffers_[slot].Generation() != gridBefore) {
             // **Hanya set slot ini, bukan seluruhnya.** `WriteFillDescriptors`
             // menulis ulang set tiap kaskade **dan** set entri tiap slot; yang
             // berpindah di sini hanya buffer satu slot. Slot lain bisa saja
@@ -389,9 +545,9 @@ void SdfClipmapResource::RecordFills(VkCommandBuffer cmd) {
     // sama, dan tidak satu pun membaca apa yang ditulis yang lain. Memisahkan
     // mereka dengan barrier akan menderetkan belasan dispatch kecil yang justru
     // paling diuntungkan oleh berjalan bersamaan.
-    const std::array<VkDescriptorSet, 1> entrySet{entrySets_[fillSlot_]};
     for (const PendingFill& fill : pendingFills_) {
-        const std::array<VkDescriptorSet, 2> sets{cascadeSets_[fill.cascade], entrySet[0]};
+        const std::array<VkDescriptorSet, 3> sets{cascadeSets_[fill.cascade],
+                                                  entrySets_[fillSlot_], gridSet_};
         fill_.Bind(cmd, sets);
 
         const float voxel = volume_.Clipmap().VoxelSize(fill.cascade);
@@ -401,7 +557,8 @@ void SdfClipmapResource::RecordFills(VkCommandBuffer cmd) {
                          static_cast<int32_t>(fill.texelMin.y),
                          static_cast<int32_t>(fill.texelMin.z),
                          static_cast<int32_t>(fillEntryCount_)};
-        push.worldMin = {fill.worldMin.x, fill.worldMin.y, fill.worldMin.z, 0};
+        push.worldMin = {fill.worldMin.x, fill.worldMin.y, fill.worldMin.z,
+                         static_cast<int32_t>(fillGridCount_)};
         push.extent = {static_cast<int32_t>(fill.extent.x), static_cast<int32_t>(fill.extent.y),
                        static_cast<int32_t>(fill.extent.z), 0};
         push.params = {voxel, band, 255.0f / (band * 2.0f), 0.0f};
