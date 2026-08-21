@@ -948,6 +948,12 @@ int main(int argc, char** argv) {
             // alasan yang sama: yang maju menurut waktu — eksposur, awan,
             // akumulasi temporal — harus maju sama jauhnya di tiap jalan, kalau
             // tidak dua gambar dari binary yang identik pun berbeda.
+            // **Langit datang dari adegan, sama seperti di viewport editor.**
+            // Tanpa baris ini setiap pengukuran headless menggambar langit
+            // bawaan berapa pun angka yang tertulis di level — dan dua level
+            // yang langitnya berbeda seratus kali menghasilkan gambar yang sama
+            // persis. Ditemukan begitu.
+            editor::ApplySceneSky(*app.Context().world, desc);
             desc.fixedDeltaSeconds = kFixedDelta;
             camera.position = eye;
             camera.rotation = glm::quatLookAt(glm::normalize(forward), Vec3(0.0f, 1.0f, 0.0f));

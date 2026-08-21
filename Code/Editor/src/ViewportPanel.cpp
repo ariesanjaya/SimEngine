@@ -40,13 +40,6 @@ namespace {
 /// bukan salah satu dari yang diminta — lebih baik satu yang menang dan yang
 /// lain terlihat tidak berpengaruh, karena itu yang mengarahkan orang mencari
 /// duplikatnya.
-const scene::SkyComponent* FindSky(const scene::World& world) {
-    for (const auto raw : world.Registry().view<scene::SkyComponent>()) {
-        return world.TryGet<scene::SkyComponent>(static_cast<scene::Entity>(raw));
-    }
-    return nullptr;
-}
-
 /// Warna kotak batas volume. Sengaja beda dari warna seleksi dan grid: yang
 /// digambar di sini bukan sesuatu yang bisa dipilih, melainkan jangkauan sebuah
 /// efek — dan menyamakan warnanya membuat orang mencoba mengkliknya.
@@ -247,20 +240,7 @@ public:
         // entity ber-SkyComponent tidak menggambar langit sama sekali — itu yang
         // membuat adegan interior berhenti membayar empat pass LUT untuk sesuatu
         // yang tidak pernah terlihat. Prefab "Sky Dome" yang menyalakannya.
-        const scene::SkyComponent* sky = FindSky(*context.world);
-        desc.skyEnabled = sky != nullptr;
-        if (sky != nullptr) {
-            desc.skySource = sky->source == scene::SkySourceKind::HdrMap
-                                 ? render::SkySource::HdrMap
-                                 : render::SkySource::Atmosphere;
-            desc.skyIntensity = sky->intensity;
-            desc.cameraHeightKm = sky->cameraHeightKm;
-            desc.aerialPerspective = sky->aerialPerspective;
-            desc.aerialHaze = sky->aerialHaze;
-            desc.hdriPath = sky->hdriPath;
-            desc.hdriRotation = sky->hdriRotation;
-            desc.hdriIntensity = sky->hdriIntensity;
-        }
+        editor::ApplySceneSky(*context.world, desc);
 
         // Volume dimuat di sini, bukan di renderer: OpenVDB adalah pengondisi
         // aset. `LoadVolumeIfChanged` tidak melakukan apa-apa bila jalur dan
