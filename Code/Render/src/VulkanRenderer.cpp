@@ -1205,8 +1205,15 @@ public:
                 // Diikat ke voxel kaskade terhalus, bukan ke satu angka meter:
                 // yang harus dilewati bias ini adalah ambang berhenti sphere
                 // tracing, dan ambang itu sendiri setengah voxel.
-                const float normalBias =
-                    clipmap.VoxelSize(0) * probeGrid_.Settings().normalBiasVoxels;
+                // **Dalam voxel, bukan dalam meter.** Ambang "mengenai" sphere
+                // tracing setengah voxel *kaskade tempat titiknya berada*, dan
+                // kaskade terkasar bervoxel 1,6 m — enam belas kali kaskade
+                // terhalus. Bias yang dihitung sekali dari kaskade nol karena
+                // itu terlalu kecil di mana-mana kecuali di dekat kamera, dan
+                // probe yang biasnya terlalu kecil terjepit di ambang: medan
+                // tidak punya jawaban untuk satu pun sinarnya. Yang mengalikan
+                // dengan ukuran voxel setempat adalah shader-nya.
+                const float normalBias = probeGrid_.Settings().normalBiasVoxels;
                 probes_.Record(command, slot.shadowSet, probeGrid_, probeFrame_,
                                clipmap.MaxRange(), normalBias, probeReset_);
             };

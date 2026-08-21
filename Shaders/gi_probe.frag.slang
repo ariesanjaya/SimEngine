@@ -17,7 +17,7 @@ struct ProbePush {
     // xy jumlah probe, z ukuran ubin dalam piksel, w akar jumlah ray
     uint4 grid;
     // x nomor frame, y jumlah frame akumulasi, z jangkauan trace maksimum,
-    // w bias titik asal sepanjang normal, meter
+    // w bias titik asal sepanjang normal, dalam voxel kaskade setempat
     float4 params;
 };
 
@@ -123,7 +123,14 @@ ProbeSh main(float4 position : SV_Position) {
     // jarak nol. Lapis layar sudah punya pergeseran seperti ini di sepanjang
     // arah sinar; lapis SDF tidak punya apa pun, dan `traceTiered` meneruskan
     // titik asal yang sama ke keduanya.
-    float3 traceOrigin = origin + surfaceNormal * pc.params.w;
+    // Bias dalam voxel **kaskade tempat probe ini berdiri**, bukan dalam meter.
+    // Lihat catatan di sisi renderer: satu bias untuk seluruh clipmap berarti
+    // probe di kaskade terkasar terjepit di ambang, dan probe yang terjepit
+    // tidak punya satu pun sinar yang bisa dijawab medannya.
+    int originCascade = cascadeFor(origin);
+    float originVoxel = originCascade >= 0 ? cascadeVoxelSize(originCascade)
+                                           : shadowParams.sdfOrigin[0].w;
+    float3 traceOrigin = origin + surfaceNormal * (pc.params.w * originVoxel);
 
     uint rayCount = pc.grid.w * pc.grid.w;
     uint frame = uint(pc.params.x);
@@ -143,6 +150,12 @@ ProbeSh main(float4 position : SV_Position) {
         float3 direction =
             giProbeRayDirection(ray, frame, probeIndex, pc.grid.w, jitterPeriod);
         TieredHit hit = traceTiered(traceOrigin, direction, tMax);
+        if (hit.unknown) {
+            // Tidak ada lapis yang punya jawaban untuk sinar ini. Membuangnya
+            // menaksir iradiansi dari sinar yang benar-benar diketahui;
+            // menghitungnya sebagai langit menaksir sesuatu yang tidak ada.
+            continue;
+        }
 
         float3 cameraPosition = shadowParams.cameraPosition.xyz;
 
@@ -207,14 +220,22 @@ ProbeSh main(float4 position : SV_Position) {
         ++known;
     }
 
-    if (known == 0u) {
-        return output;
+    // **Probe tanpa satu pun sinar yang diketahui mempertahankan riwayatnya,
+    // bukan mengembalikan nol.** Ia terjadi di sudut sempit, tempat titik asal
+    // sinar terjepit di ambang medan jarak walaupun sudah digeser sepanjang
+    // normalnya. Mengembalikan nol berarti sepetak hitam yang mengikuti kamera;
+    // mempertahankan riwayat berarti sudut itu tetap seterang terakhir kali ia
+    // punya jawaban. Yang tidak punya riwayat pun tetap nol — di sana memang
+    // belum ada yang bisa dikatakan.
+    const bool sampled = known > 0u;
+    if (sampled) {
+        // Bobot sampel bola seragam: 4π/N, dengan N sinar yang benar-benar
+        // dipakai.
+        float weight = 12.56637061 / float(known);
+        output.r *= weight;
+        output.g *= weight;
+        output.b *= weight;
     }
-    // Bobot sampel bola seragam: 4π/N, dengan N sinar yang benar-benar dipakai.
-    float weight = 12.56637061 / float(known);
-    output.r *= weight;
-    output.g *= weight;
-    output.b *= weight;
 
     // --- Reproyeksi riwayat --------------------------------------------------
     //
@@ -255,7 +276,10 @@ ProbeSh main(float4 position : SV_Position) {
                 // lampu dimatikan — riwayat yang sudah tidak sejalan dijepit
                 // masuk ke rentang baru dalam satu frame, bukan meluruh
                 // perlahan sebagai ghosting.
-                float scale = shadowParams.denoise.w;
+                // Penjepitan hanya berlaku bila ada sampel untuk menjepitnya:
+                // menjepit riwayat terhadap nol yang bukan hasil pengukuran
+                // adalah cara lain menghapus riwayat itu.
+                float scale = sampled ? shadowParams.denoise.w : 1e30;
                 float4 spreadR = abs(output.r) * scale + 1e-3;
                 float4 spreadG = abs(output.g) * scale + 1e-3;
                 float4 spreadB = abs(output.b) * scale + 1e-3;
@@ -263,7 +287,7 @@ ProbeSh main(float4 position : SV_Position) {
                 historyG = clamp(historyG, output.g - spreadG, output.g + spreadG);
                 historyB = clamp(historyB, output.b - spreadB, output.b + spreadB);
 
-                alpha = 1.0 / window;
+                alpha = sampled ? 1.0 / window : 0.0;
                 output.r = lerp(historyR, output.r, alpha);
                 output.g = lerp(historyG, output.g, alpha);
                 output.b = lerp(historyB, output.b, alpha);

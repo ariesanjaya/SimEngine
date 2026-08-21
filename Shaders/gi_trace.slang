@@ -103,6 +103,10 @@ struct SdfHit {
     float distance;
     float3 position;
     int steps;
+    /// Medan tidak punya jawaban untuk sinar ini — titik asalnya sudah berada
+    /// di ambang. **Berbeda dari "tidak mengenai apa-apa"**, dan bedanya
+    /// sebesar seluruh langit.
+    bool unknown;
 };
 
 SdfHit traceSdf(float3 origin, float3 direction, float tMax) {
@@ -111,6 +115,7 @@ SdfHit traceSdf(float3 origin, float3 direction, float tMax) {
     result.distance = 0.0;
     result.position = origin;
     result.steps = 0;
+    result.unknown = false;
 
     int maxSteps = int(shadowParams.sdfParams.w);
     float travelled = 0.0;
@@ -152,6 +157,7 @@ SdfHit traceSdf(float3 origin, float3 direction, float tMax) {
         // berada di ambang.
         if (step == 0 && distance < voxel * 0.5) {
             result.steps = 1;
+            result.unknown = true;
             return result;
         }
         if (distance < voxel * 0.5) {
@@ -380,6 +386,9 @@ static const int kLayerSky = 3;
 struct TieredHit {
     bool hit;
     int layer;
+    /// Tidak ada lapis yang punya jawaban. Yang menerimanya membuang sinar ini
+    /// dari penaksir alih-alih menghitungnya sebagai langit.
+    bool unknown;
     float distance;
     float3 position;
     float2 uv;      // hanya berarti untuk lapis layar
@@ -389,6 +398,7 @@ struct TieredHit {
 TieredHit traceTiered(float3 origin, float3 direction, float tMax) {
     TieredHit result;
     ScreenHit screen = traceScreen(origin, direction, tMax);
+    result.unknown = false;
     if (screen.hit) {
         result.hit = true;
         result.layer = kLayerScreen;
@@ -403,6 +413,15 @@ TieredHit traceTiered(float3 origin, float3 direction, float tMax) {
     // tidak tahu", bukan "tidak ada apa-apa di sana".
     SdfHit sdf = traceSdf(origin, direction, tMax);
     result.hit = sdf.hit;
+    // **"Medan tidak tahu" bukan "sinar sampai ke langit".** Keduanya sama-sama
+    // "tidak mengenai apa-apa" dari luar, dan menyamakannya berarti sebuah
+    // probe yang titik asalnya terjepit di permukaan menerima langit penuh dari
+    // keenam belas sinarnya — iradiansi terbuka lebar untuk sebuah titik yang
+    // justru sedang menempel di dinding. Ditemukan lewat tampilan ketampakan
+    // langit: lantai serambi terbaca 100% melihat langit, sementara satu
+    // tangkapan dari lantai yang sama menghadap ke atas memperlihatkan lubang
+    // langit yang hanya sepersepuluh bidang pandangnya.
+    result.unknown = sdf.unknown;
     result.layer = sdf.hit ? kLayerSdf : kLayerSky;
     result.distance = sdf.distance;
     result.position = sdf.position;
