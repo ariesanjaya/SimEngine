@@ -130,10 +130,17 @@ struct ShadowUniforms {
     Vec4 denoise{0.0f};
     /// x 1 kalau iradiansi GI berlaku, y ukuran ubin probe dalam piksel.
     Vec4 giParams{0.0f};
+    /// Langit untuk GI: x pengali radiansi, y ketinggian kamera (km),
+    /// zw ukuran LUT sky-view. **Pengali nol berarti tidak ada atmosfer** —
+    /// langit mati atau HDRI — dan penelusur GI kembali ke gradien cadangannya.
+    Vec4 skyParams{0.0f};
+    /// Penutup rekursi untuk permukaan yang belum dikenal cache radiansi:
+    /// xyz albedo yang ditebak, w 1 kalau tebakan itu dipakai.
+    Vec4 giBounce{0.0f};
 };
-// 7 mat4 + 20 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
+// 7 mat4 + 22 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
 // memperbarui shader-nya menjadi galat kompilasi, bukan bayangan yang bergeser.
-static_assert(sizeof(ShadowUniforms) == 7 * 64 + 20 * 16,
+static_assert(sizeof(ShadowUniforms) == 7 * 64 + 22 * 16,
               "ShadowUniforms harus cocok dengan blok ShadowParams di shadow_common.slang");
 
 /// Cermin dari `GpuLight` di Shaders/cluster_common.glsl. std430.
@@ -3810,7 +3817,7 @@ private:
         samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
         SIM_VK_CHECK(vkCreateSampler(device_.Handle(), &samplerInfo, nullptr, &shadow_.sampler));
 
-        const std::array<VkDescriptorSetLayoutBinding, 21> bindings{
+        const std::array<VkDescriptorSetLayoutBinding, 22> bindings{
             VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
@@ -3853,6 +3860,8 @@ private:
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{20, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{21, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
         };
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -3865,7 +3874,7 @@ private:
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                  static_cast<uint32_t>(slots_.size())},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                 static_cast<uint32_t>(slots_.size()) * 15},
+                                 static_cast<uint32_t>(slots_.size()) * 16},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                  static_cast<uint32_t>(slots_.size()) * 5},
         };
@@ -4403,7 +4412,7 @@ private:
         // dibebaskan — kerusakan yang tidak muncul sebagai galat validasi.
         std::vector<VkDescriptorBufferInfo> buffers(slots_.size() * 5);
         std::vector<VkWriteDescriptorSet> writes;
-        writes.reserve(slots_.size() * 17);
+        writes.reserve(slots_.size() * 18);
         // SHADER_READ_ONLY, bukan DEPTH_READ_ONLY. Keduanya sah untuk mengambil
         // sampel dari image depth, tapi yang berlaku adalah yang disimpulkan
         // frame graph dari `Access::ShaderRead` — dan descriptor yang menyebut
@@ -4418,6 +4427,18 @@ private:
         // bayangan sebagai pengganti — descriptor yang dibiarkan kosong adalah
         // pelanggaran di setiap draw, bahkan pada pass yang tidak membacanya.
         const VkDescriptorImageInfo hizImage = HizDescriptorImage();
+        // LUT sky-view, atau piramida HiZ sebagai pengganti kalau atmosfernya
+        // gagal dibuat — alasan yang sama dengan kaskade SDF di atas: descriptor
+        // yang dibiarkan kosong adalah pelanggaran di setiap draw, bahkan pada
+        // pass yang tidak membacanya. Yang menjaga ia tidak terbaca adalah
+        // `skyParams.x` yang nol, bukan descriptor ini. **Penggantinya harus
+        // image 2D biasa**, bukan peta bayangan: yang itu view array, dan
+        // sebuah `Sampler2D` yang dipasangi view array adalah pelanggaran
+        // walaupun tidak ada satu pun shader yang membacanya.
+        const VkDescriptorImageInfo skyImage =
+            sky_.IsValid() ? VkDescriptorImageInfo{sky_.SkyViewSampler(), sky_.SkyViewImage(),
+                                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}
+                           : hizImage;
         const std::array<VkDescriptorImageInfo, 9> probeImages = ProbeDescriptorImages();
         // Cache radiansi dipakai bersama seluruh slot: ia riwayat lintas frame,
         // bukan data per frame. Kalau gagal dibuat, descriptor-nya menunjuk
@@ -4511,6 +4532,11 @@ private:
             cache.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             cache.pBufferInfo = &cacheBufferInfo;
             writes.push_back(cache);
+
+            VkWriteDescriptorSet skyView = sampled;
+            skyView.dstBinding = 21;
+            skyView.pImageInfo = &skyImage;
+            writes.push_back(skyView);
         }
         vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
@@ -5065,6 +5091,17 @@ private:
         const bool giReady = desc.gi.enabled && probes_.IsValid() && probeFrame_ > 1;
         uniforms.giParams = Vec4(giReady ? 1.0f : 0.0f,
                                  static_cast<float>(probeGrid_.Settings().tileSize), 0.0f, 0.0f);
+        // **Syarat yang sama persis dengan syarat pass langit didaftarkan.**
+        // LUT sky-view hanya diperbarui di dalam pass itu; menyuruh GI
+        // membacanya saat pass-nya tidak ada berarti menerangi adegan dengan
+        // matahari di posisi frame kapan pun terakhir kali langit digambar.
+        const bool atmosphere = desc.skyEnabled && sky_.IsValid() &&
+                                desc.skySource != SkySource::HdrMap;
+        uniforms.skyParams =
+            Vec4(atmosphere ? desc.skyIntensity : 0.0f, desc.cameraHeightKm,
+                 static_cast<float>(SkyAtmosphere::kSkyViewWidth),
+                 static_cast<float>(SkyAtmosphere::kSkyViewHeight));
+        uniforms.giBounce = Vec4(Vec3(kBounceAlbedo), 1.0f);
         slot.shadowUniform.Write(&uniforms, sizeof(uniforms));
     }
 
@@ -5385,6 +5422,18 @@ private:
     /// Anggaran langkah sphere tracing. Angka yang paling sering disetel saat
     /// menyeimbangkan kualitas dan biaya, jadi ia disebut sekali di sini.
     static constexpr float kSdfMaxSteps = 48.0f;
+    /// Albedo yang ditebak untuk permukaan yang mengenai clipmap SDF tetapi
+    /// belum pernah terlihat layar, jadi cache radiansi tidak mengenalnya.
+    ///
+    /// **Sebuah tebakan, dan disebut tebakan.** Clipmap hanya menyimpan jarak;
+    /// warna permukaannya tidak ada di mana pun sampai ada volume albedo. Yang
+    /// dibayar tanpa tebakan ini bukan gambar yang sedikit meleset melainkan
+    /// serambi yang hitam pekat: di dalam ruang tertutup hampir setiap sinar
+    /// probe mengenai batu yang tidak pernah masuk layar, dan sinar yang
+    /// dibuang semuanya berarti iradiansi nol. 0,5 adalah albedo rata-rata
+    /// bahan bangunan — plester, batu, kayu — dan salah 0,2 di sini
+    /// menggeser kecerahan pantulan, bukan menghilangkannya.
+    static constexpr float kBounceAlbedo = 0.5f;
     /// Anggaran langkah lapis screen-space. Rencana GI menyebut 16, dan angka
     /// itulah yang membuat fallback ke SDF bukan kemewahan melainkan keharusan.
     static constexpr float kScreenMaxSteps = 16.0f;

@@ -40,6 +40,12 @@ float3 resolveProbes(float2 pixel, float3 world, float3 normal, float tile) {
     float4 sumG = float4(0.0);
     float4 sumB = float4(0.0);
     float sumWeight = 0.0;
+    // Cadangan: bilinear saja, tanpa uji bilateral sama sekali. Dikumpulkan di
+    // putaran yang sama supaya keempat probe tidak perlu dibaca ulang.
+    float4 anyR = float4(0.0);
+    float4 anyG = float4(0.0);
+    float4 anyB = float4(0.0);
+    float anyWeight = 0.0;
 
     for (int corner = 0; corner < 4; ++corner) {
         float2 offset = float2(float(corner & 1), float((corner >> 1) & 1));
@@ -56,23 +62,46 @@ float3 resolveProbes(float2 pixel, float3 world, float3 normal, float tile) {
         float3 probePosition = probeWorld.xyz / probeWorld.w;
         float3 probeNormal = octDecode(gbufferNormal.Load(int3(int2(probePixel), 0)).rg);
 
+        float4 shR = probeShR.Load(int3(probe, 0));
+        float4 shG = probeShG.Load(int3(probe, 0));
+        float4 shB = probeShB.Load(int3(probe, 0));
+
         float bilinear = lerp(1.0 - f.x, f.x, offset.x) * lerp(1.0 - f.y, f.y, offset.y);
+        anyR += shR * bilinear;
+        anyG += shG * bilinear;
+        anyB += shB * bilinear;
+        anyWeight += bilinear;
+
         float weight = bilinear * giProbeWeight(probePosition, probeNormal, world, normal,
                                                 0.5, 0.5);
         if (weight <= 0.0) {
             continue;
         }
-        sumR += probeShR.Load(int3(probe, 0)) * weight;
-        sumG += probeShG.Load(int3(probe, 0)) * weight;
-        sumB += probeShB.Load(int3(probe, 0)) * weight;
+        sumR += shR * weight;
+        sumG += shG * weight;
+        sumB += shB * weight;
         sumWeight += weight;
     }
 
-    if (sumWeight <= 1e-6) {
-        return float3(0.0);
+    if (sumWeight > 1e-6) {
+        float inverse = 1.0 / sumWeight;
+        return giEvaluateSh(sumR * inverse, sumG * inverse, sumB * inverse, normal);
     }
-    float inverse = 1.0 / sumWeight;
-    return giEvaluateSh(sumR * inverse, sumG * inverse, sumB * inverse, normal);
+
+    // **Tidak ada satu pun probe yang lolos, dan itu bukan alasan mengembalikan
+    // nol.** Uji bilateral menolak probe yang duduk di permukaan lain; kalau
+    // keempatnya ditolak, yang benar bukan "tidak ada cahaya di sini" melainkan
+    // "tidak ada probe yang tepat di sini". Di Sponza itu terjadi pada 21,8%
+    // piksel — dinding serambi yang terlihat sangat miring, tempat empat probe
+    // bertetangga di layar berjarak lebih dari setengah meter di dunia — dan
+    // hasilnya lubang hitam yang mengikuti kamera. Rembesan cahaya dari
+    // permukaan tetangga jauh lebih murah daripada itu.
+    if (anyWeight > 1e-6) {
+        float inverse = 1.0 / anyWeight;
+        return giEvaluateSh(anyR * inverse, anyG * inverse, anyB * inverse, normal);
+    }
+    // Keempat probe jatuh di langit: memang tidak ada permukaan di sekitarnya.
+    return float3(0.0);
 }
 
 

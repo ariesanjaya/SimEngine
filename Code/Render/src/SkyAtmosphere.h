@@ -106,6 +106,21 @@ public:
 
     bool HdriIsValid() const { return hdri_.IsValid(); }
 
+    /// LUT sky-view beserta sampler-nya, untuk pass lain yang perlu **langit
+    /// yang sama persis dengan yang terlihat**.
+    ///
+    /// Yang memakainya pertama: penelusur GI. Sinar yang lolos ke langit dulu
+    /// menjawab dengan gradien tetap yang ditulis di dalam shader-nya sendiri —
+    /// sebuah cadangan dari masa sebelum atmosfer ada. Langit yang menyinari
+    /// adegan lalu bukan langit yang tergambar di belakangnya, dan selisih itu
+    /// tidak muncul sebagai galat melainkan sebagai warna cahaya tak-langsung
+    /// yang tidak pernah cocok dengan langitnya.
+    ///
+    /// Tanpa intensitasnya: LUT menyimpan radiansi atmosfer apa adanya, dan
+    /// `skyIntensity` dikalikan di tempat pemakaian — sama seperti pass gambar.
+    VkImageView SkyViewImage() const { return skyView_.view; }
+    VkSampler SkyViewSampler() const { return sampler_; }
+
     /// Menggambar HDRI-nya. Pemanggil yang membuka dan menutup rendering.
     void RecordHdriDraw(VkCommandBuffer cmd, const Mat4& invViewProj, float intensity,
                         float rotationRadians);

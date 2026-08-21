@@ -13,6 +13,15 @@
 
 #include "gi_common.slang"
 #include "shadow_common.slang"
+// Hanya parameterisasi LUT-nya yang dipakai dari sini — tidak ada satu pun
+// binding di dalamnya, jadi ia tidak menuntut apa pun dari set descriptor
+// pemakainya.
+#include "sky_common.slang"
+
+/// LUT sky-view, langit yang sama dengan yang tergambar di belakang adegan.
+/// Isinya radiansi atmosfer tanpa `skyIntensity`; pengalinya ada di
+/// `shadowParams.skyParams.x`, sama seperti di pass gambar.
+[[vk::binding(21, 0)]] Sampler2D giSkyView;
 
 [[vk::binding(7, 0)]] Sampler3D sdfCascade0;
 [[vk::binding(8, 0)]] Sampler3D sdfCascade1;
@@ -281,16 +290,28 @@ ScreenHit traceScreen(float3 origin, float3 direction, float tMax) {
 }
 
 
-static /// Normal dari gradien medan jarak, beda hingga tengah.
-float3 sdfSurfaceNormal(int cascade, float3 position) {
+/// Normal dari gradien medan jarak, beda hingga tengah.
+///
+/// **`fallback` bukan kerapian melainkan penangkal NaN.** Gradien bisa tepat
+/// nol: di dalam pita yang terjepit ke nilai maksimumnya, di luar kaskade, dan
+/// di sudut tempat dua permukaan bertemu. `normalize` atas vektor nol
+/// menghasilkan NaN, dan NaN tidak berhenti di piksel tempat ia lahir — satu
+/// sinar saja meracuni seluruh SH sebuah probe, karena koefisiennya
+/// dijumlahkan. Yang terlihat: sepetak layar yang gelap gulita padahal
+/// tetangganya baik-baik saja, dan sumbernya sebuah pembagian dengan nol
+/// beberapa lapis di bawahnya. Ditemukan begitu — serambi Sponza hitam pekat
+/// sementara `float3(0.5)` di tempat yang sama tampil rata.
+static float3 sdfSurfaceNormal(int cascade, float3 position, float3 fallback) {
     float h = cascadeVoxelSize(cascade) * 0.5;
-    return normalize(float3(
+    float3 gradient = float3(
         sampleCascadeSdf(cascade, position + float3(h, 0, 0)) -
             sampleCascadeSdf(cascade, position - float3(h, 0, 0)),
         sampleCascadeSdf(cascade, position + float3(0, h, 0)) -
             sampleCascadeSdf(cascade, position - float3(0, h, 0)),
         sampleCascadeSdf(cascade, position + float3(0, 0, h)) -
-            sampleCascadeSdf(cascade, position - float3(0, 0, h))));
+            sampleCascadeSdf(cascade, position - float3(0, 0, h)));
+    float length2 = dot(gradient, gradient);
+    return length2 > 1e-12 ? gradient * rsqrt(length2) : fallback;
 }
 
 static const int kLayerNone = 0;
@@ -336,18 +357,88 @@ TieredHit traceTiered(float3 origin, float3 direction, float tMax) {
     return result;
 }
 
-/// Langit analitik sementara.
+/// Langit cadangan: gradien analitik.
 ///
-/// **Nilainya menyalin nilai bawaan `GradientSky` di `Ibl.h`**, dan itu memang
-/// duplikasi yang disengaja untuk sementara: langit sungguhan datang di E8.8
-/// bersama atmosfer, dan sampai saat itu satu-satunya alternatif adalah
-/// mengangkut tiga warna lewat UBO untuk sesuatu yang akan dibuang.
-float3 giSky(float3 direction) {
+/// **Nilainya menyalin nilai bawaan `GradientSky` di `Ibl.h`.** Ia dipakai
+/// hanya ketika tidak ada atmosfer — langit dimatikan, atau sumbernya sebuah
+/// HDRI yang belum terikat ke pass ini. Sampai E8.8 ia satu-satunya langit yang
+/// dikenal GI, dan itulah cacatnya: adegan disinari langit yang bukan langit
+/// yang tergambar di belakangnya.
+float3 giSkyGradient(float3 direction) {
     const float3 zenith = float3(0.18, 0.32, 0.62);
     const float3 horizon = float3(0.62, 0.66, 0.72);
     const float3 ground = float3(0.14, 0.13, 0.12);
     float t = direction.y;
     return t >= 0.0 ? lerp(horizon, zenith, sqrt(t)) : lerp(horizon, ground, sqrt(-t));
+}
+
+/// Langit yang menyinari adegan, yaitu **langit yang sama dengan yang
+/// tergambar**: LUT sky-view Bruneton, dicuplik dengan parameterisasi yang
+/// sama persis dengan `sky_draw.frag`.
+///
+/// Satu cuplikan tekstur 192×108 per sinar yang lolos. Menelusuri ulang
+/// atmosfernya di sini akan mengulang pekerjaan yang sudah dibayar frame ini,
+/// enam belas kali per probe.
+float3 giSky(float3 direction) {
+    float intensity = shadowParams.skyParams.x;
+    if (intensity <= 0.0) {
+        return giSkyGradient(direction);
+    }
+
+    // Kerangka planet: +Z ke atas dari pusat planet, sementara sumbu atas
+    // adegan +Y. Ditukar di sini dan hanya di sini — sama seperti pass gambar.
+    float viewHeight = kBottomRadius + max(shadowParams.skyParams.y, kRadiusOffset);
+    float3 up = float3(0.0, 0.0, 1.0);
+    float3 worldDirection = float3(direction.x, -direction.z, direction.y);
+    float3 sunDirection = float3(shadowParams.lightDirection.x, -shadowParams.lightDirection.z,
+                                 shadowParams.lightDirection.y);
+
+    float viewZenithCos = dot(worldDirection, up);
+    float viewZenithAngle = acos(clamp(viewZenithCos, -1.0, 1.0));
+    float3 sideDirection = normalize(worldDirection - up * viewZenithCos);
+    float3 sunSide = normalize(sunDirection - up * dot(sunDirection, up));
+    float lightViewAngle = acos(clamp(dot(sideDirection, sunSide), -1.0, 1.0));
+
+    float3 origin = float3(0.0, 0.0, viewHeight);
+    bool intersectsGround = raySphereNearest(origin, worldDirection, kBottomRadius) >= 0.0;
+    float2 lutUv = skyViewParamsToUv(float2(viewZenithAngle, lightViewAngle),
+                                     shadowParams.skyParams.zw, viewHeight, intersectsGround);
+    // **Tanpa cakram matahari.** Pass gambar menambahkannya supaya matahari
+    // terlihat; menambahkannya di sini akan menghitung cahaya matahari dua
+    // kali — sinar langsungnya sudah dinilai lampu directional, dan sebuah
+    // sinar probe yang kebetulan mengarah ke cakramnya akan menyumbang
+    // radiansi ribuan kali lipat tetangganya, yang terlihat sebagai bintik
+    // terang yang berpindah tiap frame.
+    return giSkyView.SampleLevel(lutUv, 0.0).rgb * intensity;
+}
+
+/// Radiansi keluar yang **ditebak** untuk sebuah permukaan clipmap SDF yang
+/// belum dikenal cache radiansi.
+///
+/// **Penutup rekursi, dan tanpanya ruang tertutup hitam pekat.** Cache hanya
+/// mengenal permukaan yang pernah terlihat layar; di dalam serambi, hampir
+/// setiap sinar probe mengenai batu yang tidak pernah masuk layar. Membuang
+/// semuanya berarti tidak ada satu pun sinar yang diketahui, dan iradiansinya
+/// nol — bukan gelap, melainkan hitam.
+///
+/// Yang ditaksir di sini satu pantulan penuh: matahari lewat peta bayangan yang
+/// sama dengan yang dipakai shading, ditambah langit. Albedo-nya tebakan
+/// (`kBounceAlbedo` di renderer); yang bergantung padanya kecerahan pantulan,
+/// bukan ada-tidaknya.
+float3 giGuessedBounce(float3 position, float3 normal) {
+    float3 albedo = shadowParams.giBounce.rgb;
+    float ndotl = max(dot(normal, shadowParams.lightDirection.xyz), 0.0);
+    float sun = ndotl > 0.0 ? sampleShadow(position, normal) * ndotl : 0.0;
+
+    // **Setengah langit, bukan seluruhnya.** `albedo * L` adalah radiansi
+    // permukaan Lambert di bawah langit seragam yang terlihat penuh; sebuah
+    // permukaan yang menempel di dinding paling banyak melihat separuh bola,
+    // dan separuh sisanya adalah adegan yang justru tidak bisa ditaksir dari
+    // sini. Mengambil seluruhnya menerangi bagian dalam gedung seterang
+    // halamannya.
+    const float kSkyClosure = 0.5;
+    return albedo * (shadowParams.sunRadiance.rgb * (sun / kPi) +
+                     giSky(normal) * kSkyClosure);
 }
 
 #endif

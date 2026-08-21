@@ -59,6 +59,13 @@ struct ShadowParams {
     float4 denoise;
     // x 1 kalau iradiansi GI berlaku, y ukuran ubin probe dalam piksel.
     float4 giParams;
+    // Langit untuk GI: x pengali radiansi, y ketinggian kamera (km), zw ukuran
+    // LUT sky-view. Pengali nol berarti tidak ada atmosfer — langit mati atau
+    // HDRI — dan penelusur GI kembali ke gradien cadangannya.
+    float4 skyParams;
+    // Penutup rekursi untuk permukaan yang belum dikenal cache radiansi:
+    // xyz albedo yang ditebak, w 1 kalau tebakan itu dipakai.
+    float4 giBounce;
 };
 
 [[vk::binding(0, 0)]] ConstantBuffer<ShadowParams> shadowParams;
