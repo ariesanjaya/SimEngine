@@ -4,11 +4,16 @@
 #include "Sim/Core/Log.h"
 #include "Sim/Core/MainThreadQueue.h"
 #include "Sim/Core/Math.h"
+#include "Sim/Core/TaskPool.h"
 
 #include <doctest/doctest.h>
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
+#include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -125,6 +130,67 @@ TEST_CASE("Pekerjaan yang mengantri saat Drain ditunda ke putaran berikutnya") {
 
     queue.Drain();
     CHECK(innerOrder == 2);
+}
+
+TEST_CASE("TaskPool berhenti sementara pemilik tugasnya masih hidup") {
+    // **Ini pernah jadi segfault, dan segfault-nya di luar jangkauan pemilik
+    // tugas.** Tugas yang diantre menangkap `this` milik pemiliknya, dan tidak
+    // ada satu pun pemilik yang bisa membatalkan tugas yang sudah dikirim.
+    // Dulu worker menghabiskan antrian lebih dulu sebelum berhenti, jadi
+    // sebuah jalan headless dengan 41 pemanggangan tekstur yang masih
+    // mengantre terus bekerja *sesudah* bakery-nya dihancurkan — jatuh di
+    // `std::filesystem::path::operator/`, di direktori cache yang sudah tidak
+    // ada. Kontraknya sekarang: yang sedang berjalan diselesaikan, yang belum
+    // dimulai dibuang.
+    struct Owner {
+        std::atomic<int> touched{0};
+    };
+    auto owner = std::make_unique<Owner>();
+
+    sim::TaskPool pool(1);
+    std::mutex mutex;
+    std::condition_variable started;
+    bool inside = false;
+
+    pool.Submit([&]() {
+        {
+            const std::lock_guard<std::mutex> lock(mutex);
+            inside = true;
+        }
+        started.notify_one();
+        // Menahan satu-satunya worker sementara `Stop()` dipanggil — persis
+        // keadaan yang ditiru: pekerjaan sedang berjalan, sisanya mengantre.
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        owner->touched.fetch_add(1, std::memory_order_relaxed);
+    });
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        started.wait(lock, [&]() { return inside; });
+    }
+
+    for (int i = 0; i < 32; ++i) {
+        pool.Submit([&]() { owner->touched.fetch_add(100, std::memory_order_relaxed); });
+    }
+    CHECK(pool.Pending() > 1);
+
+    pool.Stop();
+
+    // Yang sedang berjalan selesai — berkas yang setengah ditulis tetap tidak
+    // pernah ditinggalkan begitu saja.
+    CHECK(owner->touched.load() == 1);
+    // Yang mengantre tidak pernah dimulai, dan `Pending()` mengakuinya alih-alih
+    // menghitung tugas yang tidak akan dikerjakan siapa pun.
+    CHECK(pool.Pending() == 0);
+
+    // Mengantre sesudah berhenti tidak menghidupkan apa pun kembali. Itu yang
+    // membuat pemilik yang sedang dihancurkan — dan masih sempat mengirim satu
+    // tugas terakhir — tetap aman.
+    pool.Submit([&]() { owner->touched.fetch_add(100, std::memory_order_relaxed); });
+    CHECK(pool.Pending() == 0);
+    CHECK(owner->touched.load() == 1);
+
+    // Dan inilah gunanya: pemiliknya boleh mati sekarang.
+    owner.reset();
 }
 
 TEST_CASE("FrameLimiter menahan frame mendekati periode target") {

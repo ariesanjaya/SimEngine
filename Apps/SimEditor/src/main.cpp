@@ -296,6 +296,12 @@ int main(int argc, char** argv) {
     SIM_INFO("Editor", "Frame rate locked to {:.0f} Hz — {}", frameLock.hz, frameLock.reason);
 
     editor::EditorApp app;
+    // **Worker berhenti sebelum apa pun yang mengantre pekerjaan ke sana
+    // dihancurkan.** Di sini itu `app` — bakery tekstur, database aset,
+    // penjaga shader — dan `thumbnails`, yang keduanya mengirim tugas yang
+    // menangkap `this`. Dideklarasikan sesudah keduanya, jadi dihancurkan
+    // lebih dulu.
+    const TaskPool::StopGuard stopWorkers(tasks);
     editor::EditorApp::Config appConfig;
     appConfig.configDir = configDir;
     appConfig.projectsRoot = ProjectsRoot();

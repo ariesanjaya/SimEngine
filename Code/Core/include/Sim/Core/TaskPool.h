@@ -34,11 +34,43 @@ public:
     TaskPool(const TaskPool&) = delete;
     TaskPool& operator=(const TaskPool&) = delete;
 
+    /// Tugas yang diantre sesudah `Stop()` dibuang, bukan disimpan untuk
+    /// nanti: tidak akan ada worker yang mengambilnya lagi.
     void Submit(std::function<void()> task);
 
     /// Menunggu seluruh tugas yang sudah diantre selesai. Dipakai test dan
     /// jalur mematikan editor; bukan sesuatu yang dipanggil per frame.
     void WaitIdle();
+
+    /// Menghentikan worker: yang sedang berjalan diselesaikan, yang masih
+    /// mengantre dibuang. Idempoten, dan destruktor memanggilnya juga.
+    ///
+    /// **Ini harus terjadi sementara pemilik tugasnya masih hidup.** Tugas
+    /// yang diantre menangkap `this` milik pemiliknya — bakery tekstur,
+    /// database aset, cache thumbnail — dan tidak ada satu pun dari mereka
+    /// yang bisa membatalkan tugas yang sudah dikirim. Kalau pemiliknya
+    /// dihancurkan lebih dulu, worker meneruskan pekerjaannya di atas memori
+    /// yang sudah dibebaskan. Ditemukan persis begitu: sebuah jalan headless
+    /// dengan 41 bake tekstur yang masih mengantre segfault di
+    /// `std::filesystem::path::operator/` — direktori cache milik bakery yang
+    /// sudah tidak ada lagi.
+    void Stop();
+
+    /// Penjaga lingkup untuk `Stop()`.
+    ///
+    /// Dideklarasikan **sesudah** semua yang mengantre pekerjaan ke pool, jadi
+    /// ia dihancurkan lebih dulu — termasuk pada jalur `return` lebih awal,
+    /// yang justru jalur yang paling mudah terlupakan.
+    class StopGuard {
+    public:
+        explicit StopGuard(TaskPool& pool) : pool_(pool) {}
+        StopGuard(const StopGuard&) = delete;
+        StopGuard& operator=(const StopGuard&) = delete;
+        ~StopGuard() { pool_.Stop(); }
+
+    private:
+        TaskPool& pool_;
+    };
 
     std::size_t ThreadCount() const { return workers_.size(); }
 

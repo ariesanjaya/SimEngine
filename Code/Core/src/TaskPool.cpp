@@ -18,7 +18,9 @@ TaskPool::TaskPool(unsigned threadCount) {
     SIM_INFO("Core", "Task pool started with {} worker threads", workers_.size());
 }
 
-TaskPool::~TaskPool() {
+TaskPool::~TaskPool() { Stop(); }
+
+void TaskPool::Stop() {
     {
         const std::lock_guard<std::mutex> lock(mutex_);
         stopping_ = true;
@@ -29,6 +31,15 @@ TaskPool::~TaskPool() {
             worker.join();
         }
     }
+    workers_.clear();
+
+    // Antrian dikosongkan supaya `Pending()` tidak berbohong sesudah ini, dan
+    // penunggu di `WaitIdle()` — kalau ada — dibangunkan alih-alih menunggu
+    // tugas yang tidak akan pernah dikerjakan siapa pun.
+    const std::lock_guard<std::mutex> lock(mutex_);
+    queue_.clear();
+    pending_.store(0, std::memory_order_relaxed);
+    idle_.notify_all();
 }
 
 void TaskPool::Submit(std::function<void()> task) {
@@ -41,6 +52,12 @@ void TaskPool::Submit(std::function<void()> task) {
     pending_.fetch_add(1, std::memory_order_relaxed);
     {
         const std::lock_guard<std::mutex> lock(mutex_);
+        if (stopping_) {
+            // Tidak ada lagi yang akan mengambilnya. Menyimpannya di antrian
+            // berarti `Pending()` tidak pernah kembali ke nol.
+            pending_.fetch_sub(1, std::memory_order_relaxed);
+            return;
+        }
         queue_.push_back(std::move(task));
     }
     hasWork_.notify_one();
@@ -57,10 +74,16 @@ void TaskPool::WorkerLoop() {
         {
             std::unique_lock<std::mutex> lock(mutex_);
             hasWork_.wait(lock, [this]() { return stopping_ || !queue_.empty(); });
-            // Berhenti hanya setelah antrian kosong: tugas yang sudah diantre
-            // tetap dikerjakan, supaya berkas yang sedang ditulis tidak
-            // ditinggalkan setengah jadi saat editor ditutup.
-            if (queue_.empty()) {
+            // **Berhenti berarti berhenti, bukan menghabiskan antrian dulu.**
+            // Sempat sebaliknya, supaya berkas yang sedang ditulis tidak
+            // ditinggalkan setengah jadi — tetapi yang menjaga itu adalah
+            // tugas yang *sedang berjalan* diselesaikan, dan itu tetap
+            // berlaku. Tugas yang belum sempat dimulai belum menulis apa pun.
+            // Yang dibayar oleh versi lama: menutup editor di tengah 41
+            // pemanggangan tekstur 4K yang masih mengantre berarti menunggu
+            // semuanya selesai — semenit lebih layar beku — dan semuanya
+            // dikerjakan di atas pemilik yang sudah dihancurkan.
+            if (stopping_ || queue_.empty()) {
                 return;
             }
             task = std::move(queue_.front());
