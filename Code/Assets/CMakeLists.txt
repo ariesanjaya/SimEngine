@@ -9,6 +9,8 @@ sim_add_library(Assets
         src/GltfImport.cpp
         src/MaterialImport.cpp
         src/MeshImport.cpp
+        src/MeshSdfBake.cpp
+        src/MeshSdfBakery.cpp
         src/UsdImport.cpp
         src/MeshSettings.cpp
         src/TextureBake.cpp
