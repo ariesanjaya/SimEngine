@@ -141,12 +141,35 @@ def main() -> int:
             )
             return sample_node
 
+        # **Mode alfa dibawa apa adanya dari glTF.** Sponza menempelkan kotoran
+        # sebagai geometri decal beropasitas, dan tekstur decal itu 20,9%
+        # beralfa nol dengan RGB tepat (0,0,0) di sana. Digambar sebagai
+        # material pejal — yang terjadi selama mode alfanya diabaikan — ia
+        # mengecat bercak hitam pekat di dinding dan pilar. Yang membacanya di
+        # sisi engine `MaterialCompileResult::alphaTest`.
+        #
+        # `BLEND` ikut menjadi `mask`, dan itu penyederhanaan yang disebutkan:
+        # engine memutuskan pemaduan per objek, bukan per material, sementara
+        # Sponza satu objek dengan 28 ruas. Untuk decal kotoran bedanya tepi
+        # yang tegas alih-alih berangsur — jauh lebih kecil daripada bedanya
+        # dengan kuad hitam.
+        alpha_mode = material.get("alphaMode", "OPAQUE")
+        masked = alpha_mode in ("MASK", "BLEND")
+
         base_color = named(pbr.get("baseColorTexture"))
         if base_color:
             node = sample(base_color, "base", 40.0)
             links.append(
                 {"guid": guid("link/base", name), "from": [node, "rgb"], "to": [output, "baseColor"]}
             )
+            if masked:
+                links.append(
+                    {
+                        "guid": guid("link/opacity", name),
+                        "from": [node, "a"],
+                        "to": [output, "opacity"],
+                    }
+                )
         else:
             factor = pbr.get("baseColorFactor", [0.8, 0.8, 0.8, 1.0])
             pins["baseColor"] = f"float3({factor[0]:.4f}, {factor[1]:.4f}, {factor[2]:.4f})"
@@ -183,6 +206,9 @@ def main() -> int:
             pins["baseMetalness"] = f"{pbr.get('metallicFactor', 0.0):.4f}"
 
         surface = {"guid": output, "type": "output.surface", "position": [240.0, 80.0]}
+        if masked:
+            cutoff = material.get("alphaCutoff", 0.5)
+            surface["settings"] = {"alphaMode": "mask", "alphaCutoff": f"{cutoff:.4f}"}
         if pins:
             surface["pins"] = pins
         nodes.insert(0, surface)

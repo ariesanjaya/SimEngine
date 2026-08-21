@@ -37,7 +37,32 @@ struct SdfGrid {
     /// X tercepat, lalu Y, lalu Z.
     std::vector<float> distances;
 
+    /// Indeks material per voxel, sejajar `distances`. Kosong berarti grid ini
+    /// tidak membawa warna sama sekali.
+    ///
+    /// **Indeks dan palet, bukan RGB per voxel.** Untuk Sponza itu 12,7 MB
+    /// terhadap 51 MB, dan warnanya tetap persis — sebuah mesh punya puluhan
+    /// material, bukan jutaan warna. Nol berarti "tidak diketahui": voxel di
+    /// luar pita, tempat tidak ada permukaan yang bisa ditanyai warnanya.
+    std::vector<uint8_t> materials;
+    /// Albedo linear per indeks material. `palette[0]` tidak pernah dipakai —
+    /// ia tempat nol yang berarti "tidak diketahui".
+    std::vector<Vec3> palette;
+
     bool Empty() const { return distances.empty(); }
+    bool HasAlbedo() const { return materials.size() == distances.size() && palette.size() > 1; }
+
+    /// Albedo pada sebuah voxel, atau `fallback` bila voxel itu tidak punya
+    /// material — di luar pita, atau grid tanpa warna sama sekali.
+    ///
+    /// **Tetangga terdekat, bukan trilinear.** Yang disimpan indeks, dan
+    /// interpolasi antar indeks menghasilkan indeks yang menunjuk material yang
+    /// bukan salah satu dari keduanya. Warna permukaan pun memang tidak
+    /// berpadu: batu yang bertemu kain bertemu di sebuah tepi, bukan di sebuah
+    /// gradien.
+    Vec3 AlbedoAt(int32_t x, int32_t y, int32_t z, const Vec3& fallback) const;
+    /// Albedo pada sebuah titik di ruang lokal mesh.
+    Vec3 AlbedoLocal(const Vec3& local, const Vec3& fallback) const;
     std::size_t VoxelCount() const {
         return static_cast<std::size_t>(sizeX) * sizeY * sizeZ;
     }

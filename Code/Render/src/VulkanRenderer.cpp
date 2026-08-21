@@ -128,7 +128,9 @@ struct ShadowUniforms {
     /// x jendela akumulasi, y jarak bidang penolakan riwayat, z kosinus normal
     /// minimum, w skala penjepitan riwayat.
     Vec4 denoise{0.0f};
-    /// x 1 kalau iradiansi GI berlaku, y ukuran ubin probe dalam piksel.
+    /// x 1 kalau iradiansi GI berlaku, y ukuran ubin probe dalam piksel,
+    /// z banyaknya grid medan jarak yang punya entri frame ini, w 1 saat uji
+    /// tungku.
     Vec4 giParams{0.0f};
     /// Langit untuk GI: x pengali radiansi, y ketinggian kamera (km),
     /// zw ukuran LUT sky-view. **Pengali nol berarti tidak ada atmosfer** —
@@ -1008,6 +1010,16 @@ public:
             sdfUpdateMs_ = std::chrono::duration<float, std::milli>(
                                std::chrono::steady_clock::now() - started)
                                .count();
+            // **Menunggu device idle, sekali per grid baru.** Descriptor set
+            // frame ini bisa saja masih dipegang command buffer yang belum
+            // selesai, dan menulisinya adalah pelanggaran. Yang dibayar satu
+            // hentakan pada frame sebuah mesh selesai dibake — dan mesh itu
+            // baru saja menghabiskan tujuh detik di baker.
+            if (sdfClipmap_.GridGeneration() != sdfGridGeneration_) {
+                sdfGridGeneration_ = sdfClipmap_.GridGeneration();
+                device_.WaitIdle();
+                WriteGiGridDescriptors();
+            }
         }
 
         // Peta HDR dimuat sebelum graph dibangun, karena graph memutuskan ada
@@ -1160,7 +1172,8 @@ public:
                               /*materialVariant=*/-1,
                               gpuCullActive_
                                   ? drawCull_.CommandBuffer(static_cast<uint32_t>(slotIndex_))
-                                  : VK_NULL_HANDLE);
+                                  : VK_NULL_HANDLE,
+                              /*skipMasked=*/true);
             }
             vkCmdEndRendering(command);
             probes_.RecordNormalEnd(command);
@@ -1194,8 +1207,15 @@ public:
                 // Diikat ke voxel kaskade terhalus, bukan ke satu angka meter:
                 // yang harus dilewati bias ini adalah ambang berhenti sphere
                 // tracing, dan ambang itu sendiri setengah voxel.
-                const float normalBias =
-                    clipmap.VoxelSize(0) * probeGrid_.Settings().normalBiasVoxels;
+                // **Dalam voxel, bukan dalam meter.** Ambang "mengenai" sphere
+                // tracing setengah voxel *kaskade tempat titiknya berada*, dan
+                // kaskade terkasar bervoxel 1,6 m — enam belas kali kaskade
+                // terhalus. Bias yang dihitung sekali dari kaskade nol karena
+                // itu terlalu kecil di mana-mana kecuali di dekat kamera, dan
+                // probe yang biasnya terlalu kecil terjepit di ambang: medan
+                // tidak punya jawaban untuk satu pun sinarnya. Yang mengalikan
+                // dengan ukuran voxel setempat adalah shader-nya.
+                const float normalBias = probeGrid_.Settings().normalBiasVoxels;
                 probes_.Record(command, slot.shadowSet, probeGrid_, probeFrame_,
                                clipmap.MaxRange(), normalBias, probeReset_);
             };
@@ -1571,6 +1591,9 @@ public:
         VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
         /// Nomor material ini di larik bindless. Nol pada jalur mundur.
         uint32_t slot = 0;
+        /// Bertopeng: shader-nya membuang fragmen di bawah ambang opasitas.
+        /// Ruasnya dilewati prepass dan pass bayangan — lihat `DrawRuns`.
+        bool masked = false;
         rhi::DynamicBuffer parameters;
         /// [transparan][ber-kulit].
         std::array<PipelineVariants, 2> pipelines{};
@@ -1680,13 +1703,24 @@ public:
             return kInvalidMaterial;
         }
 
+        material->masked = program.masked;
+        // **Yang bertopeng diuji `GREATER_OR_EQUAL`, bukan `EQUAL`.** Ruasnya
+        // tidak ikut prepass — fragmen yang dibuang tidak boleh meninggalkan
+        // kedalamannya di sana — jadi kedalaman yang tertulis di buffer adalah
+        // milik permukaan **di belakangnya**. `EQUAL` karena itu tidak akan
+        // pernah lolos. Sama-dalam ikut diterima karena decal memang sebidang
+        // dengan dindingnya: reversed-Z membuat "lebih dekat" berarti lebih
+        // besar, jadi yang di depan tetap lolos dan yang di belakang tetap
+        // gagal.
+        const VkCompareOp opaqueDepth =
+            material->masked ? VK_COMPARE_OP_GREATER_OR_EQUAL : VK_COMPARE_OP_EQUAL;
         for (std::size_t skinned = 0; skinned < kPipelineVariants; ++skinned) {
             // Keadaan depth dan blending-nya sama persis dengan pipeline kotak
             // yang digantikannya — kalau tidak, ruas bermaterial akan diuji
             // terhadap depth dengan aturan yang berbeda dari tetangganya.
             material->pipelines[0][skinned] =
                 BuildPipeline(boxVertexModule_, fragment, /*depthWrite=*/false,
-                              VK_COMPARE_OP_EQUAL, /*blend=*/false, /*colorWrite=*/true,
+                              opaqueDepth, /*blend=*/false, /*colorWrite=*/true,
                               /*skinned=*/skinned != 0, material->pipelineLayout);
             material->pipelines[1][skinned] =
                 BuildPipeline(boxVertexModule_, fragment, /*depthWrite=*/false,
@@ -2920,8 +2954,8 @@ private:
 
     void DrawInstances(VkCommandBuffer cmd, const PipelineVariants& pipelines, const BoxPush& push,
                        InstanceSlot& slot, std::span<const DrawRun> runs, uint32_t instanceBase,
-                       int materialVariant = -1,
-                       VkBuffer indirectCommands = VK_NULL_HANDLE) {
+                       int materialVariant = -1, VkBuffer indirectCommands = VK_NULL_HANDLE,
+                       bool skipMasked = false) {
         // Descriptor set diikat untuk setiap pipeline forward, termasuk prepass.
         // Prepass tidak membacanya, tapi layout-nya mendeklarasikannya — dan
         // set yang dideklarasikan tapi tidak terikat adalah pelanggaran meski
@@ -2943,7 +2977,7 @@ private:
                  sets.data(), 0, nullptr);
         vkCmdPushConstants(cmd, pipelineLayout_, kBoxPushStages, 0, sizeof(BoxPush), &push);
         DrawRuns(cmd, slot, runs, instanceBase, pipelines, pipelineLayout_,
-                 /*bindsMaterial=*/true, materialVariant, indirectCommands);
+                 /*bindsMaterial=*/true, materialVariant, indirectCommands, skipMasked);
     }
 
     /// Mengikat geometri tiap ruas lalu menggambarnya. Dipakai bersama pass
@@ -2961,10 +2995,16 @@ private:
     /// setLayoutCount` — perilaku tak terdefinisi yang di mesin ini berakhir
     /// sebagai segfault beberapa detik sesudah adegan yang menjatuhkan bayangan
     /// selesai dimuat, jauh dari sebabnya.
+    /// `skipMasked` melewatkan ruas yang materialnya bertopeng. **Dipakai
+    /// prepass dan pass bayangan, dan keduanya karena alasan yang sama:** yang
+    /// menentukan bentuk material bertopeng adalah fragmen yang dibuangnya, dan
+    /// kedua pass itu tidak menjalankan shader materialnya sama sekali. Yang
+    /// ikut serta di sana akan menulis kedalaman — dan menjatuhkan bayangan —
+    /// berbentuk kuad penuh, termasuk di bagian yang seharusnya tidak ada.
     void DrawRuns(VkCommandBuffer cmd, InstanceSlot& slot, std::span<const DrawRun> runs,
                   uint32_t instanceBase, const PipelineVariants& pipelines,
                   VkPipelineLayout layout, bool bindsMaterial, int materialVariant = -1,
-                  VkBuffer indirectCommands = VK_NULL_HANDLE) {
+                  VkBuffer indirectCommands = VK_NULL_HANDLE, bool skipMasked = false) {
         VkPipeline bound = VK_NULL_HANDLE;
         // **Bukan sebuah handle sentinel**: nol adalah kubus satuan, yaitu mesh
         // yang sah dan yang paling sering muncul. Bendera terpisah karena itu,
@@ -2974,6 +3014,11 @@ private:
         bool boundSkinned = false;
         for (const DrawRun& run : runs) {
             if (run.count == 0 || run.mesh >= meshes_.size()) {
+                continue;
+            }
+            if (skipMasked && run.material != kInvalidMaterial &&
+                run.material <= materials_.size() &&
+                materials_[static_cast<std::size_t>(run.material) - 1]->masked) {
                 continue;
             }
             const GpuMesh& mesh = *meshes_[static_cast<std::size_t>(run.mesh)];
@@ -3845,7 +3890,7 @@ private:
         samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
         SIM_VK_CHECK(vkCreateSampler(device_.Handle(), &samplerInfo, nullptr, &shadow_.sampler));
 
-        const std::array<VkDescriptorSetLayoutBinding, 22> bindings{
+        const std::array<VkDescriptorSetLayoutBinding, 24> bindings{
             VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
@@ -3890,6 +3935,11 @@ private:
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{21, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{22, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{23, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                                         SdfClipmapResource::kMaxGrids,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
         };
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -3898,13 +3948,16 @@ private:
         SIM_VK_CHECK(vkCreateDescriptorSetLayout(device_.Handle(), &layoutInfo, nullptr,
                                                  &shadowSetLayout_));
 
-        const std::array<VkDescriptorPoolSize, 3> sizes{
+        const std::array<VkDescriptorPoolSize, 4> sizes{
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                  static_cast<uint32_t>(slots_.size())},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                                  static_cast<uint32_t>(slots_.size()) * 16},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                 static_cast<uint32_t>(slots_.size()) * 5},
+                                 static_cast<uint32_t>(slots_.size()) * 6},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                                 static_cast<uint32_t>(slots_.size()) *
+                                     SdfClipmapResource::kMaxGrids},
         };
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -4414,7 +4467,8 @@ private:
                 vkCmdPushConstants(cmd, shadowLayout_, kBoxPushStages, 0,
                                    sizeof(BoxPush), &push);
                 DrawRuns(cmd, slot, shadowRuns_, 0, shadowPipelines_, shadowLayout_,
-                         /*bindsMaterial=*/false);
+                         /*bindsMaterial=*/false, /*materialVariant=*/-1,
+                         /*indirectCommands=*/VK_NULL_HANDLE, /*skipMasked=*/true);
             }
         }
         vkCmdEndRendering(cmd);
@@ -4568,7 +4622,56 @@ private:
         }
         vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
+        WriteGiGridDescriptors();
         return true;
+    }
+
+    /// Menulis ulang binding 22 dan 23: entri grid dan tekstur albedonya.
+    ///
+    /// **Terpisah dari `WriteShadowDescriptors`, karena waktunya berbeda.**
+    /// Yang itu berjalan saat start, ketika belum ada satu pun command buffer;
+    /// yang ini berjalan saat sebuah mesh selesai dibake, yaitu di tengah
+    /// frame yang berjalan — dan menulisi descriptor set yang sedang dipakai
+    /// adalah pelanggaran. Pemanggil yang menunggu device idle lebih dulu.
+    void WriteGiGridDescriptors() {
+        std::array<VkDescriptorImageInfo, SdfClipmapResource::kMaxGrids> images{};
+        for (uint32_t at = 0; at < SdfClipmapResource::kMaxGrids; ++at) {
+            const VkImageView view = sdfClipmap_.GridAlbedoView(at);
+            // Slot tanpa albedo tetap harus punya descriptor yang sah:
+            // descriptor kosong adalah pelanggaran pada setiap draw, termasuk
+            // draw yang tidak membacanya. Penggantinya kaskade SDF — satu-
+            // satunya tekstur 3D yang pasti ada — dan yang menjaganya tidak
+            // pernah terbaca adalah jumlah grid di `giGridCount`.
+            images[at] = {VK_NULL_HANDLE,
+                          view != VK_NULL_HANDLE ? view : sdfClipmap_.Texture(0).View(),
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        }
+        std::vector<VkDescriptorBufferInfo> buffers(slots_.size());
+        std::vector<VkWriteDescriptorSet> writes;
+        writes.reserve(slots_.size() * 2);
+        for (std::size_t i = 0; i < slots_.size(); ++i) {
+            const VkBuffer grid = sdfClipmap_.GridBuffer(static_cast<uint32_t>(i));
+            buffers[i] = {grid != VK_NULL_HANDLE ? grid : slots_[i].lightBuffer.Handle(), 0,
+                          VK_WHOLE_SIZE};
+            VkWriteDescriptorSet entries{};
+            entries.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            entries.dstSet = slots_[i].shadowSet;
+            entries.dstBinding = 22;
+            entries.descriptorCount = 1;
+            entries.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            entries.pBufferInfo = &buffers[i];
+            writes.push_back(entries);
+
+            VkWriteDescriptorSet albedo = entries;
+            albedo.dstBinding = 23;
+            albedo.descriptorCount = SdfClipmapResource::kMaxGrids;
+            albedo.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+            albedo.pBufferInfo = nullptr;
+            albedo.pImageInfo = images.data();
+            writes.push_back(albedo);
+        }
+        vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
+                               writes.data(), 0, nullptr);
     }
 
     /// Menulis ulang binding rentang dan indeks cluster saja.
@@ -5118,7 +5221,9 @@ private:
         // dinyalakan.
         const bool giReady = desc.gi.enabled && probes_.IsValid() && probeFrame_ > 1;
         uniforms.giParams = Vec4(giReady ? 1.0f : 0.0f,
-                                 static_cast<float>(probeGrid_.Settings().tileSize), 0.0f, 0.0f);
+                                 static_cast<float>(probeGrid_.Settings().tileSize),
+                                 static_cast<float>(sdfClipmap_.ActiveGridCount()),
+                                 desc.gi.furnaceTest ? 1.0f : 0.0f);
         // **Syarat yang sama persis dengan syarat pass langit didaftarkan.**
         // LUT sky-view hanya diperbarui di dalam pass itu; menyuruh GI
         // membacanya saat pass-nya tidak ada berarti menerangi adegan dengan
@@ -5196,7 +5301,8 @@ private:
                     vkCmdPushConstants(cmd, shadowLayout_, kBoxPushStages, 0,
                                        sizeof(BoxPush), &push);
                     DrawRuns(cmd, slot, shadowRuns_, 0, shadowPipelines_, shadowLayout_,
-                             /*bindsMaterial=*/false);
+                             /*bindsMaterial=*/false, /*materialVariant=*/-1,
+                             /*indirectCommands=*/VK_NULL_HANDLE, /*skipMasked=*/true);
                 }
             }
             vkCmdEndRendering(cmd);
@@ -5461,6 +5567,13 @@ private:
     /// dibuang semuanya berarti iradiansi nol. 0,5 adalah albedo rata-rata
     /// bahan bangunan — plester, batu, kayu — dan salah 0,2 di sini
     /// menggeser kecerahan pantulan, bukan menghilangkannya.
+    ///
+    /// **Dipakai hanya untuk mesh yang albedonya belum dibake.** Yang sudah
+    /// membawa warnanya sendiri dibaca dari grid; lihat `giAlbedoAt`. Angka ini
+    /// tetap 0,5 walaupun 28 material Sponza yang diukur rata-rata 0,25 linear:
+    /// yang dijawabnya bukan "berapa albedo batu" melainkan "berapa albedo
+    /// sesuatu yang tidak diketahui", dan menyetelnya ke satu adegan yang
+    /// kebetulan diukur adalah menyetelnya ke adegan yang salah.
     static constexpr float kBounceAlbedo = 0.5f;
     /// Anggaran langkah lapis screen-space. Rencana GI menyebut 16, dan angka
     /// itulah yang membuat fallback ke SDF bukan kemewahan melainkan keharusan.
@@ -5603,6 +5716,9 @@ private:
     /// Larik sejajar `ViewportScene::meshes`, disusun ulang tiap frame supaya
     /// `SdfClipmapResource` tidak perlu mengenal `MeshHandle` sama sekali.
     std::vector<const SdfGrid*> meshFieldPointers_;
+    /// Generasi grid clipmap yang descriptor-nya sudah ditulis. Lihat
+    /// `WriteGiGridDescriptors`.
+    uint64_t sdfGridGeneration_ = 0;
     /// Jalur → handle. Jalur yang gagal dimuat dipetakan ke kubus satuan supaya
     /// ia tidak dicoba lagi setiap frame.
     /// Tekstur yang sudah di GPU, beserta set descriptor-nya.

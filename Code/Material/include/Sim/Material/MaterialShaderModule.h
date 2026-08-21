@@ -92,6 +92,15 @@ std::string InlineShaderIncludes(const std::filesystem::path& shaderDirectory,
 
 /// Bahan untuk merakit shader fragmen material **untuk pass forward renderer**.
 struct ForwardMaterialOptions {
+    /// Membuang fragmen yang opasitasnya di bawah `alphaCutoff`.
+    ///
+    /// **Uji ini ditulis sebelum lobe mana pun dinilai.** Menaruhnya di akhir
+    /// tetap benar hasilnya, tetapi membuat fragmen yang dibuang tetap membayar
+    /// seluruh evaluasi materialnya — dan material bertopeng justru yang paling
+    /// banyak fragmen terbuangnya.
+    bool alphaTest = false;
+    float alphaCutoff = 0.5f;
+
     /// Isi `openpbr.slang`, ditanam apa adanya.
     std::string prelude;
     /// Deklarasi milik renderer: varying kotak dan seluruh set 0-nya. Diisi

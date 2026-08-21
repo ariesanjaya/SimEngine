@@ -58,6 +58,12 @@ struct ProbeGridSettings {
     /// Satu voxel, bukan setengah: ambangnya sendiri setengah voxel, jadi
     /// setengah voxel adalah tepat di batasnya — dan sampel trilinear di dekat
     /// permukaan meleset cukup untuk melewatinya.
+    ///
+    /// **Voxel kaskade setempat, bukan voxel kaskade terhalus.** Ambangnya
+    /// mengikuti kaskade tempat titiknya berada, dan kaskade terkasar bervoxel
+    /// enam belas kali lebih besar; sebuah bias yang dihitung sekali dari
+    /// kaskade nol karena itu terlalu kecil di mana-mana kecuali di dekat
+    /// kamera.
     float normalBiasVoxels = 1.0f;
     /// Panjang urutan jitter sebelum ia berulang.
     ///

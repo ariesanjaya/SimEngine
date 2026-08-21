@@ -101,6 +101,32 @@ Vec3 ParseFloat3(std::string_view text, const Vec3& fallback) {
 
 }  // namespace
 
+bool ApplySceneSky(const scene::World& world, render::ViewportDesc& desc) {
+    const scene::SkyComponent* sky = nullptr;
+    for (const auto raw : world.Registry().view<scene::SkyComponent>()) {
+        // **Yang pertama, bukan yang terdekat** — aturan yang sama dengan
+        // lampu directional: dua langit di satu adegan adalah kesalahan
+        // pengarangan, dan memilih salah satunya menurut jarak hanya membuat
+        // kesalahan itu berubah-ubah saat kamera bergerak.
+        sky = world.TryGet<scene::SkyComponent>(static_cast<scene::Entity>(raw));
+        break;
+    }
+    desc.skyEnabled = sky != nullptr;
+    if (sky == nullptr) {
+        return false;
+    }
+    desc.skySource = sky->source == scene::SkySourceKind::HdrMap ? render::SkySource::HdrMap
+                                                                 : render::SkySource::Atmosphere;
+    desc.skyIntensity = sky->intensity;
+    desc.cameraHeightKm = sky->cameraHeightKm;
+    desc.aerialPerspective = sky->aerialPerspective;
+    desc.aerialHaze = sky->aerialHaze;
+    desc.hdriPath = sky->hdriPath;
+    desc.hdriRotation = sky->hdriRotation;
+    desc.hdriIntensity = sky->hdriIntensity;
+    return true;
+}
+
 void SceneView::Build(scene::World& world, const Selection& selection,
                       const assets::AssetDatabase* assets,
                       render::IViewportRenderer* renderer,

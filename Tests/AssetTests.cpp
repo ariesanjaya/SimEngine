@@ -27,6 +27,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -1164,6 +1165,64 @@ TEST_CASE("OBJ tanpa satuan terbaca sebagai meter, bukan sentimeter") {
     // menuliskan 2 dan 3.
     CHECK((mesh.boundsMax.x - mesh.boundsMin.x) == doctest::Approx(2.0f));
     CHECK((mesh.boundsMax.y - mesh.boundsMin.y) == doctest::Approx(3.0f));
+}
+
+TEST_CASE("Setiap importir menaruh asal UV di kiri atas, apa pun konvensi berkasnya") {
+    using namespace sim::assets;
+
+    // **Satu segi empat, tiga berkas, satu jawaban.** Ketiganya menuliskan
+    // pemetaan yang sama persis menurut konvensi formatnya sendiri: glTF
+    // menaruh asalnya di kiri atas seperti mesin ini, OBJ dan USD di kiri
+    // bawah. Yang dikunci uji ini bukan angka di salah satu berkas melainkan
+    // kesepakatan ketiganya sesudah diimpor — dan itulah yang dulu tidak ada,
+    // sampai dua importir membalik `v` dan yang ketiga tidak.
+    //
+    // Kekeliruannya tidak pernah muncul sebagai galat: UV yang tercermin tetap
+    // UV yang sah, teksturnya tetap terpasang, dan yang berbeda hanya baris
+    // mana yang terbaca.
+    struct Corner {
+        Vec3 position;
+        Vec2 uv;
+    };
+    const std::array<Corner, 4> expected{{
+        {Vec3(0.0f, 0.0f, 0.0f), Vec2(0.2f, 0.6f)},
+        {Vec3(1.0f, 0.0f, 0.0f), Vec2(0.7f, 0.6f)},
+        {Vec3(1.0f, 1.0f, 0.0f), Vec2(0.7f, 0.1f)},
+        {Vec3(0.0f, 1.0f, 0.0f), Vec2(0.2f, 0.1f)},
+    }};
+
+    for (const char* name : {"uvQuad.gltf", "uvQuad.obj", "uvQuad.usda"}) {
+        const std::filesystem::path path = std::filesystem::path(SIM_MESH_DIR) / name;
+        if (!std::filesystem::exists(path)) {
+            continue;  // aset opsional
+        }
+        std::string error;
+        const MeshData mesh = LoadMesh(path, error);
+        if (!mesh.IsValid() && error.find("no USD support") != std::string::npos) {
+            continue;  // build tanpa OpenUSD
+        }
+        INFO("mesh " << name << " error '" << error << "'");
+        REQUIRE(mesh.IsValid());
+        CHECK(mesh.TriangleCount() == 2);
+
+        for (const Corner& corner : expected) {
+            const MeshVertex* found = nullptr;
+            for (const MeshVertex& vertex : mesh.vertices) {
+                if (glm::distance(vertex.position, corner.position) < 1e-4f) {
+                    found = &vertex;
+                    break;
+                }
+            }
+            INFO(name << " sudut (" << corner.position.x << ", " << corner.position.y << ")");
+            REQUIRE(found != nullptr);
+            CHECK(found->uv.x == doctest::Approx(corner.uv.x).epsilon(1e-4f));
+            // **`v`-nya, dan justru di sinilah satu-satunya yang bisa keliru.**
+            // 0,6 dan 0,1 dipilih karena cerminannya 0,4 dan 0,9 — tidak satu
+            // pun beririsan, jadi importir yang lupa membalik gagal pada
+            // angkanya sendiri, bukan hanya pada pasangannya.
+            CHECK(found->uv.y == doctest::Approx(corner.uv.y).epsilon(1e-4f));
+        }
+    }
 }
 
 TEST_CASE("Tangent tiap vertex membentuk bingkai yang sah untuk peta normal") {
@@ -2462,6 +2521,11 @@ TEST_CASE("T-M1: berkas .simsdf bolak-balik, dan yang terpotong ditolak") {
     for (std::size_t i = 0; i < grid.distances.size(); ++i) {
         grid.distances[i] = static_cast<float>(i) * 0.01f - 0.3f;
     }
+    grid.palette = {Vec3(0.5f), Vec3(0.9f, 0.2f, 0.1f), Vec3(0.1f, 0.3f, 0.7f)};
+    grid.materials.resize(grid.VoxelCount());
+    for (std::size_t i = 0; i < grid.materials.size(); ++i) {
+        grid.materials[i] = static_cast<uint8_t>(i % 3);
+    }
 
     const std::filesystem::path file = temp.Path() / "field.simsdf";
     std::string error;
@@ -2470,6 +2534,10 @@ TEST_CASE("T-M1: berkas .simsdf bolak-balik, dan yang terpotong ditolak") {
     SdfGrid loaded;
     REQUIRE(ReadMeshSdf(file, loaded, error));
     CHECK(loaded.sizeX == grid.sizeX);
+    CHECK(loaded.HasAlbedo());
+    CHECK(loaded.palette.size() == grid.palette.size());
+    CHECK(loaded.materials == grid.materials);
+    CHECK(loaded.palette[1].x == doctest::Approx(grid.palette[1].x));
     CHECK(loaded.sizeY == grid.sizeY);
     CHECK(loaded.sizeZ == grid.sizeZ);
     CHECK(loaded.voxelSize == doctest::Approx(grid.voxelSize));
@@ -2583,3 +2651,66 @@ TEST_CASE("T-M1: bakery menjawab Pending lalu Ready, dan hanya membake sekali") 
     tasks.WaitIdle();
     CHECK(bakery.Request(missing).state == MeshSdfState::Failed);
 }
+
+
+TEST_CASE("T-alpha: tekstur beralfa selamat melewati baker") {
+    // **Perjalanan kali-lalu-bagi yang tidak pulih.** Pembaca gambar dulu
+    // meng-associate alfa dan baker meluruskannya kembali; texel beralfa nol
+    // keluar hitam pekat, dan texel beralfa kecil diperbesar sampai menabrak
+    // putih. Yang terlihat bercak berbintik di setiap tekstur beralfa — dan
+    // tidak satu pun uji menyentuhnya, karena seluruh fixture gambar di sini
+    // beralfa penuh.
+    TempDir temp;
+    const std::filesystem::path source = temp.Path() / "alfa.png";
+
+    imageio::Image image;
+    imageio::ImageDesc desc;
+    desc.width = 16;
+    desc.height = 16;
+    desc.channels = 4;
+    desc.type = imageio::PixelType::UInt8;
+    desc.colorSpace = imageio::ColorSpace::Srgb;
+    image.Allocate(desc);
+    // Warna yang sama di seluruh gambar, alfa yang menurun baris demi baris.
+    for (uint32_t y = 0; y < desc.height; ++y) {
+        for (uint32_t x = 0; x < desc.width; ++x) {
+            uint8_t* px = image.bytes.data() + (y * desc.width + x) * 4;
+            px[0] = 180;
+            px[1] = 120;
+            px[2] = 60;
+            px[3] = static_cast<uint8_t>(y * 17);
+        }
+    }
+    REQUIRE(imageio::Write(source, image).ok);
+
+    imageio::Image decoded;
+    imageio::ReadOptions options;
+    options.channels = 4;
+    options.type = imageio::PixelType::UInt8;
+    REQUIRE(imageio::Read(source, options, decoded).ok);
+    CHECK_FALSE(decoded.desc.premultipliedAlpha);
+    // Baris alfa nol tetap membawa warnanya. Inilah yang dulu hilang.
+    CHECK(decoded.bytes[0] == 180);
+    CHECK(decoded.bytes[1] == 120);
+    CHECK(decoded.bytes[2] == 60);
+    CHECK(decoded.bytes[3] == 0);
+
+    // Dan lewat baker sampai ke `.ktx2`: BC7 boleh menggeser beberapa satuan,
+    // tapi tidak boleh mengubah oranye menjadi hitam.
+    TextureSettings settings;
+    settings.usage = TextureUsage::Color;
+    const BakeResult baked = BakeTexture(source, settings, temp.Path() / "cache");
+    REQUIRE_MESSAGE(baked.ok, baked.error);
+    rhi::Ktx2Texture ktx;
+    REQUIRE(rhi::ReadKtx2(baked.path, ktx).ok);
+    std::vector<uint8_t> rgba;
+    REQUIRE(DecompressBlocks(BlockFormat::Bc7, ktx.LevelBytes(0), ktx.width, ktx.height, rgba));
+    std::size_t dark = 0;
+    for (std::size_t i = 0; i + 3 < rgba.size(); i += 4) {
+        if (rgba[i] < 40 && rgba[i + 1] < 40 && rgba[i + 2] < 40) {
+            ++dark;
+        }
+    }
+    CHECK(dark == 0);
+}
+

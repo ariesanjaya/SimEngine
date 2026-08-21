@@ -41,6 +41,8 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -110,6 +112,9 @@ void PrintUsage() {
         "  --bench-gi-debug <view>       off|albedo|normal|irradiance|raycount|steps|layers\n"
         "  --bench-ev <ev100>            eksposur manual pada EV100 ini\n"
         "  --bench-no-screen-trace       matikan lapis screen-space; lihat SDF sendirian\n"
+        "  --bench-furnace               uji tungku: langit seragam 1, albedo 1, tanpa matahari\n"
+        "  --dump-mesh <file> --dump-out <json>  material dan ruas sebuah berkas mesh\n"
+        "  --dump-uv <bin>               posisi+UV tiap titik, float32 x5\n"
         "  --bench-compute               ganti gambarnya dengan pass compute uji (G3)\n"
         "  --validate-sync               nyalakan validasi sinkronisasi; lambat, sengaja\n"
         "  --bench-cpu-clusters          penetapan cluster di CPU, bukan GPU (G4)\n"
@@ -454,6 +459,102 @@ int main(int argc, char** argv) {
         }
     }
 
+    // **Membaca isi sebuah berkas mesh, lalu keluar.** Bukan bagian dari jalur
+    // ukur: ia alat untuk yang mengarang aset, dan yang dijawabnya pertanyaan
+    // yang selama ini hanya bisa dijawab dengan menulis uji sementara — material
+    // apa saja yang dibawa berkas ini, tekstur mana yang disebut masing-masing,
+    // dan ruas ke berapa memakai yang mana. Larik `materials` di level diindeks
+    // nomor ruas, jadi tanpa jawaban terakhir itu sebuah level hanya bisa
+    // dikarang dengan menebak.
+    if (const std::string_view file = FlagValue(argc, argv, "--dump-mesh"); !file.empty()) {
+        std::string error;
+        const assets::MeshData mesh = assets::LoadMesh(std::filesystem::path(file), error);
+        if (!mesh.IsValid()) {
+            SIM_ERROR("Headless", "cannot read {}: {}", std::string(file), error);
+            app.Shutdown();
+            return 1;
+        }
+        std::ostringstream json;
+        json << "{\n  \"triangles\": " << mesh.TriangleCount() << ",\n";
+        json << "  \"vertices\": " << mesh.vertices.size() << ",\n";
+        json << "  \"boundsMin\": [" << mesh.boundsMin.x << ", " << mesh.boundsMin.y << ", "
+             << mesh.boundsMin.z << "],\n";
+        json << "  \"boundsMax\": [" << mesh.boundsMax.x << ", " << mesh.boundsMax.y << ", "
+             << mesh.boundsMax.z << "],\n";
+        json << "  \"materials\": [\n";
+        for (std::size_t i = 0; i < mesh.materials.size(); ++i) {
+            const assets::MeshMaterial& material = mesh.materials[i];
+            json << "    {\"name\": \"" << material.name << "\", \"baseColor\": \""
+                 << material.baseColorTexture << "\", \"normal\": \"" << material.normalTexture
+                 << "\", \"roughness\": \"" << material.roughnessTexture
+                 << "\", \"metalness\": \"" << material.metalnessTexture << "\"}"
+                 << (i + 1 < mesh.materials.size() ? "," : "") << "\n";
+        }
+        json << "  ],\n  \"parts\": [";
+        for (std::size_t i = 0; i < mesh.parts.size(); ++i) {
+            json << (i == 0 ? "" : ", ") << mesh.parts[i].material;
+        }
+        json << "],\n";
+        // **Statistik UV, karena yang ditanyakan "sama dengan aslinya atau
+        // tidak" tidak bisa dijawab satu titik.** Konvensi V yang berlawanan
+        // tidak muncul sebagai galat maupun sebagai UV di luar jangkauan; yang
+        // muncul hanya `v` yang tercermin, dan itu hanya terlihat kalau dua
+        // impor atas model yang sama dibandingkan berdampingan.
+        Vec2 uvMin(std::numeric_limits<float>::max());
+        Vec2 uvMax(std::numeric_limits<float>::lowest());
+        double uSum = 0.0;
+        double vSum = 0.0;
+        std::size_t outside = 0;
+        for (const assets::MeshVertex& vertex : mesh.vertices) {
+            uvMin = glm::min(uvMin, vertex.uv);
+            uvMax = glm::max(uvMax, vertex.uv);
+            uSum += static_cast<double>(vertex.uv.x);
+            vSum += static_cast<double>(vertex.uv.y);
+            if (vertex.uv.x < 0.0f || vertex.uv.x > 1.0f || vertex.uv.y < 0.0f ||
+                vertex.uv.y > 1.0f) {
+                ++outside;
+            }
+        }
+        const auto count = static_cast<double>(std::max<std::size_t>(mesh.vertices.size(), 1));
+        json << "  \"uv\": {\"min\": [" << uvMin.x << ", " << uvMin.y << "], \"max\": ["
+             << uvMax.x << ", " << uvMax.y << "], \"mean\": [" << uSum / count << ", "
+             << vSum / count << "], \"outside01\": " << outside << "}\n}\n";
+
+        // Posisi dan UV setiap titik, mentah. JSON tidak dipakai di sini: satu
+        // Sponza adalah ratusan ribu titik, dan yang membacanya mencocokkan
+        // titik demi posisi — pekerjaan numerik, bukan pekerjaan teks.
+        if (const std::string_view uvOut = FlagValue(argc, argv, "--dump-uv"); !uvOut.empty()) {
+            std::ofstream raw{std::filesystem::path(uvOut), std::ios::binary};
+            for (const assets::MeshVertex& vertex : mesh.vertices) {
+                const float row[5] = {vertex.position.x, vertex.position.y, vertex.position.z,
+                                      vertex.uv.x, vertex.uv.y};
+                raw.write(reinterpret_cast<const char*>(row), sizeof(row));
+            }
+            SIM_INFO("Headless", "{} titik posisi+UV ditulis ke {}", mesh.vertices.size(),
+                     std::string(uvOut));
+        }
+        // **Ke berkas, bukan ke stdout.** Log proses ini juga menulis ke
+        // stdout, jadi keluaran yang dicampur dengannya bukan JSON yang sah —
+        // dan yang membacanya adalah skrip, bukan mata.
+        const std::string_view out = FlagValue(argc, argv, "--dump-out");
+        if (out.empty()) {
+            SIM_ERROR("Headless", "--dump-mesh needs --dump-out <path>");
+            app.Shutdown();
+            return 2;
+        }
+        std::ofstream dump{std::filesystem::path(out)};
+        if (!dump) {
+            SIM_ERROR("Headless", "cannot write {}", std::string(out));
+            app.Shutdown();
+            return 1;
+        }
+        dump << json.str();
+        SIM_INFO("Headless", "{} materials, {} parts written to {}", mesh.materials.size(),
+                 mesh.parts.size(), std::string(out));
+        app.Shutdown();
+        return 0;
+    }
+
     editor::Selection selection;
     editor::SceneView sceneView;
     // **Tanpa ini setiap material bertekstur digambar tanpa teksturnya, dan
@@ -651,6 +752,20 @@ int main(int argc, char** argv) {
                 occlusion = true;
             } else if (flag == "--bench-fixed-exposure") {
                 fixedExposure = true;
+            } else if (flag == "--bench-furnace") {
+                // Uji tungku, kriteria selesai M4.
+                //
+                // **Lapis layar tetap menyala.** Mematikannya juga mematikan
+                // pass piramida HiZ, dan tampilan iradiansi membaca kedalaman
+                // dari piramida itu untuk tahu piksel mana yang punya
+                // permukaan — jadi seluruh layar terbaca langit dan yang
+                // terukur bukan apa-apa. Yang membuat lapis layar tidak
+                // mengotori tungkunya adalah shader: di bawah tungku setiap
+                // jawaban yang *diketahui* bernilai satu, karena permukaan
+                // ber-albedo satu di bawah cahaya seragam satu memang
+                // berradiansi satu. Yang tersisa diuji hanyalah penutup
+                // rekursinya.
+                app.Context().gi.furnaceTest = true;
             } else if (flag == "--bench-no-screen-trace") {
                 // **Lapis layar dimatikan supaya lapis SDF bisa dilihat
                 // sendirian.** Kriteria selesai M1 menuntut penelusuran sphere
@@ -933,6 +1048,12 @@ int main(int argc, char** argv) {
             // alasan yang sama: yang maju menurut waktu — eksposur, awan,
             // akumulasi temporal — harus maju sama jauhnya di tiap jalan, kalau
             // tidak dua gambar dari binary yang identik pun berbeda.
+            // **Langit datang dari adegan, sama seperti di viewport editor.**
+            // Tanpa baris ini setiap pengukuran headless menggambar langit
+            // bawaan berapa pun angka yang tertulis di level — dan dua level
+            // yang langitnya berbeda seratus kali menghasilkan gambar yang sama
+            // persis. Ditemukan begitu.
+            editor::ApplySceneSky(*app.Context().world, desc);
             desc.fixedDeltaSeconds = kFixedDelta;
             camera.position = eye;
             camera.rotation = glm::quatLookAt(glm::normalize(forward), Vec3(0.0f, 1.0f, 0.0f));

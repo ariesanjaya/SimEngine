@@ -213,6 +213,16 @@ public:
         /// menghasilkan pipeline yang dibangun tanpa keluhan lalu menyampel
         /// descriptor yang tidak pernah ditulis.
         bool bindless = false;
+        /// Material bertopeng: shader-nya membuang fragmen yang opasitasnya di
+        /// bawah ambang.
+        ///
+        /// **Renderer harus tahu, bukan hanya shader-nya.** Fragmen yang dibuang
+        /// tetap sudah menulis kedalamannya di depth prepass, dan piksel yang
+        /// kedalamannya milik sesuatu yang lalu tidak menggambar apa pun adalah
+        /// lubang — bukan permukaan di belakangnya. Yang bertopeng karena itu
+        /// dikeluarkan dari prepass dan digambar dengan uji kedalaman yang
+        /// menerima sama-dalam.
+        bool masked = false;
     };
 
     /// Membangun (atau mengambil kembali) pipeline sebuah material.

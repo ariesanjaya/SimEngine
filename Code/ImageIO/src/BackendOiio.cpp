@@ -105,10 +105,39 @@ ColorSpace ColorSpaceOf(const OIIO::ImageSpec& spec) {
 
 /// Alfa premultiplied tercatat sebagai `oiio:UnassociatedAlpha`.
 ///
-/// Konvensinya terbalik dari namanya: OIIO membaca alfa sebagai *associated*
-/// (premultiplied) kecuali berkasnya menyatakan sebaliknya.
+/// Konvensinya terbalik dari namanya: OIIO mengembalikan alfa *associated*
+/// (premultiplied) kecuali diminta sebaliknya — dan `StraightAlphaConfig()` di
+/// bawah yang memintanya.
 bool PremultipliedAlphaOf(const OIIO::ImageSpec& spec) {
     return spec.get_int_attribute("oiio:UnassociatedAlpha", 0) == 0;
+}
+
+/// Konfigurasi yang meminta alfa apa adanya, bukan yang sudah dikalikan.
+///
+/// **PNG menyimpan alfa lurus; yang mengalikannya adalah kita.** OIIO secara
+/// bawaan mengembalikan alfa associated, jadi sebuah PNG yang menyimpan
+/// `(74, 69, 67, 5)` sampai ke pemanggil sebagai `(1, 1, 1, 5)` — warnanya
+/// sudah dikalikan 5/255. Pemanggil lalu membaginya kembali (`ToStraightAlpha`)
+/// dan mendapat 51 dari 74; di alfa nol ia tidak mendapat apa-apa, karena tidak
+/// ada yang bisa dipulihkan dari nol dikali apa pun.
+///
+/// Yang terlihat dari perjalanan bolak-balik itu bukan tekstur yang sedikit
+/// meleset melainkan **bercak hitam dan putih berbintik** di setiap tekstur
+/// beralfa: texel beralfa nol menjadi hitam pekat, dan texel beralfa kecil
+/// diperbesar puluhan kali sampai menabrak putih. Diukur pada decal Sponza:
+/// berkasnya tidak punya satu piksel hitam pun di seluruh 4096², dan mip 0
+/// hasil bake-nya 15,1% hitam.
+///
+/// Meminta alfa lurus membuat perjalanan itu tidak pernah terjadi. Format yang
+/// memang menyimpan alfa associated — EXR, misalnya — dibagi oleh OIIO sendiri,
+/// di float, tempat pembagian itu tidak menghancurkan apa pun.
+const OIIO::ImageSpec& StraightAlphaConfig() {
+    static const OIIO::ImageSpec config = [] {
+        OIIO::ImageSpec spec;
+        spec.attribute("oiio:UnassociatedAlpha", 1);
+        return spec;
+    }();
+    return config;
 }
 
 /// Nama kanal apa adanya, sebanyak kanal yang benar-benar dibawa pulang.
@@ -180,7 +209,8 @@ public:
                        Image& out) const override {
         ImageIoResult result;
         const std::string name = path.string();
-        std::unique_ptr<OIIO::ImageInput> input = OIIO::ImageInput::open(name);
+        std::unique_ptr<OIIO::ImageInput> input =
+            OIIO::ImageInput::open(name, &StraightAlphaConfig());
         if (input == nullptr) {
             result.error = "cannot read " + name + ": " + OIIO::geterror();
             return result;
@@ -201,7 +231,19 @@ public:
         OIIO::Filesystem::IOMemReader reader(bytes.data(), bytes.size());
         // Namanya cuma petunjuk pemilih pembaca; isinya tetap dari proxy-nya.
         const std::string name = std::string("memory") + std::string(extensionHint);
-        std::unique_ptr<OIIO::ImageInput> input = OIIO::ImageInput::open(name, nullptr, &reader);
+        // **Proxy-nya masuk ke dalam config, bukan di sebelahnya.** Overload
+        // yang menerima keduanya sebagai argumen terpisah mengabaikan proxy-nya
+        // begitu config diberikan, lalu mencoba membuka berkas bernama
+        // "memory.png" yang memang tidak ada — dan gagalnya muncul sebagai
+        // thumbnail yang hilang, bukan sebagai galat yang menyebut sebabnya.
+        OIIO::ImageSpec config = StraightAlphaConfig();
+        // **Alamat dari pointer-nya, bukan alamat objeknya.** `attribute` dengan
+        // `TypeDesc::PTR` menyalin sebesar sebuah pointer dari alamat yang
+        // diberikan; menyerahkan objeknya langsung menyalin byte pertama isi
+        // objek itu sebagai kalau ia sebuah alamat.
+        OIIO::Filesystem::IOProxy* proxy = &reader;
+        config.attribute("oiio:ioproxy", OIIO::TypeDesc::PTR, &proxy);
+        std::unique_ptr<OIIO::ImageInput> input = OIIO::ImageInput::open(name, &config);
         if (input == nullptr) {
             result.error = std::string("cannot decode image from memory: ") + OIIO::geterror();
             return result;

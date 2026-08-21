@@ -18,6 +18,32 @@
 // pemakainya.
 #include "sky_common.slang"
 
+/// Entri grid medan jarak: transformasi dan kotak batasnya, cermin dari
+/// `BakedSceneField::GpuGrid`. Dipakai mencari grid mana yang memuat sebuah
+/// titik, dan di mana titik itu jatuh di dalamnya.
+struct GiGrid {
+    float4x4 inverse;
+    /// x skala terkecil, y anisotropi, z pita grid, w slot tekstur
+    float4 scaleBandSlot;
+    /// xyz kotak batas dunia terkecil, w sisi voxel grid
+    float4 boundsMinVoxel;
+    float4 boundsMax;
+    /// xyz pusat voxel (0,0,0) di ruang lokal
+    float4 origin;
+    /// xyz ukuran grid dalam voxel
+    float4 size;
+};
+
+static const int kGiMaxGrids = 16;
+
+[[vk::binding(22, 0)]] StructuredBuffer<GiGrid> giGrids;
+/// Albedo per grid: rgb warna linear, alfa 1 berarti voxel itu punya material.
+///
+/// **Warna diambil dari grid per-mesh, bukan dari kaskade clipmap.** Kaskade
+/// terkasar bervoxel 1,6 m; warna yang dirata-rata sejauh itu adalah warna yang
+/// salah di mana-mana. Grid tetap 12,7 cm berapa pun jauhnya dari kamera.
+[[vk::binding(23, 0)]] Texture3D<float4> giGridAlbedo[kGiMaxGrids];
+
 /// LUT sky-view, langit yang sama dengan yang tergambar di belakang adegan.
 /// Isinya radiansi atmosfer tanpa `skyIntensity`; pengalinya ada di
 /// `shadowParams.skyParams.x`, sama seperti di pass gambar.
@@ -77,6 +103,10 @@ struct SdfHit {
     float distance;
     float3 position;
     int steps;
+    /// Medan tidak punya jawaban untuk sinar ini — titik asalnya sudah berada
+    /// di ambang. **Berbeda dari "tidak mengenai apa-apa"**, dan bedanya
+    /// sebesar seluruh langit.
+    bool unknown;
 };
 
 SdfHit traceSdf(float3 origin, float3 direction, float tMax) {
@@ -85,8 +115,27 @@ SdfHit traceSdf(float3 origin, float3 direction, float tMax) {
     result.distance = 0.0;
     result.position = origin;
     result.steps = 0;
+    result.unknown = false;
 
     int maxSteps = int(shadowParams.sdfParams.w);
+
+    // **Sinar mengabaikan permukaannya sendiri sepanjang satu voxel pertama.**
+    // Titik asal probe sudah digeser satu voxel sepanjang normalnya, dan itu
+    // tetap tidak cukup: permukaan nol medan jarak sendiri meleset sampai
+    // setengah voxel grid mesh-nya ditambah setengah voxel kaskadenya. Terukur
+    // di lantai serambi Sponza — medan di titik asal membaca 0,49 voxel,
+    // sementara ambang "mengenai" 0,5. Setiap sinar dari probe itu lalu
+    // mengenai sesuatu di langkah pertama, ke arah mana pun, dan probe yang
+    // seluruh sinarnya begitu tidak punya apa pun untuk ditaksir: 91% bobot
+    // probe lantai depan datang dari probe mati seperti itu.
+    //
+    // Melewatinya, bukan membuang sinarnya: sinar yang mengarah menjauh
+    // memang harus melanjutkan perjalanannya, dan yang mengarah ke dalam
+    // mengenai permukaannya satu voxel kemudian. Yang hilang oklusi pada skala
+    // satu voxel — kontak — dan itu jauh lebih murah daripada probe yang mati.
+    int firstCascade = cascadeFor(origin);
+    float selfSkip = firstCascade >= 0 ? cascadeVoxelSize(firstCascade) : 0.0;
+
     float travelled = 0.0;
     for (int step = 0; step < maxSteps; ++step) {
         float3 position = origin + direction * travelled;
@@ -117,18 +166,16 @@ SdfHit traceSdf(float3 origin, float3 direction, float tMax) {
         // lapis layar. Yang mengembalikannya seluruhnya adalah medan jarak yang
         // benar-benar mengikuti segitiga, dan itu M1 di rencana GI.
         //
-        // **Ambangnya ambang hit, bukan tanda.** Diuji keduanya sesudah medan
-        // jarak sungguhan ada: menguji `distance < 0` — "benar-benar di dalam
-        // benda" — meloloskan sinar yang titik asalnya tepat di ambang hit, dan
-        // sinar itu mengenai permukaannya sendiri di jarak nol ke arah mana
-        // pun. Piksel hitam naik 4,9% menjadi 7,5%. Yang tidak punya jawaban
-        // bukan hanya titik di dalam benda melainkan setiap titik yang sudah
-        // berada di ambang.
-        if (step == 0 && distance < voxel * 0.5) {
+        // **Yang benar-benar di dalam benda tetap tidak punya jawaban.** Sphere
+        // tracing menjawab "berapa jauh sampai permukaan" dari luar; dari
+        // dalam, jawabannya nol ke arah mana pun. Itu berbeda dari titik yang
+        // hanya tersenggol ambang, yang dijawab `selfSkip` di atas.
+        if (step == 0 && distance < 0.0) {
             result.steps = 1;
+            result.unknown = true;
             return result;
         }
-        if (distance < voxel * 0.5) {
+        if (distance < voxel * 0.5 && travelled >= selfSkip) {
             result.hit = true;
             result.distance = travelled;
             result.position = position;
@@ -354,6 +401,9 @@ static const int kLayerSky = 3;
 struct TieredHit {
     bool hit;
     int layer;
+    /// Tidak ada lapis yang punya jawaban. Yang menerimanya membuang sinar ini
+    /// dari penaksir alih-alih menghitungnya sebagai langit.
+    bool unknown;
     float distance;
     float3 position;
     float2 uv;      // hanya berarti untuk lapis layar
@@ -363,6 +413,7 @@ struct TieredHit {
 TieredHit traceTiered(float3 origin, float3 direction, float tMax) {
     TieredHit result;
     ScreenHit screen = traceScreen(origin, direction, tMax);
+    result.unknown = false;
     if (screen.hit) {
         result.hit = true;
         result.layer = kLayerScreen;
@@ -377,6 +428,15 @@ TieredHit traceTiered(float3 origin, float3 direction, float tMax) {
     // tidak tahu", bukan "tidak ada apa-apa di sana".
     SdfHit sdf = traceSdf(origin, direction, tMax);
     result.hit = sdf.hit;
+    // **"Medan tidak tahu" bukan "sinar sampai ke langit".** Keduanya sama-sama
+    // "tidak mengenai apa-apa" dari luar, dan menyamakannya berarti sebuah
+    // probe yang titik asalnya terjepit di permukaan menerima langit penuh dari
+    // keenam belas sinarnya — iradiansi terbuka lebar untuk sebuah titik yang
+    // justru sedang menempel di dinding. Ditemukan lewat tampilan ketampakan
+    // langit: lantai serambi terbaca 100% melihat langit, sementara satu
+    // tangkapan dari lantai yang sama menghadap ke atas memperlihatkan lubang
+    // langit yang hanya sepersepuluh bidang pandangnya.
+    result.unknown = sdf.unknown;
     result.layer = sdf.hit ? kLayerSdf : kLayerSky;
     result.distance = sdf.distance;
     result.position = sdf.position;
@@ -411,6 +471,9 @@ float3 giSkyGradient(float3 direction) {
 /// atmosfernya di sini akan mengulang pekerjaan yang sudah dibayar frame ini,
 /// enam belas kali per probe.
 float3 giSky(float3 direction) {
+    if (shadowParams.giParams.w > 0.5) {
+        return float3(1.0);  // uji tungku: langit seragam berintensitas satu
+    }
     float intensity = shadowParams.skyParams.x;
     if (intensity <= 0.0) {
         return giSkyGradient(direction);
@@ -456,20 +519,71 @@ float3 giSky(float3 direction) {
 /// sama dengan yang dipakai shading, ditambah langit. Albedo-nya tebakan
 /// (`kBounceAlbedo` di renderer); yang bergantung padanya kecerahan pantulan,
 /// bukan ada-tidaknya.
-float3 giGuessedBounce(float3 position, float3 normal) {
-    float3 albedo = shadowParams.giBounce.rgb;
+/// Albedo sebuah titik dunia, dibaca dari grid yang memuatnya.
+///
+/// Mengembalikan tebakan tetap `giBounce.rgb` bila tidak ada grid yang memuat
+/// titiknya, atau bila voxelnya tidak punya material — di luar pita, tempat
+/// tidak ada permukaan yang bisa ditanyai warnanya.
+///
+/// **Tetangga terdekat, bukan trilinear.** Warna permukaan tidak berpadu: batu
+/// bertemu kain di sebuah tepi, bukan di sebuah gradien. Memadukannya
+/// menghasilkan sepetak warna yang tidak dimiliki bahan mana pun, tepat di
+/// tempat yang paling diperhatikan mata.
+float3 giAlbedoAt(float3 world) {
+    if (shadowParams.giParams.w > 0.5) {
+        return float3(1.0);  // uji tungku: albedo satu di mana-mana
+    }
+    int count = min(int(shadowParams.giParams.z), kGiMaxGrids);
+    for (int g = 0; g < count; ++g) {
+        GiGrid grid = giGrids[g];
+        if (any(world < grid.boundsMinVoxel.xyz) || any(world > grid.boundsMax.xyz)) {
+            continue;
+        }
+        float3 local = mul(grid.inverse, float4(world, 1.0)).xyz;
+        int3 texel = int3(round((local - grid.origin.xyz) / grid.boundsMinVoxel.w));
+        if (any(texel < int3(0)) || any(texel >= int3(grid.size.xyz))) {
+            continue;
+        }
+        int slot = int(grid.scaleBandSlot.w);
+        float4 albedo = giGridAlbedo[NonUniformResourceIndex(slot)].Load(int4(texel, 0));
+        if (albedo.a < 0.5) {
+            continue;
+        }
+        return albedo.rgb;
+    }
+    return shadowParams.giBounce.rgb;
+}
+
+/// `localIrradiance` adalah iradiansi yang diterima probe yang menembakkan sinar
+/// ini, dari frame sebelumnya.
+///
+/// **Separuh bola yang bukan langit bukan kegelapan — ia permukaan lain.**
+/// Bentuk sebelumnya berhenti pada `albedo * langit * 0,5`, dan itu gagal uji
+/// tungku yang menjadi kriteria selesai M4: di bawah cahaya seragam
+/// berintensitas satu dengan albedo satu, setiap permukaan seharusnya
+/// berradiansi satu, dan rumus itu menjawab setengah. Yang hilang persis
+/// separuh yang lain — permukaan tetangga, yang di bawah tungku juga
+/// berradiansi satu.
+///
+/// Taksiran radiansi tetangga: albedo dikali iradiansi probe ini sendiri dibagi
+/// π. Ia menutup rekursinya lewat suku yang **bertambah tiap frame** —
+/// pantulan kedua, ketiga, dan seterusnya masuk sebagai deret yang konvergen
+/// karena albedo selalu di bawah satu. Di bawah tungku titik tetapnya tepat
+/// satu.
+float3 giGuessedBounce(float3 position, float3 normal, float3 localIrradiance) {
+    float3 albedo = giAlbedoAt(position);
     float ndotl = max(dot(normal, shadowParams.lightDirection.xyz), 0.0);
     float sun = ndotl > 0.0 ? sampleShadow(position, normal) * ndotl : 0.0;
+    if (shadowParams.giParams.w > 0.5) {
+        sun = 0.0;  // uji tungku: tidak ada matahari, hanya cahaya seragam
+    }
 
-    // **Setengah langit, bukan seluruhnya.** `albedo * L` adalah radiansi
-    // permukaan Lambert di bawah langit seragam yang terlihat penuh; sebuah
-    // permukaan yang menempel di dinding paling banyak melihat separuh bola,
-    // dan separuh sisanya adalah adegan yang justru tidak bisa ditaksir dari
-    // sini. Mengambil seluruhnya menerangi bagian dalam gedung seterang
-    // halamannya.
+    // Berapa bagian bola yang dianggap langit. Sebuah permukaan yang menempel
+    // di dinding paling banyak melihat separuh bola; sisanya adegan.
     const float kSkyClosure = 0.5;
+    float3 nearby = albedo * max(localIrradiance, float3(0.0)) / kPi;
     return albedo * (shadowParams.sunRadiance.rgb * (sun / kPi) +
-                     giSky(normal) * kSkyClosure);
+                     giSky(normal) * kSkyClosure + nearby * (1.0 - kSkyClosure));
 }
 
 #endif

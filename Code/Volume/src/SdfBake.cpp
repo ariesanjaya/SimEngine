@@ -100,11 +100,17 @@ bool Available() { return true; }
 const char* BackendVersion() { return openvdb::getLibraryVersionString(); }
 
 SdfBakeResult BakeMeshSdf(std::span<const Vec3> positions, std::span<const uint32_t> indices,
-                          const SdfBakeSettings& settings, SdfGrid& out) {
+                          const SdfBakeSettings& settings, SdfGrid& out,
+                          std::span<const uint8_t> polygonAttribute) {
     SdfBakeResult result;
     out = SdfGrid{};
 
     if (!ValidateInput(positions, indices, settings, result.error)) {
+        return result;
+    }
+    if (!polygonAttribute.empty() && polygonAttribute.size() != indices.size() / 3) {
+        result.error = "polygon attribute has " + std::to_string(polygonAttribute.size()) +
+                       " entries for " + std::to_string(indices.size() / 3) + " triangles";
         return result;
     }
 
@@ -122,6 +128,7 @@ SdfBakeResult BakeMeshSdf(std::span<const Vec3> positions, std::span<const uint3
     }
 
     openvdb::FloatGrid::Ptr grid;
+    openvdb::Int32Grid::Ptr closestPolygon;
     try {
         const auto transform =
             openvdb::math::Transform::createLinearTransform(settings.voxelSize);
@@ -129,8 +136,39 @@ SdfBakeResult BakeMeshSdf(std::span<const Vec3> positions, std::span<const uint3
         // di dalam. Yang di dalam ikut dibutuhkan karena sphere tracing bisa
         // bermula di dalam geometri, dan tanda yang hilang di sana membuatnya
         // melangkah keluar menembus dinding.
-        grid = openvdb::tools::meshToLevelSet<openvdb::FloatGrid>(
-            *transform, points, triangles, settings.bandVoxels);
+        if (polygonAttribute.empty()) {
+            grid = openvdb::tools::meshToLevelSet<openvdb::FloatGrid>(
+                *transform, points, triangles, settings.bandVoxels);
+        } else {
+            // **`meshToVolume`, bukan `meshToLevelSet`.** Keduanya menjalankan
+            // konversi yang sama; yang pertama saja yang bisa mengembalikan
+            // indeks poligon terdekat per voxel. Tanpa angka itu, warna sebuah
+            // voxel hanya bisa ditebak dari geometri di sekitarnya — dan
+            // tebakan sebaik apa pun tidak tahu bahwa batu bertemu kain di
+            // sebuah tepi, bukan di sebuah gradien.
+            //
+            // **Titiknya harus sudah berada di ruang indeks.** `meshToLevelSet`
+            // yang mengubahnya lebih dulu; `meshToVolume` menerima adapter apa
+            // adanya, dan `QuadAndTriangleDataAdapter` mengembalikan titiknya
+            // tanpa menyentuhnya. Menyerahkan titik ruang dunia tidak gagal —
+            // ia menghasilkan mesh yang mengecil sebesar satu per sisi voxel,
+            // dan yang terlihat hanya grid yang jauh lebih kecil daripada
+            // seharusnya. Sponza menyusut dari 315×186×216 menjadi 65×49×52.
+            std::vector<openvdb::Vec3s> indexPoints;
+            indexPoints.reserve(points.size());
+            for (const openvdb::Vec3s& point : points) {
+                const openvdb::Vec3d local = transform->worldToIndex(openvdb::Vec3d(point));
+                indexPoints.emplace_back(static_cast<float>(local.x()),
+                                         static_cast<float>(local.y()),
+                                         static_cast<float>(local.z()));
+            }
+            closestPolygon = openvdb::Int32Grid::create();
+            const openvdb::tools::QuadAndTriangleDataAdapter<openvdb::Vec3s, openvdb::Vec3I> mesh(
+                indexPoints, triangles);
+            grid = openvdb::tools::meshToVolume<openvdb::FloatGrid>(
+                mesh, *transform, settings.bandVoxels, settings.bandVoxels, 0,
+                closestPolygon.get());
+        }
     } catch (const std::exception& error) {
         result.error = std::string("OpenVDB failed to bake the mesh: ") + error.what();
         return result;
@@ -161,6 +199,10 @@ SdfBakeResult BakeMeshSdf(std::span<const Vec3> positions, std::span<const uint3
                       static_cast<float>(min.z()) * settings.voxelSize);
     out.distances.assign(out.VoxelCount(), out.band);
 
+    if (closestPolygon != nullptr) {
+        out.materials.assign(out.VoxelCount(), 0);
+    }
+
     auto accessor = grid->getConstAccessor();
     for (uint32_t z = 0; z < out.sizeZ; ++z) {
         for (uint32_t y = 0; y < out.sizeY; ++y) {
@@ -173,6 +215,37 @@ SdfBakeResult BakeMeshSdf(std::span<const Vec3> positions, std::span<const uint3
                 // Voxel tidak aktif mengembalikan latar grid — `+band` di luar,
                 // `-band` di dalam — yang persis nilai jenuh yang diinginkan.
                 out.distances[row + x] = std::clamp(accessor.getValue(at), -out.band, out.band);
+            }
+        }
+    }
+
+    if (closestPolygon != nullptr) {
+        // **Ditelusuri lewat voxel aktifnya, bukan lewat seluruh kotak.** Grid
+        // indeks jarang justru di tempat yang penting: hanya voxel di dalam pita
+        // yang punya poligon terdekat, dan itu seperempat isi kotaknya. Menyapu
+        // seluruh kotak berarti menanyai pohon jarang belasan juta kali untuk
+        // jawaban "tidak ada".
+        for (auto leaf = closestPolygon->tree().cbeginLeaf(); leaf; ++leaf) {
+            for (auto voxel = leaf->cbeginValueOn(); voxel; ++voxel) {
+                const openvdb::Coord at = voxel.getCoord();
+                const openvdb::Coord local = at - min;
+                if (local.x() < 0 || local.y() < 0 || local.z() < 0 ||
+                    local.x() >= static_cast<int32_t>(out.sizeX) ||
+                    local.y() >= static_cast<int32_t>(out.sizeY) ||
+                    local.z() >= static_cast<int32_t>(out.sizeZ)) {
+                    continue;
+                }
+                const int32_t polygon = voxel.getValue();
+                if (polygon < 0 ||
+                    static_cast<std::size_t>(polygon) >= polygonAttribute.size()) {
+                    continue;
+                }
+                const std::size_t index =
+                    (static_cast<std::size_t>(local.z()) * out.sizeY +
+                     static_cast<std::size_t>(local.y())) *
+                        out.sizeX +
+                    static_cast<std::size_t>(local.x());
+                out.materials[index] = polygonAttribute[static_cast<std::size_t>(polygon)];
             }
         }
     }
@@ -192,8 +265,10 @@ bool Available() { return false; }
 const char* BackendVersion() { return ""; }
 
 SdfBakeResult BakeMeshSdf(std::span<const Vec3> positions, std::span<const uint32_t> indices,
-                          const SdfBakeSettings& settings, SdfGrid& out) {
+                          const SdfBakeSettings& settings, SdfGrid& out,
+                          std::span<const uint8_t> polygonAttribute) {
     out = SdfGrid{};
+    (void)polygonAttribute;
     SdfBakeResult result;
     // Masukan diperiksa lebih dulu, supaya berkas yang cacat dilaporkan sebagai
     // berkas yang cacat — bukan sebagai pustaka yang kurang.

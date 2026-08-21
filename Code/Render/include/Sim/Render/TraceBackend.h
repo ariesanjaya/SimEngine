@@ -169,6 +169,18 @@ struct GiSettings {
     /// GPU adalah harga sebenarnya dari lapis pertama — dan tanpa cara
     /// mematikannya, harga itu hanya bisa diperkirakan.
     bool screenTrace = true;
+
+    /// Uji tungku: langit seragam berintensitas satu, albedo satu, matahari
+    /// mati.
+    ///
+    /// **Kriteria selesai M4 di docs/rencana-implementasi-gi.md**, dan
+    /// satu-satunya uji yang bisa menjawab "apakah transportnya kehilangan
+    /// energi" tanpa membandingkan dengan gambar acuan. Di bawah keadaan itu
+    /// setiap permukaan harus berradiansi tepat satu, di dalam ruang tertutup
+    /// sekalipun: cahaya yang dipantulkan sama dengan cahaya yang diterima.
+    /// Angka di bawah satu berarti transportnya bocor; di atas satu berarti ia
+    /// menggandakan.
+    bool furnaceTest = false;
 };
 
 }  // namespace sim::render

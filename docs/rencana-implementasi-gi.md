@@ -123,11 +123,23 @@ kodenya:
 **Selesai kalau:** Cornell box menunjukkan color bleeding yang benar dan stabil (tidak berdenyut) saat kamera diam.
 
 ### M4 — Hash grid radiance cache (±2 minggu)
-- Kunci: posisi terkuantisasi + arah mayor, 2²⁰ entri fixed
-- Diisi dari hit ray screen probe, di-resolve tiap frame
-- Query saat ray mengenai permukaan → memberi **multi-bounce** hampir gratis
+- ✅ Kunci: posisi terkuantisasi + arah mayor, 2²⁰ entri fixed
+- ✅ Diisi dari hit ray screen probe, di-resolve tiap frame
+- ✅ Query saat ray mengenai permukaan → memberi **multi-bounce** hampir gratis
+- ✅ Albedo per material ikut dibake bersama medan jaraknya, dan pantulan
+  membacanya dari grid mesh — bukan dari kaskade clipmap, yang voxel
+  terkasarnya 1,6 m
 
-**Selesai kalau:** furnace test — adegan albedo 1,0 di bawah pencahayaan seragam mendekati putih rata, tidak menggelap.
+**Selesai:** uji tungku dijalankan lewat `--bench-furnace` — langit seragam
+berintensitas satu, albedo satu, matahari mati — dan setiap jawaban yang
+*diketahui* bernilai satu, sehingga yang tersisa diuji hanyalah penutup
+rekursinya. Terukur di Sponza:
+
+| | sebelum | sesudah |
+|---|---:|---:|
+| Dinding atas (terbuka) | 1,001 | 1,001 |
+| Serambi | 0,520 | 0,960 |
+| Lantai depan | **0,089** | **0,998** |
 
 ### M5 — Denoise & temporal (±3 minggu)
 - Reprojection dengan motion vector, tolak sampel via depth + normal
@@ -334,3 +346,102 @@ acuan datang dari matahari yang memantul di batu — dan pantulan itu menuntut
 tetap (`kBounceAlbedo` = 0,5), jadi setiap permukaan memantulkan abu-abu netral
 alih-alih warnanya sendiri. Itu langkah berikutnya, dan ia milik M4: cache
 radiansi yang tahu warna permukaan yang tidak pernah terlihat layar.
+
+### Sesudah M4 — warna, dan tiga sebab ia tidak datang bersama albedo
+
+Albedo per material mendarat tanpa mengubah warna gambarnya sama sekali. Yang
+menjelaskan kenapa bukan albedonya melainkan alat ukurnya: **74% iradiansi
+serambi datang dari sinar yang dinyatakan sampai ke langit**, di lantai yang —
+dilihat dari tempat yang sama menghadap ke atas — lubang langitnya hanya
+sepersepuluh bidang pandang. Warna yang baru masuk hanya menyentuh 27% sisanya,
+dan 28 material Sponza sendiri hampir netral: rata-rata hanya 15% lebih hangat
+di merah daripada di biru.
+
+Tiga sebab, dan yang pertama cacat yang ditulis sendiri saat memperbaiki medan
+kotak:
+
+1. **Penjaga langkah-nol menjawab "langit".** Sinar yang titik asalnya sudah
+   berada di ambang medan dilewatkan dari lapis SDF, dan "tidak mengenai apa-apa"
+   diterjemahkan menjadi langit. Sebuah probe yang terjepit di permukaan karena
+   itu menerima langit penuh dari keenam belas sinarnya.
+2. **Bias titik asal dihitung dalam meter dari kaskade terhalus**, sementara
+   ambang "mengenai" setengah voxel kaskade *setempat* — dan kaskade terkasar
+   bervoxel 1,6 m. Setiap probe yang lebih jauh dari 6,4 m dari kamera terjepit.
+3. **Probe tanpa sinar yang diketahui membuang riwayatnya** alih-alih
+   mempertahankannya.
+
+| | M1 | M4 albedo | M4 + tiga perbaikan | acuan A |
+|---|---:|---:|---:|---:|
+| Serambi R / G / B | 55/74/97 | 65/85/110 | **35/39/47** | 81/75/68 |
+| Serambi R:B | 0,57 | 0,59 | **0,73** | 1,19 |
+| Rata-rata | 56,8 | 60,5 | 64,8 | 78,7 |
+| Median | 46 | 49 | 53 | 69 |
+| Piksel hitam | 4,9% | 9,2% | 19,4% | 1,2% |
+
+Batu akhirnya terbaca abu-abu hangat alih-alih biru langit. Piksel hitam naik
+karena kecerahan sebelumnya sebagiannya palsu — langit yang diterima permukaan
+yang tidak melihat langit.
+
+**Yang tersisa: pantulan kedua.** Bayangan sekarang jujur gelap, dan yang
+mengisinya di acuan adalah cahaya yang sudah memantul dua kali atau lebih.
+Cache radiansi hanya mengenal permukaan yang pernah terlihat layar; di serambi
+itu 2% sinar. Penutup rekursinya — "setiap permukaan yang tidak dikenal melihat
+setengah langit" — memang menahan bayangan tetapi menahannya dengan warna
+langit; diuji dengan mematikannya, piksel hitam melonjak 9,2% menjadi 22,4%.
+Yang menggantinya adalah cache yang ikut mengenal permukaan di luar layar, dan
+itu M5 ke atas.
+
+### Uji tungku, dan tiga sebab transport GI kehilangan energinya
+
+Uji tungku adalah satu-satunya uji yang bisa menjawab "apakah transportnya
+bocor" tanpa membandingkan dengan gambar acuan, dan ia belum pernah dijalankan
+sampai M4 selesai. Hasil pertamanya menjelaskan seluruh sisa keremangan: lantai
+serambi mengembalikan **0,089** di tempat seharusnya 1,000 — 91% energinya
+hilang. Tiga sebab.
+
+**Satu — penutup rekursi gagal ujinya secara rumus.** `albedo × langit × 0,5`
+menjawab setengah, dan yang hilang persis separuh bola yang lain: permukaan
+tetangga, yang di bawah tungku juga berradiansi satu. Penutupnya sekarang
+memakai iradiansi probe itu sendiri dari frame lalu sebagai taksiran radiansi
+tetangganya — suku yang bertambah tiap frame, jadi pantulan kedua dan ketiga
+masuk sebagai deret yang konvergen karena albedo selalu di bawah satu.
+
+**Dua — sinar tidak pernah melewati permukaannya sendiri.** Titik asal probe
+digeser satu voxel sepanjang normalnya, dan itu tidak cukup: permukaan nol medan
+jarak meleset sampai setengah voxel grid mesh-nya ditambah setengah voxel
+kaskadenya. Terukur — medan di titik asal membaca **0,49 voxel** sementara ambang
+"mengenai" 0,5. Setiap sinar dari probe itu mengenai sesuatu di langkah pertama
+ke arah mana pun, dan probe yang seluruh sinarnya begitu tidak punya apa pun
+untuk ditaksir. Sinar sekarang mengabaikan apa pun di dalam satu voxel
+pertamanya; yang benar-benar *di dalam* benda tetap tidak punya jawaban.
+
+**Tiga — permukaan yang sedang terlihat layar tidak pernah ditanya.** Lapis
+screen-space menyusuri piksel demi piksel dengan anggaran enam belas langkah dan
+menyerah pada sinar panjang; ia menjawab 6% sinar probe. Yang tahu titik dunianya
+dari lapis SDF cukup memproyeksikan sekali dan membandingkan kedalaman.
+
+| | M1 | M4 albedo | + tiga perbaikan | acuan A |
+|---|---:|---:|---:|---:|
+| Piksel hitam | 4,9% | 19,4% | **7,3%** | 1,2% |
+| Serambi R:B | 0,57 | 0,73 | 0,73 | 1,20 |
+| p95 | 147 | 233 | 220 | 210 |
+| `gi-probe-trace` | 0,613 ms | 0,623 ms | 0,705 ms | — |
+
+Bayangan terisi tanpa kembali membiru: yang mengisinya sekarang pantulan, bukan
+langit yang dikarang untuk permukaan yang tidak melihat langit.
+
+**Yang tersisa, dan bentuknya sudah bukan bug.** Serambi acuan lebih hangat
+daripada netral (R:B 1,20); punya kami masih lebih dingin (0,73). Diukur dengan
+mematikan matahari pada eksposur tetap: matahari menyumbang **20%** cahaya isian
+serambi, langit 80%. Dua hal yang menahannya, dan keduanya pengarangan, bukan
+transport:
+
+- **Rasio matahari-langit adegan uji.** Pada `skyIntensity` 20, iradiansi langit
+  0,24–0,36 kali iradiansi matahari; langit cerah sungguhan sekitar 0,15.
+  Menurunkannya menghangatkan serambi (R:B 0,79 pada 12,5, 0,86 pada 8) dan ikut
+  menggelapkannya (piksel hitam 8,5%, 10,3%).
+- **Kebiruan langit model Bruneton berkoefisien RGB.** Koefisien Rayleigh yang
+  dipakai berbanding B:R = 5,7, dan langit yang terukur 5,0 — sementara langit
+  cerah yang diintegrasikan secara spektral ke primer sRGB berbanding sekitar
+  2,9. Ia sifat model, bukan cacat implementasi, dan menggantinya berarti
+  memutuskan bagaimana atmosfer diwarnai — bukan menambal GI.

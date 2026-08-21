@@ -286,12 +286,64 @@ int SdfClipmapResource::EnsureGridUploaded(const SdfGrid* grid) {
         gridTextures_[slot].Destroy();
         return -1;
     }
+    // Warnanya, kalau gridnya membawanya. **Palet diselesaikan di sini, sekali,
+    // bukan di shader.** Yang tersimpan di grid indeks material; yang dibaca
+    // penelusur warna. Menyerahkan indeksnya berarti setiap sinar probe
+    // membawa satu pengalihan tambahan dan satu binding tambahan, untuk
+    // menghemat memori yang toh sudah dibayar empat kali lipat oleh medan
+    // jaraknya sendiri.
+    std::size_t albedoKb = 0;
+    if (grid->HasAlbedo()) {
+        std::vector<uint32_t> colors(grid->materials.size());
+        for (std::size_t i = 0; i < colors.size(); ++i) {
+            const uint8_t index = grid->materials[i];
+            if (index == 0 || index >= grid->palette.size()) {
+                colors[i] = 0;  // alfa nol: voxel ini tidak punya material
+                continue;
+            }
+            const Vec3 albedo = glm::clamp(grid->palette[index], Vec3(0.0f), Vec3(1.0f));
+            const auto r = static_cast<uint32_t>(albedo.x * 255.0f + 0.5f);
+            const auto g = static_cast<uint32_t>(albedo.y * 255.0f + 0.5f);
+            const auto b = static_cast<uint32_t>(albedo.z * 255.0f + 0.5f);
+            colors[i] = r | (g << 8) | (b << 16) | (0xFFu << 24);
+        }
+        const std::span<const std::byte> colorBytes{
+            reinterpret_cast<const std::byte*>(colors.data()), colors.size() * sizeof(uint32_t)};
+        if (gridAlbedo_[slot].Create(*device_, extent, VK_FORMAT_R8G8B8A8_UNORM,
+                                     sizeof(uint32_t)) &&
+            gridAlbedo_[slot].UploadRegion(glm::uvec3(0), extent, colorBytes)) {
+            albedoKb = colors.size() * sizeof(uint32_t) / 1024;
+        } else {
+            SIM_WARN("Render", "cannot upload the albedo of a baked distance field");
+            gridAlbedo_[slot].Destroy();
+        }
+    }
+
     gridSources_[slot] = grid;
     gridCount_ = slot + 1;
+    ++gridGeneration_;
+    // **Menulis ulang descriptor di sini aman.** `UploadRegion` menyubmit
+    // sendiri lalu menunggu queue idle, jadi tidak ada satu pun command buffer
+    // yang masih memegang set ini saat baris berikut berjalan.
     WriteGridDescriptor();
-    SIM_INFO("Render", "baked distance field {} uploaded ({}x{}x{}, {} KB)", slot, extent.x,
-             extent.y, extent.z, grid->distances.size() * sizeof(float) / 1024);
+    SIM_INFO("Render", "baked distance field {} uploaded ({}x{}x{}, {} KB{})", slot, extent.x,
+             extent.y, extent.z, grid->distances.size() * sizeof(float) / 1024,
+             albedoKb > 0 ? " + " + std::to_string(albedoKb) + " KB albedo" : "");
     return static_cast<int>(slot);
+}
+
+VkImageView SdfClipmapResource::GridAlbedoView(uint32_t slot) const {
+    if (slot >= kMaxGrids || !gridAlbedo_[slot].IsValid()) {
+        return VK_NULL_HANDLE;
+    }
+    return gridAlbedo_[slot].View();
+}
+
+VkBuffer SdfClipmapResource::GridBuffer(uint32_t slot) const {
+    if (slot >= kSlots) {
+        return VK_NULL_HANDLE;
+    }
+    return gridBuffers_[slot].Handle();
 }
 
 void SdfClipmapResource::Destroy() {
@@ -301,9 +353,13 @@ void SdfClipmapResource::Destroy() {
     for (rhi::Texture3D& texture : gridTextures_) {
         texture.Destroy();
     }
+    for (rhi::Texture3D& texture : gridAlbedo_) {
+        texture.Destroy();
+    }
     dummyGrid_.Destroy();
     gridSources_.fill(nullptr);
     gridCount_ = 0;
+    gridGeneration_ = 0;
     reportedGridLimit_ = false;
     fill_.Destroy();
     for (rhi::DynamicBuffer& buffer : entryBuffers_) {
@@ -355,28 +411,57 @@ uint64_t SdfClipmapResource::Update(const Vec3& cameraPosition,
         return 0;
     }
 
+    // **Medan dan entrinya disusun tiap frame, bukan hanya saat kaskade
+    // bergeser.** Dulu keduanya menunggu `Scroll` supaya frame yang kameranya
+    // diam tidak membalik satu matriks pun. Sekarang entri grid punya pembaca
+    // kedua yang bekerja setiap frame — penelusur probe, yang membaca albedo
+    // dari grid per-mesh — dan buffernya berputar tiga slot. Menulisi satu slot
+    // saja berarti dua dari tiga frame melihat adegan tanpa satu pun grid, dan
+    // yang terlihat warna pantulan yang berkedip pada sepertiga frame.
+    field_.Build(meshes, grids);
+
+    // Medan jarak hasil bake diunggah sekali, saat pertama kali terlihat, lalu
+    // dikenali lewat alamat gridnya.
+    bool gridsComplete = true;
+    for (const SdfGrid* grid : grids) {
+        if (grid != nullptr && !grid->Empty() && EnsureGridUploaded(grid) < 0) {
+            gridsComplete = false;
+        }
+    }
+
+    if (slot < kSlots) {
+        field_.WriteGpuGrids(gpuGrids_, [this](const SdfGrid* grid) {
+            for (uint32_t at = 0; at < gridCount_; ++at) {
+                if (gridSources_[at] == grid) {
+                    return static_cast<int>(at);
+                }
+            }
+            return -1;
+        });
+        fillGridCount_ = static_cast<uint32_t>(gpuGrids_.size());
+        std::vector<BakedSceneField::GpuGrid> padded = gpuGrids_;
+        if (padded.empty()) {
+            padded.push_back(BakedSceneField::GpuGrid{});
+        }
+        const VkDeviceSize gridBytes = sizeof(BakedSceneField::GpuGrid) * padded.size();
+        const uint64_t gridBefore = gridBuffers_[slot].Generation();
+        if (gridBuffers_[slot].Reserve(gridBytes)) {
+            gridBuffers_[slot].Write(padded.data(), gridBytes);
+            if (gridBuffers_[slot].Generation() != gridBefore) {
+                WriteEntryDescriptor(slot);
+                ++gridGeneration_;
+            }
+        }
+    }
+
     const SdfScrollResult scroll = volume_.Clipmap().Scroll(cameraPosition);
     if (scroll.regions.empty()) {
         return 0;
     }
-    // Medan jaraknya dibangun setelah `Scroll`, bukan sebelum: frame yang tidak
-    // menggeser satu kaskade pun — yaitu kebanyakan frame saat kamera diam —
-    // tidak perlu membalik satu matriks pun.
-    field_.Build(meshes, grids);
 
-    // Medan jarak hasil bake diunggah sekali, saat pertama kali terlihat, lalu
-    // dikenali lewat alamat gridnya. Yang tidak kebagian slot dilaporkan
-    // `WriteGpuGrids` sebagai entri yang hilang — dan medan yang kehilangan
-    // sebuah gedung jauh lebih buruk daripada gedung yang berbentuk kotak, jadi
-    // yang terjadi lalu adalah jalur CPU untuk frame itu.
-    bool gridsComplete = true;
-    if (gpuFill_ && slot < kSlots) {
-        for (const SdfGrid* grid : grids) {
-            if (grid != nullptr && !grid->Empty() && EnsureGridUploaded(grid) < 0) {
-                gridsComplete = false;
-            }
-        }
-    }
+    // Jalur compute membaca larik kotak dan larik grid bersama-sama; medan yang
+    // kehilangan sebuah gedung jauh lebih buruk daripada gedung yang berbentuk
+    // kotak, jadi slot grid yang tidak kebagian tempat memaksa jalur CPU.
     const bool gpuUsable = gpuFill_ && slot < kSlots && gridsComplete;
     if (gpuFill_ && !gpuUsable && !reportedCpuFallback_) {
         reportedCpuFallback_ = true;
@@ -394,28 +479,10 @@ uint64_t SdfClipmapResource::Update(const Vec3& cameraPosition,
         // sedang dipindahkan.
         fillSlot_ = slot;
         field_.WriteGpuEntries(gpuEntries_);
-        field_.WriteGpuGrids(gpuGrids_, [this](const SdfGrid* grid) {
-            for (uint32_t at = 0; at < gridCount_; ++at) {
-                if (gridSources_[at] == grid) {
-                    return static_cast<int>(at);
-                }
-            }
-            return -1;
-        });
         fillEntryCount_ = static_cast<uint32_t>(gpuEntries_.size());
-        fillGridCount_ = static_cast<uint32_t>(gpuGrids_.size());
         if (gpuEntries_.empty()) {
             gpuEntries_.push_back(BoxSceneField::GpuEntry{});
         }
-        if (gpuGrids_.empty()) {
-            gpuGrids_.push_back(BakedSceneField::GpuGrid{});
-        }
-        const VkDeviceSize gridBytes = sizeof(BakedSceneField::GpuGrid) * gpuGrids_.size();
-        const uint64_t gridBefore = gridBuffers_[slot].Generation();
-        if (!gridBuffers_[slot].Reserve(gridBytes)) {
-            return 0;
-        }
-        gridBuffers_[slot].Write(gpuGrids_.data(), gridBytes);
         const VkDeviceSize entryBytes = sizeof(BoxSceneField::GpuEntry) * gpuEntries_.size();
         // **Generasi, bukan handle** — lihat catatan di
         // `DynamicBuffer::Generation`.
@@ -424,8 +491,7 @@ uint64_t SdfClipmapResource::Update(const Vec3& cameraPosition,
             return 0;
         }
         entryBuffers_[slot].Write(gpuEntries_.data(), entryBytes);
-        if (entryBuffers_[slot].Generation() != before ||
-            gridBuffers_[slot].Generation() != gridBefore) {
+        if (entryBuffers_[slot].Generation() != before) {
             // **Hanya set slot ini, bukan seluruhnya.** `WriteFillDescriptors`
             // menulis ulang set tiap kaskade **dan** set entri tiap slot; yang
             // berpindah di sini hanya buffer satu slot. Slot lain bisa saja

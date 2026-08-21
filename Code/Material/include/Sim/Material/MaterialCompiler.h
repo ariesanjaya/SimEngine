@@ -69,6 +69,21 @@ struct MaterialCompileResult {
     /// mematikan yang tidak mungkin dipakai sebelum `slangc` melihatnya.
     SurfaceLobes lobes;
 
+    /// Material bertopeng: fragmen yang opasitasnya di bawah `alphaCutoff`
+    /// dibuang, bukan dipadu.
+    ///
+    /// **Topeng, bukan transparansi.** Yang dipadu menuntut urutan gambar dari
+    /// belakang ke depan dan karena itu diputuskan per objek; yang dibuang tidak
+    /// menuntut apa pun dan karena itu bisa diputuskan per material. Decal
+    /// kotoran, dedaunan, dan pagar kawat semuanya jenis yang kedua — dan
+    /// tanpa jalur ini mereka digambar sebagai kuad pejal berwarna apa pun yang
+    /// kebetulan ada di bagian tekstur yang seharusnya tak terlihat. Di Sponza
+    /// itu hitam pekat: 20,9% tekstur decal-nya beralfa nol, dan RGB di sana
+    /// tepat (0,0,0).
+    bool alphaTest = false;
+    /// Ambang buang. Nilai glTF bawaan, dan alasannya sama: 0,5 adalah tengah.
+    float alphaCutoff = 0.5f;
+
     /// Node yang bertanggung jawab atas sebuah baris. Inilah yang mengubah
     /// "error di baris 42" menjadi node yang menyala merah di kanvas.
     Uuid NodeAtLine(int line) const;

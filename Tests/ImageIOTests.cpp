@@ -959,26 +959,29 @@ TEST_CASE("PNG menolak yang memang tidak bisa ditulisnya") {
     CHECK(result.error.find("2-channel") != std::string::npos);
 }
 
-TEST_CASE("PNG RGBA dengan alfa tidak penuh kembali dalam bentuk ter-associate") {
-    // **Ini mengunci perilaku, bukan merayakannya.** Pembaca gambar di sini
-    // meng-associate alfa saat membaca — warna dikalikan alfanya, di ruang
-    // linear — dan itu tercatat di `ImageDesc::premultipliedAlpha`. Yang
-    // menemukannya adalah uji round-trip PNG berwarna, dan yang membuatnya mahal
-    // adalah bahwa gambarnya tetap terlihat masuk akal: hanya lebih gelap di
-    // tempat yang alfanya rendah.
+TEST_CASE("PNG RGBA kembali dengan alfa lurus, warnanya utuh") {
+    // **Dulu tidak begitu, dan yang membayarnya setiap tekstur beralfa.**
+    // Pembaca gambar meng-associate alfa saat membaca — warna dikalikan
+    // alfanya — lalu `PrepareTexture` membaginya kembali. Perjalanan bolak-balik
+    // itu tidak pulih: texel beralfa nol menjadi hitam pekat karena tidak ada
+    // yang bisa dipulihkan dari nol dikali apa pun, dan texel beralfa kecil
+    // diperbesar puluhan kali sampai menabrak putih.
     //
-    // Karena itu `editor.screenshot` mengirim RGB, bukan RGBA. Jendela editor
-    // tidak punya alfa yang berarti, dan membawanya berarti membawa pertanyaan
-    // ini ke setiap orang yang membaca berkasnya kembali.
+    // Terukur pada decal Sponza: berkasnya tidak punya satu piksel hitam pun di
+    // seluruh 4096², dan mip 0 hasil bake-nya 15,1% hitam. Yang terlihat di
+    // layar bercak hitam-putih berbintik di dinding dan pilar.
+    //
+    // Sekarang pembacanya meminta alfa apa adanya, jadi tidak ada perjalanan
+    // yang harus dipulihkan.
     imageio::Image source;
     source.desc.width = 4;
     source.desc.height = 1;
     source.desc.channels = 4;
     source.desc.type = imageio::PixelType::UInt8;
     source.desc.colorSpace = imageio::ColorSpace::Srgb;
-    source.bytes = {200, 200, 200, 255,   // alfa penuh: harus utuh
-                    200, 200, 200, 128,   // separuh: menggelap
-                    200, 200, 200, 0,     // nol: hilang seluruhnya
+    source.bytes = {200, 200, 200, 255,   // alfa penuh
+                    200, 200, 200, 128,   // separuh
+                    200, 200, 200, 0,     // nol: warnanya tetap harus kembali
                     10,  10,  10,  255};
 
     std::vector<uint8_t> png;
@@ -989,20 +992,9 @@ TEST_CASE("PNG RGBA dengan alfa tidak penuh kembali dalam bentuk ter-associate")
     imageio::Image decoded;
     REQUIRE(imageio::Read(png, ".png", options, decoded).ok);
     REQUIRE(decoded.bytes.size() == source.bytes.size());
+    CHECK_FALSE(decoded.desc.premultipliedAlpha);
 
-    // Alfa sendiri selalu kembali utuh — yang berubah warnanya.
-    for (std::size_t pixel = 0; pixel < 4; ++pixel) {
-        CAPTURE(pixel);
-        CHECK(decoded.bytes[pixel * 4 + 3] == source.bytes[pixel * 4 + 3]);
-        // Associate hanya bisa menggelapkan, tidak pernah mencerahkan. Berlaku
-        // juga bila backend yang aktif ternyata tidak meng-associate sama
-        // sekali — yang salah lalu tetap tertangkap, yang benar tetap lulus.
-        for (std::size_t channel = 0; channel < 3; ++channel) {
-            CHECK(decoded.bytes[pixel * 4 + channel] <= source.bytes[pixel * 4 + channel]);
-        }
-    }
-    // Alfa penuh tidak boleh berubah sama sekali: itu jaminan yang dipakai
-    // `editor.screenshot` kalau suatu saat ia kembali membawa alfa.
-    CHECK(decoded.bytes[0] == 200);
-    CHECK(decoded.bytes[12] == 10);
+    // Setiap byte kembali apa adanya — alfa maupun warna, termasuk di piksel
+    // yang alfanya nol.
+    CHECK(decoded.bytes == source.bytes);
 }

@@ -143,6 +143,10 @@ private:
         std::vector<Uuid> textures;
         /// Jalur yang dipakai saat SPIR-V ini dihasilkan.
         bool bindless = false;
+        /// Material bertopeng: shader-nya membuang fragmen di bawah ambang, dan
+        /// renderer harus menggambarnya di luar prepass. Lihat
+        /// `MaterialCompileResult::alphaTest`.
+        bool masked = false;
     };
 
     struct Entry {

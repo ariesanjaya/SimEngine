@@ -896,8 +896,19 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
                     bool unmapped = false;
                     if (source->GetPolygonVertexUV(polygon, corner, uvSet, uv, unmapped) &&
                         !unmapped) {
-                        vertex.uv =
-                            Vec2(static_cast<float>(uv[0]), static_cast<float>(uv[1]));
+                        // **V dibalik: FBX menaruh asalnya di kiri bawah, mesin
+                        // ini di kiri atas** — aturan yang sama yang sudah
+                        // dipatuhi importir USD, dan yang berlaku juga untuk
+                        // OBJ karena ia dibaca SDK yang sama.
+                        //
+                        // Tanpa ini tidak ada satu pun galat: UV-nya tetap di
+                        // dalam jangkauan, teksturnya tetap terpasang, dan yang
+                        // berbeda hanya *baris mana* yang terbaca. Terukur atas
+                        // Sponza — berkas FBX dan glTF-nya model yang sama —
+                        // 99,41% titik hanya cocok setelah `1−v`, dan 0,01%
+                        // cocok apa adanya.
+                        vertex.uv = Vec2(static_cast<float>(uv[0]),
+                                         1.0f - static_cast<float>(uv[1]));
                     }
                 }
                 soup.push_back(vertex);

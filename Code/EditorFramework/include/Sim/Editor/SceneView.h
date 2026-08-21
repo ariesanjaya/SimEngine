@@ -83,6 +83,22 @@ struct ScreenRect {
 ///
 /// Dibangun ulang tiap frame. Untuk jumlah entity di fase editor ini jauh lebih
 /// murah daripada menjaga cache tetap sinkron dengan perubahan hierarki.
+/// Menyalin pengaturan langit dari adegan ke `desc`.
+///
+/// **Satu tempat, dipakai viewport editor maupun jalur headless.** Sebelumnya
+/// hanya panel viewport yang membacanya, dan setiap pengukuran headless karena
+/// itu menggambar langit bawaan berapa pun angka yang tertulis di level —
+/// `intensity` 1 dan 100 menghasilkan gambar yang sama persis byte demi byte.
+/// Ia cacat yang sama bentuknya dengan texture bakery yang tidak pernah
+/// diserahkan: sebuah permukaan pengarangan yang diam-diam tidak ada di alat
+/// ukurnya.
+///
+/// Mengembalikan false — dan mematikan `skyEnabled` — bila adegan tidak punya
+/// satu pun `SkyComponent`. Level tanpa langit tidak menggambar langit sama
+/// sekali, dan itulah yang membuat adegan interior berhenti membayar empat pass
+/// LUT untuk sesuatu yang tidak pernah terlihat.
+bool ApplySceneSky(const scene::World& world, render::ViewportDesc& desc);
+
 class SceneView {
 public:
     /// Satu objek bergeometri yang bisa diklik, sudah dalam ruang dunia.

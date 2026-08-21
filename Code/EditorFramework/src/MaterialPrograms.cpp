@@ -183,6 +183,7 @@ MaterialProgramRef MaterialPrograms::Request(const assets::AssetDatabase& assets
     program.parameters = ready.parameters;
     program.textures = textures;
     program.bindless = ready.bindless;
+    program.masked = ready.masked;
     const render::MaterialHandle handle =
         renderer.AcquireMaterial(guid.ToString() + ":" + std::to_string(hash), program);
 
@@ -213,6 +214,8 @@ void MaterialPrograms::Compile(Uuid guid, Job job) {
         options.prelude = prelude_;
         options.frameDeclarations = frameDeclarations_;
         options.lobes = compiled.lobes;
+        options.alphaTest = compiled.alphaTest;
+        options.alphaCutoff = compiled.alphaCutoff;
         // Cache dikunci di sini dan bukan di sekitar seluruh fungsi: yang harus
         // berurutan hanyalah pembacaan dan penulisan cache-nya, sedangkan
         // penguraian graph boleh berjalan bersamaan.
@@ -230,6 +233,8 @@ void MaterialPrograms::Compile(Uuid guid, Job job) {
         entries_[guid] = std::move(entry);
         return;
     }
+
+    entry.result.masked = compiled.alphaTest;
 
     material::MaterialParameterBlock block;
     block.Build(graph.parameters);
