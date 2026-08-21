@@ -1,0 +1,25 @@
+# Segi empat 1 x 1 meter untuk mengunci konvensi UV impor.
+#
+# Yang diujinya satu hal: mesin ini menaruh asal UV di kiri atas (`v = 0` adalah
+# baris pertama gambar), sedangkan OBJ — dan FBX yang dibaca SDK yang sama —
+# menaruhnya di kiri bawah. Importir harus membalik `v`.
+#
+# `v` di bawah sengaja 0,4 dan 0,9. Dengan 0 dan 1 himpunannya tidak berubah
+# oleh cerminan, jadi importir yang lupa membalik masih menghasilkan kumpulan
+# angka yang sama dan hanya memasangkannya ke sudut yang salah. Dengan 0,4 dan
+# 0,9 hasil yang benar adalah 0,6 dan 0,1 — tidak satu pun beririsan, dan
+# kelirunya terlihat pada angkanya sendiri.
+#
+# Kembarannya uvQuad.gltf dan uvQuad.usda: geometri dan pemetaan yang sama
+# persis, ditulis menurut konvensi masing-masing format.
+v 0.0 0.0 0.0
+v 1.0 0.0 0.0
+v 1.0 1.0 0.0
+v 0.0 1.0 0.0
+vt 0.2 0.4
+vt 0.7 0.4
+vt 0.7 0.9
+vt 0.2 0.9
+vn 0.0 0.0 1.0
+f 1/1/1 2/2/1 3/3/1
+f 1/1/1 3/3/1 4/4/1

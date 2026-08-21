@@ -27,6 +27,7 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -1164,6 +1165,64 @@ TEST_CASE("OBJ tanpa satuan terbaca sebagai meter, bukan sentimeter") {
     // menuliskan 2 dan 3.
     CHECK((mesh.boundsMax.x - mesh.boundsMin.x) == doctest::Approx(2.0f));
     CHECK((mesh.boundsMax.y - mesh.boundsMin.y) == doctest::Approx(3.0f));
+}
+
+TEST_CASE("Setiap importir menaruh asal UV di kiri atas, apa pun konvensi berkasnya") {
+    using namespace sim::assets;
+
+    // **Satu segi empat, tiga berkas, satu jawaban.** Ketiganya menuliskan
+    // pemetaan yang sama persis menurut konvensi formatnya sendiri: glTF
+    // menaruh asalnya di kiri atas seperti mesin ini, OBJ dan USD di kiri
+    // bawah. Yang dikunci uji ini bukan angka di salah satu berkas melainkan
+    // kesepakatan ketiganya sesudah diimpor — dan itulah yang dulu tidak ada,
+    // sampai dua importir membalik `v` dan yang ketiga tidak.
+    //
+    // Kekeliruannya tidak pernah muncul sebagai galat: UV yang tercermin tetap
+    // UV yang sah, teksturnya tetap terpasang, dan yang berbeda hanya baris
+    // mana yang terbaca.
+    struct Corner {
+        Vec3 position;
+        Vec2 uv;
+    };
+    const std::array<Corner, 4> expected{{
+        {Vec3(0.0f, 0.0f, 0.0f), Vec2(0.2f, 0.6f)},
+        {Vec3(1.0f, 0.0f, 0.0f), Vec2(0.7f, 0.6f)},
+        {Vec3(1.0f, 1.0f, 0.0f), Vec2(0.7f, 0.1f)},
+        {Vec3(0.0f, 1.0f, 0.0f), Vec2(0.2f, 0.1f)},
+    }};
+
+    for (const char* name : {"uvQuad.gltf", "uvQuad.obj", "uvQuad.usda"}) {
+        const std::filesystem::path path = std::filesystem::path(SIM_MESH_DIR) / name;
+        if (!std::filesystem::exists(path)) {
+            continue;  // aset opsional
+        }
+        std::string error;
+        const MeshData mesh = LoadMesh(path, error);
+        if (!mesh.IsValid() && error.find("no USD support") != std::string::npos) {
+            continue;  // build tanpa OpenUSD
+        }
+        INFO("mesh " << name << " error '" << error << "'");
+        REQUIRE(mesh.IsValid());
+        CHECK(mesh.TriangleCount() == 2);
+
+        for (const Corner& corner : expected) {
+            const MeshVertex* found = nullptr;
+            for (const MeshVertex& vertex : mesh.vertices) {
+                if (glm::distance(vertex.position, corner.position) < 1e-4f) {
+                    found = &vertex;
+                    break;
+                }
+            }
+            INFO(name << " sudut (" << corner.position.x << ", " << corner.position.y << ")");
+            REQUIRE(found != nullptr);
+            CHECK(found->uv.x == doctest::Approx(corner.uv.x).epsilon(1e-4f));
+            // **`v`-nya, dan justru di sinilah satu-satunya yang bisa keliru.**
+            // 0,6 dan 0,1 dipilih karena cerminannya 0,4 dan 0,9 — tidak satu
+            // pun beririsan, jadi importir yang lupa membalik gagal pada
+            // angkanya sendiri, bukan hanya pada pasangannya.
+            CHECK(found->uv.y == doctest::Approx(corner.uv.y).epsilon(1e-4f));
+        }
+    }
 }
 
 TEST_CASE("Tangent tiap vertex membentuk bingkai yang sah untuk peta normal") {

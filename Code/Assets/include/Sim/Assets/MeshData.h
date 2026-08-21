@@ -21,6 +21,17 @@ namespace sim::assets {
 struct MeshVertex {
     Vec3 position{0.0f};
     Vec3 normal{0.0f, 1.0f, 0.0f};
+    /// Koordinat tekstur, **asalnya di kiri atas**: `v = 0` adalah baris
+    /// pertama gambarnya.
+    ///
+    /// **Ditulis di sini karena inilah satu-satunya tempat yang dibaca setiap
+    /// importir.** Formatnya sendiri tidak sepakat — glTF menaruh asalnya di
+    /// kiri atas, FBX, OBJ, dan USD di kiri bawah — jadi sebagian importir
+    /// harus membalik `v` dan sebagian tidak. Yang tidak punya rumah untuk
+    /// aturannya berakhir seperti kejadian sungguhannya: dua importir
+    /// membaliknya, yang ketiga tidak, dan tidak ada satu pun galat yang
+    /// muncul karena UV yang tercermin tetap UV yang sah. Yang terlihat hanya
+    /// tekstur yang membaca baris yang salah.
     Vec2 uv{0.0f};
     /// Tangent ruang dunia di `xyz`, arah tangan di `w` (+1 atau −1).
     ///

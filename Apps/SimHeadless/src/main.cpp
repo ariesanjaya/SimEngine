@@ -41,6 +41,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <string_view>
@@ -113,6 +114,7 @@ void PrintUsage() {
         "  --bench-no-screen-trace       matikan lapis screen-space; lihat SDF sendirian\n"
         "  --bench-furnace               uji tungku: langit seragam 1, albedo 1, tanpa matahari\n"
         "  --dump-mesh <file> --dump-out <json>  material dan ruas sebuah berkas mesh\n"
+        "  --dump-uv <bin>               posisi+UV tiap titik, float32 x5\n"
         "  --bench-compute               ganti gambarnya dengan pass compute uji (G3)\n"
         "  --validate-sync               nyalakan validasi sinkronisasi; lambat, sengaja\n"
         "  --bench-cpu-clusters          penetapan cluster di CPU, bukan GPU (G4)\n"
@@ -492,7 +494,45 @@ int main(int argc, char** argv) {
         for (std::size_t i = 0; i < mesh.parts.size(); ++i) {
             json << (i == 0 ? "" : ", ") << mesh.parts[i].material;
         }
-        json << "]\n}\n";
+        json << "],\n";
+        // **Statistik UV, karena yang ditanyakan "sama dengan aslinya atau
+        // tidak" tidak bisa dijawab satu titik.** Konvensi V yang berlawanan
+        // tidak muncul sebagai galat maupun sebagai UV di luar jangkauan; yang
+        // muncul hanya `v` yang tercermin, dan itu hanya terlihat kalau dua
+        // impor atas model yang sama dibandingkan berdampingan.
+        Vec2 uvMin(std::numeric_limits<float>::max());
+        Vec2 uvMax(std::numeric_limits<float>::lowest());
+        double uSum = 0.0;
+        double vSum = 0.0;
+        std::size_t outside = 0;
+        for (const assets::MeshVertex& vertex : mesh.vertices) {
+            uvMin = glm::min(uvMin, vertex.uv);
+            uvMax = glm::max(uvMax, vertex.uv);
+            uSum += static_cast<double>(vertex.uv.x);
+            vSum += static_cast<double>(vertex.uv.y);
+            if (vertex.uv.x < 0.0f || vertex.uv.x > 1.0f || vertex.uv.y < 0.0f ||
+                vertex.uv.y > 1.0f) {
+                ++outside;
+            }
+        }
+        const auto count = static_cast<double>(std::max<std::size_t>(mesh.vertices.size(), 1));
+        json << "  \"uv\": {\"min\": [" << uvMin.x << ", " << uvMin.y << "], \"max\": ["
+             << uvMax.x << ", " << uvMax.y << "], \"mean\": [" << uSum / count << ", "
+             << vSum / count << "], \"outside01\": " << outside << "}\n}\n";
+
+        // Posisi dan UV setiap titik, mentah. JSON tidak dipakai di sini: satu
+        // Sponza adalah ratusan ribu titik, dan yang membacanya mencocokkan
+        // titik demi posisi — pekerjaan numerik, bukan pekerjaan teks.
+        if (const std::string_view uvOut = FlagValue(argc, argv, "--dump-uv"); !uvOut.empty()) {
+            std::ofstream raw{std::filesystem::path(uvOut), std::ios::binary};
+            for (const assets::MeshVertex& vertex : mesh.vertices) {
+                const float row[5] = {vertex.position.x, vertex.position.y, vertex.position.z,
+                                      vertex.uv.x, vertex.uv.y};
+                raw.write(reinterpret_cast<const char*>(row), sizeof(row));
+            }
+            SIM_INFO("Headless", "{} titik posisi+UV ditulis ke {}", mesh.vertices.size(),
+                     std::string(uvOut));
+        }
         // **Ke berkas, bukan ke stdout.** Log proses ini juga menulis ke
         // stdout, jadi keluaran yang dicampur dengannya bukan JSON yang sah —
         // dan yang membacanya adalah skrip, bukan mata.

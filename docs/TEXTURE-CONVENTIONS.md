@@ -1,7 +1,7 @@
 # Konvensi tekstur
 
 Aturan yang berlaku untuk setiap berkas gambar yang masuk ke SimEngine: ruang
-warnanya, alfanya, dan kedalaman bitnya.
+warnanya, alfanya, kedalaman bitnya, dan dari sudut mana ia dibaca.
 
 **Ditulis di sini, bukan hanya di kode.** Ketiganya adalah kesepakatan antara
 yang membuat aset dan yang memuatnya, dan kesepakatan yang hanya hidup di dalam
@@ -9,7 +9,8 @@ sebuah fungsi tidak bisa dibaca oleh orang yang sedang menyiapkan tekstur di
 Substance atau Photoshop.
 
 Yang menegakkannya ada di `Code/ImageIO/src/TextureColor.cpp`; yang mengujinya
-ada di `Tests/ImageIOTests.cpp`.
+ada di `Tests/ImageIOTests.cpp`. Konvensi UV di bawah ditegakkan di tempat lain —
+di setiap importir mesh — dan diuji di `Tests/AssetTests.cpp`.
 
 ---
 
@@ -108,6 +109,39 @@ yang premultiplied melakukannya pada nilai yang masih tersandikan, jadi
 pembaginya harus bekerja di ruang yang sama. Membalik urutannya menghasilkan
 tepi yang salah terang pada setiap tekstur beralfa — dan itu, sekali lagi,
 kesalahan yang tidak muncul sebagai galat.
+
+---
+
+## Asal UV: kiri atas
+
+**`v = 0` adalah baris pertama gambarnya.** Satu konvensi untuk seluruh mesin,
+dan `Sim::Assets::MeshVertex::uv` adalah tempat ia tertulis.
+
+Formatnya sendiri tidak sepakat, jadi sebagian importir harus membalik `v` dan
+sebagian tidak:
+
+| Format | Asal UV di berkasnya | Yang dilakukan importir |
+| --- | --- | --- |
+| glTF | kiri atas | dipakai apa adanya |
+| FBX | kiri bawah | `v → 1 − v` |
+| OBJ | kiri bawah | `v → 1 − v` (dibaca FBX SDK yang sama) |
+| USD | kiri bawah | `v → 1 − v` |
+
+**Kekeliruannya tidak pernah muncul sebagai galat.** UV yang tercermin tetap UV
+yang sah: nilainya tetap di dalam jangkauan, teksturnya tetap terpasang, dan
+yang berbeda hanya baris mana yang terbaca. Yang terlihat adalah hiasan yang
+mendarat di tempat yang salah dan tulisan yang terbalik — hal-hal yang mudah
+disangka salah aset.
+
+Terukur atas Sponza, yang berkas FBX dan glTF-nya model yang sama: 99,41% titik
+hasil impor FBX hanya cocok dengan hasil impor glTF **setelah** `1 − v`, dan
+0,01% cocok apa adanya. Sesudah importirnya membalik, angkanya bertukar tempat —
+99,43% cocok apa adanya, 0,00% perlu dibalik.
+
+Yang menguncinya `uvQuad.obj`, `uvQuad.gltf`, dan `uvQuad.usda` di
+`Resources/Meshes/`: satu segi empat yang sama, ditulis tiga kali menurut
+konvensi masing-masing format, dan satu uji yang menuntut ketiganya diimpor
+menjadi UV yang sama persis.
 
 ---
 
