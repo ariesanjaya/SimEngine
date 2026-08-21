@@ -99,6 +99,7 @@ void PrintUsage() {
         "  --bench-capture-frame <n>     frame mana yang disimpan, bawaan yang terakhir\n"
         "  --bench-cull-first <n>        gambar hanya permukaan bernomor >= n\n"
         "  --bench-async                 pass compute di antrean terpisah (G7)\n"
+        "  --bench-settle-seconds <n>    batas menunggu material siap, bawaan 300\n"
         "  --bench-camera px,py,pz,tx,ty,tz  kamera tetap, bukan lintasan orbit\n"
         "  --bench-dump-depth <path>     depth buffer mentah (w, h, float per texel)\n"
         "  --bench-cull-limit <n>        gambar hanya permukaan bernomor < n\n"
@@ -395,6 +396,13 @@ int main(int argc, char** argv) {
 #endif
 
     editor::EditorApp app;
+    // **Worker berhenti sebelum apa pun yang mengantre pekerjaan ke sana
+    // dihancurkan.** `app` memiliki bakery tekstur, database aset, dan penjaga
+    // shader; ketiganya mengirim tugas yang menangkap `this`. Dideklarasikan di
+    // sini, sesudah `app`, jadi ia dihancurkan lebih dulu — pada jalur `return`
+    // manapun, termasuk yang gagal di tengah.
+    const TaskPool::StopGuard stopWorkers(tasks);
+
     editor::EditorApp::Config config;
     config.configDir = configDir;
     config.resourceDir = std::filesystem::path(argv[0]).parent_path() / "Resources";
@@ -722,7 +730,26 @@ int main(int argc, char** argv) {
             // materialnya delapan, dan jauh dari cukup untuk adegan yang
             // teksturnya tujuh puluh dua lembar 4K: yang terukur lalu adegan
             // yang setengah materialnya masih jalur mundur.
-            const auto settleBudget = std::chrono::seconds(300);
+            // Bisa dipendekkan: sebuah jalan yang sengaja dimulai sebelum
+            // materialnya siap adalah satu-satunya cara menguji apa yang terjadi
+            // pada pekerjaan yang masih berjalan saat program ditutup.
+            auto settleBudget = std::chrono::seconds(300);
+            // **Batas yang disebut sendiri berarti tunggu selama itu, bukan
+            // paling lama selama itu.** Syarat berhenti di bawah — tidak ada
+            // kompilasi yang tertunda — juga terpenuhi *sebelum* mesh-nya
+            // selesai dimuat, karena yang menerbitkan permintaan material
+            // adalah bagian-bagian mesh yang belum ada. Sebuah jalan dengan
+            // `--bench-settle-seconds 8` lalu berhenti di frame pertama dan
+            // mengukur adegan kosong. Ketika batasnya diminta secara eksplisit,
+            // yang diminta adalah keadaan setengah siap itu sendiri, jadi
+            // syarat berhenti lebih awal tidak berlaku.
+            bool settleFixed = false;
+            if (const std::string_view value = FlagValue(argc, argv, "--bench-settle-seconds");
+                !value.empty()) {
+                settleBudget =
+                    std::chrono::seconds(std::strtol(std::string(value).c_str(), nullptr, 10));
+                settleFixed = true;
+            }
             const auto settleStart = std::chrono::steady_clock::now();
             uint32_t settle = 0;
             for (; !gStopping.load(); ++settle) {
@@ -746,7 +773,8 @@ int main(int argc, char** argv) {
                 sceneView.Build(*app.Context().world, selection, app.Context().assets,
                                 renderer.get(), app.Context().animation,
                                 app.Context().builtinAssets, app.Context().whiteboxes);
-                if (settle > 0 && app.Context().materialPrograms->PendingCount() == 0) {
+                if (!settleFixed && settle > 0 &&
+                    app.Context().materialPrograms->PendingCount() == 0) {
                     break;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));

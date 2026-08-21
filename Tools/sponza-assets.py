@@ -199,7 +199,16 @@ def main() -> int:
     level = json.loads(level_path.read_text())
     for entity in level["entities"]:
         if entity["components"].get("Name", {}).get("name") == "Sponza":
-            entity["components"]["MeshRenderer"]["materials"] = slots
+            renderer = entity["components"]["MeshRenderer"]
+            # **Mesh-nya ikut ditulis di sini, bukan diketik tangan di level.**
+            # Sempat tidak: level dikarang lebih dulu dengan GUID mesh yang
+            # diketik sendiri, lalu skrip ini menimpa `.meta` mesh dengan GUID
+            # turunannya — dan sejak saat itu Sponza tidak pernah muncul lagi.
+            # Tanpa satu pun pesan, karena mesh yang GUID-nya tidak ditemukan
+            # hanyalah entitas tanpa bagian: adegan tetap dirender, hanya
+            # kosong. Satu sumber angka, jadi keduanya tidak bisa berselisih.
+            renderer["mesh"] = guid("mesh", MESH)
+            renderer["materials"] = slots
     level_path.write_text(json.dumps(level, indent=2) + "\n")
 
     print(f"{len(needed)} tekstur, {len(slots)} material, level diperbarui")
