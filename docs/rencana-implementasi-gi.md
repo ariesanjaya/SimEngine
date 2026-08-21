@@ -308,3 +308,29 @@ gambarnya bergerak 57,4 → 58,4. Sinar tambahan itu menemukan permukaan yang
 warnanya sudah ikut biru — satu sumber biru ditukar dengan sumber biru yang
 lain. Yang mengubahnya adalah medan jarak yang mengikuti segitiga alih-alih
 kotak batas, yaitu M1, beserta albedo yang tersimpan bersamanya.
+
+### Sesudah M1
+
+Medan jaraknya sekarang mengikuti segitiga, dan yang berubah pada gambarnya
+adalah bentuk cahayanya, bukan hanya jumlahnya: lengkungan menggelap ke arah
+sudutnya, pilar punya bayangan ambien, lantai menerima langit lewat lubang
+lengkung alih-alih lewat tebakan.
+
+| | GI mati | GI, medan kotak | GI, medan segitiga | acuan A |
+|---|---:|---:|---:|---:|
+| Rata-rata | 45,3 | 46,6 | **56,8** | 78,7 |
+| Median | 36 | 37 | **46** | 69 |
+| Piksel hitam | 5,9% | 5,9% | 4,9% | 1,2% |
+| `gi-probe-trace` | — | 0,390 ms | 0,613 ms | — |
+
+Pass GI naik 57% karena sinarnya akhirnya benar-benar berjalan; sebelumnya
+setiap sinar berhenti di langkah pertama, pada kotak pejal yang memuat seluruh
+gedung.
+
+**Yang masih memisahkannya dari acuan: warna.** Serambinya biru, acuannya
+abu-abu hangat. Cahaya isian di sini masih didominasi langit, sementara warna
+acuan datang dari matahari yang memantul di batu — dan pantulan itu menuntut
+**albedo** yang tersimpan bersama medan jaraknya. Sekarang ia sebuah tebakan
+tetap (`kBounceAlbedo` = 0,5), jadi setiap permukaan memantulkan abu-abu netral
+alih-alih warnanya sendiri. Itu langkah berikutnya, dan ia milik M4: cache
+radiansi yang tahu warna permukaan yang tidak pernah terlihat layar.
