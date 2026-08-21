@@ -170,3 +170,35 @@ Urutan ini disusun supaya kamu punya GI yang **terlihat** sejak akhir M3, bukan 
 4. **Koridor dengan pintu** — occlusion jarak menengah
 5. **Adegan padat + objek bergerak** — biaya update SDF/BVH
 6. **Outdoor luas** — jangkauan kaskade & fallback langit
+
+### `Resources/Levels/gi-sponza.simlevel` — dan gambar yang harus disamainya
+
+Intel Sponza (`NewSponza_Main_glTF_003`), 3,75 juta segitiga. Ia menutup sekaligus
+nomor 3, 4, dan 6 di daftar di atas: dinding tipis, serambi yang hanya menerima
+cahaya lewat lengkungan, dan halaman terbuka ke langit.
+
+**Yang membuatnya adegan uji dan bukan sekadar model besar: berkasnya membawa
+kamera dan matahari yang dipakai render acuannya.** Node `PhysCamera001` dan
+`SUN` ada di dalam glTF-nya, jadi sudut pandang dan arah cahaya tidak perlu
+ditebak — dan gambar yang dibandingkan adalah gambar yang sama, bukan gambar yang
+mirip.
+
+- Matahari: dari `SUN` ke `SUN.Target`, arah `(0,551, −0,828, 0,105)` — 55,9°
+  di atas cakrawala. Sudah tertulis di levelnya sebagai kuaternion.
+- Kamera: `--bench-camera -8.807,1.592,-0.858,-3.004,2.762,0.237`, yaitu posisi
+  dan target `PhysCamera001` apa adanya.
+- Acuannya `Render_Main_A..F.png` di sebelah berkas modelnya.
+
+**Asetnya tidak ada di repo ini.** 140 MB geometri dan 2,6 GB tekstur; `Resources`
+disalin utuh ke direktori binary tiap build, jadi menaruhnya di sana berarti
+membayar salinan itu setiap kali. Ia dipasang sebagai symlink di dalam project
+(`Assets/Sponza/`) beserta `.meta` ber-GUID tetap, dan levelnya merujuk GUID itu.
+Tanpa asetnya, level ini memuat langit dan matahari tanpa geometri — bukan gagal,
+tapi juga bukan uji.
+
+**Yang belum ada: materialnya.** glTF-nya membawa 28 material dengan 72 tekstur,
+dan importir sudah membaca jalur teksturnya ke `MeshMaterial`. Yang belum ada
+adalah pemetaan ke aset material engine lewat `.simmeshcfg` — jadi sekarang
+seluruh Sponza digambar dengan albedo bawaan yang putih. Untuk **kebenaran** GI
+itu tidak menghalangi; untuk **menyamai gambar acuannya** ia menghalangi
+seluruhnya, karena pantulan hangat di serambi datang dari warna dindingnya.

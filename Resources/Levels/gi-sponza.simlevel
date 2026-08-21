@@ -1,0 +1,143 @@
+{
+  "schemaVersion": 3,
+  "entities": [
+    {
+      "guid": "5900f2a4-0000-4000-8000-000000000000",
+      "components": {
+        "Name": {
+          "name": "GI Sponza"
+        },
+        "Transform": {
+          "position": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "rotation": [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "scale": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        }
+      }
+    },
+    {
+      "guid": "5900f2a4-0000-4000-8000-000000000001",
+      "parent": "5900f2a4-0000-4000-8000-000000000000",
+      "components": {
+        "Name": {
+          "name": "Sky"
+        },
+        "Transform": {
+          "position": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "rotation": [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "scale": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        "Sky": {
+          "source": "Atmosphere",
+          "intensity": 20.0,
+          "cameraHeightKm": 0.5,
+          "aerialPerspective": true,
+          "aerialHaze": 1.0,
+          "hdriPath": "",
+          "hdriRotation": 0.0,
+          "hdriIntensity": 1.0
+        }
+      }
+    },
+    {
+      "guid": "5900f2a4-0000-4000-8000-000000000002",
+      "parent": "5900f2a4-0000-4000-8000-000000000000",
+      "components": {
+        "Name": {
+          "name": "Sun"
+        },
+        "Transform": {
+          "position": [
+            -21.705,
+            43.414,
+            -6.15
+          ],
+          "rotation": [
+            0.668836,
+            -0.619073,
+            -0.411591,
+            -0.0
+          ],
+          "scale": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        "Light": {
+          "type": "Directional",
+          "color": [
+            1.0,
+            0.95,
+            0.88
+          ],
+          "intensity": 4.0,
+          "range": 100.0,
+          "sourceRadius": 0.1,
+          "innerAngle": 0.436,
+          "outerAngle": 0.611,
+          "castShadows": true
+        }
+      }
+    },
+    {
+      "guid": "5900f2a4-0000-4000-8000-000000000003",
+      "parent": "5900f2a4-0000-4000-8000-000000000000",
+      "components": {
+        "Name": {
+          "name": "Sponza"
+        },
+        "Transform": {
+          "position": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "rotation": [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "scale": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        "MeshRenderer": {
+          "mesh": "5900f2a4-0000-4000-8000-000000000001",
+          "materials": [],
+          "castShadows": true,
+          "receiveShadows": true,
+          "lodBias": 0.0
+        }
+      }
+    }
+  ]
+}

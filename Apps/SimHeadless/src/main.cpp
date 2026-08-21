@@ -99,6 +99,7 @@ void PrintUsage() {
         "  --bench-capture-frame <n>     frame mana yang disimpan, bawaan yang terakhir\n"
         "  --bench-cull-first <n>        gambar hanya permukaan bernomor >= n\n"
         "  --bench-async                 pass compute di antrean terpisah (G7)\n"
+        "  --bench-camera px,py,pz,tx,ty,tz  kamera tetap, bukan lintasan orbit\n"
         "  --bench-dump-depth <path>     depth buffer mentah (w, h, float per texel)\n"
         "  --bench-cull-limit <n>        gambar hanya permukaan bernomor < n\n"
         "  --bench-fixed-exposure        eksposur manual; wajib untuk membandingkan gambar\n"
@@ -577,6 +578,16 @@ int main(int argc, char** argv) {
         bool cpuSdf = false;
         bool cpuCull = false;
         bool asyncCompute = false;
+        // Kamera tetap, menggantikan lintasan orbit.
+        //
+        // **Lintasan orbit menjawab pertanyaan "berapa biayanya dari segala
+        // arah"; ia tidak menjawab "apakah cahayanya benar".** Yang kedua
+        // menuntut satu sudut pandang yang sama persis tiap jalan, dan pada
+        // adegan berbentuk bangunan ia harus berada di **dalam** — orbit selalu
+        // memotret dindingnya dari luar.
+        bool fixedCamera = false;
+        Vec3 cameraEye{0.0f};
+        Vec3 cameraTarget{0.0f};
         bool occlusion = false;
         // Frame mana yang ditangkap. **Bawaannya yang terakhir, dan itu tidak
         // selalu berguna:** lintasan kamera menutup satu putaran penuh, jadi
@@ -621,6 +632,30 @@ int main(int argc, char** argv) {
         // G0 ingin ukur — jadi garis dasar yang diam-diam mengukur adegan tanpa
         // GI adalah garis dasar yang menjawab pertanyaan lain. Levelnya sendiri
         // tetap yang menentukan bila benderanya tidak ada.
+        if (const std::string_view value = FlagValue(argc, argv, "--bench-camera");
+            !value.empty()) {
+            std::array<float, 6> numbers{};
+            std::size_t at = 0;
+            std::size_t start = 0;
+            const std::string text(value);
+            while (at < numbers.size() && start <= text.size()) {
+                const std::size_t comma = text.find(',', start);
+                numbers[at++] =
+                    std::strtof(text.substr(start, comma - start).c_str(), nullptr);
+                if (comma == std::string::npos) {
+                    break;
+                }
+                start = comma + 1;
+            }
+            if (at != numbers.size()) {
+                SIM_ERROR("Bench", "--bench-camera wants px,py,pz,tx,ty,tz");
+                app.Shutdown();
+                return 2;
+            }
+            fixedCamera = true;
+            cameraEye = Vec3(numbers[0], numbers[1], numbers[2]);
+            cameraTarget = Vec3(numbers[3], numbers[4], numbers[5]);
+        }
         if (const std::string_view value = FlagValue(argc, argv, "--bench-capture-frame");
             !value.empty()) {
             captureFrame = static_cast<uint32_t>(std::strtoul(std::string(value).c_str(), nullptr, 10));
@@ -747,10 +782,11 @@ int main(int argc, char** argv) {
             const Vec3 extent = glm::max(boundsMax - boundsMin, Vec3(1.0f));
             const float radius = glm::length(Vec2(extent.x, extent.z)) * 0.9f + 2.0f;
             const float angle = 6.2831853f * static_cast<float>(frame) / static_cast<float>(total);
-            const Vec3 eye(centre.x + radius * std::cos(angle),
-                           centre.y + extent.y * 0.55f,
-                           centre.z + radius * std::sin(angle));
-            const Vec3 forward = centre - eye;
+            const Vec3 orbit(centre.x + radius * std::cos(angle),
+                             centre.y + extent.y * 0.55f,
+                             centre.z + radius * std::sin(angle));
+            const Vec3 eye = fixedCamera ? cameraEye : orbit;
+            const Vec3 forward = (fixedCamera ? cameraTarget : centre) - eye;
 
             render::ViewportDesc desc;
             desc.width = renderWidth;
