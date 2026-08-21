@@ -13,6 +13,7 @@
 #include "ProbeField.h"
 #include "SdfClipmapResource.h"
 #include "Sim/Assets/MeshData.h"
+#include "Sim/Core/Assert.h"
 #include "Sim/Core/Log.h"
 #include "Sim/RHI/Buffer.h"
 #include "Sim/RHI/Device.h"
@@ -1336,11 +1337,48 @@ public:
             };
         }
 
-        if (!executor_.Execute(compiled_, cmd, recorders, &profiler_)) {
+        // **Command buffer per segmen, dan yang pertama adalah `cmd` sendiri.**
+        // Prolog frame — reset query dan `sdf-fill` — sudah terekam di sana, dan
+        // ia harus berjalan di antrean grafis; jadi ia batch pertama, dan segmen
+        // graph mendapat command buffer masing-masing sesudahnya.
+        segmentBuffers_.clear();
+        submitBatches_.clear();
+        rhi::SubmitBatch prologue;
+        prologue.commandBuffer = cmd;
+        submitBatches_.push_back(prologue);
+        for (const Segment& segment : compiled_.segments) {
+            const bool async = segment.queue == Queue::AsyncCompute;
+            VkCommandBuffer into = async ? device_.BeginTransientCompute(cmd)
+                                         : device_.BeginTransientGraphics(cmd);
+            SIM_VERIFY(into != VK_NULL_HANDLE, "a frame graph segment has no command buffer");
+            segmentBuffers_.push_back(into);
+            rhi::SubmitBatch batch;
+            batch.commandBuffer = into;
+            batch.queue = async ? rhi::QueueKind::AsyncCompute : rhi::QueueKind::Graphics;
+            batch.wait = segment.wait;
+            batch.waitQueue = segment.waitQueue == Queue::AsyncCompute
+                                  ? rhi::QueueKind::AsyncCompute
+                                  : rhi::QueueKind::Graphics;
+            // Penungguan berlaku sedekat mungkin dengan pemakainya. Segmen yang
+            // menunggu selalu dimulai oleh pass yang mengambil kepemilikan, dan
+            // pengambilan itu barrier pertamanya — jadi menahan seluruh perintah
+            // batch ini sampai sinyalnya datang tidak menahan apa pun yang bisa
+            // jalan lebih dulu; yang bisa jalan lebih dulu ada di segmen
+            // sebelumnya.
+            batch.waitStages = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            batch.signal = segment.signal;
+            submitBatches_.push_back(batch);
+        }
+        if (!executor_.Execute(compiled_, segmentBuffers_, recorders,
+                               device_.GraphicsQueueFamily(), device_.ComputeQueueFamily(),
+                               &profiler_)) {
             SIM_ERROR("Render", "frame graph execution failed: {}", compiled_.error);
         }
-        profiler_.EndFrame(cmd);
-        slot.submitId = device_.SubmitTransient(cmd);
+        // Query frame ditutup di command buffer terakhir yang benar-benar
+        // dipakai graph — bukan di `cmd`, yang sudah lewat.
+        VkCommandBuffer last = segmentBuffers_.empty() ? cmd : segmentBuffers_.back();
+        profiler_.EndFrame(last);
+        slot.submitId = device_.SubmitTransientBatches(cmd, submitBatches_);
         slotIndex_ = (slotIndex_ + 1) % slots_.size();
         drawnOpaque_ = opaqueCount;
         drawnTransparent_ = transparentCount;
@@ -5134,6 +5172,11 @@ private:
     /// Batas bisect uji occlusion; lihat `ViewportDesc::cullLimit`.
     uint32_t cullLimit_ = 0xffffffffu;
     uint32_t cullFirst_ = 0;
+    /// Command buffer tiap segmen graph, dan batch submit-nya. Anggota, bukan
+    /// lokal: keduanya dibangun ulang tiap frame dan tidak ada gunanya
+    /// mengalokasi ulang vektornya setiap kali.
+    std::vector<VkCommandBuffer> segmentBuffers_;
+    std::vector<rhi::SubmitBatch> submitBatches_;
     /// Slot yang perintahnya terakhir disubmit, dan viewProj-nya. Dipakai
     /// pembaca angka antara supaya ia membaca frame yang benar.
     uint32_t lastCullSlot_ = 0;
