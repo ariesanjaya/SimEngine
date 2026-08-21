@@ -97,6 +97,29 @@ SdfHit traceSdf(float3 origin, float3 direction, float tMax) {
         }
         float distance = sampleCascadeSdf(cascade, position);
         float voxel = cascadeVoxelSize(cascade);
+        // **Titik asal yang sudah berada di dalam medan tidak bisa dilayani
+        // medan itu.** Sphere tracing menjawab "berapa jauh sampai permukaan"
+        // dari luar; dari dalam, jawabannya nol di langkah pertama ke arah mana
+        // pun — termasuk arah yang lurus keluar. Yang tampak: sebuah permukaan
+        // di jarak nol pada keenam belas sinar sebuah probe.
+        //
+        // Ini bukan kemungkinan teoretis melainkan keadaan Sponza. Medan
+        // adegan menyusun tiap mesh sebagai **kotak batasnya** (`BoxSceneField`),
+        // dan Sponza satu mesh berkotak 36×20×24 m: seluruh gedung, halaman
+        // dan serambinya, berada *di dalam* satu kotak pejal. 84% voxel kaskade
+        // terhalus terbaca "jauh di dalam benda". Setiap sinar probe lalu
+        // mengenai sesuatu di jarak nol, tidak satu pun sampai ke langit, dan
+        // yang menyinari adegan tinggal tebakan atas permukaan yang tidak ada.
+        //
+        // Melewatkan lapis ini mengembalikan sinarnya ke langit — jawaban yang
+        // benar untuk "medan ini tidak tahu", dan yang salah hanya kalau
+        // medannya memang tahu. Oklusi yang hilang sebagiannya masih dijawab
+        // lapis layar. Yang mengembalikannya seluruhnya adalah medan jarak yang
+        // benar-benar mengikuti segitiga, dan itu M1 di rencana GI.
+        if (step == 0 && distance < voxel * 0.5) {
+            result.steps = 1;
+            return result;
+        }
         if (distance < voxel * 0.5) {
             result.hit = true;
             result.distance = travelled;

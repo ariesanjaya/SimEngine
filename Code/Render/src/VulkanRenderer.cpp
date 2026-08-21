@@ -5436,6 +5436,14 @@ private:
     static constexpr float kBounceAlbedo = 0.5f;
     /// Anggaran langkah lapis screen-space. Rencana GI menyebut 16, dan angka
     /// itulah yang membuat fallback ke SDF bukan kemewahan melainkan keharusan.
+    ///
+    /// **Diuji menaikkannya, dan tidak dibayar.** Di Sponza 16 langkah menjawab
+    /// 6% sinar probe; 64 menjawab 15–32%, tetapi gambarnya hampir tidak
+    /// berubah — rata-rata 57,4 menjadi 58,4 — sementara `gi-probe-trace` naik
+    /// 0,39 ms menjadi 0,93 ms. Sebabnya sinar tambahan itu menemukan permukaan
+    /// yang warnanya sudah ikut biru langit, jadi yang ditukar hanya satu
+    /// sumber biru dengan sumber biru yang lain. Yang akan membuat angka ini
+    /// berarti adalah pantulan yang benar-benar membawa warna matahari.
     static constexpr float kScreenMaxSteps = 16.0f;
     /// Ketebalan yang diandaikan untuk permukaan di depth buffer, meter.
     static constexpr float kScreenThickness = 0.5f;
