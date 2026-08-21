@@ -1172,7 +1172,8 @@ public:
                               /*materialVariant=*/-1,
                               gpuCullActive_
                                   ? drawCull_.CommandBuffer(static_cast<uint32_t>(slotIndex_))
-                                  : VK_NULL_HANDLE);
+                                  : VK_NULL_HANDLE,
+                              /*skipMasked=*/true);
             }
             vkCmdEndRendering(command);
             probes_.RecordNormalEnd(command);
@@ -1590,6 +1591,9 @@ public:
         VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
         /// Nomor material ini di larik bindless. Nol pada jalur mundur.
         uint32_t slot = 0;
+        /// Bertopeng: shader-nya membuang fragmen di bawah ambang opasitas.
+        /// Ruasnya dilewati prepass dan pass bayangan — lihat `DrawRuns`.
+        bool masked = false;
         rhi::DynamicBuffer parameters;
         /// [transparan][ber-kulit].
         std::array<PipelineVariants, 2> pipelines{};
@@ -1699,13 +1703,24 @@ public:
             return kInvalidMaterial;
         }
 
+        material->masked = program.masked;
+        // **Yang bertopeng diuji `GREATER_OR_EQUAL`, bukan `EQUAL`.** Ruasnya
+        // tidak ikut prepass — fragmen yang dibuang tidak boleh meninggalkan
+        // kedalamannya di sana — jadi kedalaman yang tertulis di buffer adalah
+        // milik permukaan **di belakangnya**. `EQUAL` karena itu tidak akan
+        // pernah lolos. Sama-dalam ikut diterima karena decal memang sebidang
+        // dengan dindingnya: reversed-Z membuat "lebih dekat" berarti lebih
+        // besar, jadi yang di depan tetap lolos dan yang di belakang tetap
+        // gagal.
+        const VkCompareOp opaqueDepth =
+            material->masked ? VK_COMPARE_OP_GREATER_OR_EQUAL : VK_COMPARE_OP_EQUAL;
         for (std::size_t skinned = 0; skinned < kPipelineVariants; ++skinned) {
             // Keadaan depth dan blending-nya sama persis dengan pipeline kotak
             // yang digantikannya — kalau tidak, ruas bermaterial akan diuji
             // terhadap depth dengan aturan yang berbeda dari tetangganya.
             material->pipelines[0][skinned] =
                 BuildPipeline(boxVertexModule_, fragment, /*depthWrite=*/false,
-                              VK_COMPARE_OP_EQUAL, /*blend=*/false, /*colorWrite=*/true,
+                              opaqueDepth, /*blend=*/false, /*colorWrite=*/true,
                               /*skinned=*/skinned != 0, material->pipelineLayout);
             material->pipelines[1][skinned] =
                 BuildPipeline(boxVertexModule_, fragment, /*depthWrite=*/false,
@@ -2939,8 +2954,8 @@ private:
 
     void DrawInstances(VkCommandBuffer cmd, const PipelineVariants& pipelines, const BoxPush& push,
                        InstanceSlot& slot, std::span<const DrawRun> runs, uint32_t instanceBase,
-                       int materialVariant = -1,
-                       VkBuffer indirectCommands = VK_NULL_HANDLE) {
+                       int materialVariant = -1, VkBuffer indirectCommands = VK_NULL_HANDLE,
+                       bool skipMasked = false) {
         // Descriptor set diikat untuk setiap pipeline forward, termasuk prepass.
         // Prepass tidak membacanya, tapi layout-nya mendeklarasikannya — dan
         // set yang dideklarasikan tapi tidak terikat adalah pelanggaran meski
@@ -2962,7 +2977,7 @@ private:
                  sets.data(), 0, nullptr);
         vkCmdPushConstants(cmd, pipelineLayout_, kBoxPushStages, 0, sizeof(BoxPush), &push);
         DrawRuns(cmd, slot, runs, instanceBase, pipelines, pipelineLayout_,
-                 /*bindsMaterial=*/true, materialVariant, indirectCommands);
+                 /*bindsMaterial=*/true, materialVariant, indirectCommands, skipMasked);
     }
 
     /// Mengikat geometri tiap ruas lalu menggambarnya. Dipakai bersama pass
@@ -2980,10 +2995,16 @@ private:
     /// setLayoutCount` — perilaku tak terdefinisi yang di mesin ini berakhir
     /// sebagai segfault beberapa detik sesudah adegan yang menjatuhkan bayangan
     /// selesai dimuat, jauh dari sebabnya.
+    /// `skipMasked` melewatkan ruas yang materialnya bertopeng. **Dipakai
+    /// prepass dan pass bayangan, dan keduanya karena alasan yang sama:** yang
+    /// menentukan bentuk material bertopeng adalah fragmen yang dibuangnya, dan
+    /// kedua pass itu tidak menjalankan shader materialnya sama sekali. Yang
+    /// ikut serta di sana akan menulis kedalaman — dan menjatuhkan bayangan —
+    /// berbentuk kuad penuh, termasuk di bagian yang seharusnya tidak ada.
     void DrawRuns(VkCommandBuffer cmd, InstanceSlot& slot, std::span<const DrawRun> runs,
                   uint32_t instanceBase, const PipelineVariants& pipelines,
                   VkPipelineLayout layout, bool bindsMaterial, int materialVariant = -1,
-                  VkBuffer indirectCommands = VK_NULL_HANDLE) {
+                  VkBuffer indirectCommands = VK_NULL_HANDLE, bool skipMasked = false) {
         VkPipeline bound = VK_NULL_HANDLE;
         // **Bukan sebuah handle sentinel**: nol adalah kubus satuan, yaitu mesh
         // yang sah dan yang paling sering muncul. Bendera terpisah karena itu,
@@ -2993,6 +3014,11 @@ private:
         bool boundSkinned = false;
         for (const DrawRun& run : runs) {
             if (run.count == 0 || run.mesh >= meshes_.size()) {
+                continue;
+            }
+            if (skipMasked && run.material != kInvalidMaterial &&
+                run.material <= materials_.size() &&
+                materials_[static_cast<std::size_t>(run.material) - 1]->masked) {
                 continue;
             }
             const GpuMesh& mesh = *meshes_[static_cast<std::size_t>(run.mesh)];
@@ -4441,7 +4467,8 @@ private:
                 vkCmdPushConstants(cmd, shadowLayout_, kBoxPushStages, 0,
                                    sizeof(BoxPush), &push);
                 DrawRuns(cmd, slot, shadowRuns_, 0, shadowPipelines_, shadowLayout_,
-                         /*bindsMaterial=*/false);
+                         /*bindsMaterial=*/false, /*materialVariant=*/-1,
+                         /*indirectCommands=*/VK_NULL_HANDLE, /*skipMasked=*/true);
             }
         }
         vkCmdEndRendering(cmd);
@@ -5274,7 +5301,8 @@ private:
                     vkCmdPushConstants(cmd, shadowLayout_, kBoxPushStages, 0,
                                        sizeof(BoxPush), &push);
                     DrawRuns(cmd, slot, shadowRuns_, 0, shadowPipelines_, shadowLayout_,
-                             /*bindsMaterial=*/false);
+                             /*bindsMaterial=*/false, /*materialVariant=*/-1,
+                             /*indirectCommands=*/VK_NULL_HANDLE, /*skipMasked=*/true);
                 }
             }
             vkCmdEndRendering(cmd);
