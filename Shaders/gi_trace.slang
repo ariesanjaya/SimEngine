@@ -18,6 +18,32 @@
 // pemakainya.
 #include "sky_common.slang"
 
+/// Entri grid medan jarak: transformasi dan kotak batasnya, cermin dari
+/// `BakedSceneField::GpuGrid`. Dipakai mencari grid mana yang memuat sebuah
+/// titik, dan di mana titik itu jatuh di dalamnya.
+struct GiGrid {
+    float4x4 inverse;
+    /// x skala terkecil, y anisotropi, z pita grid, w slot tekstur
+    float4 scaleBandSlot;
+    /// xyz kotak batas dunia terkecil, w sisi voxel grid
+    float4 boundsMinVoxel;
+    float4 boundsMax;
+    /// xyz pusat voxel (0,0,0) di ruang lokal
+    float4 origin;
+    /// xyz ukuran grid dalam voxel
+    float4 size;
+};
+
+static const int kGiMaxGrids = 16;
+
+[[vk::binding(22, 0)]] StructuredBuffer<GiGrid> giGrids;
+/// Albedo per grid: rgb warna linear, alfa 1 berarti voxel itu punya material.
+///
+/// **Warna diambil dari grid per-mesh, bukan dari kaskade clipmap.** Kaskade
+/// terkasar bervoxel 1,6 m; warna yang dirata-rata sejauh itu adalah warna yang
+/// salah di mana-mana. Grid tetap 12,7 cm berapa pun jauhnya dari kamera.
+[[vk::binding(23, 0)]] Texture3D<float4> giGridAlbedo[kGiMaxGrids];
+
 /// LUT sky-view, langit yang sama dengan yang tergambar di belakang adegan.
 /// Isinya radiansi atmosfer tanpa `skyIntensity`; pengalinya ada di
 /// `shadowParams.skyParams.x`, sama seperti di pass gambar.
@@ -456,8 +482,40 @@ float3 giSky(float3 direction) {
 /// sama dengan yang dipakai shading, ditambah langit. Albedo-nya tebakan
 /// (`kBounceAlbedo` di renderer); yang bergantung padanya kecerahan pantulan,
 /// bukan ada-tidaknya.
+/// Albedo sebuah titik dunia, dibaca dari grid yang memuatnya.
+///
+/// Mengembalikan tebakan tetap `giBounce.rgb` bila tidak ada grid yang memuat
+/// titiknya, atau bila voxelnya tidak punya material — di luar pita, tempat
+/// tidak ada permukaan yang bisa ditanyai warnanya.
+///
+/// **Tetangga terdekat, bukan trilinear.** Warna permukaan tidak berpadu: batu
+/// bertemu kain di sebuah tepi, bukan di sebuah gradien. Memadukannya
+/// menghasilkan sepetak warna yang tidak dimiliki bahan mana pun, tepat di
+/// tempat yang paling diperhatikan mata.
+float3 giAlbedoAt(float3 world) {
+    int count = min(int(shadowParams.giParams.z), kGiMaxGrids);
+    for (int g = 0; g < count; ++g) {
+        GiGrid grid = giGrids[g];
+        if (any(world < grid.boundsMinVoxel.xyz) || any(world > grid.boundsMax.xyz)) {
+            continue;
+        }
+        float3 local = mul(grid.inverse, float4(world, 1.0)).xyz;
+        int3 texel = int3(round((local - grid.origin.xyz) / grid.boundsMinVoxel.w));
+        if (any(texel < int3(0)) || any(texel >= int3(grid.size.xyz))) {
+            continue;
+        }
+        int slot = int(grid.scaleBandSlot.w);
+        float4 albedo = giGridAlbedo[NonUniformResourceIndex(slot)].Load(int4(texel, 0));
+        if (albedo.a < 0.5) {
+            continue;
+        }
+        return albedo.rgb;
+    }
+    return shadowParams.giBounce.rgb;
+}
+
 float3 giGuessedBounce(float3 position, float3 normal) {
-    float3 albedo = shadowParams.giBounce.rgb;
+    float3 albedo = giAlbedoAt(position);
     float ndotl = max(dot(normal, shadowParams.lightDirection.xyz), 0.0);
     float sun = ndotl > 0.0 ? sampleShadow(position, normal) * ndotl : 0.0;
 

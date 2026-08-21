@@ -66,6 +66,24 @@ public:
                     std::span<const SdfGrid* const> grids, rhi::DynamicBuffer& staging,
                     uint32_t slot);
 
+    /// Tekstur albedo sebuah slot grid, atau `VK_NULL_HANDLE` bila slot itu
+    /// kosong atau gridnya dibake tanpa warna.
+    ///
+    /// **Dibaca penelusur probe, bukan pengisi clipmap.** Warna tidak ikut
+    /// dikomposit ke kaskade: kaskade terkasar bervoxel 1,6 m, dan warna yang
+    /// dirata-rata sejauh itu adalah warna yang salah di mana-mana. Grid
+    /// per-mesh tetap 12,7 cm berapa pun jauhnya dari kamera.
+    VkImageView GridAlbedoView(uint32_t slot) const;
+    /// Buffer entri grid sebuah slot frame: transformasi dan kotak batasnya.
+    /// Dipakai pembaca albedo untuk menemukan grid mana yang memuat sebuah titik.
+    VkBuffer GridBuffer(uint32_t slot) const;
+    uint32_t GridCount() const { return gridCount_; }
+    /// Berapa grid yang dipakai frame yang baru saja disiapkan `Update`.
+    uint32_t ActiveGridCount() const { return fillGridCount_; }
+    /// Naik setiap kali sebuah tekstur grid bertambah. Pembaca descriptor
+    /// membandingkannya untuk tahu kapan ia harus menulis ulang.
+    uint64_t GridGeneration() const { return gridGeneration_; }
+
     /// Berapa instance frame ini yang benar-benar memakai SDF hasil bake.
     /// Dilaporkan log dan panel: "1 dari 40 mesh ter-bake" adalah keadaan yang
     /// layak diketahui.
@@ -187,8 +205,12 @@ private:
     /// sesi, jadi alamatnya stabil, dan dua instance mesh yang sama menunjuk
     /// grid yang sama persis — satu tekstur, bukan dua.
     std::array<rhi::Texture3D, kMaxGrids> gridTextures_;
+    /// Albedo per grid, RGBA8: rgb warna linear, alfa 1 berarti voxel itu punya
+    /// material. Kosong untuk grid yang dibake tanpa warna.
+    std::array<rhi::Texture3D, kMaxGrids> gridAlbedo_;
     std::array<const SdfGrid*, kMaxGrids> gridSources_{};
     uint32_t gridCount_ = 0;
+    uint64_t gridGeneration_ = 0;
     bool reportedGridLimit_ = false;
     VkDescriptorSetLayout gridLayout_ = VK_NULL_HANDLE;
     VkDescriptorSet gridSet_ = VK_NULL_HANDLE;

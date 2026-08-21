@@ -57,7 +57,8 @@ struct ShadowParams {
     // x jendela akumulasi (frame), y jarak bidang untuk menolak riwayat (meter),
     // z kosinus normal minimum, w skala penjepitan riwayat.
     float4 denoise;
-    // x 1 kalau iradiansi GI berlaku, y ukuran ubin probe dalam piksel.
+    // x 1 kalau iradiansi GI berlaku, y ukuran ubin probe dalam piksel,
+    // z banyaknya grid medan jarak yang punya entri frame ini.
     float4 giParams;
     // Langit untuk GI: x pengali radiansi, y ketinggian kamera (km), zw ukuran
     // LUT sky-view. Pengali nol berarti tidak ada atmosfer — langit mati atau

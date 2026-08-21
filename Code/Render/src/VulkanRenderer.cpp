@@ -128,7 +128,8 @@ struct ShadowUniforms {
     /// x jendela akumulasi, y jarak bidang penolakan riwayat, z kosinus normal
     /// minimum, w skala penjepitan riwayat.
     Vec4 denoise{0.0f};
-    /// x 1 kalau iradiansi GI berlaku, y ukuran ubin probe dalam piksel.
+    /// x 1 kalau iradiansi GI berlaku, y ukuran ubin probe dalam piksel,
+    /// z banyaknya grid medan jarak yang punya entri frame ini.
     Vec4 giParams{0.0f};
     /// Langit untuk GI: x pengali radiansi, y ketinggian kamera (km),
     /// zw ukuran LUT sky-view. **Pengali nol berarti tidak ada atmosfer** —
@@ -1008,6 +1009,16 @@ public:
             sdfUpdateMs_ = std::chrono::duration<float, std::milli>(
                                std::chrono::steady_clock::now() - started)
                                .count();
+            // **Menunggu device idle, sekali per grid baru.** Descriptor set
+            // frame ini bisa saja masih dipegang command buffer yang belum
+            // selesai, dan menulisinya adalah pelanggaran. Yang dibayar satu
+            // hentakan pada frame sebuah mesh selesai dibake — dan mesh itu
+            // baru saja menghabiskan tujuh detik di baker.
+            if (sdfClipmap_.GridGeneration() != sdfGridGeneration_) {
+                sdfGridGeneration_ = sdfClipmap_.GridGeneration();
+                device_.WaitIdle();
+                WriteGiGridDescriptors();
+            }
         }
 
         // Peta HDR dimuat sebelum graph dibangun, karena graph memutuskan ada
@@ -3845,7 +3856,7 @@ private:
         samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
         SIM_VK_CHECK(vkCreateSampler(device_.Handle(), &samplerInfo, nullptr, &shadow_.sampler));
 
-        const std::array<VkDescriptorSetLayoutBinding, 22> bindings{
+        const std::array<VkDescriptorSetLayoutBinding, 24> bindings{
             VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
@@ -3890,6 +3901,11 @@ private:
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{21, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{22, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{23, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                                         SdfClipmapResource::kMaxGrids,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
         };
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -3898,13 +3914,16 @@ private:
         SIM_VK_CHECK(vkCreateDescriptorSetLayout(device_.Handle(), &layoutInfo, nullptr,
                                                  &shadowSetLayout_));
 
-        const std::array<VkDescriptorPoolSize, 3> sizes{
+        const std::array<VkDescriptorPoolSize, 4> sizes{
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                  static_cast<uint32_t>(slots_.size())},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                                  static_cast<uint32_t>(slots_.size()) * 16},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                 static_cast<uint32_t>(slots_.size()) * 5},
+                                 static_cast<uint32_t>(slots_.size()) * 6},
+            VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
+                                 static_cast<uint32_t>(slots_.size()) *
+                                     SdfClipmapResource::kMaxGrids},
         };
         VkDescriptorPoolCreateInfo poolInfo{};
         poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
@@ -4568,7 +4587,56 @@ private:
         }
         vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
+        WriteGiGridDescriptors();
         return true;
+    }
+
+    /// Menulis ulang binding 22 dan 23: entri grid dan tekstur albedonya.
+    ///
+    /// **Terpisah dari `WriteShadowDescriptors`, karena waktunya berbeda.**
+    /// Yang itu berjalan saat start, ketika belum ada satu pun command buffer;
+    /// yang ini berjalan saat sebuah mesh selesai dibake, yaitu di tengah
+    /// frame yang berjalan — dan menulisi descriptor set yang sedang dipakai
+    /// adalah pelanggaran. Pemanggil yang menunggu device idle lebih dulu.
+    void WriteGiGridDescriptors() {
+        std::array<VkDescriptorImageInfo, SdfClipmapResource::kMaxGrids> images{};
+        for (uint32_t at = 0; at < SdfClipmapResource::kMaxGrids; ++at) {
+            const VkImageView view = sdfClipmap_.GridAlbedoView(at);
+            // Slot tanpa albedo tetap harus punya descriptor yang sah:
+            // descriptor kosong adalah pelanggaran pada setiap draw, termasuk
+            // draw yang tidak membacanya. Penggantinya kaskade SDF — satu-
+            // satunya tekstur 3D yang pasti ada — dan yang menjaganya tidak
+            // pernah terbaca adalah jumlah grid di `giGridCount`.
+            images[at] = {VK_NULL_HANDLE,
+                          view != VK_NULL_HANDLE ? view : sdfClipmap_.Texture(0).View(),
+                          VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        }
+        std::vector<VkDescriptorBufferInfo> buffers(slots_.size());
+        std::vector<VkWriteDescriptorSet> writes;
+        writes.reserve(slots_.size() * 2);
+        for (std::size_t i = 0; i < slots_.size(); ++i) {
+            const VkBuffer grid = sdfClipmap_.GridBuffer(static_cast<uint32_t>(i));
+            buffers[i] = {grid != VK_NULL_HANDLE ? grid : slots_[i].lightBuffer.Handle(), 0,
+                          VK_WHOLE_SIZE};
+            VkWriteDescriptorSet entries{};
+            entries.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            entries.dstSet = slots_[i].shadowSet;
+            entries.dstBinding = 22;
+            entries.descriptorCount = 1;
+            entries.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            entries.pBufferInfo = &buffers[i];
+            writes.push_back(entries);
+
+            VkWriteDescriptorSet albedo = entries;
+            albedo.dstBinding = 23;
+            albedo.descriptorCount = SdfClipmapResource::kMaxGrids;
+            albedo.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+            albedo.pBufferInfo = nullptr;
+            albedo.pImageInfo = images.data();
+            writes.push_back(albedo);
+        }
+        vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
+                               writes.data(), 0, nullptr);
     }
 
     /// Menulis ulang binding rentang dan indeks cluster saja.
@@ -5118,7 +5186,8 @@ private:
         // dinyalakan.
         const bool giReady = desc.gi.enabled && probes_.IsValid() && probeFrame_ > 1;
         uniforms.giParams = Vec4(giReady ? 1.0f : 0.0f,
-                                 static_cast<float>(probeGrid_.Settings().tileSize), 0.0f, 0.0f);
+                                 static_cast<float>(probeGrid_.Settings().tileSize),
+                                 static_cast<float>(sdfClipmap_.ActiveGridCount()), 0.0f);
         // **Syarat yang sama persis dengan syarat pass langit didaftarkan.**
         // LUT sky-view hanya diperbarui di dalam pass itu; menyuruh GI
         // membacanya saat pass-nya tidak ada berarti menerangi adegan dengan
@@ -5461,6 +5530,13 @@ private:
     /// dibuang semuanya berarti iradiansi nol. 0,5 adalah albedo rata-rata
     /// bahan bangunan — plester, batu, kayu — dan salah 0,2 di sini
     /// menggeser kecerahan pantulan, bukan menghilangkannya.
+    ///
+    /// **Dipakai hanya untuk mesh yang albedonya belum dibake.** Yang sudah
+    /// membawa warnanya sendiri dibaca dari grid; lihat `giAlbedoAt`. Angka ini
+    /// tetap 0,5 walaupun 28 material Sponza yang diukur rata-rata 0,25 linear:
+    /// yang dijawabnya bukan "berapa albedo batu" melainkan "berapa albedo
+    /// sesuatu yang tidak diketahui", dan menyetelnya ke satu adegan yang
+    /// kebetulan diukur adalah menyetelnya ke adegan yang salah.
     static constexpr float kBounceAlbedo = 0.5f;
     /// Anggaran langkah lapis screen-space. Rencana GI menyebut 16, dan angka
     /// itulah yang membuat fallback ke SDF bukan kemewahan melainkan keharusan.
@@ -5603,6 +5679,9 @@ private:
     /// Larik sejajar `ViewportScene::meshes`, disusun ulang tiap frame supaya
     /// `SdfClipmapResource` tidak perlu mengenal `MeshHandle` sama sekali.
     std::vector<const SdfGrid*> meshFieldPointers_;
+    /// Generasi grid clipmap yang descriptor-nya sudah ditulis. Lihat
+    /// `WriteGiGridDescriptors`.
+    uint64_t sdfGridGeneration_ = 0;
     /// Jalur → handle. Jalur yang gagal dimuat dipetakan ke kubus satuan supaya
     /// ia tidak dicoba lagi setiap frame.
     /// Tekstur yang sudah di GPU, beserta set descriptor-nya.
