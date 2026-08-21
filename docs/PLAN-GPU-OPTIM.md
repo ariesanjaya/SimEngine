@@ -1443,6 +1443,73 @@ setengah-setengah menemukan permukaan yang mencat sebuah piksel dalam dua belas
 jalan — dan itulah yang menunjukkan bahwa permukaan yang hilang digambar jauh di
 luar petak kotaknya sendiri.
 
+#### Prepass dan forward ternyata sepakat — yang salah lebih besar dari itu
+
+Dugaan berikutnya yang jelas: prepass menaruh vertex di tempat yang sedikit
+berbeda dari forward, dan uji `EQUAL` menjatuhkannya. Tiga percobaan
+mematahkannya, dan ketiganya memakai satu tuas yang sama — mengganti uji depth
+pass forward:
+
+- `GREATER_OR_EQUAL` alih-alih `EQUAL`: adegan jarang **sama persis**, adegan
+  padat berselisih **3 byte**. Tidak ada satu pun fragmen forward yang lebih
+  dekat daripada apa yang ditulis prepass.
+- `ALWAYS` alih-alih `EQUAL` — yaitu setiap fragmen forward dicat tanpa syarat:
+  gambarnya **sama persis byte demi byte**. Setiap fragmen yang dihasilkan
+  forward memang sudah lolos `EQUAL`.
+
+Jadi keduanya sepakat pada setiap fragmen yang forward hasilkan. Yang berbeda
+bukan posisinya melainkan **berapa banyak** yang dihasilkan.
+
+#### Depth buffer diambil utuh, dan isinya bukan adegan ini
+
+Sesudah tiga alat probe yang masing-masing ternyata tidak bisa dipercaya —
+lampiran nomor permukaan yang menggeser posisi, kisi 56×56 yang hanya ditulis
+permukaan yang lolos frustum, dan tangkapan depth yang menebak tata letak
+image-nya — yang dibangun berikutnya adalah yang paling langsung:
+**`--bench-dump-depth` menyalin depth buffer apa adanya**, float per texel, lewat
+`rhi::RenderTarget::ReadDepth`. Tata letak lamanya diambil dari frame graph, dan
+`UNDEFINED` **ditolak** alih-alih dijawab dengan nol.
+
+Angkanya, adegan padat, frame 105:
+
+| | texel berisi kedalaman | permukaan terdekat |
+|---|---:|---:|
+| `bench` (jarang) | 1,6% | 49,5 satuan |
+| `bench-dense`, jalur GPU | **99,6%** | **0,05 satuan** |
+| `bench-dense`, jalur CPU | **99,6%** | **0,05 satuan** |
+
+**0,05 satuan adalah bidang dekat.** Titik adegan yang paling dekat ke kamera di
+frame itu berjarak 51 satuan — dihitung dari kotak lantai dan matriks yang sama.
+Dan jalur CPU menghasilkan angka yang sama persis: **ini bukan cacat G6.**
+
+Gambar akhirnya memang memuatnya. Direntang kontrasnya — rentang kecerahan
+seluruh gambar hanya 48 sampai 54 — strukturnya sama persis dengan peta
+kedalaman: sebuah permukaan raksasa yang membentang layar, tergambar hampir
+sehitam langit. Setiap perbandingan gambar adegan padat selama ini membandingkan
+dua hasil render dari benda itu.
+
+#### Yang sudah dipersempit, dan yang belum
+
+- **Bukan data mesh.** Pemeriksaan baru saat unggah — indeks terhadap banyaknya
+  simpul, dan rentang tiap ruas terhadap panjang buffer indeks — bersih untuk
+  seluruh mesh adegan ini.
+- **Bukan transform.** Buffer transform instance dibaca kembali **dari GPU**,
+  lewat binding sementara di pass culling, lalu dibandingkan dengan yang ditulis
+  CPU: translasi dan panjang ketiga kolom, **0 dari 3.129 yang meleset**.
+- **Bukan satu entity yang datanya rusak.** Seluruh 3.020 transform di level itu
+  diperiksa: kuaternion satuan, skala wajar. Yang skalanya besar hanya lantai.
+- **Bukan silinder itu sendiri.** 935 silinder tanpa prop lain: bersih. Satu
+  silinder di atas lantai: bersih.
+- **Butuh gabungan.** 869 silinder ditambah seluruh prop lain: bersih; 870:
+  meledak. 935 silinder ditambah 100 prop lain: meledak. Ambangnya bukan jumlah
+  permukaan (1.040 meledak, 2.595 tidak) dan bukan jumlah silinder saja.
+
+Yang tersisa untuk dikerjakan berikutnya, dan sekarang jalannya lurus: hantunya
+**tercat**, jadi ia bisa dilacak dengan tuas yang sudah ada — `--bench-cull-first`
+dan `--bench-cull-limit` untuk mempersempit permukaannya, `--bench-dump-depth`
+untuk melihat bentuknya. Yang masih harus dijawab: apa yang berubah antara 869
+dan 870 silinder.
+
 **Dua cacat sungguhan ikut terangkat sepanjang perburuan itu**, dan keduanya
 tetap diperbaiki:
 

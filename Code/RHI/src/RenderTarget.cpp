@@ -170,7 +170,8 @@ bool RenderTarget::CreateAttachments() {
     // Tanpa itu, lapis screen-space GI tidak punya apa pun untuk ditelusuri —
     // dan kekurangannya muncul sebagai galat pembuatan image view, jauh dari
     // tempat yang sebenarnya membutuhkannya.
-    imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    imageInfo.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT |
+                      VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     SIM_VK_CHECK(vmaCreateImage(device_->Allocator(), &imageInfo, &allocationInfo, &depthImage_,
                                 &depthAllocation_, nullptr));
 
@@ -286,6 +287,77 @@ void RenderTarget::Destroy() {
         renderPass_ = VK_NULL_HANDLE;
     }
     device_ = nullptr;
+}
+
+bool RenderTarget::ReadDepth(std::vector<float>& out, uint32_t& outWidth, uint32_t& outHeight,
+                             VkImageLayout currentLayout, std::string& error) {
+    if (!IsValid() || width_ == 0 || height_ == 0) {
+        error = "this render target has nothing in it yet";
+        return false;
+    }
+    if (depthFormat_ != VK_FORMAT_D32_SFLOAT) {
+        error = "the depth buffer is not D32_SFLOAT";
+        return false;
+    }
+    // **`UNDEFINED` berarti isinya memang tidak dijanjikan siapa pun.**
+    // Menyalinnya tetap berhasil dan mengembalikan nol di mana-mana — sebuah
+    // peta kedalaman yang meyakinkan dan salah. Menolak lebih baik daripada
+    // menjawab.
+    if (currentLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
+        error = "the frame graph has not left the depth buffer in a readable layout";
+        return false;
+    }
+
+    const VkDeviceSize bytes = VkDeviceSize(width_) * height_ * sizeof(float);
+    DynamicBuffer staging;
+    if (!staging.Create(*device_, VK_BUFFER_USAGE_TRANSFER_DST_BIT, bytes)) {
+        error = "cannot allocate a staging buffer for the depth capture";
+        return false;
+    }
+    device_->WaitIdle();
+
+    const auto barrier = [this](VkCommandBuffer cmd, VkImageLayout from, VkImageLayout to) {
+        VkImageMemoryBarrier2 memory{};
+        memory.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        memory.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        memory.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+        memory.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        memory.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+        memory.oldLayout = from;
+        memory.newLayout = to;
+        memory.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        memory.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        memory.image = depthImage_;
+        memory.subresourceRange = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
+
+        VkDependencyInfo dependency{};
+        dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dependency.imageMemoryBarrierCount = 1;
+        dependency.pImageMemoryBarriers = &memory;
+        vkCmdPipelineBarrier2(cmd, &dependency);
+    };
+
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+    region.imageExtent = {width_, height_, 1};
+
+    VkCommandBuffer cmd = device_->BeginOneShot();
+    barrier(cmd, currentLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    vkCmdCopyImageToBuffer(cmd, depthImage_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           staging.Handle(), 1, &region);
+    barrier(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, currentLayout);
+    device_->EndOneShot(cmd);
+
+    const void* source = staging.Mapped();
+    if (source == nullptr) {
+        error = "the staging buffer is not mapped";
+        return false;
+    }
+    out.resize(static_cast<std::size_t>(width_) * height_);
+    std::memcpy(out.data(), source, static_cast<std::size_t>(bytes));
+    outWidth = width_;
+    outHeight = height_;
+    return true;
 }
 
 bool RenderTarget::ReadPixels(std::vector<uint8_t>& outRgba, uint32_t& outWidth,

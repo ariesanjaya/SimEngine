@@ -98,6 +98,7 @@ void PrintUsage() {
         "  --bench-capture <path.png>    simpan sebuah frame; kameranya deterministik\n"
         "  --bench-capture-frame <n>     frame mana yang disimpan, bawaan yang terakhir\n"
         "  --bench-cull-first <n>        gambar hanya permukaan bernomor >= n\n"
+        "  --bench-dump-depth <path>     depth buffer mentah (w, h, float per texel)\n"
         "  --bench-cull-limit <n>        gambar hanya permukaan bernomor < n\n"
         "  --bench-fixed-exposure        eksposur manual; wajib untuk membandingkan gambar\n"
         "  --bench-compute               ganti gambarnya dengan pass compute uji (G3)\n"
@@ -501,6 +502,30 @@ int main(int argc, char** argv) {
         SIM_INFO("Bench", "cull data written to {}", std::string(path));
     };
 
+    // Depth buffer mentah, float per texel. Yang membacanya skrip di luar
+    // program; menulisnya sebagai gambar akan membuang persis ketelitian yang
+    // dicari.
+    const auto writeDepthDump = [](render::IViewportRenderer& target, std::string_view path) {
+        std::vector<float> depth;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        std::string dumpError;
+        if (!target.CaptureDepth(depth, width, height, dumpError)) {
+            SIM_ERROR("Bench", "cannot read the depth buffer: {}", dumpError);
+            return;
+        }
+        std::ofstream file{std::filesystem::path(path), std::ios::binary};
+        if (!file) {
+            SIM_ERROR("Bench", "cannot write {}", std::string(path));
+            return;
+        }
+        const uint32_t header[2]{width, height};
+        file.write(reinterpret_cast<const char*>(header), sizeof(header));
+        file.write(reinterpret_cast<const char*>(depth.data()),
+                   static_cast<std::streamsize>(depth.size() * sizeof(float)));
+        SIM_INFO("Bench", "depth buffer written to {} ({}x{})", std::string(path), width, height);
+    };
+
     // --- Mode ukur (G0) ------------------------------------------------------
     //
     // **Sebelum server MCP dinyalakan, dan keluar tanpa pernah menyalakannya.**
@@ -763,6 +788,10 @@ int main(int argc, char** argv) {
                 if (const std::string_view dump = FlagValue(argc, argv, "--bench-dump-cull");
                     !dump.empty()) {
                     writeCullDump(*renderer, dump);
+                }
+                if (const std::string_view dump = FlagValue(argc, argv, "--bench-dump-depth");
+                    !dump.empty()) {
+                    writeDepthDump(*renderer, dump);
                 }
             }
 

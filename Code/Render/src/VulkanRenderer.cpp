@@ -1879,6 +1879,11 @@ public:
     /// **Menunggu GPU diam lebih dulu.** Angka yang dibaca sementara dispatch
     /// yang menulisnya masih berjalan adalah angka setengah frame ini dan
     /// setengah frame lalu — yaitu tepat jenis bukti yang menyesatkan.
+    bool CaptureDepth(std::vector<float>& out, uint32_t& outWidth, uint32_t& outHeight,
+                      std::string& error) override {
+        return target_.ReadDepth(out, outWidth, outHeight, executor_.LayoutOf(depthId_), error);
+    }
+
     bool CaptureCullDebug(std::string& out, std::string& error) override {
         if (!gpuCullActive_ || !drawCull_.IsValid()) {
             error = "GPU culling is off";
@@ -3030,6 +3035,33 @@ private:
                          low.x, low.y, low.z, high.x, high.y, high.z, data.boundsMin.x,
                          data.boundsMin.y, data.boundsMin.z, data.boundsMax.x, data.boundsMax.y,
                          data.boundsMax.z);
+            }
+        }
+        // **Indeks yang menunjuk ke luar buffer simpul tidak menghasilkan satu
+        // pun galat.** Vulkan menyebutnya perilaku tak terdefinisi, dan yang
+        // keluar dari driver ini adalah simpul berisi sampah. Diperiksa sekali
+        // saat unggah, alasan yang sama persis dengan pemeriksaan kotak batas
+        // di atas.
+        {
+            uint32_t highest = 0;
+            for (uint32_t value : data.indices) {
+                highest = std::max(highest, value);
+            }
+            if (!data.indices.empty() &&
+                static_cast<std::size_t>(highest) >= data.vertices.size()) {
+                SIM_WARN("Render",
+                         "a mesh has indices past its vertex buffer: highest {} of {} vertices",
+                         highest, data.vertices.size());
+            }
+            for (std::size_t at = 0; at < mesh->parts.size(); ++at) {
+                const GpuMesh::Part& part = mesh->parts[at];
+                if (static_cast<std::size_t>(part.firstIndex) + part.indexCount >
+                    data.indices.size()) {
+                    SIM_WARN("Render",
+                             "mesh part {} runs past the index buffer: [{}, {}) of {} indices", at,
+                             part.firstIndex, part.firstIndex + part.indexCount,
+                             data.indices.size());
+                }
             }
         }
         meshes_.push_back(std::move(mesh));

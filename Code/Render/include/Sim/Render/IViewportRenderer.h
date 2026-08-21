@@ -276,6 +276,17 @@ public:
         return false;
     }
 
+    /// Depth buffer frame terakhir, float per texel. Alat diagnostik; lihat
+    /// `rhi::RenderTarget::ReadDepth`.
+    virtual bool CaptureDepth(std::vector<float>& out, uint32_t& outWidth, uint32_t& outHeight,
+                              std::string& error) {
+        (void)out;
+        (void)outWidth;
+        (void)outHeight;
+        error = "this renderer cannot read its depth buffer back";
+        return false;
+    }
+
     virtual TextureHandle ColorTarget() const = 0;
 
     /// Koordinat tekstur pojok kanan-bawah dari bagian yang benar-benar

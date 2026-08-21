@@ -202,33 +202,9 @@ bool occluded(Bounds box, uint index) {
         CullDebug entry;
         entry.rect = float4(uvMin, uvMax);
         entry.result = float4(nearest, farthest, float(level), farthest > nearest ? 0.0 : 1.0);
-        // `w` keduanya dipakai membandingkan tingkat: nilai mentah di tengah
-        // petak pada tingkat nol — yaitu salinan depth buffer apa adanya — dan
-        // pada tingkat yang benar-benar dipakai.
-        const float2 mid = (uvMin + uvMax) * 0.5;
-        // **Tiap permukaan menyampel satu titik kisi 56x56 di layar**, bukan
-        // petaknya sendiri: yang dicari bukan sifat permukaan ini melainkan peta
-        // depth buffer secara keseluruhan. Di sebelahnya, tingkat nol piramida
-        // di titik yang sama — keduanya harus sama persis, dan itulah yang
-        // membuktikan piramidanya salinan yang setia.
-        // **Tiap permukaan menyampel satu titik kisi 56x56 di layar**, bukan
-        // petaknya sendiri: yang dicari bukan sifat permukaan ini melainkan peta
-        // depth buffer secara keseluruhan.
-        // **Tiap permukaan menyampel satu titik kisi 56x56 di layar**, bukan
-        // petaknya sendiri: yang dicari bukan sifat permukaan ini melainkan peta
-        // depth buffer secara keseluruhan. Di sebelahnya tingkat nol piramida di
-        // titik yang sama — keduanya harus sama persis, dan itulah yang
-        // membuktikan piramidanya salinan yang setia.
-        //
-        // **Peta itulah yang akhirnya menjawab G6:** di petak yang gambarnya
-        // langit, depth buffer berisi permukaan sejauh ~73 satuan. Yang menulis
-        // depth di sana adalah prepass; yang tidak menggambar apa pun di sana
-        // adalah pass forward.
-        const float2 probe = (float2(index % 56u, (index / 56u) % 56u) + 0.5) / 56.0;
-        const int2 probeTexel = clamp(int2(floor(probe * float2(params.counts.zw))), int2(0),
-                                      int2(params.counts.zw) - int2(1));
-        entry.centre = float4(box.centre.xyz, viewportDepth.Load(int3(probeTexel, 0)).r);
-        entry.extent = float4(box.extent.xyz, pyramidLoad(0, probe));
+        // `w` keduanya diisi belakangan di `main`, untuk **setiap** permukaan.
+        entry.centre = box.centre;
+        entry.extent = box.extent;
         debug[index] = entry;
     }
     return farthest > nearest;
@@ -271,6 +247,20 @@ void main(uint3 id: SV_DispatchThreadID) {
         entry.centre = box.centre;
         entry.extent = box.extent;
         debug[index] = entry;
+    }
+
+    // **Peta depth ditulis untuk setiap permukaan, bukan hanya yang diuji
+    // occlusion.** Ia tidak menjelaskan permukaan ini melainkan depth buffer
+    // secara keseluruhan, dan yang gugur di frustum menyampel petak layar yang
+    // sama pentingnya dengan yang lolos. Menuliskannya hanya di dalam
+    // `occluded()` membuat setiap petak yang pemiliknya tersaring terbaca nol —
+    // yaitu "langit" yang sebenarnya tidak pernah dibaca.
+    if (pc.debug != 0u) {
+        const float2 probe = (float2(index % 56u, (index / 56u) % 56u) + 0.5) / 56.0;
+        const int2 probeTexel = clamp(int2(floor(probe * float2(params.counts.zw))), int2(0),
+                                      int2(params.counts.zw) - int2(1));
+        debug[index].centre.w = viewportDepth.Load(int3(probeTexel, 0)).r;
+        debug[index].extent.w = pyramidLoad(0, probe);
     }
 
     const Surface surface = surfaces[index];
