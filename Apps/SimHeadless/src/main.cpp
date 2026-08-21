@@ -109,6 +109,7 @@ void PrintUsage() {
         "  --bench-fixed-exposure        eksposur manual; wajib untuk membandingkan gambar\n"
         "  --bench-gi-debug <view>       off|albedo|normal|irradiance|raycount|steps|layers\n"
         "  --bench-ev <ev100>            eksposur manual pada EV100 ini\n"
+        "  --bench-no-screen-trace       matikan lapis screen-space; lihat SDF sendirian\n"
         "  --bench-compute               ganti gambarnya dengan pass compute uji (G3)\n"
         "  --validate-sync               nyalakan validasi sinkronisasi; lambat, sengaja\n"
         "  --bench-cpu-clusters          penetapan cluster di CPU, bukan GPU (G4)\n"
@@ -650,6 +651,13 @@ int main(int argc, char** argv) {
                 occlusion = true;
             } else if (flag == "--bench-fixed-exposure") {
                 fixedExposure = true;
+            } else if (flag == "--bench-no-screen-trace") {
+                // **Lapis layar dimatikan supaya lapis SDF bisa dilihat
+                // sendirian.** Kriteria selesai M1 menuntut penelusuran sphere
+                // dari kamera cocok dengan depth buffer raster, dan selama
+                // lapis layar menjawab lebih dulu yang terlihat selalu lapis
+                // layar — termasuk ketika medan jaraknya kosong sama sekali.
+                app.Context().gi.screenTrace = false;
             }
         }
         // EV100 manual. **Yang dibelinya bukan gambar yang lebih enak melainkan

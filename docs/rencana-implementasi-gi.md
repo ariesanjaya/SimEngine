@@ -68,13 +68,45 @@ Tiap milestone punya kriteria selesai yang bisa diuji. Jangan lanjut sebelum kri
 
 **Selesai kalau:** bisa menampilkan heatmap jumlah langkah SDF per pixel. Ini alat diagnostik yang paling sering kamu pakai selama 3 bulan ke depan.
 
-### M1 — Global SDF clipmap (±3 minggu)
-- ✅ Bake SDF per-mesh offline lewat OpenVDB → `sim::SdfGrid` padat per mesh, dikomposit lewat `BakedSceneField`. Opsional: tanpa OpenVDB, clipmap mundur ke `BoxSceneField`. Lihat [DEPENDENCIES.md](DEPENDENCIES.md)
-- 3 kaskade 128³ R8_UNORM, voxel 10 cm / 40 cm / 1,6 m → jangkauan ±102 m
-- Toroidal scroll: hanya irisan tepi yang ditulis ulang saat kamera bergerak
-- Komposit objek statis + dinamis ke kaskade
+### M1 — Global SDF clipmap (±3 minggu) ✅
 
-**Selesai kalau:** sphere tracing dari kamera menghasilkan depth yang cocok dengan raster depth buffer (uji visual side-by-side), dan biaya update tetap < 0,5 ms saat kamera bergerak cepat di adegan uji terpadat.
+- ✅ Bake SDF per-mesh offline lewat OpenVDB → `sim::SdfGrid` padat per mesh, dikomposit lewat `BakedSceneField`. Opsional: tanpa OpenVDB, clipmap mundur ke `BoxSceneField`. Lihat [DEPENDENCIES.md](DEPENDENCIES.md)
+- ✅ `MeshSdfBakery` di `Sim::Assets`: bake di `TaskPool`, cache `.simsdf` berkunci isi berkas, hasilnya diserahkan ke renderer lewat `IViewportRenderer::SetMeshDistanceField`
+- ✅ 3 kaskade 128³ R8_UNORM, voxel 10 cm / 40 cm / 1,6 m → jangkauan ±102 m
+- ✅ Toroidal scroll: hanya irisan tepi yang ditulis ulang saat kamera bergerak
+- ✅ Komposit objek statis ke kaskade, di CPU maupun di compute (G4)
+
+**Selesai:** biaya pembaruan 0,033 ms saat kamera mengorbit — `cpu-sdf` 0,009 ms
+ditambah `sdf-fill` 0,024 ms — jauh di bawah anggaran 0,5 ms. Penelusuran sphere
+dari kamera, dengan lapis screen-space dimatikan (`--bench-no-screen-trace`),
+memperlihatkan siluet Sponza: pilar di kedua sisi, serambi yang menjauh,
+lengkungan langit-langit. Korelasi peringkatnya terhadap depth buffer raster
+0,79 — dibatasi voxel 12,7 cm terhadap geometri raster, dan oleh tangkapan
+8-bit yang menjepit seluruh rentang 2–30 m ke sekitar tujuh puluh tingkat.
+
+**Yang paling menjelaskan bedanya**, isi kaskade terhalus pada adegan yang sama:
+
+| | kotak batas | dari segitiga |
+|---|---:|---:|
+| Voxel "jauh di dalam benda" | 84,4% | 4,4% |
+| Voxel di dalam pita | 12,5% | 43,7% |
+| Voxel ruang bebas | 3,1% | 51,9% |
+
+Angka pertama itu yang dulu membuat setiap sinar probe mengenai sesuatu di jarak
+nol: kotak batas Sponza memuat seluruh gedung beserta udaranya.
+
+**Dua hal yang ditemukan sambil mengukurnya**, keduanya tercatat di komentar
+kodenya:
+
+- **Sisi voxel diperbesar sampai muat, bukan mesh-nya ditolak.** Sponza pada
+  voxel 10 cm adalah 17,3 juta voxel, di atas anggaran baker. Menolak berarti
+  gedung itu kembali menjadi kotak pejal — persis keadaan yang M1 mengakhiri.
+- **Pita sepadan dengan bendanya, bukan jumlah voxel tetap.** Di luar pita nilai
+  medan jenuh, jadi pita adalah jangkauan langkah sphere tracing. Pita 4 voxel
+  menjawab 0,45 m di posisi kamera acuan; pita 16 voxel menjawab 1,58 m, yaitu
+  jarak sebenarnya, dengan biaya bake yang sama. Tetapi 16 voxel tetap pada mesh
+  sebesar kursi berarti grid lima kali lebih lebar daripada kursinya di tiap
+  sumbu, jadi yang dipakai pecahan sisi terpanjangnya.
 
 ### M2 — Lapis screen-space (±1 minggu)
 - HiZ march di depth buffer, maks 16 langkah
