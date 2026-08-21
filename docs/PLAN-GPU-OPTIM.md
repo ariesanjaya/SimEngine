@@ -1651,7 +1651,7 @@ tiga kali lebih sedikit, dan waktu frame yang setengahnya.
 
 ---
 
-## G7 — Async compute
+## G7 — Async compute · ✅ mesinnya, dan angkanya yang menahannya
 
 Terakhir di antara yang struktural, karena tanpa G3–G6 tidak ada yang bisa
 ditumpangkan.
@@ -1680,6 +1680,105 @@ didapat dengan mempercepat salah satunya.
 pass tidak berubah — yaitu bukti bahwa yang didapat adalah tumpang tindih, bukan
 pekerjaan yang hilang; mematikan sakelarnya mengembalikan angka lama dan gambar
 yang identik.
+
+### Yang mendarat
+
+- **Timeline semaphore yang benar-benar menyala.** Kapabilitasnya selama ini
+  dilaporkan dari `supported12` sementara `enable12` tidak pernah menyebutnya —
+  "timeline: yes" di log menjawab "apakah perangkat ini bisa", bukan "apakah kita
+  boleh". **Satu timeline per antrean, bukan satu bersama:** sebuah operasi
+  signal hanya sah bila nilainya lebih besar daripada nilai semaphore saat ia
+  berjalan, dan dua antrean yang berjalan bersamaan tidak menjamin urutan itu.
+- **Satu slot transient, dua keluarga antrean, dua fence.** Command pool terikat
+  pada keluarganya; fence menandai satu submit. Slot baru boleh dipakai ulang
+  setelah keduanya selesai — tanpa itu, slot yang antrean grafisnya sudah selesai
+  direkam ulang sementara antrean compute-nya masih membacanya.
+- **Batch adalah command buffer utuh, dan itu bukan pilihan.** Penungguan
+  semaphore berlaku di awal submit, jadi pekerjaan yang boleh jalan lebih dulu
+  harus berada di command buffer yang berbeda.
+- **Frame graph yang mengerti kepemilikan antrean.** `SetQueue` menandai pass;
+  sisanya diturunkan. Kompilasi melacak pemilik tiap resource dan memancarkan
+  pelepasan ke pass yang terakhir memakainya, pengambilan ke pass yang sekarang.
+  `CompiledGraph::segments` memotong urutan jalan menjadi batch — setiap kali
+  antreannya berganti **dan** setiap kali sebuah pass harus menunggu antrean
+  lain, karena tanpa pemotongan kedua itu tumpang tindih yang dibeli hilang di
+  baris pertama.
+- **Sakelarnya `ViewportDesc::asyncCompute`, benderanya `--bench-async`**, dan
+  tanpa keluarga compute terpisah atau tanpa timeline semaphore ia diam-diam
+  kembali ke satu antrean.
+
+### Empat hal yang hanya bisa dilihat validation layer
+
+Tidak satu pun ditemukan dengan menebak, dan tidak satu pun terlihat sebagai
+gambar yang salah:
+
+1. **Query statistik pipeline tidak ada di antrean compute.** Ia menghitung
+   primitif input assembly, dan antrean yang tidak bisa menggambar tidak
+   mendukungnya. Lingkup ukur pass compute sekarang mengukur waktunya saja.
+2. **Tahap grafis tidak boleh disebut barrier di antrean compute.** Ia muncul di
+   sisi "dari" barrier pass compute yang menimpa resource yang frame sebelumnya
+   dibaca pass forward; ketergantungan itu sudah dijaga fence slot frame, dan
+   yang tersisa hanya namanya. Eksekutor menyaring tahap menurut antrean
+   perekamnya, dan mengosongkan sisi seberang tiap perpindahan kepemilikan.
+3. **Kaskade SDF dipakai bersama antar-frame.** Antrean compute frame ini
+   menimpanya sementara antrean grafis frame lalu masih membacanya — balapan
+   lintas-frame, yaitu justru yang tidak dilihat frame graph. Batch compute
+   pertama tiap frame menunggu antrean grafis frame sebelumnya.
+4. **Reset query pool berjalan bersamaan dengan penulisan timestamp.** Penanda
+   yang ditulis antrean compute sebelum reset frame ini berjalan ikut terhapus,
+   dan waktunya lalu bukan angka yang salah melainkan angka yang tidak berarti
+   apa-apa — terbaca 28 ms untuk pass 4 ms.
+
+### Satu angka yang berhenti berarti
+
+"Jumlah waktu tiap pass" sama dengan waktu frame hanya selama tidak ada yang
+berjalan bersamaan; dua pass yang bertumpang tindih dihitung dua kali di sana.
+`GpuProfiler::FrameMilliseconds` mengukur jarak dari penanda paling awal ke
+paling akhir, dan alat ukur menampilkannya sebagai tabel tersendiri. Tanpa itu,
+tabel yang lama akan melaporkan frame yang **naik** dari 7,3 menjadi 11,3 ms
+tepat pada perubahan yang mempercepatnya.
+
+### Hasil
+
+RTX 2060, 1280×720, 120 pemanasan + 240 diukur. Waktu GPU frame, median:
+
+| adegan | GI | satu antrean | async | |
+|---|---|---:|---:|---|
+| `bench-dense` | menyala | 7,501 | **7,211** | −3,9% |
+| `bench-dense` | mati | 2,611 | 2,621 | — |
+| `bench` | menyala | 4,400 | 4,344 | −1,3% |
+| `bench` | mati | 3,610 | 3,611 | — |
+
+**Menang hanya di tempat yang pekerjaan compute-nya besar, dan menangnya kecil.**
+Yang ditumpangkan `sdf-fill`, 4,3 ms; pekerjaan grafis yang bisa berjalan di
+bawahnya — bayangan, atlas, langit, prepass, forward — sekitar 2,4 ms. Yang
+seharusnya dihemat karena itu 2,4 ms; yang benar-benar dihemat 0,29 ms.
+
+Sebabnya terukur: **`sdf-fill` sendiri berjalan lebih lambat di antrean compute**
+— 4,330 ms menjadi 5,889 ms, 36% lebih lambat. Keluarga compute pada kartu ini
+berbagi unit yang sama dengan grafis, dan yang didapat dari menjalankan keduanya
+bersamaan sebagian besar dibayar kembali oleh keduanya yang jadi lebih lambat.
+Setengah kriteria selesainya karena itu **tidak** terpenuhi: waktu tiap pass
+berubah, dan berubahnya ke arah yang salah.
+
+**Sakelarnya karena itu mati secara bawaan**, alasan yang sama persis dengan
+occlusion culling di G6: bukan karena ia salah — gambarnya sama persis byte demi
+byte di kedua adegan, GI mati maupun menyala, dan validation bersih di kedua
+jalur — melainkan karena angkanya belum sepadan dengan kelas risiko yang
+diperingatkan di kepala bagian ini.
+
+**Yang belum dikerjakan:** kandidat kedua di daftar di atas — penelusuran GI dan
+pembaruan clipmap ditumpangkan di atas geometry pass frame **berikutnya**. Ia
+yang punya peluang lebih besar, karena yang ditumpangkan bukan lagi 2,4 ms
+melainkan frame penuh; dan ia juga yang paling menuntut, karena
+ketergantungannya menyeberangi batas frame — tempat frame graph tidak melihat
+apa pun.
+
+**Satu catatan yang ditemukan sambil mengukur, dan bukan bagian G7:** adegan
+`bench` dengan GI menyala tidak deterministik antar-jalan — empat jalan berturut
+di jalur satu antrean berselisih 0, 9, dan 16 byte. Jalur async justru
+menghasilkan empat jalan yang sama persis, dan sama persis pula dengan jalur satu
+antrean. Yang bergerak ada di dalam GI, bukan di antreannya.
 
 ---
 
@@ -1759,7 +1858,7 @@ kembali ke daftar.
 | G4 | Clipmap SDF, Hi-Z, dan penetapan cluster pindah ke compute | G3 | ✅ (Hi-Z diukur lalu dikembalikan — lihat catatannya) |
 | G5 | Bindless (`descriptorIndexing`) + material terindeks | G2 | ✅ |
 | G6 | Indirect draw + occlusion culling dua fase | G3, G5 | ✅ keduanya tepat; occlusion mati secara bawaan karena angkanya |
-| G7 | Async compute lewat timeline semaphore | G4, G6 | ⏳ |
+| G7 | Async compute lewat timeline semaphore | G4, G6 | ✅ mesinnya; mati secara bawaan karena angkanya (−3,9%) |
 | G8 | Resolusi dinamis | E8.8 (TAA), G0 | ⏳ |
 
 G1 dan G2 tidak saling menunggu dan tidak menunggu apa pun kecuali G0. G5 hanya

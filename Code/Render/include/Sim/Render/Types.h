@@ -458,6 +458,14 @@ struct ViewportDesc {
     /// Menuntut keluarga antrean compute yang terpisah **dan** timeline
     /// semaphore. Tanpa keduanya ia diam-diam kembali ke satu antrean — bukan
     /// gagal, karena jalur satu-antrean memang jalur yang benar di sana.
+    ///
+    /// **Mati secara bawaan karena angkanya, bukan karena ia salah.** Gambarnya
+    /// sama persis byte demi byte di kedua adegan uji, GI mati maupun menyala.
+    /// Yang menahannya: frame adegan padat turun 7,50 menjadi 7,21 ms — 3,9% —
+    /// karena `sdf-fill` sendiri berjalan 36% lebih lambat di antrean compute,
+    /// dan yang didapat dari menjalankan keduanya bersamaan sebagian besar
+    /// dibayar kembali di sana. Angkanya lengkap di G7 pada
+    /// docs/PLAN-GPU-OPTIM.md.
     bool asyncCompute = false;
 };
 
