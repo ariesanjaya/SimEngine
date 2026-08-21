@@ -115,6 +115,7 @@ void PrintUsage() {
         "  --bench-furnace               uji tungku: langit seragam 1, albedo 1, tanpa matahari\n"
         "  --dump-mesh <file> --dump-out <json>  material dan ruas sebuah berkas mesh\n"
         "  --dump-uv <bin>               posisi+UV tiap titik, float32 x5\n"
+        "  --dump-tri <bin>              posisi+UV tiap sudut segitiga, float32 x15\n"
         "  --bench-compute               ganti gambarnya dengan pass compute uji (G3)\n"
         "  --validate-sync               nyalakan validasi sinkronisasi; lambat, sengaja\n"
         "  --bench-cpu-clusters          penetapan cluster di CPU, bukan GPU (G4)\n"
@@ -532,6 +533,32 @@ int main(int argc, char** argv) {
             }
             SIM_INFO("Headless", "{} titik posisi+UV ditulis ke {}", mesh.vertices.size(),
                      std::string(uvOut));
+        }
+
+        // Sudut demi sudut, dalam urutan segitiga.
+        //
+        // **Bukan sekadar lebih rinci daripada `--dump-uv`; ia menjawab
+        // pertanyaan yang tidak bisa dijawab per titik.** Di jahitan UV satu
+        // posisi membawa dua nilai atau lebih, jadi dua impor bisa sepakat soal
+        // *himpunan* UV di sebuah posisi dan tetap berbeda soal sudut mana
+        // mendapat yang mana — dan yang terlihat dari kekeliruan itu adalah
+        // tekstur yang robek tepat di jahitannya.
+        if (const std::string_view triOut = FlagValue(argc, argv, "--dump-tri"); !triOut.empty()) {
+            std::ofstream raw{std::filesystem::path(triOut), std::ios::binary};
+            for (std::size_t i = 0; i + 2 < mesh.indices.size(); i += 3) {
+                float row[15];
+                for (int c = 0; c < 3; ++c) {
+                    const assets::MeshVertex& v = mesh.vertices[mesh.indices[i + c]];
+                    row[c * 5 + 0] = v.position.x;
+                    row[c * 5 + 1] = v.position.y;
+                    row[c * 5 + 2] = v.position.z;
+                    row[c * 5 + 3] = v.uv.x;
+                    row[c * 5 + 4] = v.uv.y;
+                }
+                raw.write(reinterpret_cast<const char*>(row), sizeof(row));
+            }
+            SIM_INFO("Headless", "{} segitiga sudut+UV ditulis ke {}", mesh.TriangleCount(),
+                     std::string(triOut));
         }
         // **Ke berkas, bukan ke stdout.** Log proses ini juga menulis ke
         // stdout, jadi keluaran yang dicampur dengannya bukan JSON yang sah —
