@@ -442,6 +442,14 @@ int main(int argc, char** argv) {
 
     editor::Selection selection;
     editor::SceneView sceneView;
+    // **Tanpa ini setiap material bertekstur digambar tanpa teksturnya, dan
+    // tanpa satu pun pesan.** `SceneView::UploadedTexture` menjawab
+    // "tekstur tidak ada" begitu bakery-nya null, materialnya tetap dikompilasi
+    // — dengan tekstur kosong — dan hasilnya permukaan putih rata yang tidak
+    // bisa dibedakan dari material yang memang tidak bertekstur. Sampai adegan
+    // Sponza masuk, tidak ada adegan uji headless yang punya tekstur sama
+    // sekali, jadi tidak ada yang menagihnya.
+    sceneView.SetTextureBakery(app.Context().textureBakery);
     // **Material sungguhan ikut diukur, bukan hanya jalur mundur.**
     //
     // Sampai G5 sambungan ini hanya dipasang `ViewportPanel`, dan SimHeadless
@@ -706,9 +714,21 @@ int main(int argc, char** argv) {
         // permintaan kompilasi adalah `SceneView::Build`, dan yang mengambil
         // hasilnya juga ia.
         if (app.Context().materialPrograms != nullptr) {
-            constexpr uint32_t kMaxSettleFrames = 3000;
+            // **Batasnya waktu, bukan jumlah frame.** Yang ditunggu di sini
+            // bukan frame melainkan kompilasi shader dan pemanggangan tekstur,
+            // dan keduanya berjalan di thread lain dengan kecepatan yang tidak
+            // ada hubungannya dengan berapa kali frame disusun. Batas 3.000
+            // frame dulu berarti enam detik — cukup untuk adegan uji yang
+            // materialnya delapan, dan jauh dari cukup untuk adegan yang
+            // teksturnya tujuh puluh dua lembar 4K: yang terukur lalu adegan
+            // yang setengah materialnya masih jalur mundur.
+            const auto settleBudget = std::chrono::seconds(300);
+            const auto settleStart = std::chrono::steady_clock::now();
             uint32_t settle = 0;
-            for (; settle < kMaxSettleFrames && !gStopping.load(); ++settle) {
+            for (; !gStopping.load(); ++settle) {
+                if (std::chrono::steady_clock::now() - settleStart > settleBudget) {
+                    break;
+                }
                 // **Delta nol, dan itu bukan detail.** Berapa banyak frame yang
                 // dibutuhkan di sini bergantung pada apakah `slangc` menjawab
                 // dari cache atau harus benar-benar berjalan — jadi ia berbeda

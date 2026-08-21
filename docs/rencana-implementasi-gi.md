@@ -196,9 +196,31 @@ membayar salinan itu setiap kali. Ia dipasang sebagai symlink di dalam project
 Tanpa asetnya, level ini memuat langit dan matahari tanpa geometri — bukan gagal,
 tapi juga bukan uji.
 
-**Yang belum ada: materialnya.** glTF-nya membawa 28 material dengan 72 tekstur,
-dan importir sudah membaca jalur teksturnya ke `MeshMaterial`. Yang belum ada
-adalah pemetaan ke aset material engine lewat `.simmeshcfg` — jadi sekarang
-seluruh Sponza digambar dengan albedo bawaan yang putih. Untuk **kebenaran** GI
-itu tidak menghalangi; untuk **menyamai gambar acuannya** ia menghalangi
-seluruhnya, karena pantulan hangat di serambi datang dari warna dindingnya.
+**Materialnya dibangkitkan, bukan dibuat tangan.** `Tools/sponza-assets.py`
+memasang symlink asetnya, menulis 72 `.meta` tekstur, dan membangkitkan 28
+`.simmat` — masing-masing sebuah graf OpenPBR: base color, normal, dan kekasaran
+(kanal G) beserta kelogaman (kanal B) dari tekstur gabungan glTF. GUID-nya
+`uuid5` dari nama berkasnya, jadi menjalankannya ulang menghasilkan angka yang
+sama persis; GUID acak akan memberi identitas baru pada aset yang sama dan
+memutus level yang sudah menyebut yang lama.
+
+Larik `materials` di level diindeks **nomor ruas**, dan urutan ruas adalah urutan
+material saat pertama ditemui menelusuri node lalu primitive — sama persis dengan
+yang dilakukan importir glTF, dan `GroupByMaterial` mengurutkan ruasnya menurut
+indeks itu. Skrip yang sama menuliskannya ke level.
+
+### Dua cacat alat ukur yang ditemukan adegan ini
+
+Keduanya diam, dan keduanya baru bisa ditemukan oleh adegan yang **punya**
+tekstur — sampai Sponza masuk, tidak ada satu pun adegan uji headless yang
+punya:
+
+- **SimHeadless tidak pernah menyerahkan texture bakery ke `SceneView`.** Hanya
+  `ViewportPanel` yang melakukannya. Tanpa itu `UploadedTexture` menjawab
+  "tekstur tidak ada", materialnya tetap dikompilasi — dengan tekstur kosong —
+  dan hasilnya permukaan putih rata yang tidak bisa dibedakan dari material yang
+  memang tidak bertekstur. Tidak ada satu pun peringatan di sepanjang jalur itu.
+- **Batas tunggu kompilasi material dihitung dalam frame, bukan waktu.** 3.000
+  frame berarti enam detik; adegan yang teksturnya 72 lembar 4K butuh sekitar
+  satu menit untuk memanggangnya pada jalan pertama. Yang terukur lalu adegan
+  yang setengah materialnya masih jalur mundur. Sekarang batasnya waktu.
