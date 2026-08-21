@@ -118,6 +118,24 @@ SdfHit traceSdf(float3 origin, float3 direction, float tMax) {
     result.unknown = false;
 
     int maxSteps = int(shadowParams.sdfParams.w);
+
+    // **Sinar mengabaikan permukaannya sendiri sepanjang satu voxel pertama.**
+    // Titik asal probe sudah digeser satu voxel sepanjang normalnya, dan itu
+    // tetap tidak cukup: permukaan nol medan jarak sendiri meleset sampai
+    // setengah voxel grid mesh-nya ditambah setengah voxel kaskadenya. Terukur
+    // di lantai serambi Sponza — medan di titik asal membaca 0,49 voxel,
+    // sementara ambang "mengenai" 0,5. Setiap sinar dari probe itu lalu
+    // mengenai sesuatu di langkah pertama, ke arah mana pun, dan probe yang
+    // seluruh sinarnya begitu tidak punya apa pun untuk ditaksir: 91% bobot
+    // probe lantai depan datang dari probe mati seperti itu.
+    //
+    // Melewatinya, bukan membuang sinarnya: sinar yang mengarah menjauh
+    // memang harus melanjutkan perjalanannya, dan yang mengarah ke dalam
+    // mengenai permukaannya satu voxel kemudian. Yang hilang oklusi pada skala
+    // satu voxel — kontak — dan itu jauh lebih murah daripada probe yang mati.
+    int firstCascade = cascadeFor(origin);
+    float selfSkip = firstCascade >= 0 ? cascadeVoxelSize(firstCascade) : 0.0;
+
     float travelled = 0.0;
     for (int step = 0; step < maxSteps; ++step) {
         float3 position = origin + direction * travelled;
@@ -148,19 +166,16 @@ SdfHit traceSdf(float3 origin, float3 direction, float tMax) {
         // lapis layar. Yang mengembalikannya seluruhnya adalah medan jarak yang
         // benar-benar mengikuti segitiga, dan itu M1 di rencana GI.
         //
-        // **Ambangnya ambang hit, bukan tanda.** Diuji keduanya sesudah medan
-        // jarak sungguhan ada: menguji `distance < 0` — "benar-benar di dalam
-        // benda" — meloloskan sinar yang titik asalnya tepat di ambang hit, dan
-        // sinar itu mengenai permukaannya sendiri di jarak nol ke arah mana
-        // pun. Piksel hitam naik 4,9% menjadi 7,5%. Yang tidak punya jawaban
-        // bukan hanya titik di dalam benda melainkan setiap titik yang sudah
-        // berada di ambang.
-        if (step == 0 && distance < voxel * 0.5) {
+        // **Yang benar-benar di dalam benda tetap tidak punya jawaban.** Sphere
+        // tracing menjawab "berapa jauh sampai permukaan" dari luar; dari
+        // dalam, jawabannya nol ke arah mana pun. Itu berbeda dari titik yang
+        // hanya tersenggol ambang, yang dijawab `selfSkip` di atas.
+        if (step == 0 && distance < 0.0) {
             result.steps = 1;
             result.unknown = true;
             return result;
         }
-        if (distance < voxel * 0.5) {
+        if (distance < voxel * 0.5 && travelled >= selfSkip) {
             result.hit = true;
             result.distance = travelled;
             result.position = position;
@@ -456,6 +471,9 @@ float3 giSkyGradient(float3 direction) {
 /// atmosfernya di sini akan mengulang pekerjaan yang sudah dibayar frame ini,
 /// enam belas kali per probe.
 float3 giSky(float3 direction) {
+    if (shadowParams.giParams.w > 0.5) {
+        return float3(1.0);  // uji tungku: langit seragam berintensitas satu
+    }
     float intensity = shadowParams.skyParams.x;
     if (intensity <= 0.0) {
         return giSkyGradient(direction);
@@ -512,6 +530,9 @@ float3 giSky(float3 direction) {
 /// menghasilkan sepetak warna yang tidak dimiliki bahan mana pun, tepat di
 /// tempat yang paling diperhatikan mata.
 float3 giAlbedoAt(float3 world) {
+    if (shadowParams.giParams.w > 0.5) {
+        return float3(1.0);  // uji tungku: albedo satu di mana-mana
+    }
     int count = min(int(shadowParams.giParams.z), kGiMaxGrids);
     for (int g = 0; g < count; ++g) {
         GiGrid grid = giGrids[g];
@@ -533,20 +554,36 @@ float3 giAlbedoAt(float3 world) {
     return shadowParams.giBounce.rgb;
 }
 
-float3 giGuessedBounce(float3 position, float3 normal) {
+/// `localIrradiance` adalah iradiansi yang diterima probe yang menembakkan sinar
+/// ini, dari frame sebelumnya.
+///
+/// **Separuh bola yang bukan langit bukan kegelapan — ia permukaan lain.**
+/// Bentuk sebelumnya berhenti pada `albedo * langit * 0,5`, dan itu gagal uji
+/// tungku yang menjadi kriteria selesai M4: di bawah cahaya seragam
+/// berintensitas satu dengan albedo satu, setiap permukaan seharusnya
+/// berradiansi satu, dan rumus itu menjawab setengah. Yang hilang persis
+/// separuh yang lain — permukaan tetangga, yang di bawah tungku juga
+/// berradiansi satu.
+///
+/// Taksiran radiansi tetangga: albedo dikali iradiansi probe ini sendiri dibagi
+/// π. Ia menutup rekursinya lewat suku yang **bertambah tiap frame** —
+/// pantulan kedua, ketiga, dan seterusnya masuk sebagai deret yang konvergen
+/// karena albedo selalu di bawah satu. Di bawah tungku titik tetapnya tepat
+/// satu.
+float3 giGuessedBounce(float3 position, float3 normal, float3 localIrradiance) {
     float3 albedo = giAlbedoAt(position);
     float ndotl = max(dot(normal, shadowParams.lightDirection.xyz), 0.0);
     float sun = ndotl > 0.0 ? sampleShadow(position, normal) * ndotl : 0.0;
+    if (shadowParams.giParams.w > 0.5) {
+        sun = 0.0;  // uji tungku: tidak ada matahari, hanya cahaya seragam
+    }
 
-    // **Setengah langit, bukan seluruhnya.** `albedo * L` adalah radiansi
-    // permukaan Lambert di bawah langit seragam yang terlihat penuh; sebuah
-    // permukaan yang menempel di dinding paling banyak melihat separuh bola,
-    // dan separuh sisanya adalah adegan yang justru tidak bisa ditaksir dari
-    // sini. Mengambil seluruhnya menerangi bagian dalam gedung seterang
-    // halamannya.
+    // Berapa bagian bola yang dianggap langit. Sebuah permukaan yang menempel
+    // di dinding paling banyak melihat separuh bola; sisanya adegan.
     const float kSkyClosure = 0.5;
+    float3 nearby = albedo * max(localIrradiance, float3(0.0)) / kPi;
     return albedo * (shadowParams.sunRadiance.rgb * (sun / kPi) +
-                     giSky(normal) * kSkyClosure);
+                     giSky(normal) * kSkyClosure + nearby * (1.0 - kSkyClosure));
 }
 
 #endif

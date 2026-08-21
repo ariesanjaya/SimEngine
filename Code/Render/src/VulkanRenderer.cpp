@@ -129,7 +129,8 @@ struct ShadowUniforms {
     /// minimum, w skala penjepitan riwayat.
     Vec4 denoise{0.0f};
     /// x 1 kalau iradiansi GI berlaku, y ukuran ubin probe dalam piksel,
-    /// z banyaknya grid medan jarak yang punya entri frame ini.
+    /// z banyaknya grid medan jarak yang punya entri frame ini, w 1 saat uji
+    /// tungku.
     Vec4 giParams{0.0f};
     /// Langit untuk GI: x pengali radiansi, y ketinggian kamera (km),
     /// zw ukuran LUT sky-view. **Pengali nol berarti tidak ada atmosfer** —
@@ -5194,7 +5195,8 @@ private:
         const bool giReady = desc.gi.enabled && probes_.IsValid() && probeFrame_ > 1;
         uniforms.giParams = Vec4(giReady ? 1.0f : 0.0f,
                                  static_cast<float>(probeGrid_.Settings().tileSize),
-                                 static_cast<float>(sdfClipmap_.ActiveGridCount()), 0.0f);
+                                 static_cast<float>(sdfClipmap_.ActiveGridCount()),
+                                 desc.gi.furnaceTest ? 1.0f : 0.0f);
         // **Syarat yang sama persis dengan syarat pass langit didaftarkan.**
         // LUT sky-view hanya diperbarui di dalam pass itu; menyuruh GI
         // membacanya saat pass-nya tidak ada berarti menerangi adegan dengan

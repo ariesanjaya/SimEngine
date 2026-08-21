@@ -78,6 +78,45 @@ float3 unpackNormal(float packed) {
     return octDecode(oct);
 }
 
+/// Radiansi sebuah titik dunia **kalau titik itu kebetulan sedang terlihat
+/// layar**.
+///
+/// **Lapis layar mencari titiknya; ini menanyakannya.** Keduanya membaca gambar
+/// yang sama, dan bedanya arah kerja: penelusur screen-space menyusuri piksel
+/// demi piksel dengan anggaran enam belas langkah dan menyerah pada sinar yang
+/// panjang — di Sponza ia menjawab 6% sinar probe. Yang di sini sudah tahu
+/// titik dunianya dari lapis SDF, jadi ia hanya memproyeksikan sekali dan
+/// membandingkan kedalaman. Setiap permukaan yang terlihat di layar karena itu
+/// menyumbang warnanya yang sebenarnya, bukan tebakan.
+///
+/// Uji kedalamannya yang membuatnya bukan sekadar proyeksi: piksel di uv itu
+/// bisa saja permukaan lain yang berdiri di depannya. Toleransinya dua voxel
+/// kaskade setempat — cukup longgar untuk kesalahan setengah voxel medan
+/// jaraknya, cukup ketat untuk menolak dinding yang berbeda.
+bool giScreenRadianceAt(float3 world, float tolerance, out float3 radiance) {
+    radiance = float3(0.0);
+    float4 clip = mul(shadowParams.viewProj, float4(world, 1.0));
+    if (clip.w <= 1e-4) {
+        return false;
+    }
+    float2 uv = (clip.xy / clip.w) * 0.5 + 0.5;
+    if (any(uv < 0.0) || any(uv > 1.0)) {
+        return false;
+    }
+    float2 viewport = shadowParams.viewportSize.xy;
+    int2 texel = int2(clamp(uv * viewport, float2(0.0), viewport - 1.0));
+    float depth = hiZ.Load(int3(texel, 0)).r;
+    if (depth <= 0.0) {
+        return false;  // langit di piksel itu: tidak ada permukaan untuk ditanya
+    }
+    float3 surface = unproject((float2(texel) + 0.5) / viewport, depth);
+    if (distance(surface, world) > tolerance) {
+        return false;
+    }
+    radiance = litColor.Load(int3(texel, 0)).rgb;
+    return true;
+}
+
 [shader("fragment")]
 ProbeSh main(float4 position : SV_Position) {
     uint2 probe = uint2(position.xy);
@@ -132,6 +171,48 @@ ProbeSh main(float4 position : SV_Position) {
                                            : shadowParams.sdfOrigin[0].w;
     float3 traceOrigin = origin + surfaceNormal * (pc.params.w * originVoxel);
 
+    // --- Reproyeksi riwayat, dicari sebelum sinar ditembakkan ----------------
+    //
+    // **Riwayat diikat ke dunia, bukan ke piksel.** Sampai M4 seluruh riwayat
+    // dibuang begitu kamera berpindah, karena piksel yang sama menunjuk
+    // permukaan yang berbeda. Di sini titik dunia yang sama dicari di tempatnya
+    // berada frame lalu.
+    //
+    // **Dicari di sini, bukan sesudah putaran sinar seperti dulu**, karena ia
+    // punya pemakai kedua: penutup rekursi untuk permukaan yang tidak dikenal
+    // siapa pun memakai iradiansi probe ini sendiri sebagai taksiran radiansi
+    // tetangganya. Lihat catatan di `giGuessedBounce`.
+    float4 historyR = float4(0.0);
+    float4 historyG = float4(0.0);
+    float4 historyB = float4(0.0);
+    bool hasHistory = false;
+
+    float4 previousClip = mul(shadowParams.previousViewProj, float4(origin, 1.0));
+    if (previousClip.w > 1e-6) {
+        float2 previousUv = (previousClip.xy / previousClip.w) * 0.5 + 0.5;
+        if (all(previousUv >= 0.0) && all(previousUv <= 1.0)) {
+            float2 previousPixel = previousUv * viewport;
+            int2 previousProbe = int2(clamp(previousPixel / tile - 0.5 + 0.5, float2(0.0),
+                                            float2(pc.grid.xy) - 1.0));
+
+            float4 previousSurface = historySurface.Load(int3(previousProbe, 0));
+            float3 previousNormal = unpackNormal(previousSurface.w);
+            // Ditolak lewat jarak tegak lurus bidang dan kesamaan normal — sama
+            // dengan bobot interpolasi probe, dan alasannya sama: dua titik di
+            // lantai yang sama boleh berjauhan, dua titik terpisah dinding tidak
+            // boleh berdekatan.
+            float plane = abs(dot(previousSurface.xyz - origin, surfaceNormal));
+            float cosine = dot(previousNormal, surfaceNormal);
+            hasHistory = previousSurface.w != 0.0 && plane <= shadowParams.denoise.y &&
+                         cosine >= shadowParams.denoise.z;
+            if (hasHistory) {
+                historyR = historyShR.Load(int3(previousProbe, 0));
+                historyG = historyShG.Load(int3(previousProbe, 0));
+                historyB = historyShB.Load(int3(previousProbe, 0));
+            }
+        }
+    }
+
     uint rayCount = pc.grid.w * pc.grid.w;
     uint frame = uint(pc.params.x);
     uint jitterPeriod = uint(pc.params.y);
@@ -145,6 +226,13 @@ ProbeSh main(float4 position : SV_Position) {
     // yang menjawab, dan mana yang menjawab berubah tiap frame karena arahnya
     // berjitter. Membuangnya menaksir iradiansi dari sinar yang benar-benar
     // diketahui; menghitungnya nol menaksir sesuatu yang tidak ada.
+    // Di bawah uji tungku setiap jawaban yang **diketahui** bernilai satu:
+    // permukaan ber-albedo satu di bawah cahaya seragam satu berradiansi satu,
+    // dan itu berlaku baik ia dibaca dari layar, dari cache, maupun dari
+    // langit. Yang tersisa diuji hanyalah penutup rekursi untuk permukaan yang
+    // tidak dikenal siapa pun.
+    const bool furnace = shadowParams.giParams.w > 0.5;
+
     uint known = 0u;
     for (uint ray = 0u; ray < rayCount; ++ray) {
         float3 direction =
@@ -176,8 +264,17 @@ ProbeSh main(float4 position : SV_Position) {
             // tebakan yang jauh lebih baik daripada sumbu tetap mana pun.
             float3 hitNormal = sdfSurfaceNormal(cascade, hit.position, -direction);
             float3 cached;
-            if (giCacheQuery(hit.position, hitNormal, cameraPosition, cached)) {
-                radiance = cached;
+            float3 seen;
+            if (giScreenRadianceAt(hit.position, 2.0 * cascadeVoxelSize(cascade), seen)) {
+                // **Yang terlihat layar adalah jawaban yang sebenarnya**, dan ia
+                // mendahului cache: cache menyimpan warna dari frame-frame lalu,
+                // sedangkan ini warna frame ini. Disimpan juga, supaya permukaan
+                // yang sebentar lagi keluar layar tetap menyumbang cahaya.
+                radiance = furnace ? float3(1.0) : seen;
+                giCacheInsert(hit.position, hitNormal, cameraPosition, radiance,
+                              uint(shadowParams.cacheDecay.z));
+            } else if (giCacheQuery(hit.position, hitNormal, cameraPosition, cached)) {
+                radiance = furnace ? float3(1.0) : cached;
             } else if (shadowParams.giBounce.w > 0.5) {
                 // **"Tidak tahu" ditaksir, bukan lagi dibuang.** Membuangnya
                 // benar selama satu-satunya sumber radiansi adalah layar: yang
@@ -187,7 +284,14 @@ ProbeSh main(float4 position : SV_Position) {
                 // ada sama sekali — dan probe yang tidak punya satu pun sinar
                 // yang diketahui mengembalikan nol. Serambi Sponza karena itu
                 // hitam pekat justru ketika GI dinyalakan.
-                radiance = giGuessedBounce(hit.position, hitNormal);
+                // Iradiansi probe ini sendiri, dari frame lalu, dievaluasi
+                // pada normal permukaan yang dikenai: taksiran radiansi
+                // tetangga yang menutup rekursinya. Nol pada frame pertama,
+                // dan pantulan keduanya masuk frame demi frame.
+                float3 localIrradiance =
+                    hasHistory ? giEvaluateSh(historyR, historyG, historyB, hitNormal)
+                               : float3(0.0);
+                radiance = giGuessedBounce(hit.position, hitNormal, localIrradiance);
             } else {
                 continue;
             }
@@ -200,7 +304,7 @@ ProbeSh main(float4 position : SV_Position) {
             // yang tampak seperti cahaya yang masuk akal tapi datang dari
             // tempat yang salah.
             int2 texel = int2(hit.uv * viewport);
-            radiance = litColor.Load(int3(texel, 0)).rgb;
+            radiance = furnace ? float3(1.0) : litColor.Load(int3(texel, 0)).rgb;
             // **Yang dilihat layar disimpan supaya bisa dipakai saat ia tidak
             // lagi terlihat.** Normalnya dibaca dari G-buffer di piksel yang
             // sama, bukan ditebak dari arah sinar: permukaan yang dikenai
@@ -237,62 +341,31 @@ ProbeSh main(float4 position : SV_Position) {
         output.b *= weight;
     }
 
-    // --- Reproyeksi riwayat --------------------------------------------------
-    //
-    // **Riwayat diikat ke dunia, bukan ke piksel.** Sampai M4 seluruh riwayat
-    // dibuang begitu kamera berpindah, karena piksel yang sama menunjuk
-    // permukaan yang berbeda. Di sini titik dunia yang sama dicari di tempatnya
-    // berada frame lalu.
-    float window = max(shadowParams.denoise.x, 1.0);
-    float alpha = 1.0;
+    // --- Memadu dengan riwayat -----------------------------------------------
+    if (hasHistory) {
+        // **Penjepitan riwayat memutus pertukaran respons lawan derau.**
+        // Jendela pendek merespons cepat tapi berderau; jendela panjang
+        // sebaliknya. Selama riwayatnya sejalan dengan sampel frame ini ia
+        // dipertahankan utuh; begitu adegannya benar-benar berubah — lampu
+        // dimatikan — riwayat yang sudah tidak sejalan dijepit masuk ke rentang
+        // baru dalam satu frame, bukan meluruh perlahan sebagai ghosting.
+        //
+        // Penjepitan hanya berlaku bila ada sampel untuk menjepitnya: menjepit
+        // riwayat terhadap nol yang bukan hasil pengukuran adalah cara lain
+        // menghapus riwayat itu.
+        float scale = sampled ? shadowParams.denoise.w : 1e30;
+        float4 spreadR = abs(output.r) * scale + 1e-3;
+        float4 spreadG = abs(output.g) * scale + 1e-3;
+        float4 spreadB = abs(output.b) * scale + 1e-3;
+        historyR = clamp(historyR, output.r - spreadR, output.r + spreadR);
+        historyG = clamp(historyG, output.g - spreadG, output.g + spreadG);
+        historyB = clamp(historyB, output.b - spreadB, output.b + spreadB);
 
-    float4 previousClip = mul(shadowParams.previousViewProj, float4(origin, 1.0));
-    if (previousClip.w > 1e-6) {
-        float2 previousUv = (previousClip.xy / previousClip.w) * 0.5 + 0.5;
-        if (all(previousUv >= 0.0) && all(previousUv <= 1.0)) {
-            float2 previousPixel = previousUv * viewport;
-            int2 previousProbe = int2(clamp(previousPixel / tile - 0.5 + 0.5, float2(0.0),
-                                            float2(pc.grid.xy) - 1.0));
-
-            float4 previousSurface = historySurface.Load(int3(previousProbe, 0));
-            float3 previousNormal = unpackNormal(previousSurface.w);
-            // Ditolak lewat jarak tegak lurus bidang dan kesamaan normal — sama
-            // dengan bobot interpolasi probe, dan alasannya sama: dua titik di
-            // lantai yang sama boleh berjauhan, dua titik terpisah dinding tidak
-            // boleh berdekatan.
-            float plane = abs(dot(previousSurface.xyz - origin, surfaceNormal));
-            float cosine = dot(previousNormal, surfaceNormal);
-            bool usable = previousSurface.w != 0.0 && plane <= shadowParams.denoise.y &&
-                          cosine >= shadowParams.denoise.z;
-            if (usable) {
-                float4 historyR = historyShR.Load(int3(previousProbe, 0));
-                float4 historyG = historyShG.Load(int3(previousProbe, 0));
-                float4 historyB = historyShB.Load(int3(previousProbe, 0));
-
-                // **Penjepitan riwayat memutus pertukaran respons lawan derau.**
-                // Jendela pendek merespons cepat tapi berderau; jendela panjang
-                // sebaliknya. Selama riwayatnya sejalan dengan sampel frame ini
-                // ia dipertahankan utuh; begitu adegannya benar-benar berubah —
-                // lampu dimatikan — riwayat yang sudah tidak sejalan dijepit
-                // masuk ke rentang baru dalam satu frame, bukan meluruh
-                // perlahan sebagai ghosting.
-                // Penjepitan hanya berlaku bila ada sampel untuk menjepitnya:
-                // menjepit riwayat terhadap nol yang bukan hasil pengukuran
-                // adalah cara lain menghapus riwayat itu.
-                float scale = sampled ? shadowParams.denoise.w : 1e30;
-                float4 spreadR = abs(output.r) * scale + 1e-3;
-                float4 spreadG = abs(output.g) * scale + 1e-3;
-                float4 spreadB = abs(output.b) * scale + 1e-3;
-                historyR = clamp(historyR, output.r - spreadR, output.r + spreadR);
-                historyG = clamp(historyG, output.g - spreadG, output.g + spreadG);
-                historyB = clamp(historyB, output.b - spreadB, output.b + spreadB);
-
-                alpha = sampled ? 1.0 / window : 0.0;
-                output.r = lerp(historyR, output.r, alpha);
-                output.g = lerp(historyG, output.g, alpha);
-                output.b = lerp(historyB, output.b, alpha);
-            }
-        }
+        float window = max(shadowParams.denoise.x, 1.0);
+        float alpha = sampled ? 1.0 / window : 0.0;
+        output.r = lerp(historyR, output.r, alpha);
+        output.g = lerp(historyG, output.g, alpha);
+        output.b = lerp(historyB, output.b, alpha);
     }
     return output;
 }

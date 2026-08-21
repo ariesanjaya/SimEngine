@@ -110,6 +110,7 @@ void PrintUsage() {
         "  --bench-gi-debug <view>       off|albedo|normal|irradiance|raycount|steps|layers\n"
         "  --bench-ev <ev100>            eksposur manual pada EV100 ini\n"
         "  --bench-no-screen-trace       matikan lapis screen-space; lihat SDF sendirian\n"
+        "  --bench-furnace               uji tungku: langit seragam 1, albedo 1, tanpa matahari\n"
         "  --bench-compute               ganti gambarnya dengan pass compute uji (G3)\n"
         "  --validate-sync               nyalakan validasi sinkronisasi; lambat, sengaja\n"
         "  --bench-cpu-clusters          penetapan cluster di CPU, bukan GPU (G4)\n"
@@ -651,6 +652,20 @@ int main(int argc, char** argv) {
                 occlusion = true;
             } else if (flag == "--bench-fixed-exposure") {
                 fixedExposure = true;
+            } else if (flag == "--bench-furnace") {
+                // Uji tungku, kriteria selesai M4.
+                //
+                // **Lapis layar tetap menyala.** Mematikannya juga mematikan
+                // pass piramida HiZ, dan tampilan iradiansi membaca kedalaman
+                // dari piramida itu untuk tahu piksel mana yang punya
+                // permukaan — jadi seluruh layar terbaca langit dan yang
+                // terukur bukan apa-apa. Yang membuat lapis layar tidak
+                // mengotori tungkunya adalah shader: di bawah tungku setiap
+                // jawaban yang *diketahui* bernilai satu, karena permukaan
+                // ber-albedo satu di bawah cahaya seragam satu memang
+                // berradiansi satu. Yang tersisa diuji hanyalah penutup
+                // rekursinya.
+                app.Context().gi.furnaceTest = true;
             } else if (flag == "--bench-no-screen-trace") {
                 // **Lapis layar dimatikan supaya lapis SDF bisa dilihat
                 // sendirian.** Kriteria selesai M1 menuntut penelusuran sphere
