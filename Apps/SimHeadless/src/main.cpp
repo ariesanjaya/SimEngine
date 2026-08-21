@@ -12,6 +12,7 @@
 #include "Sim/AIBridge/McpServer.h"
 #include "Sim/AIBridge/ResourceRegistry.h"
 #include "Sim/AIBridge/ToolRegistry.h"
+#include "Sim/Assets/MeshSdfBakery.h"
 #include "Sim/Core/Log.h"
 #include "Sim/Core/MainThreadQueue.h"
 #include "Sim/Core/TaskPool.h"
@@ -32,6 +33,7 @@
 #include <glm/gtx/quaternion.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -42,6 +44,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -98,9 +101,15 @@ void PrintUsage() {
         "  --bench-capture <path.png>    simpan sebuah frame; kameranya deterministik\n"
         "  --bench-capture-frame <n>     frame mana yang disimpan, bawaan yang terakhir\n"
         "  --bench-cull-first <n>        gambar hanya permukaan bernomor >= n\n"
+        "  --bench-async                 pass compute di antrean terpisah (G7)\n"
+        "  --bench-settle-seconds <n>    batas menunggu material siap, bawaan 300\n"
+        "  --bench-camera px,py,pz,tx,ty,tz  kamera tetap, bukan lintasan orbit\n"
         "  --bench-dump-depth <path>     depth buffer mentah (w, h, float per texel)\n"
         "  --bench-cull-limit <n>        gambar hanya permukaan bernomor < n\n"
         "  --bench-fixed-exposure        eksposur manual; wajib untuk membandingkan gambar\n"
+        "  --bench-gi-debug <view>       off|albedo|normal|irradiance|raycount|steps|layers\n"
+        "  --bench-ev <ev100>            eksposur manual pada EV100 ini\n"
+        "  --bench-no-screen-trace       matikan lapis screen-space; lihat SDF sendirian\n"
         "  --bench-compute               ganti gambarnya dengan pass compute uji (G3)\n"
         "  --validate-sync               nyalakan validasi sinkronisasi; lambat, sengaja\n"
         "  --bench-cpu-clusters          penetapan cluster di CPU, bukan GPU (G4)\n"
@@ -393,6 +402,13 @@ int main(int argc, char** argv) {
 #endif
 
     editor::EditorApp app;
+    // **Worker berhenti sebelum apa pun yang mengantre pekerjaan ke sana
+    // dihancurkan.** `app` memiliki bakery tekstur, database aset, dan penjaga
+    // shader; ketiganya mengirim tugas yang menangkap `this`. Dideklarasikan di
+    // sini, sesudah `app`, jadi ia dihancurkan lebih dulu — pada jalur `return`
+    // manapun, termasuk yang gagal di tengah.
+    const TaskPool::StopGuard stopWorkers(tasks);
+
     editor::EditorApp::Config config;
     config.configDir = configDir;
     config.resourceDir = std::filesystem::path(argv[0]).parent_path() / "Resources";
@@ -440,6 +456,18 @@ int main(int argc, char** argv) {
 
     editor::Selection selection;
     editor::SceneView sceneView;
+    // **Tanpa ini setiap material bertekstur digambar tanpa teksturnya, dan
+    // tanpa satu pun pesan.** `SceneView::UploadedTexture` menjawab
+    // "tekstur tidak ada" begitu bakery-nya null, materialnya tetap dikompilasi
+    // — dengan tekstur kosong — dan hasilnya permukaan putih rata yang tidak
+    // bisa dibedakan dari material yang memang tidak bertekstur. Sampai adegan
+    // Sponza masuk, tidak ada adegan uji headless yang punya tekstur sama
+    // sekali, jadi tidak ada yang menagihnya.
+    sceneView.SetTextureBakery(app.Context().textureBakery);
+    // Dan medan jarak mesh, dengan alasan yang sama: tanpanya clipmap GI
+    // menyusun Sponza sebagai satu kotak pejal, dan yang terukur adalah
+    // adegan yang setiap sinar probenya mengenai dinding di jarak nol.
+    sceneView.SetMeshSdfBakery(app.Context().meshSdfBakery);
     // **Material sungguhan ikut diukur, bukan hanya jalur mundur.**
     //
     // Sampai G5 sambungan ini hanya dipasang `ViewportPanel`, dan SimHeadless
@@ -575,6 +603,17 @@ int main(int argc, char** argv) {
         bool cpuClusters = false;
         bool cpuSdf = false;
         bool cpuCull = false;
+        bool asyncCompute = false;
+        // Kamera tetap, menggantikan lintasan orbit.
+        //
+        // **Lintasan orbit menjawab pertanyaan "berapa biayanya dari segala
+        // arah"; ia tidak menjawab "apakah cahayanya benar".** Yang kedua
+        // menuntut satu sudut pandang yang sama persis tiap jalan, dan pada
+        // adegan berbentuk bangunan ia harus berada di **dalam** — orbit selalu
+        // memotret dindingnya dari luar.
+        bool fixedCamera = false;
+        Vec3 cameraEye{0.0f};
+        Vec3 cameraTarget{0.0f};
         bool occlusion = false;
         // Frame mana yang ditangkap. **Bawaannya yang terakhir, dan itu tidak
         // selalu berguna:** lintasan kamera menutup satu putaran penuh, jadi
@@ -592,6 +631,7 @@ int main(int argc, char** argv) {
         // terlihat di ujung bukan selisih isinya melainkan seluruh gambar yang
         // lebih terang. Dengan eksposur manual, yang dibandingkan kembali isinya.
         bool fixedExposure = false;
+        float manualEv = 0.0f;
         for (int at = 1; at < argc; ++at) {
             if (argv[at] == nullptr) {
                 continue;
@@ -605,11 +645,29 @@ int main(int argc, char** argv) {
                 cpuSdf = true;
             } else if (flag == "--bench-cpu-cull") {
                 cpuCull = true;
+            } else if (flag == "--bench-async") {
+                asyncCompute = true;
             } else if (flag == "--bench-occlusion") {
                 occlusion = true;
             } else if (flag == "--bench-fixed-exposure") {
                 fixedExposure = true;
+            } else if (flag == "--bench-no-screen-trace") {
+                // **Lapis layar dimatikan supaya lapis SDF bisa dilihat
+                // sendirian.** Kriteria selesai M1 menuntut penelusuran sphere
+                // dari kamera cocok dengan depth buffer raster, dan selama
+                // lapis layar menjawab lebih dulu yang terlihat selalu lapis
+                // layar — termasuk ketika medan jaraknya kosong sama sekali.
+                app.Context().gi.screenTrace = false;
             }
+        }
+        // EV100 manual. **Yang dibelinya bukan gambar yang lebih enak melainkan
+        // bagian gelap yang bisa diukur:** sebuah tangkapan 8-bit menjepit
+        // seluruh bayangan ke nol, dan dua adegan yang berbeda seratus kali di
+        // sana tetap terlihat sama hitamnya. Menurunkan EV mengangkat bayangan
+        // itu ke rentang yang masih punya angka.
+        if (const std::string_view value = FlagValue(argc, argv, "--bench-ev"); !value.empty()) {
+            manualEv = std::strtof(std::string(value).c_str(), nullptr);
+            fixedExposure = true;
         }
 
         // **GI dipaksa dari baris perintah, bukan hanya dari level.** Anggaran
@@ -617,6 +675,30 @@ int main(int argc, char** argv) {
         // G0 ingin ukur — jadi garis dasar yang diam-diam mengukur adegan tanpa
         // GI adalah garis dasar yang menjawab pertanyaan lain. Levelnya sendiri
         // tetap yang menentukan bila benderanya tidak ada.
+        if (const std::string_view value = FlagValue(argc, argv, "--bench-camera");
+            !value.empty()) {
+            std::array<float, 6> numbers{};
+            std::size_t at = 0;
+            std::size_t start = 0;
+            const std::string text(value);
+            while (at < numbers.size() && start <= text.size()) {
+                const std::size_t comma = text.find(',', start);
+                numbers[at++] =
+                    std::strtof(text.substr(start, comma - start).c_str(), nullptr);
+                if (comma == std::string::npos) {
+                    break;
+                }
+                start = comma + 1;
+            }
+            if (at != numbers.size()) {
+                SIM_ERROR("Bench", "--bench-camera wants px,py,pz,tx,ty,tz");
+                app.Shutdown();
+                return 2;
+            }
+            fixedCamera = true;
+            cameraEye = Vec3(numbers[0], numbers[1], numbers[2]);
+            cameraTarget = Vec3(numbers[3], numbers[4], numbers[5]);
+        }
         if (const std::string_view value = FlagValue(argc, argv, "--bench-capture-frame");
             !value.empty()) {
             captureFrame = static_cast<uint32_t>(std::strtoul(std::string(value).c_str(), nullptr, 10));
@@ -634,6 +716,35 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Tampilan diagnostik GI dari baris perintah. **Yang menjawab
+        // pertanyaan "kenapa gelap" bukan gambar akhirnya melainkan lapis mana
+        // yang menjawab tiap sinar**, dan tanpa bendera ini satu-satunya cara
+        // melihatnya adalah menjalankan editor dan menekan tombolnya.
+        if (const std::string_view value = FlagValue(argc, argv, "--bench-gi-debug");
+            !value.empty()) {
+            static constexpr std::array<std::pair<std::string_view, render::GiDebugView>, 7> kViews{
+                {{"off", render::GiDebugView::Off},
+                 {"albedo", render::GiDebugView::Albedo},
+                 {"normal", render::GiDebugView::Normal},
+                 {"irradiance", render::GiDebugView::Irradiance},
+                 {"raycount", render::GiDebugView::RayCount},
+                 {"steps", render::GiDebugView::MarchSteps},
+                 {"layers", render::GiDebugView::TraceLayers}}};
+            bool found = false;
+            for (const auto& [name, view] : kViews) {
+                if (value == name) {
+                    app.Context().gi.debugView = view;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                SIM_ERROR("Bench", "--bench-gi-debug tidak mengenal \"{}\"", std::string(value));
+                app.Shutdown();
+                return 2;
+            }
+        }
+
         const uint32_t total = warmup + measured;
         // **Delta tetap, bukan jam dinding.** Animasi, fisika, dan adaptasi
         // eksposur semuanya maju menurut delta; memberi mereka waktu sungguhan
@@ -642,6 +753,7 @@ int main(int argc, char** argv) {
         constexpr float kFixedDelta = 1.0f / 60.0f;
 
         SampleTable gpu;
+        SampleTable frameGpu;
         SampleTable cpu;
         uint64_t lastSerial = 0;
         bool haveBounds = false;
@@ -666,9 +778,40 @@ int main(int argc, char** argv) {
         // permintaan kompilasi adalah `SceneView::Build`, dan yang mengambil
         // hasilnya juga ia.
         if (app.Context().materialPrograms != nullptr) {
-            constexpr uint32_t kMaxSettleFrames = 3000;
+            // **Batasnya waktu, bukan jumlah frame.** Yang ditunggu di sini
+            // bukan frame melainkan kompilasi shader dan pemanggangan tekstur,
+            // dan keduanya berjalan di thread lain dengan kecepatan yang tidak
+            // ada hubungannya dengan berapa kali frame disusun. Batas 3.000
+            // frame dulu berarti enam detik — cukup untuk adegan uji yang
+            // materialnya delapan, dan jauh dari cukup untuk adegan yang
+            // teksturnya tujuh puluh dua lembar 4K: yang terukur lalu adegan
+            // yang setengah materialnya masih jalur mundur.
+            // Bisa dipendekkan: sebuah jalan yang sengaja dimulai sebelum
+            // materialnya siap adalah satu-satunya cara menguji apa yang terjadi
+            // pada pekerjaan yang masih berjalan saat program ditutup.
+            auto settleBudget = std::chrono::seconds(300);
+            // **Batas yang disebut sendiri berarti tunggu selama itu, bukan
+            // paling lama selama itu.** Syarat berhenti di bawah — tidak ada
+            // kompilasi yang tertunda — juga terpenuhi *sebelum* mesh-nya
+            // selesai dimuat, karena yang menerbitkan permintaan material
+            // adalah bagian-bagian mesh yang belum ada. Sebuah jalan dengan
+            // `--bench-settle-seconds 8` lalu berhenti di frame pertama dan
+            // mengukur adegan kosong. Ketika batasnya diminta secara eksplisit,
+            // yang diminta adalah keadaan setengah siap itu sendiri, jadi
+            // syarat berhenti lebih awal tidak berlaku.
+            bool settleFixed = false;
+            if (const std::string_view value = FlagValue(argc, argv, "--bench-settle-seconds");
+                !value.empty()) {
+                settleBudget =
+                    std::chrono::seconds(std::strtol(std::string(value).c_str(), nullptr, 10));
+                settleFixed = true;
+            }
+            const auto settleStart = std::chrono::steady_clock::now();
             uint32_t settle = 0;
-            for (; settle < kMaxSettleFrames && !gStopping.load(); ++settle) {
+            for (; !gStopping.load(); ++settle) {
+                if (std::chrono::steady_clock::now() - settleStart > settleBudget) {
+                    break;
+                }
                 // **Delta nol, dan itu bukan detail.** Berapa banyak frame yang
                 // dibutuhkan di sini bergantung pada apakah `slangc` menjawab
                 // dari cache atau harus benar-benar berjalan — jadi ia berbeda
@@ -686,10 +829,23 @@ int main(int argc, char** argv) {
                 sceneView.Build(*app.Context().world, selection, app.Context().assets,
                                 renderer.get(), app.Context().animation,
                                 app.Context().builtinAssets, app.Context().whiteboxes);
-                if (settle > 0 && app.Context().materialPrograms->PendingCount() == 0) {
+                // Medan jarak mesh ikut ditunggu, dan bukan demi kerapian:
+                // bake Sponza memakan tujuh detik, dan frame yang diukur
+                // sebelum ia siap adalah frame yang clipmap GI-nya masih
+                // menyusun gedung itu sebagai kotak pejal.
+                const std::size_t sdfPending = app.Context().meshSdfBakery != nullptr
+                                                   ? app.Context().meshSdfBakery->PendingCount()
+                                                   : 0;
+                if (!settleFixed && settle > 0 && sdfPending == 0 &&
+                    app.Context().materialPrograms->PendingCount() == 0) {
                     break;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            if (app.Context().meshSdfBakery != nullptr &&
+                app.Context().meshSdfBakery->PendingCount() > 0) {
+                SIM_WARN("Bench", "{} mesh distance fields are still baking after {} frames",
+                         app.Context().meshSdfBakery->PendingCount(), settle);
             }
             const std::size_t pending = app.Context().materialPrograms->PendingCount();
             if (pending > 0) {
@@ -742,10 +898,11 @@ int main(int argc, char** argv) {
             const Vec3 extent = glm::max(boundsMax - boundsMin, Vec3(1.0f));
             const float radius = glm::length(Vec2(extent.x, extent.z)) * 0.9f + 2.0f;
             const float angle = 6.2831853f * static_cast<float>(frame) / static_cast<float>(total);
-            const Vec3 eye(centre.x + radius * std::cos(angle),
-                           centre.y + extent.y * 0.55f,
-                           centre.z + radius * std::sin(angle));
-            const Vec3 forward = centre - eye;
+            const Vec3 orbit(centre.x + radius * std::cos(angle),
+                             centre.y + extent.y * 0.55f,
+                             centre.z + radius * std::sin(angle));
+            const Vec3 eye = fixedCamera ? cameraEye : orbit;
+            const Vec3 forward = (fixedCamera ? cameraTarget : centre) - eye;
 
             render::ViewportDesc desc;
             desc.width = renderWidth;
@@ -756,6 +913,7 @@ int main(int argc, char** argv) {
             desc.gpuSdf = !cpuSdf;
             desc.gpuCull = !cpuCull;
             desc.gpuOcclusion = occlusion;
+            desc.asyncCompute = asyncCompute;
             desc.cullDebug = !FlagValue(argc, argv, "--bench-dump-cull").empty();
             if (const std::string_view value = FlagValue(argc, argv, "--bench-cull-first");
                 !value.empty()) {
@@ -769,6 +927,7 @@ int main(int argc, char** argv) {
             }
             if (fixedExposure) {
                 desc.post.exposureMode = render::ExposureMode::Manual;
+                desc.post.manualEv100 = manualEv;
             }
             // Delta yang sama dengan yang diberikan ke `app.Tick`, dan karena
             // alasan yang sama: yang maju menurut waktu — eksposur, awan,
@@ -809,6 +968,10 @@ int main(int argc, char** argv) {
                 for (const render::PassTiming& timing : renderer->PassTimings()) {
                     gpu.Add(timing.name, timing.milliseconds, timing.primitives);
                 }
+                // **Frame diukur, bukan dijumlahkan.** Sejak G7 sebuah pass
+                // boleh berjalan di antrean lain, dan dua pass yang berjalan
+                // bersamaan dihitung dua kali oleh jumlah baris di bawah tabel.
+                frameGpu.Add("frame", renderer->FrameGpuMilliseconds());
                 ++gpuSamples;
             }
             // Yang CPU segar tiap frame; tidak ada yang perlu ditunggu.
@@ -885,6 +1048,7 @@ int main(int argc, char** argv) {
             std::snprintf(line, sizeof(line), "- Jalan selesai dalam %.2f s\n\n", wallSeconds);
             report += line;
         }
+        report += FormatTable("Waktu GPU frame (ms)", frameGpu);
         report += FormatTable("Waktu GPU per pass (ms)", gpu);
         report += "\n";
         report += FormatTable("Waktu CPU per tahap (ms)", cpu);

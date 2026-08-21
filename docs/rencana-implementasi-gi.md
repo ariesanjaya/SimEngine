@@ -68,13 +68,45 @@ Tiap milestone punya kriteria selesai yang bisa diuji. Jangan lanjut sebelum kri
 
 **Selesai kalau:** bisa menampilkan heatmap jumlah langkah SDF per pixel. Ini alat diagnostik yang paling sering kamu pakai selama 3 bulan ke depan.
 
-### M1 — Global SDF clipmap (±3 minggu)
-- ✅ Bake SDF per-mesh offline lewat OpenVDB → `sim::SdfGrid` padat per mesh, dikomposit lewat `BakedSceneField`. Opsional: tanpa OpenVDB, clipmap mundur ke `BoxSceneField`. Lihat [DEPENDENCIES.md](DEPENDENCIES.md)
-- 3 kaskade 128³ R8_UNORM, voxel 10 cm / 40 cm / 1,6 m → jangkauan ±102 m
-- Toroidal scroll: hanya irisan tepi yang ditulis ulang saat kamera bergerak
-- Komposit objek statis + dinamis ke kaskade
+### M1 — Global SDF clipmap (±3 minggu) ✅
 
-**Selesai kalau:** sphere tracing dari kamera menghasilkan depth yang cocok dengan raster depth buffer (uji visual side-by-side), dan biaya update tetap < 0,5 ms saat kamera bergerak cepat di adegan uji terpadat.
+- ✅ Bake SDF per-mesh offline lewat OpenVDB → `sim::SdfGrid` padat per mesh, dikomposit lewat `BakedSceneField`. Opsional: tanpa OpenVDB, clipmap mundur ke `BoxSceneField`. Lihat [DEPENDENCIES.md](DEPENDENCIES.md)
+- ✅ `MeshSdfBakery` di `Sim::Assets`: bake di `TaskPool`, cache `.simsdf` berkunci isi berkas, hasilnya diserahkan ke renderer lewat `IViewportRenderer::SetMeshDistanceField`
+- ✅ 3 kaskade 128³ R8_UNORM, voxel 10 cm / 40 cm / 1,6 m → jangkauan ±102 m
+- ✅ Toroidal scroll: hanya irisan tepi yang ditulis ulang saat kamera bergerak
+- ✅ Komposit objek statis ke kaskade, di CPU maupun di compute (G4)
+
+**Selesai:** biaya pembaruan 0,033 ms saat kamera mengorbit — `cpu-sdf` 0,009 ms
+ditambah `sdf-fill` 0,024 ms — jauh di bawah anggaran 0,5 ms. Penelusuran sphere
+dari kamera, dengan lapis screen-space dimatikan (`--bench-no-screen-trace`),
+memperlihatkan siluet Sponza: pilar di kedua sisi, serambi yang menjauh,
+lengkungan langit-langit. Korelasi peringkatnya terhadap depth buffer raster
+0,79 — dibatasi voxel 12,7 cm terhadap geometri raster, dan oleh tangkapan
+8-bit yang menjepit seluruh rentang 2–30 m ke sekitar tujuh puluh tingkat.
+
+**Yang paling menjelaskan bedanya**, isi kaskade terhalus pada adegan yang sama:
+
+| | kotak batas | dari segitiga |
+|---|---:|---:|
+| Voxel "jauh di dalam benda" | 84,4% | 4,4% |
+| Voxel di dalam pita | 12,5% | 43,7% |
+| Voxel ruang bebas | 3,1% | 51,9% |
+
+Angka pertama itu yang dulu membuat setiap sinar probe mengenai sesuatu di jarak
+nol: kotak batas Sponza memuat seluruh gedung beserta udaranya.
+
+**Dua hal yang ditemukan sambil mengukurnya**, keduanya tercatat di komentar
+kodenya:
+
+- **Sisi voxel diperbesar sampai muat, bukan mesh-nya ditolak.** Sponza pada
+  voxel 10 cm adalah 17,3 juta voxel, di atas anggaran baker. Menolak berarti
+  gedung itu kembali menjadi kotak pejal — persis keadaan yang M1 mengakhiri.
+- **Pita sepadan dengan bendanya, bukan jumlah voxel tetap.** Di luar pita nilai
+  medan jenuh, jadi pita adalah jangkauan langkah sphere tracing. Pita 4 voxel
+  menjawab 0,45 m di posisi kamera acuan; pita 16 voxel menjawab 1,58 m, yaitu
+  jarak sebenarnya, dengan biaya bake yang sama. Tetapi 16 voxel tetap pada mesh
+  sebesar kursi berarti grid lima kali lebih lebar daripada kursinya di tiap
+  sumbu, jadi yang dipakai pecahan sisi terpanjangnya.
 
 ### M2 — Lapis screen-space (±1 minggu)
 - HiZ march di depth buffer, maks 16 langkah
@@ -170,3 +202,135 @@ Urutan ini disusun supaya kamu punya GI yang **terlihat** sejak akhir M3, bukan 
 4. **Koridor dengan pintu** — occlusion jarak menengah
 5. **Adegan padat + objek bergerak** — biaya update SDF/BVH
 6. **Outdoor luas** — jangkauan kaskade & fallback langit
+
+### `Resources/Levels/gi-sponza.simlevel` — dan gambar yang harus disamainya
+
+Intel Sponza (`NewSponza_Main_glTF_003`), 3,75 juta segitiga. Ia menutup sekaligus
+nomor 3, 4, dan 6 di daftar di atas: dinding tipis, serambi yang hanya menerima
+cahaya lewat lengkungan, dan halaman terbuka ke langit.
+
+**Yang membuatnya adegan uji dan bukan sekadar model besar: berkasnya membawa
+kamera dan matahari yang dipakai render acuannya.** Node `PhysCamera001` dan
+`SUN` ada di dalam glTF-nya, jadi sudut pandang dan arah cahaya tidak perlu
+ditebak — dan gambar yang dibandingkan adalah gambar yang sama, bukan gambar yang
+mirip.
+
+- Matahari: dari `SUN` ke `SUN.Target`, arah `(0,551, −0,828, 0,105)` — 55,9°
+  di atas cakrawala. Sudah tertulis di levelnya sebagai kuaternion.
+- Kamera: `--bench-camera -8.807,1.592,-0.858,-3.004,2.762,0.237`, yaitu posisi
+  dan target `PhysCamera001` apa adanya.
+- Acuannya `Render_Main_A..F.png` di sebelah berkas modelnya.
+
+**Asetnya tidak ada di repo ini.** 140 MB geometri dan 2,6 GB tekstur; `Resources`
+disalin utuh ke direktori binary tiap build, jadi menaruhnya di sana berarti
+membayar salinan itu setiap kali. Ia dipasang sebagai symlink di dalam project
+(`Assets/Sponza/`) beserta `.meta` ber-GUID tetap, dan levelnya merujuk GUID itu.
+Tanpa asetnya, level ini memuat langit dan matahari tanpa geometri — bukan gagal,
+tapi juga bukan uji.
+
+**Materialnya dibangkitkan, bukan dibuat tangan.** `Tools/sponza-assets.py`
+memasang symlink asetnya, menulis 72 `.meta` tekstur, dan membangkitkan 28
+`.simmat` — masing-masing sebuah graf OpenPBR: base color, normal, dan kekasaran
+(kanal G) beserta kelogaman (kanal B) dari tekstur gabungan glTF. GUID-nya
+`uuid5` dari nama berkasnya, jadi menjalankannya ulang menghasilkan angka yang
+sama persis; GUID acak akan memberi identitas baru pada aset yang sama dan
+memutus level yang sudah menyebut yang lama.
+
+Larik `materials` di level diindeks **nomor ruas**, dan urutan ruas adalah urutan
+material saat pertama ditemui menelusuri node lalu primitive — sama persis dengan
+yang dilakukan importir glTF, dan `GroupByMaterial` mengurutkan ruasnya menurut
+indeks itu. Skrip yang sama menuliskannya ke level.
+
+### Dua cacat alat ukur yang ditemukan adegan ini
+
+Keduanya diam, dan keduanya baru bisa ditemukan oleh adegan yang **punya**
+tekstur — sampai Sponza masuk, tidak ada satu pun adegan uji headless yang
+punya:
+
+- **SimHeadless tidak pernah menyerahkan texture bakery ke `SceneView`.** Hanya
+  `ViewportPanel` yang melakukannya. Tanpa itu `UploadedTexture` menjawab
+  "tekstur tidak ada", materialnya tetap dikompilasi — dengan tekstur kosong —
+  dan hasilnya permukaan putih rata yang tidak bisa dibedakan dari material yang
+  memang tidak bertekstur. Tidak ada satu pun peringatan di sepanjang jalur itu.
+- **Batas tunggu kompilasi material dihitung dalam frame, bukan waktu.** 3.000
+  frame berarti enam detik; adegan yang teksturnya 72 lembar 4K butuh sekitar
+  satu menit untuk memanggangnya pada jalan pertama. Yang terukur lalu adegan
+  yang setengah materialnya masih jalur mundur. Sekarang batasnya waktu.
+
+### Empat sebab serambi Sponza gelap, dan yang tersisa sesudahnya
+
+Adegan ini menagih janji M0–M6 dengan satu pertanyaan: kenapa menyalakan GI
+**mengambil** cahaya? Pada eksposur yang sama, serambinya beradiansi 0,001
+dengan GI hidup dan 0,025 dengan GI mati. Empat sebab, masing-masing
+menyembunyikan yang berikutnya — jadi tiga perbaikan pertama terlihat hampir
+tidak berpengaruh sampai yang keempat ikut diperbaiki.
+
+1. **Langit GI bukan langit yang tergambar.** `giSky` sebuah gradien tetap
+   dengan catatan "langit sungguhan datang di E8.8". E8.8 sudah lama datang.
+   Sekarang penelusur mencuplik LUT sky-view yang sama dengan `sky_draw.frag`.
+2. **"Tidak tahu" dihitung sebagai "tidak ada".** Sinar yang mengenai clipmap di
+   luar jangkauan cache radiansi dibuang; di dalam serambi 98% sinar justru
+   jenis itu, jadi probe tanpa satu pun sinar yang diketahui menjawab nol.
+   Sekarang ditaksir satu pantulan penuh dengan albedo tebakan.
+3. **Satu NaN meracuni seluruh probe.** `sdfSurfaceNormal` menormalkan gradien
+   yang bisa tepat nol. Koefisien SH dijumlahkan, jadi satu dari enam belas
+   sinar cukup untuk menghitamkan probe. Selama sinar itu dibuang (sebab 2),
+   NaN-nya ikut terbuang — cacat ini baru muncul sesudah sebab 2 diperbaiki.
+4. **Medan jaraknya kotak batas, dan Sponza satu mesh.** `BoxSceneField`
+   menyusun tiap mesh sebagai kotak batasnya; kotak Sponza 36×20×24 m memuat
+   seluruh gedung beserta udaranya. 84% voxel kaskade terhalus terbaca "jauh di
+   dalam benda", dan setiap sinar probe mengenai sesuatu di jarak nol. Sinar
+   yang berangkat dari dalam medan sekarang melewatkan lapis itu.
+
+Ditambah satu di jalur resolve: piksel yang keempat probe tetangganya ditolak
+uji bilateral menjawab nol — 21,8% piksel di adegan ini.
+
+Terukur pada kamera acuan, GI hidup, EV100 = -4:
+
+| | awal | sesudah 1–3 | sesudah 1–4 | GI mati |
+|---|---:|---:|---:|---:|
+| Iradiansi serambi (E/π) | 0,006–0,015 | 0,031–0,096 | 0,153–0,502 | 0,080 |
+| Radiansi serambi | 0,001 | 0,013–0,020 | 0,045–0,115 | 0,025 |
+| Radiansi lantai | 0,000 | 0,000 | 0,020–0,058 | 0,025 |
+| Piksel hitam | 27,8% | 28,4% | 5,9% | 5,9% |
+| Median 8-bit | 11 | 42 | 47 | 36 |
+| Piksel putih pecah | 7,1% | 0,1% | 0,0% | 0,0% |
+| `gi-probe-trace` | 0,414 ms | 0,453 ms | 0,390 ms | — |
+
+**Yang tersisa, dan kenapa ia menuntut M1.** Cahaya isian sekarang seluruhnya
+langit: 94–97% sinar probe berakhir di langit, 3–6% dijawab lapis layar, dan
+lapis SDF tidak menjawab apa pun di adegan ini. Hasilnya serambi biru langit,
+sementara acuan Intel abu-abu hangat — warnanya datang dari matahari yang
+memantul di batu, bukan dari langit. Menaikkan anggaran langkah lapis layar
+sudah diuji sebagai jalan pintas: 16 → 64 langkah menaikkan jawaban lapis layar
+dari 6% ke 15–32% dan biayanya dari 0,39 ms ke 0,93 ms, sementara rata-rata
+gambarnya bergerak 57,4 → 58,4. Sinar tambahan itu menemukan permukaan yang
+warnanya sudah ikut biru — satu sumber biru ditukar dengan sumber biru yang
+lain. Yang mengubahnya adalah medan jarak yang mengikuti segitiga alih-alih
+kotak batas, yaitu M1, beserta albedo yang tersimpan bersamanya.
+
+### Sesudah M1
+
+Medan jaraknya sekarang mengikuti segitiga, dan yang berubah pada gambarnya
+adalah bentuk cahayanya, bukan hanya jumlahnya: lengkungan menggelap ke arah
+sudutnya, pilar punya bayangan ambien, lantai menerima langit lewat lubang
+lengkung alih-alih lewat tebakan.
+
+| | GI mati | GI, medan kotak | GI, medan segitiga | acuan A |
+|---|---:|---:|---:|---:|
+| Rata-rata | 45,3 | 46,6 | **56,8** | 78,7 |
+| Median | 36 | 37 | **46** | 69 |
+| Piksel hitam | 5,9% | 5,9% | 4,9% | 1,2% |
+| `gi-probe-trace` | — | 0,390 ms | 0,613 ms | — |
+
+Pass GI naik 57% karena sinarnya akhirnya benar-benar berjalan; sebelumnya
+setiap sinar berhenti di langkah pertama, pada kotak pejal yang memuat seluruh
+gedung.
+
+**Yang masih memisahkannya dari acuan: warna.** Serambinya biru, acuannya
+abu-abu hangat. Cahaya isian di sini masih didominasi langit, sementara warna
+acuan datang dari matahari yang memantul di batu — dan pantulan itu menuntut
+**albedo** yang tersimpan bersama medan jaraknya. Sekarang ia sebuah tebakan
+tetap (`kBounceAlbedo` = 0,5), jadi setiap permukaan memantulkan abu-abu netral
+alih-alih warnanya sendiri. Itu langkah berikutnya, dan ia milik M4: cache
+radiansi yang tahu warna permukaan yang tidak pernah terlihat layar.

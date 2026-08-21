@@ -206,6 +206,116 @@ TEST_CASE("Pass yang hasilnya tidak dibaca siapa pun dibuang") {
     CHECK(compiled.culled[0] == ssaoPass);
 }
 
+TEST_CASE("Graph satu antrean menghasilkan satu segmen tanpa penungguan") {
+    FrameGraph graph;
+    const ResourceId target = graph.Import("target", Access::None);
+    const ResourceId shadow = graph.CreateTexture("shadow", Colour(256, 256));
+
+    const PassId shadowPass = graph.AddPass("shadow");
+    graph.Write(shadowPass, shadow, Access::DepthWrite);
+    const PassId opaque = graph.AddPass("opaque");
+    graph.Read(opaque, shadow, Access::ShaderRead);
+    graph.Write(opaque, target, Access::ColorWrite);
+    graph.SetOutput(target, Access::Present);
+
+    const CompiledGraph compiled = graph.Compile();
+    REQUIRE(compiled.ok);
+    REQUIRE(compiled.segments.size() == 1);
+    CHECK(compiled.segments[0].queue == Queue::Graphics);
+    CHECK(compiled.segments[0].count == 2);
+    CHECK(compiled.segments[0].wait == 0);
+    CHECK(compiled.segments[0].signal == 0);
+    for (const CompiledPass& pass : compiled.order) {
+        CHECK(pass.releases.empty());
+        for (const Barrier& barrier : pass.barriers) {
+            CHECK_FALSE(barrier.CrossesQueue());
+        }
+    }
+}
+
+TEST_CASE("Pass compute yang hasilnya dibaca grafis melepas dan menyerahkan kepemilikan") {
+    FrameGraph graph;
+    const ResourceId target = graph.Import("target", Access::None);
+    // ShaderRead sebagai keadaan awal, seperti buffer cluster yang sebenarnya:
+    // frame ini menimpanya sementara frame sebelumnya masih membacanya.
+    const ResourceId clusters = graph.Import("clusters", Access::ShaderRead);
+
+    const PassId assign = graph.AddPass("cluster-assign");
+    graph.Write(assign, clusters, Access::ShaderWrite);
+    graph.SetQueue(assign, Queue::AsyncCompute);
+
+    const PassId shadow = graph.AddPass("shadow");
+    graph.Write(shadow, target, Access::DepthWrite);
+
+    const PassId opaque = graph.AddPass("opaque");
+    graph.Read(opaque, clusters, Access::ShaderRead);
+    graph.Write(opaque, target, Access::ColorWrite);
+    graph.SetOutput(target, Access::Present);
+
+    const CompiledGraph compiled = graph.Compile();
+    REQUIRE(compiled.ok);
+    REQUIRE(compiled.order.size() == 3);
+    CHECK(compiled.order[0].queue == Queue::AsyncCompute);
+    CHECK(compiled.order[1].queue == Queue::Graphics);
+
+    // Menulis dari antrean lain tidak menuntut perpindahan: isinya ditimpa
+    // seluruhnya, dan yang lama memang tidak dibutuhkan siapa pun.
+    for (const Barrier& barrier : compiled.order[0].barriers) {
+        CHECK_FALSE(barrier.CrossesQueue());
+    }
+    // Membacanya kembali di antrean grafis menuntut sepasang.
+    REQUIRE(compiled.order[0].releases.size() == 1);
+    CHECK(compiled.order[0].releases[0].resource == clusters);
+    CHECK(compiled.order[0].releases[0].fromQueue == Queue::AsyncCompute);
+    CHECK(compiled.order[0].releases[0].toQueue == Queue::Graphics);
+
+    bool acquired = false;
+    for (const Barrier& barrier : compiled.order[2].barriers) {
+        if (barrier.resource == clusters) {
+            CHECK(barrier.CrossesQueue());
+            CHECK(barrier.fromQueue == Queue::AsyncCompute);
+            CHECK(barrier.toQueue == Queue::Graphics);
+            acquired = true;
+        }
+    }
+    CHECK(acquired);
+}
+
+TEST_CASE("Penungguan lintas antrean memulai segmen sendiri, supaya yang lain jalan lebih dulu") {
+    FrameGraph graph;
+    const ResourceId target = graph.Import("target", Access::None);
+    const ResourceId clusters = graph.Import("clusters", Access::ShaderRead);
+
+    const PassId assign = graph.AddPass("cluster-assign");
+    graph.Write(assign, clusters, Access::ShaderWrite);
+    graph.SetQueue(assign, Queue::AsyncCompute);
+
+    const PassId shadow = graph.AddPass("shadow");
+    graph.Write(shadow, target, Access::DepthWrite);
+
+    const PassId opaque = graph.AddPass("opaque");
+    graph.Read(opaque, clusters, Access::ShaderRead);
+    graph.Write(opaque, target, Access::ColorWrite);
+    graph.SetOutput(target, Access::Present);
+
+    const CompiledGraph compiled = graph.Compile();
+    REQUIRE(compiled.ok);
+    // compute | shadow | opaque — pass bayangan tidak ikut menunggu, dan itulah
+    // seluruh tumpang tindih yang dibeli.
+    REQUIRE(compiled.segments.size() == 3);
+    CHECK(compiled.segments[0].queue == Queue::AsyncCompute);
+    CHECK(compiled.segments[0].signal == 1);
+    CHECK(compiled.segments[1].queue == Queue::Graphics);
+    CHECK(compiled.segments[1].count == 1);
+    CHECK(compiled.segments[1].wait == 0);
+    CHECK(compiled.segments[2].queue == Queue::Graphics);
+    CHECK(compiled.segments[2].wait == 1);
+    CHECK(compiled.segments[2].waitQueue == Queue::AsyncCompute);
+    // Segmen terakhir selalu grafis: fence yang menjaga pemakaian ulang slot
+    // bergantung padanya.
+    CHECK(compiled.segments.back().queue == Queue::Graphics);
+}
+
 TEST_CASE("Pembuangan menular ke belakang lewat rantai") {
     FrameGraph graph;
     const ResourceId target = graph.Import("target", Access::None);

@@ -9,10 +9,14 @@
 #include "Sim/Assets/TextureBakery.h"
 #include "Sim/Assets/TextureSettings.h"
 #include "Sim/Assets/MeshData.h"
+#include "Sim/Assets/MeshSdfBake.h"
+#include "Sim/Assets/MeshSdfBakery.h"
 #include "Sim/Assets/MeshSettings.h"
 #include "Sim/Assets/Thumbnail.h"
 #include "Sim/Material/MaterialGraph.h"
 #include "Sim/Material/MaterialValidation.h"
+
+#include "Sim/Volume/SdfBake.h"
 
 #include "Sim/ImageIO/ImageIO.h"
 #include "Sim/RHI/Ktx2.h"
@@ -2408,4 +2412,174 @@ TEST_CASE("Tekstur yang sudah dipanggang tetap bertipe Texture") {
     // berubah arti begitu project-nya dikirim.
     CHECK(assets::TypeFromExtension(".ktx2") == assets::AssetType::Texture);
     CHECK(assets::TypeFromExtension(".png") == assets::AssetType::Texture);
+}
+
+TEST_CASE("T-M1: sisi voxel diperbesar sampai muat, bukan mesh-nya ditolak") {
+    MeshSdfSettings settings;
+    settings.voxelSize = 0.1f;
+    settings.maxVoxels = 1u << 20;
+
+    // Mesh sebesar kursi muat apa adanya.
+    CHECK(FitVoxelSize(Vec3(-0.5f), Vec3(0.5f), settings) == doctest::Approx(0.1f));
+
+    // Mesh sebesar gedung tidak, dan yang berubah sisi voxelnya.
+    const float coarse = FitVoxelSize(Vec3(-18.0f, -1.0f, -12.0f), Vec3(18.0f, 19.0f, 12.0f),
+                                      settings);
+    CHECK(coarse > 0.1f);
+    // Dan sesudah diperbesar, ia benar-benar muat — inilah yang dipakai baker
+    // untuk memutuskan menolak atau tidak.
+    const float band = BandMeters(Vec3(-18.0f, -1.0f, -12.0f), Vec3(18.0f, 19.0f, 12.0f),
+                                  settings, coarse);
+    const Vec3 extent = Vec3(36.0f, 20.0f, 24.0f) + Vec3(2.0f * (band + coarse));
+    const double voxels = std::ceil(extent.x / coarse) * std::ceil(extent.y / coarse) *
+                          std::ceil(extent.z / coarse);
+    CHECK(voxels <= static_cast<double>(settings.maxVoxels));
+}
+
+TEST_CASE("T-M1: pita sepadan dengan bendanya, bukan jumlah voxel tetap") {
+    MeshSdfSettings settings;
+    settings.bandVoxels = 4.0f;
+    settings.bandFraction = 0.05f;
+
+    // Benda kecil: yang berlaku batas bawahnya, empat voxel.
+    CHECK(BandMeters(Vec3(-0.5f), Vec3(0.5f), settings, 0.1f) == doctest::Approx(0.4f));
+    // Benda sebesar gedung: yang berlaku pecahannya. Tanpa ini pita 40 cm
+    // membuat penelusur melangkah 40 cm di seluruh halaman yang lebarnya 20 m.
+    CHECK(BandMeters(Vec3(0.0f), Vec3(36.0f, 20.0f, 24.0f), settings, 0.1f) ==
+          doctest::Approx(1.8f));
+}
+
+TEST_CASE("T-M1: berkas .simsdf bolak-balik, dan yang terpotong ditolak") {
+    TempDir temp;
+    SdfGrid grid;
+    grid.sizeX = 3;
+    grid.sizeY = 4;
+    grid.sizeZ = 5;
+    grid.voxelSize = 0.25f;
+    grid.band = 1.0f;
+    grid.origin = Vec3(-1.0f, 2.0f, -3.0f);
+    grid.distances.resize(grid.VoxelCount());
+    for (std::size_t i = 0; i < grid.distances.size(); ++i) {
+        grid.distances[i] = static_cast<float>(i) * 0.01f - 0.3f;
+    }
+
+    const std::filesystem::path file = temp.Path() / "field.simsdf";
+    std::string error;
+    REQUIRE(WriteMeshSdf(file, grid, error));
+
+    SdfGrid loaded;
+    REQUIRE(ReadMeshSdf(file, loaded, error));
+    CHECK(loaded.sizeX == grid.sizeX);
+    CHECK(loaded.sizeY == grid.sizeY);
+    CHECK(loaded.sizeZ == grid.sizeZ);
+    CHECK(loaded.voxelSize == doctest::Approx(grid.voxelSize));
+    CHECK(loaded.band == doctest::Approx(grid.band));
+    CHECK(loaded.origin.y == doctest::Approx(grid.origin.y));
+    CHECK(loaded.distances == grid.distances);
+
+    // **Berkas yang terpotong ditolak, bukan dipotong.** Proses yang mati di
+    // tengah penulisan meninggalkan header yang menyebut ukuran penuh dan isi
+    // yang tidak sampai; menerimanya berarti separuh medan jarak berisi nol,
+    // dan nol berarti "permukaan di sini" — dinding hantu di tengah ruangan.
+    const std::filesystem::path cut = temp.Path() / "cut.simsdf";
+    std::filesystem::copy_file(file, cut);
+    std::filesystem::resize_file(cut, std::filesystem::file_size(cut) - 8);
+    SdfGrid broken;
+    CHECK_FALSE(ReadMeshSdf(cut, broken, error));
+    CHECK(broken.Empty());
+
+    // Berkas lain yang panjangnya cukup pun ditolak, lewat magic-nya.
+    const std::filesystem::path alien = temp.Path() / "alien.simsdf";
+    {
+        std::ofstream out(alien, std::ios::binary);
+        const std::vector<char> junk(512, 'x');
+        out.write(junk.data(), static_cast<std::streamsize>(junk.size()));
+    }
+    CHECK_FALSE(ReadMeshSdf(alien, broken, error));
+}
+
+TEST_CASE("T-M1: bake sebuah bola, dan jalan kedua dijawab cache") {
+    if (!volume::Available()) {
+        return;
+    }
+    const std::filesystem::path sphere = std::filesystem::path(SIM_MESH_DIR) / "unitSphere.obj";
+    REQUIRE(std::filesystem::exists(sphere));
+
+    TempDir temp;
+    MeshSdfSettings settings;
+    settings.voxelSize = 0.05f;
+
+    const uint64_t before = MeshSdfBakeCount();
+    const MeshSdfBakeResult baked = BakeMeshSdfFile(sphere, settings, temp.Path());
+    REQUIRE_MESSAGE(baked.ok, baked.error);
+    CHECK_FALSE(baked.fromCache);
+    CHECK(MeshSdfBakeCount() == before + 1);
+
+    SdfGrid grid;
+    std::string error;
+    REQUIRE(ReadMeshSdf(baked.path, grid, error));
+
+    // **Yang diuji tandanya dan besarnya, bukan bentuknya.** Pusat bola berada
+    // di dalam benda, jadi jaraknya negatif; sebuah titik jauh di luar berada di
+    // luar pita, jadi ia jenuh di +band. Keduanya adalah sifat yang membedakan
+    // medan jarak sungguhan dari kotak batas — kotak menjawab nol di pusat dan
+    // nol di setiap titik di dalamnya.
+    CHECK(grid.SampleLocal(Vec3(0.0f)) < 0.0f);
+    CHECK(grid.SampleLocal(Vec3(0.0f, 100.0f, 0.0f)) == doctest::Approx(grid.band));
+
+    // Permukaannya: jarak berubah tanda persis sekali sepanjang jari-jari, dan
+    // titik nolnya jauh dari pusat maupun dari tepi kotak batasnya.
+    float crossing = -1.0f;
+    for (int i = 0; i <= 200; ++i) {
+        const float t = static_cast<float>(i) / 200.0f * 2.0f;
+        if (grid.SampleLocal(Vec3(t, 0.0f, 0.0f)) >= 0.0f) {
+            crossing = t;
+            break;
+        }
+    }
+    CHECK(crossing > 0.05f);
+    CHECK(crossing < 2.0f);
+
+    // Jalan kedua tidak menyentuh mesh-nya sama sekali.
+    const MeshSdfBakeResult again = BakeMeshSdfFile(sphere, settings, temp.Path());
+    REQUIRE(again.ok);
+    CHECK(again.fromCache);
+    CHECK(again.path == baked.path);
+    CHECK(MeshSdfBakeCount() == before + 1);
+}
+
+TEST_CASE("T-M1: bakery menjawab Pending lalu Ready, dan hanya membake sekali") {
+    if (!volume::Available()) {
+        return;
+    }
+    const std::filesystem::path sphere = std::filesystem::path(SIM_MESH_DIR) / "unitSphere.obj";
+    TempDir temp;
+    MeshSdfSettings settings;
+    settings.voxelSize = 0.05f;
+
+    TaskPool tasks(2);
+    MeshSdfBakery bakery(temp.Path(), &tasks, settings);
+
+    const uint64_t before = MeshSdfBakeCount();
+    CHECK(bakery.Request(sphere).state == MeshSdfState::Pending);
+    // Permintaan kedua pada frame yang sama tidak mengantre bake kedua: satu
+    // mesh sebesar Sponza adalah 7 detik dan 1,5 GB, dan dua sekaligus adalah
+    // dua-duanya.
+    CHECK(bakery.Request(sphere).state == MeshSdfState::Pending);
+    tasks.WaitIdle();
+    CHECK(MeshSdfBakeCount() == before + 1);
+
+    const MeshSdfRef ready = bakery.Request(sphere);
+    REQUIRE(ready.state == MeshSdfState::Ready);
+    REQUIRE(ready.grid != nullptr);
+    CHECK(ready.grid->SampleLocal(Vec3(0.0f)) < 0.0f);
+    CHECK(bakery.PendingCount() == 0);
+
+    // Berkas yang tidak ada gagal — sesudah tugasnya berjalan, bukan seketika:
+    // dengan `TaskPool` jawaban pertama selalu `Pending`, dan itu memang
+    // kontraknya.
+    const std::filesystem::path missing = temp.Path() / "tidak-ada.obj";
+    CHECK(bakery.Request(missing).state == MeshSdfState::Pending);
+    tasks.WaitIdle();
+    CHECK(bakery.Request(missing).state == MeshSdfState::Failed);
 }

@@ -44,6 +44,17 @@ const char* ToString(Access access);
 /// berbarengan.
 bool IsReadOnly(Access access);
 
+/// Antrean tempat sebuah pass berjalan.
+///
+/// **Dideklarasikan pass, bukan diurus di tempat pemanggilan.** Barrier
+/// lintas-antrean berbentuk sepasang — lepas di sisi pemilik lama, ambil di sisi
+/// pemilik baru — dan sepasang barrier yang ditulis tangan di dua tempat yang
+/// berjauhan adalah sepasang yang suatu saat tinggal satu.
+enum class Queue : uint8_t {
+    Graphics,
+    AsyncCompute,
+};
+
 enum class ResourceKind : uint8_t {
     Texture,
     Buffer,
@@ -78,6 +89,17 @@ struct Barrier {
     ResourceId resource = kInvalidResource;
     Access from = Access::None;
     Access to = Access::None;
+    /// Antrean pemilik sebelum dan sesudah. Sama berarti tidak ada perpindahan
+    /// kepemilikan — dan itu keadaan yang berlaku untuk hampir seluruh barrier.
+    ///
+    /// Berbeda berarti barrier ini separuh dari sepasang: yang di daftar
+    /// `releases` pass pemilik lama melepaskannya, yang di `barriers` pass
+    /// pemilik baru mengambilnya. Keduanya wajib menyebut resource, tata letak,
+    /// dan pasangan keluarga yang sama persis.
+    Queue fromQueue = Queue::Graphics;
+    Queue toQueue = Queue::Graphics;
+
+    bool CrossesQueue() const { return fromQueue != toQueue; }
 };
 
 /// Pass yang benar-benar dijalankan, beserta barrier yang **mendahuluinya**.
@@ -89,11 +111,38 @@ struct Barrier {
 /// selesai punya tempatnya sendiri: `CompiledGraph::finalBarriers`.
 struct CompiledPass {
     PassId pass = kInvalidPass;
+    Queue queue = Queue::Graphics;
     /// Nama pass, disalin dari graph. Ada supaya hasil kompilasi bisa
     /// menjelaskan dirinya sendiri — pengukur waktu GPU dan pesan galat sama-
     /// sama menyebut pass menurut namanya, bukan menurut nomornya.
     std::string name;
     std::vector<Barrier> barriers;
+    /// Barrier yang dijalankan **sesudah** pass ini, dan hanya berisi pelepasan
+    /// kepemilikan antrean. Tidak ada yang lain yang boleh masuk ke sini:
+    /// barrier yang artinya "sebelum" di satu tempat dan "sesudah" di tempat
+    /// lain adalah barrier yang dipasang di sisi yang salah.
+    std::vector<Barrier> releases;
+};
+
+/// Potongan urutan jalan yang berjalan pada satu antrean.
+///
+/// Sebuah segmen dimulai setiap kali antreannya berganti, **dan** setiap kali
+/// sebuah pass harus menunggu antrean yang lain: penungguan berlaku di awal
+/// submit, jadi pekerjaan yang boleh jalan sebelum penungguan harus berada di
+/// segmen yang berbeda. Tanpa pemisahan kedua itu, tumpang tindih yang baru saja
+/// dibeli hilang lagi — antrean grafis menunggu di baris pertamanya.
+struct Segment {
+    Queue queue = Queue::Graphics;
+    /// Indeks ke `CompiledGraph::order`.
+    uint32_t first = 0;
+    uint32_t count = 0;
+    /// Nilai timeline **relatif frame ini** yang ditunggu segmen ini, pada
+    /// timeline antrean `waitQueue`. Nol berarti tidak menunggu.
+    uint64_t wait = 0;
+    Queue waitQueue = Queue::Graphics;
+    /// Nilai relatif yang di-signal segmen ini pada timeline antreannya sendiri.
+    /// Nol berarti tidak ada yang menunggunya.
+    uint64_t signal = 0;
 };
 
 /// Hasil kompilasi: urutan jalan, barrier, dan pembagian memori transien.
@@ -115,6 +164,10 @@ struct CompiledGraph {
     uint32_t slotCount = 0;
     /// Pass yang dibuang karena tidak ada yang membaca hasilnya.
     std::vector<PassId> culled;
+    /// Pembagian `order` menjadi batch submit. Selalu berisi sedikitnya satu
+    /// segmen bila `order` tidak kosong, dan segmen terakhir selalu di antrean
+    /// grafis — fence yang menjaga pemakaian ulang slot bergantung padanya.
+    std::vector<Segment> segments;
 };
 
 /// Frame graph: pass dan resource dideklarasikan, urutan dan barrier
@@ -165,6 +218,14 @@ public:
     /// guna utama graph ini.
     void SetSideEffect(PassId pass);
 
+    /// Antrean tempat pass ini berjalan. Bawaannya grafis.
+    ///
+    /// **Yang dipindahkan harus pass yang seluruh resource-nya dideklarasikan.**
+    /// Perpindahan kepemilikan diturunkan dari deklarasi itu; pass yang menulis
+    /// resource yang tidak diketahui graph akan pindah antrean tanpa satu pun
+    /// barrier yang menyertainya.
+    void SetQueue(PassId pass, Queue queue);
+
     CompiledGraph Compile() const;
 
     int PassCount() const { return static_cast<int>(passes_.size()); }
@@ -185,6 +246,7 @@ private:
         std::string name;
         std::vector<Use> uses;
         bool sideEffect = false;
+        Queue queue = Queue::Graphics;
     };
 
     struct Resource {

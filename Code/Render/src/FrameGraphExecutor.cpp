@@ -1,6 +1,9 @@
 #include "FrameGraphExecutor.h"
 
+#include "Sim/Core/Assert.h"
 #include "Sim/Core/Log.h"
+
+#include <array>
 
 namespace sim::render {
 
@@ -93,13 +96,52 @@ FrameGraphExecutor::Stage FrameGraphExecutor::Translate(Access access) {
 bool FrameGraphExecutor::Execute(const CompiledGraph& compiled, VkCommandBuffer cmd,
                                  std::span<const Recorder> recorders,
                                  rhi::GpuProfiler* profiler) {
+    // Satu segmen, satu antrean: keluarga yang sama di kedua sisi membuat setiap
+    // perpindahan kepemilikan menjadi tidak berarti apa-apa, dan graph memang
+    // tidak memancarkannya kalau tidak ada pass yang berpindah antrean.
+    const std::array<VkCommandBuffer, 1> single{cmd};
+    return Execute(compiled, single, recorders, 0, 0, profiler);
+}
+
+bool FrameGraphExecutor::Execute(const CompiledGraph& compiled,
+                                 std::span<const VkCommandBuffer> segments,
+                                 std::span<const Recorder> recorders, uint32_t graphicsFamily,
+                                 uint32_t computeFamily, rhi::GpuProfiler* profiler) {
     if (!compiled.ok) {
         return false;
     }
+    SIM_VERIFY(!segments.empty(), "Execute needs at least one command buffer");
+    const auto familyOf = [&](Queue queue) {
+        return queue == Queue::AsyncCompute ? computeFamily : graphicsFamily;
+    };
+    VkCommandBuffer cmd = segments.front();
 
     std::vector<VkImageMemoryBarrier2> barriers;
     std::vector<VkBufferMemoryBarrier2> bufferBarriers;
-    const auto flush = [&](const std::vector<Barrier>& list) -> bool {
+    // `releasing` menentukan sisi mana dari sepasang barrier perpindahan
+    // kepemilikan yang sedang dipancarkan. **Sisi seberangnya wajib kosong:**
+    // Vulkan mengabaikan stage tujuan pada operasi lepas dan stage sumber pada
+    // operasi ambil, dan menyebut tahap yang tidak ada di antrean itu — tahap
+    // fragment di antrean compute — adalah pelanggaran, bukan sekadar
+    // pemborosan.
+    // Tahap yang sah di antrean compute. **Menyebut tahap grafis di sana adalah
+    // pelanggaran, bukan pemborosan** — dan tahap grafis memang muncul di sisi
+    // "dari" barrier pass compute yang menimpa resource yang frame sebelumnya
+    // dibaca pass forward. Ketergantungan itu sudah dijaga fence slot frame;
+    // yang tersisa di sini hanya namanya.
+    const auto narrow = [](Queue queue, VkPipelineStageFlags2 stage) {
+        if (queue != Queue::AsyncCompute) {
+            return stage;
+        }
+        constexpr VkPipelineStageFlags2 kComputeLegal =
+            VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT |
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+            VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT |
+            VK_PIPELINE_STAGE_2_HOST_BIT;
+        return stage & kComputeLegal;
+    };
+    const auto flush = [&](const std::vector<Barrier>& list, VkCommandBuffer into, bool releasing,
+                           Queue queue) -> bool {
         barriers.clear();
         bufferBarriers.clear();
         for (const Barrier& barrier : list) {
@@ -110,8 +152,25 @@ bool FrameGraphExecutor::Execute(const CompiledGraph& compiled, VkCommandBuffer 
                 SIM_ERROR("Render", "frame graph resource {} has nothing bound", barrier.resource);
                 return false;
             }
-            const Stage from = Translate(barrier.from);
-            const Stage to = Translate(barrier.to);
+            Stage from = Translate(barrier.from);
+            Stage to = Translate(barrier.to);
+            if (barrier.CrossesQueue()) {
+                if (releasing) {
+                    to.stage = VK_PIPELINE_STAGE_2_NONE;
+                    to.access = VK_ACCESS_2_NONE;
+                } else {
+                    from.stage = VK_PIPELINE_STAGE_2_NONE;
+                    from.access = VK_ACCESS_2_NONE;
+                }
+            }
+            from.stage = narrow(queue, from.stage);
+            to.stage = narrow(queue, to.stage);
+            if (from.stage == VK_PIPELINE_STAGE_2_NONE) {
+                from.access = VK_ACCESS_2_NONE;
+            }
+            if (to.stage == VK_PIPELINE_STAGE_2_NONE) {
+                to.access = VK_ACCESS_2_NONE;
+            }
 
             if (buffer != VK_NULL_HANDLE) {
                 const BoundBuffer& bound = buffers_[barrier.resource];
@@ -121,8 +180,13 @@ bool FrameGraphExecutor::Execute(const CompiledGraph& compiled, VkCommandBuffer 
                 vk.srcAccessMask = from.access;
                 vk.dstStageMask = to.stage;
                 vk.dstAccessMask = to.access;
-                vk.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-                vk.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                if (barrier.CrossesQueue()) {
+                    vk.srcQueueFamilyIndex = familyOf(barrier.fromQueue);
+                    vk.dstQueueFamilyIndex = familyOf(barrier.toQueue);
+                } else {
+                    vk.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                    vk.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                }
                 vk.buffer = bound.buffer;
                 vk.offset = bound.offset;
                 vk.size = bound.size;
@@ -138,8 +202,13 @@ bool FrameGraphExecutor::Execute(const CompiledGraph& compiled, VkCommandBuffer 
             vk.dstAccessMask = to.access;
             vk.oldLayout = from.layout;
             vk.newLayout = to.layout;
-            vk.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-            vk.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            if (barrier.CrossesQueue()) {
+                vk.srcQueueFamilyIndex = familyOf(barrier.fromQueue);
+                vk.dstQueueFamilyIndex = familyOf(barrier.toQueue);
+            } else {
+                vk.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+                vk.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            }
             vk.image = image;
             vk.subresourceRange.aspectMask = bound_[barrier.resource].aspect;
             vk.subresourceRange.levelCount = VK_REMAINING_MIP_LEVELS;
@@ -159,21 +228,43 @@ bool FrameGraphExecutor::Execute(const CompiledGraph& compiled, VkCommandBuffer 
         dependency.pBufferMemoryBarriers = bufferBarriers.data();
         dependency.imageMemoryBarrierCount = static_cast<uint32_t>(barriers.size());
         dependency.pImageMemoryBarriers = barriers.data();
-        vkCmdPipelineBarrier2(cmd, &dependency);
+        vkCmdPipelineBarrier2(into, &dependency);
         return true;
     };
 
+    uint32_t segmentAt = 0;
+    uint32_t remaining = compiled.segments.empty()
+                             ? static_cast<uint32_t>(compiled.order.size())
+                             : compiled.segments.front().count;
     for (const CompiledPass& pass : compiled.order) {
+        // Pindah ke command buffer segmen berikutnya tepat di batasnya. Perekam
+        // pass tidak pernah tahu ia berada di segmen yang mana — yang tahu hanya
+        // di sini, dan itulah yang membuat menambah pass tidak menyentuh
+        // pembagian batch sama sekali.
+        while (remaining == 0 && segmentAt + 1 < compiled.segments.size()) {
+            ++segmentAt;
+            remaining = compiled.segments[segmentAt].count;
+            SIM_VERIFY(segmentAt < segments.size(), "a segment has no command buffer");
+            cmd = segments[segmentAt];
+        }
+        --remaining;
         // Barrier ikut diukur bersama pass-nya. Ia memang bagian dari biaya
         // pass itu — barrier yang mahal adalah barrier yang disimpulkan graph
         // untuk pass itu, dan memisahkannya menyembunyikan justru hal yang
         // ingin dilihat orang yang membuka tabel ini.
         if (profiler != nullptr) {
-            profiler->BeginScope(cmd, pass.name);
+            profiler->BeginScope(cmd, pass.name, pass.queue != Queue::AsyncCompute);
         }
-        const bool ok = flush(pass.barriers);
+        bool ok = flush(pass.barriers, cmd, /*releasing=*/false, pass.queue);
         if (ok && pass.pass < recorders.size() && recorders[pass.pass]) {
             recorders[pass.pass](cmd);
+        }
+        // Pelepasan kepemilikan berjalan **sesudah** pass-nya, di antrean yang
+        // melepaskannya. Ia tidak boleh masuk ke `barriers` pass mana pun: yang
+        // di sana berjalan sebelum, dan sisi lepas yang berjalan sebelum
+        // penulisnya adalah sisi lepas yang melepaskan isi yang belum ada.
+        if (ok && !pass.releases.empty()) {
+            ok = flush(pass.releases, cmd, /*releasing=*/true, pass.queue);
         }
         if (profiler != nullptr) {
             profiler->EndScope(cmd);
@@ -182,7 +273,7 @@ bool FrameGraphExecutor::Execute(const CompiledGraph& compiled, VkCommandBuffer 
             return false;
         }
     }
-    return flush(compiled.finalBarriers);
+    return flush(compiled.finalBarriers, cmd, /*releasing=*/false, Queue::Graphics);
 }
 
 }  // namespace sim::render

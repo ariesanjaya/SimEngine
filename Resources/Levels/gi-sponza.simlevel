@@ -1,0 +1,172 @@
+{
+  "schemaVersion": 3,
+  "entities": [
+    {
+      "guid": "5900f2a4-0000-4000-8000-000000000000",
+      "components": {
+        "Name": {
+          "name": "GI Sponza"
+        },
+        "Transform": {
+          "position": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "rotation": [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "scale": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        }
+      }
+    },
+    {
+      "guid": "5900f2a4-0000-4000-8000-000000000001",
+      "parent": "5900f2a4-0000-4000-8000-000000000000",
+      "components": {
+        "Name": {
+          "name": "Sky"
+        },
+        "Transform": {
+          "position": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "rotation": [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "scale": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        "Sky": {
+          "source": "Atmosphere",
+          "intensity": 20.0,
+          "cameraHeightKm": 0.5,
+          "aerialPerspective": true,
+          "aerialHaze": 1.0,
+          "hdriPath": "",
+          "hdriRotation": 0.0,
+          "hdriIntensity": 1.0
+        }
+      }
+    },
+    {
+      "guid": "5900f2a4-0000-4000-8000-000000000002",
+      "parent": "5900f2a4-0000-4000-8000-000000000000",
+      "components": {
+        "Name": {
+          "name": "Sun"
+        },
+        "Transform": {
+          "position": [
+            -21.705,
+            43.414,
+            -6.15
+          ],
+          "rotation": [
+            0.668836,
+            -0.619073,
+            -0.411591,
+            -0.0
+          ],
+          "scale": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        "Light": {
+          "type": "Directional",
+          "color": [
+            1.0,
+            0.95,
+            0.88
+          ],
+          "intensity": 4.0,
+          "range": 100.0,
+          "sourceRadius": 0.1,
+          "innerAngle": 0.436,
+          "outerAngle": 0.611,
+          "castShadows": true
+        }
+      }
+    },
+    {
+      "guid": "5900f2a4-0000-4000-8000-000000000003",
+      "parent": "5900f2a4-0000-4000-8000-000000000000",
+      "components": {
+        "Name": {
+          "name": "Sponza"
+        },
+        "Transform": {
+          "position": [
+            0.0,
+            0.0,
+            0.0
+          ],
+          "rotation": [
+            1.0,
+            0.0,
+            0.0,
+            0.0
+          ],
+          "scale": [
+            1.0,
+            1.0,
+            1.0
+          ]
+        },
+        "MeshRenderer": {
+          "mesh": "cf53c0b7-d786-5622-a206-002ba244b3c2",
+          "materials": [
+            "367e422f-1cf7-5bad-bb1b-ebfdbba1cb61",
+            "78e8831a-8f9e-51de-bcea-e7bffef07766",
+            "505a28a2-2459-5f92-b7d9-37bb0c35abe3",
+            "e6538743-f8d5-5477-a7d2-b4ddbda0c0f4",
+            "6c694711-df8c-5390-a367-9faeef34b098",
+            "7864e8a3-b457-5fcc-86f5-8b30d7c5bf21",
+            "483a97ef-d517-5685-a0af-e0701c8b0f20",
+            "ced66c42-6bb9-5285-9e77-3bf3795575c2",
+            "cf661788-c74a-59e1-b2b3-a7fae6faec7b",
+            "9d8a22eb-cb90-5b67-a224-cdfa60f1bc78",
+            "06384730-42cf-58a0-bf39-eb3ec682e788",
+            "2800349d-d848-54eb-817e-495c37e8cb2c",
+            "1025c60c-464a-5bce-a026-2ee65305040e",
+            "fbb40853-b0a4-51b8-91ea-9aad03ac9649",
+            "b877adfa-e9ba-5de0-af93-25d1fbae7c6a",
+            "496cb020-fe74-5b8e-b57b-591f627f642a",
+            "a7da41ba-9bef-5dd4-848c-b5628a310c24",
+            "6829bd5c-fb65-51f9-a2e0-5299085d4392",
+            "4a81dbba-24f0-5a87-97f3-8e69f461451e",
+            "a389c4e4-8a0c-526a-8951-3a2b4c634a2c",
+            "88e57ab8-c5af-5b3b-a887-5abe6ad98275",
+            "d575fecf-af8d-532d-8506-e558438f1a8a",
+            "96339ff5-d404-529f-84da-c015bdb9f3c5",
+            "23f98f45-1b93-5633-966d-30aa387da0fb",
+            "481d73fa-ab8c-544b-8229-e56907a98194",
+            "6333941a-ffff-519a-9408-99cc6c23cba4",
+            "ddca4ca2-dda5-5a5c-b02a-c4a96dca2853",
+            "b5ccfbf1-fadb-55a8-a27a-f0d9a268de2f"
+          ],
+          "castShadows": true,
+          "receiveShadows": true,
+          "lodBias": 0.0
+        }
+      }
+    }
+  ]
+}

@@ -141,6 +141,48 @@ public:
     void Row(uint32_t outer, uint32_t plane, float* out) const;
 
     bool Empty() const { return boxes_.Empty() && entries_.empty(); }
+
+    /// Bentuk sebuah entri grid seperti yang dibaca shader komposit.
+    ///
+    /// Dipisah dari `Entry` dengan alasan yang sama seperti `BoxSceneField`:
+    /// yang di dalam diatur demi jalur CPU, sementara std430 menuntut setiap
+    /// vektor sejajar enam belas byte.
+    struct GpuGrid {
+        /// Dunia → ruang lokal mesh, tempat gridnya dibake.
+        Mat4 inverse{1.0f};
+        /// x skala terkecil, y anisotropi, z pita grid (ruang lokal),
+        /// w indeks tekstur grid.
+        Vec4 scaleBandSlot{1.0f, 1.0f, 0.0f, 0.0f};
+        /// xyz kotak batas dunia terkecil, w sisi voxel grid.
+        Vec4 boundsMinVoxel{0.0f};
+        /// xyz kotak batas dunia terbesar.
+        Vec4 boundsMax{0.0f};
+        /// xyz pusat voxel (0,0,0) di ruang lokal.
+        Vec4 origin{0.0f};
+        /// xyz ukuran grid dalam voxel.
+        Vec4 size{0.0f};
+    };
+
+    /// Menyalin entri grid ke bentuk yang dibaca shader.
+    ///
+    /// `slotOf` menjawab indeks tekstur untuk sebuah grid, atau negatif bila
+    /// grid itu tidak punya tekstur di GPU — entri itu lalu **dilewatkan**, dan
+    /// pemanggil harus tahu bahwa medannya jadi tidak lengkap. Yang memutuskan
+    /// indeksnya bukan medan ini: yang mengunggah tekstur adalah pemilik
+    /// clipmap, dan slotnya milik dia.
+    void WriteGpuGrids(std::vector<GpuGrid>& out,
+                       const std::function<int(const SdfGrid*)>& slotOf) const;
+
+    /// Entri kotak untuk jalur compute — yaitu **hanya instance yang belum
+    /// dibake**.
+    ///
+    /// Dipakai bersama `WriteGpuGrids`: yang ini menyumbang mesh yang belum
+    /// dibake, yang itu menyumbang yang sudah. Memakai salah satunya saja
+    /// menghilangkan separuh adegan dari medannya — bukan kotak yang terlalu
+    /// kasar, melainkan ruang kosong tempat gedung berdiri.
+    void WriteGpuEntries(std::vector<BoxSceneField::GpuEntry>& out) const {
+        boxes_.WriteGpuEntries(out);
+    }
     /// Berapa instance yang benar-benar memakai SDF hasil bake. Dipakai test dan
     /// log: "1 dari 40 mesh ter-bake" adalah keadaan yang layak diketahui.
     std::size_t BakedCount() const { return entries_.size(); }

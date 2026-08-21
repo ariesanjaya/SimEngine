@@ -76,8 +76,8 @@ float4 main(SdfDebugVarying input) : SV_Target {
             return float4(0.05, 0.05, 0.06, 1.0);
         }
         int cascade = cascadeFor(hit.position);
-        float3 normal =
-            cascade >= 0 ? sdfSurfaceNormal(cascade, hit.position) : float3(0.0, 1.0, 0.0);
+        float3 normal = cascade >= 0 ? sdfSurfaceNormal(cascade, hit.position, -direction)
+                                     : float3(0.0, 1.0, 0.0);
         return float4(normal * 0.5 + 0.5, 1.0);
     }
 

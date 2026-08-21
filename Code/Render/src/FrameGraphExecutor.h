@@ -75,6 +75,18 @@ public:
     bool Execute(const CompiledGraph& compiled, VkCommandBuffer cmd,
                  std::span<const Recorder> recorders, rhi::GpuProfiler* profiler = nullptr);
 
+    /// Versi dua antrean: satu command buffer per segmen.
+    ///
+    /// **Keluarga antreannya diserahkan, bukan ditebak.** Barrier perpindahan
+    /// kepemilikan menyebut nomor keluarga, dan nomor yang salah bukan galat
+    /// melainkan isi resource yang tidak dijanjikan apa pun di sisi penerimanya.
+    /// Keduanya sama berarti perangkat ini tidak punya antrean compute terpisah,
+    /// dan perpindahan kepemilikan lalu tidak berarti apa-apa — Vulkan sendiri
+    /// yang mengabaikannya.
+    bool Execute(const CompiledGraph& compiled, std::span<const VkCommandBuffer> segments,
+                 std::span<const Recorder> recorders, uint32_t graphicsFamily,
+                 uint32_t computeFamily, rhi::GpuProfiler* profiler = nullptr);
+
     /// Keadaan layout terakhir sebuah resource sesudah `Execute`. Dipakai
     /// pemanggil yang harus mengembalikan image impor ke keadaan semula.
     VkImageLayout LayoutOf(ResourceId resource) const;

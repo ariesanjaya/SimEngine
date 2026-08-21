@@ -13,6 +13,7 @@
 #include "ProbeField.h"
 #include "SdfClipmapResource.h"
 #include "Sim/Assets/MeshData.h"
+#include "Sim/Core/Assert.h"
 #include "Sim/Core/Log.h"
 #include "Sim/RHI/Buffer.h"
 #include "Sim/RHI/Device.h"
@@ -129,10 +130,17 @@ struct ShadowUniforms {
     Vec4 denoise{0.0f};
     /// x 1 kalau iradiansi GI berlaku, y ukuran ubin probe dalam piksel.
     Vec4 giParams{0.0f};
+    /// Langit untuk GI: x pengali radiansi, y ketinggian kamera (km),
+    /// zw ukuran LUT sky-view. **Pengali nol berarti tidak ada atmosfer** —
+    /// langit mati atau HDRI — dan penelusur GI kembali ke gradien cadangannya.
+    Vec4 skyParams{0.0f};
+    /// Penutup rekursi untuk permukaan yang belum dikenal cache radiansi:
+    /// xyz albedo yang ditebak, w 1 kalau tebakan itu dipakai.
+    Vec4 giBounce{0.0f};
 };
-// 7 mat4 + 20 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
+// 7 mat4 + 22 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
 // memperbarui shader-nya menjadi galat kompilasi, bukan bayangan yang bergeser.
-static_assert(sizeof(ShadowUniforms) == 7 * 64 + 20 * 16,
+static_assert(sizeof(ShadowUniforms) == 7 * 64 + 22 * 16,
               "ShadowUniforms harus cocok dengan blok ShadowParams di shadow_common.slang");
 
 /// Cermin dari `GpuLight` di Shaders/cluster_common.glsl. std430.
@@ -784,6 +792,8 @@ public:
         cullDebugActive_ = gpuOcclusionActive_ && desc.cullDebug;
         cullLimit_ = desc.cullLimit;
         cullFirst_ = desc.cullFirst;
+        asyncComputeActive_ = desc.asyncCompute && device_.Capabilities().asyncCompute &&
+                              device_.Capabilities().timelineSemaphore;
         // **Tiap frame, dan tanpa syarat.** Ia berhenti sendiri kalau tidak ada
         // yang berubah, dan itu yang membuatnya murah — sementara menggantungkan
         // penulisan descriptor pada sebuah syarat adalah cara paling mudah
@@ -983,9 +993,18 @@ public:
             sdfClipmap_.SetGpuFill(desc.gpuSdf);
             const CpuScope scope(cpuTimings_, "cpu-sdf");
             const auto started = std::chrono::steady_clock::now();
+            // Medan jarak per instance, disusun dari peta per mesh. Larik ini
+            // sejajar `scene.meshes`, dan nullptr berarti mesh itu belum dibake.
+            meshFieldPointers_.clear();
+            meshFieldPointers_.reserve(scene.meshes.size());
+            for (const MeshInstance& instance : scene.meshes) {
+                const auto index = static_cast<std::size_t>(instance.mesh);
+                meshFieldPointers_.push_back(
+                    index < meshFields_.size() ? meshFields_[index].get() : nullptr);
+            }
             sdfVoxelsWritten_ =
-                sdfClipmap_.Update(desc.camera.position, scene.meshes, slot.sdfStaging,
-                                   static_cast<uint32_t>(slotIndex_));
+                sdfClipmap_.Update(desc.camera.position, scene.meshes, meshFieldPointers_,
+                                   slot.sdfStaging, static_cast<uint32_t>(slotIndex_));
             sdfUpdateMs_ = std::chrono::duration<float, std::milli>(
                                std::chrono::steady_clock::now() - started)
                                .count();
@@ -1055,9 +1074,6 @@ public:
         // kompositnya pindah ke compute (G4), yang direkam di sini bukan lagi
         // salinan melainkan pekerjaan sungguhan, dan pekerjaan yang tidak
         // muncul di tabel mana pun adalah pekerjaan yang dianggap gratis.
-        profiler_.BeginScope(cmd, "sdf-fill");
-        sdfClipmap_.RecordUploads(cmd);
-        profiler_.EndScope(cmd);
         executor_.Clear();
         executor_.Bind(colorId_, BoundImage{target_.ColorImage(), target_.ColorView(),
                                             VK_IMAGE_ASPECT_COLOR_BIT});
@@ -1309,6 +1325,19 @@ public:
             }
         }
 
+        if (sdfPassId_ != kInvalidPass) {
+            for (uint32_t cascade = 0; cascade < kMaxSdfCascades; ++cascade) {
+                if (sdfCascadeId_[cascade] != kInvalidResource) {
+                    executor_.Bind(sdfCascadeId_[cascade],
+                                   BoundImage{sdfClipmap_.Texture(cascade).Image(), VK_NULL_HANDLE,
+                                              VK_IMAGE_ASPECT_COLOR_BIT});
+                }
+            }
+            recorders[sdfPassId_] = [this](VkCommandBuffer command) {
+                sdfClipmap_.RecordUploads(command);
+            };
+        }
+
         if (clusterPassId_ != kInvalidPass) {
             const auto clusterSlot = static_cast<uint32_t>(slotIndex_);
             executor_.Bind(clusterRangeId_,
@@ -1336,11 +1365,48 @@ public:
             };
         }
 
-        if (!executor_.Execute(compiled_, cmd, recorders, &profiler_)) {
+        // **Command buffer per segmen, dan yang pertama adalah `cmd` sendiri.**
+        // Prolog frame — reset query dan `sdf-fill` — sudah terekam di sana, dan
+        // ia harus berjalan di antrean grafis; jadi ia batch pertama, dan segmen
+        // graph mendapat command buffer masing-masing sesudahnya.
+        segmentBuffers_.clear();
+        submitBatches_.clear();
+        rhi::SubmitBatch prologue;
+        prologue.commandBuffer = cmd;
+        submitBatches_.push_back(prologue);
+        for (const Segment& segment : compiled_.segments) {
+            const bool async = segment.queue == Queue::AsyncCompute;
+            VkCommandBuffer into = async ? device_.BeginTransientCompute(cmd)
+                                         : device_.BeginTransientGraphics(cmd);
+            SIM_VERIFY(into != VK_NULL_HANDLE, "a frame graph segment has no command buffer");
+            segmentBuffers_.push_back(into);
+            rhi::SubmitBatch batch;
+            batch.commandBuffer = into;
+            batch.queue = async ? rhi::QueueKind::AsyncCompute : rhi::QueueKind::Graphics;
+            batch.wait = segment.wait;
+            batch.waitQueue = segment.waitQueue == Queue::AsyncCompute
+                                  ? rhi::QueueKind::AsyncCompute
+                                  : rhi::QueueKind::Graphics;
+            // Penungguan berlaku sedekat mungkin dengan pemakainya. Segmen yang
+            // menunggu selalu dimulai oleh pass yang mengambil kepemilikan, dan
+            // pengambilan itu barrier pertamanya — jadi menahan seluruh perintah
+            // batch ini sampai sinyalnya datang tidak menahan apa pun yang bisa
+            // jalan lebih dulu; yang bisa jalan lebih dulu ada di segmen
+            // sebelumnya.
+            batch.waitStages = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            batch.signal = segment.signal;
+            submitBatches_.push_back(batch);
+        }
+        if (!executor_.Execute(compiled_, segmentBuffers_, recorders,
+                               device_.GraphicsQueueFamily(), device_.ComputeQueueFamily(),
+                               &profiler_)) {
             SIM_ERROR("Render", "frame graph execution failed: {}", compiled_.error);
         }
-        profiler_.EndFrame(cmd);
-        slot.submitId = device_.SubmitTransient(cmd);
+        // Query frame ditutup di command buffer terakhir yang benar-benar
+        // dipakai graph — bukan di `cmd`, yang sudah lewat.
+        VkCommandBuffer last = segmentBuffers_.empty() ? cmd : segmentBuffers_.back();
+        profiler_.EndFrame(last);
+        slot.submitId = device_.SubmitTransientBatches(cmd, submitBatches_);
         slotIndex_ = (slotIndex_ + 1) % slots_.size();
         drawnOpaque_ = opaqueCount;
         drawnTransparent_ = transparentCount;
@@ -1874,6 +1940,8 @@ public:
 
     uint64_t TimingSerial() const override { return profiler_.ResultsSerial(); }
 
+    float FrameGpuMilliseconds() const override { return profiler_.FrameMilliseconds(); }
+
     std::span<const PassTiming> CpuTimings() const override { return cpuTimings_; }
 
     RenderStats Stats() const override { return stats_; }
@@ -1986,6 +2054,45 @@ private:
         shadowId_ = graph_.Import("shadow-cascades", Access::ShaderRead);
         atlasId_ = graph_.Import("shadow-atlas", Access::ShaderRead);
 
+        // **Pengisian kaskade SDF, dan sejak G7 ia pass graph.** Sebelumnya ia
+        // direkam langsung ke command buffer frame, di luar graph, dengan
+        // perpindahan layoutnya diurus `SdfClipmapResource` sendiri. Itu tidak
+        // bisa dipertahankan begitu ia boleh berjalan di antrean lain:
+        // perpindahan kepemilikan keluarga antrean berbentuk sepasang, dan
+        // sepasang hanya bisa disusun oleh yang melihat kedua sisinya.
+        //
+        // Dideklarasikan hanya kalau ada yang mau ditulis. Pass tanpa isi tetap
+        // membawa perpindahan layout keempat kaskadenya, dan itu biaya yang
+        // dibayar untuk tidak menulis apa pun.
+        sdfPassId_ = kInvalidPass;
+        sdfCascadeId_.fill(kInvalidResource);
+        if (sdfClipmap_.IsValid() && sdfClipmap_.HasPendingUploads()) {
+            const Access fillAccess =
+                sdfClipmap_.GpuFillActive() ? Access::ShaderWrite : Access::TransferWrite;
+            sdfPassId_ = graph_.AddPass("sdf-fill");
+            for (uint32_t cascade = 0; cascade < kMaxSdfCascades; ++cascade) {
+                if (!sdfClipmap_.Touches(cascade) || !sdfClipmap_.Texture(cascade).IsValid()) {
+                    continue;
+                }
+                sdfCascadeId_[cascade] = graph_.Import(
+                    "sdf-cascade-" + std::to_string(cascade), Access::ShaderRead);
+                graph_.Write(sdfPassId_, sdfCascadeId_[cascade], fillAccess);
+                // Dikembalikan ke ShaderRead sesudah frame: itulah keadaan yang
+                // diandaikan penelusuran GI, dan keadaan awal yang
+                // dideklarasikan frame berikutnya.
+                graph_.SetOutput(sdfCascadeId_[cascade], Access::ShaderRead);
+            }
+            graph_.SetSideEffect(sdfPassId_);
+            // **Hanya kalau ada yang membacanya frame ini.** Tanpa pembaca,
+            // kepemilikannya harus dikembalikan ke antrean grafis oleh barrier
+            // penutup — dan barrier penutup tidak mengenal antrean. Tanpa
+            // pembaca ia juga tidak membeli apa pun.
+            if (asyncComputeActive_ && sdfClipmap_.GpuFillActive() && giEnabled_ &&
+                probes_.IsValid() && hiz_.IsValid()) {
+                graph_.SetQueue(sdfPassId_, Queue::AsyncCompute);
+            }
+        }
+
         // Penetapan lampu ke cluster, paling awal: yang membacanya adalah pass
         // forward, dan hasilnya tidak bergantung pada apa pun yang digambar.
         // **Ini pemakai pertama barrier buffer di eksekutor** — yang ditulis
@@ -2002,6 +2109,13 @@ private:
             clusterPassId_ = graph_.AddPass("cluster-assign");
             graph_.Write(clusterPassId_, clusterRangeId_, Access::ShaderWrite);
             graph_.Write(clusterPassId_, clusterIndexId_, Access::ShaderWrite);
+            // **Pemakai pertama antrean compute terpisah (G7).** Ia tidak
+            // menghalangi apa pun sampai pass forward membacanya, dan yang ada
+            // di antaranya — bayangan, langit, prepass — tidak menyentuh satu
+            // pun keluarannya.
+            if (asyncComputeActive_) {
+                graph_.SetQueue(clusterPassId_, Queue::AsyncCompute);
+            }
         }
 
         // **Culling lebih dulu daripada apa pun yang menggambar geometri.**
@@ -2121,6 +2235,13 @@ private:
             probePassId_ = graph_.AddPass("gi-probe-trace");
             graph_.Read(probePassId_, sceneId_, Access::ShaderRead);
             graph_.Read(probePassId_, depthId_, Access::ShaderRead);
+            // Kaskade SDF yang ditulis frame ini. Inilah yang menempatkan
+            // penungguan lintas-antrean tepat di sini dan bukan lebih awal.
+            for (const ResourceId cascade : sdfCascadeId_) {
+                if (cascade != kInvalidResource) {
+                    graph_.Read(probePassId_, cascade, Access::ShaderRead);
+                }
+            }
             // Efek samping: keluarannya tekstur SH yang layout-nya diurus
             // `ProbeField` sendiri, bukan resource yang dilacak graph.
             graph_.SetSideEffect(probePassId_);
@@ -2969,6 +3090,25 @@ private:
     }
 
     /// Mengunggah sebuah mesh dan mengembalikan handle-nya, atau nol bila gagal.
+    void SetMeshDistanceField(MeshHandle mesh, std::shared_ptr<const SdfGrid> grid) override {
+        const auto index = static_cast<std::size_t>(mesh);
+        if (index >= meshes_.size()) {
+            return;
+        }
+        if (meshFields_.size() <= index) {
+            meshFields_.resize(index + 1);
+        }
+        if (meshFields_[index] == grid) {
+            return;
+        }
+        meshFields_[index] = std::move(grid);
+        if (meshFields_[index] != nullptr) {
+            SIM_INFO("Render", "mesh {} now has a baked distance field ({}x{}x{} at {:.3f} m)",
+                     index, meshFields_[index]->sizeX, meshFields_[index]->sizeY,
+                     meshFields_[index]->sizeZ, meshFields_[index]->voxelSize);
+        }
+    }
+
     MeshHandle UploadMesh(const assets::MeshData& data) {
         auto mesh = std::make_unique<GpuMesh>();
         const VkDeviceSize vertexBytes = sizeof(assets::MeshVertex) * data.vertices.size();
@@ -3705,7 +3845,7 @@ private:
         samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
         SIM_VK_CHECK(vkCreateSampler(device_.Handle(), &samplerInfo, nullptr, &shadow_.sampler));
 
-        const std::array<VkDescriptorSetLayoutBinding, 21> bindings{
+        const std::array<VkDescriptorSetLayoutBinding, 22> bindings{
             VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
@@ -3748,6 +3888,8 @@ private:
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{20, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{21, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
         };
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -3760,7 +3902,7 @@ private:
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                  static_cast<uint32_t>(slots_.size())},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                 static_cast<uint32_t>(slots_.size()) * 15},
+                                 static_cast<uint32_t>(slots_.size()) * 16},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                  static_cast<uint32_t>(slots_.size()) * 5},
         };
@@ -4298,7 +4440,7 @@ private:
         // dibebaskan — kerusakan yang tidak muncul sebagai galat validasi.
         std::vector<VkDescriptorBufferInfo> buffers(slots_.size() * 5);
         std::vector<VkWriteDescriptorSet> writes;
-        writes.reserve(slots_.size() * 17);
+        writes.reserve(slots_.size() * 18);
         // SHADER_READ_ONLY, bukan DEPTH_READ_ONLY. Keduanya sah untuk mengambil
         // sampel dari image depth, tapi yang berlaku adalah yang disimpulkan
         // frame graph dari `Access::ShaderRead` — dan descriptor yang menyebut
@@ -4313,6 +4455,18 @@ private:
         // bayangan sebagai pengganti — descriptor yang dibiarkan kosong adalah
         // pelanggaran di setiap draw, bahkan pada pass yang tidak membacanya.
         const VkDescriptorImageInfo hizImage = HizDescriptorImage();
+        // LUT sky-view, atau piramida HiZ sebagai pengganti kalau atmosfernya
+        // gagal dibuat — alasan yang sama dengan kaskade SDF di atas: descriptor
+        // yang dibiarkan kosong adalah pelanggaran di setiap draw, bahkan pada
+        // pass yang tidak membacanya. Yang menjaga ia tidak terbaca adalah
+        // `skyParams.x` yang nol, bukan descriptor ini. **Penggantinya harus
+        // image 2D biasa**, bukan peta bayangan: yang itu view array, dan
+        // sebuah `Sampler2D` yang dipasangi view array adalah pelanggaran
+        // walaupun tidak ada satu pun shader yang membacanya.
+        const VkDescriptorImageInfo skyImage =
+            sky_.IsValid() ? VkDescriptorImageInfo{sky_.SkyViewSampler(), sky_.SkyViewImage(),
+                                                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}
+                           : hizImage;
         const std::array<VkDescriptorImageInfo, 9> probeImages = ProbeDescriptorImages();
         // Cache radiansi dipakai bersama seluruh slot: ia riwayat lintas frame,
         // bukan data per frame. Kalau gagal dibuat, descriptor-nya menunjuk
@@ -4406,6 +4560,11 @@ private:
             cache.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             cache.pBufferInfo = &cacheBufferInfo;
             writes.push_back(cache);
+
+            VkWriteDescriptorSet skyView = sampled;
+            skyView.dstBinding = 21;
+            skyView.pImageInfo = &skyImage;
+            writes.push_back(skyView);
         }
         vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
@@ -4960,6 +5119,17 @@ private:
         const bool giReady = desc.gi.enabled && probes_.IsValid() && probeFrame_ > 1;
         uniforms.giParams = Vec4(giReady ? 1.0f : 0.0f,
                                  static_cast<float>(probeGrid_.Settings().tileSize), 0.0f, 0.0f);
+        // **Syarat yang sama persis dengan syarat pass langit didaftarkan.**
+        // LUT sky-view hanya diperbarui di dalam pass itu; menyuruh GI
+        // membacanya saat pass-nya tidak ada berarti menerangi adegan dengan
+        // matahari di posisi frame kapan pun terakhir kali langit digambar.
+        const bool atmosphere = desc.skyEnabled && sky_.IsValid() &&
+                                desc.skySource != SkySource::HdrMap;
+        uniforms.skyParams =
+            Vec4(atmosphere ? desc.skyIntensity : 0.0f, desc.cameraHeightKm,
+                 static_cast<float>(SkyAtmosphere::kSkyViewWidth),
+                 static_cast<float>(SkyAtmosphere::kSkyViewHeight));
+        uniforms.giBounce = Vec4(Vec3(kBounceAlbedo), 1.0f);
         slot.shadowUniform.Write(&uniforms, sizeof(uniforms));
     }
 
@@ -5133,7 +5303,15 @@ private:
     bool cullDebugActive_ = false;
     /// Batas bisect uji occlusion; lihat `ViewportDesc::cullLimit`.
     uint32_t cullLimit_ = 0xffffffffu;
+    /// Antrean compute terpisah dipakai frame ini; lihat
+    /// `ViewportDesc::asyncCompute`.
+    bool asyncComputeActive_ = false;
     uint32_t cullFirst_ = 0;
+    /// Command buffer tiap segmen graph, dan batch submit-nya. Anggota, bukan
+    /// lokal: keduanya dibangun ulang tiap frame dan tidak ada gunanya
+    /// mengalokasi ulang vektornya setiap kali.
+    std::vector<VkCommandBuffer> segmentBuffers_;
+    std::vector<rhi::SubmitBatch> submitBatches_;
     /// Slot yang perintahnya terakhir disubmit, dan viewProj-nya. Dipakai
     /// pembaca angka antara supaya ia membaca frame yang benar.
     uint32_t lastCullSlot_ = 0;
@@ -5194,6 +5372,8 @@ private:
     float sdfUpdateMs_ = 0.0f;
     bool sdfDebugEnabled_ = false;
     PassId giDebugId_ = kInvalidPass;
+    PassId sdfPassId_ = kInvalidPass;
+    std::array<ResourceId, kMaxSdfCascades> sdfCascadeId_{};
     PassId hizPassId_ = kInvalidPass;
     PassId probePassId_ = kInvalidPass;
     bool giEnabled_ = false;
@@ -5270,8 +5450,28 @@ private:
     /// Anggaran langkah sphere tracing. Angka yang paling sering disetel saat
     /// menyeimbangkan kualitas dan biaya, jadi ia disebut sekali di sini.
     static constexpr float kSdfMaxSteps = 48.0f;
+    /// Albedo yang ditebak untuk permukaan yang mengenai clipmap SDF tetapi
+    /// belum pernah terlihat layar, jadi cache radiansi tidak mengenalnya.
+    ///
+    /// **Sebuah tebakan, dan disebut tebakan.** Clipmap hanya menyimpan jarak;
+    /// warna permukaannya tidak ada di mana pun sampai ada volume albedo. Yang
+    /// dibayar tanpa tebakan ini bukan gambar yang sedikit meleset melainkan
+    /// serambi yang hitam pekat: di dalam ruang tertutup hampir setiap sinar
+    /// probe mengenai batu yang tidak pernah masuk layar, dan sinar yang
+    /// dibuang semuanya berarti iradiansi nol. 0,5 adalah albedo rata-rata
+    /// bahan bangunan — plester, batu, kayu — dan salah 0,2 di sini
+    /// menggeser kecerahan pantulan, bukan menghilangkannya.
+    static constexpr float kBounceAlbedo = 0.5f;
     /// Anggaran langkah lapis screen-space. Rencana GI menyebut 16, dan angka
     /// itulah yang membuat fallback ke SDF bukan kemewahan melainkan keharusan.
+    ///
+    /// **Diuji menaikkannya, dan tidak dibayar.** Di Sponza 16 langkah menjawab
+    /// 6% sinar probe; 64 menjawab 15–32%, tetapi gambarnya hampir tidak
+    /// berubah — rata-rata 57,4 menjadi 58,4 — sementara `gi-probe-trace` naik
+    /// 0,39 ms menjadi 0,93 ms. Sebabnya sinar tambahan itu menemukan permukaan
+    /// yang warnanya sudah ikut biru langit, jadi yang ditukar hanya satu
+    /// sumber biru dengan sumber biru yang lain. Yang akan membuat angka ini
+    /// berarti adalah pantulan yang benar-benar membawa warna matahari.
     static constexpr float kScreenMaxSteps = 16.0f;
     /// Ketebalan yang diandaikan untuk permukaan di depth buffer, meter.
     static constexpr float kScreenThickness = 0.5f;
@@ -5397,6 +5597,12 @@ private:
     /// `unique_ptr`, karena `DynamicBuffer` tidak bisa dipindah — dan vektor yang
     /// tumbuh akan memindahkan isinya.
     std::vector<std::unique_ptr<GpuMesh>> meshes_;
+    /// Medan jarak hasil bake, diindeks `MeshHandle`. Kosong berarti mesh itu
+    /// memakai kotak batasnya di clipmap, seperti sebelum M1.
+    std::vector<std::shared_ptr<const SdfGrid>> meshFields_;
+    /// Larik sejajar `ViewportScene::meshes`, disusun ulang tiap frame supaya
+    /// `SdfClipmapResource` tidak perlu mengenal `MeshHandle` sama sekali.
+    std::vector<const SdfGrid*> meshFieldPointers_;
     /// Jalur → handle. Jalur yang gagal dimuat dipetakan ke kubus satuan supaya
     /// ia tidak dicoba lagi setiap frame.
     /// Tekstur yang sudah di GPU, beserta set descriptor-nya.

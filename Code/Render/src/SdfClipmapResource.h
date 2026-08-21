@@ -58,8 +58,18 @@ public:
     /// `staging` harus milik slot frame yang sedang direkam: isinya masih dibaca
     /// GPU sampai submit slot itu selesai. Mengembalikan banyaknya voxel yang
     /// benar-benar ditulis — angka yang diawasi terhadap anggaran 0,4 ms.
+    /// `grids[i]` adalah medan jarak hasil bake untuk `meshes[i]`, atau nullptr
+    /// bila mesh itu belum dibake — instance itu lalu memakai kotak batasnya,
+    /// seperti sebelum M1. Span yang lebih pendek daripada `meshes` berlaku
+    /// sebagai nullptr untuk sisanya.
     uint64_t Update(const Vec3& cameraPosition, std::span<const MeshInstance> meshes,
-                    rhi::DynamicBuffer& staging, uint32_t slot);
+                    std::span<const SdfGrid* const> grids, rhi::DynamicBuffer& staging,
+                    uint32_t slot);
+
+    /// Berapa instance frame ini yang benar-benar memakai SDF hasil bake.
+    /// Dilaporkan log dan panel: "1 dari 40 mesh ter-bake" adalah keadaan yang
+    /// layak diketahui.
+    std::size_t BakedCount() const { return field_.BakedCount(); }
 
     /// Merekam salinan atau dispatch yang disiapkan `Update` ke command buffer
     /// frame. Jalur mana yang direkam ditentukan `SetGpuFill`.
@@ -81,7 +91,28 @@ public:
     /// Sisi grup kerja, sama dengan `numthreads` di Shaders/sdf_fill.comp.slang.
     static constexpr uint32_t kGroupSize = 64;
 
+    /// Berapa medan jarak hasil bake yang bisa dibaca jalur compute sekaligus.
+    ///
+    /// **Larik tekstur berukuran tetap, bukan bindless.** Jumlahnya sama dengan
+    /// `kMaxGrids` di sdf_fill.comp.slang, dan yang melewatinya kembali memakai
+    /// kotak batasnya — dilaporkan, bukan didiamkan. Enam belas mesh berbeda
+    /// yang masing-masing punya medan jarak sendiri sudah jauh di atas apa pun
+    /// yang pernah diukur adegan uji ini; yang mengubahnya nanti adalah alasan
+    /// yang terukur, bukan angka yang dinaikkan berjaga-jaga.
+    static constexpr uint32_t kMaxGrids = 16;
+
     const rhi::Texture3D& Texture(uint32_t cascade) const { return textures_[cascade]; }
+
+    /// Ada pekerjaan yang menunggu `RecordUploads`.
+    ///
+    /// Dipakai frame graph memutuskan apakah pass `sdf-fill` perlu dideklarasikan
+    /// sama sekali frame ini: pass yang dideklarasikan tanpa isi tetap membawa
+    /// perpindahan layout keempat kaskadenya, dan itu biaya yang dibayar untuk
+    /// tidak menulis apa pun.
+    bool HasPendingUploads() const { return !pendingFills_.empty() || !pending_.empty(); }
+
+    /// Kaskade mana saja yang akan disentuh `RecordUploads`.
+    bool Touches(uint32_t cascade) const;
     uint32_t CascadeCount() const { return volume_.Clipmap().CascadeCount(); }
 
     /// Byte staging terbesar yang mungkin dibutuhkan satu pembaruan: seluruh
@@ -108,6 +139,11 @@ private:
     };
 
     bool WriteFillDescriptors();
+    /// Memastikan sebuah grid punya tekstur di GPU, dan menjawab slotnya.
+    /// Negatif berarti tidak ada tempat lagi, atau unggahannya gagal.
+    int EnsureGridUploaded(const SdfGrid* grid);
+    /// Menunjuk ulang larik tekstur grid sesudah ada yang bertambah.
+    void WriteGridDescriptor();
     /// Menunjuk ulang set entri **satu slot** ke buffer barunya.
     ///
     /// Terpisah dari `WriteFillDescriptors` karena keduanya dipanggil pada saat
@@ -126,7 +162,12 @@ private:
     VkBuffer pendingSource_ = VK_NULL_HANDLE;
     // Dipakai ulang tiap frame supaya medan jaraknya tidak mengalokasi vektor
     // baru setiap kali kamera bergerak satu voxel.
-    BoxSceneField field_;
+    //
+    // **`BakedSceneField`, bukan `BoxSceneField` — dan ia memuat yang kedua.**
+    // Adegan nyata berisi mesh yang sudah dibake dan mesh yang belum; yang punya
+    // grid memakai grid, sisanya tetap memakai kotak lewat medan yang sama
+    // persis seperti sebelumnya.
+    BakedSceneField field_;
 
     // --- jalur compute (G4) ---
     rhi::ComputePipeline fill_;
@@ -140,11 +181,29 @@ private:
     std::array<VkDescriptorSet, kSlots> entrySets_{};
     std::array<rhi::DynamicBuffer, kSlots> entryBuffers_;
     std::vector<BoxSceneField::GpuEntry> gpuEntries_;
+    std::vector<BakedSceneField::GpuGrid> gpuGrids_;
+    /// Satu tekstur per grid yang dipakai adegan, beserta grid yang ditempatinya.
+    /// Pointer dipakai sebagai identitas: bakery memiliki gridnya untuk seluruh
+    /// sesi, jadi alamatnya stabil, dan dua instance mesh yang sama menunjuk
+    /// grid yang sama persis — satu tekstur, bukan dua.
+    std::array<rhi::Texture3D, kMaxGrids> gridTextures_;
+    std::array<const SdfGrid*, kMaxGrids> gridSources_{};
+    uint32_t gridCount_ = 0;
+    bool reportedGridLimit_ = false;
+    VkDescriptorSetLayout gridLayout_ = VK_NULL_HANDLE;
+    VkDescriptorSet gridSet_ = VK_NULL_HANDLE;
+    std::array<rhi::DynamicBuffer, kSlots> gridBuffers_;
+    /// Isi slot tekstur yang belum terpakai. Lihat catatan di `Create`.
+    rhi::Texture3D dummyGrid_;
     std::vector<PendingFill> pendingFills_;
     uint32_t fillSlot_ = 0;
     bool storageCapable_ = false;
     uint32_t fillEntryCount_ = 0;
+    uint32_t fillGridCount_ = 0;
     bool gpuFill_ = false;
+    /// Sekali saja: sebuah pesan per frame tentang keadaan yang tidak berubah
+    /// adalah log yang tidak bisa dibaca.
+    bool reportedCpuFallback_ = false;
 };
 
 }  // namespace sim::render

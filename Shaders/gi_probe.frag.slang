@@ -158,12 +158,26 @@ ProbeSh main(float4 position : SV_Position) {
             if (cascade < 0) {
                 continue;
             }
-            float3 hitNormal = sdfSurfaceNormal(cascade, hit.position);
+            // Cadangan normal: menghadap balik ke sinar. Sebuah permukaan
+            // yang dikenai sinar memang menghadap ke arah datangnya, dan itu
+            // tebakan yang jauh lebih baik daripada sumbu tetap mana pun.
+            float3 hitNormal = sdfSurfaceNormal(cascade, hit.position, -direction);
             float3 cached;
-            if (!giCacheQuery(hit.position, hitNormal, cameraPosition, cached)) {
+            if (giCacheQuery(hit.position, hitNormal, cameraPosition, cached)) {
+                radiance = cached;
+            } else if (shadowParams.giBounce.w > 0.5) {
+                // **"Tidak tahu" ditaksir, bukan lagi dibuang.** Membuangnya
+                // benar selama satu-satunya sumber radiansi adalah layar: yang
+                // tidak pernah terlihat memang tidak diketahui warnanya. Tetapi
+                // di dalam ruang tertutup hampir *setiap* sinar mengenai
+                // permukaan seperti itu, jadi yang tersisa untuk ditaksir tidak
+                // ada sama sekali — dan probe yang tidak punya satu pun sinar
+                // yang diketahui mengembalikan nol. Serambi Sponza karena itu
+                // hitam pekat justru ketika GI dinyalakan.
+                radiance = giGuessedBounce(hit.position, hitNormal);
+            } else {
                 continue;
             }
-            radiance = cached;
         } else if (hit.layer == kLayerScreen) {
             // **Koordinat texel, bukan uv ternormalisasi.** `RenderTarget`
             // mengalokasi lebih besar daripada yang digambar dan hanya membangun

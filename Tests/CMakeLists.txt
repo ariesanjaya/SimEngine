@@ -113,6 +113,12 @@ sim_add_test(SimAssetTests
         AssetTests.cpp
     DEPS
         Sim::Assets
+        # Bake SDF mesh ada di `Sim::Assets`, pustakanya di `Sim::Volume`, dan
+        # tautannya di sana PRIVATE — sengaja: OpenVDB adalah pengondisi aset,
+        # bukan sesuatu yang ikut ke jalur yang dikirim. Uji-nya perlu bertanya
+        # "build ini punya OpenVDB atau tidak" untuk melewatkan dirinya sendiri
+        # bila tidak, jadi ia menautkannya sendiri.
+        Sim::Volume
         # **Uji-nya yang butuh keduanya, bukan Sim::Assets.** Baker menulis
         # `.ktx2` lewat libktx; yang membacanya di runtime adalah pembaca yang
         # ditulis tangan di `Sim::RHI`. Round-trip di sini karena itu
