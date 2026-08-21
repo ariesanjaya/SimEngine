@@ -1096,7 +1096,7 @@ beserta jalur mundur ke putih — bukan descriptor tak sah.
 
 ---
 
-## G6 — GPU-driven: indirect draw dan occlusion culling dua fase · ✅ selesai (waktu perlu diukur ulang)
+## G6 — GPU-driven: indirect draw dan occlusion culling dua fase · ✅ selesai
 
 Ini bagian yang benar-benar "terinspirasi CryEngine", dan satu-satunya yang tidak
 boleh dikerjakan sebelum lima milestone di atasnya selesai.
@@ -1164,30 +1164,66 @@ permukaan.
 
 ### Hasil
 
-RTX 2060, 1280×720, GI menyala, 120 frame pemanasan + 240 diukur,
-`Resources/Levels/bench-dense.simlevel`.
+> **Tabel pertama di sini ditarik.** Ia melaporkan GPU 2,4× dan CPU 2,9× lebih
+> cepat, dan kedua kolomnya diukur di atas adegan yang setiap framenya menggambar
+> sebuah permukaan hantu seluas layar — lihat "Akarnya: `VkBuffer` yang dipakai
+> ulang" di bawah. Yang di bawah ini menggantikannya.
+
+RTX 2060, 1280×720, 120 frame pemanasan + 240 diukur,
+`Resources/Levels/bench-dense.simlevel`, median dari empat jalan.
+
+**Garis dasarnya G5 (`3b23d8a`) dengan `DynamicBuffer::Generation` di-backport ke
+sana.** Tanpa itu yang terbandingkan dua hal sekaligus: G6, dan sebuah cacat yang
+sudah ada sejak sebelumnya. Levelnya ikut disalin ke sana — ia baru mendarat
+bersama G6.
+
+Dengan GI mati, yang memisahkan sumbangan G6 dari biaya SDF fill yang mendominasi
+frame:
+
+| | sebelum G6 | sesudah | |
+|---|---:|---:|---|
+| draw / frame | 7.585 | **2.232** | −71% |
+| **total CPU** | 3,796 | **2,804** | **−26%** |
+| `cpu-record` | 2,996 | **1,834** | **−39%** |
+| `cpu-gather` | 0,697 | 0,831 | +19% |
+| **total GPU** | 2,356 | 2,609 | +11% |
+| `forward-opaque` | 0,565 | 0,500 | −12% |
+| `depth-prepass` | 0,408 | 0,492 | +21% |
+| `shadow-cascades` | 0,678 | 0,802 | +18% |
+| `shadow-atlas` | 0,405 | 0,506 | +25% |
+
+Dengan GI menyala, yaitu frame yang sebenarnya:
 
 | | sebelum G6 | sesudah |
 |---|---:|---:|
-| draw / frame | 7.586 | **2.232** |
-| **total GPU** | 34,511 | **14,421** |
-| **total CPU** | 32,634 | **11,269** |
-| `forward-opaque` | 13,174 | 3,638 |
-| `sdf-fill` | 17,375 | 8,433 |
-| `shadow-cascades` | 2,397 | 0,727 |
-| `depth-prepass` | 0,561 | 0,480 |
-| `cpu-record` | 7,840 | 4,261 |
-| `cpu-gather` | 1,498 | 1,919 |
-| primitif, seluruh pass | 13.211.816 | 13.200.456 |
+| draw / frame | 7.585 | **2.232** |
+| total CPU | 5,643 | 5,679 |
+| `cpu-record` | 3,112 | **2,335** |
+| total GPU | 7,067 | 7,436 |
+| `sdf-fill` | 4,372 | 4,447 |
 
-**GPU 2,4× lebih cepat dan CPU 2,9× lebih cepat, tanpa satu pun segitiga
-dibuang.** Yang turun bukan pekerjaan menggambar melainkan biaya menyuruhnya:
-7.586 panggilan menjadi 2.232, dan tiap panggilan yang hilang membawa serta
-pengikatan buffer, push constant, dan penyiapan keadaan di driver.
+**Yang dibeli G6 adalah waktu CPU menyuruh menggambar, dan hanya itu.**
+`cpu-record` turun 39% dan total CPU 26% dengan GI mati; 7.585 panggilan menjadi
+2.232, dan tiap panggilan yang hilang membawa serta pengikatan buffer, push
+constant, dan penyiapan keadaan di driver. Dengan GI menyala keuntungan itu
+tenggelam: `sdf-fill` sendirian berharga 4,4 ms, dan CPU-nya menunggu GPU.
 
-`cpu-gather` justru **naik**, dan itu memang yang diharapkan: yang diurutkan
-sekarang permukaan, bukan entity, dan jumlahnya lebih banyak. Ia belum tersentuh
-G6 — lihat di bawah.
+`cpu-gather` **naik**, dan itu memang yang diharapkan: yang diurutkan sekarang
+permukaan, bukan entity, dan jumlahnya lebih banyak. Ia belum tersentuh G6 —
+lihat di bawah.
+
+**Sisi GPU justru sedikit lebih lambat, dan sebagian besarnya harga kebenaran.**
+G6 memperbaiki `firstIndex`/`vertexOffset` yang tertukar (lihat di bawah), jadi
+mesh berruas banyak sekarang menggambar geometrinya sendiri alih-alih mengulang
+ruas pertamanya. Jumlah segitiganya sama; bentuknya tidak, dan shader ball yang
+utuh lebih mahal dirasterisasi daripada satu ruas yang diulang. Itu terlihat di
+pass yang menggambar geometri yang sama tanpa memakai indirect draw sama sekali —
+`shadow-cascades` +18% dan `shadow-atlas` +25%. Sisanya biaya indirect draw itu
+sendiri: `depth-prepass` +21%.
+
+**Dan yang paling besar bukan G6.** Memperbaiki cacat descriptor itu saja
+memangkas frame adegan padat kira-kira separuh: 14,4 → 7,4 ms GPU dan 11,3 → 5,7
+ms CPU, terhadap angka "sesudah" yang lama.
 
 Gambar dengan GI mati pada adegan G0: **jalur GPU dan jalur CPU identik byte demi
 byte** — 0 dari 2.764.800. Sakelarnya `--bench-cpu-cull`. Jalur CPU bukan sekadar
@@ -1559,10 +1595,9 @@ pass yang ditambahkannya berharga 0,059 ms; yang dihemat pass forward sekitar
 0,03 ms. **Ia karena itu tetap mati secara bawaan — sekarang karena angkanya,
 bukan karena ia salah.**
 
-**Satu hal yang belum dikerjakan:** tabel hasil G6 di atas — 34,5 → 14,4 ms dan
-seterusnya — diukur saat hantunya masih ada di setiap frame. Jumlah draw-nya
-(7.586 → 2.232) struktural dan tetap berlaku, tetapi waktunya harus diukur ulang
-terhadap garis dasar sebelum G6.
+Tabel hasil G6 sudah diukur ulang terhadap garis dasar G5 yang ikut diperbaiki;
+lihat "Hasil" di atas. Ringkasnya: yang dibeli G6 waktu CPU merekam, bukan waktu
+GPU, dan yang paling besar justru perbaikan descriptor ini sendiri.
 
 **Dua cacat sungguhan ikut terangkat sepanjang perburuan itu**, dan keduanya
 tetap diperbaiki:
@@ -1723,7 +1758,7 @@ kembali ke daftar.
 | G3 | Fondasi compute: build, RHI, pass di frame graph | G2 | ✅ |
 | G4 | Clipmap SDF, Hi-Z, dan penetapan cluster pindah ke compute | G3 | ✅ (Hi-Z diukur lalu dikembalikan — lihat catatannya) |
 | G5 | Bindless (`descriptorIndexing`) + material terindeks | G2 | ✅ |
-| G6 | Indirect draw + occlusion culling dua fase | G3, G5 | ⏳ indirect draw ✅, occlusion ada tapi belum tepat |
+| G6 | Indirect draw + occlusion culling dua fase | G3, G5 | ✅ keduanya tepat; occlusion mati secara bawaan karena angkanya |
 | G7 | Async compute lewat timeline semaphore | G4, G6 | ⏳ |
 | G8 | Resolusi dinamis | E8.8 (TAA), G0 | ⏳ |
 
