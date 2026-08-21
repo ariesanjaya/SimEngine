@@ -32,6 +32,7 @@
 #include <glm/gtx/quaternion.hpp>
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <csignal>
@@ -42,6 +43,7 @@
 #include <string>
 #include <string_view>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -104,6 +106,8 @@ void PrintUsage() {
         "  --bench-dump-depth <path>     depth buffer mentah (w, h, float per texel)\n"
         "  --bench-cull-limit <n>        gambar hanya permukaan bernomor < n\n"
         "  --bench-fixed-exposure        eksposur manual; wajib untuk membandingkan gambar\n"
+        "  --bench-gi-debug <view>       off|albedo|normal|irradiance|raycount|steps|layers\n"
+        "  --bench-ev <ev100>            eksposur manual pada EV100 ini\n"
         "  --bench-compute               ganti gambarnya dengan pass compute uji (G3)\n"
         "  --validate-sync               nyalakan validasi sinkronisasi; lambat, sengaja\n"
         "  --bench-cpu-clusters          penetapan cluster di CPU, bukan GPU (G4)\n"
@@ -621,6 +625,7 @@ int main(int argc, char** argv) {
         // terlihat di ujung bukan selisih isinya melainkan seluruh gambar yang
         // lebih terang. Dengan eksposur manual, yang dibandingkan kembali isinya.
         bool fixedExposure = false;
+        float manualEv = 0.0f;
         for (int at = 1; at < argc; ++at) {
             if (argv[at] == nullptr) {
                 continue;
@@ -641,6 +646,15 @@ int main(int argc, char** argv) {
             } else if (flag == "--bench-fixed-exposure") {
                 fixedExposure = true;
             }
+        }
+        // EV100 manual. **Yang dibelinya bukan gambar yang lebih enak melainkan
+        // bagian gelap yang bisa diukur:** sebuah tangkapan 8-bit menjepit
+        // seluruh bayangan ke nol, dan dua adegan yang berbeda seratus kali di
+        // sana tetap terlihat sama hitamnya. Menurunkan EV mengangkat bayangan
+        // itu ke rentang yang masih punya angka.
+        if (const std::string_view value = FlagValue(argc, argv, "--bench-ev"); !value.empty()) {
+            manualEv = std::strtof(std::string(value).c_str(), nullptr);
+            fixedExposure = true;
         }
 
         // **GI dipaksa dari baris perintah, bukan hanya dari level.** Anggaran
@@ -684,6 +698,35 @@ int main(int argc, char** argv) {
                 app.Context().gi.enabled = false;
             } else {
                 SIM_ERROR("Bench", "--bench-gi wants on or off, got \"{}\"", std::string(value));
+                app.Shutdown();
+                return 2;
+            }
+        }
+
+        // Tampilan diagnostik GI dari baris perintah. **Yang menjawab
+        // pertanyaan "kenapa gelap" bukan gambar akhirnya melainkan lapis mana
+        // yang menjawab tiap sinar**, dan tanpa bendera ini satu-satunya cara
+        // melihatnya adalah menjalankan editor dan menekan tombolnya.
+        if (const std::string_view value = FlagValue(argc, argv, "--bench-gi-debug");
+            !value.empty()) {
+            static constexpr std::array<std::pair<std::string_view, render::GiDebugView>, 7> kViews{
+                {{"off", render::GiDebugView::Off},
+                 {"albedo", render::GiDebugView::Albedo},
+                 {"normal", render::GiDebugView::Normal},
+                 {"irradiance", render::GiDebugView::Irradiance},
+                 {"raycount", render::GiDebugView::RayCount},
+                 {"steps", render::GiDebugView::MarchSteps},
+                 {"layers", render::GiDebugView::TraceLayers}}};
+            bool found = false;
+            for (const auto& [name, view] : kViews) {
+                if (value == name) {
+                    app.Context().gi.debugView = view;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                SIM_ERROR("Bench", "--bench-gi-debug tidak mengenal \"{}\"", std::string(value));
                 app.Shutdown();
                 return 2;
             }
@@ -859,6 +902,7 @@ int main(int argc, char** argv) {
             }
             if (fixedExposure) {
                 desc.post.exposureMode = render::ExposureMode::Manual;
+                desc.post.manualEv100 = manualEv;
             }
             // Delta yang sama dengan yang diberikan ke `app.Tick`, dan karena
             // alasan yang sama: yang maju menurut waktu — eksposur, awan,
