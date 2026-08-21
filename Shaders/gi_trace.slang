@@ -116,6 +116,14 @@ SdfHit traceSdf(float3 origin, float3 direction, float tMax) {
         // medannya memang tahu. Oklusi yang hilang sebagiannya masih dijawab
         // lapis layar. Yang mengembalikannya seluruhnya adalah medan jarak yang
         // benar-benar mengikuti segitiga, dan itu M1 di rencana GI.
+        //
+        // **Ambangnya ambang hit, bukan tanda.** Diuji keduanya sesudah medan
+        // jarak sungguhan ada: menguji `distance < 0` — "benar-benar di dalam
+        // benda" — meloloskan sinar yang titik asalnya tepat di ambang hit, dan
+        // sinar itu mengenai permukaannya sendiri di jarak nol ke arah mana
+        // pun. Piksel hitam naik 4,9% menjadi 7,5%. Yang tidak punya jawaban
+        // bukan hanya titik di dalam benda melainkan setiap titik yang sudah
+        // berada di ambang.
         if (step == 0 && distance < voxel * 0.5) {
             result.steps = 1;
             return result;
