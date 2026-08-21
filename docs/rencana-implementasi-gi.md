@@ -224,3 +224,55 @@ punya:
   frame berarti enam detik; adegan yang teksturnya 72 lembar 4K butuh sekitar
   satu menit untuk memanggangnya pada jalan pertama. Yang terukur lalu adegan
   yang setengah materialnya masih jalur mundur. Sekarang batasnya waktu.
+
+### Empat sebab serambi Sponza gelap, dan yang tersisa sesudahnya
+
+Adegan ini menagih janji M0–M6 dengan satu pertanyaan: kenapa menyalakan GI
+**mengambil** cahaya? Pada eksposur yang sama, serambinya beradiansi 0,001
+dengan GI hidup dan 0,025 dengan GI mati. Empat sebab, masing-masing
+menyembunyikan yang berikutnya — jadi tiga perbaikan pertama terlihat hampir
+tidak berpengaruh sampai yang keempat ikut diperbaiki.
+
+1. **Langit GI bukan langit yang tergambar.** `giSky` sebuah gradien tetap
+   dengan catatan "langit sungguhan datang di E8.8". E8.8 sudah lama datang.
+   Sekarang penelusur mencuplik LUT sky-view yang sama dengan `sky_draw.frag`.
+2. **"Tidak tahu" dihitung sebagai "tidak ada".** Sinar yang mengenai clipmap di
+   luar jangkauan cache radiansi dibuang; di dalam serambi 98% sinar justru
+   jenis itu, jadi probe tanpa satu pun sinar yang diketahui menjawab nol.
+   Sekarang ditaksir satu pantulan penuh dengan albedo tebakan.
+3. **Satu NaN meracuni seluruh probe.** `sdfSurfaceNormal` menormalkan gradien
+   yang bisa tepat nol. Koefisien SH dijumlahkan, jadi satu dari enam belas
+   sinar cukup untuk menghitamkan probe. Selama sinar itu dibuang (sebab 2),
+   NaN-nya ikut terbuang — cacat ini baru muncul sesudah sebab 2 diperbaiki.
+4. **Medan jaraknya kotak batas, dan Sponza satu mesh.** `BoxSceneField`
+   menyusun tiap mesh sebagai kotak batasnya; kotak Sponza 36×20×24 m memuat
+   seluruh gedung beserta udaranya. 84% voxel kaskade terhalus terbaca "jauh di
+   dalam benda", dan setiap sinar probe mengenai sesuatu di jarak nol. Sinar
+   yang berangkat dari dalam medan sekarang melewatkan lapis itu.
+
+Ditambah satu di jalur resolve: piksel yang keempat probe tetangganya ditolak
+uji bilateral menjawab nol — 21,8% piksel di adegan ini.
+
+Terukur pada kamera acuan, GI hidup, EV100 = -4:
+
+| | awal | sesudah 1–3 | sesudah 1–4 | GI mati |
+|---|---:|---:|---:|---:|
+| Iradiansi serambi (E/π) | 0,006–0,015 | 0,031–0,096 | 0,153–0,502 | 0,080 |
+| Radiansi serambi | 0,001 | 0,013–0,020 | 0,045–0,115 | 0,025 |
+| Radiansi lantai | 0,000 | 0,000 | 0,020–0,058 | 0,025 |
+| Piksel hitam | 27,8% | 28,4% | 5,9% | 5,9% |
+| Median 8-bit | 11 | 42 | 47 | 36 |
+| Piksel putih pecah | 7,1% | 0,1% | 0,0% | 0,0% |
+| `gi-probe-trace` | 0,414 ms | 0,453 ms | 0,390 ms | — |
+
+**Yang tersisa, dan kenapa ia menuntut M1.** Cahaya isian sekarang seluruhnya
+langit: 94–97% sinar probe berakhir di langit, 3–6% dijawab lapis layar, dan
+lapis SDF tidak menjawab apa pun di adegan ini. Hasilnya serambi biru langit,
+sementara acuan Intel abu-abu hangat — warnanya datang dari matahari yang
+memantul di batu, bukan dari langit. Menaikkan anggaran langkah lapis layar
+sudah diuji sebagai jalan pintas: 16 → 64 langkah menaikkan jawaban lapis layar
+dari 6% ke 15–32% dan biayanya dari 0,39 ms ke 0,93 ms, sementara rata-rata
+gambarnya bergerak 57,4 → 58,4. Sinar tambahan itu menemukan permukaan yang
+warnanya sudah ikut biru — satu sumber biru ditukar dengan sumber biru yang
+lain. Yang mengubahnya adalah medan jarak yang mengikuti segitiga alih-alih
+kotak batas, yaitu M1, beserta albedo yang tersimpan bersamanya.
