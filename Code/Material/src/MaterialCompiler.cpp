@@ -449,6 +449,7 @@ MaterialCompileResult Emitter::Run() {
     // yang berbeda. Menebaknya dari "opacity tersambung ke sesuatu" akan
     // memindahkan kaca ke jalur topeng tanpa ada yang memintanya.
     result_.alphaTest = output.Setting("alphaMode") == "mask";
+    result_.alphaBlend = output.Setting("alphaMode") == "blend";
     if (result_.alphaTest) {
         const std::string cutoff = output.Setting("alphaCutoff");
         if (!cutoff.empty()) {

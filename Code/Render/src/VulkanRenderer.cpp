@@ -1594,6 +1594,10 @@ public:
         /// Bertopeng: shader-nya membuang fragmen di bawah ambang opasitas.
         /// Ruasnya dilewati prepass dan pass bayangan — lihat `DrawRuns`.
         bool masked = false;
+        /// Dipadu: ruasnya pindah ke daftar tersortir, dan dengan itu keluar
+        /// sendirinya dari prepass maupun pass bayangan — keduanya menggambar
+        /// daftar buram. Lihat `Gather`.
+        bool blended = false;
         rhi::DynamicBuffer parameters;
         /// [transparan][ber-kulit].
         std::array<PipelineVariants, 2> pipelines{};
@@ -1704,6 +1708,7 @@ public:
         }
 
         material->masked = program.masked;
+        material->blended = program.blended;
         // **Yang bertopeng diuji `GREATER_OR_EQUAL`, bukan `EQUAL`.** Ruasnya
         // tidak ikut prepass — fragmen yang dibuang tidak boleh meninggalkan
         // kedalamannya di sana — jadi kedalaman yang tertulis di buffer adalah
@@ -2539,6 +2544,16 @@ private:
                     }
                 }
 
+                // **Dipadu diputuskan per ruas, tembus pandang per instance —
+                // dan keduanya bermuara ke daftar yang sama.** Alfa warna
+                // instance milik pemanggil; `alphaMode: blend` milik
+                // materialnya. Sebuah dinding buram yang salah satu ruasnya
+                // decal kotoran adalah instance buram dengan satu ruas yang
+                // harus dipadu, dan memutuskannya per instance akan memindahkan
+                // seluruh dindingnya ke jalur tersortir.
+                const bool materialBlended =
+                    material != kInvalidMaterial && material <= materials_.size() &&
+                    materials_[static_cast<std::size_t>(material) - 1]->blended;
                 const uint32_t materialSlot =
                     material == kInvalidMaterial
                         ? 0u
@@ -2558,9 +2573,16 @@ private:
                                    world,
                                    cameraVisible,
                                    distance};
-                if (opaqueInstance) {
+                if (opaqueInstance && !materialBlended) {
                     gathered_.push_back(entry);
-                } else {
+                } else if (cameraVisible) {
+                    // **Yang di luar pandangan dijatuhkan, bukan disortir.**
+                    // Daftar tersortir digambar seluruhnya tanpa penyaringan
+                    // lagi — pass transparan tidak punya prepass yang menyaring
+                    // untuknya — dan ia juga tidak menjatuhkan bayangan, jadi
+                    // tidak ada alasan tersisa untuk membawanya. Aturan yang
+                    // sama sudah berlaku untuk instance tembus pandang, satu
+                    // tingkat di atas.
                     sorted_.push_back(entry);
                 }
             }

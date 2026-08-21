@@ -110,6 +110,31 @@ pembaginya harus bekerja di ruang yang sama. Membalik urutannya menghasilkan
 tepi yang salah terang pada setiap tekstur beralfa — dan itu, sekali lagi,
 kesalahan yang tidak muncul sebagai galat.
 
+### Tiga mode, dan material yang menentukannya
+
+Alfa sebuah tekstur belum menyatakan apa yang harus dilakukan dengannya. Yang
+menyatakannya adalah `alphaMode` di node `output.surface` material:
+
+| Mode | Yang terjadi | Jalur gambarnya |
+| --- | --- | --- |
+| *(tidak disetel)* | alfa diabaikan; permukaan pejal | daftar buram |
+| `mask` | fragmen di bawah `alphaCutoff` **dibuang** | daftar buram, keluar dari prepass dan bayangan |
+| `blend` | warnanya **dicampur** menurut alfanya | daftar tersortir, belakang ke depan |
+
+**Ketiganya berangkat dari alfa yang sama dan berakhir sangat berbeda, jadi
+memilih yang salah bukan soal selera.** Yang dibuang kehilangan seluruh
+gradasinya menjadi tepi biner; yang dipadu mempertahankannya. Untuk kotoran,
+noda, dan sapuan tipis bedanya menentukan: yang dipadu mencampur *sedikit*
+warnanya ke permukaan di belakangnya, sedangkan yang ditopeng **menggantikan**
+warna permukaan itu dengan warnanya sendiri. Sponza pernah dipasang dengan
+decal `BLEND`-nya diciutkan menjadi `mask`, dan hasilnya bercak bertepi keras
+yang hampir hitam: 80,7% piksel yang lebih gelap dari 70 di potongan lengkung
+kamera acuan adalah kuad decal itu. Sesudah dipadu, angkanya 12,9% → 6,1%.
+
+Pagar kawat, dedaunan, dan huruf berlubang justru sebaliknya — `mask` yang
+benar untuk mereka. Yang dibuang tidak menuntut urutan gambar apa pun, tetap
+menulis kedalamannya, dan karena itu jauh lebih murah.
+
 ---
 
 ## Asal UV: kiri atas
@@ -142,6 +167,30 @@ Yang menguncinya `uvQuad.obj`, `uvQuad.gltf`, `uvQuad.usda`, dan `uvQuad.fbx`
 di `Resources/Meshes/`: satu segi empat yang sama, ditulis empat kali menurut
 konvensi masing-masing format, dan satu uji yang menuntut keempatnya diimpor
 menjadi UV yang sama persis.
+
+### Set UV: yang diminta materialnya, bukan yang pertama
+
+Sebuah mesh boleh membawa lebih dari satu set UV, dan **urutannya tidak
+menyatakan apa-apa**. Yang menentukan set mana yang dipakai sebuah tekstur
+adalah materialnya: `UVSet` pada tekstur di FBX, `TEXCOORD_n` pada glTF.
+
+Set kedua lazimnya UV lightmap — pemetaan yang sengaja tidak tumpang tindih —
+dan memakainya untuk tekstur biasa menghasilkan permukaan yang teksturnya
+teregang ke petak-petak kecil, tanpa satu pun galat. Sponza membawa dua set di
+tiap mesh FBX-nya (456 `LayerElementUV` di 230 mesh); materialnya kebetulan
+meminta yang pertama, jadi mengambil "yang pertama" di sana benar karena
+kebetulan, bukan karena dipilih.
+
+**Pilihan itu lewat material muka, jadi muka yang materialnya tidak terpetakan
+kehilangan pilihannya.** Berkas yang membawa elemen material bermode `eNone` di
+sebelah elemen yang benar — bentuk yang ditinggalkan sebagian pengekspor —
+dulu membuat seluruh mukanya bermaterial −1. Node bermaterial tunggal sekarang
+memakainya kapan pun elemennya tidak menjawab, bukan hanya ketika elemennya
+tidak ada.
+
+`uvQuadTwoSets.fbx` menguncinya: `lightmapUV` lebih dulu, `map1` sesudahnya,
+dan teksturnya menyebut `map1`. Angka kedua set sengaja berjauhan — yang benar
+0,2/0,7 dan 0,6/0,1, yang salah 0/1 di keempat sudutnya.
 
 ### Bingkai tangent ikut terbalik
 

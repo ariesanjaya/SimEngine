@@ -1225,6 +1225,63 @@ TEST_CASE("Setiap importir menaruh asal UV di kiri atas, apa pun konvensi berkas
     }
 }
 
+TEST_CASE("Set UV yang dipakai adalah yang diminta materialnya, bukan yang pertama") {
+    using namespace sim::assets;
+
+    // **Sebuah mesh FBX boleh membawa beberapa set UV, dan urutannya tidak
+    // menyatakan apa pun.** Yang menentukan mana yang dipakai adalah tekstur
+    // materialnya, lewat properti `UVSet`. Set kedua lazimnya UV lightmap —
+    // pemetaan yang sengaja tidak tumpang tindih — dan memakainya untuk
+    // tekstur biasa menghasilkan permukaan yang teksturnya teregang ke
+    // petak-petak kecil, tanpa satu pun galat.
+    //
+    // uvQuadTwoSets.fbx membawa `lightmapUV` lebih dulu lalu `map1`, dan
+    // teksturnya menyebut `map1`. Angka kedua set sengaja berjauhan: yang
+    // benar 0,2/0,7 dan 0,6/0,1, yang salah 0/1 di keempat sudutnya.
+    const std::filesystem::path path =
+        std::filesystem::path(SIM_MESH_DIR) / "uvQuadTwoSets.fbx";
+    if (!std::filesystem::exists(path)) {
+        return;  // aset opsional
+    }
+    std::string error;
+    const MeshData mesh = LoadMesh(path, error);
+    INFO("error '" << error << "'");
+    REQUIRE(mesh.IsValid());
+
+    // **Materialnya juga, dan itu bukan pemeriksaan sampingan.** Set UV dipilih
+    // lewat material muka ini, jadi muka yang materialnya tidak terpetakan
+    // kehilangan pilihannya dan diam-diam kembali ke set pertama. Berkas ini
+    // membawa dua elemen material dan yang pertama bermode `eNone` — bentuk
+    // yang ditinggalkan pengekspor, dan yang dulu membuat seluruh mukanya
+    // bermaterial −1.
+    REQUIRE(mesh.parts.size() == 1);
+    CHECK(mesh.parts[0].material == 0);
+
+    struct Corner {
+        Vec3 position;
+        Vec2 uv;
+    };
+    const std::array<Corner, 4> expected{{
+        {Vec3(0.0f, 0.0f, 0.0f), Vec2(0.2f, 0.6f)},
+        {Vec3(1.0f, 0.0f, 0.0f), Vec2(0.7f, 0.6f)},
+        {Vec3(1.0f, 1.0f, 0.0f), Vec2(0.7f, 0.1f)},
+        {Vec3(0.0f, 1.0f, 0.0f), Vec2(0.2f, 0.1f)},
+    }};
+    for (const Corner& corner : expected) {
+        const MeshVertex* found = nullptr;
+        for (const MeshVertex& vertex : mesh.vertices) {
+            if (glm::distance(vertex.position, corner.position) < 1e-4f) {
+                found = &vertex;
+                break;
+            }
+        }
+        INFO("sudut (" << corner.position.x << ", " << corner.position.y << ")");
+        REQUIRE(found != nullptr);
+        CHECK(found->uv.x == doctest::Approx(corner.uv.x).epsilon(1e-4f));
+        CHECK(found->uv.y == doctest::Approx(corner.uv.y).epsilon(1e-4f));
+    }
+}
+
 TEST_CASE("Tangent berkasnya dipakai kalau ada, dan dihitung ulang kalau tidak") {
     using namespace sim::assets;
 
