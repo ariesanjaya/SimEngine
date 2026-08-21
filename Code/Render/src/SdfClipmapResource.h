@@ -58,8 +58,18 @@ public:
     /// `staging` harus milik slot frame yang sedang direkam: isinya masih dibaca
     /// GPU sampai submit slot itu selesai. Mengembalikan banyaknya voxel yang
     /// benar-benar ditulis — angka yang diawasi terhadap anggaran 0,4 ms.
+    /// `grids[i]` adalah medan jarak hasil bake untuk `meshes[i]`, atau nullptr
+    /// bila mesh itu belum dibake — instance itu lalu memakai kotak batasnya,
+    /// seperti sebelum M1. Span yang lebih pendek daripada `meshes` berlaku
+    /// sebagai nullptr untuk sisanya.
     uint64_t Update(const Vec3& cameraPosition, std::span<const MeshInstance> meshes,
-                    rhi::DynamicBuffer& staging, uint32_t slot);
+                    std::span<const SdfGrid* const> grids, rhi::DynamicBuffer& staging,
+                    uint32_t slot);
+
+    /// Berapa instance frame ini yang benar-benar memakai SDF hasil bake.
+    /// Dilaporkan log dan panel: "1 dari 40 mesh ter-bake" adalah keadaan yang
+    /// layak diketahui.
+    std::size_t BakedCount() const { return field_.BakedCount(); }
 
     /// Merekam salinan atau dispatch yang disiapkan `Update` ke command buffer
     /// frame. Jalur mana yang direkam ditentukan `SetGpuFill`.
@@ -137,7 +147,12 @@ private:
     VkBuffer pendingSource_ = VK_NULL_HANDLE;
     // Dipakai ulang tiap frame supaya medan jaraknya tidak mengalokasi vektor
     // baru setiap kali kamera bergerak satu voxel.
-    BoxSceneField field_;
+    //
+    // **`BakedSceneField`, bukan `BoxSceneField` — dan ia memuat yang kedua.**
+    // Adegan nyata berisi mesh yang sudah dibake dan mesh yang belum; yang punya
+    // grid memakai grid, sisanya tetap memakai kotak lewat medan yang sama
+    // persis seperti sebelumnya.
+    BakedSceneField field_;
 
     // --- jalur compute (G4) ---
     rhi::ComputePipeline fill_;
@@ -156,6 +171,9 @@ private:
     bool storageCapable_ = false;
     uint32_t fillEntryCount_ = 0;
     bool gpuFill_ = false;
+    /// Sekali saja: sebuah pesan per frame tentang keadaan yang tidak berubah
+    /// adalah log yang tidak bisa dibaca.
+    bool reportedCpuFallback_ = false;
 };
 
 }  // namespace sim::render

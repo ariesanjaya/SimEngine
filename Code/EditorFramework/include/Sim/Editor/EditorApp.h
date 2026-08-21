@@ -229,6 +229,10 @@ private:
     /// ThumbnailCache ia tidak butuh device sama sekali — ia mendekode, memampat,
     /// dan menulis berkas, semuanya di CPU.
     std::unique_ptr<assets::TextureBakery> textureBakery_;
+    /// Baker medan jarak mesh, dengan alasan yang sama: ia bekerja di CPU, di
+    /// `TaskPool`, dan hasilnya diserahkan ke renderer alih-alih dihitung di
+    /// dalamnya.
+    std::unique_ptr<assets::MeshSdfBakery> meshSdfBakery_;
     /// Penjaga shader material, dengan alasan yang sama: ia bekerja di CPU dan
     /// di `TaskPool`, dan yang menyentuh GPU hanyalah langkah terakhirnya di
     /// main thread.

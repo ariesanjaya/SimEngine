@@ -993,9 +993,18 @@ public:
             sdfClipmap_.SetGpuFill(desc.gpuSdf);
             const CpuScope scope(cpuTimings_, "cpu-sdf");
             const auto started = std::chrono::steady_clock::now();
+            // Medan jarak per instance, disusun dari peta per mesh. Larik ini
+            // sejajar `scene.meshes`, dan nullptr berarti mesh itu belum dibake.
+            meshFieldPointers_.clear();
+            meshFieldPointers_.reserve(scene.meshes.size());
+            for (const MeshInstance& instance : scene.meshes) {
+                const auto index = static_cast<std::size_t>(instance.mesh);
+                meshFieldPointers_.push_back(
+                    index < meshFields_.size() ? meshFields_[index].get() : nullptr);
+            }
             sdfVoxelsWritten_ =
-                sdfClipmap_.Update(desc.camera.position, scene.meshes, slot.sdfStaging,
-                                   static_cast<uint32_t>(slotIndex_));
+                sdfClipmap_.Update(desc.camera.position, scene.meshes, meshFieldPointers_,
+                                   slot.sdfStaging, static_cast<uint32_t>(slotIndex_));
             sdfUpdateMs_ = std::chrono::duration<float, std::milli>(
                                std::chrono::steady_clock::now() - started)
                                .count();
@@ -3081,6 +3090,25 @@ private:
     }
 
     /// Mengunggah sebuah mesh dan mengembalikan handle-nya, atau nol bila gagal.
+    void SetMeshDistanceField(MeshHandle mesh, std::shared_ptr<const SdfGrid> grid) override {
+        const auto index = static_cast<std::size_t>(mesh);
+        if (index >= meshes_.size()) {
+            return;
+        }
+        if (meshFields_.size() <= index) {
+            meshFields_.resize(index + 1);
+        }
+        if (meshFields_[index] == grid) {
+            return;
+        }
+        meshFields_[index] = std::move(grid);
+        if (meshFields_[index] != nullptr) {
+            SIM_INFO("Render", "mesh {} now has a baked distance field ({}x{}x{} at {:.3f} m)",
+                     index, meshFields_[index]->sizeX, meshFields_[index]->sizeY,
+                     meshFields_[index]->sizeZ, meshFields_[index]->voxelSize);
+        }
+    }
+
     MeshHandle UploadMesh(const assets::MeshData& data) {
         auto mesh = std::make_unique<GpuMesh>();
         const VkDeviceSize vertexBytes = sizeof(assets::MeshVertex) * data.vertices.size();
@@ -5569,6 +5597,12 @@ private:
     /// `unique_ptr`, karena `DynamicBuffer` tidak bisa dipindah — dan vektor yang
     /// tumbuh akan memindahkan isinya.
     std::vector<std::unique_ptr<GpuMesh>> meshes_;
+    /// Medan jarak hasil bake, diindeks `MeshHandle`. Kosong berarti mesh itu
+    /// memakai kotak batasnya di clipmap, seperti sebelum M1.
+    std::vector<std::shared_ptr<const SdfGrid>> meshFields_;
+    /// Larik sejajar `ViewportScene::meshes`, disusun ulang tiap frame supaya
+    /// `SdfClipmapResource` tidak perlu mengenal `MeshHandle` sama sekali.
+    std::vector<const SdfGrid*> meshFieldPointers_;
     /// Jalur → handle. Jalur yang gagal dimuat dipetakan ke kubus satuan supaya
     /// ia tidak dicoba lagi setiap frame.
     /// Tekstur yang sudah di GPU, beserta set descriptor-nya.

@@ -19,6 +19,7 @@ class FrameLimiter;
 }
 
 namespace sim::assets {
+class MeshSdfBakery;
 class TextureBakery;
 class AssetDatabase;
 }
@@ -101,6 +102,11 @@ struct EditorContext {
     /// aset dan bukan penggambaran: ia mendekode PNG, membangkitkan mip, dan
     /// menjalankan encoder BC7. Renderer hanya menerima `.ktx2`-nya.
     assets::TextureBakery* textureBakery = nullptr;
+    /// Baker medan jarak mesh: dari berkas mesh ke `SdfGrid` yang dipakai
+    /// clipmap GI. Dimiliki pemanggil EditorApp, dan ada di sini bukan di dalam
+    /// renderer karena yang membakenya OpenVDB — pengondisi aset yang tidak
+    /// pernah ikut ke jalur yang dikirim ke pemain.
+    assets::MeshSdfBakery* meshSdfBakery = nullptr;
     /// Penjaga shader material untuk pass forward. Dimiliki pemanggil EditorApp,
     /// dan seperti baker tekstur ia mengerjakan pekerjaannya di `TaskPool`.
     MaterialPrograms* materialPrograms = nullptr;

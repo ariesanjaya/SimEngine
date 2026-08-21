@@ -2,9 +2,11 @@
 
 #include "Sim/Render/TraceBackend.h"
 #include "Sim/Assets/MeshData.h"
+#include "Sim/Core/SdfGrid.h"
 #include "Sim/Render/Types.h"
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <vector>
 #include <span>
@@ -134,6 +136,27 @@ public:
         (void)data;
         (void)version;
         return {};
+    }
+
+    /// Menyerahkan medan jarak sebuah mesh yang sudah dibake.
+    ///
+    /// **Inilah M1 di docs/rencana-implementasi-gi.md.** Tanpa ini clipmap GI
+    /// menyusun tiap mesh sebagai kotak batasnya, dan sebuah gedung menjadi
+    /// balok pejal: setiap sinar probe di dalamnya mengenai sesuatu di jarak
+    /// nol, tidak satu pun sampai ke langit.
+    ///
+    /// Yang membakenya `Sim::Assets` lewat OpenVDB — pengondisi aset, bukan
+    /// jalur yang dikirim ke pemain — jadi ia diserahkan ke sini alih-alih
+    /// dihitung di sini. `shared_ptr` dan bukan salinan: grid Sponza 48 MB, dan
+    /// yang memilikinya adalah bakery yang menyimpannya untuk seluruh sesi.
+    ///
+    /// Memanggilnya ulang dengan grid yang sama tidak melakukan apa pun, jadi
+    /// pemanggil boleh memanggilnya tiap frame.
+    ///
+    /// Bawaannya tidak melakukan apa-apa: renderer tanpa GI tidak perlu tahu.
+    virtual void SetMeshDistanceField(MeshHandle mesh, std::shared_ptr<const SdfGrid> grid) {
+        (void)mesh;
+        (void)grid;
     }
 
     /// Tekstur dari berkas, di-cache dan siap diikat sebagai albedo sebuah

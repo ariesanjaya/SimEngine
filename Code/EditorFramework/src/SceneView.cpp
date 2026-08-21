@@ -1,5 +1,6 @@
 #include "Sim/Editor/SceneView.h"
 
+#include "Sim/Assets/MeshSdfBakery.h"
 #include "Sim/Assets/TextureBakery.h"
 
 #include "Sim/Assets/AssetDatabase.h"
@@ -215,8 +216,22 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                 if (!fromWhitebox && assets != nullptr && renderer != nullptr &&
                     meshRenderer != nullptr && meshRenderer->mesh.IsValid()) {
                     if (const AssetLookup found = FindAsset(assets, meshRenderer->mesh.guid)) {
-                        const render::MeshAsset mesh = renderer->AcquireMesh(
-                            found.database->AbsolutePath(*found.record).string());
+                        const std::filesystem::path meshPath =
+                            found.database->AbsolutePath(*found.record);
+                        const render::MeshAsset mesh =
+                            renderer->AcquireMesh(meshPath.string());
+                        // **Medan jaraknya diminta di sini, di sebelah
+                        // geometrinya.** Keduanya berkunci berkas yang sama, dan
+                        // yang meminta salah satunya hampir selalu memerlukan
+                        // yang lain. Jawaban pertamanya `Pending` — bake sebuah
+                        // gedung memakan detik — dan sampai ia siap, clipmap
+                        // memakai kotak batas mesh itu seperti sebelum M1.
+                        if (sdfBakery_ != nullptr && mesh.loaded) {
+                            const assets::MeshSdfRef field = sdfBakery_->Request(meshPath);
+                            if (field.state == assets::MeshSdfState::Ready) {
+                                renderer->SetMeshDistanceField(mesh.handle, field.grid);
+                            }
+                        }
                         // Angkanya dilaporkan balik ke indeks aset. Yang
                         // memuatnya sudah memegangnya, dan menghitungnya lagi
                         // saat impor berarti mengurai berkas yang sama dua kali

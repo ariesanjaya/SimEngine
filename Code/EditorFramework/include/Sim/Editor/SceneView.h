@@ -17,6 +17,7 @@
 #include <vector>
 
 namespace sim::assets {
+class MeshSdfBakery;
 class TextureBakery;
 struct AssetRecord;
 class AssetDatabase;
@@ -132,6 +133,13 @@ public:
     /// bukan bahwa berkas sumbernya dipakai apa adanya. Renderer hanya menerima
     /// `.ktx2`.
     void SetTextureBakery(assets::TextureBakery* bakery) { bakery_ = bakery; }
+
+    /// Baker medan jarak mesh untuk clipmap GI.
+    ///
+    /// Null berarti tidak ada yang dibake, dan clipmap kembali menyusun tiap
+    /// mesh sebagai kotak batasnya — keadaan sebelum M1, dan keadaan yang benar
+    /// untuk build tanpa OpenVDB.
+    void SetMeshSdfBakery(assets::MeshSdfBakery* bakery) { sdfBakery_ = bakery; }
 
     /// Penjaga shader material. Null berarti tidak ada material yang
     /// dikompilasi sama sekali — dan setiap ruas digambar jalur mundur
@@ -272,6 +280,7 @@ private:
     /// Sejajar dengan `partColors_`, dengan alasan yang sama persis.
     std::vector<render::MaterialHandle> partMaterials_;
     assets::TextureBakery* bakery_ = nullptr;
+    assets::MeshSdfBakery* sdfBakery_ = nullptr;
     /// Indeks bawaan editor, dipasang tiap `Build`. Lihat `FindAsset`.
     const assets::AssetDatabase* builtinAssets_ = nullptr;
     MaterialPrograms* materialPrograms_ = nullptr;

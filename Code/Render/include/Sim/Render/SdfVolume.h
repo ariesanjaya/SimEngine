@@ -141,6 +141,18 @@ public:
     void Row(uint32_t outer, uint32_t plane, float* out) const;
 
     bool Empty() const { return boxes_.Empty() && entries_.empty(); }
+
+    /// Entri kotak untuk jalur compute — yaitu **hanya instance yang belum
+    /// dibake**.
+    ///
+    /// Jalur compute belum bisa membaca grid, jadi memberinya larik ini saja
+    /// akan menghilangkan mesh yang sudah dibake dari medannya sama sekali:
+    /// bukan kotak yang terlalu kasar, melainkan ruang kosong tempat gedung
+    /// berdiri. Yang memakainya karena itu wajib memeriksa `BakedCount` dan
+    /// memilih jalur CPU bila ada isinya.
+    void WriteGpuEntries(std::vector<BoxSceneField::GpuEntry>& out) const {
+        boxes_.WriteGpuEntries(out);
+    }
     /// Berapa instance yang benar-benar memakai SDF hasil bake. Dipakai test dan
     /// log: "1 dari 40 mesh ter-bake" adalah keadaan yang layak diketahui.
     std::size_t BakedCount() const { return entries_.size(); }

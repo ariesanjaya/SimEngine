@@ -216,6 +216,7 @@ VkDeviceSize SdfClipmapResource::StagingBytes() const {
 
 uint64_t SdfClipmapResource::Update(const Vec3& cameraPosition,
                                     std::span<const MeshInstance> meshes,
+                                    std::span<const SdfGrid* const> grids,
                                     rhi::DynamicBuffer& staging, uint32_t slot) {
     pending_.clear();
     pendingFills_.clear();
@@ -231,9 +232,23 @@ uint64_t SdfClipmapResource::Update(const Vec3& cameraPosition,
     // Medan jaraknya dibangun setelah `Scroll`, bukan sebelum: frame yang tidak
     // menggeser satu kaskade pun — yaitu kebanyakan frame saat kamera diam —
     // tidak perlu membalik satu matriks pun.
-    field_.Build(meshes);
+    field_.Build(meshes, grids);
 
-    if (gpuFill_ && slot < kSlots) {
+    // **Jalur compute belum bisa membaca grid hasil bake.** Ia membaca larik
+    // kotak, dan larik itu memuat mesh yang belum dibake saja — menyerahkannya
+    // apa adanya berarti gedung yang sudah dibake hilang dari medannya, yang
+    // jauh lebih buruk daripada gedung yang berbentuk kotak. Selama ada yang
+    // dibake, yang dipakai jalur CPU. Yang mengembalikan jalur compute adalah
+    // tekstur grid di GPU, langkah berikutnya M1.
+    const bool gpuUsable = gpuFill_ && slot < kSlots && field_.BakedCount() == 0;
+    if (gpuFill_ && !gpuUsable && !reportedCpuFallback_) {
+        reportedCpuFallback_ = true;
+        SIM_INFO("Render",
+                 "SDF clipmap falls back to the CPU fill: {} meshes have a baked field and the "
+                 "compute path cannot read those yet",
+                 field_.BakedCount());
+    }
+    if (gpuUsable) {
         // **Yang disiapkan di sini hanya daftar kotaknya.** Evaluasi medan
         // jaraknya sendiri — bagian yang berharga 3,9 ms di CPU — terjadi di
         // `RecordUploads`, sebagai dispatch. Larik byte `SdfVolume` sengaja

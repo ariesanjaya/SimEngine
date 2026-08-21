@@ -12,6 +12,7 @@
 #include "Sim/AIBridge/McpServer.h"
 #include "Sim/AIBridge/ResourceRegistry.h"
 #include "Sim/AIBridge/ToolRegistry.h"
+#include "Sim/Assets/MeshSdfBakery.h"
 #include "Sim/Core/Log.h"
 #include "Sim/Core/MainThreadQueue.h"
 #include "Sim/Core/TaskPool.h"
@@ -462,6 +463,10 @@ int main(int argc, char** argv) {
     // Sponza masuk, tidak ada adegan uji headless yang punya tekstur sama
     // sekali, jadi tidak ada yang menagihnya.
     sceneView.SetTextureBakery(app.Context().textureBakery);
+    // Dan medan jarak mesh, dengan alasan yang sama: tanpanya clipmap GI
+    // menyusun Sponza sebagai satu kotak pejal, dan yang terukur adalah
+    // adegan yang setiap sinar probenya mengenai dinding di jarak nol.
+    sceneView.SetMeshSdfBakery(app.Context().meshSdfBakery);
     // **Material sungguhan ikut diukur, bukan hanya jalur mundur.**
     //
     // Sampai G5 sambungan ini hanya dipasang `ViewportPanel`, dan SimHeadless
@@ -816,11 +821,23 @@ int main(int argc, char** argv) {
                 sceneView.Build(*app.Context().world, selection, app.Context().assets,
                                 renderer.get(), app.Context().animation,
                                 app.Context().builtinAssets, app.Context().whiteboxes);
-                if (!settleFixed && settle > 0 &&
+                // Medan jarak mesh ikut ditunggu, dan bukan demi kerapian:
+                // bake Sponza memakan tujuh detik, dan frame yang diukur
+                // sebelum ia siap adalah frame yang clipmap GI-nya masih
+                // menyusun gedung itu sebagai kotak pejal.
+                const std::size_t sdfPending = app.Context().meshSdfBakery != nullptr
+                                                   ? app.Context().meshSdfBakery->PendingCount()
+                                                   : 0;
+                if (!settleFixed && settle > 0 && sdfPending == 0 &&
                     app.Context().materialPrograms->PendingCount() == 0) {
                     break;
                 }
                 std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            if (app.Context().meshSdfBakery != nullptr &&
+                app.Context().meshSdfBakery->PendingCount() > 0) {
+                SIM_WARN("Bench", "{} mesh distance fields are still baking after {} frames",
+                         app.Context().meshSdfBakery->PendingCount(), settle);
             }
             const std::size_t pending = app.Context().materialPrograms->PendingCount();
             if (pending > 0) {
