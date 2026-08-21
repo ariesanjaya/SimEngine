@@ -625,6 +625,13 @@ bool Device::CreateLogicalDevice() {
     VkPhysicalDeviceVulkan12Features enable12{};
     enable12.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES;
     enable12.pNext = &enable11;
+    // **Dinyalakan, bukan sekadar ditanyakan.** Sampai G7 kapabilitasnya
+    // dilaporkan dari `supported12` sementara `enable12` tidak pernah
+    // menyebutnya — jadi yang tertulis "timeline: yes" adalah jawaban atas
+    // pertanyaan "apakah perangkat ini bisa", bukan "apakah kita boleh".
+    // Memakai timeline semaphore tanpa fiturnya dinyalakan adalah pelanggaran
+    // yang jalan di sebagian driver dan tidak di sebagian lain.
+    enable12.timelineSemaphore = supported12.timelineSemaphore;
     // Kapasitas nol berarti pertanyaannya tidak pernah sampai ke driver
     // (perangkat pra-1.3). Menyalakan fiturnya tetap sah di sana, tetapi larik
     // berkapasitas nol bukan jalur bindless melainkan jalur yang gagal pada
@@ -675,6 +682,16 @@ bool Device::CreateLogicalDevice() {
     if (computeQueueFamily_ != UINT32_MAX) {
         vkGetDeviceQueue(device_, computeQueueFamily_, 0, &computeQueue_);
     }
+    if (enable12.timelineSemaphore != 0) {
+        VkSemaphoreTypeCreateInfo typeInfo{};
+        typeInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_TYPE_CREATE_INFO;
+        typeInfo.semaphoreType = VK_SEMAPHORE_TYPE_TIMELINE;
+        typeInfo.initialValue = 0;
+        VkSemaphoreCreateInfo semaphoreInfo{};
+        semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        semaphoreInfo.pNext = &typeInfo;
+        SIM_VK_CHECK(vkCreateSemaphore(device_, &semaphoreInfo, nullptr, &timeline_));
+    }
 
     capabilities_.vulkan13 = supportsVulkan13_;
     capabilities_.dynamicRendering = enable13.dynamicRendering != 0;
@@ -685,7 +702,7 @@ bool Device::CreateLogicalDevice() {
     capabilities_.bindlessTextureCapacity =
         capabilities_.descriptorIndexing ? bindlessCapacity : 0;
     capabilities_.bufferDeviceAddress = supported12.bufferDeviceAddress != 0;
-    capabilities_.timelineSemaphore = supported12.timelineSemaphore != 0;
+    capabilities_.timelineSemaphore = enable12.timelineSemaphore != 0;
     capabilities_.drawIndirectCount = supported12.drawIndirectCount != 0;
     capabilities_.shaderFloat16 = supported12.shaderFloat16 != 0;
     capabilities_.multiDrawIndirect =
@@ -727,9 +744,19 @@ void Device::Destroy() {
     SavePipelineCache();
     for (TransientSubmit& slot : transients_) {
         vkDestroyFence(device_, slot.fence, nullptr);
+        if (slot.computeFence != VK_NULL_HANDLE) {
+            vkDestroyFence(device_, slot.computeFence, nullptr);
+        }
         vkDestroyCommandPool(device_, slot.pool, nullptr);
+        if (slot.computePool != VK_NULL_HANDLE) {
+            vkDestroyCommandPool(device_, slot.computePool, nullptr);
+        }
     }
     transients_.clear();
+    if (timeline_ != VK_NULL_HANDLE) {
+        vkDestroySemaphore(device_, timeline_, nullptr);
+        timeline_ = VK_NULL_HANDLE;
+    }
     if (pipelineCache_ != VK_NULL_HANDLE) {
         vkDestroyPipelineCache(device_, pipelineCache_, nullptr);
         pipelineCache_ = VK_NULL_HANDLE;
@@ -815,17 +842,72 @@ Device::TransientSubmit Device::CreateTransient() const {
     poolInfo.queueFamilyIndex = graphicsQueueFamily_;
     SIM_VK_CHECK(vkCreateCommandPool(device_, &poolInfo, nullptr, &slot.pool));
 
+    VkCommandBuffer primary = VK_NULL_HANDLE;
     VkCommandBufferAllocateInfo allocateInfo{};
     allocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     allocateInfo.commandPool = slot.pool;
     allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
     allocateInfo.commandBufferCount = 1;
-    SIM_VK_CHECK(vkAllocateCommandBuffers(device_, &allocateInfo, &slot.commandBuffer));
+    SIM_VK_CHECK(vkAllocateCommandBuffers(device_, &allocateInfo, &primary));
+    slot.graphics.push_back(primary);
 
     VkFenceCreateInfo fenceInfo{};
     fenceInfo.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO;
     SIM_VK_CHECK(vkCreateFence(device_, &fenceInfo, nullptr, &slot.fence));
+
+    // Kolam compute dibuat hanya kalau ada keluarganya **dan** ada timeline
+    // semaphore: tanpa yang kedua tidak ada cara menjaga urutan antar-antrean,
+    // dan antrean kedua tanpa urutan bukan tumpang tindih melainkan balapan.
+    if (computeQueueFamily_ != UINT32_MAX && timeline_ != VK_NULL_HANDLE) {
+        poolInfo.queueFamilyIndex = computeQueueFamily_;
+        SIM_VK_CHECK(vkCreateCommandPool(device_, &poolInfo, nullptr, &slot.computePool));
+        SIM_VK_CHECK(vkCreateFence(device_, &fenceInfo, nullptr, &slot.computeFence));
+    }
     return slot;
+}
+
+VkCommandBuffer Device::NextTransientBuffer(std::vector<VkCommandBuffer>& pool, uint32_t& used,
+                                            VkCommandPool from) const {
+    if (from == VK_NULL_HANDLE) {
+        return VK_NULL_HANDLE;
+    }
+    if (used == pool.size()) {
+        VkCommandBuffer buffer = VK_NULL_HANDLE;
+        VkCommandBufferAllocateInfo allocateInfo{};
+        allocateInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
+        allocateInfo.commandPool = from;
+        allocateInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        allocateInfo.commandBufferCount = 1;
+        SIM_VK_CHECK(vkAllocateCommandBuffers(device_, &allocateInfo, &buffer));
+        pool.push_back(buffer);
+    }
+    VkCommandBuffer buffer = pool[used++];
+    VkCommandBufferBeginInfo beginInfo{};
+    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    SIM_VK_CHECK(vkBeginCommandBuffer(buffer, &beginInfo));
+    return buffer;
+}
+
+Device::TransientSubmit* Device::FindTransient(VkCommandBuffer primary) const {
+    for (TransientSubmit& candidate : transients_) {
+        if (!candidate.graphics.empty() && candidate.graphics.front() == primary) {
+            return &candidate;
+        }
+    }
+    return nullptr;
+}
+
+VkCommandBuffer Device::BeginTransientCompute(VkCommandBuffer primary) const {
+    TransientSubmit* slot = FindTransient(primary);
+    SIM_VERIFY(slot != nullptr, "BeginTransientCompute called with a foreign command buffer");
+    return NextTransientBuffer(slot->compute, slot->computeUsed, slot->computePool);
+}
+
+VkCommandBuffer Device::BeginTransientGraphics(VkCommandBuffer primary) const {
+    TransientSubmit* slot = FindTransient(primary);
+    SIM_VERIFY(slot != nullptr, "BeginTransientGraphics called with a foreign command buffer");
+    return NextTransientBuffer(slot->graphics, slot->graphicsUsed, slot->pool);
 }
 
 VkCommandBuffer Device::BeginTransient() const {
@@ -837,9 +919,23 @@ VkCommandBuffer Device::BeginTransient() const {
         }
         // vkGetFenceStatus tidak memblokir: slot yang GPU-nya sudah selesai
         // langsung bisa dipakai ulang, yang belum dilewati begitu saja.
-        if (vkGetFenceStatus(device_, candidate.fence) == VK_SUCCESS) {
+        //
+        // **Kedua fence, bukan salah satunya.** Antrean grafis bisa selesai
+        // lebih dulu daripada antrean compute, dan merekam ulang kolam yang
+        // command buffer-nya masih dijalankan antrean compute adalah kerusakan
+        // yang muncul jauh dari sini.
+        const bool graphicsDone = vkGetFenceStatus(device_, candidate.fence) == VK_SUCCESS;
+        const bool computeDone =
+            !candidate.computePending ||
+            vkGetFenceStatus(device_, candidate.computeFence) == VK_SUCCESS;
+        if (graphicsDone && computeDone) {
             SIM_VK_CHECK(vkResetFences(device_, 1, &candidate.fence));
             SIM_VK_CHECK(vkResetCommandPool(device_, candidate.pool, 0));
+            if (candidate.computePending) {
+                SIM_VK_CHECK(vkResetFences(device_, 1, &candidate.computeFence));
+                SIM_VK_CHECK(vkResetCommandPool(device_, candidate.computePool, 0));
+                candidate.computePending = false;
+            }
             candidate.pending = false;
             // Nomor submit lama dilepas di sini. Itulah yang membuat
             // WaitTransient() aman: nomor yang tidak lagi ditemukan berarti
@@ -860,31 +956,93 @@ VkCommandBuffer Device::BeginTransient() const {
         slot = &transients_.back();
     }
 
-    VkCommandBufferBeginInfo beginInfo{};
-    beginInfo.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
-    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    SIM_VK_CHECK(vkBeginCommandBuffer(slot->commandBuffer, &beginInfo));
-    return slot->commandBuffer;
+    slot->graphicsUsed = 0;
+    slot->computeUsed = 0;
+    return NextTransientBuffer(slot->graphics, slot->graphicsUsed, slot->pool);
 }
 
 uint64_t Device::SubmitTransient(VkCommandBuffer commandBuffer) const {
-    TransientSubmit* slot = nullptr;
-    for (TransientSubmit& candidate : transients_) {
-        if (candidate.commandBuffer == commandBuffer) {
-            slot = &candidate;
-            break;
-        }
+    const SubmitBatch single{commandBuffer, QueueKind::Graphics, 0,
+                             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0};
+    return SubmitTransientBatches(commandBuffer, std::span<const SubmitBatch>(&single, 1));
+}
+
+uint64_t Device::SubmitTransientBatches(VkCommandBuffer primary,
+                                        std::span<const SubmitBatch> batches) const {
+    TransientSubmit* slot = FindTransient(primary);
+    SIM_VERIFY(slot != nullptr, "SubmitTransientBatches called with a foreign command buffer");
+    SIM_VERIFY(!batches.empty(), "SubmitTransientBatches called without a batch");
+
+    // Setiap command buffer yang dibagikan frame ini ditutup — termasuk yang
+    // ternyata tidak dipakai batch mana pun. Command buffer yang dibiarkan
+    // terbuka tidak bisa direkam ulang saat slotnya dipakai lagi.
+    for (uint32_t i = 0; i < slot->graphicsUsed; ++i) {
+        SIM_VK_CHECK(vkEndCommandBuffer(slot->graphics[i]));
     }
-    SIM_VERIFY(slot != nullptr, "SubmitTransient called with a foreign command buffer");
+    for (uint32_t i = 0; i < slot->computeUsed; ++i) {
+        SIM_VK_CHECK(vkEndCommandBuffer(slot->compute[i]));
+    }
 
-    SIM_VK_CHECK(vkEndCommandBuffer(commandBuffer));
+    // Batch terakhir tiap antrean yang benar-benar dipakai mendapat fence.
+    std::size_t lastGraphics = batches.size();
+    std::size_t lastCompute = batches.size();
+    uint64_t highest = 0;
+    for (std::size_t i = 0; i < batches.size(); ++i) {
+        if (batches[i].queue == QueueKind::AsyncCompute) {
+            SIM_VERIFY(slot->computePool != VK_NULL_HANDLE,
+                       "an async compute batch was submitted on a device without one");
+            lastCompute = i;
+        } else {
+            lastGraphics = i;
+        }
+        highest = std::max(highest, batches[i].signal);
+    }
+    SIM_VERIFY(lastGraphics != batches.size(),
+               "every frame must end on the graphics queue: the fence that guards slot reuse "
+               "hangs on it");
 
-    VkSubmitInfo submitInfo{};
-    submitInfo.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
-    submitInfo.commandBufferCount = 1;
-    submitInfo.pCommandBuffers = &commandBuffer;
-    SIM_VK_CHECK(vkQueueSubmit(graphicsQueue_, 1, &submitInfo, slot->fence));
+    const uint64_t base = timelineValue_;
+    for (std::size_t i = 0; i < batches.size(); ++i) {
+        const SubmitBatch& batch = batches[i];
+        VkCommandBufferSubmitInfo command{};
+        command.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
+        command.commandBuffer = batch.commandBuffer;
+
+        VkSemaphoreSubmitInfo wait{};
+        wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        wait.semaphore = timeline_;
+        wait.value = base + batch.wait;
+        wait.stageMask = batch.waitStages;
+
+        VkSemaphoreSubmitInfo signal{};
+        signal.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+        signal.semaphore = timeline_;
+        signal.value = base + batch.signal;
+        signal.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+
+        VkSubmitInfo2 submit{};
+        submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
+        submit.commandBufferInfoCount = 1;
+        submit.pCommandBufferInfos = &command;
+        submit.waitSemaphoreInfoCount = batch.wait != 0 ? 1u : 0u;
+        submit.pWaitSemaphoreInfos = batch.wait != 0 ? &wait : nullptr;
+        submit.signalSemaphoreInfoCount = batch.signal != 0 ? 1u : 0u;
+        submit.pSignalSemaphoreInfos = batch.signal != 0 ? &signal : nullptr;
+
+        const bool async = batch.queue == QueueKind::AsyncCompute;
+        VkFence fence = VK_NULL_HANDLE;
+        if (async && i == lastCompute) {
+            fence = slot->computeFence;
+        } else if (!async && i == lastGraphics) {
+            fence = slot->fence;
+        }
+        SIM_VK_CHECK(
+            vkQueueSubmit2(async ? computeQueue_ : graphicsQueue_, 1, &submit, fence));
+    }
+
+    timelineValue_ = base + highest;
     slot->pending = true;
+    slot->computePending = lastCompute != batches.size();
     slot->submitId = nextSubmitId_++;
     return slot->submitId;
 }
@@ -899,6 +1057,10 @@ void Device::WaitTransient(uint64_t submitId) const {
         }
         if (candidate.pending) {
             SIM_VK_CHECK(vkWaitForFences(device_, 1, &candidate.fence, VK_TRUE, UINT64_MAX));
+        }
+        if (candidate.computePending) {
+            SIM_VK_CHECK(
+                vkWaitForFences(device_, 1, &candidate.computeFence, VK_TRUE, UINT64_MAX));
         }
         return;
     }

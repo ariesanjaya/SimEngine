@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -109,6 +110,35 @@ struct DeviceCapabilities {
 ///   - memakai VK_EXT_debug_utils, bukan VK_EXT_debug_report yang sudah usang
 ///   - pemilihan GPU mengutamakan discrete, dan mencatat pilihannya ke log
 ///   - alokasi memori lewat VMA sejak awal, supaya E8 tidak perlu migrasi
+/// Antrean tempat sebuah batch berjalan.
+enum class QueueKind : uint8_t {
+    Graphics,
+    /// Keluarga compute yang **tidak** bisa menggambar. Keluarga yang punya
+    /// kedua bit hampir selalu keluarga grafis itu sendiri, dan dua antrean di
+    /// atasnya tidak membeli tumpang tindih apa pun.
+    AsyncCompute,
+};
+
+/// Satu batch submit: sebuah command buffer utuh pada satu antrean.
+///
+/// **Utuh, dan itu bukan pilihan.** Penungguan semaphore berlaku di awal
+/// submit, jadi pekerjaan yang boleh jalan sebelum penungguan harus berada di
+/// command buffer yang berbeda. Itulah yang membuat "batch" di sini sama dengan
+/// "command buffer", bukan potongan sebuah command buffer.
+struct SubmitBatch {
+    VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+    QueueKind queue = QueueKind::Graphics;
+    /// Nilai timeline **relatif frame ini**, mulai 1. Nol berarti tidak
+    /// menunggu apa pun.
+    uint64_t wait = 0;
+    /// Tahap tempat penungguan itu berlaku. Menyebut tahap yang sedekat mungkin
+    /// dengan pemakai sebenarnya adalah seluruh gunanya: `TOP_OF_PIPE` menahan
+    /// seluruh batch dan menghapus tumpang tindih yang baru saja dibeli.
+    VkPipelineStageFlags2 waitStages = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+    /// Nilai timeline relatif yang di-signal batch ini. Nol berarti tidak.
+    uint64_t signal = 0;
+};
+
 class Device {
 public:
     Device() = default;
@@ -135,6 +165,22 @@ public:
     VkCommandBuffer BeginOneShot() const;
     void EndOneShot(VkCommandBuffer commandBuffer) const;
 
+    /// Command buffer kedua pada slot transient yang sama, di keluarga antrean
+    /// compute.
+    ///
+    /// `VK_NULL_HANDLE` bila perangkat ini tidak punya keluarga compute
+    /// terpisah atau tidak punya timeline semaphore — pemanggilnya lalu merekam
+    /// semuanya ke command buffer grafis, dan itulah jalur satu-antrean yang
+    /// wajib tetap ada sebagai pembanding.
+    VkCommandBuffer BeginTransientCompute(VkCommandBuffer primary) const;
+
+    /// Command buffer grafis tambahan pada slot yang sama.
+    ///
+    /// **Ada karena batch adalah command buffer utuh.** Sebuah submit menunggu
+    /// semaphore di awalnya, jadi pekerjaan grafis yang boleh jalan *sebelum*
+    /// penungguan itu harus berada di command buffer yang lain.
+    VkCommandBuffer BeginTransientGraphics(VkCommandBuffer primary) const;
+
     /// Versi yang tidak memblokir, untuk pekerjaan per frame.
     ///
     /// Submit ditandai fence dan command buffer-nya dipakai ulang begitu fence
@@ -153,6 +199,20 @@ public:
     /// menunggunya berarti menunggu sesuatu yang belum di-submit sama sekali.
     /// Nomor submit tidak pernah dipakai ulang, jadi tidak bisa salah sasaran.
     uint64_t SubmitTransient(VkCommandBuffer commandBuffer) const;
+
+    /// Submit beberapa batch sekaligus, dengan urutan antar-antrean dijaga
+    /// timeline semaphore.
+    ///
+    /// **Nilai timeline-nya relatif frame ini**, mulai dari 1. Device yang
+    /// menerjemahkannya ke nilai mutlak; pemanggil tidak boleh menyimpan angka
+    /// mutlak, karena semaphore-nya satu dan dipakai seluruh frame.
+    ///
+    /// Batch terakhir tiap antrean yang dipakai mendapat fence-nya sendiri, dan
+    /// slot ini baru bisa dipakai ulang setelah keduanya selesai. Tanpa itu,
+    /// slot yang antrean grafisnya sudah selesai akan direkam ulang sementara
+    /// antrean compute-nya masih membaca command buffer yang sama.
+    uint64_t SubmitTransientBatches(VkCommandBuffer primary,
+                                    std::span<const SubmitBatch> batches) const;
 
     /// Menunggu submit transient tertentu selesai.
     ///
@@ -212,14 +272,31 @@ private:
     void SavePipelineCache() const;
 
     /// Satu slot command buffer sekali pakai beserta fence penandanya.
+    ///
+    /// **Dua keluarga antrean, dua kolam, dua fence.** Command pool terikat pada
+    /// keluarga antrean, jadi command buffer yang dijalankan antrean compute
+    /// tidak bisa datang dari kolam grafis; dan fence menandai satu submit, jadi
+    /// dua antrean menuntut dua penanda.
     struct TransientSubmit {
         VkCommandPool pool = VK_NULL_HANDLE;
-        VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
+        VkCommandPool computePool = VK_NULL_HANDLE;
+        std::vector<VkCommandBuffer> graphics;
+        std::vector<VkCommandBuffer> compute;
+        /// Berapa banyak yang sudah dibagikan frame ini.
+        uint32_t graphicsUsed = 0;
+        uint32_t computeUsed = 0;
         VkFence fence = VK_NULL_HANDLE;
+        VkFence computeFence = VK_NULL_HANDLE;
+        bool computePending = false;
         /// Nomor submit yang sedang ditandai fence ini, 0 bila slot menganggur.
         uint64_t submitId = 0;
         bool pending = false;
     };
+
+    /// Command buffer berikutnya dari kolam `pool`, dialokasikan bila perlu.
+    VkCommandBuffer NextTransientBuffer(std::vector<VkCommandBuffer>& pool, uint32_t& used,
+                                        VkCommandPool from) const;
+    TransientSubmit* FindTransient(VkCommandBuffer primary) const;
 
     TransientSubmit CreateTransient() const;
 
@@ -227,6 +304,9 @@ private:
     // Device secara const, tapi keduanya memang mengubah kolam internal ini.
     mutable std::vector<TransientSubmit> transients_;
     mutable uint64_t nextSubmitId_ = 1;
+    /// Satu untuk seluruh perangkat, menaik terus. Lihat `SubmitTransientBatches`.
+    VkSemaphore timeline_ = VK_NULL_HANDLE;
+    mutable uint64_t timelineValue_ = 0;
 
     VkInstance instance_ = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT debugMessenger_ = VK_NULL_HANDLE;
