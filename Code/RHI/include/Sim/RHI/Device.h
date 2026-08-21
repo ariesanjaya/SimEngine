@@ -2,6 +2,7 @@
 
 #include "Sim/RHI/Vulkan.h"
 
+#include <array>
 #include <cstdint>
 #include <filesystem>
 #include <span>
@@ -128,6 +129,14 @@ enum class QueueKind : uint8_t {
 struct SubmitBatch {
     VkCommandBuffer commandBuffer = VK_NULL_HANDLE;
     QueueKind queue = QueueKind::Graphics;
+    /// Antrean yang timeline-nya ditunggu.
+    ///
+    /// **Satu timeline per antrean, bukan satu bersama.** Sebuah operasi signal
+    /// hanya sah bila nilainya lebih besar daripada nilai semaphore saat ia
+    /// berjalan — dan dua antrean yang berjalan bersamaan tidak menjamin urutan
+    /// itu. Timeline milik satu antrean di-signal hanya oleh antrean itu, jadi
+    /// nilainya menaik menurut konstruksi.
+    QueueKind waitQueue = QueueKind::Graphics;
     /// Nilai timeline **relatif frame ini**, mulai 1. Nol berarti tidak
     /// menunggu apa pun.
     uint64_t wait = 0;
@@ -304,9 +313,9 @@ private:
     // Device secara const, tapi keduanya memang mengubah kolam internal ini.
     mutable std::vector<TransientSubmit> transients_;
     mutable uint64_t nextSubmitId_ = 1;
-    /// Satu untuk seluruh perangkat, menaik terus. Lihat `SubmitTransientBatches`.
-    VkSemaphore timeline_ = VK_NULL_HANDLE;
-    mutable uint64_t timelineValue_ = 0;
+    /// Satu per antrean, menaik terus. Lihat `SubmitBatch::waitQueue`.
+    std::array<VkSemaphore, 2> timeline_{VK_NULL_HANDLE, VK_NULL_HANDLE};
+    mutable std::array<uint64_t, 2> timelineValue_{0, 0};
 
     VkInstance instance_ = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT debugMessenger_ = VK_NULL_HANDLE;

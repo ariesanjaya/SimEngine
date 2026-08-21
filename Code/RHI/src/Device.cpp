@@ -690,7 +690,9 @@ bool Device::CreateLogicalDevice() {
         VkSemaphoreCreateInfo semaphoreInfo{};
         semaphoreInfo.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
         semaphoreInfo.pNext = &typeInfo;
-        SIM_VK_CHECK(vkCreateSemaphore(device_, &semaphoreInfo, nullptr, &timeline_));
+        for (VkSemaphore& semaphore : timeline_) {
+            SIM_VK_CHECK(vkCreateSemaphore(device_, &semaphoreInfo, nullptr, &semaphore));
+        }
     }
 
     capabilities_.vulkan13 = supportsVulkan13_;
@@ -753,9 +755,11 @@ void Device::Destroy() {
         }
     }
     transients_.clear();
-    if (timeline_ != VK_NULL_HANDLE) {
-        vkDestroySemaphore(device_, timeline_, nullptr);
-        timeline_ = VK_NULL_HANDLE;
+    for (VkSemaphore& semaphore : timeline_) {
+        if (semaphore != VK_NULL_HANDLE) {
+            vkDestroySemaphore(device_, semaphore, nullptr);
+            semaphore = VK_NULL_HANDLE;
+        }
     }
     if (pipelineCache_ != VK_NULL_HANDLE) {
         vkDestroyPipelineCache(device_, pipelineCache_, nullptr);
@@ -858,7 +862,7 @@ Device::TransientSubmit Device::CreateTransient() const {
     // Kolam compute dibuat hanya kalau ada keluarganya **dan** ada timeline
     // semaphore: tanpa yang kedua tidak ada cara menjaga urutan antar-antrean,
     // dan antrean kedua tanpa urutan bukan tumpang tindih melainkan balapan.
-    if (computeQueueFamily_ != UINT32_MAX && timeline_ != VK_NULL_HANDLE) {
+    if (computeQueueFamily_ != UINT32_MAX && timeline_[0] != VK_NULL_HANDLE) {
         poolInfo.queueFamilyIndex = computeQueueFamily_;
         SIM_VK_CHECK(vkCreateCommandPool(device_, &poolInfo, nullptr, &slot.computePool));
         SIM_VK_CHECK(vkCreateFence(device_, &fenceInfo, nullptr, &slot.computeFence));
@@ -962,8 +966,8 @@ VkCommandBuffer Device::BeginTransient() const {
 }
 
 uint64_t Device::SubmitTransient(VkCommandBuffer commandBuffer) const {
-    const SubmitBatch single{commandBuffer, QueueKind::Graphics, 0,
-                             VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, 0};
+    SubmitBatch single;
+    single.commandBuffer = commandBuffer;
     return SubmitTransientBatches(commandBuffer, std::span<const SubmitBatch>(&single, 1));
 }
 
@@ -986,7 +990,6 @@ uint64_t Device::SubmitTransientBatches(VkCommandBuffer primary,
     // Batch terakhir tiap antrean yang benar-benar dipakai mendapat fence.
     std::size_t lastGraphics = batches.size();
     std::size_t lastCompute = batches.size();
-    uint64_t highest = 0;
     for (std::size_t i = 0; i < batches.size(); ++i) {
         if (batches[i].queue == QueueKind::AsyncCompute) {
             SIM_VERIFY(slot->computePool != VK_NULL_HANDLE,
@@ -995,29 +998,35 @@ uint64_t Device::SubmitTransientBatches(VkCommandBuffer primary,
         } else {
             lastGraphics = i;
         }
-        highest = std::max(highest, batches[i].signal);
     }
     SIM_VERIFY(lastGraphics != batches.size(),
                "every frame must end on the graphics queue: the fence that guards slot reuse "
                "hangs on it");
 
-    const uint64_t base = timelineValue_;
+    const std::array<uint64_t, 2> base = timelineValue_;
+    std::array<uint64_t, 2> highestPerQueue{0, 0};
+    for (const SubmitBatch& batch : batches) {
+        highestPerQueue[static_cast<std::size_t>(batch.queue)] =
+            std::max(highestPerQueue[static_cast<std::size_t>(batch.queue)], batch.signal);
+    }
     for (std::size_t i = 0; i < batches.size(); ++i) {
         const SubmitBatch& batch = batches[i];
+        const auto self = static_cast<std::size_t>(batch.queue);
+        const auto other = static_cast<std::size_t>(batch.waitQueue);
         VkCommandBufferSubmitInfo command{};
         command.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO;
         command.commandBuffer = batch.commandBuffer;
 
         VkSemaphoreSubmitInfo wait{};
         wait.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-        wait.semaphore = timeline_;
-        wait.value = base + batch.wait;
+        wait.semaphore = timeline_[other];
+        wait.value = base[other] + batch.wait;
         wait.stageMask = batch.waitStages;
 
         VkSemaphoreSubmitInfo signal{};
         signal.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
-        signal.semaphore = timeline_;
-        signal.value = base + batch.signal;
+        signal.semaphore = timeline_[self];
+        signal.value = base[self] + batch.signal;
         signal.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 
         VkSubmitInfo2 submit{};
@@ -1040,7 +1049,8 @@ uint64_t Device::SubmitTransientBatches(VkCommandBuffer primary,
             vkQueueSubmit2(async ? computeQueue_ : graphicsQueue_, 1, &submit, fence));
     }
 
-    timelineValue_ = base + highest;
+    timelineValue_[0] = base[0] + highestPerQueue[0];
+    timelineValue_[1] = base[1] + highestPerQueue[1];
     slot->pending = true;
     slot->computePending = lastCompute != batches.size();
     slot->submitId = nextSubmitId_++;

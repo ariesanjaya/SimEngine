@@ -111,6 +111,12 @@ void FrameGraph::SetSideEffect(PassId pass) {
     }
 }
 
+void FrameGraph::SetQueue(PassId pass, Queue queue) {
+    if (pass < passes_.size()) {
+        passes_[pass].queue = queue;
+    }
+}
+
 std::string_view FrameGraph::PassName(PassId pass) const {
     return pass < passes_.size() ? std::string_view(passes_[pass].name) : std::string_view{};
 }
@@ -256,6 +262,15 @@ CompiledGraph FrameGraph::Compile() const {
     }
     std::vector<uint32_t> firstUse(resources_.size(), 0xFFFFFFFFu);
     std::vector<uint32_t> lastUse(resources_.size(), 0);
+    // Pemilik tiap resource, dan langkah tempat ia terakhir dipakai. **Grafis
+    // sebagai keadaan awal**: frame dimulai dan diakhiri di sana, dan resource
+    // yang belum disentuh frame ini memang ditinggalkan frame sebelumnya di
+    // antrean itu.
+    std::vector<Queue> owner(resources_.size(), Queue::Graphics);
+    std::vector<uint32_t> ownerStep(resources_.size(), 0xFFFFFFFFu);
+    // Sisi "dari" tiap perpindahan kepemilikan: (langkah pelepas, langkah
+    // pengambil). Dipakai menyusun segmen sesudah seluruh pass terkumpul.
+    std::vector<std::pair<uint32_t, uint32_t>> crossings;
 
     uint32_t step = 0;
     for (PassId pass = 0; pass < passes_.size(); ++pass) {
@@ -264,6 +279,7 @@ CompiledGraph FrameGraph::Compile() const {
         }
         CompiledPass compiled;
         compiled.pass = pass;
+        compiled.queue = passes_[pass].queue;
         compiled.name = passes_[pass].name;
         for (const Use& use : passes_[pass].uses) {
             // **Tulisan storage menuntut barrier walaupun keadaannya tidak
@@ -281,11 +297,36 @@ CompiledGraph FrameGraph::Compile() const {
             // di sini, dan itu keputusan yang berdiri sendiri: menambahkan
             // barrier di antara setiap pass adegan adalah perubahan biaya yang
             // harus diukur, bukan efek samping dari milestone compute.
+            //
+            // **Perpindahan antrean menuntut barrier walaupun keadaannya tidak
+            // berpindah.** Yang dipindahkan bukan tata letak melainkan
+            // kepemilikan keluarga antrean, dan tanpa sepasang lepas-ambil isi
+            // resource itu tidak dijanjikan apa pun di sisi penerimanya.
+            //
+            // Hanya kalau resource-nya memang sudah dipakai frame ini. Yang
+            // belum: isinya datang dari frame sebelumnya, dan satu-satunya pass
+            // yang boleh memakainya di antrean lain adalah pass yang
+            // menimpanya — perpindahan yang tidak dilakukan di sana tidak
+            // menghilangkan apa pun.
+            const bool crosses = passes_[pass].queue != owner[use.resource] &&
+                                 ownerStep[use.resource] != 0xFFFFFFFFu;
             const bool moved = state[use.resource] != use.access;
-            if (moved || use.access == Access::ShaderWrite) {
-                compiled.barriers.push_back(Barrier{use.resource, state[use.resource], use.access});
+            if (moved || crosses || use.access == Access::ShaderWrite) {
+                Barrier barrier{use.resource, state[use.resource], use.access};
+                if (crosses) {
+                    barrier.fromQueue = owner[use.resource];
+                    barrier.toQueue = passes_[pass].queue;
+                    // Sisi pelepasnya ditempelkan ke pass yang terakhir
+                    // memakainya, bukan ke pass ini: pelepasan harus berjalan
+                    // di antrean pemilik lama.
+                    result.order[ownerStep[use.resource]].releases.push_back(barrier);
+                    crossings.emplace_back(ownerStep[use.resource], step);
+                }
+                compiled.barriers.push_back(barrier);
                 state[use.resource] = use.access;
             }
+            owner[use.resource] = passes_[pass].queue;
+            ownerStep[use.resource] = step;
             if (firstUse[use.resource] == 0xFFFFFFFFu) {
                 firstUse[use.resource] = step;
             }
@@ -293,6 +334,57 @@ CompiledGraph FrameGraph::Compile() const {
         }
         result.order.push_back(std::move(compiled));
         ++step;
+    }
+
+    // 5. Segmen. Urutan jalan dipotong setiap kali antreannya berganti, **dan**
+    //    setiap kali sebuah pass harus menunggu antrean lain — penungguan
+    //    berlaku di awal submit, jadi pekerjaan yang boleh jalan lebih dulu
+    //    harus berada di potongan yang berbeda. Tanpa pemotongan kedua itu,
+    //    tumpang tindih yang baru saja dibeli hilang di baris pertama.
+    if (!result.order.empty()) {
+        std::vector<uint8_t> waitsHere(result.order.size(), 0);
+        for (const auto& [from, to] : crossings) {
+            waitsHere[to] = 1;
+        }
+        std::vector<uint32_t> segmentOf(result.order.size(), 0);
+        for (uint32_t at = 0; at < result.order.size(); ++at) {
+            const bool queueChanged =
+                result.segments.empty() || result.order[at].queue != result.segments.back().queue;
+            if (queueChanged || (waitsHere[at] != 0 && result.segments.back().count > 0)) {
+                Segment segment;
+                segment.queue = result.order[at].queue;
+                segment.first = at;
+                result.segments.push_back(segment);
+            }
+            ++result.segments.back().count;
+            segmentOf[at] = static_cast<uint32_t>(result.segments.size() - 1);
+        }
+
+        // Ketergantungan antar-segmen, lalu nilai timeline-nya. Nilainya dibagi
+        // per antrean dan menaik di dalamnya: sebuah operasi signal hanya sah
+        // bila nilainya lebih besar daripada nilai semaphore saat ia berjalan,
+        // dan dua antrean yang berjalan bersamaan tidak menjamin urutan itu.
+        std::vector<std::vector<uint32_t>> dependsOn(result.segments.size());
+        for (const auto& [from, to] : crossings) {
+            const uint32_t producer = segmentOf[from];
+            const uint32_t consumer = segmentOf[to];
+            if (producer != consumer) {
+                dependsOn[consumer].push_back(producer);
+            }
+        }
+        std::array<uint64_t, 2> next{0, 0};
+        for (uint32_t at = 0; at < result.segments.size(); ++at) {
+            for (const uint32_t producer : dependsOn[at]) {
+                Segment& source = result.segments[producer];
+                if (source.signal == 0) {
+                    source.signal = ++next[static_cast<std::size_t>(source.queue)];
+                }
+                if (source.signal > result.segments[at].wait) {
+                    result.segments[at].wait = source.signal;
+                    result.segments[at].waitQueue = source.queue;
+                }
+            }
+        }
     }
 
     // Keluaran dikembalikan ke keadaan yang dijanjikannya — **sesudah** pass
