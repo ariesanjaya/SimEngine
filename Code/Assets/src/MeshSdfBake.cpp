@@ -1,16 +1,19 @@
 #include "Sim/Assets/MeshSdfBake.h"
 
 #include "Sim/Assets/MeshData.h"
+#include "Sim/ImageIO/ImageIO.h"
 #include "Sim/Core/Log.h"
 #include "Sim/Volume/SdfBake.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
+#include <unordered_map>
 #include <vector>
 
 namespace sim::assets {
@@ -19,12 +22,17 @@ namespace {
 /// Dinaikkan setiap kali hasil bake bisa berubah untuk mesh yang sama — lebar
 /// pita diubah, pemilihan voxel diubah, pustakanya berganti. Kunci cache ikut
 /// berubah, jadi mesh yang sudah pernah dibake dikerjakan ulang.
-constexpr uint64_t kBakerVersion = 1;
+constexpr uint64_t kBakerVersion = 2;
 
 /// Delapan byte pertama berkas `.simsdf`. Berkas yang tidak dimulai dengan ini
 /// ditolak alih-alih diurai — sebuah berkas lain yang kebetulan sepanjang
 /// header akan terbaca sebagai grid berukuran acak.
 constexpr char kMagic[8] = {'S', 'I', 'M', 'S', 'D', 'F', '1', '\0'};
+
+/// Versi 2 menambahkan palet albedo dan indeks materialnya. Versi 1 tetap bisa
+/// dibaca — ia grid tanpa warna, dan itu keadaan yang sah untuk mesh yang
+/// materialnya tidak punya tekstur base color satu pun.
+constexpr uint32_t kFileVersion = 2;
 
 /// Header berkas. **Setiap medan eksplisit, tanpa satu pun padding tersirat:**
 /// yang ditulis `fwrite` atas sebuah struct berpadding adalah byte yang tidak
@@ -41,8 +49,10 @@ struct FileHeader {
     float originX;
     float originY;
     float originZ;
+    /// Banyaknya warna di palet, nol berarti grid tanpa warna. Hanya versi 2.
+    uint32_t paletteCount;
 };
-static_assert(sizeof(FileHeader) == 8 + 4 * 9, "header .simsdf tidak boleh berpadding");
+static_assert(sizeof(FileHeader) == 8 + 4 * 10, "header .simsdf tidak boleh berpadding");
 
 std::atomic<uint64_t> g_bakeCount{0};
 
@@ -73,6 +83,112 @@ std::vector<uint8_t> ReadFileBytes(const std::filesystem::path& path) {
         return {};
     }
     return bytes;
+}
+
+/// Albedo linear rata-rata sebuah tekstur base color.
+///
+/// **Dirata-rata di ruang linear, bukan di ruang sRGB.** Rata-rata byte sRGB
+/// sebuah tekstur separuh hitam separuh putih adalah 128, yang linear-nya 0,22;
+/// rata-rata linear yang sebenarnya 0,5. Selisih dua kali lipat pada warna
+/// pantulan, dan ia condong ke arah yang sama pada setiap tekstur — jadi ia
+/// tidak terlihat sebagai satu tekstur yang salah melainkan sebagai seluruh
+/// pantulan yang terlalu gelap.
+///
+/// Tabel 256 entri, bukan `pow` per piksel: sebuah tekstur 4K adalah 50 juta
+/// kanal, dan `pow` sebanyak itu berharga lebih lama daripada mendekode
+/// berkasnya.
+bool AverageTextureAlbedo(const std::filesystem::path& path, Vec3& out) {
+    imageio::Image image;
+    imageio::ReadOptions options;
+    options.channels = 3;
+    options.type = imageio::PixelType::UInt8;
+    const imageio::ImageIoResult read = imageio::Read(path, options, image);
+    if (!read || image.desc.width == 0 || image.desc.height == 0) {
+        return false;
+    }
+    std::array<float, 256> toLinear{};
+    for (std::size_t i = 0; i < toLinear.size(); ++i) {
+        const float srgb = static_cast<float>(i) / 255.0f;
+        toLinear[i] = srgb <= 0.04045f ? srgb / 12.92f
+                                       : std::pow((srgb + 0.055f) / 1.055f, 2.4f);
+    }
+
+    const uint8_t* pixels = image.AsU8();
+    if (pixels == nullptr) {
+        return false;
+    }
+    const std::size_t count = static_cast<std::size_t>(image.desc.width) * image.desc.height;
+    double sum[3] = {0.0, 0.0, 0.0};
+    for (std::size_t i = 0; i < count; ++i) {
+        sum[0] += toLinear[pixels[i * 3 + 0]];
+        sum[1] += toLinear[pixels[i * 3 + 1]];
+        sum[2] += toLinear[pixels[i * 3 + 2]];
+    }
+    const auto inverse = 1.0 / static_cast<double>(count);
+    out = Vec3(static_cast<float>(sum[0] * inverse), static_cast<float>(sum[1] * inverse),
+               static_cast<float>(sum[2] * inverse));
+    return true;
+}
+
+/// Palet albedo mesh, beserta indeks material per segitiga.
+///
+/// Indeks nol disediakan untuk "tidak diketahui", jadi material ke-`m` menempati
+/// indeks `m + 1`. Mesh dengan lebih dari 255 material kehilangan sisanya —
+/// dilaporkan, bukan didiamkan, karena yang hilang muncul sebagai permukaan yang
+/// memantulkan warna cadangan alih-alih warnanya sendiri.
+void BuildAlbedoPalette(const MeshData& mesh, const std::filesystem::path& source,
+                        std::vector<Vec3>& palette, std::vector<uint8_t>& triangleMaterial) {
+    palette.assign(1, Vec3(0.5f));
+    if (mesh.materials.empty()) {
+        return;
+    }
+    const std::size_t used = std::min<std::size_t>(mesh.materials.size(), 255);
+    if (used < mesh.materials.size()) {
+        SIM_WARN("Assets", "{} has {} materials; only the first 255 carry an albedo",
+                 source.filename().string(), mesh.materials.size());
+    }
+
+    // Tekstur yang sama dipakai beberapa material — di Sponza, dinding dan
+    // lengkungan berbagi batu yang sama. Dekode sebuah 4K berharga setengah
+    // detik, jadi yang sudah dihitung diingat.
+    std::unordered_map<std::string, Vec3> averages;
+    palette.resize(used + 1, Vec3(0.5f));
+    for (std::size_t m = 0; m < used; ++m) {
+        const MeshMaterial& material = mesh.materials[m];
+        Vec3 albedo = material.baseColor;
+        if (!material.baseColorTexture.empty()) {
+            const auto found = averages.find(material.baseColorTexture);
+            if (found != averages.end()) {
+                albedo *= found->second;
+            } else {
+                Vec3 average(1.0f);
+                const std::filesystem::path texture =
+                    source.parent_path() / material.baseColorTexture;
+                if (AverageTextureAlbedo(texture, average)) {
+                    averages.emplace(material.baseColorTexture, average);
+                    albedo *= average;
+                } else {
+                    SIM_WARN("Assets", "cannot read {} for its average albedo",
+                             texture.filename().string());
+                }
+            }
+        }
+        palette[m + 1] = glm::clamp(albedo, Vec3(0.0f), Vec3(1.0f));
+    }
+
+    triangleMaterial.assign(mesh.indices.size() / 3, 0);
+    for (const SubMesh& part : mesh.parts) {
+        if (part.material < 0 || static_cast<std::size_t>(part.material) >= used) {
+            continue;
+        }
+        const auto value = static_cast<uint8_t>(part.material + 1);
+        const std::size_t first = part.firstIndex / 3;
+        const std::size_t last = std::min<std::size_t>((part.firstIndex + part.indexCount) / 3,
+                                                       triangleMaterial.size());
+        for (std::size_t t = first; t < last; ++t) {
+            triangleMaterial[t] = value;
+        }
+    }
 }
 
 MeshSdfBakeResult Fail(std::string message) {
@@ -164,7 +280,7 @@ bool WriteMeshSdf(const std::filesystem::path& file, const SdfGrid& grid, std::s
         }
         FileHeader header{};
         std::memcpy(header.magic, kMagic, sizeof(kMagic));
-        header.version = 1;
+        header.version = kFileVersion;
         header.sizeX = grid.sizeX;
         header.sizeY = grid.sizeY;
         header.sizeZ = grid.sizeZ;
@@ -173,9 +289,22 @@ bool WriteMeshSdf(const std::filesystem::path& file, const SdfGrid& grid, std::s
         header.originX = grid.origin.x;
         header.originY = grid.origin.y;
         header.originZ = grid.origin.z;
+        header.paletteCount = grid.HasAlbedo() ? static_cast<uint32_t>(grid.palette.size()) : 0;
         out.write(reinterpret_cast<const char*>(&header), sizeof(header));
         out.write(reinterpret_cast<const char*>(grid.distances.data()),
                   static_cast<std::streamsize>(grid.distances.size() * sizeof(float)));
+        if (header.paletteCount > 0) {
+            // Palet ditulis sebagai tiga float per warna, bukan sebagai `Vec3`:
+            // `Vec3` boleh berpadding, dan padding yang tidak diinisialisasi
+            // membuat dua bake atas mesh yang sama menghasilkan berkas yang
+            // berbeda.
+            for (const Vec3& color : grid.palette) {
+                const std::array<float, 3> rgb{color.x, color.y, color.z};
+                out.write(reinterpret_cast<const char*>(rgb.data()), sizeof(rgb));
+            }
+            out.write(reinterpret_cast<const char*>(grid.materials.data()),
+                      static_cast<std::streamsize>(grid.materials.size()));
+        }
         if (!out) {
             error = "cannot write " + temporary.string();
             return false;
@@ -199,7 +328,8 @@ bool ReadMeshSdf(const std::filesystem::path& file, SdfGrid& out, std::string& e
     }
     FileHeader header{};
     in.read(reinterpret_cast<char*>(&header), sizeof(header));
-    if (!in || std::memcmp(header.magic, kMagic, sizeof(kMagic)) != 0 || header.version != 1) {
+    if (!in || std::memcmp(header.magic, kMagic, sizeof(kMagic)) != 0 || header.version == 0 ||
+        header.version > kFileVersion) {
         error = file.filename().string() + " is not a .simsdf file this build can read";
         return false;
     }
@@ -224,6 +354,22 @@ bool ReadMeshSdf(const std::filesystem::path& file, SdfGrid& out, std::string& e
         out = SdfGrid{};
         error = file.filename().string() + " is truncated";
         return false;
+    }
+    if (header.version >= 2 && header.paletteCount > 0) {
+        out.palette.resize(header.paletteCount);
+        for (Vec3& color : out.palette) {
+            std::array<float, 3> rgb{};
+            in.read(reinterpret_cast<char*>(rgb.data()), sizeof(rgb));
+            color = Vec3(rgb[0], rgb[1], rgb[2]);
+        }
+        out.materials.resize(voxels);
+        in.read(reinterpret_cast<char*>(out.materials.data()),
+                static_cast<std::streamsize>(voxels));
+        if (in.gcount() != static_cast<std::streamsize>(voxels)) {
+            out = SdfGrid{};
+            error = file.filename().string() + " is truncated in its albedo";
+            return false;
+        }
     }
     return true;
 }
@@ -279,12 +425,20 @@ MeshSdfBakeResult BakeMeshSdfFile(const std::filesystem::path& source,
         BandMeters(mesh.boundsMin, mesh.boundsMax, settings, bake.voxelSize) / bake.voxelSize;
     bake.maxVoxels = settings.maxVoxels;
 
+    // Warna permukaannya, dan segitiga mana memakai yang mana. Ini bagian yang
+    // membuat pantulan membawa warna: tanpanya setiap permukaan memantulkan
+    // abu-abu yang sama.
+    std::vector<Vec3> palette;
+    std::vector<uint8_t> triangleMaterial;
+    BuildAlbedoPalette(mesh, source, palette, triangleMaterial);
+
     SdfGrid grid;
     const volume::SdfBakeResult baked =
-        volume::BakeMeshSdf(positions, mesh.indices, bake, grid);
+        volume::BakeMeshSdf(positions, mesh.indices, bake, grid, triangleMaterial);
     if (!baked) {
         return Fail(source.filename().string() + ": " + baked.error);
     }
+    grid.palette = std::move(palette);
 
     if (!WriteMeshSdf(cached, grid, error)) {
         return Fail(error);

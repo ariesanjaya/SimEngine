@@ -2462,6 +2462,11 @@ TEST_CASE("T-M1: berkas .simsdf bolak-balik, dan yang terpotong ditolak") {
     for (std::size_t i = 0; i < grid.distances.size(); ++i) {
         grid.distances[i] = static_cast<float>(i) * 0.01f - 0.3f;
     }
+    grid.palette = {Vec3(0.5f), Vec3(0.9f, 0.2f, 0.1f), Vec3(0.1f, 0.3f, 0.7f)};
+    grid.materials.resize(grid.VoxelCount());
+    for (std::size_t i = 0; i < grid.materials.size(); ++i) {
+        grid.materials[i] = static_cast<uint8_t>(i % 3);
+    }
 
     const std::filesystem::path file = temp.Path() / "field.simsdf";
     std::string error;
@@ -2470,6 +2475,10 @@ TEST_CASE("T-M1: berkas .simsdf bolak-balik, dan yang terpotong ditolak") {
     SdfGrid loaded;
     REQUIRE(ReadMeshSdf(file, loaded, error));
     CHECK(loaded.sizeX == grid.sizeX);
+    CHECK(loaded.HasAlbedo());
+    CHECK(loaded.palette.size() == grid.palette.size());
+    CHECK(loaded.materials == grid.materials);
+    CHECK(loaded.palette[1].x == doctest::Approx(grid.palette[1].x));
     CHECK(loaded.sizeY == grid.sizeY);
     CHECK(loaded.sizeZ == grid.sizeZ);
     CHECK(loaded.voxelSize == doctest::Approx(grid.voxelSize));
@@ -2583,3 +2592,4 @@ TEST_CASE("T-M1: bakery menjawab Pending lalu Ready, dan hanya membake sekali") 
     tasks.WaitIdle();
     CHECK(bakery.Request(missing).state == MeshSdfState::Failed);
 }
+

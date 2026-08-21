@@ -75,8 +75,19 @@ const char* BackendVersion();
 /// tidak berarti — level set dari permukaan terbuka tidak punya "dalam". Yang
 /// dijamin tetap benar adalah besarnya jarak di dekat permukaan, dan itulah yang
 /// dipakai sphere tracing untuk berhenti.
+///
+/// `polygonAttribute` boleh kosong. Bila ada, ia satu byte per segitiga, dan
+/// hasilnya disalin ke `out.materials`: setiap voxel di dalam pita mendapat byte
+/// milik **segitiga terdekatnya**, dan voxel di luar pita mendapat nol.
+///
+/// **Atribut, bukan material.** Modul ini tidak tahu apa arti bytenya; yang tahu
+/// adalah pemanggilnya. Yang diberikan OpenVDB adalah indeks poligon terdekat
+/// per voxel, dan menyimpannya apa adanya berarti empat byte per voxel — 51 MB
+/// untuk Sponza — untuk sebuah angka yang langsung dipetakan menjadi satu byte
+/// oleh siapa pun yang memakainya.
 SdfBakeResult BakeMeshSdf(std::span<const Vec3> positions, std::span<const uint32_t> indices,
-                          const SdfBakeSettings& settings, SdfGrid& out);
+                          const SdfBakeSettings& settings, SdfGrid& out,
+                          std::span<const uint8_t> polygonAttribute = {});
 
 // --- impor .vdb --------------------------------------------------------------
 
