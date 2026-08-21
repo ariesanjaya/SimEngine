@@ -2199,6 +2199,64 @@ TEST_CASE("E8.4: setiap shader yang ditanam modul material ikut disalin ke sebel
     }
 }
 
+TEST_CASE("T-mask: mode alfa dibaca dari node keluaran, dan uji buangnya masuk modul forward") {
+    MaterialGraph graph = MinimalGraph();
+
+    SUBCASE("bawaannya tanpa uji apa pun") {
+        const MaterialCompileResult compiled = CompileMaterial(graph);
+        REQUIRE(compiled.ok);
+        CHECK_FALSE(compiled.alphaTest);
+
+        ForwardMaterialOptions options;
+        options.alphaTest = compiled.alphaTest;
+        options.alphaCutoff = compiled.alphaCutoff;
+        const std::string module = AssembleForwardMaterialModule(compiled.slang, options);
+        // **Yang buram tidak boleh membayar satu instruksi pun.** `discard`
+        // mematikan uji depth awal pada sebagian perangkat keras, dan
+        // membayarnya untuk material yang opasitasnya tetap satu adalah
+        // membayarnya untuk hampir seluruh adegan.
+        CHECK(module.find("discard") == std::string::npos);
+    }
+
+    SUBCASE("mask menyalakannya, beserta ambangnya") {
+        auto& output = graph.nodes[0];
+        REQUIRE(output.type == "output.surface");
+        output.settings["alphaMode"] = "mask";
+        output.settings["alphaCutoff"] = "0.25";
+
+        const MaterialCompileResult compiled = CompileMaterial(graph);
+        REQUIRE(compiled.ok);
+        CHECK(compiled.alphaTest);
+        CHECK(compiled.alphaCutoff == doctest::Approx(0.25f));
+
+        ForwardMaterialOptions options;
+        options.alphaTest = compiled.alphaTest;
+        options.alphaCutoff = compiled.alphaCutoff;
+        const std::string module = AssembleForwardMaterialModule(compiled.slang, options);
+        const std::size_t at = module.find("discard");
+        REQUIRE(at != std::string::npos);
+        CHECK(module.find("m.opacity < 0.25") != std::string::npos);
+
+        // **Buangnya mendahului bingkai shading.** Menaruhnya di akhir tetap
+        // benar hasilnya dan tetap membayar seluruh evaluasi lobe untuk fragmen
+        // yang toh dibuang.
+        const std::size_t frame = module.find("ShadingFrame frame;");
+        REQUIRE(frame != std::string::npos);
+        CHECK(at < frame);
+    }
+
+    SUBCASE("mode lain tidak menyalakannya") {
+        auto& output = graph.nodes[0];
+        output.settings["alphaMode"] = "blend";
+        const MaterialCompileResult compiled = CompileMaterial(graph);
+        REQUIRE(compiled.ok);
+        // Yang dipadu diputuskan per objek di renderer ini, bukan per material —
+        // dan material yang diam-diam berpindah ke jalur topeng akan kehilangan
+        // gradasinya tanpa ada yang memintanya.
+        CHECK_FALSE(compiled.alphaTest);
+    }
+}
+
 TEST_CASE("G5: jalur bindless mengubah dari mana datanya datang, bukan bentuk materialnya") {
     // **Yang diuji di sini ABI-nya, bukan sintaksnya.** Kedua jalur menghasilkan
     // modul yang sama sahnya, jadi tidak ada satu pun galat yang muncul ketika
