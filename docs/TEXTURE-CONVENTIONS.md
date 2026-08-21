@@ -168,6 +168,30 @@ di `Resources/Meshes/`: satu segi empat yang sama, ditulis empat kali menurut
 konvensi masing-masing format, dan satu uji yang menuntut keempatnya diimpor
 menjadi UV yang sama persis.
 
+### Set UV: yang diminta materialnya, bukan yang pertama
+
+Sebuah mesh boleh membawa lebih dari satu set UV, dan **urutannya tidak
+menyatakan apa-apa**. Yang menentukan set mana yang dipakai sebuah tekstur
+adalah materialnya: `UVSet` pada tekstur di FBX, `TEXCOORD_n` pada glTF.
+
+Set kedua lazimnya UV lightmap — pemetaan yang sengaja tidak tumpang tindih —
+dan memakainya untuk tekstur biasa menghasilkan permukaan yang teksturnya
+teregang ke petak-petak kecil, tanpa satu pun galat. Sponza membawa dua set di
+tiap mesh FBX-nya (456 `LayerElementUV` di 230 mesh); materialnya kebetulan
+meminta yang pertama, jadi mengambil "yang pertama" di sana benar karena
+kebetulan, bukan karena dipilih.
+
+**Pilihan itu lewat material muka, jadi muka yang materialnya tidak terpetakan
+kehilangan pilihannya.** Berkas yang membawa elemen material bermode `eNone` di
+sebelah elemen yang benar — bentuk yang ditinggalkan sebagian pengekspor —
+dulu membuat seluruh mukanya bermaterial −1. Node bermaterial tunggal sekarang
+memakainya kapan pun elemennya tidak menjawab, bukan hanya ketika elemennya
+tidak ada.
+
+`uvQuadTwoSets.fbx` menguncinya: `lightmapUV` lebih dulu, `map1` sesudahnya,
+dan teksturnya menyebut `map1`. Angka kedua set sengaja berjauhan — yang benar
+0,2/0,7 dan 0,6/0,1, yang salah 0/1 di keempat sudutnya.
+
 ### Bingkai tangent ikut terbalik
 
 **Membalik `v` membalik arah tangan, dan tandanya harus ikut dibalik.**

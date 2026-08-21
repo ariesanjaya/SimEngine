@@ -634,6 +634,25 @@ std::string TexturePath(const FbxProperty& property) {
     return relative;
 }
 
+/// Nama set UV yang diminta tekstur sebuah saluran material.
+///
+/// **Sebuah mesh FBX boleh membawa beberapa set UV, dan yang menentukan mana
+/// yang dipakai adalah teksturnya, bukan urutannya.** Set kedua lazimnya UV
+/// lightmap — pemetaan yang tidak tumpang tindih, dan yang kalau dipakai
+/// menggambar tekstur biasa menghasilkan permukaan yang teksturnya teregang ke
+/// petak-petak kecil. Sponza membawa dua set di tiap mesh-nya.
+std::string TextureUvSet(const FbxProperty& property) {
+    if (!property.IsValid()) {
+        return {};
+    }
+    const FbxFileTexture* texture = property.GetSrcObject<FbxFileTexture>(0);
+    if (texture == nullptr) {
+        return {};
+    }
+    const FbxString name = texture->UVSet.Get();
+    return name.Buffer() != nullptr ? std::string(name.Buffer()) : std::string{};
+}
+
 /// Nilai skalar sebuah properti material, atau `fallback` bila tidak ada.
 float PropertyScalar(const FbxSurfaceMaterial& source, const char* name, float fallback) {
     const FbxProperty property = source.FindProperty(name);
@@ -877,11 +896,16 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
         // Material node ini, dicatat sekali. Elemen material mengindeks daftar
         // ini, bukan daftar material scene.
         std::vector<int> nodeMaterial(static_cast<std::size_t>(node->GetMaterialCount()), -1);
+        /// Set UV yang diminta tiap slot material node ini. Kosong berarti
+        /// "tidak menyebut", dan yang tidak menyebut memakai set pertama.
+        std::vector<std::string> nodeUvSet(static_cast<std::size_t>(node->GetMaterialCount()));
         for (int m = 0; m < node->GetMaterialCount(); ++m) {
             const FbxSurfaceMaterial* sourceMaterial = node->GetMaterial(m);
             if (sourceMaterial == nullptr) {
                 continue;
             }
+            nodeUvSet[static_cast<std::size_t>(m)] =
+                TextureUvSet(sourceMaterial->FindProperty(FbxSurfaceMaterial::sDiffuse));
             const auto found = materialIndex.find(sourceMaterial);
             if (found != materialIndex.end()) {
                 nodeMaterial[static_cast<std::size_t>(m)] = found->second;
@@ -911,6 +935,7 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
             }
 
             int faceMaterial = -1;
+            int faceSlot = -1;
             if (materialElement != nullptr) {
                 const FbxLayerElement::EMappingMode mapping = materialElement->GetMappingMode();
                 int slot = -1;
@@ -923,13 +948,43 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
                 }
                 if (slot >= 0 && static_cast<std::size_t>(slot) < nodeMaterial.size()) {
                     faceMaterial = nodeMaterial[static_cast<std::size_t>(slot)];
+                    faceSlot = slot;
                 }
-            } else if (nodeMaterial.size() == 1) {
-                // Berkas yang tidak menyebut material per muka tapi punya satu
-                // material untuk seluruh node — bentuk yang lazim.
+            }
+            if (faceSlot < 0 && nodeMaterial.size() == 1) {
+                // **Node bermaterial tunggal memakainya, dan syaratnya bukan
+                // "tidak ada elemen material" melainkan "elemennya tidak
+                // menjawab".** Keduanya terjadi di berkas sungguhan: yang tidak
+                // menyebut material per muka sama sekali, dan yang membawa
+                // elemen bermode `eNone` — elemen yang ada tapi tidak memetakan
+                // apa pun, dan yang lazim ditinggalkan pengekspor di sebelah
+                // elemen yang benar.
+                //
+                // Tanpa jalur ini seluruh muka bermaterial −1: bukan galat,
+                // hanya permukaan yang digambar jalur mundur dan karena itu
+                // tidak bisa dibedakan dari permukaan yang memang tidak
+                // bermaterial.
                 faceMaterial = nodeMaterial[0];
+                faceSlot = 0;
             }
             triangleMaterial.push_back(faceMaterial);
+
+            // **Set UV yang diminta material muka ini, kalau ia menyebut satu
+            // yang benar-benar ada di mesh ini.** Nama yang disebut tapi tidak
+            // ada bukan alasan untuk kehilangan UV: yang tercatat di sebuah
+            // material bisa saja set milik mesh lain, dan mesh tanpa UV
+            // digambar tanpa tekstur sama sekali.
+            const char* polygonUvSet = uvSet;
+            if (faceSlot >= 0 && static_cast<std::size_t>(faceSlot) < nodeUvSet.size() &&
+                !nodeUvSet[static_cast<std::size_t>(faceSlot)].empty()) {
+                const std::string& wanted = nodeUvSet[static_cast<std::size_t>(faceSlot)];
+                for (int i = 0; i < uvSetNames.GetCount(); ++i) {
+                    if (wanted == uvSetNames.GetStringAt(i)) {
+                        polygonUvSet = uvSetNames.GetStringAt(i);
+                        break;
+                    }
+                }
+            }
 
             for (int corner = 0; corner < 3; ++corner) {
                 const int point = corners[corner];
@@ -944,10 +999,10 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
                     vertex.normal =
                         length > 1e-8f ? transformed / length : Vec3(0.0f, 1.0f, 0.0f);
                 }
-                if (uvSet != nullptr) {
+                if (polygonUvSet != nullptr) {
                     FbxVector2 uv;
                     bool unmapped = false;
-                    if (source->GetPolygonVertexUV(polygon, corner, uvSet, uv, unmapped) &&
+                    if (source->GetPolygonVertexUV(polygon, corner, polygonUvSet, uv, unmapped) &&
                         !unmapped) {
                         // **V dibalik: FBX menaruh asalnya di kiri bawah, mesin
                         // ini di kiri atas** — aturan yang sama yang sudah
