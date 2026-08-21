@@ -2593,3 +2593,65 @@ TEST_CASE("T-M1: bakery menjawab Pending lalu Ready, dan hanya membake sekali") 
     CHECK(bakery.Request(missing).state == MeshSdfState::Failed);
 }
 
+
+TEST_CASE("T-alpha: tekstur beralfa selamat melewati baker") {
+    // **Perjalanan kali-lalu-bagi yang tidak pulih.** Pembaca gambar dulu
+    // meng-associate alfa dan baker meluruskannya kembali; texel beralfa nol
+    // keluar hitam pekat, dan texel beralfa kecil diperbesar sampai menabrak
+    // putih. Yang terlihat bercak berbintik di setiap tekstur beralfa — dan
+    // tidak satu pun uji menyentuhnya, karena seluruh fixture gambar di sini
+    // beralfa penuh.
+    TempDir temp;
+    const std::filesystem::path source = temp.Path() / "alfa.png";
+
+    imageio::Image image;
+    imageio::ImageDesc desc;
+    desc.width = 16;
+    desc.height = 16;
+    desc.channels = 4;
+    desc.type = imageio::PixelType::UInt8;
+    desc.colorSpace = imageio::ColorSpace::Srgb;
+    image.Allocate(desc);
+    // Warna yang sama di seluruh gambar, alfa yang menurun baris demi baris.
+    for (uint32_t y = 0; y < desc.height; ++y) {
+        for (uint32_t x = 0; x < desc.width; ++x) {
+            uint8_t* px = image.bytes.data() + (y * desc.width + x) * 4;
+            px[0] = 180;
+            px[1] = 120;
+            px[2] = 60;
+            px[3] = static_cast<uint8_t>(y * 17);
+        }
+    }
+    REQUIRE(imageio::Write(source, image).ok);
+
+    imageio::Image decoded;
+    imageio::ReadOptions options;
+    options.channels = 4;
+    options.type = imageio::PixelType::UInt8;
+    REQUIRE(imageio::Read(source, options, decoded).ok);
+    CHECK_FALSE(decoded.desc.premultipliedAlpha);
+    // Baris alfa nol tetap membawa warnanya. Inilah yang dulu hilang.
+    CHECK(decoded.bytes[0] == 180);
+    CHECK(decoded.bytes[1] == 120);
+    CHECK(decoded.bytes[2] == 60);
+    CHECK(decoded.bytes[3] == 0);
+
+    // Dan lewat baker sampai ke `.ktx2`: BC7 boleh menggeser beberapa satuan,
+    // tapi tidak boleh mengubah oranye menjadi hitam.
+    TextureSettings settings;
+    settings.usage = TextureUsage::Color;
+    const BakeResult baked = BakeTexture(source, settings, temp.Path() / "cache");
+    REQUIRE_MESSAGE(baked.ok, baked.error);
+    rhi::Ktx2Texture ktx;
+    REQUIRE(rhi::ReadKtx2(baked.path, ktx).ok);
+    std::vector<uint8_t> rgba;
+    REQUIRE(DecompressBlocks(BlockFormat::Bc7, ktx.LevelBytes(0), ktx.width, ktx.height, rgba));
+    std::size_t dark = 0;
+    for (std::size_t i = 0; i + 3 < rgba.size(); i += 4) {
+        if (rgba[i] < 40 && rgba[i + 1] < 40 && rgba[i + 2] < 40) {
+            ++dark;
+        }
+    }
+    CHECK(dark == 0);
+}
+

@@ -18,7 +18,11 @@ namespace {
 /// Dinaikkan setiap kali hasil bake bisa berubah untuk sumber yang sama —
 /// filter mip diganti, encoder diganti, tabel format diubah. Kunci cache ikut
 /// berubah karenanya, jadi aset yang sudah pernah di-bake ikut dikerjakan ulang.
-constexpr uint64_t kBakerVersion = 2;
+///
+/// Versi 3: pembaca gambar berhenti meng-associate alfa. Sebelumnya setiap
+/// tekstur RGBA menempuh perjalanan kali-lalu-bagi yang tidak pulih, dan
+/// hasilnya bercak hitam dan putih berbintik di area beralfa rendah.
+constexpr uint64_t kBakerVersion = 3;
 
 /// Nomor `VkFormat` yang dipakai baker ini.
 ///
