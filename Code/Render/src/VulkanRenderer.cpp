@@ -713,8 +713,8 @@ public:
             occlusion_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(),
                              target_.DepthView(), target_.Sampler())) {
             occlusion_.AdoptLayouts();
-            drawCull_.AdoptPyramid(occlusion_.View(), occlusion_.Sampler(), target_.DepthView(),
-                                   target_.Sampler());
+            drawCull_.AdoptPyramid(occlusion_.View(), occlusion_.Sampler(),
+                                   target_.DepthView(), target_.Sampler());
         }
         const bool probesChanged =
             probes_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(), kNormalFormat);
@@ -782,15 +782,23 @@ public:
         gpuCullActive_ = desc.gpuCull && drawCull_.IsValid() && !cullSurfaces_.empty();
         gpuOcclusionActive_ = gpuCullActive_ && desc.gpuOcclusion && occlusion_.IsValid();
         cullDebugActive_ = gpuOcclusionActive_ && desc.cullDebug;
-        if (gpuOcclusionActive_) {
-            // **Tiap frame, dan ia berhenti sendiri kalau tidak ada yang
-            // berubah.** Piramida dan depth buffer dibuat ulang setiap kali
-            // target render dialokasi ulang — dan `DepthPyramid::Adopt` menjawab
-            // "tidak berubah" saat ukurannya sama walaupun image-nya baru, jadi
-            // menyandarkan penulisan descriptor pada jawabannya berarti
-            // descriptor yang menunjuk image yang sudah dibebaskan.
-            drawCull_.AdoptPyramid(occlusion_.View(), occlusion_.Sampler(), target_.DepthView(),
-                                   target_.Sampler());
+        cullLimit_ = desc.cullLimit;
+        cullFirst_ = desc.cullFirst;
+        // **Tiap frame, dan tanpa syarat.** Ia berhenti sendiri kalau tidak ada
+        // yang berubah, dan itu yang membuatnya murah — sementara menggantungkan
+        // penulisan descriptor pada sebuah syarat adalah cara paling mudah
+        // membuatnya tidak pernah ditulis sama sekali.
+        //
+        // **Pernah begitu, dan akibatnya diam:** binding piramida baru sah
+        // sesudah `occlusion_` ada, yang terjadi belakangan daripada
+        // `DrawCull::Create`. Penulisan descriptor yang menunggunya lalu tidak
+        // pernah kejadian pada jalur yang occlusion-nya mati — dan dispatch
+        // membaca descriptor tak terdefinisi, yaitu perintah gambar berisi
+        // sampah. Validation layer melaporkannya dengan jelas; yang tidak
+        // melaporkannya adalah gambarnya, yang cuma sedikit berbeda.
+        if (gpuCullActive_) {
+            drawCull_.AdoptPyramid(occlusion_.View(), occlusion_.Sampler(),
+                                   target_.DepthView(), target_.Sampler());
         }
         lastCullSlot_ = static_cast<uint32_t>(slotIndex_);
         lastViewProjection_ = viewProj;
@@ -1280,7 +1288,8 @@ public:
             executor_.Bind(drawCommandId_,
                            BoundBuffer{drawCull_.CommandBuffer(cullSlot), 0, VK_WHOLE_SIZE});
             recorders[drawCullPassId_] = [this, cullSlot](VkCommandBuffer command) {
-                drawCull_.Record(command, cullSlot, DrawCull::Phase::Frustum, false);
+                drawCull_.Record(command, cullSlot, DrawCull::Phase::Frustum, false, cullLimit_,
+                                 cullFirst_);
             };
             if (drawCullLatePassId_ != kInvalidPass) {
                 executor_.Bind(visibleCommandId_,
@@ -1291,7 +1300,7 @@ public:
                 };
                 recorders[drawCullLatePassId_] = [this, cullSlot](VkCommandBuffer command) {
                     drawCull_.Record(command, cullSlot, DrawCull::Phase::Occlusion,
-                                     cullDebugActive_);
+                                     cullDebugActive_, cullLimit_, cullFirst_);
                 };
             }
         }
@@ -1897,19 +1906,21 @@ public:
             }
         }
         out += "\n# index centre.xyz extent.xyz uvMin.xy uvMax.xy nearest farthest level visible "
-               "depth pyramid0 translate.xyz\n";
+               "depth surfaceId translate.xyz indexCount firstIndex\n";
         for (std::size_t i = 0; i < entries.size(); ++i) {
             const DrawCull::GpuCullDebug& entry = entries[i];
             out += std::format(
                 "{} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} {:.6g} "
-                "{:.9g} {:.9g} {:g} {:g} {:.9g} {:.9g} {:.6g} {:.6g} {:.6g}\n",
+                "{:.9g} {:.9g} {:g} {:g} {:.9g} {:.9g} {:.6g} {:.6g} {:.6g} {} {}\n",
                 i, entry.centre.x, entry.centre.y, entry.centre.z, entry.extent.x, entry.extent.y,
                 entry.extent.z, entry.rect.x, entry.rect.y, entry.rect.z, entry.rect.w,
                 entry.result.x, entry.result.y, entry.result.z, entry.result.w, entry.centre.w,
                 entry.extent.w,
                 i < opaqueTransforms_.size() ? opaqueTransforms_[i][3][0] : 0.0f,
                 i < opaqueTransforms_.size() ? opaqueTransforms_[i][3][1] : 0.0f,
-                i < opaqueTransforms_.size() ? opaqueTransforms_[i][3][2] : 0.0f);
+                i < opaqueTransforms_.size() ? opaqueTransforms_[i][3][2] : 0.0f,
+                i < cullSurfaces_.size() ? cullSurfaces_[i].indexCount : 0u,
+                i < cullSurfaces_.size() ? cullSurfaces_[i].firstIndex : 0u);
         }
         return true;
     }
@@ -5084,6 +5095,9 @@ private:
     /// Menulis angka antara uji occlusion. Alat diagnostik; lihat
     /// `ViewportDesc::cullDebug`.
     bool cullDebugActive_ = false;
+    /// Batas bisect uji occlusion; lihat `ViewportDesc::cullLimit`.
+    uint32_t cullLimit_ = 0xffffffffu;
+    uint32_t cullFirst_ = 0;
     /// Slot yang perintahnya terakhir disubmit, dan viewProj-nya. Dipakai
     /// pembaca angka antara supaya ia membaca frame yang benar.
     uint32_t lastCullSlot_ = 0;

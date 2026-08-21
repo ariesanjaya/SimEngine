@@ -1102,7 +1102,11 @@ Ini bagian yang benar-benar "terinspirasi CryEngine", dan satu-satunya yang tida
 boleh dikerjakan sebelum lima milestone di atasnya selesai.
 
 **Yang sudah mendarat: alat ukurnya, satuan gambarnya, dan mesin
-indirect-draw-nya. Yang belum: occlusion culling, dan alasannya sebuah angka.**
+indirect-draw-nya. Yang belum: occlusion culling — dan sebabnya sekarang
+diketahui, dan ia bukan di G6.** Uji occlusion-nya sudah dibuktikan benar
+permukaan demi permukaan; yang salah adalah depth buffer yang dibacanya, yang
+berisi kedalaman dari geometri yang tidak pernah tergambar. Lihat "Ujinya benar;
+yang dibacanya tidak" di bawah.
 
 ### Alat ukur lebih dulu, karena kriterianya tidak bisa diperiksa tanpanya
 
@@ -1342,6 +1346,102 @@ lampiran kedua — normal oktahedral untuk screen probe. Menuliskan nomor permuk
 ke sana alih-alih normal, lalu membacanya di texel yang kedalamannya ganjil,
 menjawab "permukaan mana" dengan satu jalan — dan itu pertanyaan terakhir yang
 tersisa.
+
+#### Alat itu dicoba, dan ia mengubah yang diukurnya
+
+Nomor permukaan memang sampai ke lampiran normal. Yang ikut datang: **gambar
+jalur bawaan berubah.** Adegan padat yang sebelumnya sama persis antara jalur GPU
+dan jalur CPU mulai berselisih 28.749 byte, dan yang bergerak ternyata jalur CPU
+— yaitu jalur yang tidak menyentuh satu pun bagian G6.
+
+Sebabnya ada di catatan yang sudah lama tertulis di kepala prepass: **prepass dan
+forward wajib menghitung posisi yang sama persis**, karena forward mengujinya
+dengan `EQUAL`. Menambah satu varying `nointerpolation uint` ke tahap vertex
+prepass mengubah kode yang dihasilkan compiler untuk perhitungan posisinya, dan
+selisih satu ULP di sana sudah cukup untuk membuat sebuah permukaan gagal uji
+`EQUAL` dan hilang dari gambar.
+
+Instrumennya karena itu **dicabut, bukan diperbaiki**: sebuah alat ukur yang
+menggeser besaran yang diukurnya tidak bisa dipakai membuktikan apa pun, dan
+bentuk yang aman untuknya adalah varian shader prepass tersendiri — bukan cabang
+push constant di dalam yang dipakai jalur bawaan. Sesudah dicabut, kedua adegan
+kembali sama persis antara jalur GPU dan jalur CPU.
+
+#### Satu cacat sungguhan ditemukan sambil mencabutnya
+
+**Descriptor set pass culling tidak pernah ditulis.** `WriteSlotDescriptors`
+menunggu ketiga binding image-nya ada sebelum menulis apa pun, dan salah satunya
+baru sah belakangan daripada `DrawCull::Create`; penulisan ulangnya digantung
+pada `gpuOcclusionActive_`, yang bawaannya mati. Jalur bawaan karena itu
+men-dispatch compute shader di atas descriptor tak terdefinisi — yaitu buffer
+perintah gambar berisi sampah. Yang melaporkannya validation layer, bukan
+gambarnya. Sekarang piramidanya diadopsi ulang **tiap frame dan tanpa syarat**
+selama culling GPU menyala.
+
+#### Adegan padat ternyata tidak deterministik, dan itu bukan urusan G6
+
+Sebelum ada angka yang bisa dipercaya soal occlusion, satu hal harus dipastikan
+lebih dulu: **dua jalan dengan bendera yang sama menghasilkan gambar yang
+berbeda.** Pada adegan padat, tiga dari enam jalan berselisih 3.850 byte — sebuah
+serpih tipis sepanjang layar yang kadang ada dan kadang tidak. Yang sudah
+dipastikan bukan sebabnya:
+
+- **Bukan G6.** Ia muncul juga dengan `--bench-cpu-cull`, yaitu jalur yang tidak
+  memakai satu pun perintah gambar bangkitan GPU.
+- **Bukan simulasi.** Dengan dunia dibekukan — `Tick(0)` tiap frame — ia tetap
+  muncul.
+- **Bukan tumpang tindih CPU/GPU.** Dengan menunggu GPU menganggur di ujung
+  **setiap** frame, ia tetap muncul.
+- **Bukan frame pertama.** Frame 0 deterministik pada enam jalan; frame 105
+  tidak. Ia menumpuk sepanjang frame.
+- **Bukan adegan jarang.** `bench` deterministik pada setiap jalan yang dicoba.
+
+Selama ini ada, setiap perbandingan gambar adegan padat harus dilakukan
+**sekondisi**: jalankan beberapa kali, kelompokkan yang sama persis, lalu
+bandingkan kelompok dengan kelompok. Dengan aturan itu, jalur GPU dan jalur CPU
+adegan padat **sama persis** — nol byte.
+
+#### Ujinya benar; yang dibacanya tidak
+
+Dengan alat yang sama, dua pemeriksaan terakhir menutup pertanyaan "apakah uji
+occlusion-nya sendiri salah":
+
+1. **Piramidanya peringkasan minimum yang setia.** Shader menghitung minimum blok
+   16×16 texel tingkat nol dan membandingkannya dengan texel tingkat 4 di petak
+   yang sama: **3.129 dari 3.129 sama persis**.
+2. **Setiap keputusan buang bisa dibenarkan.** Untuk tiap permukaan yang dibuang,
+   shader menghitung minimum tingkat nol atas **petak layarnya sendiri**, texel
+   demi texel, lalu membandingkannya dengan kedalaman sudut terdekat kotaknya:
+   **0 dari 2.235 yang dibuang tanpa dasar**. Uji yang memakai tingkat kasar
+   selalu lebih longgar daripada perhitungan tepat itu, tidak pernah lebih ketat.
+
+Lalu satu sampel yang menutupnya. Di texel (10, 10) — sudut kiri atas layar,
+langit pada setiap sudut pandang lintasan ini, dan memang langit di gambar
+akhirnya — depth buffer berisi **6,5·10⁻⁴**, yaitu permukaan sejauh ~73 satuan.
+
+**Jadi urutannya begini, dan tidak ada lagi tebakan di dalamnya:** depth prepass
+menulis kedalaman di petak-petak yang pass forward tidak menggambar apa pun di
+sana. Piramida occlusion mewarisinya. Uji occlusion lalu menyimpulkan — dengan
+benar, menurut apa yang dibacanya — bahwa permukaan di belakang kedalaman itu
+tertutup, dan membuangnya. Yang hilang dari gambar adalah permukaan yang
+sesungguhnya terlihat.
+
+Selisih terakhirnya kecil dan tepat sasaran: dibandingkan sekondisi, jalur
+occlusion berselisih **4 piksel** dari jalur frustum pada adegan padat, dan
+**nol** pada adegan jarang. Empat piksel itu satu permukaan yang tertutup oleh
+geometri yang tidak pernah tergambar.
+
+**Yang harus diperbaiki karena itu bukan G6 melainkan perbedaan antara prepass
+dan forward** — dua pass yang menggambar perintah yang sama dengan transform yang
+sama dan menghasilkan kedalaman yang berbeda. Ia juga kandidat sebab untuk
+ketidak-deterministikan di atas, dan untuk pertanyaan GI yang sudah dicatat:
+piramida penelusuran membaca depth buffer yang sama.
+
+**Alat yang ikut mendarat dari perburuan ini:** `--bench-cull-first` dan
+`--bench-cull-limit` membatasi nomor permukaan yang digambar. Membelah rentangnya
+setengah-setengah menemukan permukaan yang mencat sebuah piksel dalam dua belas
+jalan — dan itulah yang menunjukkan bahwa permukaan yang hilang digambar jauh di
+luar petak kotaknya sendiri.
 
 **Dua cacat sungguhan ikut terangkat sepanjang perburuan itu**, dan keduanya
 tetap diperbaiki:

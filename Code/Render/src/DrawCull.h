@@ -118,7 +118,8 @@ public:
     ///
     /// `debug` bukan nol menuliskan angka antara tiap permukaan; ia hanya
     /// dipakai alat diagnostik, dan tanpa itu satu pun byte tidak ditulis.
-    void Record(VkCommandBuffer cmd, uint32_t slot, Phase phase, bool debug) const;
+    void Record(VkCommandBuffer cmd, uint32_t slot, Phase phase, bool debug,
+                uint32_t limit = 0xffffffffu, uint32_t first = 0) const;
 
     /// Menyalin angka antara slot ini ke `out`. Sah hanya sesudah submit slot
     /// itu selesai — pemanggil yang menunggunya.

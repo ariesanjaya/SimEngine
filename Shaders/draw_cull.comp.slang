@@ -67,6 +67,15 @@ struct DrawCommand {
 struct Push {
     /// 0: frustum saja. 1: frustum dan occlusion.
     uint phase;
+    /// Nomor permukaan tertinggi yang digambar, eksklusif.
+    ///
+    /// **Alat bisect, dan ia menjawab pertanyaan yang tidak bisa dijawab dari
+    /// angka:** permukaan mana yang hilang dari gambar saat occlusion menyala.
+    /// Menaikkan batasnya setengah-setengah menemukannya dalam dua belas
+    /// jalan, tanpa satu pun tebakan soal apa yang digambar di mana.
+    uint limit;
+    /// Nomor permukaan terendah yang digambar.
+    uint first;
     /// Bukan nol: tulis angka antara tiap permukaan ke `debug`.
     ///
     /// **Ada karena menebak sudah kehabisan giliran.** Sembilan hipotesis soal
@@ -197,13 +206,29 @@ bool occluded(Bounds box, uint index) {
         // petak pada tingkat nol — yaitu salinan depth buffer apa adanya — dan
         // pada tingkat yang benar-benar dipakai.
         const float2 mid = (uvMin + uvMax) * 0.5;
-        // Depth buffer apa adanya di tengah petak, dan tingkat nol piramida di
-        // titik yang sama. **Keduanya harus sama persis** — dan itulah yang
-        // membuktikan piramidanya salinan yang setia, bukan sumber kesalahan.
-        const int2 midTexel = clamp(int2(floor(mid * float2(params.counts.zw))), int2(0),
-                                    int2(params.counts.zw) - int2(1));
-        entry.centre = float4(box.centre.xyz, viewportDepth.Load(int3(midTexel, 0)).r);
-        entry.extent = float4(box.extent.xyz, pyramidLoad(0, mid));
+        // **Tiap permukaan menyampel satu titik kisi 56x56 di layar**, bukan
+        // petaknya sendiri: yang dicari bukan sifat permukaan ini melainkan peta
+        // depth buffer secara keseluruhan. Di sebelahnya, tingkat nol piramida
+        // di titik yang sama — keduanya harus sama persis, dan itulah yang
+        // membuktikan piramidanya salinan yang setia.
+        // **Tiap permukaan menyampel satu titik kisi 56x56 di layar**, bukan
+        // petaknya sendiri: yang dicari bukan sifat permukaan ini melainkan peta
+        // depth buffer secara keseluruhan.
+        // **Tiap permukaan menyampel satu titik kisi 56x56 di layar**, bukan
+        // petaknya sendiri: yang dicari bukan sifat permukaan ini melainkan peta
+        // depth buffer secara keseluruhan. Di sebelahnya tingkat nol piramida di
+        // titik yang sama — keduanya harus sama persis, dan itulah yang
+        // membuktikan piramidanya salinan yang setia.
+        //
+        // **Peta itulah yang akhirnya menjawab G6:** di petak yang gambarnya
+        // langit, depth buffer berisi permukaan sejauh ~73 satuan. Yang menulis
+        // depth di sana adalah prepass; yang tidak menggambar apa pun di sana
+        // adalah pass forward.
+        const float2 probe = (float2(index % 56u, (index / 56u) % 56u) + 0.5) / 56.0;
+        const int2 probeTexel = clamp(int2(floor(probe * float2(params.counts.zw))), int2(0),
+                                      int2(params.counts.zw) - int2(1));
+        entry.centre = float4(box.centre.xyz, viewportDepth.Load(int3(probeTexel, 0)).r);
+        entry.extent = float4(box.extent.xyz, pyramidLoad(0, probe));
         debug[index] = entry;
     }
     return farthest > nearest;
@@ -230,6 +255,9 @@ void main(uint3 id: SV_DispatchThreadID) {
         if (distance + reach < 0.0) {
             visible = false;
         }
+    }
+    if (index >= pc.limit || index < pc.first) {
+        visible = false;
     }
     if (visible && pc.phase != 0u) {
         visible = !occluded(box, index);

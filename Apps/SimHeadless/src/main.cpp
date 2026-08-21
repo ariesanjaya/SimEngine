@@ -97,6 +97,8 @@ void PrintUsage() {
         "  --bench-gi <on|off>           paksa GI; bawaannya mengikuti level\n"
         "  --bench-capture <path.png>    simpan sebuah frame; kameranya deterministik\n"
         "  --bench-capture-frame <n>     frame mana yang disimpan, bawaan yang terakhir\n"
+        "  --bench-cull-first <n>        gambar hanya permukaan bernomor >= n\n"
+        "  --bench-cull-limit <n>        gambar hanya permukaan bernomor < n\n"
         "  --bench-fixed-exposure        eksposur manual; wajib untuk membandingkan gambar\n"
         "  --bench-compute               ganti gambarnya dengan pass compute uji (G3)\n"
         "  --validate-sync               nyalakan validasi sinkronisasi; lambat, sengaja\n"
@@ -730,6 +732,16 @@ int main(int argc, char** argv) {
             desc.gpuCull = !cpuCull;
             desc.gpuOcclusion = occlusion;
             desc.cullDebug = !FlagValue(argc, argv, "--bench-dump-cull").empty();
+            if (const std::string_view value = FlagValue(argc, argv, "--bench-cull-first");
+                !value.empty()) {
+                desc.cullFirst =
+                    static_cast<uint32_t>(std::strtoul(std::string(value).c_str(), nullptr, 10));
+            }
+            if (const std::string_view value = FlagValue(argc, argv, "--bench-cull-limit");
+                !value.empty()) {
+                desc.cullLimit =
+                    static_cast<uint32_t>(std::strtoul(std::string(value).c_str(), nullptr, 10));
+            }
             if (fixedExposure) {
                 desc.post.exposureMode = render::ExposureMode::Manual;
             }

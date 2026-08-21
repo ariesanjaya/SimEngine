@@ -19,6 +19,8 @@ struct GpuParams {
 /// Harus sama persis dengan `Push` di shader.
 struct GpuPush {
     uint32_t phase = 0;
+    uint32_t limit = 0xffffffffu;
+    uint32_t first = 0;
     uint32_t debug = 0;
 };
 
@@ -220,8 +222,9 @@ void DrawCull::WriteSlotDescriptors(uint32_t slot) {
 
 void DrawCull::AdoptPyramid(VkImageView view, VkSampler sampler, VkImageView depthView,
                             VkSampler depthSampler) {
-    if (device_ == nullptr || (view == pyramidView_ && sampler == pyramidSampler_ &&
-                               depthView == depthView_ && depthSampler == depthSampler_)) {
+    if (device_ == nullptr ||
+        (view == pyramidView_ && sampler == pyramidSampler_ && depthView == depthView_ &&
+         depthSampler == depthSampler_)) {
         return;
     }
     pyramidView_ = view;
@@ -322,7 +325,8 @@ void DrawCull::ReadDebug(uint32_t slot, std::vector<GpuCullDebug>& out) const {
     std::memcpy(out.data(), mapped, sizeof(GpuCullDebug) * out.size());
 }
 
-void DrawCull::Record(VkCommandBuffer cmd, uint32_t slot, Phase phase, bool debug) const {
+void DrawCull::Record(VkCommandBuffer cmd, uint32_t slot, Phase phase, bool debug,
+                      uint32_t limit, uint32_t first) const {
     if (!IsValid() || slot >= kSlots || pyramidView_ == VK_NULL_HANDLE) {
         return;
     }
@@ -330,7 +334,7 @@ void DrawCull::Record(VkCommandBuffer cmd, uint32_t slot, Phase phase, bool debu
     if (target.surfaceCount == 0 || target.set == VK_NULL_HANDLE) {
         return;
     }
-    const GpuPush push{static_cast<uint32_t>(phase), debug ? 1u : 0u};
+    const GpuPush push{static_cast<uint32_t>(phase), limit, first, debug ? 1u : 0u};
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_.Handle());
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline_.Layout(), 0, 1,
                             &target.set, 0, nullptr);

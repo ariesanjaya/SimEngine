@@ -436,6 +436,13 @@ struct ViewportDesc {
     /// membandingkan gambar — yang hanya bisa menjawab "ada yang salah", tidak
     /// pernah "yang mana".
     bool cullDebug = false;
+    /// Nomor permukaan tertinggi yang boleh diuji occlusion, eksklusif.
+    ///
+    /// Alat bisect: menaikkannya setengah-setengah menemukan permukaan mana
+    /// yang hilang dari gambar saat occlusion menyala. Bawaannya "semua".
+    uint32_t cullLimit = 0xffffffffu;
+    /// Nomor permukaan terendah yang digambar. Pasangan `cullLimit`.
+    uint32_t cullFirst = 0;
 };
 
 /// Satu objek yang bisa digambar, sudah dalam ruang dunia.
