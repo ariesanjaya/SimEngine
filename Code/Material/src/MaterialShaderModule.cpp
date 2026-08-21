@@ -396,6 +396,17 @@ std::string AssembleForwardMaterialModule(const std::string& generatedSlang,
 
     out << "    MaterialSurface m = evalMaterial(inputs);\n\n";
 
+    if (options.alphaTest) {
+        // Sebelum apa pun dihitung — lihat catatan di `ForwardMaterialOptions`.
+        // Ambangnya ditanam sebagai literal, bukan dibaca dari blok parameter:
+        // ia milik material, bukan milik instance, dan menaruhnya di blok
+        // berarti setiap material membayar empat byte untuk angka yang hampir
+        // selalu 0,5.
+        out << "    if (m.opacity < " << options.alphaCutoff << ") {\n";
+        out << "        discard;\n";
+        out << "    }\n\n";
+    }
+
     out << "    ShadingFrame frame;\n";
     out << "    frame.normal = inputs.worldNormal;\n";
     out << "    frame.view = inputs.viewDirection;\n";

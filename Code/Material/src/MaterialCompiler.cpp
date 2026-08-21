@@ -443,6 +443,19 @@ MaterialCompileResult Emitter::Run() {
     // pernah menjadi instruksi.
     result_.lobes = DetectLobes(output);
 
+    // **Mode alfa dibaca dari node keluaran, bukan disimpulkan dari graph.**
+    // Sebuah material yang menghitung opasitas per fragmen bisa berarti kaca
+    // yang dipadu maupun decal yang dibuang, dan keduanya menuntut jalur gambar
+    // yang berbeda. Menebaknya dari "opacity tersambung ke sesuatu" akan
+    // memindahkan kaca ke jalur topeng tanpa ada yang memintanya.
+    result_.alphaTest = output.Setting("alphaMode") == "mask";
+    if (result_.alphaTest) {
+        const std::string cutoff = output.Setting("alphaCutoff");
+        if (!cutoff.empty()) {
+            result_.alphaCutoff = std::strtof(cutoff.c_str(), nullptr);
+        }
+    }
+
     CollectReachable(output.guid);
     for (const MaterialNode* node : order_) {
         EmitNode(*node);
