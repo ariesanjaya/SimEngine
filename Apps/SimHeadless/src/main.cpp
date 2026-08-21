@@ -41,6 +41,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -111,6 +112,7 @@ void PrintUsage() {
         "  --bench-ev <ev100>            eksposur manual pada EV100 ini\n"
         "  --bench-no-screen-trace       matikan lapis screen-space; lihat SDF sendirian\n"
         "  --bench-furnace               uji tungku: langit seragam 1, albedo 1, tanpa matahari\n"
+        "  --dump-mesh <file> --dump-out <json>  material dan ruas sebuah berkas mesh\n"
         "  --bench-compute               ganti gambarnya dengan pass compute uji (G3)\n"
         "  --validate-sync               nyalakan validasi sinkronisasi; lambat, sengaja\n"
         "  --bench-cpu-clusters          penetapan cluster di CPU, bukan GPU (G4)\n"
@@ -453,6 +455,64 @@ int main(int argc, char** argv) {
             app.Shutdown();
             return 1;
         }
+    }
+
+    // **Membaca isi sebuah berkas mesh, lalu keluar.** Bukan bagian dari jalur
+    // ukur: ia alat untuk yang mengarang aset, dan yang dijawabnya pertanyaan
+    // yang selama ini hanya bisa dijawab dengan menulis uji sementara — material
+    // apa saja yang dibawa berkas ini, tekstur mana yang disebut masing-masing,
+    // dan ruas ke berapa memakai yang mana. Larik `materials` di level diindeks
+    // nomor ruas, jadi tanpa jawaban terakhir itu sebuah level hanya bisa
+    // dikarang dengan menebak.
+    if (const std::string_view file = FlagValue(argc, argv, "--dump-mesh"); !file.empty()) {
+        std::string error;
+        const assets::MeshData mesh = assets::LoadMesh(std::filesystem::path(file), error);
+        if (!mesh.IsValid()) {
+            SIM_ERROR("Headless", "cannot read {}: {}", std::string(file), error);
+            app.Shutdown();
+            return 1;
+        }
+        std::ostringstream json;
+        json << "{\n  \"triangles\": " << mesh.TriangleCount() << ",\n";
+        json << "  \"vertices\": " << mesh.vertices.size() << ",\n";
+        json << "  \"boundsMin\": [" << mesh.boundsMin.x << ", " << mesh.boundsMin.y << ", "
+             << mesh.boundsMin.z << "],\n";
+        json << "  \"boundsMax\": [" << mesh.boundsMax.x << ", " << mesh.boundsMax.y << ", "
+             << mesh.boundsMax.z << "],\n";
+        json << "  \"materials\": [\n";
+        for (std::size_t i = 0; i < mesh.materials.size(); ++i) {
+            const assets::MeshMaterial& material = mesh.materials[i];
+            json << "    {\"name\": \"" << material.name << "\", \"baseColor\": \""
+                 << material.baseColorTexture << "\", \"normal\": \"" << material.normalTexture
+                 << "\", \"roughness\": \"" << material.roughnessTexture
+                 << "\", \"metalness\": \"" << material.metalnessTexture << "\"}"
+                 << (i + 1 < mesh.materials.size() ? "," : "") << "\n";
+        }
+        json << "  ],\n  \"parts\": [";
+        for (std::size_t i = 0; i < mesh.parts.size(); ++i) {
+            json << (i == 0 ? "" : ", ") << mesh.parts[i].material;
+        }
+        json << "]\n}\n";
+        // **Ke berkas, bukan ke stdout.** Log proses ini juga menulis ke
+        // stdout, jadi keluaran yang dicampur dengannya bukan JSON yang sah —
+        // dan yang membacanya adalah skrip, bukan mata.
+        const std::string_view out = FlagValue(argc, argv, "--dump-out");
+        if (out.empty()) {
+            SIM_ERROR("Headless", "--dump-mesh needs --dump-out <path>");
+            app.Shutdown();
+            return 2;
+        }
+        std::ofstream dump{std::filesystem::path(out)};
+        if (!dump) {
+            SIM_ERROR("Headless", "cannot write {}", std::string(out));
+            app.Shutdown();
+            return 1;
+        }
+        dump << json.str();
+        SIM_INFO("Headless", "{} materials, {} parts written to {}", mesh.materials.size(),
+                 mesh.parts.size(), std::string(out));
+        app.Shutdown();
+        return 0;
     }
 
     editor::Selection selection;
