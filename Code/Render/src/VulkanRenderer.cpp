@@ -1058,9 +1058,6 @@ public:
         // kompositnya pindah ke compute (G4), yang direkam di sini bukan lagi
         // salinan melainkan pekerjaan sungguhan, dan pekerjaan yang tidak
         // muncul di tabel mana pun adalah pekerjaan yang dianggap gratis.
-        profiler_.BeginScope(cmd, "sdf-fill");
-        sdfClipmap_.RecordUploads(cmd);
-        profiler_.EndScope(cmd);
         executor_.Clear();
         executor_.Bind(colorId_, BoundImage{target_.ColorImage(), target_.ColorView(),
                                             VK_IMAGE_ASPECT_COLOR_BIT});
@@ -1310,6 +1307,19 @@ public:
                                      cullDebugActive_, cullLimit_, cullFirst_);
                 };
             }
+        }
+
+        if (sdfPassId_ != kInvalidPass) {
+            for (uint32_t cascade = 0; cascade < kMaxSdfCascades; ++cascade) {
+                if (sdfCascadeId_[cascade] != kInvalidResource) {
+                    executor_.Bind(sdfCascadeId_[cascade],
+                                   BoundImage{sdfClipmap_.Texture(cascade).Image(), VK_NULL_HANDLE,
+                                              VK_IMAGE_ASPECT_COLOR_BIT});
+                }
+            }
+            recorders[sdfPassId_] = [this](VkCommandBuffer command) {
+                sdfClipmap_.RecordUploads(command);
+            };
         }
 
         if (clusterPassId_ != kInvalidPass) {
@@ -1914,6 +1924,8 @@ public:
 
     uint64_t TimingSerial() const override { return profiler_.ResultsSerial(); }
 
+    float FrameGpuMilliseconds() const override { return profiler_.FrameMilliseconds(); }
+
     std::span<const PassTiming> CpuTimings() const override { return cpuTimings_; }
 
     RenderStats Stats() const override { return stats_; }
@@ -2025,6 +2037,45 @@ private:
         // ada yang perlu ditunggu".
         shadowId_ = graph_.Import("shadow-cascades", Access::ShaderRead);
         atlasId_ = graph_.Import("shadow-atlas", Access::ShaderRead);
+
+        // **Pengisian kaskade SDF, dan sejak G7 ia pass graph.** Sebelumnya ia
+        // direkam langsung ke command buffer frame, di luar graph, dengan
+        // perpindahan layoutnya diurus `SdfClipmapResource` sendiri. Itu tidak
+        // bisa dipertahankan begitu ia boleh berjalan di antrean lain:
+        // perpindahan kepemilikan keluarga antrean berbentuk sepasang, dan
+        // sepasang hanya bisa disusun oleh yang melihat kedua sisinya.
+        //
+        // Dideklarasikan hanya kalau ada yang mau ditulis. Pass tanpa isi tetap
+        // membawa perpindahan layout keempat kaskadenya, dan itu biaya yang
+        // dibayar untuk tidak menulis apa pun.
+        sdfPassId_ = kInvalidPass;
+        sdfCascadeId_.fill(kInvalidResource);
+        if (sdfClipmap_.IsValid() && sdfClipmap_.HasPendingUploads()) {
+            const Access fillAccess =
+                sdfClipmap_.GpuFillActive() ? Access::ShaderWrite : Access::TransferWrite;
+            sdfPassId_ = graph_.AddPass("sdf-fill");
+            for (uint32_t cascade = 0; cascade < kMaxSdfCascades; ++cascade) {
+                if (!sdfClipmap_.Touches(cascade) || !sdfClipmap_.Texture(cascade).IsValid()) {
+                    continue;
+                }
+                sdfCascadeId_[cascade] = graph_.Import(
+                    "sdf-cascade-" + std::to_string(cascade), Access::ShaderRead);
+                graph_.Write(sdfPassId_, sdfCascadeId_[cascade], fillAccess);
+                // Dikembalikan ke ShaderRead sesudah frame: itulah keadaan yang
+                // diandaikan penelusuran GI, dan keadaan awal yang
+                // dideklarasikan frame berikutnya.
+                graph_.SetOutput(sdfCascadeId_[cascade], Access::ShaderRead);
+            }
+            graph_.SetSideEffect(sdfPassId_);
+            // **Hanya kalau ada yang membacanya frame ini.** Tanpa pembaca,
+            // kepemilikannya harus dikembalikan ke antrean grafis oleh barrier
+            // penutup — dan barrier penutup tidak mengenal antrean. Tanpa
+            // pembaca ia juga tidak membeli apa pun.
+            if (asyncComputeActive_ && sdfClipmap_.GpuFillActive() && giEnabled_ &&
+                probes_.IsValid() && hiz_.IsValid()) {
+                graph_.SetQueue(sdfPassId_, Queue::AsyncCompute);
+            }
+        }
 
         // Penetapan lampu ke cluster, paling awal: yang membacanya adalah pass
         // forward, dan hasilnya tidak bergantung pada apa pun yang digambar.
@@ -2168,6 +2219,13 @@ private:
             probePassId_ = graph_.AddPass("gi-probe-trace");
             graph_.Read(probePassId_, sceneId_, Access::ShaderRead);
             graph_.Read(probePassId_, depthId_, Access::ShaderRead);
+            // Kaskade SDF yang ditulis frame ini. Inilah yang menempatkan
+            // penungguan lintas-antrean tepat di sini dan bukan lebih awal.
+            for (const ResourceId cascade : sdfCascadeId_) {
+                if (cascade != kInvalidResource) {
+                    graph_.Read(probePassId_, cascade, Access::ShaderRead);
+                }
+            }
             // Efek samping: keluarannya tekstur SH yang layout-nya diurus
             // `ProbeField` sendiri, bukan resource yang dilacak graph.
             graph_.SetSideEffect(probePassId_);
@@ -5249,6 +5307,8 @@ private:
     float sdfUpdateMs_ = 0.0f;
     bool sdfDebugEnabled_ = false;
     PassId giDebugId_ = kInvalidPass;
+    PassId sdfPassId_ = kInvalidPass;
+    std::array<ResourceId, kMaxSdfCascades> sdfCascadeId_{};
     PassId hizPassId_ = kInvalidPass;
     PassId probePassId_ = kInvalidPass;
     bool giEnabled_ = false;

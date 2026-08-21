@@ -646,6 +646,7 @@ int main(int argc, char** argv) {
         constexpr float kFixedDelta = 1.0f / 60.0f;
 
         SampleTable gpu;
+        SampleTable frameGpu;
         SampleTable cpu;
         uint64_t lastSerial = 0;
         bool haveBounds = false;
@@ -814,6 +815,10 @@ int main(int argc, char** argv) {
                 for (const render::PassTiming& timing : renderer->PassTimings()) {
                     gpu.Add(timing.name, timing.milliseconds, timing.primitives);
                 }
+                // **Frame diukur, bukan dijumlahkan.** Sejak G7 sebuah pass
+                // boleh berjalan di antrean lain, dan dua pass yang berjalan
+                // bersamaan dihitung dua kali oleh jumlah baris di bawah tabel.
+                frameGpu.Add("frame", renderer->FrameGpuMilliseconds());
                 ++gpuSamples;
             }
             // Yang CPU segar tiap frame; tidak ada yang perlu ditunggu.
@@ -890,6 +895,7 @@ int main(int argc, char** argv) {
             std::snprintf(line, sizeof(line), "- Jalan selesai dalam %.2f s\n\n", wallSeconds);
             report += line;
         }
+        report += FormatTable("Waktu GPU frame (ms)", frameGpu);
         report += FormatTable("Waktu GPU per pass (ms)", gpu);
         report += "\n";
         report += FormatTable("Waktu CPU per tahap (ms)", cpu);

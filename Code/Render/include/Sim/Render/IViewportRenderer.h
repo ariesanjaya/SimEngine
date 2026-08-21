@@ -287,6 +287,10 @@ public:
         return false;
     }
 
+    /// Lama frame terakhir di GPU, dari penanda pertama ke terakhir. Nol bila
+    /// perender ini tidak mengukur apa pun.
+    virtual float FrameGpuMilliseconds() const { return 0.0f; }
+
     virtual TextureHandle ColorTarget() const = 0;
 
     /// Koordinat tekstur pojok kanan-bawah dari bagian yang benar-benar

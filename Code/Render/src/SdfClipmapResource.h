@@ -82,6 +82,17 @@ public:
     static constexpr uint32_t kGroupSize = 64;
 
     const rhi::Texture3D& Texture(uint32_t cascade) const { return textures_[cascade]; }
+
+    /// Ada pekerjaan yang menunggu `RecordUploads`.
+    ///
+    /// Dipakai frame graph memutuskan apakah pass `sdf-fill` perlu dideklarasikan
+    /// sama sekali frame ini: pass yang dideklarasikan tanpa isi tetap membawa
+    /// perpindahan layout keempat kaskadenya, dan itu biaya yang dibayar untuk
+    /// tidak menulis apa pun.
+    bool HasPendingUploads() const { return !pendingFills_.empty() || !pending_.empty(); }
+
+    /// Kaskade mana saja yang akan disentuh `RecordUploads`.
+    bool Touches(uint32_t cascade) const;
     uint32_t CascadeCount() const { return volume_.Clipmap().CascadeCount(); }
 
     /// Byte staging terbesar yang mungkin dibutuhkan satu pembaruan: seluruh

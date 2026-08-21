@@ -1009,6 +1009,28 @@ uint64_t Device::SubmitTransientBatches(VkCommandBuffer primary,
         highestPerQueue[static_cast<std::size_t>(batch.queue)] =
             std::max(highestPerQueue[static_cast<std::size_t>(batch.queue)], batch.signal);
     }
+    // Batch grafis terakhir selalu menandai sesuatu, walaupun tidak ada yang
+    // menunggunya frame ini: yang menunggunya adalah batch compute pertama
+    // frame **berikutnya**.
+    // Batch grafis **pertama** frame ini juga menandai sesuatu: yang
+    // menunggunya batch compute pertama frame yang sama. Di dalamnya ada reset
+    // query pool frame ini, dan antrean compute yang menulis timestamp sebelum
+    // reset itu berjalan akan melihat penandanya terhapus — waktunya lalu bukan
+    // angka yang salah melainkan angka yang tidak berarti apa-apa.
+    std::size_t firstGraphics = batches.size();
+    for (std::size_t i = 0; i < batches.size(); ++i) {
+        if (batches[i].queue == QueueKind::Graphics) {
+            firstGraphics = i;
+            break;
+        }
+    }
+    const uint64_t graphicsHead = ++highestPerQueue[static_cast<std::size_t>(QueueKind::Graphics)];
+    const uint64_t graphicsTail =
+        firstGraphics == lastGraphics
+            ? graphicsHead
+            : ++highestPerQueue[static_cast<std::size_t>(QueueKind::Graphics)];
+    const uint64_t previousGraphics = lastGraphicsSignal_;
+    bool asyncSeen = false;
     for (std::size_t i = 0; i < batches.size(); ++i) {
         const SubmitBatch& batch = batches[i];
         const auto self = static_cast<std::size_t>(batch.queue);
@@ -1029,16 +1051,41 @@ uint64_t Device::SubmitTransientBatches(VkCommandBuffer primary,
         signal.value = base[self] + batch.signal;
         signal.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
 
+        const bool async = batch.queue == QueueKind::AsyncCompute;
+        if (i == lastGraphics) {
+            signal.value = base[self] + graphicsTail;
+        } else if (i == firstGraphics) {
+            signal.value = base[self] + graphicsHead;
+        }
+        std::array<VkSemaphoreSubmitInfo, 3> waits{};
+        uint32_t waitCount = 0;
+        if (batch.wait != 0) {
+            waits[waitCount++] = wait;
+        }
+        if (async && !asyncSeen) {
+            VkSemaphoreSubmitInfo extra{};
+            extra.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO;
+            extra.semaphore = timeline_[static_cast<std::size_t>(QueueKind::Graphics)];
+            extra.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+            if (previousGraphics != 0) {
+                extra.value = previousGraphics;
+                waits[waitCount++] = extra;
+            }
+            extra.value = base[static_cast<std::size_t>(QueueKind::Graphics)] + graphicsHead;
+            waits[waitCount++] = extra;
+        }
+        asyncSeen = asyncSeen || async;
+
         VkSubmitInfo2 submit{};
         submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2;
         submit.commandBufferInfoCount = 1;
         submit.pCommandBufferInfos = &command;
-        submit.waitSemaphoreInfoCount = batch.wait != 0 ? 1u : 0u;
-        submit.pWaitSemaphoreInfos = batch.wait != 0 ? &wait : nullptr;
-        submit.signalSemaphoreInfoCount = batch.signal != 0 ? 1u : 0u;
-        submit.pSignalSemaphoreInfos = batch.signal != 0 ? &signal : nullptr;
+        submit.waitSemaphoreInfoCount = waitCount;
+        submit.pWaitSemaphoreInfos = waitCount != 0 ? waits.data() : nullptr;
+        const bool signals = batch.signal != 0 || i == lastGraphics || i == firstGraphics;
+        submit.signalSemaphoreInfoCount = signals ? 1u : 0u;
+        submit.pSignalSemaphoreInfos = signals ? &signal : nullptr;
 
-        const bool async = batch.queue == QueueKind::AsyncCompute;
         VkFence fence = VK_NULL_HANDLE;
         if (async && i == lastCompute) {
             fence = slot->computeFence;
@@ -1051,6 +1098,8 @@ uint64_t Device::SubmitTransientBatches(VkCommandBuffer primary,
 
     timelineValue_[0] = base[0] + highestPerQueue[0];
     timelineValue_[1] = base[1] + highestPerQueue[1];
+    lastGraphicsSignal_ =
+        base[static_cast<std::size_t>(QueueKind::Graphics)] + graphicsTail;
     slot->pending = true;
     slot->computePending = lastCompute != batches.size();
     slot->submitId = nextSubmitId_++;

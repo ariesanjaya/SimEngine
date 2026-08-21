@@ -193,13 +193,26 @@ void GpuProfiler::Collect(uint32_t frame) {
 
     results_.clear();
     results_.reserve(entry.count);
+    // **Rentang frame diukur dari penanda paling awal ke paling akhir, bukan
+    // dijumlahkan.** Sejak pass boleh berjalan di antrean lain, jumlah waktu
+    // tiap pass tidak lagi sama dengan waktu frame — dua pass yang berjalan
+    // bersamaan dihitung dua kali di sana. Yang menjawab "frame ini berapa lama
+    // di GPU" hanya jarak antara penanda pertama dan terakhir.
+    uint64_t earliest = UINT64_MAX;
+    uint64_t latest = 0;
     for (uint32_t i = 0; i < entry.count; ++i) {
         const uint64_t begin = readback_[i * 2];
         const uint64_t end = readback_[i * 2 + 1];
         const double ticks = end >= begin ? static_cast<double>(end - begin) : 0.0;
         results_.push_back(Scope{entry.names[i], ticks * nanosecondsPerTick_ * 1e-6,
                                  haveStats ? statsReadback_[i] : 0});
+        earliest = std::min(earliest, begin);
+        latest = std::max(latest, end);
     }
+    frameMilliseconds_ =
+        latest > earliest
+            ? static_cast<double>(latest - earliest) * nanosecondsPerTick_ * 1e-6
+            : 0.0;
     // Di sini, bukan di awal `Collect`: yang kembali lebih awal karena hasilnya
     // belum siap tidak mengganti apa pun, dan serial yang naik untuk isi yang
     // sama persis meniadakan gunanya.

@@ -331,6 +331,20 @@ uint64_t SdfClipmapResource::Update(const Vec3& cameraPosition,
     return volume_.WrittenVoxels();
 }
 
+bool SdfClipmapResource::Touches(uint32_t cascade) const {
+    for (const PendingFill& fill : pendingFills_) {
+        if (fill.cascade == cascade) {
+            return true;
+        }
+    }
+    for (const PendingCopy& copy : pending_) {
+        if (copy.cascade == cascade) {
+            return true;
+        }
+    }
+    return false;
+}
+
 void SdfClipmapResource::RecordUploads(VkCommandBuffer cmd) {
     if (!pendingFills_.empty()) {
         RecordFills(cmd);
@@ -339,48 +353,22 @@ void SdfClipmapResource::RecordUploads(VkCommandBuffer cmd) {
     if (pending_.empty() || pendingSource_ == VK_NULL_HANDLE) {
         return;
     }
-    // Barrier per tekstur, bukan per wilayah. Sebuah kaskade yang menerima tiga
-    // lempeng dan delapan potongan toroidal tetap hanya berpindah layout dua
-    // kali.
-    std::array<bool, kMaxSdfCascades> touched{};
-    for (const PendingCopy& copy : pending_) {
-        touched[copy.cascade] = true;
-    }
-    for (uint32_t cascade = 0; cascade < kMaxSdfCascades; ++cascade) {
-        if (touched[cascade]) {
-            textures_[cascade].RecordTransition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-        }
-    }
+    // **Perpindahan layoutnya diurus frame graph sejak G7.** Ia harus: pass ini
+    // bisa berjalan di antrean compute, dan perpindahan kepemilikan keluarga
+    // antrean berbentuk sepasang yang hanya bisa disusun oleh yang melihat kedua
+    // sisinya. Yang tersisa di sini hanya salinannya.
     for (const PendingCopy& copy : pending_) {
         textures_[copy.cascade].RecordRegionCopy(cmd, pendingSource_, copy.sourceOffset,
                                                  copy.offset, copy.extent);
-    }
-    for (uint32_t cascade = 0; cascade < kMaxSdfCascades; ++cascade) {
-        if (touched[cascade]) {
-            textures_[cascade].RecordTransition(cmd, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        }
     }
     pending_.clear();
     pendingSource_ = VK_NULL_HANDLE;
 }
 
 void SdfClipmapResource::RecordFills(VkCommandBuffer cmd) {
-    // Barrier per tekstur, bukan per kotak. Sebuah kaskade yang menerima tiga
-    // lempeng dan delapan potongan toroidal tetap hanya berpindah layout dua
-    // kali — alasan yang sama dengan jalur salinan yang digantikannya.
-    std::array<bool, kMaxSdfCascades> touched{};
-    for (const PendingFill& fill : pendingFills_) {
-        touched[fill.cascade] = true;
-    }
-    for (uint32_t cascade = 0; cascade < kMaxSdfCascades; ++cascade) {
-        if (touched[cascade] && textures_[cascade].IsValid()) {
-            textures_[cascade].RecordTransition(cmd, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                                                VK_IMAGE_LAYOUT_GENERAL);
-        }
-    }
-
+    // Perpindahan layoutnya diurus frame graph sejak G7; lihat catatan di
+    // `RecordUploads`.
+    //
     // **Tidak ada barrier di antara dispatch.** Kotak-kotak ini saling lepas:
     // `SplitWrapped` menjamin tidak ada dua kotak yang menyentuh texel yang
     // sama, dan tidak satu pun membaca apa yang ditulis yang lain. Memisahkan
@@ -408,12 +396,6 @@ void SdfClipmapResource::RecordFills(VkCommandBuffer cmd) {
         vkCmdDispatch(cmd, rhi::GroupCount(voxels, kGroupSize), 1, 1);
     }
 
-    for (uint32_t cascade = 0; cascade < kMaxSdfCascades; ++cascade) {
-        if (touched[cascade] && textures_[cascade].IsValid()) {
-            textures_[cascade].RecordTransition(cmd, VK_IMAGE_LAYOUT_GENERAL,
-                                                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-        }
-    }
     pendingFills_.clear();
 }
 

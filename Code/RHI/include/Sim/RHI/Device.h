@@ -220,6 +220,17 @@ public:
     /// slot ini baru bisa dipakai ulang setelah keduanya selesai. Tanpa itu,
     /// slot yang antrean grafisnya sudah selesai akan direkam ulang sementara
     /// antrean compute-nya masih membaca command buffer yang sama.
+    /// **Batch compute pertama tiap frame menunggu antrean grafis frame
+    /// sebelumnya selesai, dan itu ditambahkan di sini, bukan diminta
+    /// pemanggil.** Frame graph mengerti satu frame; resource yang dipakai
+    /// bersama antar-frame — kaskade SDF, buffer cluster — tidak terlihat
+    /// olehnya sama sekali. Tanpa penungguan itu, antrean compute frame ini
+    /// menimpa apa yang antrean grafis frame lalu masih baca: balapan yang
+    /// dilaporkan sync validation dan terlihat sebagai kedipan yang tidak bisa
+    /// diulang.
+    ///
+    /// Ia tidak menghapus tumpang tindih: yang ditunggu frame **sebelumnya**,
+    /// dan pekerjaan grafis frame ini baru mulai sesudah itu juga.
     uint64_t SubmitTransientBatches(VkCommandBuffer primary,
                                     std::span<const SubmitBatch> batches) const;
 
@@ -316,6 +327,8 @@ private:
     /// Satu per antrean, menaik terus. Lihat `SubmitBatch::waitQueue`.
     std::array<VkSemaphore, 2> timeline_{VK_NULL_HANDLE, VK_NULL_HANDLE};
     mutable std::array<uint64_t, 2> timelineValue_{0, 0};
+    /// Nilai mutlak yang ditandai batch grafis terakhir frame sebelumnya.
+    mutable uint64_t lastGraphicsSignal_ = 0;
 
     VkInstance instance_ = VK_NULL_HANDLE;
     VkDebugUtilsMessengerEXT debugMessenger_ = VK_NULL_HANDLE;

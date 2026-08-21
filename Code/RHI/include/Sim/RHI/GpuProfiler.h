@@ -76,6 +76,14 @@ public:
     /// Hasil frame terakhir yang sudah selesai di GPU. Kosong sampai beberapa
     /// frame pertama lewat.
     std::span<const Scope> Results() const { return results_; }
+
+    /// Lama frame ini di GPU: jarak dari penanda paling awal ke paling akhir.
+    ///
+    /// **Bukan jumlah waktu tiap pass.** Sejak pass boleh berjalan di antrean
+    /// lain, dua pass yang berjalan bersamaan dihitung dua kali di sana — dan
+    /// jumlah yang naik sementara framenya justru lebih cepat adalah angka yang
+    /// menjawab pertanyaan yang tidak ditanyakan siapa pun.
+    float FrameMilliseconds() const { return static_cast<float>(frameMilliseconds_); }
     /// Naik tepat sekali setiap kali `Results()` benar-benar berganti isi.
     ///
     /// **Ada karena pemungutan boleh gagal, dan gagalnya diam.** `Collect`
@@ -119,6 +127,7 @@ private:
     std::vector<uint64_t> readback_;
     std::vector<uint64_t> statsReadback_;
     std::vector<Scope> results_;
+    double frameMilliseconds_ = 0.0;
     uint64_t resultsSerial_ = 0;
     int openScope_ = -1;
     /// Query statistik lingkup yang sedang terbuka benar-benar dimulai.
