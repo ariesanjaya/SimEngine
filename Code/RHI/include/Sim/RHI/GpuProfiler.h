@@ -64,7 +64,11 @@ public:
     /// Membuka dan menutup satu lingkup ukur. Tidak bersarang — pass frame graph
     /// memang datar, dan lingkup bersarang menuntut pohon yang tidak ada yang
     /// membutuhkannya.
-    void BeginScope(VkCommandBuffer cmd, std::string_view name);
+    /// `countPrimitives` false untuk lingkup yang direkam di antrean compute:
+    /// query statistik pipeline menghitung primitif input assembly, dan antrean
+    /// yang tidak bisa menggambar tidak mendukungnya sama sekali. Waktunya tetap
+    /// diukur — timestamp sah di antrean mana pun yang menyediakannya.
+    void BeginScope(VkCommandBuffer cmd, std::string_view name, bool countPrimitives = true);
     void EndScope(VkCommandBuffer cmd);
     /// Dipanggil sekali di akhir command buffer, sesudah seluruh lingkup ditutup.
     void EndFrame(VkCommandBuffer cmd);
@@ -117,6 +121,8 @@ private:
     std::vector<Scope> results_;
     uint64_t resultsSerial_ = 0;
     int openScope_ = -1;
+    /// Query statistik lingkup yang sedang terbuka benar-benar dimulai.
+    bool statsOpen_ = false;
 };
 
 }  // namespace sim::rhi

@@ -118,7 +118,30 @@ bool FrameGraphExecutor::Execute(const CompiledGraph& compiled,
 
     std::vector<VkImageMemoryBarrier2> barriers;
     std::vector<VkBufferMemoryBarrier2> bufferBarriers;
-    const auto flush = [&](const std::vector<Barrier>& list, VkCommandBuffer into) -> bool {
+    // `releasing` menentukan sisi mana dari sepasang barrier perpindahan
+    // kepemilikan yang sedang dipancarkan. **Sisi seberangnya wajib kosong:**
+    // Vulkan mengabaikan stage tujuan pada operasi lepas dan stage sumber pada
+    // operasi ambil, dan menyebut tahap yang tidak ada di antrean itu — tahap
+    // fragment di antrean compute — adalah pelanggaran, bukan sekadar
+    // pemborosan.
+    // Tahap yang sah di antrean compute. **Menyebut tahap grafis di sana adalah
+    // pelanggaran, bukan pemborosan** — dan tahap grafis memang muncul di sisi
+    // "dari" barrier pass compute yang menimpa resource yang frame sebelumnya
+    // dibaca pass forward. Ketergantungan itu sudah dijaga fence slot frame;
+    // yang tersisa di sini hanya namanya.
+    const auto narrow = [](Queue queue, VkPipelineStageFlags2 stage) {
+        if (queue != Queue::AsyncCompute) {
+            return stage;
+        }
+        constexpr VkPipelineStageFlags2 kComputeLegal =
+            VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT | VK_PIPELINE_STAGE_2_BOTTOM_OF_PIPE_BIT |
+            VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+            VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT | VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT |
+            VK_PIPELINE_STAGE_2_HOST_BIT;
+        return stage & kComputeLegal;
+    };
+    const auto flush = [&](const std::vector<Barrier>& list, VkCommandBuffer into, bool releasing,
+                           Queue queue) -> bool {
         barriers.clear();
         bufferBarriers.clear();
         for (const Barrier& barrier : list) {
@@ -129,8 +152,25 @@ bool FrameGraphExecutor::Execute(const CompiledGraph& compiled,
                 SIM_ERROR("Render", "frame graph resource {} has nothing bound", barrier.resource);
                 return false;
             }
-            const Stage from = Translate(barrier.from);
-            const Stage to = Translate(barrier.to);
+            Stage from = Translate(barrier.from);
+            Stage to = Translate(barrier.to);
+            if (barrier.CrossesQueue()) {
+                if (releasing) {
+                    to.stage = VK_PIPELINE_STAGE_2_NONE;
+                    to.access = VK_ACCESS_2_NONE;
+                } else {
+                    from.stage = VK_PIPELINE_STAGE_2_NONE;
+                    from.access = VK_ACCESS_2_NONE;
+                }
+            }
+            from.stage = narrow(queue, from.stage);
+            to.stage = narrow(queue, to.stage);
+            if (from.stage == VK_PIPELINE_STAGE_2_NONE) {
+                from.access = VK_ACCESS_2_NONE;
+            }
+            if (to.stage == VK_PIPELINE_STAGE_2_NONE) {
+                to.access = VK_ACCESS_2_NONE;
+            }
 
             if (buffer != VK_NULL_HANDLE) {
                 const BoundBuffer& bound = buffers_[barrier.resource];
@@ -213,9 +253,9 @@ bool FrameGraphExecutor::Execute(const CompiledGraph& compiled,
         // untuk pass itu, dan memisahkannya menyembunyikan justru hal yang
         // ingin dilihat orang yang membuka tabel ini.
         if (profiler != nullptr) {
-            profiler->BeginScope(cmd, pass.name);
+            profiler->BeginScope(cmd, pass.name, pass.queue != Queue::AsyncCompute);
         }
-        bool ok = flush(pass.barriers, cmd);
+        bool ok = flush(pass.barriers, cmd, /*releasing=*/false, pass.queue);
         if (ok && pass.pass < recorders.size() && recorders[pass.pass]) {
             recorders[pass.pass](cmd);
         }
@@ -224,7 +264,7 @@ bool FrameGraphExecutor::Execute(const CompiledGraph& compiled,
         // di sana berjalan sebelum, dan sisi lepas yang berjalan sebelum
         // penulisnya adalah sisi lepas yang melepaskan isi yang belum ada.
         if (ok && !pass.releases.empty()) {
-            ok = flush(pass.releases, cmd);
+            ok = flush(pass.releases, cmd, /*releasing=*/true, pass.queue);
         }
         if (profiler != nullptr) {
             profiler->EndScope(cmd);
@@ -233,7 +273,7 @@ bool FrameGraphExecutor::Execute(const CompiledGraph& compiled,
             return false;
         }
     }
-    return flush(compiled.finalBarriers, cmd);
+    return flush(compiled.finalBarriers, cmd, /*releasing=*/false, Queue::Graphics);
 }
 
 }  // namespace sim::render

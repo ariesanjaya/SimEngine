@@ -115,7 +115,7 @@ void GpuProfiler::BeginFrame(VkCommandBuffer cmd) {
     }
 }
 
-void GpuProfiler::BeginScope(VkCommandBuffer cmd, std::string_view name) {
+void GpuProfiler::BeginScope(VkCommandBuffer cmd, std::string_view name, bool countPrimitives) {
     if (!IsValid()) {
         return;
     }
@@ -129,7 +129,8 @@ void GpuProfiler::BeginScope(VkCommandBuffer cmd, std::string_view name) {
     // sampai di awal pipeline, yang paling dekat dengan "pass ini mulai".
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, pool_,
                         frame.first + frame.count * 2);
-    if (statsPool_ != VK_NULL_HANDLE) {
+    statsOpen_ = countPrimitives && statsPool_ != VK_NULL_HANDLE;
+    if (statsOpen_) {
         vkCmdBeginQuery(cmd, statsPool_, frameIndex_ * maxScopes_ + frame.count, 0);
     }
 }
@@ -143,9 +144,10 @@ void GpuProfiler::EndScope(VkCommandBuffer cmd) {
     // pass ini selesai. Memakai TOP di kedua ujung mengukur jarak antar-perintah
     // di CPU, bukan waktu kerja GPU — dan hasilnya mendekati nol untuk pass
     // yang justru paling berat.
-    if (statsPool_ != VK_NULL_HANDLE) {
+    if (statsOpen_) {
         vkCmdEndQuery(cmd, statsPool_,
                       frameIndex_ * maxScopes_ + static_cast<uint32_t>(openScope_));
+        statsOpen_ = false;
     }
     vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, pool_,
                         frame.first + static_cast<uint32_t>(openScope_) * 2 + 1);

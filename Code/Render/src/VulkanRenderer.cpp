@@ -785,6 +785,8 @@ public:
         cullDebugActive_ = gpuOcclusionActive_ && desc.cullDebug;
         cullLimit_ = desc.cullLimit;
         cullFirst_ = desc.cullFirst;
+        asyncComputeActive_ = desc.asyncCompute && device_.Capabilities().asyncCompute &&
+                              device_.Capabilities().timelineSemaphore;
         // **Tiap frame, dan tanpa syarat.** Ia berhenti sendiri kalau tidak ada
         // yang berubah, dan itu yang membuatnya murah — sementara menggantungkan
         // penulisan descriptor pada sebuah syarat adalah cara paling mudah
@@ -2040,6 +2042,13 @@ private:
             clusterPassId_ = graph_.AddPass("cluster-assign");
             graph_.Write(clusterPassId_, clusterRangeId_, Access::ShaderWrite);
             graph_.Write(clusterPassId_, clusterIndexId_, Access::ShaderWrite);
+            // **Pemakai pertama antrean compute terpisah (G7).** Ia tidak
+            // menghalangi apa pun sampai pass forward membacanya, dan yang ada
+            // di antaranya — bayangan, langit, prepass — tidak menyentuh satu
+            // pun keluarannya.
+            if (asyncComputeActive_) {
+                graph_.SetQueue(clusterPassId_, Queue::AsyncCompute);
+            }
         }
 
         // **Culling lebih dulu daripada apa pun yang menggambar geometri.**
@@ -5171,6 +5180,9 @@ private:
     bool cullDebugActive_ = false;
     /// Batas bisect uji occlusion; lihat `ViewportDesc::cullLimit`.
     uint32_t cullLimit_ = 0xffffffffu;
+    /// Antrean compute terpisah dipakai frame ini; lihat
+    /// `ViewportDesc::asyncCompute`.
+    bool asyncComputeActive_ = false;
     uint32_t cullFirst_ = 0;
     /// Command buffer tiap segmen graph, dan batch submit-nya. Anggota, bukan
     /// lokal: keduanya dibangun ulang tiap frame dan tidak ada gunanya

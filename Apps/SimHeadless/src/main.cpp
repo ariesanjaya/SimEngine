@@ -98,6 +98,7 @@ void PrintUsage() {
         "  --bench-capture <path.png>    simpan sebuah frame; kameranya deterministik\n"
         "  --bench-capture-frame <n>     frame mana yang disimpan, bawaan yang terakhir\n"
         "  --bench-cull-first <n>        gambar hanya permukaan bernomor >= n\n"
+        "  --bench-async                 pass compute di antrean terpisah (G7)\n"
         "  --bench-dump-depth <path>     depth buffer mentah (w, h, float per texel)\n"
         "  --bench-cull-limit <n>        gambar hanya permukaan bernomor < n\n"
         "  --bench-fixed-exposure        eksposur manual; wajib untuk membandingkan gambar\n"
@@ -575,6 +576,7 @@ int main(int argc, char** argv) {
         bool cpuClusters = false;
         bool cpuSdf = false;
         bool cpuCull = false;
+        bool asyncCompute = false;
         bool occlusion = false;
         // Frame mana yang ditangkap. **Bawaannya yang terakhir, dan itu tidak
         // selalu berguna:** lintasan kamera menutup satu putaran penuh, jadi
@@ -605,6 +607,8 @@ int main(int argc, char** argv) {
                 cpuSdf = true;
             } else if (flag == "--bench-cpu-cull") {
                 cpuCull = true;
+            } else if (flag == "--bench-async") {
+                asyncCompute = true;
             } else if (flag == "--bench-occlusion") {
                 occlusion = true;
             } else if (flag == "--bench-fixed-exposure") {
@@ -756,6 +760,7 @@ int main(int argc, char** argv) {
             desc.gpuSdf = !cpuSdf;
             desc.gpuCull = !cpuCull;
             desc.gpuOcclusion = occlusion;
+            desc.asyncCompute = asyncCompute;
             desc.cullDebug = !FlagValue(argc, argv, "--bench-dump-cull").empty();
             if (const std::string_view value = FlagValue(argc, argv, "--bench-cull-first");
                 !value.empty()) {

@@ -445,6 +445,20 @@ struct ViewportDesc {
     uint32_t cullLimit = 0xffffffffu;
     /// Nomor permukaan terendah yang digambar. Pasangan `cullLimit`.
     uint32_t cullFirst = 0;
+
+    /// Pass compute yang tidak menghalangi apa pun dijalankan di antrean
+    /// terpisah, ditumpangkan di atas pekerjaan grafis (G7).
+    ///
+    /// **Sakelarnya wajib ada dan wajib dipakai membandingkan.** Balapan
+    /// lintas-antrean muncul sebagai kedipan di satu GPU dan tidak pernah di GPU
+    /// lain, dan validation layer tidak melihatnya; satu-satunya cara memeriksa
+    /// jalur ini adalah menjalankan adegan yang sama dengan sakelar ini mati dan
+    /// membandingkan gambarnya byte demi byte.
+    ///
+    /// Menuntut keluarga antrean compute yang terpisah **dan** timeline
+    /// semaphore. Tanpa keduanya ia diam-diam kembali ke satu antrean — bukan
+    /// gagal, karena jalur satu-antrean memang jalur yang benar di sana.
+    bool asyncCompute = false;
 };
 
 /// Satu objek yang bisa digambar, sudah dalam ruang dunia.
