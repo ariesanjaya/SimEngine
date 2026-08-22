@@ -4,6 +4,7 @@
 #include "Sim/Core/Math.h"
 #include "Sim/Editor/Command.h"
 #include "Sim/Editor/EditorContext.h"
+#include "Sim/Physics/PhysicsScene.h"
 #include "Sim/Editor/Gizmo.h"
 #include "Sim/Editor/Icons.h"
 #include "Sim/Editor/Notifications.h"
@@ -105,6 +106,29 @@ constexpr float kIconScale = 1.6f;
 
 /// Warna entity terpilih, sama dengan yang dipakai renderer untuk wireframe.
 constexpr Vec4 kSelectionColor{1.0f, 0.62f, 0.20f, 1.0f};
+
+// --- rangka kawat fisika ----------------------------------------------------
+//
+// **Warnanya menyebut jenis bendanya, bukan sekadar "ini collider".** Yang
+// paling sering salah bukan ukurannya melainkan jenisnya: sebuah lantai yang
+// tidak sengaja Dynamic akan jatuh menembus dirinya sendiri pada frame pertama
+// Play, dan sampai frame itu tidak ada satu pun petunjuk di layar. Tiga warna
+// membuatnya terbaca sebelum Play ditekan.
+constexpr Vec4 kColliderStaticColor{0.35f, 0.90f, 0.45f, 0.85f};
+constexpr Vec4 kColliderKinematicColor{0.35f, 0.70f, 1.00f, 0.85f};
+constexpr Vec4 kColliderDynamicColor{1.00f, 0.85f, 0.30f, 0.85f};
+/// Collider tanpa RigidBody, dan benda tegar tanpa collider. Keduanya tidak
+/// pernah sampai ke solver.
+constexpr Vec4 kColliderInertColor{0.85f, 0.35f, 0.35f, 0.85f};
+constexpr Vec4 kJointColor{0.85f, 0.55f, 1.00f, 0.90f};
+constexpr Vec4 kVehicleColor{1.00f, 0.55f, 0.25f, 0.90f};
+
+/// Setengah-sisi kisi yang menggambarkan bidang tak hingga, meter.
+constexpr float kPlaneWireExtent = 5.0f;
+/// Setengah-panjang lengan salib penanda, meter.
+constexpr float kMarkerSize = 0.25f;
+/// Setengah-panjang garis sumbu sendi, meter.
+constexpr float kJointAxisLength = 0.5f;
 
 /// Dorongan terkecil (meter) yang masih dianggap ekstrusi.
 ///
@@ -279,6 +303,9 @@ public:
             desc.volume.scatterAlbedo = context.volume.albedo;
             desc.volume.incomingLight = Vec3(context.volume.lightIntensity);
         }
+        // Rangka kawat komponen fisika, hanya untuk yang sedang terpilih.
+        DrawPhysicsWires(context);
+
         desc.clouds = context.clouds;
         camera_.ApplyTo(desc.camera);
         // Permintaan kamera dari luar panel — `viewport.capture` milik track AI.
@@ -1415,6 +1442,207 @@ private:
         // objek pipih tetap muat dari arah pandang mana pun.
         const float radius = glm::length(boundsMax - boundsMin) * 0.5f;
         camera_.distance = std::max(radius * 2.5f, 0.5f);
+    }
+
+    // --- rangka kawat fisika -------------------------------------------------
+
+    /// Menggambar bentuk tabrakan dan penanda komponen fisika entity terpilih.
+    ///
+    /// **Hanya yang terpilih, dan itu keputusan biaya.** Sebuah level dengan
+    /// ribuan collider menghasilkan ratusan ribu ruas garis per frame — dan
+    /// hampir semuanya menggambarkan benda yang sedang tidak dikerjakan siapa
+    /// pun. Yang dicari orang yang membuka gizmo collider adalah ukuran benda
+    /// yang baru saja ia setel, dan benda itu selalu yang terpilih.
+    ///
+    /// Ukurannya tidak dihitung di sini melainkan diminta dari
+    /// `physics::DescribeCollider` — jalur yang sama persis yang memberi makan
+    /// solver. Menghitungnya sendiri berarti dua aritmetika untuk satu bentuk,
+    /// dan yang kedua akan menyimpang tepat di kasus yang paling sulit dilihat.
+    void DrawPhysicsWires(EditorContext& context) {
+        if (context.world == nullptr || context.selection == nullptr) {
+            return;
+        }
+        scene::World& world = *context.world;
+        for (const SelectionId id : context.selection->Items()) {
+            const scene::Entity entity = ToEntity(id);
+            if (entity == scene::kNullEntity || !world.IsAlive(entity)) {
+                continue;
+            }
+            DrawColliderWire(world, entity);
+            DrawBodyMarker(world, entity);
+            DrawJointWire(world, entity);
+            DrawVehicleWire(world, entity);
+        }
+    }
+
+    /// Matriks bentuk: posisi dan putaran saja.
+    ///
+    /// **Skalanya sengaja ditinggalkan.** Ia sudah masuk ke ukuran bentuknya di
+    /// `DescribeCollider`, dengan aturan yang berbeda per sumbu untuk kotak dan
+    /// seragam untuk bola — memasukkannya lagi ke matriks berarti mengalikannya
+    /// dua kali, dan yang tergambar menjadi bentuk yang tidak pernah ada.
+    static Mat4 ShapeMatrix(const physics::ColliderPlacement& placement) {
+        Mat4 matrix = glm::mat4_cast(placement.rotation);
+        const Vec3 center =
+            placement.position + Vec3(matrix * Vec4(placement.shape.localPosition, 0.0f));
+        matrix[3] = Vec4(center, 1.0f);
+        return matrix;
+    }
+
+    void DrawColliderWire(scene::World& world, scene::Entity entity) {
+        physics::ColliderPlacement placement;
+        if (!physics::DescribeCollider(world, entity, placement)) {
+            return;
+        }
+        const auto* body = world.TryGet<scene::RigidBodyComponent>(entity);
+        Vec4 color = kColliderInertColor;
+        if (body != nullptr) {
+            switch (body->kind) {
+                case scene::RigidBodyKind::Static: color = kColliderStaticColor; break;
+                case scene::RigidBodyKind::Kinematic: color = kColliderKinematicColor; break;
+                case scene::RigidBodyKind::Dynamic: color = kColliderDynamicColor; break;
+            }
+        }
+
+        const Mat4 matrix = ShapeMatrix(placement);
+        const physics::ShapeDesc& shape = placement.shape;
+        switch (shape.kind) {
+            case physics::ShapeKind::Box:
+                sceneView_.AddWireBox(matrix, shape.halfExtents, color);
+                break;
+            case physics::ShapeKind::Sphere:
+                sceneView_.AddWireSphere(matrix, shape.radius, color);
+                break;
+            case physics::ShapeKind::Capsule:
+                sceneView_.AddWireCapsule(matrix, shape.radius, shape.halfExtents.x, color);
+                break;
+            case physics::ShapeKind::Cylinder:
+                sceneView_.AddWireCylinder(matrix, shape.radius, shape.halfExtents.x, color);
+                break;
+            case physics::ShapeKind::Plane:
+                sceneView_.AddWirePlane(matrix, kPlaneWireExtent, color);
+                break;
+            case physics::ShapeKind::ConvexHull:
+            case physics::ShapeKind::TriangleMesh:
+            case physics::ShapeKind::HeightField:
+                // Bentuknya datang dari aset — whitebox atau terrain — dan yang
+                // bisa membacanya adalah `ColliderGeometrySource` yang hanya
+                // dipegang `Build`. Yang digambar karena itu kotak batas
+                // geometri yang tergambar, dan itu jujur: collider ini memang
+                // mengikuti geometri itu, jadi kotak yang salah di sini berarti
+                // geometri yang salah di sana.
+                DrawEntityBounds(entity, color);
+                break;
+        }
+    }
+
+    /// Kotak batas geometri entity, diambil dari daftar pickable frame ini.
+    void DrawEntityBounds(scene::Entity entity, const Vec4& color) {
+        for (const SceneView::Pickable& pickable : sceneView_.Pickables()) {
+            if (pickable.entity != entity) {
+                continue;
+            }
+            const Vec3 half = (pickable.boundsMax - pickable.boundsMin) * 0.5f;
+            Mat4 matrix = pickable.worldMatrix;
+            matrix[3] = Vec4(Vec3(matrix * Vec4((pickable.boundsMin + pickable.boundsMax) * 0.5f,
+                                                1.0f)),
+                             1.0f);
+            sceneView_.AddWireBox(matrix, half, color);
+            return;
+        }
+    }
+
+    /// Penanda benda tegar yang tidak punya bentuk.
+    ///
+    /// **Yang digambar di sini adalah ketiadaan.** `PhysicsScene::Build`
+    /// melewatkan benda tanpa collider dan menyebutkannya di log — tetapi log
+    /// baru dibaca setelah ada yang aneh, sedangkan salib merah di tempat benda
+    /// itu terlihat sebelum Play ditekan.
+    void DrawBodyMarker(scene::World& world, scene::Entity entity) {
+        if (world.TryGet<scene::RigidBodyComponent>(entity) == nullptr ||
+            world.Has<scene::ColliderComponent>(entity)) {
+            return;
+        }
+        sceneView_.AddWireCross(Vec3(world.WorldMatrix(entity)[3]), kMarkerSize,
+                                kColliderInertColor);
+    }
+
+    /// Garis dari benda yang bergerak ke benda yang menahannya.
+    ///
+    /// Sendi tidak punya bentuk untuk digambar; yang perlu terlihat adalah
+    /// **pasangannya**, karena rujukannya GUID dan satu-satunya cara memeriksanya
+    /// hari ini adalah membaca Inspector dan mencocokkan nama.
+    void DrawJointWire(scene::World& world, scene::Entity entity) {
+        const auto* joint = world.TryGet<scene::JointComponent>(entity);
+        if (joint == nullptr) {
+            return;
+        }
+        const Mat4 worldMatrix = world.WorldMatrix(entity);
+        // Titik sendinya, bukan titik asal entity: `anchor` ruang lokal, dan
+        // engsel pintu duduk di tepinya — bukan di tengahnya.
+        const Vec3 anchor(worldMatrix * Vec4(joint->anchor, 1.0f));
+        sceneView_.AddWireCross(anchor, kMarkerSize, kJointColor);
+
+        // Sumbunya +X bingkai sendi, seperti yang tertulis di `JointComponent`.
+        // Engsel yang berputar pada sumbu yang salah terlihat benar sampai Play
+        // ditekan; garis ini membuatnya terlihat sebelum itu.
+        const Mat4 frame = worldMatrix * glm::mat4_cast(joint->frame);
+        const Vec3 axis = glm::normalize(Vec3(frame[0]));
+        sceneView_.AddLine(anchor - axis * kJointAxisLength, anchor + axis * kJointAxisLength,
+                           kJointColor);
+
+        if (!joint->connectedBody.IsValid()) {
+            // Kosong berarti dunia, dan itu bukan galat — pintu dan bandul
+            // memang tergantung pada titik tetap di ruang.
+            return;
+        }
+        const scene::Entity other = world.FindByGuid(joint->connectedBody);
+        if (other == scene::kNullEntity) {
+            // Menunjuk sesuatu yang tidak ada di level ini. Dibiarkan sebagai
+            // salib tanpa garis: sendi yang pasangannya hilang tidak menyambung
+            // ke mana pun, dan garis ke titik asal dunia akan berbohong bahwa ia
+            // tersambung ke sana.
+            return;
+        }
+        sceneView_.AddLine(anchor, Vec3(world.WorldMatrix(other)[3]), kJointColor);
+    }
+
+    /// Chassis dan keempat rodanya, pada ukuran yang benar-benar dipakai.
+    void DrawVehicleWire(scene::World& world, scene::Entity entity) {
+        const auto* vehicle = world.TryGet<scene::VehicleComponent>(entity);
+        if (vehicle == nullptr) {
+            return;
+        }
+        const Mat4 worldMatrix = world.WorldMatrix(entity);
+        Mat4 matrix(1.0f);
+        for (int axis = 0; axis < 3; ++axis) {
+            const Vec3 column(worldMatrix[axis]);
+            const float length = glm::length(column);
+            matrix[axis] = Vec4(length > 1e-8f ? column / length : Vec3(axis == 0, axis == 1,
+                                                                       axis == 2),
+                                0.0f);
+        }
+        matrix[3] = worldMatrix[3];
+
+        sceneView_.AddWireBox(matrix, vehicle->chassisHalfExtents, kVehicleColor);
+        // Titik berat: satu angka yang salah di sini membuat mobil terguling di
+        // tikungan pertama, dan itu terbaca sebagai fisika yang salah.
+        sceneView_.AddWireCross(Vec3(matrix * Vec4(vehicle->centerOfMassOffset, 1.0f)),
+                                kMarkerSize, kVehicleColor);
+
+        // **Posisi rodanya diminta, bukan diturunkan ulang di sini.** Empat
+        // koordinat yang dihitung dua kali adalah empat kesempatan menggambar
+        // roda di tempat yang bukan tempatnya dibangun — dan yang paling mudah
+        // luput justru tanda kiri-kanannya, karena mobil simetris terlihat sama
+        // saja ketika keduanya tertukar.
+        for (const physics::VehicleWheelDesc& wheel :
+             physics::DescribeVehicleWheels(*vehicle)) {
+            // Silinder bersumbu X, yaitu sumbu putar roda.
+            Mat4 wheelMatrix = matrix;
+            wheelMatrix[3] = Vec4(Vec3(matrix * Vec4(wheel.centerOffset, 1.0f)), 1.0f);
+            sceneView_.AddWireCylinder(wheelMatrix, wheel.radius, wheel.width * 0.5f,
+                                       kVehicleColor);
+        }
     }
 
     // --- overlay ------------------------------------------------------------

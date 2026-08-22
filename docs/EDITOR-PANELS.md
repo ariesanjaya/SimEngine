@@ -141,6 +141,23 @@ pembuatan aset baru (Material, Material Instance, Particle, Terrain, Lua Script)
 - **(D2) Overlay orientasi** kanan-atas: kubus arah yang bisa diklik untuk melihat
   dari sumbu tertentu, plus tombol **W**(wireframe) / **P**(perspective) / **L**(lit).
 - **Grid** adaptif terhadap jarak kamera, dengan sumbu berwarna.
+- **Rangka kawat komponen fisika**, hanya untuk entity yang sedang **terpilih**.
+  Collider digambar pada bentuk dan ukuran yang benar-benar dipakai solver —
+  kotak, bola, kapsul, silinder, dan bidang, dengan kapsul dan silinder
+  berbaring di sumbu **X** lokal dan bidang bernormal **+X** lokal, karena itulah
+  konvensi PhysX. Collider whitebox dan terrain digambar sebagai kotak batas
+  geometrinya.
+
+  Warnanya menyebut jenis bendanya: hijau statis, biru kinematik, kuning
+  dinamis, dan **merah untuk yang tidak disimulasikan sama sekali** — collider
+  tanpa RigidBody, dan RigidBody tanpa collider (yang terakhir sebagai salib,
+  karena ia memang tidak punya bentuk untuk digambar). Sendi menggambar titik
+  sendinya, sumbu putarnya, dan garis ke benda pasangannya; kendaraan
+  menggambar chassis, titik beratnya, dan keempat rodanya.
+
+  Ukurannya diminta dari `physics::DescribeCollider` dan
+  `physics::DescribeVehicleWheels` — jalur yang sama yang memberi makan solver,
+  bukan aritmetika kedua yang kebetulan mirip.
 - **Picking**: klik untuk memilih, Ctrl+klik untuk menambah, drag pada ruang kosong
   untuk seleksi kotak.
 - **Snapping**: grid (nilai bisa diatur), sudut, skala.

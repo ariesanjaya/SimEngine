@@ -867,6 +867,160 @@ void SceneView::AddWireBox(const Vec3& boxMin, const Vec3& boxMax, const Vec4& c
     }
 }
 
+void SceneView::AddLine(const Vec3& from, const Vec3& to, const Vec4& color) {
+    lines_.push_back(render::LineSegment{from, to, color});
+}
+
+namespace {
+
+/// Titik lingkaran ke-`step` dari `steps`, di bidang yang direntang `axisA` dan
+/// `axisB`.
+Vec3 CirclePoint(const Vec3& center, const Vec3& axisA, const Vec3& axisB, float radius,
+                 int step, int steps) {
+    const float angle = 2.0f * kPi * static_cast<float>(step) / static_cast<float>(steps);
+    return center + axisA * (radius * std::cos(angle)) + axisB * (radius * std::sin(angle));
+}
+
+/// Sudut lingkaran, 32 ruas.
+///
+/// Cukup halus untuk terbaca sebagai lingkaran pada ukuran layar mana pun yang
+/// masuk akal, dan kebetulan sama dengan jumlah sisi yang dipakai
+/// `CookCylinder` — jadi rangka kawat silinder punya sebanyak sisi yang
+/// benar-benar dimasak PhysX, bukan lebih halus daripada bentuk aslinya.
+constexpr int kCircleSteps = 32;
+
+}  // namespace
+
+void SceneView::AddWireBox(const Mat4& transform, const Vec3& halfExtents, const Vec4& color) {
+    const auto corner = [&](int index) {
+        const Vec3 local((index & 1) != 0 ? halfExtents.x : -halfExtents.x,
+                         (index & 2) != 0 ? halfExtents.y : -halfExtents.y,
+                         (index & 4) != 0 ? halfExtents.z : -halfExtents.z);
+        return Vec3(transform * Vec4(local, 1.0f));
+    };
+    for (int index = 0; index < 8; ++index) {
+        for (int axis = 0; axis < 3; ++axis) {
+            const int bit = 1 << axis;
+            if ((index & bit) != 0) {
+                continue;
+            }
+            AddLine(corner(index), corner(index | bit), color);
+        }
+    }
+}
+
+void SceneView::AddWireSphere(const Mat4& transform, float radius, const Vec4& color) {
+    const Vec3 center(transform[3]);
+    const Vec3 axes[3] = {Vec3(transform[0]), Vec3(transform[1]), Vec3(transform[2])};
+    // Tiga lingkaran besar, satu per bidang sumbu. Bola yang digambar satu
+    // lingkaran terlihat sama dari segala arah dan karena itu tidak
+    // memperlihatkan putaran apa pun; tiga sudah cukup untuk membacanya sebagai
+    // bola tanpa menjadi bola benang.
+    for (int plane = 0; plane < 3; ++plane) {
+        const Vec3& a = axes[plane];
+        const Vec3& b = axes[(plane + 1) % 3];
+        for (int step = 0; step < kCircleSteps; ++step) {
+            AddLine(CirclePoint(center, a, b, radius, step, kCircleSteps),
+                    CirclePoint(center, a, b, radius, step + 1, kCircleSteps), color);
+        }
+    }
+}
+
+void SceneView::AddWireCapsule(const Mat4& transform, float radius, float halfHeight,
+                               const Vec4& color) {
+    const Vec3 center(transform[3]);
+    const Vec3 axis(transform[0]);   // sumbu X lokal: konvensi PhysX
+    const Vec3 up(transform[1]);
+    const Vec3 side(transform[2]);
+    const Vec3 capA = center - axis * halfHeight;
+    const Vec3 capB = center + axis * halfHeight;
+
+    // Dua lingkaran tudung, tegak lurus sumbunya.
+    for (int step = 0; step < kCircleSteps; ++step) {
+        AddLine(CirclePoint(capA, up, side, radius, step, kCircleSteps),
+                CirclePoint(capA, up, side, radius, step + 1, kCircleSteps), color);
+        AddLine(CirclePoint(capB, up, side, radius, step, kCircleSteps),
+                CirclePoint(capB, up, side, radius, step + 1, kCircleSteps), color);
+    }
+    // Empat garis sisi, di kedua bidang yang memuat sumbunya.
+    for (const Vec3& radial : {up, -up, side, -side}) {
+        AddLine(capA + radial * radius, capB + radial * radius, color);
+    }
+    // Tudung setengah bola. **Inilah yang membedakan kapsul dari silinder di
+    // layar**, dan tanpanya sebuah kapsul setinggi 2 m terbaca sebagai silinder
+    // setinggi 1,4 m — persis kesalahan yang membuat orang membuka gizmo.
+    constexpr int kCapSteps = kCircleSteps / 4;
+    for (int half = 0; half < 2; ++half) {
+        const Vec3 tip = half == 0 ? capA : capB;
+        const Vec3 outward = half == 0 ? -axis : axis;
+        for (const Vec3& radial : {up, side}) {
+            for (int step = 0; step < kCapSteps; ++step) {
+                const float angleA = 0.5f * kPi * static_cast<float>(step) /
+                                     static_cast<float>(kCapSteps);
+                const float angleB = 0.5f * kPi * static_cast<float>(step + 1) /
+                                     static_cast<float>(kCapSteps);
+                const auto at = [&](float angle, float sign) {
+                    return tip + outward * (radius * std::sin(angle)) +
+                           radial * (sign * radius * std::cos(angle));
+                };
+                AddLine(at(angleA, 1.0f), at(angleB, 1.0f), color);
+                AddLine(at(angleA, -1.0f), at(angleB, -1.0f), color);
+            }
+        }
+    }
+}
+
+void SceneView::AddWireCylinder(const Mat4& transform, float radius, float halfHeight,
+                                const Vec4& color) {
+    const Vec3 center(transform[3]);
+    const Vec3 axis(transform[0]);   // sumbu X lokal, sama dengan `CookCylinder`
+    const Vec3 up(transform[1]);
+    const Vec3 side(transform[2]);
+    const Vec3 capA = center - axis * halfHeight;
+    const Vec3 capB = center + axis * halfHeight;
+    for (int step = 0; step < kCircleSteps; ++step) {
+        const Vec3 a0 = CirclePoint(capA, up, side, radius, step, kCircleSteps);
+        const Vec3 a1 = CirclePoint(capA, up, side, radius, step + 1, kCircleSteps);
+        const Vec3 b0 = CirclePoint(capB, up, side, radius, step, kCircleSteps);
+        const Vec3 b1 = CirclePoint(capB, up, side, radius, step + 1, kCircleSteps);
+        AddLine(a0, a1, color);
+        AddLine(b0, b1, color);
+        // Rusuk sisi tiap seperempat lingkaran saja: tiga puluh dua rusuk
+        // membuat silinder tampak sebagai tabung padat dan menutupi apa yang ada
+        // di dalamnya.
+        if (step % (kCircleSteps / 4) == 0) {
+            AddLine(a0, b0, color);
+        }
+    }
+}
+
+void SceneView::AddWirePlane(const Mat4& transform, float extent, const Vec4& color) {
+    const Vec3 center(transform[3]);
+    const Vec3 normal(transform[0]);  // +X lokal: konvensi PxPlaneGeometry
+    const Vec3 up(transform[1]);
+    const Vec3 side(transform[2]);
+
+    // Kisi, bukan kotak kosong. Bidangnya tak hingga; sebuah kotak berpinggir
+    // terbaca sebagai lantai seukuran kotak itu, sementara kisi yang terpotong
+    // di tepinya terbaca sebagai "berlanjut".
+    constexpr int kGrid = 4;
+    for (int index = -kGrid; index <= kGrid; ++index) {
+        const float offset = extent * static_cast<float>(index) / static_cast<float>(kGrid);
+        AddLine(center + up * offset - side * extent, center + up * offset + side * extent,
+                color);
+        AddLine(center + side * offset - up * extent, center + side * offset + up * extent,
+                color);
+    }
+    // Normal: satu-satunya yang memberi tahu sisi mana yang padat.
+    AddLine(center, center + normal * (extent * 0.5f), color);
+}
+
+void SceneView::AddWireCross(const Vec3& center, float size, const Vec4& color) {
+    AddLine(center - Vec3(size, 0.0f, 0.0f), center + Vec3(size, 0.0f, 0.0f), color);
+    AddLine(center - Vec3(0.0f, size, 0.0f), center + Vec3(0.0f, size, 0.0f), color);
+    AddLine(center - Vec3(0.0f, 0.0f, size), center + Vec3(0.0f, 0.0f, size), color);
+}
+
 render::ViewportScene SceneView::Scene() const {
     render::ViewportScene scene;
     scene.meshes = meshes_;

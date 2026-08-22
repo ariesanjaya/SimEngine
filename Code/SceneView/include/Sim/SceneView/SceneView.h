@@ -192,6 +192,37 @@ public:
     /// keduanya aman.
     void AddWireBox(const Vec3& boxMin, const Vec3& boxMax, const Vec4& color);
 
+    /// Satu ruas garis di ruang dunia.
+    void AddLine(const Vec3& from, const Vec3& to, const Vec4& color);
+
+    // --- rangka kawat bentuk tabrakan ---------------------------------------
+    //
+    // **Sumbunya mengikuti PhysX, bukan selera.** Kapsul dan silinder berbaring
+    // di sumbu **X** lokal dan bidang tak hingga bernormal **+X** lokal, karena
+    // itulah yang dibuat `PxCapsuleGeometry` dan `PxPlaneGeometry`. Rangka kawat
+    // yang memakai sumbu lain akan terlihat masuk akal dan berbohong — dan yang
+    // membukanya adalah orang yang sedang memeriksa apakah bentuknya benar.
+    //
+    // `transform` membawa posisi dan putaran saja. Skala tidak masuk ke sana
+    // melainkan ke ukurannya, mengikuti `physics::DescribeCollider`: sebuah
+    // jari-jari tidak bisa diregangkan ke satu arah, jadi menskalakan matriksnya
+    // akan menggambar telur di tempat bola disimulasikan.
+
+    void AddWireBox(const Mat4& transform, const Vec3& halfExtents, const Vec4& color);
+    void AddWireSphere(const Mat4& transform, float radius, const Vec4& color);
+    /// Setengah-tinggi **bagian silindernya**, tidak termasuk kedua tudung —
+    /// konvensi `ColliderComponent::halfHeight` dan `PxCapsuleGeometry`.
+    void AddWireCapsule(const Mat4& transform, float radius, float halfHeight,
+                        const Vec4& color);
+    void AddWireCylinder(const Mat4& transform, float radius, float halfHeight,
+                         const Vec4& color);
+    /// Bidang tak hingga digambar sepotong: `extent` setengah-sisi kotaknya.
+    /// Ditambah satu garis normal, karena kotak tanpa normal tidak memberi tahu
+    /// sisi mana yang padat.
+    void AddWirePlane(const Mat4& transform, float extent, const Vec4& color);
+    /// Salib tiga sumbu. Untuk yang tidak punya bentuk untuk digambar.
+    void AddWireCross(const Vec3& center, float size, const Vec4& color);
+
 private:
     /// Mesh decal yang sudah dibangun, beserta keadaan yang menghasilkannya.
     ///
