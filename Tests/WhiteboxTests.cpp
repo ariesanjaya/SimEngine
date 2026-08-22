@@ -1163,3 +1163,100 @@ TEST_CASE("blockout yang diekspor bisa dimuat kembali sebagai mesh biasa") {
 
     std::filesystem::remove_all(directory, ec);
 }
+
+TEST_CASE("Bentuk awal blockout tertutup, menghadap keluar, dan setiap sisinya cembung") {
+    // **Tiga invarian, dan ketiganya tidak terlihat sebagai galat saat dilanggar.**
+    // Tertutup: rumus Euler V - E + F = 2 — bentuk yang salah rakit meninggalkan
+    // rusuk yang hanya dipakai satu sisi, dan yang terlihat adalah lubang.
+    // Menghadap keluar: satu sisi terbalik terbaca sebagai lubang juga, bukan
+    // sebagai galat. Cembung: `BuildMeshData` menyegitiga dengan kipas dari
+    // simpul pertama, jadi sisi bertakik menghasilkan segitiga yang menembus
+    // dirinya sendiri — bentuk yang salah, tanpa satu pun pesan.
+    struct Shape {
+        std::string name;
+        HalfEdgeMesh mesh;
+        /// Volume yang seharusnya, dihitung tangan dari bentuknya.
+        float volume;
+    };
+    std::vector<Shape> shapes;
+    shapes.push_back({"Ramp", MakeUnitRamp(), 0.5f});
+    // Tinggi anak tangga ke-i adalah (i+1)/6 dari alas; jumlahnya 21/36.
+    shapes.push_back({"Stairs", MakeUnitStairs(6), 21.0f / 36.0f});
+    // Segi-12 beraturan berjari-jari 0,5: (1/2)·n·r²·sin(2pi/n) = 0,75.
+    shapes.push_back({"Cylinder", MakeUnitCylinder(12), 0.75f});
+    shapes.push_back({"Cone", MakeUnitCone(12), 0.25f});
+    // Satu anak tangga adalah kotak, dan itu kasus tepi yang paling mudah salah.
+    shapes.push_back({"Stairs(1)", MakeUnitStairs(1), 1.0f});
+    shapes.push_back({"Cylinder(3)", MakeUnitCylinder(3), 0.5f * 3.0f * 0.25f *
+                                                              std::sin(2.0f * kPi / 3.0f)});
+
+    for (const Shape& shape : shapes) {
+        INFO("bentuk " << shape.name);
+        const HalfEdgeMesh& mesh = shape.mesh;
+
+        const MeshCheck check = mesh.CheckInvariants();
+        INFO(check.error);
+        CHECK(check.ok);
+
+        const int euler = static_cast<int>(mesh.VertexCount()) -
+                          static_cast<int>(mesh.EdgeCount()) + static_cast<int>(mesh.FaceCount());
+        INFO("V - E + F = " << euler);
+        CHECK(euler == 2);
+        // Tertutup: tiap rusuk dipakai dua face, tidak ada half-edge batas.
+        CHECK(mesh.HalfEdgeCount() == mesh.EdgeCount() * 2);
+
+        // **Menghadap keluar diuji lewat volume bertandanya, bukan per sisi.**
+        // Bentuk pertama uji ini menanyakan "apakah normal tiap sisi menjauhi
+        // sebuah titik di dalam" — dan itu hanya benar untuk benda cembung.
+        // Tangga tidak cembung: normal tegak anak tangga keempat menunjuk
+        // kembali ke arah titik mana pun yang dipilih di bawahnya, dan uji yang
+        // benar terbaca gagal. Volume bertanda tidak menuntut kecembungan, dan
+        // ia sekaligus mengunci ukurannya: satu sisi terbalik menggeser
+        // angkanya sebesar dua kali sumbangan sisi itu.
+        float volume = 0.0f;
+        for (uint32_t f = 0; f < mesh.FaceCount(); ++f) {
+            const FaceHandle face = static_cast<FaceHandle>(f);
+            const std::vector<VertexHandle> loop = mesh.FaceVertices(face);
+            REQUIRE(loop.size() >= 3);
+
+            const Vec3 first = mesh.GetVertex(loop[0]).position;
+            for (std::size_t i = 1; i + 1 < loop.size(); ++i) {
+                const Vec3 b = mesh.GetVertex(loop[i]).position;
+                const Vec3 c = mesh.GetVertex(loop[i + 1]).position;
+                volume += glm::dot(first, glm::cross(b, c)) / 6.0f;
+            }
+
+            const Vec3 normal = mesh.FaceNormal(face);
+            INFO("sisi " << f);
+
+            // Cembung: setiap belokan berputar ke arah yang sama.
+            for (std::size_t i = 0; i < loop.size(); ++i) {
+                const Vec3 p0 = mesh.GetVertex(loop[i]).position;
+                const Vec3 p1 = mesh.GetVertex(loop[(i + 1) % loop.size()]).position;
+                const Vec3 p2 = mesh.GetVertex(loop[(i + 2) % loop.size()]).position;
+                const Vec3 turn = glm::cross(p1 - p0, p2 - p1);
+                INFO("belokan " << i << " di sisi " << f);
+                CHECK(glm::dot(turn, normal) >= -1e-5f);
+            }
+        }
+
+        INFO("volume " << volume << ", seharusnya " << shape.volume);
+        CHECK(volume == doctest::Approx(shape.volume).epsilon(0.001));
+    }
+}
+
+TEST_CASE("Bentuk awal blockout menghasilkan segitiga yang bisa digambar") {
+    // Topologi yang sah belum tentu menghasilkan mesh: `BuildMeshData` yang
+    // memutuskan, dan ia jalur yang sama yang dipakai viewport dan eksportir.
+    for (const WhiteboxMesh& box : {WhiteboxMesh::MakeRamp(), WhiteboxMesh::MakeStairs(6),
+                                    WhiteboxMesh::MakeCylinder(12), WhiteboxMesh::MakeCone(12)}) {
+        const assets::MeshData data = box.BuildMeshData();
+        CHECK(data.vertices.size() >= 3);
+        REQUIRE(data.indices.size() % 3 == 0);
+        CHECK(data.indices.size() >= 3);
+        CHECK_FALSE(data.parts.empty());
+        for (const uint32_t index : data.indices) {
+            REQUIRE(index < data.vertices.size());
+        }
+    }
+}

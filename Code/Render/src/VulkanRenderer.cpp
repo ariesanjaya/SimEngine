@@ -5139,14 +5139,6 @@ private:
             slot.shadowFaceBuffer.Write(gpuFaces_.data(), faceBytes);
         }
 
-        {   // DIAGNOSA SEMENTARA
-            static std::size_t reported = 9999;
-            if (scene.lights.size() != reported) {
-                reported = scene.lights.size();
-                SIM_INFO("Render", "DIAG lights={} gpuLights={} clusterLights={}",
-                         scene.lights.size(), gpuLights_.size(), clusterLights_.size());
-            }
-        }
         clusterGrid_.Build(clusterSettings_, desc.camera.fovYRadians, aspect, desc.camera.nearZ,
                            std::min(desc.camera.farZ, kClusterFar));
         // **Satu dari dua jalur, dan yang tidak dipakai tidak dibayar.** Yang di
@@ -5168,19 +5160,6 @@ private:
             clusterAssignment_ =
                 AssignLights(clusterGrid_, desc.camera.View(), clusterLights_, clusterSettings_);
             overflowed = clusterAssignment_.overflowed;
-            {   // DIAGNOSA SEMENTARA
-                static std::size_t reported = 9999;
-                std::size_t nonEmpty = 0;
-                for (const auto& r : clusterAssignment_.ranges) {
-                    nonEmpty += r.count > 0 ? 1u : 0u;
-                }
-                if (nonEmpty != reported) {
-                    reported = nonEmpty;
-                    SIM_INFO("Render", "DIAG cluster ranges={} nonEmpty={} indices={}",
-                             clusterAssignment_.ranges.size(), nonEmpty,
-                             clusterAssignment_.indices.size());
-                }
-            }
         }
         // **Diperingatkan saat angkanya berubah, bukan tiap frame.** Alasannya
         // sama dengan lampu yang tidak muat atlas: enam puluh baris identik per

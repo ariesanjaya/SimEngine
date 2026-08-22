@@ -35,7 +35,10 @@ sim_add_library(EditorPanels
         # Panel Vegetation Editor membuka `.simveg` beserta terrain-nya.
         Sim::Vegetation
         # Panel Animation Editor menyunting `.simskel` dan `.simanim`.
-        Sim::Animation)
+        Sim::Animation
+        # Panel Prefab membangkitkan bentuk awal blockout, dan panel
+        # Whitebox menyuntingnya.
+        Sim::Whitebox)
 
 list(LENGTH _sim_panel_sources _sim_panel_count)
 message(STATUS "  editor panels: ${_sim_panel_count} berkas")

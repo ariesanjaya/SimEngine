@@ -268,6 +268,19 @@ Sumber log ditandai kategori (`[Asset]`, `[Lua]`, `[RHI]`).
   Detail: [PLAN-AI.md](PLAN-AI.md) A4.
 - **AI Bridge** — status MCP server: port, token, klien yang tersambung, daftar
   request masuk beserta waktu eksekusinya, tombol start/stop. Detail: PLAN-AI.md A0.
+- **Prefabs** — palet template siap tempat, dikelompokkan menurut subfoldernya:
+  bawaan editor dari `Resources/Prefabs`, plus prefab milik project. Diklik
+  berarti ditempatkan di bawah entity terpilih (atau sebagai akar), lewat
+  perintah yang sama dengan paste — jadi bisa di-undo.
+
+  Grup **Whitebox** tidak datang dari berkas: lima bentuk awal blockout — Box,
+  Ramp, Stairs, Cylinder, Cone, semuanya 1×1×1 — yang **membuat aset
+  `.simwhitebox` baru** di `Whitebox/` setiap kali diklik, lalu menempatkan blok
+  yang memakainya. Aset per klik, bukan satu aset bersama: sepuluh blok dari satu
+  prefab whitebox akan menunjuk aset yang sama, dan menyunting salah satunya
+  mengubah kesepuluhnya — kebalikan dari gunanya blockout. Undo mengembalikan
+  entity-nya; berkas asetnya tetap ada, aturan yang sama dengan setiap pembuatan
+  aset di editor ini.
 - **History** — daftar command, klik untuk melompat ke titik tertentu. Command yang
   berasal dari agen diberi awalan `AI:` supaya mudah dibedakan.
 - **Preferences** — tema, font & skala, pintasan, path project, setting editor.

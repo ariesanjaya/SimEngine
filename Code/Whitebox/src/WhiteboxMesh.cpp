@@ -31,6 +31,24 @@ WhiteboxMesh WhiteboxMesh::MakeCube() {
     return box;
 }
 
+WhiteboxMesh WhiteboxMesh::FromMesh(HalfEdgeMesh mesh) {
+    WhiteboxMesh out;
+    out.mesh_ = std::move(mesh);
+    out.polygons_.Reset(out.mesh_);
+    out.polygonMaterial_.assign(out.mesh_.FaceCount(), kNoMaterial);
+    return out;
+}
+
+WhiteboxMesh WhiteboxMesh::MakeRamp() { return FromMesh(MakeUnitRamp()); }
+
+WhiteboxMesh WhiteboxMesh::MakeStairs(uint32_t steps) { return FromMesh(MakeUnitStairs(steps)); }
+
+WhiteboxMesh WhiteboxMesh::MakeCylinder(uint32_t sides) {
+    return FromMesh(MakeUnitCylinder(sides));
+}
+
+WhiteboxMesh WhiteboxMesh::MakeCone(uint32_t sides) { return FromMesh(MakeUnitCone(sides)); }
+
 WhiteboxMesh WhiteboxMesh::MakeTriangulatedCube() {
     WhiteboxMesh box;
     box.mesh_ = MakeUnitCubeTriangulated();

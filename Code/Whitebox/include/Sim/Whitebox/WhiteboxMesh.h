@@ -54,6 +54,14 @@ public:
     /// Kubus yang tiap sisinya dua segitiga, seperti yang datang dari importir.
     static WhiteboxMesh MakeTriangulatedCube();
 
+    /// Bentuk awal blockout lain. Semuanya 1×1×1 berpusat di titik asal, dan
+    /// semuanya tetap bisa diextrude dan digeser sesudahnya — bentuk awal, bukan
+    /// bentuk jadi. Lihat catatan cembung di `HalfEdgeMesh.h`.
+    static WhiteboxMesh MakeRamp();
+    static WhiteboxMesh MakeStairs(uint32_t steps = 6);
+    static WhiteboxMesh MakeCylinder(uint32_t sides = 12);
+    static WhiteboxMesh MakeCone(uint32_t sides = 12);
+
     /// **Hanya bisa dibaca, dan itu disengaja.** Penetapan material sejajar
     /// dengan poligon, dan poligon dikenali face terkecilnya — jadi setiap
     /// perubahan topologi maupun pengelompokan bisa menggeser nomornya. Kalau
@@ -101,6 +109,11 @@ private:
     /// mengikuti poligon, dan poligon dikenali face terkecilnya — jadi nomor
     /// yang bergeser harus ikut dipindahkan, bukan ditinggalkan.
     void RemapMaterials(const std::vector<uint32_t>& oldFacePolygon);
+
+    /// Membungkus sebuah topologi menjadi whitebox utuh: poligon direset dan
+    /// setiap sisi dimulai tanpa material. Sama untuk setiap bentuk awal, jadi
+    /// ditulis sekali alih-alih lima kali.
+    static WhiteboxMesh FromMesh(HalfEdgeMesh mesh);
 
     HalfEdgeMesh mesh_;
     PolygonSet polygons_;
