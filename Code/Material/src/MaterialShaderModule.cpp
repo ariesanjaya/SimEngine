@@ -433,6 +433,17 @@ std::string AssembleForwardMaterialModule(const std::string& generatedSlang,
     // menggeser titik sampel keluar permukaan, dan menggesernya menurut normal
     // peta membuat bias itu ikut berlekuk — yang terlihat sebagai acne pada
     // permukaan yang normal map-nya kasar.
+    // **Adegan tanpa lampu digambar diffuse-nya apa adanya** — alasan lengkapnya
+    // di `box_shading.slang`, dan keduanya harus sepakat supaya ruas bermaterial
+    // dan ruas jalur-mundur tidak berbeda perlakuan di adegan yang sama.
+    //
+    // `baseWeight` ikut karena ia memang pengali albedo di OpenPBR; emissive ikut
+    // karena ia tidak menuntut cahaya untuk terlihat.
+    out << "    if (!anyLightInScene()) {\n";
+    out << "        return float4(m.surface.baseColor * m.surface.baseWeight + m.emissive,\n";
+    out << "                      m.opacity * input.color.a);\n";
+    out << "    }\n\n";
+
     out << "    const float shadow = (input.flags & kFlagReceiveShadows) != 0u\n";
     out << "                             ? sampleShadow(input.worldPosition, inputs.worldNormal)\n";
     out << "                             : 1.0;\n";

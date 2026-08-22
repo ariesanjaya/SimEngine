@@ -126,6 +126,26 @@ bool ConeIntersectsSphere(const Vec3& apex, const Vec3& direction, float range,
     return glm::dot(delta, delta) <= radius * radius;
 }
 
+const LightInstance* FindSunLight(std::span<const LightInstance> lights) {
+    for (const LightInstance& light : lights) {
+        if (light.kind == LightKind::Directional) {
+            return &light;
+        }
+    }
+    return nullptr;
+}
+
+ClusterViewLight ToClusterView(const Mat4& view, const Vec3& position, const Vec3& direction) {
+    ClusterViewLight out;
+    // Posisi memakai matriks penuh, arah hanya bagian 3x3-nya: translasi tidak
+    // boleh ikut pada vektor arah.
+    const Vec3 viewPosition = Vec3(view * Vec4(position, 1.0f));
+    const Vec3 viewDirection = Mat3(view) * direction;
+    out.position = Vec3(viewPosition.x, viewPosition.y, -viewPosition.z);
+    out.direction = glm::normalize(Vec3(viewDirection.x, viewDirection.y, -viewDirection.z));
+    return out;
+}
+
 ClusterAssignment AssignLights(const ClusterGrid& grid, const Mat4& view,
                                std::span<const ClusterLight> lights,
                                const ClusterGridSettings& settings) {
@@ -150,10 +170,9 @@ ClusterAssignment AssignLights(const ClusterGrid& grid, const Mat4& view,
     viewLights.reserve(lights.size());
     for (const ClusterLight& light : lights) {
         ViewLight entry;
-        // Posisi memakai matriks penuh, arah hanya bagian 3x3-nya: translasi
-        // tidak boleh ikut pada vektor arah.
-        entry.position = Vec3(view * Vec4(light.position, 1.0f));
-        entry.direction = glm::normalize(Mat3(view) * light.direction);
+        const ClusterViewLight placed = ToClusterView(view, light.position, light.direction);
+        entry.position = placed.position;
+        entry.direction = placed.direction;
         entry.range = std::max(light.range, 0.0f);
         entry.cosOuterAngle = light.cosOuterAngle;
         entry.spot = light.type == ClusterLightType::Spot;

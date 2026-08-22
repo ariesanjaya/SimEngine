@@ -826,11 +826,23 @@ public:
         // Menghitungnya dari kamera frame sebelumnya menghemat satu ketergantungan
         // dan menukarnya dengan bayangan yang tertinggal satu frame — terlihat
         // sebagai bayangan yang "berenang" saat kamera bergerak cepat.
-        // Directional pertama dari scene menjadi matahari; `desc.sunDirection`
-        // adalah nilai mundurnya. Cascade hanya ada satu himpunan, jadi
-        // directional kedua dan seterusnya diabaikan — dan mengabaikannya
-        // diam-diam lebih baik daripada menjumlahkan arah, yang menghasilkan
-        // bayangan yang tidak cocok dengan lampu mana pun.
+        // **Matahari datang dari scene, dan hanya dari scene.** Directional
+        // pertama yang ditemukan menjadi matahari; kalau tidak ada satu pun,
+        // radiansinya nol dan adegan gelap.
+        //
+        // Sampai E8 ada nilai mundur di `ViewportDesc` — arah dan radiansi tetap
+        // yang dipakai "selama scene belum benar-benar punya lampu directional".
+        // Syarat itu sudah lama terpenuhi, dan yang tersisa dari nilai mundur itu
+        // adalah cacat: **menghapus lampu terakhir sebuah level tidak
+        // menggelapkan apa pun.** Adegan tetap tersinari matahari yang tidak
+        // dimiliki entity mana pun, tidak muncul di Outliner, dan tidak bisa
+        // disunting — dan orang yang mencari dari mana cahayanya datang tidak
+        // akan menemukannya, karena ia memang tidak ada di level itu.
+        //
+        // Cascade hanya ada satu himpunan, jadi directional kedua dan seterusnya
+        // diabaikan — dan mengabaikannya diam-diam lebih baik daripada
+        // menjumlahkan arah, yang menghasilkan bayangan yang tidak cocok dengan
+        // lampu mana pun.
         // Backend GI diselesaikan tiap frame dari kemampuan perangkat dan
         // permintaan pengguna. Murah, dan menyimpannya berarti pertanyaan
         // "yang mana yang berlaku sekarang" setiap kali preferensinya berubah.
@@ -838,20 +850,20 @@ public:
         caps.rayQuery = device_.SupportsRayQuery();
         giBackend_ = SelectTraceBackend(caps, desc.gi.backend);
 
-        sunDirection_ = desc.sunDirection;
-        sunRadiance_ = desc.sunRadiance;
-        sunCastsShadows_ = desc.castShadows;
-        for (const LightInstance& light : scene.lights) {
-            if (light.kind == LightKind::Directional) {
-                sunDirection_ = light.direction;
-                // Warna dikali intensitas — keduanya sampai ke shader sekarang.
-                // Sebelumnya hanya arahnya yang dipakai, jadi menyunting warna
-                // matahari di Inspector tidak mengubah apa pun: antarmuka yang
-                // berbohong, dan itu lebih buruk daripada tombol yang belum ada.
-                sunRadiance_ = light.color * light.intensity;
-                sunCastsShadows_ = desc.castShadows && light.castShadows;
-                break;
-            }
+        // Tegak lurus ke atas, dan radiansinya nol: arah yang tidak dipakai
+        // siapa pun tetap harus sah, karena cascade dan LUT langit dihitung dari
+        // sana sebelum ada yang memeriksa apakah mataharinya menyala.
+        sunDirection_ = Vec3(0.0f, 1.0f, 0.0f);
+        sunRadiance_ = Vec3(0.0f);
+        sunCastsShadows_ = false;
+        if (const LightInstance* sun = FindSunLight(scene.lights)) {
+            sunDirection_ = sun->direction;
+            // Warna dikali intensitas — keduanya sampai ke shader sekarang.
+            // Sebelumnya hanya arahnya yang dipakai, jadi menyunting warna
+            // matahari di Inspector tidak mengubah apa pun: antarmuka yang
+            // berbohong, dan itu lebih buruk daripada tombol yang belum ada.
+            sunRadiance_ = sun->color * sun->intensity;
+            sunCastsShadows_ = desc.castShadows && sun->castShadows;
         }
         CascadeSettings cascadeSettings;
         cascadeSettings.resolution = kShadowResolution;
@@ -914,8 +926,24 @@ public:
         partTextures_.assign(scene.partTextures.begin(), scene.partTextures.end());
         partMaterials_.assign(scene.partMaterials.begin(), scene.partMaterials.end());
 
+        // **Dua kelompok dalam satu buffer, yang diuji kedalaman lebih dulu.**
+        // Keduanya memakai vertex buffer yang sama dan berbeda hanya pada
+        // pipeline-nya, jadi memisahkannya menjadi dua buffer berarti dua
+        // alokasi dan dua unggahan untuk data yang bentuknya identik. Yang
+        // dibutuhkan hanya batasnya, dan batas itu satu angka.
         lineVertices_.clear();
         for (const LineSegment& line : scene.lines) {
+            if (line.throughGeometry) {
+                continue;
+            }
+            lineVertices_.push_back({line.a, line.color});
+            lineVertices_.push_back({line.b, line.color});
+        }
+        depthTestedLineVertices_ = lineVertices_.size();
+        for (const LineSegment& line : scene.lines) {
+            if (!line.throughGeometry) {
+                continue;
+            }
             lineVertices_.push_back({line.a, line.color});
             lineVertices_.push_back({line.b, line.color});
         }
@@ -1256,7 +1284,19 @@ public:
                 const VkDeviceSize offset = 0;
                 const VkBuffer handle = slot.lineBuffer.Handle();
                 vkCmdBindVertexBuffers(command, 0, 1, &handle, &offset);
-                vkCmdDraw(command, static_cast<uint32_t>(lineVertices_.size()), 1, 0, 0);
+                if (depthTestedLineVertices_ > 0) {
+                    vkCmdDraw(command, static_cast<uint32_t>(depthTestedLineVertices_), 1, 0, 0);
+                }
+                const std::size_t overlay = lineVertices_.size() - depthTestedLineVertices_;
+                if (overlay > 0 && lineOverlayPipeline_ != VK_NULL_HANDLE) {
+                    // Pipeline kedua, buffer yang sama, offset di `firstVertex`.
+                    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                      lineOverlayPipeline_);
+                    vkCmdPushConstants(command, lineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                                       sizeof(LinePush), &linePush);
+                    vkCmdDraw(command, static_cast<uint32_t>(overlay), 1,
+                              static_cast<uint32_t>(depthTestedLineVertices_), 0);
+                }
             }
             vkCmdEndRendering(command);
         };
@@ -3346,11 +3386,17 @@ private:
         linePipeline_ = BuildOverlayPipeline(lineVertex, lineFragment, lineLayout_,
                                              VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
                                              /*useDepth=*/true, /*vertexInput=*/true);
+        // Kembarannya tanpa uji kedalaman, untuk garis yang menjelaskan sesuatu
+        // yang tersembunyi di dalam geometri — lihat `LineSegment::throughGeometry`.
+        lineOverlayPipeline_ = BuildOverlayPipeline(lineVertex, lineFragment, lineLayout_,
+                                                    VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
+                                                    /*useDepth=*/false, /*vertexInput=*/true);
 
         for (VkShaderModule module : {gridVertex, gridFragment, lineVertex, lineFragment}) {
             vkDestroyShaderModule(device_.Handle(), module, nullptr);
         }
-        return gridPipeline_ != VK_NULL_HANDLE && linePipeline_ != VK_NULL_HANDLE;
+        return gridPipeline_ != VK_NULL_HANDLE && linePipeline_ != VK_NULL_HANDLE &&
+               lineOverlayPipeline_ != VK_NULL_HANDLE;
     }
 
     VkPipeline BuildOverlayPipeline(VkShaderModule vertex, VkShaderModule fragment,
@@ -5093,6 +5139,14 @@ private:
             slot.shadowFaceBuffer.Write(gpuFaces_.data(), faceBytes);
         }
 
+        {   // DIAGNOSA SEMENTARA
+            static std::size_t reported = 9999;
+            if (scene.lights.size() != reported) {
+                reported = scene.lights.size();
+                SIM_INFO("Render", "DIAG lights={} gpuLights={} clusterLights={}",
+                         scene.lights.size(), gpuLights_.size(), clusterLights_.size());
+            }
+        }
         clusterGrid_.Build(clusterSettings_, desc.camera.fovYRadians, aspect, desc.camera.nearZ,
                            std::min(desc.camera.farZ, kClusterFar));
         // **Satu dari dua jalur, dan yang tidak dipakai tidak dibayar.** Yang di
@@ -5114,6 +5168,19 @@ private:
             clusterAssignment_ =
                 AssignLights(clusterGrid_, desc.camera.View(), clusterLights_, clusterSettings_);
             overflowed = clusterAssignment_.overflowed;
+            {   // DIAGNOSA SEMENTARA
+                static std::size_t reported = 9999;
+                std::size_t nonEmpty = 0;
+                for (const auto& r : clusterAssignment_.ranges) {
+                    nonEmpty += r.count > 0 ? 1u : 0u;
+                }
+                if (nonEmpty != reported) {
+                    reported = nonEmpty;
+                    SIM_INFO("Render", "DIAG cluster ranges={} nonEmpty={} indices={}",
+                             clusterAssignment_.ranges.size(), nonEmpty,
+                             clusterAssignment_.indices.size());
+                }
+            }
         }
         // **Diperingatkan saat angkanya berubah, bukan tiap frame.** Alasannya
         // sama dengan lampu yang tidak muat atlas: enam puluh baris identik per
@@ -5125,6 +5192,12 @@ private:
                          overflowed, clusterSettings_.maxLightsPerCluster);
             }
         }
+
+        // Dicatat SEBELUM entri boneka ditambahkan di bawah. Angka inilah yang
+        // sampai ke shader sebagai "berapa lampu punctual ada", dan sebuah
+        // adegan tanpa lampu harus terbaca sebagai nol — bukan sebagai satu
+        // lampu boneka yang radiansinya kebetulan nol.
+        punctualLightCount_ = static_cast<uint32_t>(gpuLights_.size());
 
         // Buffer kosong tidak sah, jadi keduanya selalu berisi minimal satu
         // entri boneka. Cluster yang jumlahnya nol tidak pernah membacanya.
@@ -5185,7 +5258,7 @@ private:
         uniforms.clusterCounts = Vec4(static_cast<float>(clusterGrid_.TilesX()),
                                       static_cast<float>(clusterGrid_.TilesY()),
                                       static_cast<float>(clusterGrid_.Slices()),
-                                      static_cast<float>(gpuLights_.size()));
+                                      static_cast<float>(punctualLightCount_));
         // Skala dan bias irisan datang dari CPU apa adanya, bukan diturunkan
         // ulang di shader dari near dan far. Dua rumus yang setara secara
         // matematis tapi ditulis berbeda berselisih satu irisan di tepinya.
@@ -5384,7 +5457,8 @@ private:
                 }
             }
         }
-        for (VkPipeline* pipeline : {&gridPipeline_, &linePipeline_, &sdfDebugPipeline_}) {
+        for (VkPipeline* pipeline :
+             {&gridPipeline_, &linePipeline_, &lineOverlayPipeline_, &sdfDebugPipeline_}) {
             if (*pipeline != VK_NULL_HANDLE) {
                 vkDestroyPipeline(device_.Handle(), *pipeline, nullptr);
                 *pipeline = VK_NULL_HANDLE;
@@ -5540,7 +5614,11 @@ private:
     VkPipeline gridPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout lineLayout_ = VK_NULL_HANDLE;
     VkPipeline linePipeline_ = VK_NULL_HANDLE;
+    /// Kembaran `linePipeline_` tanpa uji kedalaman.
+    VkPipeline lineOverlayPipeline_ = VK_NULL_HANDLE;
     std::vector<LineVertex> lineVertices_;
+    /// Berapa simpul pertama `lineVertices_` yang diuji kedalaman.
+    std::size_t depthTestedLineVertices_ = 0;
     /// Dipakai ulang tiap frame; ukurannya mengikuti jumlah pass graph.
     std::vector<FrameGraphExecutor::Recorder> recorders_;
 
@@ -5554,6 +5632,8 @@ private:
     /// sentimeter, dan lampu punctual memang tidak relevan di kejauhan.
     static constexpr float kClusterFar = 300.0f;
 
+    /// Berapa lampu punctual benar-benar ada frame ini, tanpa entri boneka.
+    uint32_t punctualLightCount_ = 0;
     Vec3 sunDirection_{0.0f, 1.0f, 0.0f};
     Vec3 sunRadiance_{0.75f};
     bool sunCastsShadows_ = true;

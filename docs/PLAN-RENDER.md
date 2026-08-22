@@ -2750,6 +2750,64 @@ menerima `irradiance` terpisah, sudah mengalikannya dengan `(1 - E_spec)`, dan
 sudah mengecualikan logam dari lobe difus lewat `lerp(..., metalness)`. Yang
 tersisa hanya menyambungkan sumbernya.
 
+### Cahaya: satu tanda, dan lampu titik yang tidak pernah menyala
+
+**Setiap lampu titik dan sorot di engine ini tidak pernah menyala sejak jalur
+cluster ada**, dan penyebabnya satu tanda. `AssignLights` dan
+`ClusterAssign::Upload` memindahkan lampu ke ruang pandang dengan
+`view * position` — dan `glm::lookAt` tangan-kanan, jadi yang di depan kamera
+bernilai z **negatif**. Kisi cluster mengukur kedalaman sebagai jarak
+**positif**: `ClusterBounds` menulis `box.min.z = depth.x` dari near ke far, dan
+fragment shader menghitung kedalamannya sebagai
+`dot(worldPos - cameraPos, cameraForward)`. Kedua ruang itu cermin satu sama lain.
+
+**Gagalnya tidak terlihat seperti bug.** Lampu di depan kamera pada jarak 8 m
+diuji terhadap kotak yang membentang z = 0,1..100: ia memotong sekumpulan
+cluster di dekat bidang dekat, jadi daftar penetapannya **tidak kosong** dan
+tidak ada satu pun peringatan. Diukur pada Cornell: CPU melaporkan 1.728 dari
+3.456 cluster "berlampu", sementara hanya 0,2% fragmen yang cluster-nya berisi
+lampu. Sapuan brute-force atas seluruh lampu — melewati cluster sepenuhnya —
+menerangi 29,0% fragmen dari kamera yang sama. Selisih 0,2% lawan 29,0% itu yang
+memisahkan "data lampunya salah" dari "pencariannya yang salah".
+
+**Dan dua jalur yang sepakat bukan bukti.** Jalur CPU dan jalur GPU menghasilkan
+gambar yang identik piksel-per-piksel sebelum maupun sesudah perbaikan, karena
+keduanya menyalin aritmetika yang sama — termasuk tandanya. Sekarang keduanya
+memanggil `ToClusterView`, satu konversi untuk satu ruang.
+
+**Uji yang ada tidak bisa menangkapnya** karena semuanya memberi `Mat4(1.0f)`
+sebagai matriks pandang dan menaruh lampunya di z positif — memeriksa penyaringan
+kotak-bola tanpa pernah melewati konversi ruangnya. Sekarang mereka memakai
+`LookAt` sungguhan, ditambah uji kamera yang diputar 90° dan uji kontrak
+`ToClusterView` sendiri. Melepas tandanya menggagalkan 11 assertion.
+
+### Cahaya yang tidak dimiliki siapa pun
+
+`ViewportDesc` membawa `sunDirection` dan `sunRadiance` sebagai nilai mundur
+"selama scene belum benar-benar punya lampu directional". Syarat itu sudah lama
+terpenuhi, dan yang tersisa adalah cacat: **menghapus lampu terakhir sebuah level
+tidak menggelapkan apa pun.** Adegan tetap tersinari matahari radiance 3,0 yang
+tidak dimiliki entity mana pun, tidak muncul di Outliner, dan tidak bisa
+dimatikan — dan orang yang mencari dari mana cahayanya datang tidak akan
+menemukannya.
+
+Keduanya dihapus. Matahari datang dari `FindSunLight(scene.lights)` — directional
+**pertama**, karena cascade hanya ada satu himpunan — dan tidak ada berarti
+radiansi nol.
+
+**Yang menggantikannya bukan layar hitam melainkan diffuse datar.** Hitam memang
+jujur — tanpa cahaya tidak ada yang dipantulkan — tapi ia menghapus satu-satunya
+hal yang masih bisa dikerjakan orang di adegan yang belum punya lampu: melihat
+bentuk dan warna yang sudah ia susun. Adegan tanpa lampu karena itu digambar
+albedo-nya apa adanya: tanpa bayangan, tanpa sorotan, tanpa gradasi. Kedua jalur
+melakukannya di tempat yang sama — `anyLightInScene()` di `cluster_common.slang`,
+dipanggil `box_shading.slang` dan modul material — supaya ruas bermaterial dan
+ruas jalur-mundur tidak berbeda perlakuan di adegan yang sama.
+
+Diukur pada Cornell dari dalam, eksposur tetap: tanpa lampu luminansi maksimumnya
+177 dan permukaannya seragam sempurna (tidak ada gradasi sama sekali); dengan
+lampu titiknya, maksimumnya 255 dengan gradasi dan bayangan.
+
 ## E9 — Runtime & distribusi
 
 **Keadaan · 17 Agustus 2026.** `SimRuntime` dan `SimCook` sudah ada dan

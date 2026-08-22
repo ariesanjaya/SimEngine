@@ -127,6 +127,21 @@ float sampleAtlasShadow(GpuLight light, float3 worldPosition, float3 normal, flo
     return sum / 9.0;
 }
 
+/// Apakah adegan ini punya sumber cahaya sama sekali.
+///
+/// **Dipakai memutuskan apakah suku ambient penambal berlaku.** Sebuah konstanta
+/// ambient yang menyala tanpa satu pun lampu adalah cahaya yang tidak dimiliki
+/// entity mana pun — tidak muncul di Outliner, tidak bisa disunting, dan tidak
+/// bisa dimatikan. Yang mencarinya tidak akan menemukannya.
+///
+/// Matahari dibaca dari radiansinya, bukan dari arahnya: arah selalu ada (ia
+/// dipakai cascade dan LUT langit apa pun keadaannya), sedangkan radiansi nol
+/// berarti tidak ada directional di scene.
+bool anyLightInScene() {
+    return dot(shadowParams.sunRadiance.rgb, float3(1.0, 1.0, 1.0)) > 0.0 ||
+           shadowParams.clusterCounts.w > 0.5;
+}
+
 /// Cluster untuk sebuah fragmen. `viewDepth` jarak sepanjang sumbu pandang.
 uint clusterOf(float2 fragCoord, float viewDepth) {
     uint3 counts = uint3(shadowParams.clusterCounts.xyz);

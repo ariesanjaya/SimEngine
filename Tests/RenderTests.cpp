@@ -1251,16 +1251,24 @@ TEST_CASE("Kerucut spot menghitung bola yang menyerempet tepinya") {
 }
 
 TEST_CASE("Lampu hanya masuk ke cluster yang benar-benar dikenainya") {
+    // **Matriks pandang sungguhan, bukan identitas.** Uji ini dulu memberi
+    // `Mat4(1.0f)` dan menaruh lampunya di z POSITIF, sehingga ia memeriksa
+    // penyaringan kotak-bola tanpa pernah melewati konversi ruangnya — dan
+    // konversi itulah yang salah. `glm::lookAt` tangan-kanan: yang di depan
+    // kamera bernilai z negatif, sementara kisi cluster mengukur kedalaman
+    // sebagai jarak positif. Satu tanda, dan setiap lampu titik di engine ini
+    // tidak pernah menyala; identitas menyembunyikannya karena ia tidak punya
+    // arah pandang untuk dibalik.
     ClusterGridSettings settings;
     settings.tilesX = 8;
     settings.tilesY = 6;
     settings.slices = 12;
     const ClusterGrid grid = MakeGrid(settings);
 
-    // Lampu kecil di sumbu pandang pada kedalaman 10.
+    // Kamera di titik asal menghadap +Z dunia; lampu kecil 10 m di depannya.
+    const Mat4 view = LookAt(Vec3(0.0f), Vec3(0.0f, 0.0f, 1.0f));
     const std::array<ClusterLight, 1> lights{PointAt(Vec3(0.0f, 0.0f, 10.0f), 1.0f)};
-    const ClusterAssignment assignment =
-        AssignLights(grid, Mat4(1.0f), lights, settings);
+    const ClusterAssignment assignment = AssignLights(grid, view, lights, settings);
 
     uint32_t touched = 0;
     for (uint32_t i = 0; i < grid.ClusterCount(); ++i) {
@@ -1270,21 +1278,106 @@ TEST_CASE("Lampu hanya masuk ke cluster yang benar-benar dikenainya") {
     // Kalau ia masuk ke sebagian besar cluster, penyaringannya tidak menyaring.
     CHECK(touched < grid.ClusterCount() / 4);
 
-    // Cluster tempat lampunya berada pasti termuat.
+    // **Cluster tempat fragmen yang disinarinya berada, bukan sekadar "ada yang
+    // termuat".** Inilah yang membedakan penetapan yang benar dari penetapan
+    // yang kebetulan tidak kosong: sebelum perbaikan, lampu ini masuk ke 1.728
+    // dari 3.456 cluster di dekat bidang dekat — daftar yang penuh, tanpa satu
+    // pun peringatan, dan tidak satu pun di antaranya cluster yang benar.
     const uint32_t slice = grid.SliceOf(10.0f);
     const uint32_t centre = grid.IndexOf(settings.tilesX / 2, settings.tilesY / 2, slice);
     CHECK(assignment.LightsOf(centre).size() == 1);
 }
 
+TEST_CASE("Matahari adegan adalah directional pertama, dan hanya itu") {
+    // **Aturan yang diminta, ditulis sebagai uji.** Cascade bayangan hanya ada
+    // satu himpunan; directional kedua tidak bisa dipenuhi tanpa membuang
+    // bayangan salah satunya. Yang tidak boleh terjadi adalah keduanya
+    // dijumlahkan diam-diam — arah yang dihasilkan tidak dimiliki lampu mana
+    // pun, dan bayangannya tidak cocok dengan apa pun di layar.
+    std::vector<LightInstance> lights;
+
+    // Tanpa lampu sama sekali: tidak ada matahari, dan yang menggambarnya gelap.
+    CHECK(FindSunLight(lights) == nullptr);
+
+    // Lampu punctual saja juga bukan matahari.
+    LightInstance point;
+    point.kind = LightKind::Point;
+    point.color = Vec3(1.0f, 0.0f, 0.0f);
+    lights.push_back(point);
+    CHECK(FindSunLight(lights) == nullptr);
+
+    LightInstance first;
+    first.kind = LightKind::Directional;
+    first.direction = Vec3(0.0f, 1.0f, 0.0f);
+    first.color = Vec3(1.0f, 0.9f, 0.8f);
+    lights.push_back(first);
+
+    LightInstance second;
+    second.kind = LightKind::Directional;
+    second.direction = Vec3(1.0f, 0.0f, 0.0f);
+    second.color = Vec3(0.0f, 0.0f, 1.0f);
+    lights.push_back(second);
+
+    const LightInstance* sun = FindSunLight(lights);
+    REQUIRE(sun != nullptr);
+    // Yang pertama, bukan yang terakhir dan bukan campurannya.
+    CHECK(sun->direction.y == doctest::Approx(1.0f));
+    CHECK(sun->color.b == doctest::Approx(0.8f));
+}
+
 TEST_CASE("Lampu di belakang kamera tidak masuk cluster mana pun") {
     const ClusterGridSettings settings;
     const ClusterGrid grid = MakeGrid(settings);
+    // Kamera menghadap +Z, lampunya 50 m di belakang punggungnya.
+    const Mat4 view = LookAt(Vec3(0.0f), Vec3(0.0f, 0.0f, 1.0f));
     const std::array<ClusterLight, 1> lights{PointAt(Vec3(0.0f, 0.0f, -50.0f), 5.0f)};
-    const ClusterAssignment assignment = AssignLights(grid, Mat4(1.0f), lights, settings);
+    const ClusterAssignment assignment = AssignLights(grid, view, lights, settings);
 
     for (uint32_t i = 0; i < grid.ClusterCount(); ++i) {
         CHECK(assignment.ranges[i].count == 0);
     }
+}
+
+TEST_CASE("Kamera yang diputar tetap menemukan cluster lampunya") {
+    // Kamera menghadap −X dari samping, lampu 12 m di depannya. Yang diuji di
+    // sini bukan penyaringannya melainkan **ruangnya**: sebuah konversi yang
+    // hanya benar untuk kamera yang menghadap satu arah tertentu akan lolos uji
+    // di atas dan gagal di sini.
+    ClusterGridSettings settings;
+    settings.tilesX = 8;
+    settings.tilesY = 6;
+    settings.slices = 12;
+    const ClusterGrid grid = MakeGrid(settings);
+
+    const Vec3 eye(20.0f, 3.0f, -5.0f);
+    const Vec3 target = eye + Vec3(-1.0f, 0.0f, 0.0f);
+    const Mat4 view = LookAt(eye, target);
+    const Vec3 lightPosition = eye + Vec3(-12.0f, 0.0f, 0.0f);
+    const std::array<ClusterLight, 1> lights{PointAt(lightPosition, 1.0f)};
+    const ClusterAssignment assignment = AssignLights(grid, view, lights, settings);
+
+    const uint32_t slice = grid.SliceOf(12.0f);
+    const uint32_t centre = grid.IndexOf(settings.tilesX / 2, settings.tilesY / 2, slice);
+    CHECK(assignment.LightsOf(centre).size() == 1);
+}
+
+TEST_CASE("Ruang kisi cluster mengukur kedalaman ke arah pandang, positif") {
+    // Kontrak `ToClusterView` ditulis sebagai uji karena ia satu-satunya tempat
+    // dua konvensi bertemu, dan karena selisihnya satu tanda yang tidak pernah
+    // terlihat sebagai galat — hanya sebagai lampu yang tidak menyala.
+    const Mat4 view = LookAt(Vec3(0.0f, 2.0f, 0.0f), Vec3(0.0f, 2.0f, 5.0f));
+
+    const ClusterViewLight front = ToClusterView(view, Vec3(0.0f, 2.0f, 7.0f),
+                                                 Vec3(0.0f, 0.0f, 1.0f));
+    CHECK(front.position.z == doctest::Approx(7.0f));
+    CHECK(front.position.x == doctest::Approx(0.0f));
+    CHECK(front.position.y == doctest::Approx(0.0f));
+    // Arah pancar yang searah pandangan juga menunjuk ke kedalaman positif.
+    CHECK(front.direction.z == doctest::Approx(1.0f));
+
+    const ClusterViewLight behind = ToClusterView(view, Vec3(0.0f, 2.0f, -3.0f),
+                                                 Vec3(0.0f, 0.0f, 1.0f));
+    CHECK(behind.position.z == doctest::Approx(-3.0f));
 }
 
 TEST_CASE("Daftar cluster dipotong dan pemotongannya dilaporkan") {

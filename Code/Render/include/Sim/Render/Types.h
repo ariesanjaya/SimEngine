@@ -294,16 +294,16 @@ struct ViewportDesc {
     float gridCellSize = 1.0f;   ///< meter per petak kecil
     float gridFadeDistance = 120.0f;
 
-    /// Arah **dari permukaan ke matahari**, tidak harus ternormalisasi.
+    /// Bayangan matahari boleh digambar sama sekali.
     ///
-    /// Di sini, bukan di `ViewportScene`: ia pengaturan tampilan viewport
-    /// selama scene belum benar-benar punya lampu directional. Begitu komponen
-    /// lampu dibaca renderer, medan ini yang menjadi nilai mundurnya.
-    Vec3 sunDirection{-0.4f, 0.8f, 0.45f};
-    /// Radiance matahari — warna dikali intensitas — saat scene tidak punya
-    /// lampu directional. Angkanya sama dengan matahari yang disemai editor,
-    /// jadi scene tanpa matahari tampak seperti scene dengan matahari bawaan.
-    Vec3 sunRadiance{3.0f};
+    /// **Arah dan radiansi mataharinya tidak ada di sini lagi.** Keduanya dulu
+    /// medan `ViewportDesc` dengan alasan yang tertulis di tempatnya: "pengaturan
+    /// tampilan viewport selama scene belum benar-benar punya lampu
+    /// directional". Syarat itu sudah lama terpenuhi, dan yang tersisa adalah
+    /// matahari yang menyala tanpa dimiliki entity mana pun — sehingga menghapus
+    /// lampu terakhir sebuah level tidak menggelapkan apa pun, dan tidak ada
+    /// tempat untuk mematikannya. Sekarang keduanya datang dari
+    /// `ViewportScene::lights`, dan adegan tanpa lampu memang gelap.
     bool castShadows = true;
 
     /// Langit atmosferik. Saat mati, latar viewport tetap `clearColor`.
@@ -561,6 +561,17 @@ struct LineSegment {
     Vec3 a{0.0f};
     Vec3 b{0.0f};
     Vec4 color{1.0f};
+    /// Digambar menembus geometri, tanpa uji kedalaman.
+    ///
+    /// **Untuk garis yang menjelaskan sesuatu yang tidak terlihat.** Rangka
+    /// kawat collider adalah contohnya: bentuk tabrakan hampir selalu berada di
+    /// dalam mesh yang menggambarkannya, jadi garis yang diuji kedalaman
+    /// tertutup persis oleh benda yang ukurannya sedang diperiksa orang.
+    ///
+    /// Bawaannya false: garis yang menggambarkan sesuatu yang **ada** di dunia —
+    /// batas volume asap, sumbu, kisi bantu — harus tertutup benda di depannya,
+    /// karena kalau tidak ia terbaca melayang di depan segalanya.
+    bool throughGeometry = false;
 };
 
 /// Isi yang harus digambar frame ini.

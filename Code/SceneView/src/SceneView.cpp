@@ -862,13 +862,15 @@ void SceneView::AddWireBox(const Vec3& boxMin, const Vec3& boxMax, const Vec4& c
             if ((index & bit) != 0) {
                 continue;
             }
-            lines_.push_back(render::LineSegment{corner(index), corner(index | bit), color});
+            lines_.push_back(
+                render::LineSegment{corner(index), corner(index | bit), color,
+                                    linesThroughGeometry_});
         }
     }
 }
 
 void SceneView::AddLine(const Vec3& from, const Vec3& to, const Vec4& color) {
-    lines_.push_back(render::LineSegment{from, to, color});
+    lines_.push_back(render::LineSegment{from, to, color, linesThroughGeometry_});
 }
 
 namespace {

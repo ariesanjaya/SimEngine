@@ -195,6 +195,15 @@ public:
     /// Satu ruas garis di ruang dunia.
     void AddLine(const Vec3& from, const Vec3& to, const Vec4& color);
 
+    /// Menggambar ruas berikutnya menembus geometri, sampai dikembalikan.
+    ///
+    /// **Sakelar, bukan parameter di setiap fungsi.** Rangka kawat sebuah kapsul
+    /// adalah seratus ruas yang semuanya menginginkan jawaban yang sama; menaruh
+    /// pilihannya di tanda tangan setiap primitif berarti seratus kesempatan
+    /// meneruskannya salah, dan yang salah tidak terlihat sebagai galat melainkan
+    /// sebagai satu bagian rangka yang tertutup dinding.
+    void SetLinesThroughGeometry(bool through) { linesThroughGeometry_ = through; }
+
     // --- rangka kawat bentuk tabrakan ---------------------------------------
     //
     // **Sumbunya mengikuti PhysX, bukan selera.** Kapsul dan silinder berbaring
@@ -356,6 +365,7 @@ private:
     std::vector<render::LightInstance> lights_;
     std::vector<Pickable> pickables_;
     IconGlyphs iconGlyphs_;
+    bool linesThroughGeometry_ = false;
     std::vector<EntityIcon> icons_;
     /// Warna dasar per material, supaya `.simmat` tidak diurai tiap frame untuk
     /// jawaban yang tidak berubah. Kunci GUID; jalur yang gagal dibaca dicatat

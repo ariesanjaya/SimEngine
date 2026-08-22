@@ -1463,6 +1463,11 @@ private:
             return;
         }
         scene::World& world = *context.world;
+        // **Tembus geometri.** Bentuk tabrakan hampir selalu berada di dalam mesh
+        // yang menggambarkannya — itu justru gunanya — jadi rangka kawat yang
+        // diuji kedalaman tertutup persis oleh benda yang ukurannya sedang
+        // diperiksa orang.
+        sceneView_.SetLinesThroughGeometry(true);
         for (const SelectionId id : context.selection->Items()) {
             const scene::Entity entity = ToEntity(id);
             if (entity == scene::kNullEntity || !world.IsAlive(entity)) {
@@ -1473,6 +1478,7 @@ private:
             DrawJointWire(world, entity);
             DrawVehicleWire(world, entity);
         }
+        sceneView_.SetLinesThroughGeometry(false);
     }
 
     /// Matriks bentuk: posisi dan putaran saja.

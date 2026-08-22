@@ -158,6 +158,13 @@ pembuatan aset baru (Material, Material Instance, Particle, Terrain, Lua Script)
   Ukurannya diminta dari `physics::DescribeCollider` dan
   `physics::DescribeVehicleWheels` — jalur yang sama yang memberi makan solver,
   bukan aritmetika kedua yang kebetulan mirip.
+
+  **Digambar menembus geometri**, tanpa uji kedalaman. Bentuk tabrakan hampir
+  selalu berada di dalam mesh yang menggambarkannya — itu justru gunanya — jadi
+  rangka yang diuji kedalaman tertutup persis oleh benda yang ukurannya sedang
+  diperiksa. Garis yang menggambarkan sesuatu yang **ada** di dunia (batas volume
+  asap) tetap diuji kedalaman; pilihannya per ruas, di
+  `render::LineSegment::throughGeometry`.
 - **Picking**: klik untuk memilih, Ctrl+klik untuk menambah, drag pada ruang kosong
   untuk seleksi kotak.
 - **Snapping**: grid (nilai bisa diatur), sudut, skala.
