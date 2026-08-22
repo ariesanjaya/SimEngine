@@ -526,6 +526,15 @@ private:
         // Kolom WAJIB menyesuaikan isi, bukan meregang — lihat catatan panjang
         // di GraphEditorPanel: node yang meregang tidak bisa digeser, hanya
         // melebar.
+        // Label keluaran terlebar node ini; yang lain diganjal supaya ikonnya
+        // sejajar di tepi kanan.
+        float outputLabelWidth = 0.0f;
+        for (const std::size_t index : outputs) {
+            const MaterialPin& pin = pins[index];
+            const std::string& text = pin.label.empty() ? pin.name : pin.label;
+            outputLabelWidth = std::max(outputLabelWidth, ImGui::CalcTextSize(text.c_str()).x);
+        }
+
         constexpr ImGuiTableFlags kPinTableFlags =
             ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoHostExtendX;
         if (ImGui::BeginTable("pins", 2, kPinTableFlags)) {
@@ -534,11 +543,11 @@ private:
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
                 if (row < inputs.size()) {
-                    DrawPin(node, pins[inputs[row]], PinId(id, inputs[row]));
+                    DrawPin(node, pins[inputs[row]], PinId(id, inputs[row]), outputLabelWidth);
                 }
                 ImGui::TableSetColumnIndex(1);
                 if (row < outputs.size()) {
-                    DrawPin(node, pins[outputs[row]], PinId(id, outputs[row]));
+                    DrawPin(node, pins[outputs[row]], PinId(id, outputs[row]), outputLabelWidth);
                 }
             }
             ImGui::EndTable();
@@ -693,7 +702,8 @@ private:
         }
     }
 
-    void DrawPin(const MaterialNode& node, const MaterialPin& pin, uint64_t pinId) {
+    void DrawPin(const MaterialNode& node, const MaterialPin& pin, uint64_t pinId,
+                 float outputLabelWidth) {
         const std::string label = pin.label.empty() ? pin.name : pin.label;
         const bool input = pin.direction == PinDirection::Input;
         // Tipe yang DISIMPULKAN, bukan yang dideklarasikan: sebuah Multiply
@@ -717,7 +727,16 @@ private:
             ImGui::SameLine();
             ImGui::TextUnformatted(label.c_str());
         } else {
+            // **Ikonnya rata kanan.** Label keluaran sebuah node panjangnya
+            // berbeda-beda — "rgba" lawan "r" — dan ikon yang mengikuti
+            // panjang labelnya membuat tepi kanan node bergerigi, padahal di
+            // situlah mata mencari tempat menarik kabel.
             canvas_.BeginOutputPin(pinId);
+            const float pad = outputLabelWidth - ImGui::CalcTextSize(label.c_str()).x;
+            if (pad > 0.0f) {
+                ImGui::Dummy(ImVec2(pad, 0.0f));
+                ImGui::SameLine(0.0f, 0.0f);
+            }
             ImGui::TextUnformatted(label.c_str());
             ImGui::SameLine();
             widgets::PinIcon(shape, connected, color);
