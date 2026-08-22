@@ -1,0 +1,33 @@
+ImGui 1.92.8 menukar urutan dua argumen terakhir `ImDrawList::PathStroke`:
+dulu `(col, flags, thickness)`, sekarang `(col, thickness, flags)`. Kode contoh
+blueprints pustaka ini masih memakai urutan yang lama.
+
+Yang terjadi tanpa patch ini bukan kegagalan kompilasi — kedua parameter sama-
+sama bisa dikonversi — melainkan ikon pin yang digambar dengan tebal garis 1,0
+(nilai `true`) dan flag berisi angka tebalnya, plus spanduk merah
+"Did you swap 'thickness' and 'flags'?" yang menutupi kanvas node setiap frame.
+
+Dilaporkan ke hulu belum; patch ini menyempit ke dua panggilan yang sama.
+
+diff --git a/examples/blueprints-example/utilities/drawing.cpp b/examples/blueprints-example/utilities/drawing.cpp
+index 1f255ee..443a4bb 100644
+--- a/examples/blueprints-example/utilities/drawing.cpp
++++ b/examples/blueprints-example/utilities/drawing.cpp
+@@ -69,7 +69,7 @@ void ax::Drawing::DrawIcon(ImDrawList* drawList, const ImVec2& a, const ImVec2&
+             if (innerColor & 0xFF000000)
+                 drawList->AddConvexPolyFilled(drawList->_Path.Data, drawList->_Path.Size, innerColor);
+ 
+-            drawList->PathStroke(color, true, 2.0f * outline_scale);
++            drawList->PathStroke(color, 2.0f * outline_scale, ImDrawFlags_Closed);
+         }
+         else
+             drawList->PathFillConvex(color);
+@@ -235,7 +235,7 @@ void ax::Drawing::DrawIcon(ImDrawList* drawList, const ImVec2& a, const ImVec2&
+                 if (innerColor & 0xFF000000)
+                     drawList->AddConvexPolyFilled(drawList->_Path.Data, drawList->_Path.Size, innerColor);
+ 
+-                drawList->PathStroke(color, true, 2.0f * outline_scale);
++                drawList->PathStroke(color, 2.0f * outline_scale, ImDrawFlags_Closed);
+             }
+         }
+         else

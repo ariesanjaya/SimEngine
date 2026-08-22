@@ -147,16 +147,44 @@ void NodeCanvas::SetGroupSize(uint64_t id, const Vec2& size) {
     ed::SetGroupSize(ed::NodeId(id), ToImGui(size));
 }
 
-void NodeCanvas::BeginInputPin(uint64_t id) {
+namespace {
+
+/// Titik tambat kabel, sebagai pecahan dari kotak pin: (0,0) kiri-atas,
+/// (1,1) kanan-bawah.
+ImVec2 PivotOf(NodeCanvas::PinSide side) {
+    switch (side) {
+        case NodeCanvas::PinSide::Left: return ImVec2(0.0f, 0.5f);
+        case NodeCanvas::PinSide::Right: return ImVec2(1.0f, 0.5f);
+        case NodeCanvas::PinSide::Top: return ImVec2(0.5f, 0.0f);
+        case NodeCanvas::PinSide::Bottom: return ImVec2(0.5f, 1.0f);
+    }
+    return ImVec2(0.0f, 0.5f);
+}
+
+/// Berapa jauh kabel keluar lurus sebelum melengkung, sebagai ukuran kotak
+/// tambatnya. Nol berarti kabel berangkat tepat dari titik tambatnya.
+void PushPivot(NodeCanvas::PinSide side) {
+    ed::PushStyleVar(ed::StyleVar_PivotAlignment, PivotOf(side));
+    ed::PushStyleVar(ed::StyleVar_PivotSize, ImVec2(0.0f, 0.0f));
+}
+
+}  // namespace
+
+void NodeCanvas::BeginInputPin(uint64_t id, PinSide side) {
+    PushPivot(side);
     ed::BeginPin(ed::PinId(id), ed::PinKind::Input);
 }
 
-void NodeCanvas::BeginOutputPin(uint64_t id) {
+void NodeCanvas::BeginOutputPin(uint64_t id, PinSide side) {
+    PushPivot(side);
     ed::BeginPin(ed::PinId(id), ed::PinKind::Output);
 }
 
 void NodeCanvas::EndPin() {
     ed::EndPin();
+    // Dilepas SESUDAH EndPin(): pustaka membaca pivotnya saat pin ditutup, dan
+    // yang melepasnya lebih dulu menambatkan setiap kabel di kiri.
+    ed::PopStyleVar(2);
 }
 
 void NodeCanvas::Link(uint64_t id, uint64_t fromPin, uint64_t toPin, const Vec4& color,
@@ -378,6 +406,55 @@ void NodeCanvas::DrawNodeHeader(uint64_t id, float height, const Vec4& color) {
     // kabur tepat ketika node berlatar terang.
     draw->AddLine(ImVec2(headerMin.x, headerMax.y), ImVec2(headerMax.x, headerMax.y),
                   ImGui::GetColorU32(ImVec4(0.0f, 0.0f, 0.0f, 0.35f)), 1.0f);
+}
+
+void NodeCanvas::PushNodeStyle(const Vec4& background, const Vec4& border, const Vec4& padding,
+                               float rounding) {
+    const ScopedEditor scoped(impl_->context);
+    ed::PushStyleColor(ed::StyleColor_NodeBg, ToImGui(background));
+    ed::PushStyleColor(ed::StyleColor_NodeBorder, ToImGui(border));
+    ed::PushStyleVar(ed::StyleVar_NodePadding,
+                     ImVec4(padding.x, padding.y, padding.z, padding.w));
+    ed::PushStyleVar(ed::StyleVar_NodeRounding, rounding);
+}
+
+void NodeCanvas::PopNodeStyle() {
+    const ScopedEditor scoped(impl_->context);
+    ed::PopStyleVar(2);
+    ed::PopStyleColor(2);
+}
+
+void NodeCanvas::PushLinkDirection(const Vec2& source, const Vec2& target, float strength) {
+    const ScopedEditor scoped(impl_->context);
+    ed::PushStyleVar(ed::StyleVar_SourceDirection, ImVec2(source.x, source.y));
+    ed::PushStyleVar(ed::StyleVar_TargetDirection, ImVec2(target.x, target.y));
+    ed::PushStyleVar(ed::StyleVar_LinkStrength, strength);
+}
+
+void NodeCanvas::PopLinkDirection() {
+    const ScopedEditor scoped(impl_->context);
+    ed::PopStyleVar(3);
+}
+
+void NodeCanvas::SetPinRect(const Vec2& min, const Vec2& max) {
+    ed::PinPivotRect(ImVec2(min.x, min.y), ImVec2(max.x, max.y));
+    ed::PinRect(ImVec2(min.x, min.y), ImVec2(max.x, max.y));
+}
+
+void NodeCanvas::DrawNodeBand(uint64_t id, float top, float bottom, const Vec4& color,
+                              float rounding, float inset) {
+    const ScopedEditor scoped(impl_->context);
+    ImDrawList* draw = ed::GetNodeBackgroundDrawList(ed::NodeId(id));
+    if (draw == nullptr || bottom <= top) {
+        return;
+    }
+    const ImVec2 min = ed::GetNodePosition(ed::NodeId(id));
+    const ImVec2 size = ed::GetNodeSize(ed::NodeId(id));
+    if (size.x <= inset * 2.0f) {
+        return;
+    }
+    draw->AddRectFilled(ImVec2(min.x + inset, top), ImVec2(min.x + size.x - inset, bottom),
+                        ImGui::GetColorU32(ToImGui(color)), rounding);
 }
 
 void NodeCanvas::SetStyle(const NodeCanvasStyle& style) {

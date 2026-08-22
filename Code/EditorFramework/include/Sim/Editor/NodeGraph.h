@@ -78,10 +78,25 @@ public:
     Vec2 GetNodeSize(uint64_t id) const;
     void SetGroupSize(uint64_t id, const Vec2& size);
 
-    /// Pin masukan (kiri) dan keluaran (kanan). Isi visualnya digambar pemanggil
-    /// dengan ImGui biasa di antara Begin dan End.
-    void BeginInputPin(uint64_t id);
-    void BeginOutputPin(uint64_t id);
+    /// Dari sisi mana kabel sebuah pin berangkat.
+    ///
+    /// **Ini bukan soal di mana ikonnya digambar.** Letak ikon ditentukan tata
+    /// letak ImGui pemanggil; arah kabel ditentukan *pivot* pin, dan pustaka
+    /// tidak menyimpulkan yang satu dari yang lain. Pin yang digambar di rel
+    /// atas sebuah node tapi pivotnya masih di kiri menghasilkan kabel yang
+    /// berangkat menyamping lalu berbelok — terlihat seperti kabel yang salah
+    /// sambung, padahal ikonnya sudah di tempat yang benar.
+    enum class PinSide : uint8_t {
+        Left,
+        Right,
+        Top,
+        Bottom,
+    };
+
+    /// Pin masukan dan keluaran. Isi visualnya digambar pemanggil dengan ImGui
+    /// biasa di antara Begin dan End.
+    void BeginInputPin(uint64_t id, PinSide side = PinSide::Left);
+    void BeginOutputPin(uint64_t id, PinSide side = PinSide::Right);
     void EndPin();
 
     void Link(uint64_t id, uint64_t fromPin, uint64_t toPin, const Vec4& color, float thickness);
@@ -174,6 +189,54 @@ public:
     /// Mengubah ukuran dan warna kanvas. Boleh dipanggil kapan saja setelah
     /// `Initialize()`; berlaku mulai frame berikutnya yang digambar.
     void SetStyle(const NodeCanvasStyle& style);
+
+    /// Warna dan bentuk satu node saja, dipasang sebelum `BeginNode()` dan
+    /// dilepas sesudah `EndNode()`.
+    ///
+    /// **Ada karena tidak semua node adalah benda yang sama.** Node berkepala —
+    /// judul di atas, badan gelap di bawah — cocok untuk yang punya banyak pin
+    /// bernama. Sebuah state di state machine tidak punya pin bernama sama
+    /// sekali: yang dibawanya satu nama dan dua arah. Bentuk yang benar
+    /// untuknya bingkai terang dengan rel di atas dan di bawah, dan itu bukan
+    /// varian warna melainkan node yang bentuknya berbeda.
+    void PushNodeStyle(const Vec4& background, const Vec4& border, const Vec4& padding,
+                       float rounding);
+    void PopNodeStyle();
+
+    /// Arah kabel berangkat dari pin sumber dan tiba di pin tujuan, beserta
+    /// seberapa jauh ia keluar lurus sebelum melengkung.
+    ///
+    /// **Inilah yang menentukan kabel keluar dari atas-bawah atau kiri-kanan —
+    /// bukan letak ikon pinnya.** Pustaka tidak menyimpulkan arah dari tata
+    /// letak; pin yang digambar di rel atas sebuah node tapi arahnya masih
+    /// mendatar menghasilkan kabel yang berangkat menyamping lalu berbelok,
+    /// dan itu terbaca sebagai kabel yang salah sambung.
+    ///
+    /// `strength` nol berarti kabel lurus dari titik ke titik. Untuk node yang
+    /// tersusun atas-bawah itu yang benar: lengkungan mendatar pada kabel yang
+    /// menurun hanya membuatnya melingkar.
+    void PushLinkDirection(const Vec2& source, const Vec2& target, float strength);
+    void PopLinkDirection();
+
+    /// Kotak yang menjadi pin, dipanggil di antara Begin…Pin() dan EndPin().
+    ///
+    /// **Pin-nya seluas relnya, bukan seluas ikonnya.** Yang menambatkan kabel
+    /// adalah kotak ini, jadi ikon bisa digambar di mana saja di dalamnya —
+    /// dan sasaran klik untuk menarik kabel baru menjadi selebar rel, bukan
+    /// sebesar satu ikon.
+    void SetPinRect(const Vec2& min, const Vec2& max);
+
+    /// Persegi membulat di dalam latar sebuah node.
+    ///
+    /// `top` dan `bottom` adalah koordinat Y kanvas — yaitu apa yang
+    /// dikembalikan `ImGui::GetCursorScreenPos()` di antara `Begin()` dan
+    /// `End()`. Dipanggil sesudah `EndNode()`, alasan yang sama dengan
+    /// `DrawNodeHeader`: lebar node baru diketahui di akhir.
+    ///
+    /// `inset` menarik sisi kiri dan kanannya ke dalam, supaya bingkai node
+    /// tetap terlihat mengelilinginya.
+    void DrawNodeBand(uint64_t id, float top, float bottom, const Vec4& color, float rounding,
+                      float inset);
 
 private:
     struct Impl;

@@ -114,16 +114,22 @@ bool GradientEditor(const char* id, Gradient& gradient, const ImVec2& size);
 /// separuh pinnya bertipe angka semua lingkarannya lalu berwarna sama. Bentuk
 /// memisahkan yang berbeda secara mendasar — nilai yang dihitung, aset yang
 /// dirujuk, dan alur yang dijalankan — sebelum warna diperlukan sama sekali.
+/// **Bentuknya sama dengan yang dipakai contoh blueprints pustaka node
+/// editor**, dan itu disengaja: bentuk-bentuk ini sudah punya arti yang dikenal
+/// orang dari editor lain. Yang menggambarnya pun kode contoh itu sendiri —
+/// lihat `drawing.cpp` di `cmake/SimDeps.cmake`.
 enum class PinShape : uint8_t {
+    /// Alur eksekusi. Satu-satunya pin yang tidak membawa nilai, dan bentuknya
+    /// mengatakan itu sebelum warnanya dilihat.
+    Flow,
     /// Nilai yang dihitung: angka, vektor, warna.
     Circle,
     /// Sesuatu yang dirujuk, bukan dihitung: tekstur, aset.
     Square,
+    Grid,
+    RoundSquare,
     /// Objek atau referensi.
     Diamond,
-    /// Alur eksekusi. Bentuknya sengaja bukan lingkaran, karena ia satu-satunya
-    /// pin yang tidak membawa nilai.
-    Arrow,
 };
 
 /// Menggambar ikon sebuah pin, dan memajukan kursor selebar ikonnya.
@@ -135,5 +141,11 @@ enum class PinShape : uint8_t {
 ///
 /// `size` nol berarti setinggi satu baris teks.
 void PinIcon(PinShape shape, bool connected, const ImVec4& color, float size = 0.0f);
+
+/// Sama, tapi digambar di sekitar sebuah titik dan **tanpa menyentuh tata
+/// letak**. Dipakai node yang menaruh ikonnya di dalam kotak yang sudah
+/// dipesan lebih dulu — rel sebuah node tree, misalnya.
+void PinIconAt(const ImVec2& centre, PinShape shape, bool connected, const ImVec4& color,
+               float size = 0.0f);
 
 }  // namespace sim::editor::widgets

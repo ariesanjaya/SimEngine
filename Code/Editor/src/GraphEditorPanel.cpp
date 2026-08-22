@@ -97,7 +97,7 @@ widgets::PinShape ShapeOf(PinKind kind) {
     switch (kind) {
         // Alur bukan nilai: ia satu-satunya pin yang tidak membawa apa pun,
         // dan bentuknya harus mengatakan itu sebelum warnanya dilihat.
-        case PinKind::Exec: return widgets::PinShape::Arrow;
+        case PinKind::Exec: return widgets::PinShape::Flow;
         // Entity dirujuk, bukan dihitung.
         case PinKind::Entity: return widgets::PinShape::Diamond;
         default: return widgets::PinShape::Circle;

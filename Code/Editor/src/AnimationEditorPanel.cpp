@@ -42,6 +42,27 @@ constexpr ImVec4 kHintColor(0.55f, 0.57f, 0.60f, 1.0f);
 constexpr ImVec4 kFlowPinColor(0.88f, 0.88f, 0.90f, 1.0f);
 /// Jarak isi node ke tepinya; dipakai gaya kanvas dan tinggi pita kepala.
 constexpr float kNodePadding = 7.0f;
+
+// --- node "tree" untuk state machine ----------------------------------------
+/// Bingkai terang yang mengelilingi seluruh node.
+constexpr Vec4 kTreeFrame(0.46f, 0.47f, 0.50f, 0.92f);
+constexpr Vec4 kTreeBorder(0.10f, 0.10f, 0.12f, 0.95f);
+/// Rel gelap tempat pin duduk, di atas dan di bawah.
+constexpr Vec4 kTreeRail(0.16f, 0.16f, 0.18f, 1.0f);
+constexpr ImVec4 kTreeSubtitleColor(0.86f, 0.88f, 0.92f, 0.75f);
+constexpr float kTreeRounding = 7.0f;
+/// Tebal bingkai terang yang terlihat di sisi kiri dan kanan.
+constexpr float kTreeInset = 6.0f;
+/// Tebal bingkai di sisi atas dan bawah.
+constexpr float kTreeFrameEdge = 5.0f;
+constexpr float kTreeGap = 3.0f;
+/// Lebar isi terkecil sebuah node tree.
+///
+/// **Tanpa ini node menjulang, bukan melebar.** Lebarnya kalau tidak dipatok
+/// hanya seluas teks terpanjangnya, dan nama state biasanya pendek — "Idle"
+/// menghasilkan node setinggi tiga baris selebar empat huruf, yang terbaca
+/// sebagai tiang, bukan sebagai state.
+constexpr float kTreeMinWidth = 104.0f;
 constexpr ImVec4 kWarnColor(0.95f, 0.68f, 0.25f, 1.0f);
 
 /// Sumbu yang dipetakan ke layar pada pratinjau.
@@ -1105,17 +1126,8 @@ private:
         // Simpul "Any State" digambar walaupun ia bukan state: transisi
         // ber-`from` -1 berlaku dari mana pun, dan menggambarnya tanpa pangkal
         // membuat kabelnya seolah muncul dari ketiadaan.
-        canvas_.BeginNode(AnyStateNodeId());
-        const float anyTop = ImGui::GetCursorScreenPos().y;
-        ImGui::TextUnformatted("Any State");
-        const float anyBottom = ImGui::GetCursorScreenPos().y;
-        ImGui::Dummy(ImVec2(0.0f, 3.0f));
-        canvas_.BeginOutputPin(OutputPinId(AnyStateNodeId()));
-        widgets::PinIcon(widgets::PinShape::Arrow, HasAnyStateTransition(layer), kFlowPinColor);
-        canvas_.EndPin();
-        canvas_.EndNode();
-        canvas_.DrawNodeHeader(AnyStateNodeId(), (anyBottom - anyTop) + kNodePadding * 2.0f,
-                               Vec4(0.34f, 0.28f, 0.40f, 1.0f));
+        DrawTreeNode(AnyStateNodeId(), "Any State", "entry", ImVec4(0.34f, 0.28f, 0.44f, 1.0f),
+                     /*hasIncoming=*/false, HasAnyStateTransition(layer));
 
         for (int i = 0; i < static_cast<int>(layer.states.size()); ++i) {
             DrawStateNode(layer, i);
@@ -1182,36 +1194,98 @@ private:
             }
         }
 
-        canvas_.BeginNode(id);
         const bool isDefault = index == layer.defaultState;
         const bool isActive = graphPlaying_ && instance_.Bound() &&
                               instance_.CurrentState(activeLayer_) == index;
-        const float headerTop = ImGui::GetCursorScreenPos().y;
-        ImGui::TextUnformatted(state.name.c_str());
-        ImGui::TextColored(kHintColor, "%s", ToString(state.motion.kind));
-        const float headerBottom = ImGui::GetCursorScreenPos().y;
-        ImGui::Dummy(ImVec2(0.0f, 3.0f));
-
-        // Transisi adalah alur, bukan nilai — pin-nya karena itu panah, sama
-        // seperti pin eksekusi di graph skrip.
-        canvas_.BeginInputPin(InputPinId(id));
-        widgets::PinIcon(widgets::PinShape::Arrow, HasIncoming(layer, index), kFlowPinColor);
-        canvas_.EndPin();
-        ImGui::SameLine();
-        canvas_.BeginOutputPin(OutputPinId(id));
-        widgets::PinIcon(widgets::PinShape::Arrow, HasOutgoing(layer, index), kFlowPinColor);
-        canvas_.EndPin();
-        canvas_.EndNode();
-
-        // **Warna kepala menyatakan peran state, bukan jenis geraknya.** Yang
+        // **Warna pita menyatakan peran state, bukan jenis geraknya.** Yang
         // dicari mata saat membaca sebuah state machine adalah "mana yang
-        // sedang berjalan" dan "mana yang mulai duluan"; jenis geraknya sudah
-        // tertulis di bawah namanya.
-        const ImVec4 header = isActive    ? ImVec4(0.24f, 0.52f, 0.30f, 1.0f)
-                              : isDefault ? ImVec4(0.54f, 0.44f, 0.20f, 1.0f)
-                                          : ImVec4(0.28f, 0.34f, 0.46f, 1.0f);
-        canvas_.DrawNodeHeader(id, (headerBottom - headerTop) + kNodePadding * 2.0f,
-                               Vec4(header.x, header.y, header.z, header.w));
+        // sedang berjalan" dan "mana yang mulai duluan".
+        const ImVec4 band = isActive    ? ImVec4(0.24f, 0.52f, 0.30f, 1.0f)
+                            : isDefault ? ImVec4(0.54f, 0.44f, 0.20f, 1.0f)
+                                        : ImVec4(0.20f, 0.36f, 0.58f, 1.0f);
+        DrawTreeNode(id, state.name, ToString(state.motion.kind), band,
+                     HasIncoming(layer, index), HasOutgoing(layer, index));
+    }
+
+    /// Node berbentuk "tree": bingkai terang, rel gelap di atas dan di bawah,
+    /// pita judul berwarna di tengah.
+    ///
+    /// **Bentuknya berbeda karena isinya berbeda.** Node berkepala cocok untuk
+    /// yang punya banyak pin bernama — satu judul di atas, lalu daftar pin di
+    /// bawahnya. Sebuah state tidak punya pin bernama sama sekali: yang
+    /// dibawanya satu nama dan dua arah. Rel di atas dan di bawah menyatakan
+    /// kedua arah itu tanpa satu pun label, dan pita di tengah menjadi seluruh
+    /// isinya alih-alih sekadar tajuk bagi ruang kosong.
+    void DrawTreeNode(uint64_t id, const std::string& title, const char* subtitle,
+                      const ImVec4& band, bool hasIncoming, bool hasOutgoing) {
+        canvas_.PushNodeStyle(kTreeFrame, kTreeBorder,
+                              Vec4(kTreeInset, kTreeFrameEdge, kTreeInset, kTreeFrameEdge),
+                              kTreeRounding);
+        // **Kabel berangkat ke bawah dan tiba dari atas, lurus.** Angkanya
+        // diambil dari node "tree" di contoh pustakanya: sumber (0, 1), tujuan
+        // (0, −1), kekuatan lengkung nol. Tanpa ini kabel tetap berangkat
+        // menyamping lalu berbelok, betapa pun pin-nya digambar di rel atas —
+        // arah kabel ditentukan gaya ini, bukan letak ikonnya.
+        canvas_.PushLinkDirection(Vec2(0.0f, 1.0f), Vec2(0.0f, -1.0f), 0.0f);
+        canvas_.BeginNode(id);
+
+        // Lebar isi ditentukan teks terlebar; rel dan pita mengikutinya. Lebar
+        // node sendiri baru diketahui sesudah EndNode(), jadi yang bisa dipakai
+        // untuk menengahkan hanyalah ini.
+        const float width = std::max({ImGui::CalcTextSize(title.c_str()).x,
+                                      ImGui::CalcTextSize(subtitle).x, kTreeMinWidth});
+        const float icon = ImGui::GetTextLineHeight();
+        const auto centred = [&](const char* text) {
+            const float indent = std::max((width - ImGui::CalcTextSize(text).x) * 0.5f, 0.0f);
+            ImGui::Dummy(ImVec2(indent, 0.0f));
+            ImGui::SameLine(0.0f, 0.0f);
+        };
+
+        // **Pin-nya seluas rel, bukan seluas ikon.** Itu yang dilakukan contoh
+        // pustakanya: kotak pin dipesan lebih dulu sebagai item ImGui biasa,
+        // lalu pin dideklarasikan di atas kotak itu. Akibatnya kabel menambat
+        // di tengah rel, dan sasaran klik untuk menariknya selebar rel.
+        const float railTop = ImGui::GetCursorScreenPos().y;
+        ImGui::Dummy(ImVec2(width, icon + 2.0f));
+        const ImVec2 inMin = ImGui::GetItemRectMin();
+        const ImVec2 inMax = ImGui::GetItemRectMax();
+        canvas_.BeginInputPin(InputPinId(id));
+        canvas_.SetPinRect(Vec2(inMin.x, inMin.y), Vec2(inMax.x, inMax.y));
+        canvas_.EndPin();
+        widgets::PinIconAt(ImVec2((inMin.x + inMax.x) * 0.5f, (inMin.y + inMax.y) * 0.5f),
+                           widgets::PinShape::Flow, hasIncoming, kFlowPinColor);
+        const float railBottom = ImGui::GetCursorScreenPos().y;
+
+        ImGui::Dummy(ImVec2(width, kTreeGap));
+        const float titleTop = ImGui::GetCursorScreenPos().y;
+        centred(title.c_str());
+        ImGui::TextUnformatted(title.c_str());
+        centred(subtitle);
+        ImGui::TextColored(kTreeSubtitleColor, "%s", subtitle);
+        const float titleBottom = ImGui::GetCursorScreenPos().y;
+        ImGui::Dummy(ImVec2(width, kTreeGap));
+
+        const float exitTop = ImGui::GetCursorScreenPos().y;
+        ImGui::Dummy(ImVec2(width, icon + 2.0f));
+        const ImVec2 outMin = ImGui::GetItemRectMin();
+        const ImVec2 outMax = ImGui::GetItemRectMax();
+        canvas_.BeginOutputPin(OutputPinId(id));
+        canvas_.SetPinRect(Vec2(outMin.x, outMin.y), Vec2(outMax.x, outMax.y));
+        canvas_.EndPin();
+        widgets::PinIconAt(ImVec2((outMin.x + outMax.x) * 0.5f, (outMin.y + outMax.y) * 0.5f),
+                           widgets::PinShape::Flow, hasOutgoing, kFlowPinColor);
+        const float exitBottom = ImGui::GetCursorScreenPos().y;
+
+        canvas_.EndNode();
+        canvas_.PopLinkDirection();
+        canvas_.PopNodeStyle();
+
+        // Ketiganya digambar sesudah node-nya, di latar belakangnya: lebar node
+        // baru diketahui di sini, dan latar itu berada di belakang teksnya.
+        canvas_.DrawNodeBand(id, railTop - 1.0f, railBottom + 1.0f, kTreeRail, 4.0f, kTreeInset);
+        canvas_.DrawNodeBand(id, titleTop - 2.0f, titleBottom + 2.0f,
+                             Vec4(band.x, band.y, band.z, band.w), 2.0f, kTreeInset);
+        canvas_.DrawNodeBand(id, exitTop - 1.0f, exitBottom + 1.0f, kTreeRail, 4.0f, kTreeInset);
     }
 
     /// Apakah ada transisi yang berakhir di state ini. Termasuk dari "Any
