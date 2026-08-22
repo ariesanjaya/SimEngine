@@ -2,6 +2,7 @@
 #include "Sim/Editor/EditorContext.h"
 #include "Sim/Editor/Icons.h"
 #include "Sim/Editor/NodeGraph.h"
+#include "Sim/Editor/Widgets.h"
 #include "Sim/Editor/Notifications.h"
 #include "Sim/Editor/Panel.h"
 #include "Sim/Editor/PanelIds.h"
@@ -70,6 +71,39 @@ std::size_t PinIndexOf(uint64_t pinId) {
 
 /// Warna pin menurut tipenya. Warna adalah cara tercepat melihat apa yang bisa
 /// disambung ke apa, jauh sebelum pengguna mencoba dan ditolak.
+/// Jarak isi node ke tepinya; dipakai gaya kanvas dan tinggi pita kepala.
+constexpr float kNodePadding = 7.0f;
+
+/// Warna pita kepala menurut kategori node. Kategori, bukan jenis node — lihat
+/// catatan yang sama di Material Editor.
+ImVec4 HeaderColorOf(std::string_view category) {
+    if (category == "Event") {
+        return ImVec4(0.62f, 0.24f, 0.24f, 1.0f);
+    }
+    if (category == "Flow") {
+        return ImVec4(0.30f, 0.30f, 0.34f, 1.0f);
+    }
+    if (category == "Math") {
+        return ImVec4(0.28f, 0.52f, 0.36f, 1.0f);
+    }
+    if (category == "Debug") {
+        return ImVec4(0.52f, 0.42f, 0.22f, 1.0f);
+    }
+    return ImVec4(0.24f, 0.44f, 0.62f, 1.0f);
+}
+
+/// Bentuk ikon pin menurut jenisnya.
+widgets::PinShape ShapeOf(PinKind kind) {
+    switch (kind) {
+        // Alur bukan nilai: ia satu-satunya pin yang tidak membawa apa pun,
+        // dan bentuknya harus mengatakan itu sebelum warnanya dilihat.
+        case PinKind::Exec: return widgets::PinShape::Flow;
+        // Entity dirujuk, bukan dihitung.
+        case PinKind::Entity: return widgets::PinShape::Diamond;
+        default: return widgets::PinShape::Circle;
+    }
+}
+
 ImVec4 ColorOf(PinKind kind) {
     switch (kind) {
         case PinKind::Exec: return ImVec4(0.90f, 0.90f, 0.90f, 1.0f);
@@ -121,6 +155,9 @@ public:
             return;
         }
         canvas_.Initialize();
+        NodeCanvasStyle style;
+        style.nodePadding = Vec4(kNodePadding, kNodePadding, kNodePadding, kNodePadding);
+        canvas_.SetStyle(style);
         // Pustaka graph dipegang cache milik runtime — sumber yang sama dengan
         // yang dipakai compiler saat Play, sehingga pin yang digambar di kanvas
         // tidak pernah berbeda dari pin yang dikompilasi.
@@ -319,6 +356,27 @@ private:
     void DrawCanvas(EditorContext& context) {
         canvas_.Begin("graph", Vec2(0.0f, 0.0f));
 
+        // Pin yang tersambung, dihitung sekali per frame — ikon pin yang terisi
+        // menyatakan tersambung, dan menanyakannya per pin berarti menelusuri
+        // seluruh daftar link untuk tiap pin di kanvas.
+        connectedPins_.clear();
+        for (const GraphLink& link : graph_.links) {
+            const auto mark = [&](const Uuid& nodeGuid, const std::string& pinName) {
+                const GraphNode* owner = graph_.FindNode(nodeGuid);
+                if (owner == nullptr) {
+                    return;
+                }
+                const std::vector<GraphPin> pins = PinsOf(graph_, *owner, library_);
+                for (std::size_t i = 0; i < pins.size(); ++i) {
+                    if (pins[i].name == pinName) {
+                        connectedPins_.insert(PinId(IdOf(owner->guid), i));
+                    }
+                }
+            };
+            mark(link.fromNode, link.fromPin);
+            mark(link.toNode, link.toPin);
+        }
+
         for (const GraphNode& node : graph_.nodes) {
             DrawNode(node);
         }
@@ -391,8 +449,10 @@ private:
             return;
         }
 
+        const float headerTop = ImGui::GetCursorScreenPos().y;
         ImGui::TextUnformatted(type != nullptr ? type->label.c_str() : node.type.c_str());
-        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        const float headerBottom = ImGui::GetCursorScreenPos().y;
+        ImGui::Dummy(ImVec2(0.0f, 3.0f));
 
         const std::vector<GraphPin> pins = PinsOf(graph_, node, library_);
         std::vector<std::size_t> inputs;
@@ -433,6 +493,9 @@ private:
         }
         canvas_.EndNode();
 
+        canvas_.DrawNodeHeader(id, (headerBottom - headerTop) + kNodePadding * 2.0f,
+                               ToVec4(HeaderColorOf(type != nullptr ? type->category : "")));
+
         if (Contains(errorNodes_, node.guid) || Contains(runtimeNodes_, node.guid)) {
             canvas_.DrawNodeBackground(id, ToVec4(kErrorColor), 2.5f);
         } else if (Contains(breakpoints_, node.guid)) {
@@ -451,9 +514,8 @@ private:
 
         canvas_.BeginNode(id);
         canvas_.BeginInputPin(PinId(id, 0));
-        ImGui::TextColored(color, "%s", pins.empty() || pins.front().kind != PinKind::Exec
-                                            ? "\u25cf"
-                                            : "\u25b6");
+        widgets::PinIcon(pins.empty() ? widgets::PinShape::Circle : ShapeOf(pins.front().kind),
+                         true, color);
         canvas_.EndPin();
         ImGui::SameLine();
         canvas_.BeginOutputPin(PinId(id, 1));
@@ -563,7 +625,7 @@ private:
         } else {
             canvas_.BeginOutputPin(pinId);
         }
-        ImGui::TextColored(ColorOf(pin.kind), "%s", pin.kind == PinKind::Exec ? "▶" : "●");
+        widgets::PinIcon(ShapeOf(pin.kind), connectedPins_.count(pinId) != 0, ColorOf(pin.kind));
         ImGui::SameLine();
         ImGui::TextUnformatted(label.c_str());
         canvas_.EndPin();
@@ -1559,6 +1621,8 @@ private:
     }
 
     NodeCanvas canvas_;
+    /// Pin yang tersambung pada frame ini.
+    std::unordered_set<uint64_t> connectedPins_;
     const GraphLibrary* library_ = nullptr;
     Graph graph_;
     CompileResult compiled_;

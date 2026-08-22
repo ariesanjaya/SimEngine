@@ -3,6 +3,7 @@
 #include "Sim/Editor/EditorContext.h"
 #include "Sim/Editor/Icons.h"
 #include "Sim/Editor/NodeGraph.h"
+#include "Sim/Editor/Widgets.h"
 #include "Sim/Editor/Notifications.h"
 #include "Sim/Editor/Panel.h"
 #include "Sim/Editor/PanelIds.h"
@@ -103,6 +104,36 @@ Vec4 ToVec4(const ImVec4& v) {
     return Vec4(v.x, v.y, v.z, v.w);
 }
 
+/// Warna pita kepala menurut kategori node.
+///
+/// **Kategori, bukan tipe node.** Sebuah graph material berisi puluhan jenis
+/// node, dan warna per jenis hanya menghasilkan pelangi yang tidak menyatakan
+/// apa pun. Kategori memisahkan yang benar-benar berbeda perannya: dari mana
+/// data masuk, apa yang menghitungnya, dan ke mana ia keluar.
+ImVec4 HeaderColorOf(std::string_view category) {
+    if (category == "Output") {
+        return ImVec4(0.62f, 0.24f, 0.24f, 1.0f);
+    }
+    if (category == "Input") {
+        return ImVec4(0.24f, 0.44f, 0.62f, 1.0f);
+    }
+    if (category == "Math") {
+        return ImVec4(0.28f, 0.52f, 0.36f, 1.0f);
+    }
+    return ImVec4(0.40f, 0.38f, 0.46f, 1.0f);
+}
+
+/// Jarak isi node ke tepinya. Dipakai dua kali — sebagai gaya kanvas, dan
+/// sebagai tinggi tambahan pita kepala — jadi keduanya tidak boleh berbeda.
+constexpr float kNodePadding = 7.0f;
+
+/// Bentuk ikon pin menurut tipe nilainya.
+widgets::PinShape ShapeOf(ValueKind kind) {
+    // Tekstur adalah sesuatu yang dirujuk, bukan dihitung — dan itu perbedaan
+    // yang paling sering salah disambung di graph material.
+    return kind == ValueKind::Texture ? widgets::PinShape::Square : widgets::PinShape::Circle;
+}
+
 bool Contains(const std::vector<Uuid>& list, const Uuid& value) {
     return std::find(list.begin(), list.end(), value) != list.end();
 }
@@ -141,6 +172,12 @@ public:
         // menentukan konteks mana yang dipakai pustaka, jadi memanggilnya sekali
         // saja di awal berarti panel ini bekerja pada konteks milik panel lain.
         canvas_.Initialize();
+        // Gaya dipasang tiap frame bersama Initialize(): keduanya bekerja pada
+        // konteks kanvas yang sedang aktif, dan panel node lain memasang
+        // gayanya sendiri pada konteksnya sendiri.
+        NodeCanvasStyle style;
+        style.nodePadding = Vec4(kNodePadding, kNodePadding, kNodePadding, kNodePadding);
+        canvas_.SetStyle(style);
 
         DrawToolbar(context);
         ImGui::Separator();
@@ -388,6 +425,31 @@ private:
     void DrawCanvas(EditorContext& context) {
         canvas_.Begin("##materialcanvas", Vec2(0.0f, 0.0f));
 
+        // Pin mana yang tersambung, dihitung sekali per frame. Menanyakannya
+        // per pin berarti menelusuri seluruh daftar link untuk setiap pin di
+        // kanvas, dan itu berlipat dua kali terhadap ukuran graph.
+        connectedPins_.clear();
+        for (const MaterialLink& link : graph_.links) {
+            const MaterialNode* from = graph_.FindNode(link.fromNode);
+            const MaterialNode* to = graph_.FindNode(link.toNode);
+            if (from != nullptr) {
+                const std::vector<MaterialPin> pins = PinsOf(graph_, *from);
+                for (std::size_t i = 0; i < pins.size(); ++i) {
+                    if (pins[i].name == link.fromPin) {
+                        connectedPins_.insert(PinId(IdOf(from->guid), i));
+                    }
+                }
+            }
+            if (to != nullptr) {
+                const std::vector<MaterialPin> pins = PinsOf(graph_, *to);
+                for (std::size_t i = 0; i < pins.size(); ++i) {
+                    if (pins[i].name == link.toPin) {
+                        connectedPins_.insert(PinId(IdOf(to->guid), i));
+                    }
+                }
+            }
+        }
+
         for (const MaterialNode& node : graph_.nodes) {
             DrawNode(node);
         }
@@ -446,9 +508,13 @@ private:
             return;
         }
 
+        // Tinggi pita kepala diukur di sini dan digambar sesudah EndNode():
+        // lebar node baru diketahui setelah seluruh isinya ditata.
+        const float headerTop = ImGui::GetCursorScreenPos().y;
         ImGui::TextUnformatted(type != nullptr ? type->label.c_str() : node.type.c_str());
         DrawNodeSubtitle(node);
-        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        const float headerBottom = ImGui::GetCursorScreenPos().y;
+        ImGui::Dummy(ImVec2(0.0f, 3.0f));
 
         const std::vector<MaterialPin> pins = PinsOf(graph_, node);
         std::vector<std::size_t> inputs;
@@ -478,6 +544,10 @@ private:
             ImGui::EndTable();
         }
         canvas_.EndNode();
+
+        // Pita kepala setinggi isinya ditambah padding node di atas dan bawah.
+        canvas_.DrawNodeHeader(id, (headerBottom - headerTop) + kNodePadding * 2.0f,
+                               ToVec4(HeaderColorOf(type != nullptr ? type->category : "")));
 
         if (Contains(errorNodes_, node.guid)) {
             canvas_.DrawNodeBackground(id, ToVec4(kErrorColor), 2.5f);
@@ -634,16 +704,23 @@ private:
                                      : types_.Of(graph_, node, pin.name);
         const ImVec4 color = ColorOf(kind);
 
+        // Bentuk dari tipe yang DIDEKLARASIKAN, warna dari tipe yang
+        // DISIMPULKAN. Bentuk menyatakan apa yang boleh disambungkan ke sana
+        // dan tidak berubah-ubah; warna menyatakan apa yang sebenarnya
+        // mengalir, dan itu memang bergantung pada apa yang sudah tersambung.
+        const widgets::PinShape shape = ShapeOf(pin.kind);
+        const bool connected = connectedPins_.count(pinId) != 0;
+
         if (input) {
             canvas_.BeginInputPin(pinId);
-            ImGui::TextColored(color, "%s", pin.kind == ValueKind::Texture ? "■" : "●");
+            widgets::PinIcon(shape, connected, color);
             ImGui::SameLine();
             ImGui::TextUnformatted(label.c_str());
         } else {
             canvas_.BeginOutputPin(pinId);
             ImGui::TextUnformatted(label.c_str());
             ImGui::SameLine();
-            ImGui::TextColored(color, "%s", pin.kind == ValueKind::Texture ? "■" : "●");
+            widgets::PinIcon(shape, connected, color);
         }
         canvas_.EndPin();
 
@@ -1832,6 +1909,9 @@ private:
     }
 
     NodeCanvas canvas_;
+    /// Pin yang tersambung pada frame ini. Diisi ulang tiap frame sebelum node
+    /// digambar — ikon pin yang terisi menyatakan tersambung.
+    std::unordered_set<uint64_t> connectedPins_;
 
     MaterialGraph graph_;
     /// Terisi hanya di mode instance; `graph_` lalu berisi graph INDUKNYA.

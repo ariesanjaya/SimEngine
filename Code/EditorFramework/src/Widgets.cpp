@@ -7,6 +7,11 @@
 #include <algorithm>
 #include <cmath>
 
+// Ikon pin digambar kode contoh pustaka node editor sendiri — lihat
+// `cmake/SimDeps.cmake`. Ini satu-satunya berkas di luar `NodeGraph.cpp` yang
+// menyentuh namespace `ax`.
+#include <drawing.h>
+
 namespace sim::editor::widgets {
 namespace {
 
@@ -493,6 +498,49 @@ bool GradientEditor(const char* id, Gradient& gradient, const ImVec2& size) {
     ImGui::SetCursorScreenPos(ImVec2(origin.x, origin.y + size.y));
     ImGui::PopID();
     return changed;
+}
+
+namespace {
+
+/// Padanan bentuk kita dengan bentuk milik kode contoh.
+ax::Drawing::IconType ToIconType(PinShape shape) {
+    switch (shape) {
+        case PinShape::Flow: return ax::Drawing::IconType::Flow;
+        case PinShape::Circle: return ax::Drawing::IconType::Circle;
+        case PinShape::Square: return ax::Drawing::IconType::Square;
+        case PinShape::Grid: return ax::Drawing::IconType::Grid;
+        case PinShape::RoundSquare: return ax::Drawing::IconType::RoundSquare;
+        case PinShape::Diamond: return ax::Drawing::IconType::Diamond;
+    }
+    return ax::Drawing::IconType::Circle;
+}
+
+/// Warna rongga ikon yang belum tersambung.
+///
+/// Gelap, bukan tembus pandang: pin berongga yang menampakkan kabel di
+/// belakangnya terbaca sebagai pin yang tersambung. Angkanya diambil dari
+/// contohnya, yang memakai (32, 32, 32).
+const ImVec4 kIconHollow(32.0f / 255.0f, 32.0f / 255.0f, 32.0f / 255.0f, 1.0f);
+
+}  // namespace
+
+void PinIcon(PinShape shape, bool connected, const ImVec4& color, float size) {
+    const float side = size > 0.0f ? size : ImGui::GetTextLineHeight();
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    // Ruangnya dipesan lebih dulu supaya tata letak baris tetap benar meski
+    // yang menggambar adalah draw list, bukan widget.
+    ImGui::Dummy(ImVec2(side, side));
+    PinIconAt(ImVec2(origin.x + side * 0.5f, origin.y + side * 0.5f), shape, connected, color,
+              side);
+}
+
+void PinIconAt(const ImVec2& centre, PinShape shape, bool connected, const ImVec4& color,
+               float size) {
+    const float side = size > 0.0f ? size : ImGui::GetTextLineHeight();
+    const ImVec2 min(centre.x - side * 0.5f, centre.y - side * 0.5f);
+    const ImVec2 max(centre.x + side * 0.5f, centre.y + side * 0.5f);
+    ax::Drawing::DrawIcon(ImGui::GetWindowDrawList(), min, max, ToIconType(shape), connected,
+                          ImGui::GetColorU32(color), ImGui::GetColorU32(kIconHollow));
 }
 
 }  // namespace sim::editor::widgets

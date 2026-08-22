@@ -256,12 +256,23 @@ FetchContent_Declare(imgui_node_editor
         -P ${CMAKE_CURRENT_LIST_DIR}/ApplyPatch.cmake)
 FetchContent_MakeAvailable(imgui_node_editor)
 
+# `drawing.cpp` datang dari contoh blueprints pustaka ini, dan ia ikut
+# dikompilasi alih-alih ditiru.
+#
+# **Ikon pin adalah bagian dari bahasa visual editor node, bukan hiasan.**
+# Bentuk aliran, lingkaran, kotak, dan belah ketupat itu sudah punya arti yang
+# dikenal orang dari editor lain; menggambar ulang "yang mirip" menghasilkan
+# bentuk yang hampir sama dan karena itu justru membingungkan. Berkasnya MIT,
+# Copyright (c) 2019 Michał Cichoń, sama seperti pustakanya sendiri.
 add_library(imgui_node_editor STATIC
     ${imgui_node_editor_SOURCE_DIR}/imgui_node_editor.cpp
     ${imgui_node_editor_SOURCE_DIR}/imgui_node_editor_api.cpp
     ${imgui_node_editor_SOURCE_DIR}/imgui_canvas.cpp
-    ${imgui_node_editor_SOURCE_DIR}/crude_json.cpp)
-target_include_directories(imgui_node_editor SYSTEM PUBLIC ${imgui_node_editor_SOURCE_DIR})
+    ${imgui_node_editor_SOURCE_DIR}/crude_json.cpp
+    ${imgui_node_editor_SOURCE_DIR}/examples/blueprints-example/utilities/drawing.cpp)
+target_include_directories(imgui_node_editor SYSTEM PUBLIC
+    ${imgui_node_editor_SOURCE_DIR}
+    ${imgui_node_editor_SOURCE_DIR}/examples/blueprints-example/utilities)
 target_link_libraries(imgui_node_editor PUBLIC imgui)
 set_target_properties(imgui_node_editor PROPERTIES FOLDER "ThirdParty")
 add_library(ImGuiNodeEditor::ImGuiNodeEditor ALIAS imgui_node_editor)

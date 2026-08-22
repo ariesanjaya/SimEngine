@@ -1,5 +1,7 @@
 #include "Sim/Editor/NodeGraph.h"
 
+#include <algorithm>
+
 #include <imgui.h>
 #include <imgui_node_editor.h>
 
@@ -145,16 +147,44 @@ void NodeCanvas::SetGroupSize(uint64_t id, const Vec2& size) {
     ed::SetGroupSize(ed::NodeId(id), ToImGui(size));
 }
 
-void NodeCanvas::BeginInputPin(uint64_t id) {
+namespace {
+
+/// Titik tambat kabel, sebagai pecahan dari kotak pin: (0,0) kiri-atas,
+/// (1,1) kanan-bawah.
+ImVec2 PivotOf(NodeCanvas::PinSide side) {
+    switch (side) {
+        case NodeCanvas::PinSide::Left: return ImVec2(0.0f, 0.5f);
+        case NodeCanvas::PinSide::Right: return ImVec2(1.0f, 0.5f);
+        case NodeCanvas::PinSide::Top: return ImVec2(0.5f, 0.0f);
+        case NodeCanvas::PinSide::Bottom: return ImVec2(0.5f, 1.0f);
+    }
+    return ImVec2(0.0f, 0.5f);
+}
+
+/// Berapa jauh kabel keluar lurus sebelum melengkung, sebagai ukuran kotak
+/// tambatnya. Nol berarti kabel berangkat tepat dari titik tambatnya.
+void PushPivot(NodeCanvas::PinSide side) {
+    ed::PushStyleVar(ed::StyleVar_PivotAlignment, PivotOf(side));
+    ed::PushStyleVar(ed::StyleVar_PivotSize, ImVec2(0.0f, 0.0f));
+}
+
+}  // namespace
+
+void NodeCanvas::BeginInputPin(uint64_t id, PinSide side) {
+    PushPivot(side);
     ed::BeginPin(ed::PinId(id), ed::PinKind::Input);
 }
 
-void NodeCanvas::BeginOutputPin(uint64_t id) {
+void NodeCanvas::BeginOutputPin(uint64_t id, PinSide side) {
+    PushPivot(side);
     ed::BeginPin(ed::PinId(id), ed::PinKind::Output);
 }
 
 void NodeCanvas::EndPin() {
     ed::EndPin();
+    // Dilepas SESUDAH EndPin(): pustaka membaca pivotnya saat pin ditutup, dan
+    // yang melepasnya lebih dulu menambatkan setiap kabel di kiri.
+    ed::PopStyleVar(2);
 }
 
 void NodeCanvas::Link(uint64_t id, uint64_t fromPin, uint64_t toPin, const Vec4& color,
@@ -335,6 +365,112 @@ void NodeCanvas::DrawNodeBackground(uint64_t id, const Vec4& color, float thickn
     draw->AddRect(ImVec2(min.x - 1.0f, min.y - 1.0f),
                   ImVec2(min.x + size.x + 1.0f, min.y + size.y + 1.0f),
                   ImGui::GetColorU32(ToImGui(color)), ed::GetStyle().NodeRounding, 0, thickness);
+}
+
+void NodeCanvas::DrawNodeHeader(uint64_t id, float height, const Vec4& color) {
+    const ScopedEditor scoped(impl_->context);
+    ImDrawList* draw = ed::GetNodeBackgroundDrawList(ed::NodeId(id));
+    if (draw == nullptr || height <= 0.0f) {
+        return;
+    }
+    const ImVec2 min = ed::GetNodePosition(ed::NodeId(id));
+    const ImVec2 size = ed::GetNodeSize(ed::NodeId(id));
+    if (size.x <= 0.0f) {
+        return;
+    }
+    const float rounding = ed::GetStyle().NodeRounding;
+    const float border = ed::GetStyle().NodeBorderWidth;
+    // Ditarik masuk selebar garis batasnya supaya pita tidak menutupi tepi
+    // node — yang tertutup akan terlihat sebagai node tanpa batas di bagian
+    // atas saja.
+    const ImVec2 headerMin(min.x + border, min.y + border);
+    const ImVec2 headerMax(min.x + size.x - border, min.y + std::min(height, size.y));
+
+    const ImVec4 top = ToImGui(color);
+    const ImVec4 bottom(top.x * 0.55f, top.y * 0.55f, top.z * 0.55f, top.w);
+
+    // **Dua bagian, dan pembagiannya tepat di garis membulatnya.** Sudut
+    // membulat hanya bisa digambar `AddRectFilled`, yang satu warna; gradasi
+    // hanya bisa digambar `AddRectFilledMultiColor`, yang tidak bisa membulat.
+    // Membagi di garis itu membuat keduanya bertemu tanpa celah dan tanpa warna
+    // yang menyembul di luar sudutnya.
+    const float split = std::min(headerMin.y + rounding, headerMax.y);
+    draw->AddRectFilled(headerMin, ImVec2(headerMax.x, split), ImGui::GetColorU32(top), rounding,
+                        ImDrawFlags_RoundCornersTop);
+    if (split < headerMax.y) {
+        draw->AddRectFilledMultiColor(ImVec2(headerMin.x, split), headerMax,
+                                      ImGui::GetColorU32(top), ImGui::GetColorU32(top),
+                                      ImGui::GetColorU32(bottom), ImGui::GetColorU32(bottom));
+    }
+    // Garis pemisah tipis di kaki pita: gradasi sendirian membuat batasnya
+    // kabur tepat ketika node berlatar terang.
+    draw->AddLine(ImVec2(headerMin.x, headerMax.y), ImVec2(headerMax.x, headerMax.y),
+                  ImGui::GetColorU32(ImVec4(0.0f, 0.0f, 0.0f, 0.35f)), 1.0f);
+}
+
+void NodeCanvas::PushNodeStyle(const Vec4& background, const Vec4& border, const Vec4& padding,
+                               float rounding) {
+    const ScopedEditor scoped(impl_->context);
+    ed::PushStyleColor(ed::StyleColor_NodeBg, ToImGui(background));
+    ed::PushStyleColor(ed::StyleColor_NodeBorder, ToImGui(border));
+    ed::PushStyleVar(ed::StyleVar_NodePadding,
+                     ImVec4(padding.x, padding.y, padding.z, padding.w));
+    ed::PushStyleVar(ed::StyleVar_NodeRounding, rounding);
+}
+
+void NodeCanvas::PopNodeStyle() {
+    const ScopedEditor scoped(impl_->context);
+    ed::PopStyleVar(2);
+    ed::PopStyleColor(2);
+}
+
+void NodeCanvas::PushLinkDirection(const Vec2& source, const Vec2& target, float strength) {
+    const ScopedEditor scoped(impl_->context);
+    ed::PushStyleVar(ed::StyleVar_SourceDirection, ImVec2(source.x, source.y));
+    ed::PushStyleVar(ed::StyleVar_TargetDirection, ImVec2(target.x, target.y));
+    ed::PushStyleVar(ed::StyleVar_LinkStrength, strength);
+}
+
+void NodeCanvas::PopLinkDirection() {
+    const ScopedEditor scoped(impl_->context);
+    ed::PopStyleVar(3);
+}
+
+void NodeCanvas::SetPinRect(const Vec2& min, const Vec2& max) {
+    ed::PinPivotRect(ImVec2(min.x, min.y), ImVec2(max.x, max.y));
+    ed::PinRect(ImVec2(min.x, min.y), ImVec2(max.x, max.y));
+}
+
+void NodeCanvas::DrawNodeBand(uint64_t id, float top, float bottom, const Vec4& color,
+                              float rounding, float inset) {
+    const ScopedEditor scoped(impl_->context);
+    ImDrawList* draw = ed::GetNodeBackgroundDrawList(ed::NodeId(id));
+    if (draw == nullptr || bottom <= top) {
+        return;
+    }
+    const ImVec2 min = ed::GetNodePosition(ed::NodeId(id));
+    const ImVec2 size = ed::GetNodeSize(ed::NodeId(id));
+    if (size.x <= inset * 2.0f) {
+        return;
+    }
+    draw->AddRectFilled(ImVec2(min.x + inset, top), ImVec2(min.x + size.x - inset, bottom),
+                        ImGui::GetColorU32(ToImGui(color)), rounding);
+}
+
+void NodeCanvas::SetStyle(const NodeCanvasStyle& style) {
+    if (impl_->context == nullptr) {
+        return;
+    }
+    const ScopedEditor scoped(impl_->context);
+    ed::Style& target = ed::GetStyle();
+    target.NodeRounding = style.nodeRounding;
+    target.NodeBorderWidth = style.nodeBorderWidth;
+    target.NodePadding = ImVec4(style.nodePadding.x, style.nodePadding.y, style.nodePadding.z,
+                                style.nodePadding.w);
+    target.PinRounding = style.pinRounding;
+    target.LinkStrength = style.linkStrength;
+    target.Colors[ed::StyleColor_NodeBg] = ToImGui(style.nodeBackground);
+    target.Colors[ed::StyleColor_NodeBorder] = ToImGui(style.nodeBorder);
 }
 
 }  // namespace sim::editor
