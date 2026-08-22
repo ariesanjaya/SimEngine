@@ -17,7 +17,7 @@ namespace sim::assets {
 class AssetDatabase;
 }
 
-namespace sim::editor {
+namespace sim::view {
 
 /// Memutar klip animasi pada entity yang aset mesh-nya ber-rig, lalu menyediakan
 /// palet matriks kulitnya untuk `SceneView`.
@@ -81,4 +81,4 @@ private:
     int animated_ = 0;
 };
 
-}  // namespace sim::editor
+}  // namespace sim::view

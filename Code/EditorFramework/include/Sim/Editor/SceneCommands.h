@@ -9,9 +9,13 @@
 #include <string>
 #include <vector>
 
+namespace sim::view {
+class Selection;
+}
+
 namespace sim::editor {
 
-class Selection;
+using view::Selection;
 
 /// Perintah yang dipakai bersama oleh Outliner, Inspector, dan Viewport.
 ///

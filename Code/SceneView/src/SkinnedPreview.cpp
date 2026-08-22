@@ -1,4 +1,4 @@
-#include "Sim/Editor/SkinnedPreview.h"
+#include "Sim/SceneView/SkinnedPreview.h"
 
 #include "Sim/Animation/AnimationIo.h"
 #include "Sim/Animation/ClipImport.h"
@@ -10,7 +10,7 @@
 #include <algorithm>
 #include <utility>
 
-namespace sim::editor {
+namespace sim::view {
 namespace {
 
 /// Jalur absolut sebuah rujukan aset, atau kosong.
@@ -198,4 +198,4 @@ void SkinnedPreview::Clear() {
     animated_ = 0;
 }
 
-}  // namespace sim::editor
+}  // namespace sim::view

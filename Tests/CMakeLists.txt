@@ -85,28 +85,33 @@ sim_add_test(SimWhiteboxTests
         Sim::Whitebox
         Sim::Assets)
 
-sim_add_test(SimEditorTests
-    SOURCES
-        EditorTests.cpp
-    DEPS
-        Sim::EditorFramework)
+# **Uji yang menautkan editor ikut gerbang SIM_BUILD_EDITOR.** Yang dilewati di
+# sini bukan cakupan yang hilang melainkan cakupan yang tidak ada targetnya:
+# build tanpa editor tidak punya `Sim::EditorFramework` untuk diuji.
+if(SIM_BUILD_EDITOR)
+    sim_add_test(SimEditorTests
+        SOURCES
+            EditorTests.cpp
+        DEPS
+            Sim::EditorFramework)
 
-# Impor berkas sumber diuji terhadap mesh sungguhan di folder sumber, alasan
-# yang sama dengan SIM_MESH_DIR pada SimAssetTests.
-target_compile_definitions(SimEditorTests
-    PRIVATE SIM_MESH_DIR="${CMAKE_SOURCE_DIR}/Resources/Meshes"
-    # Panel-nya sendiri ada di `Sim::Editor`, yang sengaja tidak ditautkan ke
-    # uji mana pun. Aturan "panel yang tidak di-dock harus mulai tertutup"
-    # karena itu ditegakkan dengan menyisir sumbernya, pola yang sama dengan
-    # SIM_CODE_DIR pada SimImageIOTests.
-    PRIVATE SIM_CODE_DIR="${CMAKE_SOURCE_DIR}/Code"
-    # Shader renderer dan `openpbr.slang`, dibaca dari folder sumber: uji yang
-    # mengompilasi material harus memakai berkas yang sedang ada di repo.
-    PRIVATE SIM_SHADER_DIR="${CMAKE_SOURCE_DIR}/Shaders"
-    # Material bawaan editor, dipakai uji sebagai material sungguhan yang bisa
-    # dikompilasi — bukan graph buatan uji, yang hanya membuktikan uji itu
-    # sepakat dengan dirinya sendiri.
-    PRIVATE SIM_BUILTIN_DIR="${CMAKE_SOURCE_DIR}/Resources")
+    # Impor berkas sumber diuji terhadap mesh sungguhan di folder sumber, alasan
+    # yang sama dengan SIM_MESH_DIR pada SimAssetTests.
+    target_compile_definitions(SimEditorTests
+        PRIVATE SIM_MESH_DIR="${CMAKE_SOURCE_DIR}/Resources/Meshes"
+        # Panel-nya sendiri ada di `Sim::Editor`, yang sengaja tidak ditautkan ke
+        # uji mana pun. Aturan "panel yang tidak di-dock harus mulai tertutup"
+        # karena itu ditegakkan dengan menyisir sumbernya, pola yang sama dengan
+        # SIM_CODE_DIR pada SimImageIOTests.
+        PRIVATE SIM_CODE_DIR="${CMAKE_SOURCE_DIR}/Code"
+        # Shader renderer dan `openpbr.slang`, dibaca dari folder sumber: uji yang
+        # mengompilasi material harus memakai berkas yang sedang ada di repo.
+        PRIVATE SIM_SHADER_DIR="${CMAKE_SOURCE_DIR}/Shaders"
+        # Material bawaan editor, dipakai uji sebagai material sungguhan yang bisa
+        # dikompilasi — bukan graph buatan uji, yang hanya membuktikan uji itu
+        # sepakat dengan dirinya sendiri.
+        PRIVATE SIM_BUILTIN_DIR="${CMAKE_SOURCE_DIR}/Resources")
+endif()
 
 sim_add_test(SimAssetTests
     SOURCES
@@ -260,15 +265,20 @@ sim_add_test(SimParticleTests
     DEPS
         Sim::Particle)
 
-sim_add_test(SimLevelEditorTests
-    SOURCES
-        LevelEditorTests.cpp
-    DEPS
-        Sim::EditorFramework)
+# **Uji yang menautkan editor ikut gerbang SIM_BUILD_EDITOR.** Yang dilewati di
+# sini bukan cakupan yang hilang melainkan cakupan yang tidak ada targetnya:
+# build tanpa editor tidak punya `Sim::EditorFramework` untuk diuji.
+if(SIM_BUILD_EDITOR)
+    sim_add_test(SimLevelEditorTests
+        SOURCES
+            LevelEditorTests.cpp
+        DEPS
+            Sim::EditorFramework)
 
-# Material bawaan dibaca dari folder sumber, alasan yang sama dengan yang lain.
-target_compile_definitions(SimLevelEditorTests
-    PRIVATE SIM_BUILTIN_DIR="${CMAKE_SOURCE_DIR}/Resources")
+    # Material bawaan dibaca dari folder sumber, alasan yang sama dengan yang lain.
+    target_compile_definitions(SimLevelEditorTests
+        PRIVATE SIM_BUILTIN_DIR="${CMAKE_SOURCE_DIR}/Resources")
+endif()
 
 if(SIM_WITH_LUA)
     sim_add_test(SimScriptTests
@@ -294,13 +304,15 @@ if(SIM_WITH_LUA)
     # Terpisah dari SimEditorTests karena hanya ada saat Lua ikut dibangun.
     # Yang diuji di sini adalah jembatannya — menu, panel, dan command yang
     # didaftarkan Lua — bukan `sim.ui`, yang menuntut konteks ImGui hidup.
-    sim_add_test(SimEditorScriptingTests
-        SOURCES
-            EditorScriptingTests.cpp
-        DEPS
-            Sim::EditorFramework
-            Sim::Script
-            Sim::Assets)
+    if(SIM_BUILD_EDITOR)
+        sim_add_test(SimEditorScriptingTests
+            SOURCES
+                EditorScriptingTests.cpp
+            DEPS
+                Sim::EditorFramework
+                Sim::Script
+                Sim::Assets)
+    endif()
 endif()
 
 # AIBridge diuji lewat HTTP sungguhan, bukan dengan memanggil dispatcher-nya
@@ -320,17 +332,22 @@ sim_add_test(SimAIBridgeTests
 # sudah ditutup SimAIBridgeTests. Yang dikunci di sini adalah apa yang dilakukan
 # sebuah tool call terhadap World, Selection, dan CommandHistory, dengan
 # EditorApp yang berjalan tanpa GPU maupun jendela.
-sim_add_test(SimAiToolsTests
-    SOURCES
-        AiToolsTests.cpp
-    DEPS
-        Sim::EditorFramework
-        Sim::AIBridge
-        Sim::ImageIO
-        # Tool A3 menjalankan Lua sungguhan; harness-nya membuat ScriptRuntime
-        # sendiri karena EditorApp menerimanya dari pemanggil, bukan membuatnya.
-        Sim::Script
-        # Uji terrain menyemai terrain lewat TerrainStore::Adopt — jalur yang
-        # sama dengan menu "Terrain baru", bukan berkas yang dikarang uji.
-        Sim::Terrain
-        nlohmann_json::nlohmann_json)
+# **Uji yang menautkan editor ikut gerbang SIM_BUILD_EDITOR.** Yang dilewati di
+# sini bukan cakupan yang hilang melainkan cakupan yang tidak ada targetnya:
+# build tanpa editor tidak punya `Sim::EditorFramework` untuk diuji.
+if(SIM_BUILD_EDITOR)
+    sim_add_test(SimAiToolsTests
+        SOURCES
+            AiToolsTests.cpp
+        DEPS
+            Sim::EditorFramework
+            Sim::AIBridge
+            Sim::ImageIO
+            # Tool A3 menjalankan Lua sungguhan; harness-nya membuat ScriptRuntime
+            # sendiri karena EditorApp menerimanya dari pemanggil, bukan membuatnya.
+            Sim::Script
+            # Uji terrain menyemai terrain lewat TerrainStore::Adopt — jalur yang
+            # sama dengan menu "Terrain baru", bukan berkas yang dikarang uji.
+            Sim::Terrain
+            nlohmann_json::nlohmann_json)
+endif()

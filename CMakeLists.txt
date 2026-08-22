@@ -97,6 +97,10 @@ add_subdirectory(Code/Vegetation)
 # Animation: rangka, klip berbasis kurva, pencampuran pose, dan graph state
 # machine untuk `.simskel`/`.simanim`/`.simanimgraph` (E7.5).
 add_subdirectory(Code/Animation)
+# SceneView: terjemahan `World` → `ViewportScene`, dipakai viewport editor dan
+# player. Sesudah Animation, Terrain, dan Whitebox karena ia menyebut ketiganya;
+# sebelum EditorFramework karena EditorFramework-lah yang memakainya.
+add_subdirectory(Code/SceneView)
 if(SIM_WITH_LUA)
     add_subdirectory(Code/Script)
 endif()
@@ -104,18 +108,28 @@ endif()
 # adalah EditorApp, jadi ia melihat AIBridge — bukan sebaliknya. AIBridge sendiri
 # tidak tahu apa-apa tentang editor.
 add_subdirectory(Code/AIBridge)
-add_subdirectory(Code/EditorFramework)
-add_subdirectory(Code/Editor)
+# **Ikut SIM_BUILD_EDITOR sejak `SceneView` punya modulnya sendiri.** Sebelum itu
+# keduanya wajib dibangun apa pun sakelarnya, karena player menautkan
+# EditorFramework demi terjemahan `World` → `ViewportScene` — jadi "bangun tanpa
+# editor" tidak pernah benar-benar berarti tanpa editor. Sekarang berarti.
+if(SIM_BUILD_EDITOR)
+    add_subdirectory(Code/EditorFramework)
+    add_subdirectory(Code/Editor)
+endif()
 
 if(SIM_BUILD_EDITOR)
     add_subdirectory(Apps/SimEditor)
     # Ikut SIM_BUILD_EDITOR karena ia menyusun inti editor yang sama. Ia tidak
     # menautkan panel maupun SDL — lihat alasannya di CMakeLists-nya.
     add_subdirectory(Apps/SimHeadless)
-    # Player (E9). Ikut SIM_BUILD_EDITOR untuk sementara: ia masih menautkan
-    # EditorFramework demi SceneView — lihat CMakeLists-nya.
-    add_subdirectory(Apps/SimRuntime)
 endif()
+
+# Player (E9). **Di luar gerbang SIM_BUILD_EDITOR sejak terjemahan
+# `World` → `ViewportScene` punya modulnya sendiri.** Selama ia menautkan
+# EditorFramework, membangun player tanpa editor mustahil — dan "player tidak
+# membawa editornya" adalah klaim yang hanya bisa dibuktikan oleh build yang
+# memang tidak punya editor untuk dibawa.
+add_subdirectory(Apps/SimRuntime)
 
 # Alat berkas: tidak menuntut GPU, jadi ia dibangun juga di build tanpa editor.
 add_subdirectory(Apps/SimCook)

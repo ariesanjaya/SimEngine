@@ -8,9 +8,13 @@
 
 /// Menyunting whitebox lewat riwayat undo yang sama dengan operasi scene
 /// lainnya.
+namespace sim::view {
+class WhiteboxStore;
+}
+
 namespace sim::editor {
 
-class WhiteboxStore;
+using view::WhiteboxStore;
 
 /// Satu perubahan bentuk whitebox, disimpan sebagai keadaan sebelum dan
 /// sesudah.

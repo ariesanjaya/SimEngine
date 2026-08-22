@@ -5,7 +5,7 @@
 #include "Sim/Editor/EditorContext.h"
 #include "Sim/Editor/EditorScripting.h"
 #include "Sim/Editor/PanelManager.h"
-#include "Sim/Editor/Selection.h"
+#include "Sim/SceneView/Selection.h"
 #include "Sim/Scene/Components.h"
 #include "Sim/Script/ScriptRuntime.h"
 

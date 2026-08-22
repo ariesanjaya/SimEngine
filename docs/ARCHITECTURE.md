@@ -25,13 +25,14 @@ SimEngine/
 │   ├── Terrain/              # heightmap berubin, layer splat, peta hole, brush, undo, I/O PNG/RAW
 │   ├── Vegetation/           # `.simveg`, sebaran Poisson deterministik, peta kepadatan, suntingan tangan
 │   ├── Render/               # IViewportRenderer + StubRenderer, frame graph & frustum culling (E8.1)
-│   ├── EditorFramework/      # App, PanelManager, dock layout, Command/Undo, Selection, widget
+│   ├── SceneView/            # `World` → `ViewportScene`: dipakai viewport editor DAN player
+│   ├── EditorFramework/      # App, PanelManager, dock layout, Command/Undo, widget
 │   ├── AIBridge/             # MCP server (JSON-RPC/HTTP), ToolRegistry, MainThreadQueue, izin
 │   └── Editor/               # panel konkrit (Outliner, Inspector, Material, Particle, ...)
 ├── Apps/
 │   ├── SimEditor/            # entry point editor
 │   ├── SimHeadless/          # editor tanpa GUI + MCP server, untuk agen di CI (A4)
-│   ├── SimRuntime/           # entry point player (E9)
+│   ├── SimRuntime/           # entry point player (E9) — tanpa EditorFramework, tanpa ImGui
 │   └── SimCook/              # memangkas aset tak terpakai untuk dikirim (E9)
 ├── Resources/                # font, ikon, tema, layout dock bawaan
 ├── Shaders/
@@ -83,7 +84,7 @@ Aturan keras:
 | `Core`, `Reflect`, `Scene`, `Asset`, `Script` | ❌ | murni CPU/data, bisa di-unit-test headless |
 | `RHI`, `ImGuiIntegration` | ✅ | satu-satunya tempat `vulkan.h` boleh muncul |
 | `Render` | ✅ di `src/`, ❌ di `include/` | header publik hanya antarmuka + POD |
-| `EditorFramework`, `Editor`, `AIBridge` | ❌ | bicara ke `Render` lewat antarmuka |
+| `SceneView`, `EditorFramework`, `Editor`, `AIBridge` | ❌ | bicara ke `Render` lewat antarmuka |
 
 ## Seam utama
 

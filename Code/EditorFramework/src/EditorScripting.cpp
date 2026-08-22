@@ -6,7 +6,7 @@
 #include "Sim/Editor/EditorContext.h"
 #include "Sim/Editor/Panel.h"
 #include "Sim/Editor/PanelManager.h"
-#include "Sim/Editor/Selection.h"
+#include "Sim/SceneView/Selection.h"
 
 #if SIM_WITH_LUA
 #include "Sim/Script/LuaVM.h"

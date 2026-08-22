@@ -14,7 +14,7 @@
 /// viewport menggambar — kalau keduanya memuat sendiri-sendiri, yang tergambar
 /// adalah bentuk sebelum suntingan terakhir, dan tidak ada satu pun pesan yang
 /// menjelaskan mengapa.
-namespace sim::editor {
+namespace sim::view {
 
 /// Sisi yang sedang disorot, beserta aset pemiliknya.
 ///
@@ -88,4 +88,4 @@ private:
     SideSelection selected_;
 };
 
-}  // namespace sim::editor
+}  // namespace sim::view

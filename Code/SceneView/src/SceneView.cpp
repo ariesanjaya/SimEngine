@@ -1,4 +1,4 @@
-#include "Sim/Editor/SceneView.h"
+#include "Sim/SceneView/SceneView.h"
 
 #include "Sim/Assets/MeshSdfBakery.h"
 #include "Sim/Assets/TextureBakery.h"
@@ -9,10 +9,8 @@
 #include "Sim/Core/Log.h"
 #include "Sim/Material/MaterialInstance.h"
 #include "Sim/Material/MaterialNodeCatalog.h"
-#include "Sim/Editor/EditorContext.h"
 #include "Sim/Terrain/TerrainDecal.h"
-#include "Sim/Editor/Icons.h"
-#include "Sim/Editor/Selection.h"
+#include "Sim/SceneView/Selection.h"
 #include "Sim/Scene/Components.h"
 
 #include <algorithm>
@@ -20,7 +18,7 @@
 #include <charconv>
 #include <limits>
 
-namespace sim::editor {
+namespace sim::view {
 namespace {
 
 constexpr Vec4 kMeshColor{0.62f, 0.65f, 0.70f, 1.0f};
@@ -304,14 +302,15 @@ void SceneView::Build(scene::World& world, const Selection& selection,
             // Lampu directional dibedakan dari yang lain: ia menerangi seluruh
             // scene tanpa punya posisi bermakna, dan membedakannya sekilas
             // menghemat satu klik ke Inspector.
-            icon.glyph = light->type == scene::LightType::Directional ? icons::kSunLight
-                                                                     : icons::kLight;
+            icon.glyph = light->type == scene::LightType::Directional
+                             ? iconGlyphs_.directionalLight
+                             : iconGlyphs_.light;
             icon.color = kLightColor;
         } else if (world.Has<scene::CameraComponent>(entity)) {
-            icon.glyph = icons::kCamera;
+            icon.glyph = iconGlyphs_.camera;
             icon.color = kCameraColor;
         } else {
-            icon.glyph = icons::kEntity;
+            icon.glyph = iconGlyphs_.empty;
             icon.color = kEmptyColor;
         }
         icons_.push_back(icon);
@@ -1059,4 +1058,4 @@ bool WorldToScreen(const Mat4& viewProjection, const Vec2& origin, const Vec2& s
     return true;
 }
 
-}  // namespace sim::editor
+}  // namespace sim::view

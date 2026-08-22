@@ -96,7 +96,7 @@ dan ia tidak punya title bar sendiri untuk ditempati.
 - **Help** — Dokumentasi, About
 
 Toolbar kiri: mode transform, ruang gizmo (world/local), snapping, pivot.
-Toolbar kanan: **Play / Pause / Stop** untuk simulasi in-editor.
+Toolbar kanan: **Play / Pause / Step / Stop** untuk simulasi in-editor (F5 · F6 · F7 · Shift+F5). Pause menahan jam dunia — pose animasi, matahari, skrip, solver — sementara editor tetap berjalan penuh; Step memajukannya satu langkah tetap 1/60 detik lalu menahannya lagi.
 
 ## (B) Entity Outliner
 

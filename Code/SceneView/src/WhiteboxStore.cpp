@@ -1,11 +1,11 @@
-#include "Sim/Editor/WhiteboxStore.h"
+#include "Sim/SceneView/WhiteboxStore.h"
 
 #include "Sim/Core/Log.h"
 #include "Sim/Whitebox/WhiteboxIo.h"
 
 #include <utility>
 
-namespace sim::editor {
+namespace sim::view {
 
 whitebox::WhiteboxMesh* WhiteboxStore::Get(const Uuid& guid,
                                            const std::filesystem::path& path) {
@@ -97,4 +97,4 @@ void WhiteboxStore::Clear() {
     selected_ = {};
 }
 
-}  // namespace sim::editor
+}  // namespace sim::view

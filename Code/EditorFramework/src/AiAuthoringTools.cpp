@@ -12,7 +12,7 @@
 #include "Sim/Particle/ParticleEffect.h"
 #include "Sim/Terrain/Terrain.h"
 #include "Sim/Terrain/TerrainBrush.h"
-#include "Sim/Editor/TerrainStore.h"
+#include "Sim/SceneView/TerrainStore.h"
 #include "Sim/Editor/Panel.h"
 #include "Sim/Editor/PanelIds.h"
 #include "Sim/Editor/PanelManager.h"

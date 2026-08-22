@@ -3,11 +3,11 @@
 #include "Sim/Core/Math.h"
 #include "Sim/Render/IViewportRenderer.h"
 #include "Sim/Render/Types.h"
-#include "Sim/Editor/SkinnedPreview.h"
-#include "Sim/Editor/TerrainStore.h"
+#include "Sim/SceneView/SkinnedPreview.h"
+#include "Sim/SceneView/TerrainStore.h"
 #include "Sim/Terrain/TerrainDecal.h"
-#include "Sim/Editor/WhiteboxStore.h"
-#include "Sim/Editor/MaterialPrograms.h"
+#include "Sim/SceneView/WhiteboxStore.h"
+#include "Sim/SceneView/MaterialPrograms.h"
 #include "Sim/Scene/World.h"
 
 #include <filesystem>
@@ -23,7 +23,7 @@ struct AssetRecord;
 class AssetDatabase;
 }
 
-namespace sim::editor {
+namespace sim::view {
 
 class Selection;
 class TerrainStore;
@@ -122,6 +122,27 @@ public:
         bool selected = false;
         bool pickable = true;
     };
+
+    /// Glyph penanda per jenis entity, diisi pemanggilnya.
+    ///
+    /// **Nama glyph-nya milik yang menggambarnya, bukan modul ini.** Komentar di
+    /// `EntityIcon` di atas sudah menyebutnya bertahun-tahun: "entity ini lampu,
+    /// jadi gambarkan bohlam" adalah pengetahuan editor. Sampai E9 kalimat itu
+    /// benar sementara kodenya tidak — modul ini menyebut `icons::kLight`
+    /// sendiri, dan font ikon lalu ikut terseret ke mana pun terjemahan
+    /// `World` → `ViewportScene` dipakai, player termasuk.
+    ///
+    /// Yang membiarkannya kosong tetap mendapat seluruh daftar penanda beserta
+    /// posisi, warna, dan status pickable-nya; yang hilang hanya glyph-nya. Dan
+    /// yang tidak menggambar penanda memang tidak punya font untuk membacanya.
+    struct IconGlyphs {
+        const char* directionalLight = nullptr;
+        const char* light = nullptr;
+        const char* camera = nullptr;
+        const char* empty = nullptr;
+    };
+
+    void SetIconGlyphs(const IconGlyphs& glyphs) { iconGlyphs_ = glyphs; }
 
     /// Menyusun ulang seluruh daftar dari isi world.
     /// Membangun daftar gambar dan daftar pickable untuk frame ini.
@@ -303,6 +324,7 @@ private:
     std::vector<render::LineSegment> lines_;
     std::vector<render::LightInstance> lights_;
     std::vector<Pickable> pickables_;
+    IconGlyphs iconGlyphs_;
     std::vector<EntityIcon> icons_;
     /// Warna dasar per material, supaya `.simmat` tidak diurai tiap frame untuk
     /// jawaban yang tidak berubah. Kunci GUID; jalur yang gagal dibaca dicatat
@@ -324,4 +346,4 @@ Ray ScreenPointToRay(const Mat4& view, const Mat4& projection, const Vec2& size,
 bool WorldToScreen(const Mat4& viewProjection, const Vec2& origin, const Vec2& size,
                    const Vec3& world, Vec2& outScreen);
 
-}  // namespace sim::editor
+}  // namespace sim::view

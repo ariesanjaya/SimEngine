@@ -1,7 +1,7 @@
 #include "Sim/Editor/SceneCommands.h"
 
 #include "Sim/Editor/EditorContext.h"
-#include "Sim/Editor/Selection.h"
+#include "Sim/SceneView/Selection.h"
 #include "Sim/Scene/Serialization.h"
 
 #include <algorithm>

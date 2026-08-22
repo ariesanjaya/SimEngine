@@ -11,11 +11,11 @@
 #include "Sim/Editor/PanelIds.h"
 #include "Sim/Editor/PanelRegistry.h"
 #include "Sim/Editor/SceneCommands.h"
-#include "Sim/Editor/SceneView.h"
-#include "Sim/Editor/Selection.h"
+#include "Sim/SceneView/SceneView.h"
+#include "Sim/SceneView/Selection.h"
 #include "Sim/Editor/Widgets.h"
 #include "Sim/Editor/WhiteboxCommands.h"
-#include "Sim/Editor/WhiteboxStore.h"
+#include "Sim/SceneView/WhiteboxStore.h"
 #include "Sim/Terrain/TerrainBrush.h"
 #include "Sim/Terrain/TerrainPicking.h"
 #include "Sim/Render/IViewportRenderer.h"
@@ -186,7 +186,19 @@ class ViewportPanel final : public Panel {
 public:
     ViewportPanel()
         : Panel(panel_id::kViewport, std::string(icons::kPanelViewport) + "  Viewport",
-                PanelCategory::Scene) {}
+                PanelCategory::Scene) {
+        // **Glyph penanda diisi di sini, bukan di `SceneView`.** Modul itu
+        // dipakai player juga, dan sebuah player tidak punya font ikon untuk
+        // membaca `ICON_LC_SUN`. "Entity ini lampu, jadi gambarkan bohlam"
+        // memang selalu pengetahuan editor — komentar di `EntityIcon` sudah
+        // menyebutnya sejak lama; yang baru adalah kodenya ikut mengatakannya.
+        SceneView::IconGlyphs glyphs;
+        glyphs.directionalLight = icons::kSunLight;
+        glyphs.light = icons::kLight;
+        glyphs.camera = icons::kCamera;
+        glyphs.empty = icons::kEntity;
+        sceneView_.SetIconGlyphs(glyphs);
+    }
 
     bool WantsZeroPadding() const override { return true; }
 
@@ -641,6 +653,13 @@ private:
             Vec2 screen;
             if (!WorldToScreen(viewProjection, Vec2(imagePos.x, imagePos.y), Vec2(size.x, size.y),
                                icon.position, screen)) {
+                continue;
+            }
+            // Penanda tanpa glyph dilewati. `SceneView::IconGlyphs` boleh
+            // kosong — itulah yang membuatnya bisa dipakai player — dan
+            // `CalcTextSizeA(nullptr)` bukan gambar yang hilang melainkan
+            // segfault di dalam ImGui.
+            if (icon.glyph == nullptr) {
                 continue;
             }
             const Vec4 color = icon.selected ? kSelectionColor : icon.color;

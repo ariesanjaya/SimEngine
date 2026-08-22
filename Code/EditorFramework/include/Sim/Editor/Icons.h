@@ -40,6 +40,7 @@ inline constexpr const char* kFocus = ICON_LC_TARGET;
 inline constexpr const char* kPlay = ICON_LC_PLAY;
 inline constexpr const char* kPause = ICON_LC_PAUSE;
 inline constexpr const char* kStop = ICON_LC_SQUARE;
+inline constexpr const char* kStepForward = ICON_LC_SKIP_FORWARD;
 
 // --- Panel -----------------------------------------------------------------
 inline constexpr const char* kPanelOutliner = ICON_LC_LIST_TREE;

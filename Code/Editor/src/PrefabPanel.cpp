@@ -6,7 +6,7 @@
 #include "Sim/Editor/PanelIds.h"
 #include "Sim/Editor/PanelRegistry.h"
 #include "Sim/Editor/SceneCommands.h"
-#include "Sim/Editor/Selection.h"
+#include "Sim/SceneView/Selection.h"
 #include "Sim/Scene/World.h"
 
 #include <imgui.h>

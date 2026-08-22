@@ -1,7 +1,7 @@
 #include "Sim/Editor/WhiteboxCommands.h"
 
 #include "Sim/Core/Log.h"
-#include "Sim/Editor/WhiteboxStore.h"
+#include "Sim/SceneView/WhiteboxStore.h"
 
 namespace sim::editor {
 

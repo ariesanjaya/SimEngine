@@ -1,9 +1,23 @@
 #pragma once
 
+#include "Sim/Scene/World.h"
+
 #include <cstdint>
 #include <vector>
 
-namespace sim::editor {
+namespace sim::view {
+
+/// Menjembatani Entity dan SelectionId.
+///
+/// Digeser satu supaya nilai 0 tetap berarti "tidak ada": entity pertama entt
+/// bernilai 0, dan tanpa pergeseran ini objek pertama di scene akan selalu
+/// tampak tidak terpilih.
+inline uint64_t ToSelectionId(scene::Entity entity) {
+    return static_cast<uint64_t>(entity) + 1;
+}
+inline scene::Entity ToEntity(uint64_t id) {
+    return id == 0 ? scene::kNullEntity : static_cast<scene::Entity>(id - 1);
+}
 
 /// Identitas objek yang bisa diseleksi.
 ///
@@ -47,4 +61,4 @@ private:
     uint64_t version_ = 0;
 };
 
-}  // namespace sim::editor
+}  // namespace sim::view

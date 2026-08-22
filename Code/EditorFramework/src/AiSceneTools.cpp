@@ -3,7 +3,7 @@
 #include "Sim/Editor/AiTools.h"
 #include "Sim/Editor/EditorApp.h"
 #include "Sim/Editor/EditorContext.h"
-#include "Sim/Editor/Selection.h"
+#include "Sim/SceneView/Selection.h"
 #include "Sim/Reflect/TypeRegistry.h"
 #include "Sim/Scene/ComponentRegistry.h"
 #include "Sim/Scene/Components.h"

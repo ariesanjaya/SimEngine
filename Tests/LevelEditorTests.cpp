@@ -6,16 +6,16 @@
 #include "Sim/Editor/EditorContext.h"
 #include "Sim/Editor/Gizmo.h"
 #include "Sim/Editor/SceneCommands.h"
-#include "Sim/Editor/SceneView.h"
+#include "Sim/SceneView/SceneView.h"
 #include "Sim/Editor/ProjectLibrary.h"
-#include "Sim/Editor/Selection.h"
-#include "Sim/Editor/SkinnedPreview.h"
+#include "Sim/SceneView/Selection.h"
+#include "Sim/SceneView/SkinnedPreview.h"
 #include "Sim/Editor/WhiteboxCommands.h"
-#include "Sim/Editor/TerrainStore.h"
+#include "Sim/SceneView/TerrainStore.h"
 #include "Sim/Editor/TextureSettingsCommand.h"
 #include "Sim/Terrain/TerrainBrush.h"
 #include "Sim/Terrain/TerrainPicking.h"
-#include "Sim/Editor/WhiteboxStore.h"
+#include "Sim/SceneView/WhiteboxStore.h"
 #include "Sim/Physics/PhysicsScene.h"
 #include "Sim/Whitebox/WhiteboxIo.h"
 #include "Sim/Scene/AssetUsage.h"
@@ -1326,6 +1326,111 @@ TEST_CASE("Play menjalankan fisika, Stop mengembalikan level seperti semula") {
     const auto* groundBody = app.GetWorld().TryGet<scene::RigidBodyComponent>(restoredGround);
     REQUIRE(groundBody != nullptr);
     CHECK(groundBody->kind == scene::RigidBodyKind::Static);
+
+    app.Shutdown();
+}
+
+TEST_CASE("Pause menahan jam dunia, Step memajukannya tepat satu langkah") {
+    // **Tombol Pause mati sejak E2, dan komentarnya menyebut alasannya:**
+    // "menunggu pemisahan waktu simulasi dari waktu editor". Selama keduanya
+    // satu angka, satu-satunya arti Pause adalah "bekukan editornya juga" —
+    // panel berhenti menggambar, kamera berhenti bergerak, dan keadaan yang
+    // ingin diperiksa orang justru tidak bisa diperiksa.
+    //
+    // Yang diuji di sini bahwa keduanya benar-benar dua jam: fisika berhenti
+    // sementara `deltaSeconds` yang dilihat panel tetap berjalan.
+    if (!physics::Available()) {
+        return;
+    }
+
+    ScratchDir scratch;
+    EditorApp app;
+    EditorApp::Config config;
+    config.configDir = scratch.path / "config";
+    config.projectsRoot = scratch.path / "Documents" / "SimEngine";
+    REQUIRE(app.Initialize(config));
+    // Tick tidak melakukan apa pun tanpa project — dan sebuah uji Pause yang
+    // lolos karena Tick-nya keluar lebih awal adalah uji yang selalu hijau.
+    REQUIRE(app.CreateProject(config.projectsRoot, "Jeda"));
+
+    scene::World& world = app.GetWorld();
+    const scene::Entity ground = world.Create("Ground");
+    {
+        auto& body = world.Add<scene::RigidBodyComponent>(ground);
+        body.kind = scene::RigidBodyKind::Static;
+        auto& collider = world.Add<scene::ColliderComponent>(ground);
+        collider.shape = scene::ColliderShape::Plane;
+    }
+    const scene::Entity ball = world.Create("Ball");
+    {
+        world.Add<scene::RigidBodyComponent>(ball);
+        auto& collider = world.Add<scene::ColliderComponent>(ball);
+        collider.shape = scene::ColliderShape::Sphere;
+        collider.radius = 0.5f;
+        world.TryGet<scene::TransformComponent>(ball)->position = Vec3(0.0f, 20.0f, 0.0f);
+        world.MarkTransformDirty(ball);
+    }
+    const Uuid ballGuid = world.GuidOf(ball);
+
+    constexpr float kFrame = 1.0f / 60.0f;
+    const auto ballY = [&app, &ballGuid]() {
+        const scene::Entity entity = app.GetWorld().FindByGuid(ballGuid);
+        REQUIRE(entity != scene::kNullEntity);
+        return app.GetWorld().TryGet<scene::TransformComponent>(entity)->position.y;
+    };
+
+    // Menahan yang tidak berjalan tidak berarti apa-apa: Pause bukan sakelar
+    // editor, ia sakelar simulasi.
+    app.Pause();
+    CHECK_FALSE(app.IsPaused());
+
+    app.Play();
+    REQUIRE(app.IsPlaying());
+    CHECK_FALSE(app.IsPaused());
+    for (int frame = 0; frame < 30; ++frame) {
+        app.Tick(kFrame);
+    }
+    const float running = ballY();
+    CHECK(running < 20.0f);
+
+    app.Pause();
+    CHECK(app.IsPaused());
+    for (int frame = 0; frame < 60; ++frame) {
+        app.Tick(kFrame);
+    }
+    // Satu detik penuh berlalu di editor, nol di dunia.
+    CHECK(ballY() == doctest::Approx(running));
+    CHECK(app.Context().deltaSeconds == doctest::Approx(kFrame));
+
+    // **Satu langkah, dan tepat satu.** Sebuah Step yang membuka gerbangnya
+    // sampai frame berikutnya akan terlihat benar di frame pertama dan salah
+    // sesudahnya — dan selisihnya tidak akan pernah dicari orang, karena
+    // keduanya sama-sama "bergerak sedikit".
+    app.StepFrame();
+    app.Tick(kFrame);
+    const float stepped = ballY();
+    CHECK(stepped < running);
+    CHECK(app.IsPaused());
+    for (int frame = 0; frame < 30; ++frame) {
+        app.Tick(kFrame);
+    }
+    CHECK(ballY() == doctest::Approx(stepped));
+
+    app.Resume();
+    CHECK_FALSE(app.IsPaused());
+    for (int frame = 0; frame < 30; ++frame) {
+        app.Tick(kFrame);
+    }
+    CHECK(ballY() < stepped);
+
+    // Stop mengembalikan dunia; ia juga melepaskan tahanannya, supaya Play
+    // berikutnya tidak dimulai dalam keadaan berhenti tanpa ada yang memintanya.
+    app.Pause();
+    REQUIRE(app.IsPaused());
+    app.Stop();
+    CHECK_FALSE(app.IsPlaying());
+    CHECK_FALSE(app.IsPaused());
+    CHECK(ballY() == doctest::Approx(20.0f));
 
     app.Shutdown();
 }

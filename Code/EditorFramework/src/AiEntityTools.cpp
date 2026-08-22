@@ -4,7 +4,7 @@
 #include "Sim/Editor/EditorApp.h"
 #include "Sim/Editor/EditorContext.h"
 #include "Sim/Editor/SceneCommands.h"
-#include "Sim/Editor/Selection.h"
+#include "Sim/SceneView/Selection.h"
 #include "Sim/Scene/ComponentRegistry.h"
 #include "Sim/Scene/Components.h"
 #include "Sim/Scene/Serialization.h"

@@ -21,7 +21,7 @@
 /// Bentuknya sengaja sama dengan `WhiteboxStore`: sebuah terrain jauh lebih
 /// besar, tetapi persoalannya persis sama, dan dua jawaban berbeda untuk satu
 /// persoalan adalah dua tempat yang harus dibetulkan setiap kali.
-namespace sim::editor {
+namespace sim::view {
 
 /// Kuas yang berlaku sekarang: kuas bersama, ditambah pengubah papan ketik.
 ///
@@ -134,4 +134,4 @@ private:
     terrain::Brush sculptBrush_;
 };
 
-}  // namespace sim::editor
+}  // namespace sim::view

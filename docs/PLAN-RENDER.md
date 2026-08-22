@@ -2762,10 +2762,21 @@ terverifikasi ujung-ke-ujung: cook sebuah project, lalu mainkan hasilnya.
   ImGui, jadi tidak ada player yang mungkin. `--screenshot` membuat player
   memotret dirinya sendiri, yang membuat regresi visual bisa jalan di CI.
 
-  **Utang lapisan yang harus dibayar sebelum E9 selesai:** terjemahan `World` →
-  `ViewportScene` tinggal di `SceneView`, yang ada di `EditorFramework` — jadi
-  player menautkan ImGui, riwayat undo, dan PanelManager yang tidak dipakainya.
-  Yang benar adalah memindahkannya ke modul yang dipakai bersama editor.
+  **Utang lapisannya sudah dibayar.** Terjemahan `World` → `ViewportScene` dulu
+  tinggal di `SceneView` yang ada di `EditorFramework`, jadi player menautkan
+  ImGui, riwayat undo, dan PanelManager yang tidak dipakainya. Sekarang ia modul
+  sendiri, `Sim::SceneView`, bersama simpanan yang dibutuhkannya —
+  `SkinnedPreview`, `TerrainStore`, `WhiteboxStore`, `MaterialPrograms`, dan
+  `Selection` — yang ternyata memang sudah tidak menyebut satu pun tipe editor.
+  Yang tersisa hanya glyph penanda entity, dan itu diisi pemanggilnya sekarang:
+  "entity ini lampu, jadi gambarkan bohlam" adalah pengetahuan editor, seperti
+  yang sudah tertulis di komentar `EntityIcon` bertahun-tahun.
+
+  Diverifikasi dengan cara yang bisa gagal: `SimRuntime` keluar dari gerbang
+  `SIM_BUILD_EDITOR`, dan `EditorFramework` beserta panelnya masuk ke dalamnya.
+  Build `-DSIM_BUILD_EDITOR=OFF` karena itu tidak punya editor untuk dibawa —
+  107 target alih-alih 807 — dan player yang keluar darinya membuka level yang
+  sama dan memotretnya. **Nol simbol `ImGui::` di dalam binarinya.**
 
 - ◐ **Cook/packaging**: pemangkasan aset lewat graf ketergantungan E5 sudah ada
   (`assets::PlanCook` + `SimCook`), ditelusuri dari level yang benar-benar
@@ -2807,7 +2818,8 @@ terverifikasi ujung-ke-ujung: cook sebuah project, lalu mainkan hasilnya.
 - **Audio** (OpenAL Soft di `/home/arie/SDK/openal-soft-1.25.2`): sumber suara 3D,
   bus, mixing.
 - ✅ **Play-in-Editor** yang sesungguhnya: menjalankan world sungguhan dalam proses
-  editor, dengan pemisahan state agar Stop mengembalikan scene ke keadaan awal.
+  editor, dengan pemisahan state agar Stop mengembalikan scene ke keadaan awal,
+  dan **Pause / Step** yang menahan jam dunia tanpa menahan jam editor.
 
   Sudah ada sejak sebelumnya — `Play()` mengambil cuplikan sebelum satu baris
   skrip berjalan, `Stop()` membangun ulang dunia dan seleksi dari cuplikan itu —
@@ -2818,6 +2830,31 @@ terverifikasi ujung-ke-ujung: cook sebuah project, lalu mainkan hasilnya.
   Perbandingannya byte-per-byte, bukan jumlah entity: dunia yang jumlahnya sama
   tapi transform-nya bergeser adalah dunia yang tidak dikembalikan. Diperiksa
   bisa merah — melepas restore-nya menggagalkan tujuh assertion.
+
+  **Dan sampai sekarang tujuh assertion itu tidak pernah benar-benar berjalan di
+  suite penuh.** Sebuah uji lain di binari yang sama memanggil
+  `MainThreadQueue::Drain()` tanpa pernah memanggil `BindMainThread()`; assert-nya
+  memanggil `abort()`, jadi prosesnya mati sebelum uji Play/Stop giliran — dan
+  yang terlihat di terminal bukan uji merah melainkan perintah yang menggantung,
+  karena core dump proses Debug 226 MB butuh menit. Satu baris memperbaikinya;
+  `SimAiToolsTests` sekarang 36/36, 1028 assertion.
+
+  **Pause bukan Stop yang lebih halus.** Stop membangun ulang dunia dari
+  cuplikan; Pause tidak menyentuh dunia sama sekali, ia berhenti memajukan
+  waktunya. Tombolnya mati sejak E2 dengan komentar "menunggu pemisahan waktu
+  simulasi dari waktu editor" — dan itu memang syaratnya: selama `deltaSeconds`
+  satu angka untuk keduanya, Pause hanya bisa berarti "bekukan editornya juga",
+  sehingga keadaan yang ingin diperiksa orang justru tidak bisa diperiksa.
+  Sekarang `Tick` memegang dua jam. Panel, kamera, dan pratinjau material tetap
+  hidup pada `deltaSeconds`; pose animasi, matahari, skrip, dan solver berjalan
+  pada jam dunia yang berhenti saat tertahan.
+
+  Step memajukan jam dunia **satu langkah tetap** (1/60 detik), bukan sebesar
+  frame terakhir: dua langkah yang tidak sama besarnya tidak bisa dipakai
+  membandingkan dua frame berurutan, yang justru gunanya. Diuji dengan bola yang
+  jatuh — satu detik penuh berlalu di editor sementara y-nya tidak bergeser
+  sedikit pun, lalu satu Step menggesernya sekali dan berhenti lagi. Diperiksa
+  bisa merah: melepas gerbangnya menggagalkan dua assertion.
 - Profiler (Tracy), build Windows, dan skrip rilis.
 
 ## Keputusan yang sudah dikunci sejak fase editor
