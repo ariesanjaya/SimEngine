@@ -126,6 +126,42 @@ bool ConeIntersectsSphere(const Vec3& apex, const Vec3& direction, float range,
     return glm::dot(delta, delta) <= radius * radius;
 }
 
+float PunctualFalloff(float distanceSq, float invRangeSq, float minDistanceSq) {
+    const float factor = distanceSq * invRangeSq;
+    const float smoothFactor = std::clamp(1.0f - factor * factor, 0.0f, 1.0f);
+    return (smoothFactor * smoothFactor) / std::max(distanceSq, minDistanceSq);
+}
+
+float LightUsefulRadius(const LightInstance& light, float threshold) {
+    const float range = std::max(light.range, 1e-3f);
+    const float sourceRadius = std::max(light.sourceRadius, 1e-3f);
+    // Kanal paling terang, bukan luminansinya: sebuah lampu merah murni tetap
+    // menerangi merah sejauh yang dijanjikan intensitasnya, dan luminansi akan
+    // memendekkannya sebesar bobot kanal itu di mata.
+    const float peak = std::max({light.color.r, light.color.g, light.color.b}) * light.intensity;
+    if (peak <= 0.0f || threshold <= 0.0f) {
+        return 0.0f;
+    }
+    const float invRangeSq = 1.0f / (range * range);
+    const float minDistanceSq = sourceRadius * sourceRadius;
+    const auto radianceAt = [&](float distance) {
+        return peak * PunctualFalloff(distance * distance, invRangeSq, minDistanceSq);
+    };
+    if (radianceAt(sourceRadius) < threshold) {
+        return 0.0f;  // tidak pernah seterang itu, bahkan di permukaannya
+    }
+
+    // Dua puluh langkah membagi jangkauan menjadi sepersejuta — jauh lebih halus
+    // daripada yang bisa dibedakan mata pada rangka kawat.
+    float low = sourceRadius;
+    float high = range;
+    for (int step = 0; step < 20; ++step) {
+        const float middle = (low + high) * 0.5f;
+        (radianceAt(middle) >= threshold ? low : high) = middle;
+    }
+    return low;
+}
+
 const LightInstance* FindSunLight(std::span<const LightInstance> lights) {
     for (const LightInstance& light : lights) {
         if (light.kind == LightKind::Directional) {

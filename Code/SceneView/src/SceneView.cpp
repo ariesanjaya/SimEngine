@@ -1017,6 +1017,39 @@ void SceneView::AddWirePlane(const Mat4& transform, float extent, const Vec4& co
     AddLine(center, center + normal * (extent * 0.5f), color);
 }
 
+void SceneView::AddWireCircle(const Vec3& center, const Vec3& axisA, const Vec3& axisB,
+                              float radius, const Vec4& color) {
+    for (int step = 0; step < kCircleSteps; ++step) {
+        AddLine(CirclePoint(center, axisA, axisB, radius, step, kCircleSteps),
+                CirclePoint(center, axisA, axisB, radius, step + 1, kCircleSteps), color);
+    }
+}
+
+void SceneView::AddWireCone(const Vec3& apex, const Vec3& direction, float halfAngle,
+                            float length, const Vec4& color) {
+    const float axisLength = glm::length(direction);
+    if (axisLength < 1e-6f || length <= 0.0f) {
+        return;
+    }
+    const Vec3 axis = direction / axisLength;
+    // Bingkai tegak lurus sumbu. Sumbu bantu dipilih yang paling tidak sejajar,
+    // karena hasil silang dua vektor yang hampir sejajar panjangnya mendekati
+    // nol dan arahnya ditentukan pembulatan.
+    const Vec3 helper = std::abs(axis.y) < 0.99f ? Vec3(0.0f, 1.0f, 0.0f) : Vec3(1.0f, 0.0f, 0.0f);
+    const Vec3 side = glm::normalize(glm::cross(helper, axis));
+    const Vec3 up = glm::cross(axis, side);
+
+    const Vec3 rim = apex + axis * length;
+    const float radius = length * std::tan(std::clamp(halfAngle, 0.0f, 1.5f));
+    AddWireCircle(rim, side, up, radius, color);
+    // Empat rusuk saja. Setiap rusuk lingkaran menghasilkan kerucut padat yang
+    // menutupi apa yang ada di dalamnya — dan yang ada di dalamnya justru yang
+    // sedang disinari.
+    for (const Vec3& radial : {side, -side, up, -up}) {
+        AddLine(apex, rim + radial * radius, color);
+    }
+}
+
 void SceneView::AddWireCross(const Vec3& center, float size, const Vec4& color) {
     AddLine(center - Vec3(size, 0.0f, 0.0f), center + Vec3(size, 0.0f, 0.0f), color);
     AddLine(center - Vec3(0.0f, size, 0.0f), center + Vec3(0.0f, size, 0.0f), color);

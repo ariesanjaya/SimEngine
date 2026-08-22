@@ -5,6 +5,7 @@
 #include "Sim/Editor/Command.h"
 #include "Sim/Editor/EditorContext.h"
 #include "Sim/Physics/PhysicsScene.h"
+#include "Sim/Render/LightCluster.h"
 #include "Sim/Editor/Gizmo.h"
 #include "Sim/Editor/Icons.h"
 #include "Sim/Editor/Notifications.h"
@@ -129,6 +130,21 @@ constexpr float kPlaneWireExtent = 5.0f;
 constexpr float kMarkerSize = 0.25f;
 /// Setengah-panjang garis sumbu sendi, meter.
 constexpr float kJointAxisLength = 0.5f;
+
+// --- gizmo lampu ------------------------------------------------------------
+//
+// **Radiansi ambang tempat "jangkauan berguna" diukur.** Satu, dalam satuan
+// radiansi yang sama yang dipakai shader — kira-kira seterang permukaan putih di
+// bawah matahari bawaan. Angkanya sendiri sembarang; yang tidak sembarang adalah
+// bahwa ia tetap, sehingga dua lampu bisa dibandingkan dari besar bolanya.
+constexpr float kLightUsefulThreshold = 1.0f;
+/// Panjang berkas lampu directional, meter. Ia tak hingga; yang digambar sekadar
+/// cukup untuk membaca arahnya.
+constexpr float kDirectionalRayLength = 2.0f;
+/// Jari-jari cincin tempat berkas directional berangkat.
+constexpr float kDirectionalRingRadius = 0.25f;
+/// Panjang sayap kepala panah, sebagai pecahan panjang berkasnya.
+constexpr float kArrowHeadFraction = 0.18f;
 
 /// Dorongan terkecil (meter) yang masih dianggap ekstrusi.
 ///
@@ -303,8 +319,8 @@ public:
             desc.volume.scatterAlbedo = context.volume.albedo;
             desc.volume.incomingLight = Vec3(context.volume.lightIntensity);
         }
-        // Rangka kawat komponen fisika, hanya untuk yang sedang terpilih.
-        DrawPhysicsWires(context);
+        // Rangka kawat komponen, hanya untuk yang sedang terpilih.
+        DrawSelectionWires(context);
 
         desc.clouds = context.clouds;
         camera_.ApplyTo(desc.camera);
@@ -1446,7 +1462,8 @@ private:
 
     // --- rangka kawat fisika -------------------------------------------------
 
-    /// Menggambar bentuk tabrakan dan penanda komponen fisika entity terpilih.
+    /// Menggambar rangka kawat komponen entity terpilih: bentuk tabrakan, sendi,
+    /// kendaraan, dan jangkauan lampu.
     ///
     /// **Hanya yang terpilih, dan itu keputusan biaya.** Sebuah level dengan
     /// ribuan collider menghasilkan ratusan ribu ruas garis per frame — dan
@@ -1458,7 +1475,7 @@ private:
     /// `physics::DescribeCollider` — jalur yang sama persis yang memberi makan
     /// solver. Menghitungnya sendiri berarti dua aritmetika untuk satu bentuk,
     /// dan yang kedua akan menyimpang tepat di kasus yang paling sulit dilihat.
-    void DrawPhysicsWires(EditorContext& context) {
+    void DrawSelectionWires(EditorContext& context) {
         if (context.world == nullptr || context.selection == nullptr) {
             return;
         }
@@ -1477,6 +1494,7 @@ private:
             DrawBodyMarker(world, entity);
             DrawJointWire(world, entity);
             DrawVehicleWire(world, entity);
+            DrawLightWire(world, entity);
         }
         sceneView_.SetLinesThroughGeometry(false);
     }
@@ -1648,6 +1666,94 @@ private:
             wheelMatrix[3] = Vec4(Vec3(matrix * Vec4(wheel.centerOffset, 1.0f)), 1.0f);
             sceneView_.AddWireCylinder(wheelMatrix, wheel.radius, wheel.width * 0.5f,
                                        kVehicleColor);
+        }
+    }
+
+    /// Jangkauan dan arah sebuah lampu.
+    ///
+    /// **Intensitas digambar sebagai jarak, bukan sebagai warna.** `range` hanya
+    /// menyebut di mana cahaya berakhir tepat nol, dan ia sama besar untuk lampu
+    /// redup dan lampu menyilaukan — dua bola sebesar itu tidak memberi tahu apa
+    /// pun tentang selisih keduanya. Bola kedua di dalamnya adalah sejauh mana
+    /// cahayanya masih seterang ambang tetap, dan ia bergerak saat intensitasnya
+    /// disetel. Jaraknya diminta dari `render::LightUsefulRadius`, yang memakai
+    /// peredupan yang sama dengan shader.
+    void DrawLightWire(scene::World& world, scene::Entity entity) {
+        const auto* light = world.TryGet<scene::LightComponent>(entity);
+        if (light == nullptr) {
+            return;
+        }
+        const Mat4 matrix = world.WorldMatrix(entity);
+        const Vec3 origin(matrix[3]);
+        // Arah pancar: -Z lokal, sama dengan `SceneView::AppendLight` dan sama
+        // dengan arah hadap kamera. Menurunkannya sendiri di sini berarti gizmo
+        // yang menunjuk ke arah lain daripada cahayanya begitu salah satu diubah.
+        const Vec3 forward = glm::normalize(Vec3(matrix * Vec4(0.0f, 0.0f, -1.0f, 0.0f)));
+
+        // Warna lampunya sendiri, dinaikkan sampai kanal terkuatnya penuh: dua
+        // lampu di adegan yang sama harus bisa dibedakan, dan lampu biru redup
+        // yang digambar biru redup tidak terlihat di atas latar gelap.
+        const float peak = std::max({light->color.r, light->color.g, light->color.b});
+        const Vec3 hue = peak > 1e-4f ? light->color / peak : Vec3(1.0f);
+        const Vec4 rangeColor(hue.r, hue.g, hue.b, 0.55f);
+        const Vec4 reachColor(hue.r, hue.g, hue.b, 0.95f);
+
+        render::LightInstance instance;
+        instance.color = light->color;
+        instance.intensity = light->intensity;
+        instance.range = light->range;
+        instance.sourceRadius = light->sourceRadius;
+        const float reach = render::LightUsefulRadius(instance, kLightUsefulThreshold);
+
+        switch (light->type) {
+            case scene::LightType::Directional: {
+                // Jangkauan tidak berarti untuk directional — ia menerangi
+                // seluruh adegan — jadi yang digambar hanya arahnya. Cincin
+                // beserta berkas sejajar: satu panah tunggal terbaca sebagai
+                // "cahaya datang dari titik ini", yang justru bukan sifatnya.
+                const Vec3 helper =
+                    std::abs(forward.y) < 0.99f ? Vec3(0.0f, 1.0f, 0.0f) : Vec3(1.0f, 0.0f, 0.0f);
+                const Vec3 side = glm::normalize(glm::cross(helper, forward));
+                const Vec3 up = glm::cross(forward, side);
+                sceneView_.AddWireCircle(origin, side, up, kDirectionalRingRadius, reachColor);
+                for (const Vec3& offset : {Vec3(0.0f), side * kDirectionalRingRadius,
+                                           -side * kDirectionalRingRadius,
+                                           up * kDirectionalRingRadius,
+                                           -up * kDirectionalRingRadius}) {
+                    const Vec3 from = origin + offset;
+                    const Vec3 to = from + forward * kDirectionalRayLength;
+                    sceneView_.AddLine(from, to, reachColor);
+                    // Kepala panah: tanpa ini kedua ujung berkas terlihat sama,
+                    // dan lampu yang terbalik 180° tidak bisa dibedakan.
+                    const float head = kDirectionalRayLength * kArrowHeadFraction;
+                    for (const Vec3& wing : {side, -side, up, -up}) {
+                        sceneView_.AddLine(to, to - forward * head + wing * (head * 0.5f),
+                                           reachColor);
+                    }
+                }
+                break;
+            }
+            case scene::LightType::Point:
+                sceneView_.AddWireSphere(matrix, light->range, rangeColor);
+                if (reach > 0.0f) {
+                    sceneView_.AddWireSphere(matrix, reach, reachColor);
+                }
+                break;
+            case scene::LightType::Spot: {
+                // Kerucut luar pada jangkauannya, kerucut dalam di sebelahnya:
+                // yang di antara keduanya adalah tepi yang memudar, dan itu
+                // satu-satunya bagian berkas yang tidak bisa ditebak dari angka.
+                const float outer = std::max(light->outerAngleRadians, light->innerAngleRadians);
+                const float inner = std::min(light->outerAngleRadians, light->innerAngleRadians);
+                sceneView_.AddWireCone(origin, forward, outer, light->range, rangeColor);
+                sceneView_.AddWireCone(origin, forward, inner, light->range, rangeColor);
+                if (reach > 0.0f) {
+                    // Mulut kerucut pada jangkauan bergunanya — sejauh itu
+                    // berkasnya masih seterang ambang.
+                    sceneView_.AddWireCone(origin, forward, outer, reach, reachColor);
+                }
+                break;
+            }
         }
     }
 

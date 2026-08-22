@@ -232,6 +232,19 @@ public:
     /// Salib tiga sumbu. Untuk yang tidak punya bentuk untuk digambar.
     void AddWireCross(const Vec3& center, float size, const Vec4& color);
 
+    /// Lingkaran pada bidang yang direntang `axisA` dan `axisB`, keduanya
+    /// diharapkan satuan dan saling tegak lurus.
+    void AddWireCircle(const Vec3& center, const Vec3& axisA, const Vec3& axisB, float radius,
+                       const Vec4& color);
+
+    /// Kerucut terbuka: puncak, empat rusuk, dan lingkaran mulutnya.
+    ///
+    /// `halfAngle` sudut dari sumbu ke rusuknya — separuh bukaan penuh, mengikuti
+    /// `LightComponent::outerAngleRadians`. `length` diukur sepanjang sumbu, bukan
+    /// sepanjang rusuknya: itu yang membuat mulutnya tepat di jangkauan lampu.
+    void AddWireCone(const Vec3& apex, const Vec3& direction, float halfAngle, float length,
+                     const Vec4& color);
+
 private:
     /// Mesh decal yang sudah dibangun, beserta keadaan yang menghasilkannya.
     ///

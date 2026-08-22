@@ -1288,6 +1288,66 @@ TEST_CASE("Lampu hanya masuk ke cluster yang benar-benar dikenainya") {
     CHECK(assignment.LightsOf(centre).size() == 1);
 }
 
+TEST_CASE("Peredupan punctual: nol tepat di jangkauan, dan bentuknya kuartik") {
+    // **Angka-angka ini yang mengikat versi CPU ke versi shader.** Keduanya
+    // ditulis terpisah karena satu berjalan di GPU — pola yang sama dengan
+    // `AutoExposure` — jadi yang menjaga keduanya tetap sama adalah uji ini dan
+    // komentar yang menunjuk ke sana. Jendela yang berganti bentuk (Frostbite ke
+    // Unity, misalnya) menggeser angka di tengah tanpa menyentuh yang di ujung,
+    // jadi setengah jangkauan ikut diperiksa.
+    const float range = 10.0f;
+    const float invRangeSq = 1.0f / (range * range);
+    const float minDistanceSq = 0.01f * 0.01f;
+
+    // Nol tepat di jangkauan — itu yang membuat penyaringan bola berjari-jari
+    // `range` eksak alih-alih pendekatan.
+    CHECK(PunctualFalloff(range * range, invRangeSq, minDistanceSq) == doctest::Approx(0.0f));
+    CHECK(PunctualFalloff(range * range * 1.5f, invRangeSq, minDistanceSq) ==
+          doctest::Approx(0.0f));
+
+    // Setengah jangkauan: (1 - 0,5^4)^2 / 5^2 = 0,9375^2 / 25.
+    const float half = PunctualFalloff(25.0f, invRangeSq, minDistanceSq);
+    CHECK(half == doctest::Approx(0.9375f * 0.9375f / 25.0f));
+
+    // Di dalam jari-jari sumber, jaraknya dijepit: dua titik yang sama-sama di
+    // dalam lampu tidak boleh berbeda tak hingga.
+    const float inside = PunctualFalloff(1e-8f, invRangeSq, minDistanceSq);
+    CHECK(std::isfinite(inside));
+    CHECK(inside == doctest::Approx(1.0f / minDistanceSq).epsilon(0.001));
+}
+
+TEST_CASE("Jangkauan berguna sebuah lampu tumbuh bersama intensitasnya") {
+    // Yang digambar gizmo lampu titik: jari-jari tempat cahayanya masih seterang
+    // ambang. `range` sendiri tidak membedakan lampu redup dari lampu
+    // menyilaukan — keduanya berakhir di tempat yang sama.
+    LightInstance light;
+    light.kind = LightKind::Point;
+    light.color = Vec3(1.0f);
+    light.range = 10.0f;
+    light.sourceRadius = 0.1f;
+
+    light.intensity = 1.0f;
+    const float dim = LightUsefulRadius(light, 1.0f);
+    light.intensity = 100.0f;
+    const float bright = LightUsefulRadius(light, 1.0f);
+    INFO("redup " << dim << ", terang " << bright);
+    CHECK(bright > dim);
+    // Selalu di dalam jangkauannya: di luar sana peredupannya sudah nol.
+    CHECK(bright < light.range);
+    CHECK(dim > 0.0f);
+
+    // Dan jaraknya benar-benar tempat radiansinya sama dengan ambangnya.
+    const float invRangeSq = 1.0f / (light.range * light.range);
+    const float minDistanceSq = light.sourceRadius * light.sourceRadius;
+    CHECK(100.0f * PunctualFalloff(bright * bright, invRangeSq, minDistanceSq) ==
+          doctest::Approx(1.0f).epsilon(0.01));
+
+    // Lampu yang tidak pernah setera ambangnya tidak menggambar apa pun, bukan
+    // menggambar lingkaran sebesar nol yang terbaca sebagai lampu mati.
+    light.intensity = 1e-6f;
+    CHECK(LightUsefulRadius(light, 1.0f) == doctest::Approx(0.0f));
+}
+
 TEST_CASE("Matahari adegan adalah directional pertama, dan hanya itu") {
     // **Aturan yang diminta, ditulis sebagai uji.** Cascade bayangan hanya ada
     // satu himpunan; directional kedua tidak bisa dipenuhi tanpa membuang

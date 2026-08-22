@@ -140,6 +140,31 @@ struct ClusterAssignment {
 /// berarti tidak ada cahaya directional, dan yang menggambarnya harus gelap.
 const LightInstance* FindSunLight(std::span<const LightInstance> lights);
 
+/// Peredupan jarak sebuah lampu punctual, satu angka tanpa warna.
+///
+/// **Kembaran `distanceAttenuation` di `Shaders/cluster_common.slang`, dan
+/// keduanya harus diubah bersama.** Pola yang sama dengan `AutoExposure` di
+/// `ToneMap.h`: yang di CPU diuji, yang di shader terlihat. Sebuah gizmo yang
+/// menggambar jangkauan cahaya dari rumus kedua akan sepakat di tengah dan
+/// meleset di tepinya — dan tepinya justru yang sedang dilihat orang.
+///
+/// Jendelanya kuartik, bentuk Frostbite; alasannya lengkap di shader.
+float PunctualFalloff(float distanceSq, float invRangeSq, float minDistanceSq);
+
+/// Jarak tempat radiansi sebuah lampu turun ke `threshold`.
+///
+/// **Supaya intensitas bisa digambar sebagai jarak, bukan sebagai warna.**
+/// Jangkauan (`range`) hanya menyebut di mana cahaya berakhir tepat nol; ia sama
+/// besar untuk lampu redup dan lampu menyilaukan. Yang membedakan keduanya
+/// adalah seberapa jauh cahayanya masih berarti, dan itu sebuah jarak — bisa
+/// dilihat, bisa dibandingkan antar lampu, dan bergerak saat intensitasnya
+/// disetel.
+///
+/// Nol bila lampunya tidak pernah setera `threshold` bahkan di permukaannya
+/// sendiri. Dicari dengan bagi-dua: peredupannya turun sepanjang jarak tanpa
+/// pernah naik, jadi akarnya tunggal.
+float LightUsefulRadius(const LightInstance& light, float threshold = 1.0f);
+
 /// Sebuah lampu di ruang yang dipakai kisi cluster.
 struct ClusterViewLight {
     Vec3 position{0.0f};

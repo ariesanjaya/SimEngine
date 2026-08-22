@@ -159,6 +159,18 @@ pembuatan aset baru (Material, Material Instance, Particle, Terrain, Lua Script)
   `physics::DescribeVehicleWheels` — jalur yang sama yang memberi makan solver,
   bukan aritmetika kedua yang kebetulan mirip.
 
+  **Lampu ikut menggambar jangkauannya**, dengan warna lampunya sendiri:
+  directional sebuah cincin beserta berkas sejajar berkepala panah — arahnya
+  saja, karena jangkauan tidak berarti untuknya; point dua bola sepusat; spot
+  kerucut luar, kerucut dalam, dan kerucut jangkauan-bergunanya.
+
+  **Intensitas digambar sebagai jarak, bukan sebagai warna.** `range` hanya
+  menyebut di mana cahaya berakhir tepat nol, dan ia sama besar untuk lampu redup
+  dan lampu menyilaukan. Bola (atau kerucut) yang lebih rapat di dalamnya adalah
+  sejauh mana cahayanya masih seterang ambang tetap — ia tumbuh saat intensitas
+  dinaikkan, dan dua lampu bisa dibandingkan dari besarnya. Jaraknya dihitung
+  `render::LightUsefulRadius`, yang memakai peredupan yang sama dengan shader.
+
   **Digambar menembus geometri**, tanpa uji kedalaman. Bentuk tabrakan hampir
   selalu berada di dalam mesh yang menggambarkannya — itu justru gunanya — jadi
   rangka yang diuji kedalaman tertutup persis oleh benda yang ukurannya sedang
