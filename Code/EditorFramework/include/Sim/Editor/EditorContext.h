@@ -93,6 +93,18 @@ struct EditorContext {
     /// target berarti yang belakangan menimpa yang duluan. Null bila perangkat
     /// tidak mendukungnya — panel wajib memeriksa.
     render::IMaterialPreview* materialPreview = nullptr;
+    /// Pratinjau untuk thumbnail **di dalam** node graph material.
+    ///
+    /// Instance ketiga, dan alasannya sama seperti yang kedua ada: ia memegang
+    /// material yang berbeda dari pratinjau besar — satu pin, bukan seluruh
+    /// permukaan — dan `SetMaterial` membangun pipeline. Satu instance untuk
+    /// keduanya berarti membangun ulang dua pipeline setiap frame, bergantian,
+    /// selamanya.
+    ///
+    /// Kecil dengan sengaja: yang digambar sebesar kotak di dalam node, dan
+    /// target 512² untuk kotak 96 px adalah 27 kali piksel yang tidak pernah
+    /// terlihat.
+    render::IMaterialPreview* materialNodePreview = nullptr;
     /// Pratinjau aset untuk Asset Browser. Dimiliki pemanggil EditorApp.
     render::IThumbnailCache* thumbnails = nullptr;
     /// Baker tekstur: dari berkas sumber ke `.ktx2` di cache. Dimiliki pemanggil

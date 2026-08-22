@@ -450,6 +450,7 @@ private:
             }
         }
 
+        UpdateNodePreview(context);
         for (const MaterialNode& node : graph_.nodes) {
             DrawNode(node);
         }
@@ -552,6 +553,7 @@ private:
             }
             ImGui::EndTable();
         }
+        DrawNodePreviewImage(node);
         canvas_.EndNode();
 
         // Pita kepala setinggi isinya ditambah padding node di atas dan bawah.
@@ -1487,6 +1489,32 @@ private:
     /// sebuah node menandai dokumen kotor tanpa mengubah satu karakter pun kode
     /// yang dihasilkan, dan membangun ulang pipeline karenanya akan membuat
     /// menyeret node terasa tersendat.
+    /// Menyiapkan `slangc` dan prelude-nya, sekali seumur panel.
+    ///
+    /// **Dipisah dari `EnsurePreviewShaders` karena bukan hanya ia yang
+    /// membutuhkannya.** Thumbnail di dalam node mengompilasi shader-nya sendiri,
+    /// dan ia digambar sebelum pratinjau besar dalam urutan frame — kalau
+    /// penyiapan ini tetap tinggal di sana, thumbnail selalu tertinggal satu
+    /// frame dari graph yang sedang disunting orang.
+    void EnsureShaderCache(EditorContext& context) {
+        if (cacheReady_) {
+            return;
+        }
+        cacheReady_ = true;
+        const std::string identity = material::SlangCompilerIdentity();
+        if (identity.empty()) {
+            cacheUsable_ = false;
+            return;
+        }
+        cache_.Configure(context.shaderCacheDir, identity);
+        cache_.SetCompiler(material::MakeSlangCompiler());
+        prelude_ = material::LoadOpenPbrPrelude(context.shaderDir);
+        cacheUsable_ = !prelude_.empty();
+        if (!cacheUsable_) {
+            SIM_WARN("Editor", "openpbr.slang not found in {}", context.shaderDir);
+        }
+    }
+
     void EnsurePreviewShaders(EditorContext& context, render::IMaterialPreview& preview) {
         if (compiled_.slang == previewSource_ && (preview.HasMaterial() || !previewError_.empty())) {
             return;
@@ -1494,21 +1522,7 @@ private:
         previewSource_ = compiled_.slang;
         previewError_.clear();
 
-        if (!cacheReady_) {
-            cacheReady_ = true;
-            const std::string identity = material::SlangCompilerIdentity();
-            if (identity.empty()) {
-                cacheUsable_ = false;
-            } else {
-                cache_.Configure(context.shaderCacheDir, identity);
-                cache_.SetCompiler(material::MakeSlangCompiler());
-                prelude_ = material::LoadOpenPbrPrelude(context.shaderDir);
-                cacheUsable_ = !prelude_.empty();
-                if (!cacheUsable_) {
-                    SIM_WARN("Editor", "openpbr.slang not found in {}", context.shaderDir);
-                }
-            }
-        }
+        EnsureShaderCache(context);
         if (!cacheUsable_) {
             previewError_ = prelude_.empty() && !cache_.Statistics().compiles
                                 ? "Shader toolchain unavailable (slangc or openpbr.slang missing)."
@@ -1564,9 +1578,17 @@ private:
     /// yang sama dengan jalur tekstur viewport, dan alasan yang sama — yang
     /// mendekode gambar adalah baker, bukan yang menggambar.
     void UpdatePreviewTextures(EditorContext& context, render::IMaterialPreview& preview) {
+        UpdateTexturesFor(context, preview, compiled_.textures, previewTexturePaths_);
+    }
+
+    /// Sama untuk pratinjau mana pun: daftar binding-nya dan jalur yang sedang
+    /// terpasang untuknya diserahkan pemanggil.
+    void UpdateTexturesFor(EditorContext& context, render::IMaterialPreview& preview,
+                           const std::vector<material::TextureBinding>& bindings,
+                           std::vector<std::string>& cached) {
         std::vector<std::string> paths;
-        paths.reserve(compiled_.textures.size());
-        for (const material::TextureBinding& binding : compiled_.textures) {
+        paths.reserve(bindings.size());
+        for (const material::TextureBinding& binding : bindings) {
             Uuid image = binding.texture;
             // Slot yang diisi parameter diambil dari instance-nya; yang tidak,
             // dari node-nya sendiri.
@@ -1594,11 +1616,11 @@ private:
         // detik. Yang masih di-bake menjadi jalur kosong hari ini dan jalur
         // sungguhan beberapa frame lagi — dan perbandingan inilah yang membuat
         // pergantian itu terjadi tepat sekali.
-        if (paths == previewTexturePaths_) {
+        if (paths == cached) {
             return;
         }
-        previewTexturePaths_ = std::move(paths);
-        preview.SetTextures(previewTexturePaths_);
+        cached = std::move(paths);
+        preview.SetTextures(cached);
     }
 
     /// Menulis blok uniform dari nilai bawaan parameter, ditimpa override
@@ -1611,6 +1633,150 @@ private:
         block_.Fill(graph_.parameters, instanceMode_ ? instance_.overrides : kNoOverrides,
                     parameterBytes_);
         preview.SetParameters(parameterBytes_);
+    }
+
+    // --- pratinjau di dalam node --------------------------------------------
+
+    /// Pin keluaran yang dimaksud orang ketika ia memilih sebuah node.
+    ///
+    /// Yang pertama, dan itu bukan kompromi: katalog menyusun pin keluaran mulai
+    /// dari yang paling utuh — `rgba` sebelum `rgb`, `rgb` sebelum `r` — jadi
+    /// yang pertama adalah yang paling banyak isinya. Node tanpa keluaran (node
+    /// keluaran permukaan) tidak punya apa pun untuk dilihat, dan mengembalikan
+    /// kosong di sini yang membuatnya tidak menggambar kotak.
+    std::string PreviewablePin(const MaterialNode& node) const {
+        for (const MaterialPin& pin : PinsOf(graph_, node)) {
+            if (pin.direction == PinDirection::Output) {
+                return pin.name;
+            }
+        }
+        return {};
+    }
+
+    /// Menyiapkan thumbnail yang digambar di dalam node yang sedang dipilih.
+    ///
+    /// **Satu node per frame, bukan semuanya.** `IMaterialPreview` punya satu
+    /// target warna dan satu pipeline; menggambar lima node berarti lima
+    /// `SetMaterial` dan lima salinan target per frame, dan `SetMaterial`
+    /// membangun pipeline. Yang dipilih orang adalah yang sedang ia kerjakan,
+    /// dan itulah satu-satunya yang jawabannya sedang ia tunggu.
+    ///
+    /// Waktunya ikut berjalan, jadi UV yang digeser `input.time` benar-benar
+    /// bergerak di dalam kotak itu — yang justru menjadi alasan pratinjau ini
+    /// diminta: melihat hasil perpaduan sebelum menyambungkannya ke permukaan.
+    void UpdateNodePreview(EditorContext& context) {
+        nodePreviewTexture_ = render::kInvalidTexture;
+        render::IMaterialPreview* preview = context.materialNodePreview;
+        if (preview == nullptr) {
+            return;
+        }
+        EnsureShaderCache(context);
+        if (!cacheUsable_) {
+            return;
+        }
+
+        const std::vector<uint64_t> selected = canvas_.SelectedNodes();
+        const Uuid* guid = selected.size() == 1 ? GuidOf(selected.front()) : nullptr;
+        const MaterialNode* node = guid != nullptr ? graph_.FindNode(*guid) : nullptr;
+        const std::string pin = node != nullptr ? PreviewablePin(*node) : std::string{};
+        if (node == nullptr || pin.empty()) {
+            return;
+        }
+
+        // Kompilasi ulang hanya ketika ada yang berubah. `compiled_.slang`
+        // berganti setiap kali graph disunting, jadi ia dipakai sebagai cap
+        // revisi — membandingkan graph-nya sendiri berarti menyalinnya.
+        if (compiled_.slang != nodePreviewBase_ || node->guid != nodePreviewGuid_ ||
+            pin != nodePreviewPin_) {
+            nodePreviewBase_ = compiled_.slang;
+            nodePreviewGuid_ = node->guid;
+            nodePreviewPin_ = pin;
+            RebuildNodePreview(*preview);
+        }
+        if (!preview->HasMaterial()) {
+            return;
+        }
+
+        UpdateTexturesFor(context, *preview, nodePreviewTextures_, nodePreviewTexturePaths_);
+        nodeBlock_.Fill(graph_.parameters, instanceMode_ ? instance_.overrides : kNoOverrides,
+                        nodeParameterBytes_);
+        preview->SetParameters(nodeParameterBytes_);
+
+        render::MaterialPreviewDesc desc;
+        desc.width = kNodePreviewPixels;
+        desc.height = kNodePreviewPixels;
+        // Bidang datar, dilihat nyaris tegak lurus. Bukan tepat 90°: sumbu
+        // pandang dan sumbu atas berimpit di sana, dan matriks LookAt-nya
+        // menjadi tak terdefinisi — kotaknya berkedip hitam alih-alih rata.
+        desc.shape = render::PreviewShape::Plane;
+        desc.cameraYaw = 0.0f;
+        desc.cameraPitch = 1.55f;
+        // Bidangnya membentang -1..1 dan bukaan lensanya 40°, jadi 2,75 pas
+        // memenuhi tinggi kotak; sedikit lebih jauh menyisakan tepi.
+        desc.distance = 2.9f;
+        desc.lightDirection = Vec3(0.0f, 1.0f, 0.0f);
+        desc.lightRadiance = Vec3(1.0f);
+        desc.time = nodePreviewTime_;
+        nodePreviewTime_ += context.deltaSeconds;
+        preview->Render(desc);
+
+        nodePreviewTexture_ = preview->ColorTarget();
+        nodePreviewUv_ = preview->ColorTargetUvMax();
+    }
+
+    /// Mengompilasi ulang shader thumbnail untuk pasangan (node, pin) yang baru.
+    void RebuildNodePreview(render::IMaterialPreview& preview) {
+        nodePreviewTexturePaths_.clear();
+        nodePreviewTextures_.clear();
+        preview.ClearMaterial();
+
+        MaterialCompileOptions compileOptions;
+        compileOptions.moduleName = openName_.empty() ? "preview" : openName_;
+        compileOptions.previewNode = nodePreviewGuid_;
+        compileOptions.previewPin = nodePreviewPin_;
+        const MaterialCompileResult previewGraph = CompileMaterial(graph_, compileOptions);
+        if (!previewGraph.ok) {
+            return;
+        }
+
+        material::MaterialModuleOptions options;
+        options.prelude = prelude_;
+        options.lobes = previewGraph.lobes;
+        const material::CompileOutput vertex = cache_.Get(material::MakeMaterialRequest(
+            previewGraph.slang, material::ShaderStage::Vertex, options));
+        const material::CompileOutput fragment = cache_.Get(material::MakeMaterialRequest(
+            previewGraph.slang, material::ShaderStage::Fragment, options));
+        if (!vertex.ok || !fragment.ok) {
+            return;
+        }
+
+        nodeBlock_.Build(graph_.parameters);
+        nodePreviewTextures_ = previewGraph.textures;
+        render::MaterialPreviewShaders shaders;
+        shaders.vertexSpirv = vertex.spirv;
+        shaders.fragmentSpirv = fragment.spirv;
+        shaders.parameterBytes = nodeBlock_.Bytes();
+        shaders.textureCount = static_cast<uint32_t>(nodePreviewTextures_.size());
+        preview.SetMaterial(shaders);
+    }
+
+    /// Menggambar kotak pratinjau di dalam node, bila node inilah yang tergambar
+    /// frame ini.
+    void DrawNodePreviewImage(const MaterialNode& node) {
+        if (node.guid != nodePreviewGuid_ || nodePreviewTexture_ == render::kInvalidTexture) {
+            return;
+        }
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        const ImVec2 size(kNodePreviewSize, kNodePreviewSize);
+        ImGui::Dummy(size);
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        const ImVec2 end(origin.x + size.x, origin.y + size.y);
+        draw->AddImage(static_cast<ImTextureID>(nodePreviewTexture_), origin, end,
+                       ImVec2(0.0f, 0.0f), ImVec2(nodePreviewUv_.x, nodePreviewUv_.y));
+        // Tepi tipis: tanpa itu, pratinjau yang kebetulan gelap di pinggirnya
+        // menyatu dengan badan node dan ukurannya tidak lagi terbaca.
+        draw->AddRect(origin, end, ImGui::GetColorU32(ImVec4(0.0f, 0.0f, 0.0f, 0.55f)), 2.0f);
     }
 
     // --- berkas -------------------------------------------------------------
@@ -1972,6 +2138,27 @@ private:
     material::MaterialParameterBlock block_;
     std::vector<uint8_t> parameterBytes_;
     render::PreviewShape previewShape_ = render::PreviewShape::Sphere;
+
+    // --- pratinjau di dalam node ---
+    /// Sisi kotaknya di kanvas, satuan logis ImGui.
+    static constexpr float kNodePreviewSize = 104.0f;
+    /// Sisi target rendernya, piksel. Lebih besar dari kotaknya supaya kanvas
+    /// yang di-zoom masuk tidak memperbesar piksel yang sudah kepalang kasar.
+    static constexpr uint32_t kNodePreviewPixels = 128u;
+    /// Node dan pin yang shader thumbnail-nya sedang terpasang.
+    Uuid nodePreviewGuid_;
+    std::string nodePreviewPin_;
+    /// Cap revisi graph saat shader itu dibangun: Slang milik material utuhnya.
+    std::string nodePreviewBase_;
+    std::vector<material::TextureBinding> nodePreviewTextures_;
+    std::vector<std::string> nodePreviewTexturePaths_;
+    material::MaterialParameterBlock nodeBlock_;
+    std::vector<uint8_t> nodeParameterBytes_;
+    /// Target yang sudah tergambar frame ini, atau kInvalidTexture.
+    render::TextureHandle nodePreviewTexture_ = render::kInvalidTexture;
+    Vec2 nodePreviewUv_{1.0f, 1.0f};
+    float nodePreviewTime_ = 0.0f;
+
     float previewYaw_ = 0.0f;
     float previewPitch_ = 0.2f;
     float previewDistance_ = 3.2f;

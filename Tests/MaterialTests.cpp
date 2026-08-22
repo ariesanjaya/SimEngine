@@ -2428,3 +2428,92 @@ TEST_CASE("G5: modul material bindless dikompilasi slangc sungguhan") {
     const std::string module = AssembleForwardMaterialModule(compiled.slang, options);
     CHECK(module.find("inputs.materialSlot = input.slots.x;") != std::string::npos);
 }
+
+TEST_CASE("Pratinjau pin: yang digambar nilainya, bukan nilainya di bawah lampu") {
+    MaterialGraph graph;
+    graph.nodes.push_back(Node(1, std::string(kSurfaceOutputType)));
+    graph.nodes.back().settings["alphaMode"] = "mask";
+    graph.nodes.push_back(Node(2, "input.texture"));
+    graph.nodes.back().settings["texture"] = Id(900).ToString();
+    graph.nodes.back().settings["name"] = "Albedo";
+    graph.nodes.push_back(Node(3, "input.sample"));
+    Link(graph, 2, "texture", 3, "texture");
+    Link(graph, 3, "rgb", 1, "baseColor");
+
+    // Cabang yang **belum** tersambung ke keluaran: UV yang digeser terhadap x.
+    // Justru cabang seperti inilah yang paling sering ingin dilihat orang, karena
+    // ia sedang dirakit dan belum menghasilkan apa pun di permukaan.
+    graph.nodes.push_back(Node(4, "input.uv"));
+    graph.nodes.push_back(Node(5, "math.add"));
+    graph.nodes.back().pinValues["b"] = "float2(0.25, 0.0)";
+    Link(graph, 4, "uv", 5, "a");
+
+    const MaterialCompileResult plain = CompileMaterial(graph);
+    REQUIRE_MESSAGE(plain.ok, FirstError({false, plain.errors}));
+    CHECK(plain.slang.find("float2(0.25, 0.0)") == std::string::npos);
+    CHECK(plain.alphaTest);
+
+    MaterialCompileOptions options;
+    options.previewNode = Id(5);
+    options.previewPin = "result";
+    const MaterialCompileResult preview = CompileMaterial(graph, options);
+    REQUIRE_MESSAGE(preview.ok, FirstError({false, preview.errors}));
+
+    // Cabangnya ikut ditulis sekarang, meski tidak menyentuh node keluaran.
+    CHECK(preview.slang.find("inputs.uv0 + float2(0.25, 0.0)") != std::string::npos);
+
+    // Permukaannya dibuang: albedo nol dan spekular mati, jadi tidak ada satu
+    // pun jalur yang mengalikan nilai itu dengan cahaya sebelum ia terlihat.
+    CHECK(preview.slang.find("result.surface.baseColor = float3(0.0, 0.0, 0.0);") !=
+          std::string::npos);
+    CHECK(preview.slang.find("result.surface.specularWeight = 0.0;") != std::string::npos);
+    CHECK(preview.slang.find("result.normal = float3(0.0, 0.0, 1.0);") != std::string::npos);
+    CHECK(preview.slang.find("result.opacity = 1.0;") != std::string::npos);
+
+    // Float2 dilebarkan dengan nol, sehingga UV terbaca sebagai gradien
+    // merah-hijau — dan pergeseran terhadap x terlihat sebagai gradien yang
+    // bergeser, bukan sebagai warna yang berganti.
+    CHECK(preview.slang.find("result.emissive = float3(n4_result, 0.0);") != std::string::npos);
+
+    // Mode alfa material tidak ikut: sebuah pratinjau yang dibuang uji topeng
+    // adalah kotak kosong, dan kotak kosong tidak menjawab apa pun.
+    CHECK_FALSE(preview.alphaTest);
+    CHECK_FALSE(preview.alphaBlend);
+}
+
+TEST_CASE("Pratinjau pin: node tekstur ditampilkan gambarnya, bukan binding-nya") {
+    MaterialGraph graph;
+    graph.nodes.push_back(Node(1, std::string(kSurfaceOutputType)));
+    graph.nodes.push_back(Node(2, "input.texture"));
+    graph.nodes.back().settings["texture"] = Id(900).ToString();
+    graph.nodes.back().settings["name"] = "Albedo";
+    graph.nodes.push_back(Node(3, "input.sample"));
+    Link(graph, 2, "texture", 3, "texture");
+    Link(graph, 3, "rgb", 1, "baseColor");
+
+    MaterialCompileOptions options;
+    options.previewNode = Id(2);
+    options.previewPin = "texture";
+    const MaterialCompileResult preview = CompileMaterial(graph, options);
+    REQUIRE_MESSAGE(preview.ok, FirstError({false, preview.errors}));
+
+    // Yang mengalir dari node tekstur cuma namanya. Menampilkannya apa adanya
+    // tidak mungkin — sebuah `Texture2D` bukan warna — jadi ia disampel di sini
+    // dengan pasangan sampler yang sama dengan yang dipakai node Sample.
+    CHECK(preview.slang.find("result.emissive = tAlbedo.Sample(sAlbedo, inputs.uv0).rgb;") !=
+          std::string::npos);
+    REQUIRE(preview.textures.size() == 1);
+    CHECK(preview.textures.front().name == "tAlbedo");
+}
+
+TEST_CASE("Pratinjau pin: pin yang tidak ada ditolak dengan pesan, bukan digambar hitam") {
+    MaterialGraph graph = MinimalGraph();
+
+    MaterialCompileOptions options;
+    options.previewNode = Id(2);
+    options.previewPin = "tidakAda";
+    const MaterialCompileResult preview = CompileMaterial(graph, options);
+    CHECK_FALSE(preview.ok);
+    REQUIRE_FALSE(preview.errors.empty());
+    CHECK(preview.errors.front().message.find("no value to preview") != std::string::npos);
+}

@@ -124,6 +124,28 @@ struct MaterialCompileOptions {
     /// yang berbeda adalah bentuk descriptor set layout-nya. Lihat G5 di
     /// docs/PLAN-GPU-OPTIM.md.
     bool bindless = false;
+
+    /// Pin keluaran yang isinya ingin **dilihat**, bukan dipakai.
+    ///
+    /// Kosong berarti kompilasi biasa: yang keluar adalah permukaan yang ditulis
+    /// node keluaran. Terisi berarti seluruh permukaan itu diabaikan dan yang
+    /// digambar hanyalah nilai pin ini — sebagai `emissive`, dengan `baseColor`
+    /// nol, sehingga yang terlihat persis angkanya dan bukan angkanya setelah
+    /// dikali cahaya.
+    ///
+    /// **Sebuah pratinjau yang ikut dibayangi berbohong tentang isinya.** Sebuah
+    /// UV yang digeser terhadap x akan tetap bergeser di bawah pencahayaan, tapi
+    /// warnanya tidak lagi bisa dibaca sebagai koordinat, dan justru itu yang
+    /// dicari orang saat membuka pratinjau sebuah node.
+    ///
+    /// Pin bertipe `Texture` disampel lebih dulu dengan `uv0`: yang dimaksud
+    /// orang yang menunjuk node tekstur adalah gambarnya, bukan bahwa ia sebuah
+    /// binding.
+    Uuid previewNode;
+    std::string previewPin;
+
+    /// Apakah opsi ini meminta pratinjau sebuah pin.
+    bool WantsPreview() const { return previewNode.IsValid() && !previewPin.empty(); }
 };
 
 /// Mengompilasi graph material menjadi sumber Slang.

@@ -54,6 +54,7 @@ public:
         std::filesystem::path shaderDir;
         render::IViewportRenderer* viewportRenderer = nullptr;
         render::IMaterialPreview* materialPreview = nullptr;
+        render::IMaterialPreview* materialNodePreview = nullptr;
         /// Perender kedua untuk Mesh Editor. Boleh null.
         render::IViewportRenderer* meshPreview = nullptr;
         const FrameLimiter* frameLimiter = nullptr;

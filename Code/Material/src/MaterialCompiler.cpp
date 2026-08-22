@@ -93,6 +93,8 @@ private:
     bool IsDriven(const MaterialNode& node, const MaterialPin& pin) const;
     bool MaybeNonZero(const MaterialNode& node, std::string_view pin) const;
     SurfaceLobes DetectLobes(const MaterialNode& output) const;
+    /// Ekspresi float3 yang menampilkan pin yang diminta `options_.previewNode`.
+    std::string PreviewExpression();
 
     void EmitNode(const MaterialNode& node);
     void Line(std::string text, const Uuid& node = {});
@@ -425,6 +427,60 @@ void Emitter::EmitNode(const MaterialNode& node) {
     result_.errors.push_back({node.guid, {}, "No shader translation for node '" + type + "'"});
 }
 
+std::string Emitter::PreviewExpression() {
+    const MaterialNode* node = graph_.FindNode(options_.previewNode);
+    if (node == nullptr) {
+        result_.errors.push_back({options_.previewNode, {}, "Preview node is not in the graph"});
+        return "float3(0.0, 0.0, 0.0)";
+    }
+
+    const auto it = values_.find(std::make_pair(options_.previewNode, options_.previewPin));
+    if (it == values_.end()) {
+        result_.errors.push_back(
+            {options_.previewNode, options_.previewPin, "Pin '" + options_.previewPin +
+                                                            "' has no value to preview"});
+        return "float3(0.0, 0.0, 0.0)";
+    }
+    const std::string& value = it->second;
+
+    switch (types_.Of(graph_, *node, options_.previewPin)) {
+        case ValueKind::Float:
+            // Skalar menjadi abu-abu, bukan merah. Yang dibaca orang dari sebuah
+            // kanal kekasaran adalah terang-gelapnya, dan mewarnainya menambah
+            // satu lapis terjemahan di antara angka dan mata.
+            return "float3(" + value + ")";
+        case ValueKind::Float2:
+            // Kanal ketiga nol, sehingga UV terbaca sebagai gradien merah-hijau
+            // yang sudah dikenal — dan pergeseran terhadap x atau y terlihat
+            // sebagai gradien yang bergeser, bukan sebagai warna yang berubah.
+            return "float3(" + value + ", 0.0)";
+        case ValueKind::Float3:
+            return value;
+        case ValueKind::Float4:
+            // Alfa dibuang, tidak dikalikan. Sebuah tekstur bertopeng yang
+            // dipratinjau lewat alfanya akan menghilang justru di bagian yang
+            // sedang diperiksa orang.
+            return "(" + value + ").rgb";
+        case ValueKind::Bool:
+            return "float3(" + value + " ? 1.0 : 0.0)";
+        case ValueKind::Texture: {
+            // Sebuah node tekstur tidak punya nilai — yang mengalir darinya
+            // hanyalah nama binding-nya. Yang dimaksud orang yang menunjuknya
+            // adalah gambarnya, jadi ia disampel di sini dengan uv0, memakai
+            // pasangan sampler yang sama dengan yang dipakai node Sample.
+            const std::string sampler = "s" + value.substr(value.empty() || value.front() != 't'
+                                                               ? 0u
+                                                               : 1u);
+            return value + ".Sample(" + sampler + ", inputs.uv0).rgb";
+        }
+        case ValueKind::Numeric:
+            break;
+    }
+    result_.errors.push_back(
+        {options_.previewNode, options_.previewPin, "Pin type cannot be previewed"});
+    return "float3(0.0, 0.0, 0.0)";
+}
+
 MaterialCompileResult Emitter::Run() {
     const ValidationResult validated = ValidateMaterial(graph_);
     if (!validated.ok) {
@@ -448,8 +504,11 @@ MaterialCompileResult Emitter::Run() {
     // yang dipadu maupun decal yang dibuang, dan keduanya menuntut jalur gambar
     // yang berbeda. Menebaknya dari "opacity tersambung ke sesuatu" akan
     // memindahkan kaca ke jalur topeng tanpa ada yang memintanya.
-    result_.alphaTest = output.Setting("alphaMode") == "mask";
-    result_.alphaBlend = output.Setting("alphaMode") == "blend";
+    // Mode alfa material tidak berlaku untuk pratinjau sebuah pin: sebuah
+    // material bertopeng akan membuang fragmen pratinjaunya menurut opasitas yang
+    // sedang tidak dihitung, dan yang terlihat adalah kotak kosong.
+    result_.alphaTest = !options_.WantsPreview() && output.Setting("alphaMode") == "mask";
+    result_.alphaBlend = !options_.WantsPreview() && output.Setting("alphaMode") == "blend";
     if (result_.alphaTest) {
         const std::string cutoff = output.Setting("alphaCutoff");
         if (!cutoff.empty()) {
@@ -458,6 +517,13 @@ MaterialCompileResult Emitter::Run() {
     }
 
     CollectReachable(output.guid);
+    // Node yang dipratinjau belum tentu tersambung ke keluaran — dan justru node
+    // yang belum tersambung itulah yang paling sering ingin dilihat orang, karena
+    // ia sedang dirakit. Kerucut masukannya dikumpulkan setelah kerucut keluaran,
+    // sehingga daftar tekstur node yang sudah terpakai tidak bergeser nomornya.
+    if (options_.WantsPreview()) {
+        CollectReachable(options_.previewNode);
+    }
     for (const MaterialNode* node : order_) {
         EmitNode(*node);
     }
@@ -467,7 +533,32 @@ MaterialCompileResult Emitter::Run() {
     std::ostringstream tail;
     tail << "\n    MaterialSurface result;\n";
     tail << "    result.surface = OpenPBRSurface::defaults();\n";
+
+    if (options_.WantsPreview()) {
+        // **Permukaannya dibuang, bukan dikemudikan.** Yang diminta di sini
+        // adalah melihat satu nilai; menyalurkannya lewat `baseColor` berarti
+        // mengalikannya dengan cahaya lebih dulu, dan yang sampai ke mata bukan
+        // lagi nilai itu melainkan nilai itu di bawah lampu tertentu.
+        //
+        // Ketiga pin di luar `OpenPBRSurface` ditulis semua, karena tidak ada
+        // `defaults()` yang bisa mengisinya — dan sebuah `normal` yang tidak
+        // ditulis adalah float3 tak berisi, bukan normal identitas.
+        tail << "    result.surface.baseColor = float3(0.0, 0.0, 0.0);\n";
+        // Spekular selalu hidup — ia bukan lobe pilihan seperti coat dan fuzz —
+        // jadi ia dimatikan lewat bobotnya. Tanpa baris ini sebuah sorotan lampu
+        // ikut tergambar di atas pratinjau dan terbaca seperti bagian dari
+        // nilainya.
+        tail << "    result.surface.specularWeight = 0.0;\n";
+        tail << "    result.normal = float3(0.0, 0.0, 1.0);\n";
+        tail << "    result.emissive = " << PreviewExpression() << ";\n";
+        tail << "    result.opacity = 1.0;\n";
+        tail << "    return result;\n";
+    }
+
     for (const MaterialPin& pin : outputPins) {
+        if (options_.WantsPreview()) {
+            break;
+        }
         if (pin.direction != PinDirection::Input) {
             continue;
         }
