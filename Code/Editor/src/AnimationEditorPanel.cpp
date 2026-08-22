@@ -37,6 +37,11 @@ namespace {
 using namespace sim::animation;
 
 constexpr ImVec4 kHintColor(0.55f, 0.57f, 0.60f, 1.0f);
+/// Warna pin alur. Putih, seperti pin eksekusi di editor blueprint: transisi
+/// tidak punya tipe, jadi tidak ada yang perlu dibedakan warnanya.
+constexpr ImVec4 kFlowPinColor(0.88f, 0.88f, 0.90f, 1.0f);
+/// Jarak isi node ke tepinya; dipakai gaya kanvas dan tinggi pita kepala.
+constexpr float kNodePadding = 7.0f;
 constexpr ImVec4 kWarnColor(0.95f, 0.68f, 0.25f, 1.0f);
 
 /// Sumbu yang dipetakan ke layar pada pratinjau.
@@ -1081,18 +1086,36 @@ private:
         widgets::Tooltip("Run the graph on the open skeleton");
     }
 
+    /// Apakah ada transisi yang berpangkal di "Any State" (`from` −1).
+    static bool HasAnyStateTransition(const Layer& layer) {
+        for (const auto& transition : layer.transitions) {
+            if (transition.from < 0) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     void DrawGraphCanvas(Layer& layer) {
+        NodeCanvasStyle style;
+        style.nodePadding = Vec4(kNodePadding, kNodePadding, kNodePadding, kNodePadding);
+        canvas_.SetStyle(style);
         canvas_.Begin("##animgraph", Vec2(0.0f, 0.0f));
 
         // Simpul "Any State" digambar walaupun ia bukan state: transisi
         // ber-`from` -1 berlaku dari mana pun, dan menggambarnya tanpa pangkal
         // membuat kabelnya seolah muncul dari ketiadaan.
         canvas_.BeginNode(AnyStateNodeId());
-        ImGui::TextColored(kHintColor, "Any State");
+        const float anyTop = ImGui::GetCursorScreenPos().y;
+        ImGui::TextUnformatted("Any State");
+        const float anyBottom = ImGui::GetCursorScreenPos().y;
+        ImGui::Dummy(ImVec2(0.0f, 3.0f));
         canvas_.BeginOutputPin(OutputPinId(AnyStateNodeId()));
-        ImGui::TextUnformatted(" >");
+        widgets::PinIcon(widgets::PinShape::Arrow, HasAnyStateTransition(layer), kFlowPinColor);
         canvas_.EndPin();
         canvas_.EndNode();
+        canvas_.DrawNodeHeader(AnyStateNodeId(), (anyBottom - anyTop) + kNodePadding * 2.0f,
+                               Vec4(0.34f, 0.28f, 0.40f, 1.0f));
 
         for (int i = 0; i < static_cast<int>(layer.states.size()); ++i) {
             DrawStateNode(layer, i);
@@ -1163,23 +1186,53 @@ private:
         const bool isDefault = index == layer.defaultState;
         const bool isActive = graphPlaying_ && instance_.Bound() &&
                               instance_.CurrentState(activeLayer_) == index;
-        if (isActive) {
-            ImGui::TextColored(ImVec4(0.45f, 0.95f, 0.55f, 1.0f), "%s", state.name.c_str());
-        } else if (isDefault) {
-            ImGui::TextColored(ImVec4(0.95f, 0.85f, 0.45f, 1.0f), "%s", state.name.c_str());
-        } else {
-            ImGui::TextUnformatted(state.name.c_str());
-        }
+        const float headerTop = ImGui::GetCursorScreenPos().y;
+        ImGui::TextUnformatted(state.name.c_str());
         ImGui::TextColored(kHintColor, "%s", ToString(state.motion.kind));
+        const float headerBottom = ImGui::GetCursorScreenPos().y;
+        ImGui::Dummy(ImVec2(0.0f, 3.0f));
 
+        // Transisi adalah alur, bukan nilai — pin-nya karena itu panah, sama
+        // seperti pin eksekusi di graph skrip.
         canvas_.BeginInputPin(InputPinId(id));
-        ImGui::TextUnformatted("> ");
+        widgets::PinIcon(widgets::PinShape::Arrow, HasIncoming(layer, index), kFlowPinColor);
         canvas_.EndPin();
         ImGui::SameLine();
         canvas_.BeginOutputPin(OutputPinId(id));
-        ImGui::TextUnformatted(" >");
+        widgets::PinIcon(widgets::PinShape::Arrow, HasOutgoing(layer, index), kFlowPinColor);
         canvas_.EndPin();
         canvas_.EndNode();
+
+        // **Warna kepala menyatakan peran state, bukan jenis geraknya.** Yang
+        // dicari mata saat membaca sebuah state machine adalah "mana yang
+        // sedang berjalan" dan "mana yang mulai duluan"; jenis geraknya sudah
+        // tertulis di bawah namanya.
+        const ImVec4 header = isActive    ? ImVec4(0.24f, 0.52f, 0.30f, 1.0f)
+                              : isDefault ? ImVec4(0.54f, 0.44f, 0.20f, 1.0f)
+                                          : ImVec4(0.28f, 0.34f, 0.46f, 1.0f);
+        canvas_.DrawNodeHeader(id, (headerBottom - headerTop) + kNodePadding * 2.0f,
+                               Vec4(header.x, header.y, header.z, header.w));
+    }
+
+    /// Apakah ada transisi yang berakhir di state ini. Termasuk dari "Any
+    /// State": pin masuk yang berongga padahal ada transisi ke sana akan
+    /// terbaca sebagai state yang tak terjangkau.
+    static bool HasIncoming(const Layer& layer, int index) {
+        for (const auto& transition : layer.transitions) {
+            if (transition.to == index) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    static bool HasOutgoing(const Layer& layer, int index) {
+        for (const auto& transition : layer.transitions) {
+            if (transition.from == index) {
+                return true;
+            }
+        }
+        return false;
     }
 
     void HandleGraphCreate(Layer& layer) {

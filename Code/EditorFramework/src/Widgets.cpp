@@ -495,4 +495,74 @@ bool GradientEditor(const char* id, Gradient& gradient, const ImVec2& size) {
     return changed;
 }
 
+void PinIcon(PinShape shape, bool connected, const ImVec4& color, float size) {
+    const float side = size > 0.0f ? size : ImGui::GetTextLineHeight();
+    const ImVec2 origin = ImGui::GetCursorScreenPos();
+    // Ruangnya dipesan lebih dulu supaya tata letak baris tetap benar meski
+    // yang menggambar adalah draw list, bukan widget.
+    ImGui::Dummy(ImVec2(side, side));
+
+    ImDrawList* draw = ImGui::GetWindowDrawList();
+    const ImU32 fill = ImGui::GetColorU32(color);
+    // Bagian dalam ikon yang tidak tersambung dibiarkan sewarna latar node,
+    // bukan tembus pandang: pin berongga yang menampakkan kabel di belakangnya
+    // terbaca sebagai pin yang tersambung.
+    const ImU32 hollow = ImGui::GetColorU32(ImGuiCol_WindowBg);
+    constexpr float kBorder = 1.6f;
+
+    // Ikon tidak mengisi seluruh kotaknya: sisi kanan disisakan untuk nub
+    // segitiga, dan tepinya diberi napas supaya garis batasnya tidak terpotong.
+    const float pad = side * 0.12f;
+    const float body = side - pad * 2.0f;
+    const float nub = side * 0.22f;
+    const ImVec2 centre(origin.x + pad + (body - nub) * 0.5f, origin.y + side * 0.5f);
+    const float radius = (body - nub) * 0.5f;
+
+    switch (shape) {
+        case PinShape::Circle:
+            draw->AddCircleFilled(centre, radius, connected ? fill : hollow, 16);
+            draw->AddCircle(centre, radius, fill, 16, kBorder);
+            break;
+        case PinShape::Square: {
+            const ImVec2 min(centre.x - radius, centre.y - radius);
+            const ImVec2 max(centre.x + radius, centre.y + radius);
+            draw->AddRectFilled(min, max, connected ? fill : hollow, 1.0f);
+            draw->AddRect(min, max, fill, 1.0f, 0, kBorder);
+            break;
+        }
+        case PinShape::Diamond: {
+            const ImVec2 points[4] = {ImVec2(centre.x, centre.y - radius),
+                                      ImVec2(centre.x + radius, centre.y),
+                                      ImVec2(centre.x, centre.y + radius),
+                                      ImVec2(centre.x - radius, centre.y)};
+            draw->AddConvexPolyFilled(points, 4, connected ? fill : hollow);
+            draw->AddPolyline(points, 4, fill, ImDrawFlags_Closed, kBorder);
+            break;
+        }
+        case PinShape::Arrow: {
+            // Panah alur: sisi kiri rata, ujung kanan lancip — bentuk yang sama
+            // dengan pin eksekusi di editor blueprint, dan yang membuatnya
+            // terbaca sebagai "jalan terus", bukan sebagai nilai.
+            const float half = radius * 1.15f;
+            const ImVec2 points[3] = {ImVec2(centre.x - half * 0.75f, centre.y - half),
+                                      ImVec2(centre.x + half, centre.y),
+                                      ImVec2(centre.x - half * 0.75f, centre.y + half)};
+            draw->AddConvexPolyFilled(points, 3, connected ? fill : hollow);
+            draw->AddPolyline(points, 3, fill, ImDrawFlags_Closed, kBorder);
+            break;
+        }
+    }
+
+    // Nub: segitiga kecil di kanan ikon, selalu terisi. Ia yang membuat arah
+    // pin terbaca — dari mana kabelnya berangkat — tanpa perlu melihat di sisi
+    // mana node pin itu berada.
+    if (shape != PinShape::Arrow) {
+        const float top = centre.y - nub * 0.55f;
+        const ImVec2 points[3] = {ImVec2(origin.x + side - pad - nub, top),
+                                  ImVec2(origin.x + side - pad, centre.y),
+                                  ImVec2(origin.x + side - pad - nub, centre.y + nub * 0.55f)};
+        draw->AddConvexPolyFilled(points, 3, fill);
+    }
+}
+
 }  // namespace sim::editor::widgets

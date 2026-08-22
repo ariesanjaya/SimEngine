@@ -105,4 +105,35 @@ bool CurveEditor(const char* id, Curve& curve, const ImVec2& size, float minValu
 /// Mengembalikan true bila gradientnya berubah frame ini.
 bool GradientEditor(const char* id, Gradient& gradient, const ImVec2& size);
 
+// --- ikon pin kanvas node ----------------------------------------------------
+
+/// Bentuk sebuah pin di kanvas node.
+///
+/// **Bentuk menyatakan jenisnya, warna menyatakan tipenya.** Keduanya perlu:
+/// warna sendirian menuntut pengguna menghafal peta warna, dan pada graph yang
+/// separuh pinnya bertipe angka semua lingkarannya lalu berwarna sama. Bentuk
+/// memisahkan yang berbeda secara mendasar — nilai yang dihitung, aset yang
+/// dirujuk, dan alur yang dijalankan — sebelum warna diperlukan sama sekali.
+enum class PinShape : uint8_t {
+    /// Nilai yang dihitung: angka, vektor, warna.
+    Circle,
+    /// Sesuatu yang dirujuk, bukan dihitung: tekstur, aset.
+    Square,
+    /// Objek atau referensi.
+    Diamond,
+    /// Alur eksekusi. Bentuknya sengaja bukan lingkaran, karena ia satu-satunya
+    /// pin yang tidak membawa nilai.
+    Arrow,
+};
+
+/// Menggambar ikon sebuah pin, dan memajukan kursor selebar ikonnya.
+///
+/// **Terisi berarti tersambung.** Itu satu-satunya keadaan yang perlu terlihat
+/// tanpa mengarahkan tetikus: pin yang lupa disambung adalah kesalahan yang
+/// paling sering terjadi di graph, dan yang paling mahal dicari kalau bentuknya
+/// sama dengan pin yang sudah tersambung.
+///
+/// `size` nol berarti setinggi satu baris teks.
+void PinIcon(PinShape shape, bool connected, const ImVec4& color, float size = 0.0f);
+
 }  // namespace sim::editor::widgets

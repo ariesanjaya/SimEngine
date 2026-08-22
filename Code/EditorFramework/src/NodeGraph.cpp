@@ -1,5 +1,7 @@
 #include "Sim/Editor/NodeGraph.h"
 
+#include <algorithm>
+
 #include <imgui.h>
 #include <imgui_node_editor.h>
 
@@ -335,6 +337,63 @@ void NodeCanvas::DrawNodeBackground(uint64_t id, const Vec4& color, float thickn
     draw->AddRect(ImVec2(min.x - 1.0f, min.y - 1.0f),
                   ImVec2(min.x + size.x + 1.0f, min.y + size.y + 1.0f),
                   ImGui::GetColorU32(ToImGui(color)), ed::GetStyle().NodeRounding, 0, thickness);
+}
+
+void NodeCanvas::DrawNodeHeader(uint64_t id, float height, const Vec4& color) {
+    const ScopedEditor scoped(impl_->context);
+    ImDrawList* draw = ed::GetNodeBackgroundDrawList(ed::NodeId(id));
+    if (draw == nullptr || height <= 0.0f) {
+        return;
+    }
+    const ImVec2 min = ed::GetNodePosition(ed::NodeId(id));
+    const ImVec2 size = ed::GetNodeSize(ed::NodeId(id));
+    if (size.x <= 0.0f) {
+        return;
+    }
+    const float rounding = ed::GetStyle().NodeRounding;
+    const float border = ed::GetStyle().NodeBorderWidth;
+    // Ditarik masuk selebar garis batasnya supaya pita tidak menutupi tepi
+    // node — yang tertutup akan terlihat sebagai node tanpa batas di bagian
+    // atas saja.
+    const ImVec2 headerMin(min.x + border, min.y + border);
+    const ImVec2 headerMax(min.x + size.x - border, min.y + std::min(height, size.y));
+
+    const ImVec4 top = ToImGui(color);
+    const ImVec4 bottom(top.x * 0.55f, top.y * 0.55f, top.z * 0.55f, top.w);
+
+    // **Dua bagian, dan pembagiannya tepat di garis membulatnya.** Sudut
+    // membulat hanya bisa digambar `AddRectFilled`, yang satu warna; gradasi
+    // hanya bisa digambar `AddRectFilledMultiColor`, yang tidak bisa membulat.
+    // Membagi di garis itu membuat keduanya bertemu tanpa celah dan tanpa warna
+    // yang menyembul di luar sudutnya.
+    const float split = std::min(headerMin.y + rounding, headerMax.y);
+    draw->AddRectFilled(headerMin, ImVec2(headerMax.x, split), ImGui::GetColorU32(top), rounding,
+                        ImDrawFlags_RoundCornersTop);
+    if (split < headerMax.y) {
+        draw->AddRectFilledMultiColor(ImVec2(headerMin.x, split), headerMax,
+                                      ImGui::GetColorU32(top), ImGui::GetColorU32(top),
+                                      ImGui::GetColorU32(bottom), ImGui::GetColorU32(bottom));
+    }
+    // Garis pemisah tipis di kaki pita: gradasi sendirian membuat batasnya
+    // kabur tepat ketika node berlatar terang.
+    draw->AddLine(ImVec2(headerMin.x, headerMax.y), ImVec2(headerMax.x, headerMax.y),
+                  ImGui::GetColorU32(ImVec4(0.0f, 0.0f, 0.0f, 0.35f)), 1.0f);
+}
+
+void NodeCanvas::SetStyle(const NodeCanvasStyle& style) {
+    if (impl_->context == nullptr) {
+        return;
+    }
+    const ScopedEditor scoped(impl_->context);
+    ed::Style& target = ed::GetStyle();
+    target.NodeRounding = style.nodeRounding;
+    target.NodeBorderWidth = style.nodeBorderWidth;
+    target.NodePadding = ImVec4(style.nodePadding.x, style.nodePadding.y, style.nodePadding.z,
+                                style.nodePadding.w);
+    target.PinRounding = style.pinRounding;
+    target.LinkStrength = style.linkStrength;
+    target.Colors[ed::StyleColor_NodeBg] = ToImGui(style.nodeBackground);
+    target.Colors[ed::StyleColor_NodeBorder] = ToImGui(style.nodeBorder);
 }
 
 }  // namespace sim::editor

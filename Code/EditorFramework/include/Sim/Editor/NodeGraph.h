@@ -25,6 +25,21 @@ namespace sim::editor {
 /// HandleCreate()/HandleDelete() … End(). Query koneksi baru dan penghapusan
 /// hanya sah setelah seluruh node dan link digambar; sebelum itu pustaka belum
 /// tahu apa yang ada di kanvas.
+/// Ukuran dan warna kanvas node. Tanpa satu pun tipe pustaka di baliknya.
+struct NodeCanvasStyle {
+    float nodeRounding = 6.0f;
+    float nodeBorderWidth = 1.0f;
+    /// Kiri, atas, kanan, bawah. Atasnya nol karena pita kepala menggambar
+    /// paddingnya sendiri — lihat `DrawNodeHeader`.
+    Vec4 nodePadding{8.0f, 4.0f, 8.0f, 8.0f};
+    float pinRounding = 3.0f;
+    /// Seberapa jauh kabel keluar mendatar sebelum melengkung. Kecil membuat
+    /// kabel antar node yang berdekatan patah; besar membuatnya melingkar jauh.
+    float linkStrength = 120.0f;
+    Vec4 nodeBackground{0.16f, 0.16f, 0.18f, 0.94f};
+    Vec4 nodeBorder{0.06f, 0.06f, 0.07f, 0.9f};
+};
+
 class NodeCanvas {
 public:
     NodeCanvas();
@@ -143,6 +158,22 @@ public:
     /// Latar node, untuk menggambar bingkai penanda (error, breakpoint).
     /// Sah setelah node yang bersangkutan digambar pada frame ini.
     void DrawNodeBackground(uint64_t id, const Vec4& color, float thickness);
+
+    /// Pita kepala berwarna di puncak sebuah node, setinggi `height`.
+    ///
+    /// **Digambar sesudah node-nya, bukan di dalamnya.** Tingginya baru
+    /// diketahui setelah judulnya digambar, dan sudut membulatnya harus
+    /// mengikuti sudut node — yang ukurannya juga baru diketahui di akhir. Yang
+    /// menggambarnya di dalam node harus menebak keduanya.
+    ///
+    /// Warnanya memudar ke bawah, dan itu bukan hiasan: gradasi memisahkan pita
+    /// kepala dari badan node tanpa garis kedua, sehingga node tetap terbaca
+    /// sebagai satu benda utuh saat kanvas diperkecil.
+    void DrawNodeHeader(uint64_t id, float height, const Vec4& color);
+
+    /// Mengubah ukuran dan warna kanvas. Boleh dipanggil kapan saja setelah
+    /// `Initialize()`; berlaku mulai frame berikutnya yang digambar.
+    void SetStyle(const NodeCanvasStyle& style);
 
 private:
     struct Impl;
