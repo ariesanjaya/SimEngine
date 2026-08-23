@@ -365,3 +365,31 @@ if(SIM_BUILD_EDITOR)
             Sim::Terrain
             nlohmann_json::nlohmann_json)
 endif()
+
+# Path tracer acuan — R4. Ikut gerbang slangc karena Sim::Reference tidak ada
+# tanpanya: model shading-nya dibangkitkan slangc, bukan ditulis tangan.
+if(TARGET Sim::Reference)
+    sim_add_test(SimReferenceTests
+        SOURCES
+            ReferenceTests.cpp
+        DEPS
+            Sim::Reference)
+endif()
+
+# --- Model shading OpenPBR dijalankan di CPU ---------------------------------
+#
+# **Yang diuji berkas ini bukan tiruan `openpbr.slang`, melainkan berkas itu
+# sendiri.** C++-nya dipancarkan `slangc -target cpp` dari sumber yang sama yang
+# dikompilasi ke SPIR-V untuk GPU, jadi drift bukan sesuatu yang diuji melainkan
+# sesuatu yang tidak bisa terjadi.
+#
+# Pembangkitannya milik `Sim::Reference`, bukan milik direktori ini: dua langkah
+# codegen atas berkas yang sama berarti dua salinan yang bisa berselisih, dan
+# yang berselisih di sini justru model shading yang seluruh gunanya tunggal.
+if(TARGET Sim::Reference)
+    sim_add_test(SimOpenPbrCpuTests
+        SOURCES
+            OpenPbrCpuTests.cpp
+        DEPS
+            Sim::Reference)
+endif()

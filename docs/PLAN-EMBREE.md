@@ -31,9 +31,13 @@ dan C (kain) di [ROADMAP.md](ROADMAP.md).
 > magnitudo. Antarmukanya tetap berdiri, jadi keputusan ini bisa dibalik tanpa
 > membongkar apa pun.
 >
-> **Jalur kritis berikutnya bukan intersector, melainkan kembaran CPU dari
-> `openpbr.slang`** — dan berkas itu tumbuh dari 374 menjadi 920 baris ketika
-> audit spesifikasi dikerjakan. Lihat [AUDIT-OPENPBR.md](AUDIT-OPENPBR.md).
+> **R4 langkah 1 dan 2 selesai.** Yang disebut jalur kritisnya — kembaran CPU
+> dari `openpbr.slang` — ternyata tidak perlu ditulis sama sekali: `slangc
+> -target cpp` memancarkannya dari sumber yang sama yang dijalankan GPU.
+> Integratornya berdiri di `Code/Reference`, tak-bias, dan diuji terhadap
+> jawaban analitik — termasuk `E/(1-ρ)` di rongga tertutup, yang menguji energi
+> pantulan ke-n. Yang tinggal butuh GPU atau penulis EXR, jadi keduanya alat,
+> bukan uji.
 >
 > `PLAN-EMBREE-GI.md` — usulan terpisah yang memakai Embree sebagai builder BVH
 > untuk traversal compute — **dihapus**, sudah terjawab lain oleh arsitektur GI
@@ -479,19 +483,171 @@ Path tracer unidirectional sederhana: Lambert + GGX yang **parameternya
 disamakan dengan OpenPBR** ([RENDER-OPENPBR.md](RENDER-OPENPBR.md)), next-event
 estimation, tanpa denoise. Tidak perlu cepat; perlu benar dan tak-bias.
 
-> **Ongkosnya naik, dan naiknya bukan di intersector.** Ketika rencana ini
-> ditulis, `openpbr.slang` 374 baris. Setelah audit spesifikasi ia 920 baris,
-> dan yang bertambah justru bagian yang paling sulit dikembarkan: sheen LTC
-> Zeltner dengan fit rasionalnya, EON beserta albedo terarah bentuk tertutup,
-> Fresnel F82, kompensasi energi GGX, dan penggelapan coat lewat albedo
-> hemisferis Fresnel.
->
-> Kembaran yang **meleset** dari salah satunya bukan referensi melainkan
-> renderer kedua yang kebetulan mirip — dan selisih yang muncul akan dibaca
-> sebagai galat GI, padahal asalnya BSDF. Karena itu langkah pertama R4 bukan
-> integrator melainkan **uji kesamaan lobe demi lobe** antara kembaran CPU dan
-> shader-nya, di satu titik dan satu arah cahaya, sebelum satu piksel pun
-> dirender.
+#### Langkah 1 — kembaran CPU · ✅ **selesai, dan tidak ditulis tangan**
+
+Ini yang selama ini disebut jalur kritis R4, dan ongkosnya ternyata **nol**.
+
+Ketika rencana ini ditulis, kekhawatirannya jelas: `openpbr.slang` harus punya
+kembaran CPU, dan berkas itu sudah 920 baris — termasuk sheen LTC Zeltner
+dengan fit rasionalnya, EON beserta albedo terarah bentuk tertutup, Fresnel
+F82, kompensasi energi GGX, dan penggelapan coat lewat albedo hemisferis
+Fresnel. Kembaran yang meleset di salah satunya bukan acuan melainkan renderer
+kedua yang kebetulan mirip, dan selisihnya akan terbaca sebagai galat GI
+padahal asalnya BSDF.
+
+**`slangc -target cpp` memancarkan C++ dari sumber yang sama yang dikompilasi
+ke SPIR-V.** Tidak ada transkripsi, jadi tidak ada yang bisa meleset: drift
+bukan sesuatu yang diuji, melainkan sesuatu yang **tidak bisa terjadi**.
+
+- `Shaders/openpbr_cpu.slang` — pembungkus tanpa satu baris matematika pun.
+  Entry point compute, karena itu bentuk yang bisa dipancarkan slangc ke CPU;
+  ia tidak pernah dijalankan di GPU.
+- `Tests/CMakeLists.txt` membangkitkannya saat build, dengan `openpbr.slang`
+  sebagai dependensi eksplisit — tanpa itu uji ini akan lulus atas model
+  shading yang sudah tidak ada, bug yang sama persis dengan yang dijaga
+  identitas kompilator di `ShaderCache`.
+- `Tests/OpenPbrCpuTests.cpp` — sebelas uji, mengunci temuan audit sebagai
+  angka. Yang paling tajam: rasio antara logam bertepi warna dan logam bertepi
+  putih di sudut `acos(1/7)` harus **tepat** `specularColor`, bukan sekadar
+  "lebih gelap".
+
+Dilewati bersih tanpa `slangc`, seperti target shader lainnya.
+
+**Satu jebakan yang mahal, dan sudah dipasang penjaganya.** Koreksi F82
+memuncak di `mu = 1/7` dan meluruh ke nol di kedua ujungnya — pada insidensi
+tegak lurus bobotnya `3e-7`. Uji pertama yang saya tulis memeriksa
+`specularColor` menghadap kamera, dan ia **lulus untuk material yang pin-nya
+mati sama sekali**. Sudut ujinya sekarang disebut eksplisit di harness-nya,
+beserta alasannya.
+
+C++ yang sama inilah yang ditautkan path tracer acuan di langkah berikutnya,
+jadi acuan dan runtime berbagi satu sumber model shading — bukan dua yang
+dijaga tetap sama.
+
+#### Langkah 2 — integrator · ✅
+
+`Code/Reference` — modul CPU murni, tanpa `Sim::RHI` maupun `Sim::Render`,
+dijaga guard CMake yang sama dengan `Sim::Raycast`.
+
+**Model shading-nya dibangkitkan di sini, bukan di direktori uji.** C++ dari
+`slangc` sekarang milik modulnya, dan seluruh nama bermangling dikurung di satu
+berkas: `Shading.cpp`. Akhiran angka yang dipancarkan slangc bisa bergeser
+ketika slangc diperbarui; dibiarkan bocor ke pemanggil, yang rusak setiap
+pemakai model shading.
+
+Bentuk integratornya persis yang ditetapkan bagian sebelumnya:
+
+- **Estimator eksplisit** — `emisi + f·cos · L / pdf`, tiap faktor bisa dicetak
+  sendiri.
+- **Campuran dua strategi, satu sampel**, bobot tetap 50/50 antara sampling
+  lampu dan kosinus. Yang memilih arah salah satunya; PDF-nya tetap gabungan
+  keduanya, karena kalau tidak yang terjadi bukan campuran melainkan dua
+  estimator yang dijumlahkan — dan itu bias.
+- **Russian roulette dari throughput**, `maxDepth` hanya jaring pengaman.
+- **Kamera pinhole + cakram defokus, stratified √spp × √spp.**
+
+**Sampling BSDF sengaja kosinus, dan itu disebutkan.** `openpbr.slang` hanya
+mengevaluasi — bentuk yang benar untuk model shading rasterizer. Menuliskan
+penyampel yang cocok untuk kesembilan lobenya adalah proyek tersendiri, dan
+yang dibutuhkan acuan lebih dulu adalah **benar**, bukan cepat konvergen.
+Kosinus tak-bias untuk BSDF apa pun selama pembaginya PDF yang sama; yang
+dibayar hanya derau pada lobe spekular sempit.
+
+**Daftar lampu berdiri sendiri**, seperti yang sudah diperkirakan bagian
+"Apa yang berbenturan": backend memberi `(geometri, primitif)`, bukan objek.
+Satu konsekuensi yang perlu diketahui pengarang adegan — lampu harus ada di
+**dua** tempat, di daftar lampu *dan* sebagai geometri, karena estimator
+satu-sampel menemukan cahaya dengan mengenainya.
+
+#### Kriteria terima, dan angkanya
+
+Delapan uji, seluruhnya dibandingkan dengan jawaban yang **diketahui lebih
+dulu** — bukan dengan keluaran renderer ini sendiri di masa lalu:
+
+| Yang diuji | Terhadap apa |
+| --- | --- |
+| Tungku putih, albedo 1 | tepat 1,0 |
+| Albedo 0,25 / 0,5 / 0,8 | tepat albedonya |
+| PDF lampu kuad | `d²/(cos·A)` dihitung tangan |
+| `Sample` lawan `Pdf` | keduanya harus sepakat |
+| Lampu bidang di atas lantai | `ρ·L·A/(π·h²)`, hampiran sudut kecil |
+| Derau turun saat spp naik | konvergensi, bukan rupa |
+
+**Satu kelulusan palsu yang hampir lolos, dan cara ia ketahuan.** Kamera yang
+melihat lurus ke bawah — sudut yang paling sering dipakai — membuat
+`cross(forward, up)` nol dan seluruh basisnya NaN, sehingga setiap sinar
+meleset dan gambarnya menjadi langit seluruhnya. **Uji tungku putih lulus di
+sana**, karena langit seragam memang jawabannya. Yang menemukannya uji albedo,
+tiga uji kemudian. Sekarang kameranya punya sumbu cadangan, dan uji tungku
+putihnya membuktikan lebih dulu bahwa lantainya benar-benar kena.
+
+#### Langkah 3 — adegan acuan · ✅ sebagian
+
+`Scene` menyusun geometri, material per segitiga, dan daftar lampunya sekaligus.
+**Lampu masuk ke dua tempat lewat satu panggilan** — `AddQuadLight` menaruhnya
+di geometri *dan* di daftar — supaya keadaan setengah itu tidak bisa terjadi
+karena lupa: yang hanya ada di daftar tidak akan pernah menerangi apa pun, yang
+hanya ada di geometri tidak akan pernah disampel langsung.
+
+`ImageCompare` menjawab **angka**: RMSE, selisih mutlak terbesar beserta
+letaknya, dan rata-rata kedua gambar — yang terakhir yang membedakan bias dari
+derau, karena derau tidak menggeser rata-rata. Daerah bernama ada karena RMSE
+seluruh gambar menyembunyikan justru yang dicari: kebocoran lewat dinding
+menyentuh beberapa persen piksel, dan ditenggelamkan rata-rata ia terbaca
+sebagai selisih kecil yang bisa diabaikan.
+
+**Dua adegan, dan yang pertama jawabannya eksak.**
+
+`MakeEnclosedFurnace(ρ, E)` — rongga tertutup yang setiap dindingnya memancar
+dan memantul. Radiansi kesetimbangannya deret geometri `E/(1-ρ)`. Itu menguji
+energi pantulan ke-**n**, bukan pantulan pertama, dan ia yang memisahkan
+integrator tak-bias dari yang memotong kedalaman: pada ρ = 0,8 pantulan kelima
+ke atas masih menyumbang sepertiga jawabannya.
+
+`MakeCornellBox()` — kotak tertutup, kameranya di dalam.
+
+#### Kriteria terima yang sudah terpenuhi
+
+| Kriteria | Keadaan |
+| --- | --- |
+| Uji tungku lulus (albedo 1, langit seragam 1) | ✅ tepat 1,0 |
+| Menggandakan `max_depth` tidak menggeser rata-rata | ✅ 32 lawan 64, dalam 2% |
+| Energi bounce kedua | ✅ `E/(1-ρ)` pada ρ = 0 / 0,5 / 0,8 |
+| Kebocoran cahaya Cornell box | ✅ langit 50× lebih terang tidak menembus |
+| Laporan perbandingan sebagai angka, bukan gambar | ✅ `ImageCompare`, RMSE per daerah |
+
+#### Yang belum, dan kenapa
+
+| Kriteria | Kenapa belum |
+| --- | --- |
+| `SimHeadless --reference-render <level> --spp N` menghasilkan EXR | Butuh penulis EXR dan jembatan dari level SimEngine ke `Scene`; keduanya pekerjaan tersendiri |
+| Perbandingan GI runtime lawan acuan | **Butuh GPU**, jadi ia tidak bisa menjadi uji CI. Bentuknya alat, bukan uji |
+| Nilai analitik faktor bentuk Cornell box | Yang dipakai `E/(1-ρ)`, yang lebih ketat *dan* lebih mudah dibaca ulang daripada faktor bentuk dinding |
+| Satu bias diketahui, terdokumentasi dengan angkanya | Belum ada pembanding runtime, jadi belum ada bias yang bisa diukur |
+
+**Satu bias yang sudah diketahui, dan disebut di sini karena harus:** sampling
+BSDF-nya kosinus, bukan menurut lobe-nya. Itu **tidak** membuat hasilnya bias —
+pembaginya PDF yang sama — tetapi ia membuat lobe spekular sempit konvergen
+sangat lambat. Adegan acuan yang berisi logam licin akan berderau lama, dan
+itu batas yang diketahui, bukan yang ditemukan nanti.
+
+#### Dua kelulusan palsu, dan bagaimana keduanya ketahuan
+
+Ditulis di sini karena polanya berulang, bukan karena kejadiannya menarik.
+
+1. **Kamera yang melihat lurus ke bawah** menghasilkan basis NaN, setiap sinar
+   meleset, gambarnya menjadi langit seluruhnya — dan uji tungku putih **lulus**
+   di sana, karena langit seragam memang jawabannya. Ditemukan uji albedo, tiga
+   uji kemudian. Uji tungku putihnya sekarang membuktikan lebih dulu bahwa
+   lantainya benar-benar kena.
+2. **Sisi mana yang merah ditebak, bukan dibuktikan.** Dengan pandangan ke +z
+   dan `up` +y, sumbu kanan layar menunjuk ke dunia **-x**, jadi dinding di
+   `x = 0` muncul di sisi kanan gambar. Uji kebocoran warnanya menebak
+   terbalik. Sekarang warna dindingnya diperiksa lebih dulu, jadi tebakan yang
+   salah gagal di baris yang mengatakan sebabnya.
+
+Keduanya bentuk yang sama: **sebuah uji yang lulus untuk alasan yang salah lebih
+buruk daripada tidak ada uji.**
 
 Sengaja dibatasi: tidak ada volume, tidak ada SSS, tidak ada dispersi. Yang
 divalidasi adalah GI difus dan spekular kasar — persis yang diaproksimasi
