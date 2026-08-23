@@ -645,16 +645,39 @@ TEST_CASE("query yang menabrak langkah simulasi ditolak, bukan dijawab separuh")
     // Langkah satu per satu, seperti frame sungguhan — bukan `Step(200)`, yang
     // menahan penjagaannya sepanjang seluruh rangkaian dan tidak menyisakan
     // satu pun sela bagi pembacanya.
-    for (int i = 0; i < 200; ++i) {
+    //
+    // **Berhenti ketika pembacanya benar-benar sudah berjalan, bukan setelah
+    // hitungan langkah tertentu.** Di bawah `ctest -j` seluruh inti terpakai,
+    // dan main thread bisa menyelesaikan dua ratus langkah sebelum thread
+    // pembacanya dijadwalkan sekali pun — sehingga uji yang seharusnya
+    // menabrakkan query dengan langkah simulasi justru tidak menabrakkan apa
+    // pun, lalu gagal karena tidak menemukan apa yang tidak pernah terjadi.
+    // Itu bentuk kegagalan yang menuduh kode padahal yang salah penjadwalnya.
+    const auto observed = [&]() { return answered.load() + refused.load(); };
+    constexpr int kMinSteps = 200;
+    // Penjaga supaya kegagalan sungguhan tetap berupa uji yang gagal, bukan uji
+    // yang menggantung.
+    constexpr int kMaxSteps = 20000;
+    int steps = 0;
+    while (steps < kMaxSteps && (steps < kMinSteps || observed() == 0)) {
         world.Step(1);
+        ++steps;
+        if (observed() == 0) {
+            // Giliran diserahkan secara eksplisit: main thread yang sedang
+            // memegang intinya tidak akan melepaskannya sendiri.
+            std::this_thread::yield();
+        }
     }
     running.store(false, std::memory_order_release);
     reader.join();
 
     INFO("dijawab " << answered.load() << ", ditolak " << refused.load() << ", salah "
-                    << wrong.load());
+                    << wrong.load() << ", langkah " << steps);
     CHECK(wrong.load() == 0);
-    CHECK(answered.load() + refused.load() > 0);
+    CHECK(observed() > 0);
+    // Dan pembacanya benar-benar tumpang tindih dengan langkah simulasinya,
+    // bukan sekadar sempat berjalan sesudah semuanya selesai.
+    CHECK(steps < kMaxSteps);
 
     // Dan penjagaannya tidak menolak selamanya: sesudah langkah terakhir selesai
     // ia harus terbuka lagi. Diperiksa dari main thread supaya jawabannya tidak
