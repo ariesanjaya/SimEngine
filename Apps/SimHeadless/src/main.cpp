@@ -110,6 +110,7 @@ void PrintUsage() {
         "  --bench-cull-limit <n>        gambar hanya permukaan bernomor < n\n"
         "  --bench-fixed-exposure        eksposur manual; wajib untuk membandingkan gambar\n"
         "  --bench-gi-debug <view>       off|albedo|normal|irradiance|raycount|steps|layers\n"
+        "  --bench-draw-mode <mode>      material|unlit|clay|material+wireframe|wireframe\n"
         "  --bench-ev <ev100>            eksposur manual pada EV100 ini\n"
         "  --bench-no-screen-trace       matikan lapis screen-space; lihat SDF sendirian\n"
         "  --bench-furnace               uji tungku: langit seragam 1, albedo 1, tanpa matahari\n"
@@ -887,6 +888,35 @@ int main(int argc, char** argv) {
             }
         }
 
+        // Saringan tampilan viewport dari baris perintah, dengan alasan yang
+        // sama seperti `--bench-gi-debug` di atas: tanpa bendera ini
+        // satu-satunya cara melihat rangka kawat adalah menjalankan editor dan
+        // menekan tombolnya, dan itu berarti tidak ada satu pun gambar rangka
+        // kawat yang bisa dibandingkan dengan gambar rangka kawat kemarin.
+        render::DrawMode drawMode = render::DrawMode::Material;
+        if (const std::string_view value = FlagValue(argc, argv, "--bench-draw-mode");
+            !value.empty()) {
+            static constexpr std::array<std::pair<std::string_view, render::DrawMode>, 5> kModes{
+                {{"material", render::DrawMode::Material},
+                 {"unlit", render::DrawMode::Unlit},
+                 {"clay", render::DrawMode::Clay},
+                 {"material+wireframe", render::DrawMode::MaterialWireframe},
+                 {"wireframe", render::DrawMode::Wireframe}}};
+            bool found = false;
+            for (const auto& [name, mode] : kModes) {
+                if (value == name) {
+                    drawMode = mode;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                SIM_ERROR("Bench", "--bench-draw-mode tidak mengenal \"{}\"", std::string(value));
+                app.Shutdown();
+                return 2;
+            }
+        }
+
         const uint32_t total = warmup + measured;
         // **Delta tetap, bukan jam dinding.** Animasi, fisika, dan adaptasi
         // eksposur semuanya maju menurut delta; memberi mereka waktu sungguhan
@@ -1049,6 +1079,7 @@ int main(int argc, char** argv) {
             render::ViewportDesc desc;
             desc.width = renderWidth;
             desc.height = renderHeight;
+            desc.mode = drawMode;
             desc.gi = app.Context().gi;
             desc.computeGradient = computeGradient;
             desc.gpuClusters = !cpuClusters;

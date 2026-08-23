@@ -101,7 +101,7 @@ namespace sim::render {
 struct ViewportDesc {
     uint32_t width = 0, height = 0;
     Camera   camera;                 // view/proj, POD dari Core/Math
-    DrawMode mode = DrawMode::Lit;   // Lit / Unlit / Wireframe / Overlay
+    DrawMode mode = DrawMode::Material;  // Material / Unlit / Clay / MaterialWireframe / Wireframe
 };
 
 // Apa yang harus digambar frame ini. Diisi ulang tiap frame oleh panel,

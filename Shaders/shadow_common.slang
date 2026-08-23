@@ -68,6 +68,17 @@ struct ShadowParams {
     // Penutup rekursi untuk permukaan yang belum dikenal cache radiansi:
     // xyz albedo yang ditebak, w 1 kalau tebakan itu dipakai.
     float4 giBounce;
+    // Keadaan tampilan per-frame: x 1 kalau mode Unlit, y 1 kalau mode Clay,
+    // **z detik sejak adegan dibuka**.
+    //
+    // **Di sini, bukan konstanta spesialisasi.** Konstanta spesialisasi
+    // ditetapkan saat pipeline dibuat, dan pipeline pass forward dibuat satu per
+    // material oleh kompiler graph — jadi sebuah bendera `kUnlit` berarti setiap
+    // material di project dikompilasi dua kali, dan sakelar di viewport menunggu
+    // kompilasi itu selesai. Sebuah float di blok per-frame berlaku pada frame
+    // berikutnya, untuk seluruh material sekaligus, tanpa satu pun pipeline
+    // dibangun ulang.
+    float4 viewParams;
 };
 
 [[vk::binding(0, 0)]] ConstantBuffer<ShadowParams> shadowParams;

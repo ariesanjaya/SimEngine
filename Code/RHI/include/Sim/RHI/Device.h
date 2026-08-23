@@ -281,6 +281,15 @@ public:
     /// dan berharap.
     bool SupportsBlockCompression() const { return supportsBlockCompression_; }
 
+    /// Apakah perangkat ini bisa meraster poligon sebagai rusuk.
+    ///
+    /// **Ditanya, dengan alasan yang sama seperti BCn.** `fillModeNonSolid`
+    /// adalah fitur opsional, dan `VK_POLYGON_MODE_LINE` pada perangkat yang
+    /// tidak memilikinya bukan pipeline yang gagal dibuat melainkan penggunaan
+    /// yang tidak sah: sebagian driver tetap mengembalikan `VK_SUCCESS`. Yang
+    /// membangun pipeline rangka kawat karena itu harus bertanya lebih dulu.
+    bool SupportsWireframe() const { return supportsWireframe_; }
+
 private:
     bool CreateInstance(const DeviceDesc& desc);
     bool SelectPhysicalDevice();
@@ -352,6 +361,7 @@ private:
     bool syncValidationEnabled_ = false;
     bool supportsVulkan13_ = false;
     bool supportsBlockCompression_ = false;
+    bool supportsWireframe_ = false;
 };
 
 }  // namespace sim::rhi

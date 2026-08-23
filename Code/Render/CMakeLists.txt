@@ -60,6 +60,9 @@ sim_compile_shaders(SimShadersGrid
         ${CMAKE_SOURCE_DIR}/Shaders/box.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/box_bindless.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/shadow.vert.slang
+        # Tahap fragmennya saja. Rangka kawat memakai `shadow.vert` di atas
+        # sebagai tahap vertexnya — lihat catatan di berkasnya.
+        ${CMAKE_SOURCE_DIR}/Shaders/wireframe.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/prepass.vert.slang
         ${CMAKE_SOURCE_DIR}/Shaders/prepass.frag.slang
         ${CMAKE_SOURCE_DIR}/Shaders/hiz_reduce.vert.slang
