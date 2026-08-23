@@ -31,10 +31,11 @@ dan C (kain) di [ROADMAP.md](ROADMAP.md).
 > magnitudo. Antarmukanya tetap berdiri, jadi keputusan ini bisa dibalik tanpa
 > membongkar apa pun.
 >
-> **R4 langkah 1 selesai.** Yang disebut jalur kritisnya — kembaran CPU dari
-> `openpbr.slang` — ternyata tidak perlu ditulis sama sekali: `slangc -target
-> cpp` memancarkannya dari sumber yang sama yang dijalankan GPU. Lihat R4 di
-> bawah dan [AUDIT-OPENPBR.md](AUDIT-OPENPBR.md).
+> **R4 langkah 1 dan 2 selesai.** Yang disebut jalur kritisnya — kembaran CPU
+> dari `openpbr.slang` — ternyata tidak perlu ditulis sama sekali: `slangc
+> -target cpp` memancarkannya dari sumber yang sama yang dijalankan GPU.
+> Integratornya berdiri di `Code/Reference`, tak-bias, dan diuji terhadap
+> jawaban analitik. Tinggal adegan acuannya.
 >
 > `PLAN-EMBREE-GI.md` — usulan terpisah yang memakai Embree sebagai builder BVH
 > untuk traversal compute — **dihapus**, sudah terjawab lain oleh arsitektur GI
@@ -521,7 +522,64 @@ C++ yang sama inilah yang ditautkan path tracer acuan di langkah berikutnya,
 jadi acuan dan runtime berbagi satu sumber model shading — bukan dua yang
 dijaga tetap sama.
 
-#### Langkah 2 — integrator
+#### Langkah 2 — integrator · ✅
+
+`Code/Reference` — modul CPU murni, tanpa `Sim::RHI` maupun `Sim::Render`,
+dijaga guard CMake yang sama dengan `Sim::Raycast`.
+
+**Model shading-nya dibangkitkan di sini, bukan di direktori uji.** C++ dari
+`slangc` sekarang milik modulnya, dan seluruh nama bermangling dikurung di satu
+berkas: `Shading.cpp`. Akhiran angka yang dipancarkan slangc bisa bergeser
+ketika slangc diperbarui; dibiarkan bocor ke pemanggil, yang rusak setiap
+pemakai model shading.
+
+Bentuk integratornya persis yang ditetapkan bagian sebelumnya:
+
+- **Estimator eksplisit** — `emisi + f·cos · L / pdf`, tiap faktor bisa dicetak
+  sendiri.
+- **Campuran dua strategi, satu sampel**, bobot tetap 50/50 antara sampling
+  lampu dan kosinus. Yang memilih arah salah satunya; PDF-nya tetap gabungan
+  keduanya, karena kalau tidak yang terjadi bukan campuran melainkan dua
+  estimator yang dijumlahkan — dan itu bias.
+- **Russian roulette dari throughput**, `maxDepth` hanya jaring pengaman.
+- **Kamera pinhole + cakram defokus, stratified √spp × √spp.**
+
+**Sampling BSDF sengaja kosinus, dan itu disebutkan.** `openpbr.slang` hanya
+mengevaluasi — bentuk yang benar untuk model shading rasterizer. Menuliskan
+penyampel yang cocok untuk kesembilan lobenya adalah proyek tersendiri, dan
+yang dibutuhkan acuan lebih dulu adalah **benar**, bukan cepat konvergen.
+Kosinus tak-bias untuk BSDF apa pun selama pembaginya PDF yang sama; yang
+dibayar hanya derau pada lobe spekular sempit.
+
+**Daftar lampu berdiri sendiri**, seperti yang sudah diperkirakan bagian
+"Apa yang berbenturan": backend memberi `(geometri, primitif)`, bukan objek.
+Satu konsekuensi yang perlu diketahui pengarang adegan — lampu harus ada di
+**dua** tempat, di daftar lampu *dan* sebagai geometri, karena estimator
+satu-sampel menemukan cahaya dengan mengenainya.
+
+#### Kriteria terima, dan angkanya
+
+Delapan uji, seluruhnya dibandingkan dengan jawaban yang **diketahui lebih
+dulu** — bukan dengan keluaran renderer ini sendiri di masa lalu:
+
+| Yang diuji | Terhadap apa |
+| --- | --- |
+| Tungku putih, albedo 1 | tepat 1,0 |
+| Albedo 0,25 / 0,5 / 0,8 | tepat albedonya |
+| PDF lampu kuad | `d²/(cos·A)` dihitung tangan |
+| `Sample` lawan `Pdf` | keduanya harus sepakat |
+| Lampu bidang di atas lantai | `ρ·L·A/(π·h²)`, hampiran sudut kecil |
+| Derau turun saat spp naik | konvergensi, bukan rupa |
+
+**Satu kelulusan palsu yang hampir lolos, dan cara ia ketahuan.** Kamera yang
+melihat lurus ke bawah — sudut yang paling sering dipakai — membuat
+`cross(forward, up)` nol dan seluruh basisnya NaN, sehingga setiap sinar
+meleset dan gambarnya menjadi langit seluruhnya. **Uji tungku putih lulus di
+sana**, karena langit seragam memang jawabannya. Yang menemukannya uji albedo,
+tiga uji kemudian. Sekarang kameranya punya sumbu cadangan, dan uji tungku
+putihnya membuktikan lebih dulu bahwa lantainya benar-benar kena.
+
+#### Langkah 3 — adegan acuan
 
 Sengaja dibatasi: tidak ada volume, tidak ada SSS, tidak ada dispersi. Yang
 divalidasi adalah GI difus dan spekular kasar — persis yang diaproksimasi

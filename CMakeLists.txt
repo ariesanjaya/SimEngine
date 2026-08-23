@@ -75,6 +75,7 @@ add_subdirectory(Code/Volume)
 # bergantung pada Render — lihat docs/PLAN-PHYSICS.md.
 add_subdirectory(Code/Physics)
 add_subdirectory(Code/Raycast)
+add_subdirectory(Code/Reference)
 add_subdirectory(Code/Whitebox)
 add_subdirectory(Code/Reflect)
 add_subdirectory(Code/Scene)

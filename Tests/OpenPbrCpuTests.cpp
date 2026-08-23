@@ -1,106 +1,61 @@
 // Uji kesamaan model shading OpenPBR, dijalankan di CPU.
 //
 // **Yang diuji di sini bukan tiruan `openpbr.slang`, melainkan `openpbr.slang`
-// itu sendiri.** Berkasnya dipancarkan `slangc -target cpp` dari sumber yang
-// sama persis yang dikompilasi ke SPIR-V untuk GPU, jadi tidak ada dua
-// implementasi yang bisa berselisih. Itu yang membuat berkas ini bisa
-// menjadi acuan: acuan yang isinya transkripsi tangan hanya menguji ketelitian
-// penyalinnya.
+// itu sendiri.** `Sim::Reference` menjalankan C++ yang dipancarkan
+// `slangc -target cpp` dari sumber yang sama persis yang dikompilasi ke SPIR-V
+// untuk GPU, jadi tidak ada dua implementasi yang bisa berselisih. Itu yang
+// membuat berkas ini bisa menjadi acuan: acuan yang isinya transkripsi tangan
+// hanya menguji ketelitian penyalinnya.
 //
-// Ini langkah pertama R4 di [PLAN-EMBREE.md](../docs/PLAN-EMBREE.md), dan C++
-// yang sama nantinya ditautkan path tracer acuannya.
-//
-// **Kalau berkas ini berhenti bisa dikompilasi setelah slangc diperbarui**,
-// yang paling mungkin berubah adalah akhiran nama yang dipancarkannya
-// (`OpenPbrQuery_0`, `GlobalParams_0`). Perbaikannya menyesuaikan nama di
-// `Harness` di bawah, dan hanya di sana.
-
-#include "openpbr_cpu.cpp"  // dihasilkan slangc dari Shaders/openpbr_cpu.slang
+// Ini langkah pertama R4 di [PLAN-EMBREE.md](../docs/PLAN-EMBREE.md). Nama
+// bermangling yang dipancarkan slangc **tidak muncul di sini** — semuanya
+// dikurung `Code/Reference/src/Shading.cpp`.
 
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include "Sim/Reference/Shading.h"
+
 #include <cmath>
-// Prelude slangc mendefinisikan ulang sebagian nama pustaka standar, jadi yang
-// dibutuhkan disebut eksplisit alih-alih diandaikan ikut terbawa.
 #include <initializer_list>
+
+using namespace sim;
+using namespace sim::reference;
 
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
 
-using Float3 = Vector<float, 3>;
-using Float2 = Vector<float, 2>;
-
-Float3 F3(float x, float y, float z) {
-    Float3 v;
-    v.x = x;
-    v.y = y;
-    v.z = z;
-    return v;
-}
-Float3 F3(float s) { return F3(s, s, s); }
-
-Float3 Normalize(Float3 v) {
-    const float len = std::sqrt(v.x * v.x + v.y * v.y + v.z * v.z);
-    return len > 0.0f ? F3(v.x / len, v.y / len, v.z / len) : v;
-}
-
-/// Nilai bawaan `OpenPBRSurface::defaults()`, ditulis ulang di sisi C++.
-///
-/// **Ini satu-satunya angka yang disalin**, dan ia sudah dikunci uji
-/// terpisah di `MaterialTests.cpp` terhadap katalog node maupun terhadap
-/// berkas normatif OpenPBR. Menyalinnya di sini justru membuat uji itu
-/// berlaku dua arah.
-OpenPBRSurface_0 Defaults() {
-    OpenPBRSurface_0 s{};
-    s.baseWeight_0 = 1.0f;
-    s.baseColor_0 = F3(0.8f);
-    s.baseMetalness_0 = 0.0f;
-    s.baseDiffuseRoughness_0 = 0.0f;
-    s.specularWeight_0 = 1.0f;
-    s.specularColor_0 = F3(1.0f);
-    s.specularRoughness_0 = 0.3f;
-    s.specularRoughnessAnisotropy_0 = 0.0f;
-    s.specularIor_0 = 1.5f;
-    s.coatWeight_0 = 0.0f;
-    s.coatColor_0 = F3(1.0f);
-    s.coatRoughness_0 = 0.0f;
-    s.coatRoughnessAnisotropy_0 = 0.0f;
-    s.coatIor_0 = 1.6f;
-    s.coatDarkening_0 = 1.0f;
-    s.fuzzWeight_0 = 0.0f;
-    s.fuzzColor_0 = F3(1.0f);
-    s.fuzzRoughness_0 = 0.5f;
-    return s;
-}
+Vec3 F3(float x, float y, float z) { return Vec3(x, y, z); }
+Vec3 F3(float s) { return Vec3(s); }
 
 struct Result {
-    Float3 direct{};
-    Float3 ambient{};
+    Vec3 direct{0.0f};
+    Vec3 ambient{0.0f};
 };
 
-/// Menjalankan satu query lewat entry point yang dipancarkan slangc.
+/// Satu permukaan pada satu titik, dengan bingkai yang ditentukan uji.
 struct Harness {
-    OpenPbrQuery_0 query{};
+    Surface surface;
+    Frame frame;
+    Frame coatFrame;
+    Vec3 light{0.0f};
+    Vec3 radiance{1.0f};
+    Environment environment;
 
     Harness() {
         // Bingkai bawaan: normal +Z, pandangan tegak lurus permukaan.
-        query.shadingNormal_0 = F3(0.0f, 0.0f, 1.0f);
-        query.shadingTangent_0 = F3(1.0f, 0.0f, 0.0f);
-        query.shadingBitangent_0 = F3(0.0f, 1.0f, 0.0f);
-        query.viewDirection_0 = F3(0.0f, 0.0f, 1.0f);
-        query.coatNormal_0 = query.shadingNormal_0;
-        query.coatTangent_0 = query.shadingTangent_0;
-        query.coatBitangent_0 = query.shadingBitangent_0;
-        query.light_0 = Normalize(F3(0.0f, 0.6f, 0.8f));
-        query.radiance_0 = F3(1.0f);
-        query.irradiance_0 = F3(kPi);  // radiansi seragam 1 memberi iradiansi pi
-        query.prefilteredBase_0 = F3(1.0f);
-        query.prefilteredCoat_0 = F3(1.0f);
-        query.dfg_0.x = 0.9f;
-        query.dfg_0.y = 0.05f;
-        query.surface_0 = Defaults();
+        frame.normal = F3(0.0f, 0.0f, 1.0f);
+        frame.tangent = F3(1.0f, 0.0f, 0.0f);
+        frame.bitangent = F3(0.0f, 1.0f, 0.0f);
+        frame.view = F3(0.0f, 0.0f, 1.0f);
+        coatFrame = frame;
+        light = glm::normalize(F3(0.0f, 0.6f, 0.8f));
+        environment.irradiance = F3(kPi);  // radiansi seragam 1 memberi iradiansi pi
+        environment.prefilteredBase = F3(1.0f);
+        environment.prefilteredCoat = F3(1.0f);
+        environment.dfgScale = 0.9f;
+        environment.dfgBias = 0.05f;
     }
 
     /// Menaruh pandangan dan cahaya berseberangan pada sudut yang diminta.
@@ -112,32 +67,19 @@ struct Harness {
     /// bobot koreksinya 3e-7.
     void Grazing(float degrees) {
         const float r = degrees * kPi / 180.0f;
-        query.viewDirection_0 = F3(std::sin(r), 0.0f, std::cos(r));
-        query.light_0 = F3(-std::sin(r), 0.0f, std::cos(r));
+        frame.view = F3(std::sin(r), 0.0f, std::cos(r));
+        light = F3(-std::sin(r), 0.0f, std::cos(r));
     }
 
     Result Run() const {
-        OpenPbrQuery_0 q = query;
-        Float3 direct = F3(0.0f);
-        Float3 ambient = F3(0.0f);
-
-        GlobalParams_0 params{};
-        params.gQueries_0.data = &q;
-        params.gQueries_0.count = 1;
-        params.gDirect_0.data = &direct;
-        params.gDirect_0.count = 1;
-        params.gAmbient_0.data = &ambient;
-        params.gAmbient_0.count = 1;
-
-        ComputeThreadVaryingInput in{};
-        in.groupID = uint3{0, 0, 0};
-        in.groupThreadID = uint3{0, 0, 0};
-        evaluateQueries_Thread(&in, nullptr, &params);
-        return Result{direct, ambient};
+        Result out;
+        out.direct = EvaluateDirect(surface, frame, coatFrame, light, radiance);
+        out.ambient = EvaluateEnvironment(surface, frame, coatFrame, environment);
+        return out;
     }
 };
 
-float Luminance(Float3 c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; }
+float Luminance(Vec3 c) { return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z; }
 
 }  // namespace
 
@@ -166,14 +108,14 @@ TEST_CASE("F82: specularColor mewarnai tepi menyerempet logam, tepat sebagai pec
     // `specularColor`, bukan sekadar "lebih gelap".
     Harness h;
     h.Grazing(81.79f);  // acos(1/7)
-    h.query.surface_0.baseMetalness_0 = 1.0f;
+    h.surface.baseMetalness = 1.0f;
 
-    const Float3 white = h.Run().direct;
+    const Vec3 white = h.Run().direct;
     REQUIRE(white.x > 0.0f);
 
-    const Float3 tint = F3(0.4f, 0.5f, 0.9f);
-    h.query.surface_0.specularColor_0 = tint;
-    const Float3 tinted = h.Run().direct;
+    const Vec3 tint = F3(0.4f, 0.5f, 0.9f);
+    h.surface.specularColor = tint;
+    const Vec3 tinted = h.Run().direct;
 
     CHECK(tinted.x / white.x == doctest::Approx(tint.x).epsilon(0.01));
     CHECK(tinted.y / white.y == doctest::Approx(tint.y).epsilon(0.01));
@@ -187,11 +129,11 @@ TEST_CASE("F82 tereduksi ke Schlick pada nilai bawaan") {
     for (const float degrees : {5.0f, 45.0f, 81.79f, 89.0f}) {
         Harness h;
         h.Grazing(degrees);
-        h.query.surface_0.baseMetalness_0 = 1.0f;
-        const Float3 base = h.Run().direct;
+        h.surface.baseMetalness = 1.0f;
+        const Vec3 base = h.Run().direct;
 
-        h.query.surface_0.specularColor_0 = F3(1.0f);
-        const Float3 same = h.Run().direct;
+        h.surface.specularColor = F3(1.0f);
+        const Vec3 same = h.Run().direct;
 
         CAPTURE(degrees);
         CHECK(same.x == doctest::Approx(base.x));
@@ -203,10 +145,10 @@ TEST_CASE("baseWeight menskala reflektansi logam") {
     // dan `baseWeight` sebelumnya hanya menyentuh lobe difus — yang justru
     // tidak dimiliki logam sama sekali.
     Harness h;
-    h.query.surface_0.baseMetalness_0 = 1.0f;
+    h.surface.baseMetalness = 1.0f;
     const float full = Luminance(h.Run().direct);
 
-    h.query.surface_0.baseWeight_0 = 0.5f;
+    h.surface.baseWeight = 0.5f;
     const float half = Luminance(h.Run().direct);
 
     REQUIRE(full > 0.0f);
@@ -221,12 +163,12 @@ TEST_CASE("coatDarkening membatalkan penggelapan tanpa membuang warna pernisnya"
     // `coatDarkening = 0` ikut menghapus `coatColor`, sehingga pernis merah
     // menjadi bening. Spesifikasi hanya membatalkan penggelapannya.
     Harness h;
-    h.query.surface_0.coatWeight_0 = 1.0f;
-    h.query.surface_0.coatColor_0 = F3(1.0f, 0.2f, 0.2f);
+    h.surface.coatWeight = 1.0f;
+    h.surface.coatColor = F3(1.0f, 0.2f, 0.2f);
 
-    const Float3 dark = h.Run().direct;
-    h.query.surface_0.coatDarkening_0 = 0.0f;
-    const Float3 boosted = h.Run().direct;
+    const Vec3 dark = h.Run().direct;
+    h.surface.coatDarkening = 0.0f;
+    const Vec3 boosted = h.Run().direct;
 
     // Warnanya bertahan: rasio merah terhadap hijau tidak berubah.
     REQUIRE(dark.y > 0.0f);
@@ -241,13 +183,13 @@ TEST_CASE("coatIor menurunkan pantulan dasar di bawahnya") {
     // rapat daripada udara, dan pantulannya anjlok. Diuji pada logam supaya
     // yang terukur benar-benar lobe spekularnya.
     Harness h;
-    h.query.surface_0.specularRoughness_0 = 0.05f;
+    h.surface.specularRoughness = 0.05f;
     const float uncoated = Luminance(h.Run().direct);
 
-    h.query.surface_0.coatWeight_0 = 1.0f;
+    h.surface.coatWeight = 1.0f;
     // Warna coat putih dan tanpa penggelapan, supaya yang tersisa hanya
     // perubahan rasio IOR-nya.
-    h.query.surface_0.coatDarkening_0 = 0.0f;
+    h.surface.coatDarkening = 0.0f;
     const float coated = Luminance(h.Run().direct);
 
     CHECK(uncoated > 0.0f);
@@ -264,15 +206,15 @@ TEST_CASE("Difus EON tidak pernah melebihi energi yang diterimanya") {
     // memantulkan lebih dari yang diterimanya.
     for (const float roughness : {0.0f, 0.25f, 0.5f, 1.0f}) {
         Harness h;
-        h.query.surface_0.baseColor_0 = F3(1.0f);
-        h.query.surface_0.baseDiffuseRoughness_0 = roughness;
+        h.surface.baseColor = F3(1.0f);
+        h.surface.baseDiffuseRoughness = roughness;
         // Spekular dimatikan supaya yang terukur murni lobe difusnya.
-        h.query.surface_0.specularWeight_0 = 0.0f;
-        h.query.prefilteredBase_0 = F3(0.0f);
-        h.query.dfg_0.x = 0.0f;
-        h.query.dfg_0.y = 0.0f;
+        h.surface.specularWeight = 0.0f;
+        h.environment.prefilteredBase = F3(0.0f);
+        h.environment.dfgScale = 0.0f;
+        h.environment.dfgBias = 0.0f;
 
-        const Float3 ambient = h.Run().ambient;
+        const Vec3 ambient = h.Run().ambient;
         CAPTURE(roughness);
         CHECK(std::isfinite(ambient.x));
         CHECK(ambient.x <= doctest::Approx(1.0f).epsilon(0.02));
@@ -285,9 +227,9 @@ TEST_CASE("Kekasaran difus terlihat di kedua jalur cahaya") {
     // Lambert murni, sehingga satu material menjawab dua hal berbeda
     // tergantung dari mana cahayanya datang.
     Harness smooth;
-    smooth.query.surface_0.specularWeight_0 = 0.0f;
+    smooth.surface.specularWeight = 0.0f;
     Harness rough = smooth;
-    rough.query.surface_0.baseDiffuseRoughness_0 = 1.0f;
+    rough.surface.baseDiffuseRoughness = 1.0f;
 
     CHECK(Luminance(rough.Run().direct) != doctest::Approx(Luminance(smooth.Run().direct)));
     CHECK(Luminance(rough.Run().ambient) != doctest::Approx(Luminance(smooth.Run().ambient)));
@@ -297,15 +239,15 @@ TEST_CASE("Fuzz meredam yang di bawahnya, bukan sekadar menambah energi") {
     // Temuan §9. Fuzz sebelumnya ditambahkan tanpa dilapiskan, sehingga
     // permukaan berbulu bisa memantulkan lebih dari yang diterimanya.
     Harness h;
-    h.query.surface_0.baseColor_0 = F3(1.0f);
-    h.query.surface_0.specularWeight_0 = 0.0f;
-    h.query.prefilteredBase_0 = F3(0.0f);
-    h.query.dfg_0.x = 0.0f;
-    h.query.dfg_0.y = 0.0f;
+    h.surface.baseColor = F3(1.0f);
+    h.surface.specularWeight = 0.0f;
+    h.environment.prefilteredBase = F3(0.0f);
+    h.environment.dfgScale = 0.0f;
+    h.environment.dfgBias = 0.0f;
     const float bare = Luminance(h.Run().ambient);
 
-    h.query.surface_0.fuzzWeight_0 = 1.0f;
-    h.query.surface_0.fuzzColor_0 = F3(0.0f);  // fuzz hitam: hanya meredam
+    h.surface.fuzzWeight = 1.0f;
+    h.surface.fuzzColor = F3(0.0f);  // fuzz hitam: hanya meredam
     const float fuzzed = Luminance(h.Run().ambient);
 
     CHECK(bare > 0.0f);
@@ -322,9 +264,9 @@ TEST_CASE("Anisotropi mengawetkan kekasaran rata-rata, bukan hasil kali sumbunya
     // anisotropik tidak boleh melenceng jauh dari yang isotropik ketika sumbu
     // panjangnya sejajar bidang pandang.
     Harness iso;
-    iso.query.surface_0.specularRoughness_0 = 0.4f;
+    iso.surface.specularRoughness = 0.4f;
     Harness aniso = iso;
-    aniso.query.surface_0.specularRoughnessAnisotropy_0 = 0.8f;
+    aniso.surface.specularRoughnessAnisotropy = 0.8f;
     const float anisotropic = Luminance(aniso.Run().direct);
 
     CHECK(std::isfinite(anisotropic));
@@ -332,7 +274,7 @@ TEST_CASE("Anisotropi mengawetkan kekasaran rata-rata, bukan hasil kali sumbunya
     // Anisotropi penuh membuat sumbu pendek mendekati nol; tanpa lantai alpha
     // ini akan menjadi NaN atau lobe yang lenyap.
     Harness extreme = iso;
-    extreme.query.surface_0.specularRoughnessAnisotropy_0 = 1.0f;
+    extreme.surface.specularRoughnessAnisotropy = 1.0f;
     const float full = Luminance(extreme.Run().direct);
     CHECK(std::isfinite(full));
     CHECK(full >= 0.0f);
@@ -342,13 +284,13 @@ TEST_CASE("Bingkai coat sendiri mengubah sorotnya, bukan sisanya") {
     // Temuan §12. Normal coat yang berbeda dari normal dasar adalah yang
     // membuat kulit jeruk pada cat mobil mungkin.
     Harness flat;
-    flat.query.surface_0.coatWeight_0 = 1.0f;
-    flat.query.surface_0.coatRoughness_0 = 0.1f;
+    flat.surface.coatWeight = 1.0f;
+    flat.surface.coatRoughness = 0.1f;
     const float aligned = Luminance(flat.Run().direct);
 
     Harness tilted = flat;
-    tilted.query.coatNormal_0 = Normalize(F3(0.3f, 0.0f, 1.0f));
-    tilted.query.coatTangent_0 = Normalize(F3(1.0f, 0.0f, -0.3f));
+    tilted.coatFrame.normal = glm::normalize(F3(0.3f, 0.0f, 1.0f));
+    tilted.coatFrame.tangent = glm::normalize(F3(1.0f, 0.0f, -0.3f));
     const float perturbed = Luminance(tilted.Run().direct);
 
     CHECK(std::isfinite(perturbed));

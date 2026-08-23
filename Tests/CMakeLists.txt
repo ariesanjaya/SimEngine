@@ -366,48 +366,30 @@ if(SIM_BUILD_EDITOR)
             nlohmann_json::nlohmann_json)
 endif()
 
+# Path tracer acuan — R4. Ikut gerbang slangc karena Sim::Reference tidak ada
+# tanpanya: model shading-nya dibangkitkan slangc, bukan ditulis tangan.
+if(TARGET Sim::Reference)
+    sim_add_test(SimReferenceTests
+        SOURCES
+            ReferenceTests.cpp
+        DEPS
+            Sim::Reference)
+endif()
+
 # --- Model shading OpenPBR dijalankan di CPU ---------------------------------
 #
 # **Yang diuji berkas ini bukan tiruan `openpbr.slang`, melainkan berkas itu
-# sendiri.** `slangc -target cpp` memancarkan C++ dari sumber yang sama yang
-# dikompilasi ke SPIR-V untuk GPU, jadi tidak ada dua implementasi yang bisa
-# berselisih — drift bukan sesuatu yang diuji, melainkan sesuatu yang tidak bisa
-# terjadi. Ini langkah pertama R4 di docs/PLAN-EMBREE.md, dan C++ yang sama
-# nantinya ditautkan path tracer acuannya.
+# sendiri.** C++-nya dipancarkan `slangc -target cpp` dari sumber yang sama yang
+# dikompilasi ke SPIR-V untuk GPU, jadi drift bukan sesuatu yang diuji melainkan
+# sesuatu yang tidak bisa terjadi.
 #
-# Dilewati tanpa slangc, dengan alasan yang sama seperti target shader lain:
-# yang hilang cakupan yang tidak punya alat untuk dibangkitkan, bukan cakupan
-# yang diabaikan.
-if(SIM_SLANGC)
-    set(_openpbr_cpu "${CMAKE_CURRENT_BINARY_DIR}/openpbr_cpu.cpp")
-    set(_openpbr_src "${CMAKE_SOURCE_DIR}/Shaders/openpbr_cpu.slang")
-    add_custom_command(
-        OUTPUT  "${_openpbr_cpu}"
-        COMMAND "${SIM_SLANGC}" "${_openpbr_src}" -target cpp -o "${_openpbr_cpu}"
-                -I "${CMAKE_SOURCE_DIR}/Shaders"
-        # **`openpbr.slang` ikut sebagai dependensi eksplisit.** Tanpanya,
-        # mengubah model shading tidak membangkitkan ulang C++-nya, dan uji ini
-        # akan lulus atas kode yang sudah tidak ada lagi — bug yang sama persis
-        # dengan yang dijaga identitas kompilator di ShaderCache.
-        DEPENDS "${_openpbr_src}" "${CMAKE_SOURCE_DIR}/Shaders/openpbr.slang"
-        COMMENT "slangc -target cpp openpbr_cpu.slang"
-        VERBATIM)
-
-    # **Berkas hasilnya di-`#include` uji, bukan dikompilasi terpisah.** Uji itu
-    # butuh definisi struct yang dipancarkan slangc, dan menyertakannya *juga*
-    # sebagai source berarti setiap simbol punya dua salinan. Dependensinya
-    # karena itu lewat target, bukan lewat daftar source.
-    add_custom_target(SimOpenPbrCpuSource DEPENDS "${_openpbr_cpu}")
-
+# Pembangkitannya milik `Sim::Reference`, bukan milik direktori ini: dua langkah
+# codegen atas berkas yang sama berarti dua salinan yang bisa berselisih, dan
+# yang berselisih di sini justru model shading yang seluruh gunanya tunggal.
+if(TARGET Sim::Reference)
     sim_add_test(SimOpenPbrCpuTests
         SOURCES
-            OpenPbrCpuTests.cpp)
-    add_dependencies(SimOpenPbrCpuTests SimOpenPbrCpuSource)
-    target_include_directories(SimOpenPbrCpuTests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
-    # C++ yang dipancarkan slangc bukan kode kita: ia tidak lolos -Werror milik
-    # `sim_target_defaults`, dan menambalnya berarti menambal keluaran generator
-    # setiap kali generatornya diperbarui.
-    target_compile_options(SimOpenPbrCpuTests PRIVATE -Wno-error)
-else()
-    message(STATUS "slangc tidak ditemukan; SimOpenPbrCpuTests dilewati")
+            OpenPbrCpuTests.cpp
+        DEPS
+            Sim::Reference)
 endif()
