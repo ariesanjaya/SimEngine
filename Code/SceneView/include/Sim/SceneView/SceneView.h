@@ -8,6 +8,7 @@
 #include "Sim/Terrain/TerrainDecal.h"
 #include "Sim/SceneView/WhiteboxStore.h"
 #include "Sim/SceneView/MaterialPrograms.h"
+#include "Sim/SceneView/PickScene.h"
 #include "Sim/Scene/World.h"
 
 #include <filesystem>
@@ -102,11 +103,34 @@ bool ApplySceneSky(const scene::World& world, render::ViewportDesc& desc);
 class SceneView {
 public:
     /// Satu objek bergeometri yang bisa diklik, sudah dalam ruang dunia.
+    /// Satu titik di permukaan geometri, beserta pemiliknya.
+    struct SurfaceHit {
+        bool hit = false;
+        scene::Entity entity = scene::kNullEntity;
+        Vec3 position{0.0f};
+        /// Normal geometri ruang dunia, sudah dinormalkan dan **menghadap ke
+        /// arah datangnya sinar** — sehingga benda yang dijatuhkan berdiri di
+        /// atas permukaan, bukan menembusnya.
+        Vec3 normal{0.0f, 1.0f, 0.0f};
+        float distance = 0.0f;
+
+        explicit operator bool() const { return hit; }
+    };
+
     struct Pickable {
         scene::Entity entity = scene::kNullEntity;
         Mat4 worldMatrix{1.0f};
         Vec3 boundsMin{-0.5f, -0.5f, -0.5f};
         Vec3 boundsMax{0.5f, 0.5f, 0.5f};
+        /// Kunci geometri CPU-nya di `assets::MeshGeometryCache` — jalur berkas
+        /// untuk mesh yang diimpor, dan kunci sintetis untuk bentuk yang lahir di
+        /// editor. Kosong berarti entity ini tidak punya segitiga untuk
+        /// ditembak, dan picking presisi melewatkannya.
+        ///
+        /// **Kunci, bukan geometrinya.** Yang menyusun daftar ini berjalan tiap
+        /// frame; menaruh segitiga di sini berarti menyalin adegan enam puluh
+        /// kali per detik.
+        std::string meshKey;
     };
 
     /// Penanda untuk entity tanpa geometri — lampu, kamera, node kosong.
@@ -182,6 +206,16 @@ public:
     /// dikompilasi sama sekali — dan setiap ruas digambar jalur mundur
     /// `box.frag`, seperti sebelum jalur ini ada.
     void SetMaterialPrograms(MaterialPrograms* programs) { materialPrograms_ = programs; }
+
+    /// Salinan CPU geometri, untuk picking presisi (R2).
+    ///
+    /// Null berarti setiap picking memakai jalur kotak batas — keadaan sebelum
+    /// R2, dan keadaan yang benar untuk build tanpa cache.
+    void SetMeshGeometryCache(assets::MeshGeometryCache* cache) { picks_.SetCache(cache); }
+
+    /// Berapa benda yang geometrinya masih dimuat. Nol berarti picking sudah
+    /// presisi untuk seluruh isi adegan.
+    std::size_t PendingPickGeometry() const { return picks_.PendingCount(); }
 
     /// Menambahkan kotak wireframe sejajar sumbu, sesudah `Build`.
     ///
@@ -337,6 +371,20 @@ public:
     /// objek yang diputar tetap bisa diklik tepat pada bentuknya.
     scene::Entity Raycast(const Ray& ray) const;
 
+    /// Permukaan yang tertembus sinar: titiknya, normalnya, dan pemiliknya.
+    ///
+    /// **Hanya jalur presisi — kotak batas sengaja tidak dipakai di sini**, dan
+    /// itu perbedaan yang menentukan terhadap `Raycast` di atas. Memilih benda
+    /// dari kotaknya sedikit terlalu murah hati dan hasilnya tetap benda yang
+    /// dimaksud; menaruh sesuatu di *permukaan* sebuah kotak menaruhnya di udara,
+    /// dengan orientasi mengikuti sisi kotak yang tidak ada di bentuk aslinya.
+    /// Yang geometrinya belum dimuat karena itu menjawab "tidak kena", dan
+    /// pemanggil melewatkannya alih-alih memindahkannya ke tempat yang salah.
+    ///
+    /// `ignore` melewatkan entity tertentu — benda yang sedang dijatuhkan tidak
+    /// boleh mendarat di dirinya sendiri.
+    SurfaceHit RaycastSurface(const Ray& ray, std::span<const scene::Entity> ignore = {}) const;
+
     /// Ikon terdekat dari sebuah titik layar, dalam radius tertentu.
     ///
     /// Diuji di ruang layar, bukan ruang dunia: ikon digambar dengan ukuran
@@ -377,6 +425,12 @@ private:
     std::vector<render::LineSegment> lines_;
     std::vector<render::LightInstance> lights_;
     std::vector<Pickable> pickables_;
+    /// Geometri yang bisa ditembak. **`mutable` karena ia cache**: `Raycast`
+    /// tidak mengubah apa yang dilihat pemanggil, ia hanya menyiapkan jawaban
+    /// yang sama dengan lebih teliti.
+    mutable PickScene picks_;
+    /// Dipakai ulang tiap picking supaya tidak mengalokasi di dalam klik.
+    mutable std::vector<PickItem> pickItems_;
     IconGlyphs iconGlyphs_;
     bool linesThroughGeometry_ = false;
     std::vector<EntityIcon> icons_;

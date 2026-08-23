@@ -16,6 +16,7 @@ sim_add_library(SceneView
     SOURCES
         src/MaterialPrograms.cpp
         src/SceneView.cpp
+        src/PickScene.cpp
         src/Selection.cpp
         src/SkinnedPreview.cpp
         src/TerrainStore.cpp
@@ -29,6 +30,8 @@ sim_add_library(SceneView
         # Mesh, tekstur, dan material dicari lewat GUID di database aset, lalu
         # dipanggangkan bila belum ada bentuk siap-GPU-nya.
         Sim::Assets
+        # Picking presisi (R1). Murni CPU — lihat docs/PLAN-EMBREE.md.
+        Sim::Raycast
         Sim::Material
         # Pose skinning dihitung `SkinnedPreview`, yang menyimpan klip dan
         # rangkanya sendiri.

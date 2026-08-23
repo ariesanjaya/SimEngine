@@ -4,6 +4,20 @@ sim_add_test(SimCoreTests
     DEPS
         Sim::Core)
 
+# Raycast: BVH dua tingkat dan ketiga query-nya. Bebas GPU dan bebas editor —
+# itu bagian dari yang diuji, bukan kebetulan: modul ini harus bisa dipakai
+# SimHeadless tanpa satu pun display.
+sim_add_test(SimRaycastTests
+    SOURCES
+        RaycastTests.cpp
+    DEPS
+        Sim::Raycast)
+
+# Dipakai uji yang menyisir `Code/` untuk memastikan Möller–Trumbore tidak punya
+# salinan kedua. Pola yang sama dengan SIM_CODE_DIR di SimImageIOTests.
+target_compile_definitions(SimRaycastTests
+    PRIVATE SIM_CODE_DIR="${CMAKE_SOURCE_DIR}/Code")
+
 sim_add_test(SimSceneTests
     SOURCES
         SceneTests.cpp

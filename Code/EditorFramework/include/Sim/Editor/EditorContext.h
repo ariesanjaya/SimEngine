@@ -20,6 +20,7 @@ class FrameLimiter;
 }
 
 namespace sim::assets {
+class MeshGeometryCache;
 class MeshSdfBakery;
 class TextureBakery;
 class AssetDatabase;
@@ -130,6 +131,9 @@ struct EditorContext {
     /// renderer karena yang membakenya OpenVDB — pengondisi aset yang tidak
     /// pernah ikut ke jalur yang dikirim ke pemain.
     assets::MeshSdfBakery* meshSdfBakery = nullptr;
+    /// Salinan CPU geometri mesh, untuk picking presisi dan query authoring.
+    /// Null berarti picking kembali ke jalur kotak batas.
+    assets::MeshGeometryCache* meshGeometry = nullptr;
     /// Penjaga shader material untuk pass forward. Dimiliki pemanggil EditorApp,
     /// dan seperti baker tekstur ia mengerjakan pekerjaannya di `TaskPool`.
     MaterialPrograms* materialPrograms = nullptr;

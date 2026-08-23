@@ -1,0 +1,43 @@
+# Ray query CPU — R0 di docs/PLAN-EMBREE.md.
+#
+# **Yang tidak ada di daftar dependensi ini yang penting:** Sim::RHI dan
+# Sim::Render. Modul ini murni CPU dan geometri, dan itulah yang membuatnya bisa
+# dipakai SimHeadless tanpa satu pun display — beserta seluruh nilai CI-nya.
+#
+# Sim::Assets juga tidak ada, dan itu disengaja: modul ini menerima posisi dan
+# indeks mentah, bukan `MeshData`. Yang menjembatani keduanya adalah R1, dan ia
+# tinggal di sisi pemanggil.
+sim_add_library(Raycast
+    SOURCES
+        src/Bvh.cpp
+        src/RayScene.cpp
+        src/Query.cpp
+        src/SceneBackend.cpp
+    PUBLIC_DEPS
+        # `Vec3`, `Mat4`, dan Möller–Trumbore bersama di Sim/Core/Intersect.h.
+        Sim::Core)
+
+# **Aturannya ditegakkan, bukan dituliskan lalu diharapkan.** Sebuah `#include`
+# yang menyeret Sim::RHI ke sini tidak menghasilkan galat apa pun — ia hanya
+# membuat SimHeadless berhenti bisa dibangun di mesin tanpa Vulkan, beberapa
+# bulan kemudian, jauh dari sebabnya. Yang menemukannya harus konfigurasi, bukan
+# mesin build orang lain.
+function(sim_raycast_assert_no_gpu_deps target)
+    get_target_property(_deps ${target} LINK_LIBRARIES)
+    if(NOT _deps)
+        return()
+    endif()
+    foreach(_dep IN LISTS _deps)
+        string(REPLACE "Sim::" "Sim" _normalised "${_dep}")
+        if(_normalised STREQUAL "SimRHI" OR _normalised STREQUAL "SimRender")
+            message(FATAL_ERROR
+                "Sim::Raycast bergantung pada ${_dep}. Modul ini harus tetap murni CPU — "
+                "lihat 'Yang tidak boleh ditunda' di docs/PLAN-EMBREE.md.")
+        endif()
+        if(TARGET ${_normalised})
+            sim_raycast_assert_no_gpu_deps(${_normalised})
+        endif()
+    endforeach()
+endfunction()
+
+sim_raycast_assert_no_gpu_deps(SimRaycast)

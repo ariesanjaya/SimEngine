@@ -1,46 +1,8 @@
 #include "Sim/Whitebox/Picking.h"
 
-#include <cmath>
+#include "Sim/Core/Intersect.h"
 
 namespace sim::whitebox {
-namespace {
-
-/// Möller–Trumbore, sisi depan maupun belakang.
-///
-/// **Sisi belakang ikut diterima**, dan itu disengaja: perancang kerap bekerja
-/// dari dalam ruangan yang baru dibuatnya, dan sisi yang tidak bisa diklik dari
-/// dalam berarti dinding yang tidak bisa dipindahkan tanpa memutar kamera
-/// keluar.
-bool RayTriangle(const Vec3& origin, const Vec3& direction, const Vec3& a, const Vec3& b,
-                 const Vec3& c, float& outDistance) {
-    constexpr float kEpsilon = 1e-8f;
-    const Vec3 edge1 = b - a;
-    const Vec3 edge2 = c - a;
-    const Vec3 pvec = glm::cross(direction, edge2);
-    const float determinant = glm::dot(edge1, pvec);
-    if (std::abs(determinant) < kEpsilon) {
-        return false;  // sinar sejajar bidang segitiga
-    }
-    const float inverse = 1.0f / determinant;
-    const Vec3 tvec = origin - a;
-    const float u = glm::dot(tvec, pvec) * inverse;
-    if (u < 0.0f || u > 1.0f) {
-        return false;
-    }
-    const Vec3 qvec = glm::cross(tvec, edge1);
-    const float v = glm::dot(direction, qvec) * inverse;
-    if (v < 0.0f || u + v > 1.0f) {
-        return false;
-    }
-    const float distance = glm::dot(edge2, qvec) * inverse;
-    if (distance < kEpsilon) {
-        return false;  // di belakang titik asal sinar
-    }
-    outDistance = distance;
-    return true;
-}
-
-}  // namespace
 
 PolygonHit PickPolygon(const WhiteboxMesh& box, const Vec3& origin, const Vec3& direction,
                        float maxDistance) {
@@ -69,18 +31,18 @@ PolygonHit PickPolygon(const WhiteboxMesh& box, const Vec3& origin, const Vec3& 
         for (std::size_t i = 1; i + 1 < loop.size(); ++i) {
             const Vec3& second = mesh.GetVertex(loop[i]).position;
             const Vec3& third = mesh.GetVertex(loop[i + 1]).position;
-            float distance = 0.0f;
-            if (!RayTriangle(origin, ray, first, second, third, distance)) {
+            // `nearest` diserahkan sebagai batas atas, bukan diperiksa
+            // sesudahnya: segitiga yang lebih jauh dari yang sudah ditemukan
+            // ditolak sebelum barycentric-nya dihitung.
+            const TriangleHit hit = RayTriangle(origin, ray, first, second, third, nearest);
+            if (!hit) {
                 continue;
             }
-            if (distance >= nearest) {
-                continue;
-            }
-            nearest = distance;
+            nearest = hit.distance;
             result.hit = true;
             result.face = face;
-            result.distance = distance;
-            result.position = origin + ray * distance;
+            result.distance = hit.distance;
+            result.position = origin + ray * hit.distance;
         }
     }
 

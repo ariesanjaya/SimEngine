@@ -197,6 +197,11 @@ void SceneView::Build(scene::World& world, const Selection& selection,
             instance.boundsMax = Vec3(0.5f);
             instance.color = kMeshColor;
             instance.selected = selected;
+            // Kunci geometri CPU-nya, untuk picking presisi (R1). Sama dengan
+            // kunci yang dipakai renderer supaya keduanya tidak pernah menunjuk
+            // bentuk yang berbeda. **Di luar blok di bawah**, karena yang
+            // membacanya adalah daftar pickable di ujung.
+            std::string meshKey;
             {
                 // Warna mundur untuk ruas yang tidak punya material di mana pun:
                 // material bawaan editor.
@@ -233,6 +238,7 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                                 AppendPartColors(*meshRenderer, mesh.partCount, assets, renderer, instance);
                             }
                             fromWhitebox = true;
+                            meshKey = guid.ToString();
                         }
                     }
                 }
@@ -244,6 +250,9 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                             found.database->AbsolutePath(*found.record);
                         const render::MeshAsset mesh =
                             renderer->AcquireMesh(meshPath.string());
+                        if (mesh.loaded) {
+                            meshKey = meshPath.string();
+                        }
                         // **Medan jaraknya diminta di sini, di sebelah
                         // geometrinya.** Keduanya berkunci berkas yang sama, dan
                         // yang meminta salah satunya hampir selalu memerlukan
@@ -285,8 +294,8 @@ void SceneView::Build(scene::World& world, const Selection& selection,
             meshes_.push_back(instance);
 
             if (pickable) {
-                pickables_.push_back(
-                    Pickable{entity, matrix, instance.boundsMin, instance.boundsMax});
+                pickables_.push_back(Pickable{entity, matrix, instance.boundsMin,
+                                              instance.boundsMax, std::move(meshKey)});
             }
             continue;
         }
@@ -702,7 +711,10 @@ void SceneView::AppendDecal(const scene::DecalComponent& component, scene::Entit
     meshes_.push_back(instance);
 
     if (pickable) {
-        pickables_.push_back(Pickable{entity, hostWorld, mesh.boundsMin, mesh.boundsMax});
+        // Kunci geometri sengaja kosong: decal selembar kulit di atas permukaan
+        // lain, dan memilihnya per segitiga berarti mengklik lantai di bawahnya
+        // memilih decal-nya.
+        pickables_.push_back(Pickable{entity, hostWorld, mesh.boundsMin, mesh.boundsMax, {}});
     }
 }
 
@@ -794,7 +806,11 @@ void SceneView::AppendTerrain(const scene::TerrainComponent& component, scene::E
             meshes_.push_back(instance);
 
             if (pickable) {
-                pickables_.push_back(Pickable{entity, matrix, mesh.boundsMin, mesh.boundsMax});
+                // Terrain punya jalur pickingnya sendiri lewat heightmap, yang
+                // eksak sekaligus lebih murah daripada ray cast mana pun —
+                // lihat batasnya di docs/PLAN-EMBREE.md.
+                pickables_.push_back(
+                    Pickable{entity, matrix, mesh.boundsMin, mesh.boundsMax, {}});
             }
         }
     }
@@ -1095,7 +1111,48 @@ scene::Entity SceneView::Raycast(const Ray& ray) const {
     scene::Entity best = scene::kNullEntity;
     float bestDistance = std::numeric_limits<float>::max();
 
+    // **Geometri disusun di sini, bukan di `Build`.** Adegan menggambar enam
+    // puluh kali per detik dan diklik beberapa kali per menit; menyusunnya tiap
+    // frame berarti membayar seluruh biayanya untuk setiap kali ia benar-benar
+    // dipakai. `Sync` sendiri melewatkan pekerjaannya bila tidak ada yang
+    // bergeser sejak terakhir kali.
+    pickItems_.clear();
+    pickItems_.reserve(pickables_.size());
     for (const Pickable& pickable : pickables_) {
+        if (pickable.meshKey.empty()) {
+            continue;
+        }
+        PickItem item;
+        item.entity = pickable.entity;
+        item.worldMatrix = pickable.worldMatrix;
+        item.meshKey = pickable.meshKey;
+        // Kunci mesh impor **adalah** jalur berkasnya; whitebox memakai GUID,
+        // yang bukan jalur dan karena itu tidak punya sumber untuk dimuat.
+        if (pickable.meshKey.find('/') != std::string::npos ||
+            pickable.meshKey.find('\\') != std::string::npos) {
+            item.sourcePath = pickable.meshKey;
+        }
+        pickItems_.push_back(item);
+    }
+    picks_.Sync(pickItems_);
+
+    const raycast::RayHit hit = picks_.Raycast(ray.origin, ray.direction);
+    if (hit) {
+        best = ToEntity(hit.userData);
+        // **Jaraknya dibandingkan dalam satuan yang sama** dengan jalur kotak di
+        // bawah: keduanya mengukur sepanjang sinar dunia yang sama, jadi benda
+        // yang geometrinya belum dimuat tetap bisa menang bila memang lebih
+        // dekat — dan jawabannya tidak melompat begitu pemuatannya selesai.
+        bestDistance = hit.distance;
+    }
+
+    for (const Pickable& pickable : pickables_) {
+        // Yang sudah terwakili segitiga tidak diuji kotaknya lagi: kotaknya
+        // selalu lebih besar daripada bentuknya, dan mengujinya kembali berarti
+        // mengembalikan persis positif palsu yang baru saja dibuang.
+        if (picks_.Covers(pickable.entity)) {
+            continue;
+        }
         // Sinar dibawa ke ruang lokal objek, bukan sebaliknya. Dengan begitu
         // ujinya tetap AABB sederhana walau objeknya diputar dan diskala, dan
         // dua objek bertumpuk terpisah tepat pada bentuk masing-masing.
@@ -1118,6 +1175,49 @@ scene::Entity SceneView::Raycast(const Ray& ray) const {
         }
     }
     return best;
+}
+
+SceneView::SurfaceHit SceneView::RaycastSurface(const Ray& ray,
+                                                std::span<const scene::Entity> ignore) const {
+    SurfaceHit result;
+
+    // Daftar yang sama dengan `Raycast`, disusun ulang di sini karena keduanya
+    // dipanggil terpisah dan `Sync` sendiri melewatkan pekerjaannya bila tidak
+    // ada yang bergeser.
+    pickItems_.clear();
+    pickItems_.reserve(pickables_.size());
+    for (const Pickable& pickable : pickables_) {
+        if (pickable.meshKey.empty()) {
+            continue;
+        }
+        PickItem item;
+        item.entity = pickable.entity;
+        item.worldMatrix = pickable.worldMatrix;
+        item.meshKey = pickable.meshKey;
+        if (pickable.meshKey.find('/') != std::string::npos ||
+            pickable.meshKey.find('\\') != std::string::npos) {
+            item.sourcePath = pickable.meshKey;
+        }
+        pickItems_.push_back(item);
+    }
+    picks_.Sync(pickItems_);
+
+    const raycast::RayHit hit = picks_.RaycastExcluding(
+        ray.origin, ray.direction, raycast::kUnbounded, ignore);
+    if (!hit) {
+        return result;
+    }
+
+    result.hit = true;
+    result.entity = ToEntity(hit.userData);
+    result.position = hit.position;
+    result.distance = hit.distance;
+    // Dibalik bila menghadap searah sinar: sisi belakang sebuah permukaan tetap
+    // permukaan, dan benda yang dijatuhkan ke sana harus tetap berdiri di
+    // atasnya — bukan tertanam menembusnya.
+    const Vec3 normal = glm::normalize(hit.normal);
+    result.normal = glm::dot(normal, ray.direction) > 0.0f ? -normal : normal;
+    return result;
 }
 
 std::vector<scene::Entity> SceneView::RectSelect(const Mat4& viewProjection, const Vec2& origin,

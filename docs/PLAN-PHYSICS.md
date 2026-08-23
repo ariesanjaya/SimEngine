@@ -5,7 +5,7 @@ articulation, dan kendaraan — semuanya di CPU lebih dulu, dengan CUDA sebagai
 lapisan tambahan yang bisa dimatikan.
 
 Penomoran **P** supaya tidak bertabrakan dengan E (editor/render), A (agentic
-AI), C (kain), R (Embree), I (gambar), dan M (GI) di [ROADMAP.md](ROADMAP.md).
+AI), C (kain), R (ray query CPU), I (gambar), dan M (GI) di [ROADMAP.md](ROADMAP.md).
 
 ---
 
@@ -121,13 +121,16 @@ menuntut CUDA, jadi keduanya sama-sama absen di RDNA1. Yang tersisa dari PBD —
 cairan, inflatable, shape matching — tidak dikerjakan rencana mana pun, jadi
 tidak ikut bertabrakan apa pun yang diputuskan.
 
-**2. Scene query: PhysX melawan Embree.**
-[PLAN-EMBREE.md](PLAN-EMBREE.md) R2 merencanakan picking presisi segitiga lewat
-Embree, R3 merencanakan query authoring. PhysX juga menyediakan raycast, sweep,
-dan overlap.
+**2. Scene query: PhysX melawan `Sim::Raycast`.**
+[PLAN-EMBREE.md](PLAN-EMBREE.md) R2 merencanakan picking presisi segitiga, R3
+merencanakan query authoring. PhysX juga menyediakan raycast, sweep, dan overlap.
 
-Usulan: **keduanya ada, dan batasnya jelas.** Embree melayani *authoring dan
-offline* — picking di editor, path tracer acuan, bake. Ia bekerja pada geometri
+(Backend `Sim::Raycast` bukan lagi Embree sejak awal — R0 memakai BVH sendiri dan
+Embree turun ke R6 yang bersyarat. Batas di bawah ini tidak terpengaruh: ia
+tentang *geometri apa yang ditanyai*, bukan tentang siapa yang menelusurinya.)
+
+Usulan: **keduanya ada, dan batasnya jelas.** `Sim::Raycast` melayani *authoring
+dan offline* — picking di editor, path tracer acuan, bake. Ia bekerja pada geometri
 render yang sebenarnya, termasuk mesh yang tidak punya collider sama sekali.
 PhysX melayani *gameplay runtime* — apa yang dilihat peluru, apa yang dipijak
 karakter. Ia bekerja pada bentuk tabrakan, yang memang sengaja lebih sederhana
@@ -250,12 +253,12 @@ berdiri sendiri.
 
 Raycast, sweep, dan overlap untuk gameplay, dengan filter layer.
 
-#### Batasnya terhadap Embree
+#### Batasnya terhadap `Sim::Raycast`
 
 Ditulis di sini dan di `PhysicsQuery.h`, bukan hanya dipahami — keduanya
 menembakkan ray, dan itu satu-satunya kemiripannya.
 
-| | PhysX scene query | Embree ([PLAN-EMBREE.md](PLAN-EMBREE.md)) |
+| | PhysX scene query | `Sim::Raycast` ([PLAN-EMBREE.md](PLAN-EMBREE.md)) |
 |---|---|---|
 | Menjawab tentang | bentuk tabrakan, keadaan simulasi frame ini | setiap segitiga yang digambar |
 | Umur jawabannya | kedaluwarsa satu langkah kemudian | tetap, selama geometrinya tidak berubah |
@@ -662,7 +665,7 @@ bawah.
 - **Kain PBD PhysX** — `Sim::Cloth` sudah memilikinya.
 - **Fisika deterministik lintas-platform** — PhysX tidak menjanjikannya, dan
   membangunnya di atas yang tidak dijanjikan adalah membangun di atas pasir.
-- **Menggantikan picking Embree** — batasnya ditulis di atas; keduanya melayani
+- **Menggantikan picking `Sim::Raycast`** — batasnya ditulis di atas; keduanya melayani
   konsumen yang berbeda.
 - **Physics authoring lengkap di editor** — panel khusus menunggu sampai ada yang
   benar-benar menyetel fisika setiap hari. Sampai itu, Inspector lewat refleksi

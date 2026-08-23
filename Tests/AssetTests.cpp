@@ -9,6 +9,7 @@
 #include "Sim/Assets/TextureBakery.h"
 #include "Sim/Assets/TextureSettings.h"
 #include "Sim/Assets/MeshData.h"
+#include "Sim/Assets/MeshGeometryCache.h"
 #include "Sim/Assets/MeshSdfBake.h"
 #include "Sim/Assets/MeshSdfBakery.h"
 #include "Sim/Assets/MeshSettings.h"
@@ -2818,3 +2819,84 @@ TEST_CASE("T-alpha: tekstur beralfa selamat melewati baker") {
     CHECK(dark == 0);
 }
 
+
+// --- R1: salinan CPU geometri mesh -------------------------------------------
+
+TEST_CASE("cache geometri menjawab Ready sinkron dan mengingat hasilnya") {
+    // Tanpa TaskPool: pemuatan dikerjakan di tempat. Itu jalur uji, dan yang
+    // membuat perilakunya bisa diperiksa tanpa menunggu thread.
+    assets::MeshGeometryCache cache(nullptr);
+    CHECK(cache.ReadyCount() == 0);
+    CHECK(cache.BytesHeld() == 0);
+
+    const std::filesystem::path shaderBall =
+        std::filesystem::path(SIM_MESH_DIR) / "shaderBall.fbx";
+    if (!std::filesystem::exists(shaderBall)) {
+        WARN("shaderBall.fbx tidak ada; melewati");
+        return;
+    }
+
+    const assets::MeshGeometryRef first = cache.Request(shaderBall);
+    REQUIRE(first.state == assets::MeshGeometryState::Ready);
+    REQUIRE(first.data != nullptr);
+    CHECK(first.data->IsValid());
+    CHECK(cache.ReadyCount() == 1);
+    CHECK(cache.BytesHeld() > 0);
+
+    // **Permintaan kedua tidak mengurai berkasnya lagi**, dan mengembalikan
+    // pointer yang sama persis — yang memegangnya adalah BVH yang menyimpan
+    // pointer telanjang ke dalamnya.
+    const assets::MeshGeometryRef second = cache.Request(shaderBall);
+    CHECK(second.state == assets::MeshGeometryState::Ready);
+    CHECK(second.data.get() == first.data.get());
+    CHECK(cache.ReadyCount() == 1);
+}
+
+TEST_CASE("berkas yang tidak bisa dimuat diingat sebagai Failed") {
+    assets::MeshGeometryCache cache(nullptr);
+    const std::filesystem::path missing =
+        std::filesystem::temp_directory_path() / "tidak-ada-sama-sekali.fbx";
+
+    const assets::MeshGeometryRef ref = cache.Request(missing);
+    CHECK(ref.state == assets::MeshGeometryState::Failed);
+    CHECK(ref.data == nullptr);
+    // Diingat, supaya tidak diurai ulang enam puluh kali per detik.
+    CHECK(cache.Request(missing).state == assets::MeshGeometryState::Failed);
+    CHECK(cache.PendingCount() == 0);
+
+    CHECK(cache.Request(std::filesystem::path{}).state == assets::MeshGeometryState::Failed);
+}
+
+TEST_CASE("geometri yang lahir di editor diadopsi tanpa membaca berkas") {
+    assets::MeshGeometryCache cache(nullptr);
+
+    assets::MeshData quad;
+    quad.vertices = {
+        assets::MeshVertex{Vec3(0.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, 1.0f), Vec2(0.0f)},
+        assets::MeshVertex{Vec3(1.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, 1.0f), Vec2(1.0f, 0.0f)},
+        assets::MeshVertex{Vec3(0.0f, 1.0f, 0.0f), Vec3(0.0f, 0.0f, 1.0f), Vec2(0.0f, 1.0f)},
+    };
+    quad.indices = {0, 1, 2};
+
+    const assets::MeshGeometryRef ref = cache.Adopt("whitebox#1", quad);
+    REQUIRE(ref.state == assets::MeshGeometryState::Ready);
+    REQUIRE(ref.data != nullptr);
+    CHECK(ref.data->vertices.size() == 3);
+
+    // **Adopsi kedua menimpa**, karena bentuk yang diadopsi adalah bentuk yang
+    // baru saja disunting — entri lama justru bentuk sebelum suntingan itu.
+    assets::MeshData grown = quad;
+    grown.vertices.push_back(
+        assets::MeshVertex{Vec3(1.0f, 1.0f, 0.0f), Vec3(0.0f, 0.0f, 1.0f), Vec2(1.0f)});
+    grown.indices.insert(grown.indices.end(), {1u, 3u, 2u});
+    const assets::MeshGeometryRef again = cache.Adopt("whitebox#1", grown);
+    CHECK(again.data->vertices.size() == 4);
+    CHECK(cache.ReadyCount() == 1);
+
+    // Yang masih memegang ref lama tidak terpengaruh — itulah guna shared_ptr.
+    CHECK(ref.data->vertices.size() == 3);
+
+    cache.Invalidate("whitebox#1");
+    CHECK(cache.ReadyCount() == 0);
+    CHECK(ref.data->vertices.size() == 3);
+}

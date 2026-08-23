@@ -74,6 +74,7 @@ add_subdirectory(Code/Volume)
 # Physics: simulasi PhysX 5 (E9). Pengondisi maupun runtime, tapi tidak pernah
 # bergantung pada Render — lihat docs/PLAN-PHYSICS.md.
 add_subdirectory(Code/Physics)
+add_subdirectory(Code/Raycast)
 add_subdirectory(Code/Whitebox)
 add_subdirectory(Code/Reflect)
 add_subdirectory(Code/Scene)

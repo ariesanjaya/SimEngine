@@ -255,6 +255,10 @@ private:
     /// `TaskPool`, dan hasilnya diserahkan ke renderer alih-alih dihitung di
     /// dalamnya.
     std::unique_ptr<assets::MeshSdfBakery> meshSdfBakery_;
+    /// Geometri CPU untuk picking presisi. Umurnya sepanjang aplikasi, seperti
+    /// kedua bakery di atasnya — yang memegangnya adalah BVH yang hidup selama
+    /// level terbuka.
+    std::unique_ptr<assets::MeshGeometryCache> meshGeometry_;
     /// Penjaga shader material, dengan alasan yang sama: ia bekerja di CPU dan
     /// di `TaskPool`, dan yang menyentuh GPU hanyalah langkah terakhirnya di
     /// main thread.

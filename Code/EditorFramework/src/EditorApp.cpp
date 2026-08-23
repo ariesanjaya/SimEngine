@@ -1,6 +1,7 @@
 #include "Sim/Editor/EditorApp.h"
 #include "Sim/Editor/ToolApproval.h"
 
+#include "Sim/Assets/MeshGeometryCache.h"
 #include "Sim/Assets/MeshSdfBakery.h"
 #include "Sim/Assets/TextureBakery.h"
 #include "Sim/SceneView/MaterialPrograms.h"
@@ -116,6 +117,12 @@ bool EditorApp::Initialize(const Config& config) {
                                                             config.tasks,
                                                             assets::MeshSdfSettings{});
     context_.meshSdfBakery = meshSdfBakery_.get();
+    // Ikut `TaskPool`, dengan alasan yang sama seperti bake SDF di atasnya:
+    // mengurai satu FBX memakan ratusan milidetik, dan ratusan milidetik di
+    // dalam penanganan klik adalah editor yang membeku tepat saat seseorang
+    // menunjuk sesuatu.
+    meshGeometry_ = std::make_unique<assets::MeshGeometryCache>(config.tasks);
+    context_.meshGeometry = meshGeometry_.get();
     // Shader material ikut ke `TaskPool`. Satu panggilan `slangc` adalah detik,
     // dan detik di dalam jalur gambar adalah editor yang membeku tepat pada
     // frame sebuah level dibuka — yaitu frame yang paling terasa.
