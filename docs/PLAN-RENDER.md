@@ -2915,6 +2915,61 @@ terverifikasi ujung-ke-ujung: cook sebuah project, lalu mainkan hasilnya.
   bisa merah: melepas gerbangnya menggagalkan dua assertion.
 - Profiler (Tracy), build Windows, dan skrip rilis.
 
+## Garis dasar terukur — Sponza, 23 Agustus 2026
+
+Diukur `SimHeadless --bench`, `linux-clang-release`, RTX 2060, 1280×720, 120 frame
+sesudah 60 pemanasan, GI mati. Adegan `gi-sponza` (NewSponza_Main glTF).
+
+| Pass | Median (ms) | Primitif |
+| --- | ---: | ---: |
+| `shadow-cascades` | **2,438** | 14.955.512 |
+| `forward-opaque` | 0,769 | 3.738.878 |
+| `depth-prepass` | 0,672 | 3.738.878 |
+| `frame` | **4,188** | |
+
+Tiga hal yang dijawab angka ini, dicatat supaya tidak ditemukan ulang dengan
+harga yang sama:
+
+**1. Bayangan adalah pos terbesar, dan bukan tipis-tipis.** `shadow-cascades`
+memakan 58% frame dan menggambar **empat kali** geometri yang terlihat — setiap
+kaskade menggambar ulang seluruh caster. Arah yang belum diperiksa: apakah
+kaskade directional menyaring caster dengan ketelitian yang sama seperti atlas
+point/spot, apakah kaskade jauh perlu digambar ulang setiap frame, dan apakah
+resolusi seragam 2048 untuk keempatnya sudah tepat. **Belum diukur** — ini
+daftar dugaan, bukan temuan.
+
+**2. Tidak ada satu pun geometri bertopeng di adegan ini.** `depth-prepass` dan
+`forward-opaque` memproses primitif yang **sama persis**; kalau ada yang
+bertopeng, prepass akan lebih kecil dan selisihnya adalah geometri yang
+kehilangan early-Z. Sebabnya: **1 dari 28** material Sponza punya opacity
+(`dirt_decal`), dan ia tidak tergambar.
+
+Konsekuensinya untuk keputusan yang sempat ditimbang — membagi material menjadi
+`Opaque | Masked | Transparent | Decal` demi performa: **adegan ini tidak bisa
+membuktikan apa pun tentangnya.** Alasan yang tersisa untuk melakukannya adalah
+kebenaran, bukan kecepatan: material bertopeng hari ini dilewatkan dari prepass
+*dan* dari pass bayangan, jadi ia tidak punya early-Z, tidak menjatuhkan
+bayangan, dan tidak menulis kedalaman — dua permukaan bertopeng yang bertumpuk
+saling menutupi menurut urutan gambar, bukan jarak. Obatnya satu: varian shader
+depth-only ber-uji-alfa, yang justru dibenarkan oleh tipe yang **dinyatakan**
+alih-alih disimpulkan dari graph seperti sekarang (`masked = compiled.alphaTest`).
+
+**3. Importir glTF tidak membaca `alphaMode` sama sekali.** Tidak ada satu pun
+kemunculan `alpha_mode`, `MASK`, atau `BLEND` di `Code/Assets`; yang dibaca hanya
+`material.opacity = pbr.base_color_factor[3]` — sebuah skalar. Alfa dedaunan
+sungguhan tinggal di kanal alfa tekstur base color, dan itu tidak dibaca siapa
+pun.
+
+Akibatnya paket dedaunan Sponza (`pkg_c_trees`, cemara) **tidak bisa dipakai
+menguji jalur bertopeng apa adanya**: materialnya `alphaMode: BLEND` tanpa
+`baseColorFactor`, jadi ia terimpor buram penuh dan setiap kartu daun tergambar
+sebagai persegi panjang solid. Yang harus mendahului uji itu: importir membaca
+`alphaMode`, dan alfa diambil dari kanal tekstur — plus keputusan pengarangan
+apakah dedaunan ber-BLEND boleh ditimpa menjadi MASK lewat `.simmeshcfg`, karena
+BLEND untuk dedaunan lebat mahal sekaligus salah secara visual.
+
+---
+
 ## Keputusan yang sudah dikunci sejak fase editor
 
 Dicatat supaya tidak diperdebatkan ulang saat E8:

@@ -723,9 +723,19 @@ private:
         const widgets::PinShape shape = ShapeOf(pin.kind);
         const bool connected = connectedPins_.count(pinId) != 0;
 
+        // Pudar berarti "ada, tapi bukan untuk tipe material ini". Warnanya ikut
+        // diredupkan, bukan hanya labelnya — ikon berwarna penuh di sebelah
+        // label pudar terbaca seperti pin yang masih bisa ditarik.
+        const bool enabled = PinEnabled(node, pin);
+        const ImVec4 pinColor =
+            enabled ? color : ImVec4(color.x, color.y, color.z, color.w * 0.25f);
+        if (!enabled) {
+            ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.4f);
+        }
+
         if (input) {
             canvas_.BeginInputPin(pinId);
-            widgets::PinIcon(shape, connected, color);
+            widgets::PinIcon(shape, connected, pinColor);
             ImGui::SameLine();
             ImGui::TextUnformatted(label.c_str());
         } else {
@@ -741,12 +751,22 @@ private:
             }
             ImGui::TextUnformatted(label.c_str());
             ImGui::SameLine();
-            widgets::PinIcon(shape, connected, color);
+            widgets::PinIcon(shape, connected, pinColor);
         }
         canvas_.EndPin();
+        if (!enabled) {
+            ImGui::PopStyleVar();
+        }
 
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
-            ImGui::SetTooltip("%s", ToString(kind));
+            if (enabled) {
+                ImGui::SetTooltip("%s", ToString(kind));
+            } else {
+                // Menyebut sebabnya, bukan hanya menolak. Pin pudar tanpa
+                // penjelasan terbaca sebagai cacat editor.
+                ImGui::SetTooltip("%s — tidak berlaku untuk material %s", ToString(kind),
+                                  material::ToString(graph_.Domain()));
+            }
         }
     }
 
@@ -784,6 +804,19 @@ private:
         canvas_.EndCreate();
     }
 
+    /// Apakah pin ini boleh dikemudikan pada domain material yang sedang dipilih.
+    ///
+    /// **Dinonaktifkan, bukan disembunyikan.** Pin yang lenyap membuat orang
+    /// mencari-cari apa yang hilang dan mengira materialnya rusak; pin yang
+    /// pudar dan menolak kabel menjawab pertanyaannya sendiri — "ini ada, tapi
+    /// tidak untuk tipe ini".
+    bool PinEnabled(const MaterialNode& node, const MaterialPin& pin) const {
+        if (node.type != kSurfaceOutputType || pin.direction != PinDirection::Input) {
+            return true;
+        }
+        return SurfacePinApplies(pin.name, graph_.Domain());
+    }
+
     void TryConnect(uint64_t fromPinId, uint64_t toPinId) {
         MaterialPin fromPin;
         MaterialPin toPin;
@@ -806,6 +839,13 @@ private:
         if (fromPin.direction != PinDirection::Output ||
             toPin.direction != PinDirection::Input || fromNode == toNode ||
             !Accepts(toPin.kind, sourceKind)) {
+            canvas_.RejectLink();
+            return;
+        }
+        // Pin yang tidak berlaku untuk domain ini menolak kabel. Diperiksa di
+        // sini dan bukan hanya digambar pudar: yang menahan pengguna harus
+        // penolakannya, bukan warnanya.
+        if (!PinEnabled(*toNode, toPin)) {
             canvas_.RejectLink();
             return;
         }
@@ -1190,6 +1230,8 @@ private:
 
         if (node->type == "input.texture") {
             DrawSetting(*node, "name", "Name");
+        } else if (node->type == kSurfaceOutputType) {
+            DrawDomainCombo();
         } else if (node->type == "input.constant") {
             ValueKind kind = ValueKindFromString(node->Setting("kind", "float"));
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.0f);
@@ -1213,6 +1255,11 @@ private:
                 graph_.LinkInto(node->guid, pin.name) != nullptr) {
                 continue;
             }
+            // Nilai yang diketik sama sahnya dengan kabel, jadi ia harus ikut
+            // ditolak — menutup kabelnya saja meninggalkan pintu kedua yang
+            // terbuka lebar untuk masukan yang sama tidak berlakunya.
+            const bool enabled = PinEnabled(*node, pin);
+            ImGui::BeginDisabled(!enabled);
             std::string value = node->pinValues.count(pin.name) != 0
                                     ? node->pinValues.at(pin.name)
                                     : pin.defaultValue;
@@ -1228,7 +1275,78 @@ private:
             }
             RecompileOnCommit();
             ImGui::PopID();
+            ImGui::EndDisabled();
         }
+    }
+
+    /// Pemilih tipe material.
+    ///
+    /// **Di node keluaran, bukan di sisi panel.** Domain menentukan arti pin
+    /// node ini dan tidak berarti apa-apa untuk node lain; menaruhnya jauh dari
+    /// pin yang ia matikan membuat sebab dan akibatnya tidak pernah terlihat
+    /// bersamaan.
+    void DrawDomainCombo() {
+        struct Choice {
+            MaterialDomain domain;
+            const char* label;
+            const char* hint;
+        };
+        static const Choice kChoices[] = {
+            {MaterialDomain::Opaque, "Opaque", "Tanpa alfa. Opacity tidak dibaca siapa pun."},
+            {MaterialDomain::Masked, "Masked",
+             "Opacity menjadi ambang uji alfa — cahaya menembus lubangnya."},
+            {MaterialDomain::Transparent, "Transparent",
+             "Opacity mencampur warnanya dengan apa yang ada di belakangnya."},
+            {MaterialDomain::Decal, "Decal",
+             "Selembar kulit di atas permukaan lain. Coat, fuzz, dan anisotropi "
+             "tidak berlaku."},
+        };
+
+        const MaterialDomain current = graph_.Domain();
+        const char* label = "Opaque";
+        for (const Choice& choice : kChoices) {
+            if (choice.domain == current) {
+                label = choice.label;
+            }
+        }
+
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
+        if (ImGui::BeginCombo("Material type", label)) {
+            for (const Choice& choice : kChoices) {
+                if (ImGui::Selectable(choice.label, choice.domain == current)) {
+                    // **Kabel yang menjadi tidak berlaku tidak dibuang.** Yang
+                    // berpindah tipe untuk melihat-lihat lalu kembali akan
+                    // menemukan graph-nya utuh; membuangnya di sini membuat satu
+                    // klik salah menghapus pekerjaan yang tidak bisa dikembalikan
+                    // tanpa undo. Kompiler mengabaikan yang tidak berlaku.
+                    graph_.SetDomain(choice.domain);
+                    Touch();
+                }
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
+                    ImGui::SetTooltip("%s", choice.hint);
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        // Ambang buang hanya berarti untuk yang bertopeng — di domain lain ia
+        // angka yang tidak pernah dibaca, dan angka yang tidak pernah dibaca
+        // adalah setelan yang mengajari orang bahwa mengubahnya percuma.
+        if (current == MaterialDomain::Masked) {
+            if (MaterialNode* output = SurfaceOutputNode()) {
+                DrawSetting(*output, "alphaCutoff", "Alpha cutoff");
+            }
+        }
+    }
+
+    /// Node keluaran. Tepat satu boleh ada, dan ia tidak bisa dihapus.
+    MaterialNode* SurfaceOutputNode() {
+        for (MaterialNode& node : graph_.nodes) {
+            if (node.type == kSurfaceOutputType) {
+                return &node;
+            }
+        }
+        return nullptr;
     }
 
     void DrawSetting(MaterialNode& node, const char* key, const char* label) {

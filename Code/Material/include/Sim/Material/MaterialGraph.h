@@ -137,6 +137,36 @@ struct MaterialParameter {
     bool isColor = false;
 };
 
+/// Untuk apa sebuah material dipakai, dan karena itu keluaran mana yang berarti.
+///
+/// **Dinyatakan di asetnya, bukan disimpulkan dari graph-nya.** Menebaknya dari
+/// bentuk graph — "ada yang tersambung ke opacity, berarti bertopeng" — berarti
+/// jalur gambar sebuah material berubah diam-diam saat seseorang menyambungkan
+/// kabel untuk mencoba sesuatu. Yang menentukan jalur harus dinyatakan, dan
+/// terlihat saat dinyatakan.
+///
+/// Domain juga yang menutup pin yang tidak berlaku. Node keluaran punya dua
+/// puluh satu masukan, dan sebuah decal yang menawarkan coat, fuzz, dan
+/// anisotropi bukan menawarkan kemampuan — ia menawarkan dua puluh satu cara
+/// untuk salah.
+enum class MaterialDomain : uint8_t {
+    /// Tanpa alfa sama sekali. `opacity` tidak dibaca siapa pun, jadi ia tidak
+    /// ditawarkan.
+    Opaque,
+    /// `opacity` menjadi ambang uji alfa. Cahaya menembus lubangnya, dan
+    /// bentuknya ditentukan fragmen yang dibuang.
+    Masked,
+    /// `opacity` menjadi alfa pencampuran. Diurutkan menurut jarak, tidak
+    /// menulis kedalaman.
+    Transparent,
+    /// Selembar kulit yang diproyeksikan ke permukaan lain.
+    Decal,
+};
+
+const char* ToString(MaterialDomain domain);
+MaterialDomain MaterialDomainFromString(std::string_view text,
+                                        MaterialDomain fallback = MaterialDomain::Opaque);
+
 struct MaterialGraph {
     std::vector<MaterialNode> nodes;
     std::vector<MaterialLink> links;
@@ -161,6 +191,15 @@ struct MaterialGraph {
     /// (kabelnya memang hilang) tapi tertulis ke berkas dan baru meledak saat
     /// dikompilasi.
     void RemoveNode(const Uuid& guid);
+
+    /// Domain material ini, dibaca dari node keluarannya.
+    ///
+    /// Graph tanpa node keluaran — yang seharusnya tidak mungkin — menjawab
+    /// `Opaque`, dan begitu pula nama domain yang tidak dikenali. Keduanya
+    /// jawaban yang paling tidak merusak apa pun: buram menggambar benar,
+    /// sekadar tanpa alfa.
+    MaterialDomain Domain() const;
+    void SetDomain(MaterialDomain domain);
 };
 
 struct MaterialIoResult {

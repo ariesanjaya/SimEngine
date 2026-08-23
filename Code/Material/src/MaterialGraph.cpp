@@ -1,5 +1,7 @@
 #include "Sim/Material/MaterialGraph.h"
 
+#include "Sim/Material/MaterialNodeCatalog.h"
+
 #include "Sim/Core/Log.h"
 
 #include <nlohmann/json.hpp>
@@ -10,6 +12,56 @@
 #include <sstream>
 
 namespace sim::material {
+
+const char* ToString(MaterialDomain domain) {
+    switch (domain) {
+        case MaterialDomain::Opaque: return "opaque";
+        case MaterialDomain::Masked: return "masked";
+        case MaterialDomain::Transparent: return "transparent";
+        case MaterialDomain::Decal: return "decal";
+    }
+    return "opaque";
+}
+
+MaterialDomain MaterialDomainFromString(std::string_view text, MaterialDomain fallback) {
+    if (text == "opaque") {
+        return MaterialDomain::Opaque;
+    }
+    if (text == "masked") {
+        return MaterialDomain::Masked;
+    }
+    if (text == "transparent") {
+        return MaterialDomain::Transparent;
+    }
+    if (text == "decal") {
+        return MaterialDomain::Decal;
+    }
+    // **Nama yang tidak dikenali jatuh ke cadangan, tidak menggagalkan
+    // pemuatan.** Satu setting salah ketik tidak sebanding dengan material yang
+    // menolak terbuka; yang keliru terlihat sebagai buram, dan itu terbaca.
+    return fallback;
+}
+
+MaterialDomain MaterialGraph::Domain() const {
+    for (const MaterialNode& node : nodes) {
+        if (node.type != kSurfaceOutputType) {
+            continue;
+        }
+        return MaterialDomainFromString(node.Setting("domain"));
+    }
+    return MaterialDomain::Opaque;
+}
+
+void MaterialGraph::SetDomain(MaterialDomain domain) {
+    for (MaterialNode& node : nodes) {
+        if (node.type != kSurfaceOutputType) {
+            continue;
+        }
+        node.settings["domain"] = ToString(domain);
+        return;
+    }
+}
+
 namespace {
 
 /// ordered_json, alasan yang sama dengan berkas level dan `.simgraph`: yang
