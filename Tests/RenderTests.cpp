@@ -1251,16 +1251,24 @@ TEST_CASE("Kerucut spot menghitung bola yang menyerempet tepinya") {
 }
 
 TEST_CASE("Lampu hanya masuk ke cluster yang benar-benar dikenainya") {
+    // **Matriks pandang sungguhan, bukan identitas.** Uji ini dulu memberi
+    // `Mat4(1.0f)` dan menaruh lampunya di z POSITIF, sehingga ia memeriksa
+    // penyaringan kotak-bola tanpa pernah melewati konversi ruangnya — dan
+    // konversi itulah yang salah. `glm::lookAt` tangan-kanan: yang di depan
+    // kamera bernilai z negatif, sementara kisi cluster mengukur kedalaman
+    // sebagai jarak positif. Satu tanda, dan setiap lampu titik di engine ini
+    // tidak pernah menyala; identitas menyembunyikannya karena ia tidak punya
+    // arah pandang untuk dibalik.
     ClusterGridSettings settings;
     settings.tilesX = 8;
     settings.tilesY = 6;
     settings.slices = 12;
     const ClusterGrid grid = MakeGrid(settings);
 
-    // Lampu kecil di sumbu pandang pada kedalaman 10.
+    // Kamera di titik asal menghadap +Z dunia; lampu kecil 10 m di depannya.
+    const Mat4 view = LookAt(Vec3(0.0f), Vec3(0.0f, 0.0f, 1.0f));
     const std::array<ClusterLight, 1> lights{PointAt(Vec3(0.0f, 0.0f, 10.0f), 1.0f)};
-    const ClusterAssignment assignment =
-        AssignLights(grid, Mat4(1.0f), lights, settings);
+    const ClusterAssignment assignment = AssignLights(grid, view, lights, settings);
 
     uint32_t touched = 0;
     for (uint32_t i = 0; i < grid.ClusterCount(); ++i) {
@@ -1270,21 +1278,166 @@ TEST_CASE("Lampu hanya masuk ke cluster yang benar-benar dikenainya") {
     // Kalau ia masuk ke sebagian besar cluster, penyaringannya tidak menyaring.
     CHECK(touched < grid.ClusterCount() / 4);
 
-    // Cluster tempat lampunya berada pasti termuat.
+    // **Cluster tempat fragmen yang disinarinya berada, bukan sekadar "ada yang
+    // termuat".** Inilah yang membedakan penetapan yang benar dari penetapan
+    // yang kebetulan tidak kosong: sebelum perbaikan, lampu ini masuk ke 1.728
+    // dari 3.456 cluster di dekat bidang dekat — daftar yang penuh, tanpa satu
+    // pun peringatan, dan tidak satu pun di antaranya cluster yang benar.
     const uint32_t slice = grid.SliceOf(10.0f);
     const uint32_t centre = grid.IndexOf(settings.tilesX / 2, settings.tilesY / 2, slice);
     CHECK(assignment.LightsOf(centre).size() == 1);
 }
 
+TEST_CASE("Peredupan punctual: nol tepat di jangkauan, dan bentuknya kuartik") {
+    // **Angka-angka ini yang mengikat versi CPU ke versi shader.** Keduanya
+    // ditulis terpisah karena satu berjalan di GPU — pola yang sama dengan
+    // `AutoExposure` — jadi yang menjaga keduanya tetap sama adalah uji ini dan
+    // komentar yang menunjuk ke sana. Jendela yang berganti bentuk (Frostbite ke
+    // Unity, misalnya) menggeser angka di tengah tanpa menyentuh yang di ujung,
+    // jadi setengah jangkauan ikut diperiksa.
+    const float range = 10.0f;
+    const float invRangeSq = 1.0f / (range * range);
+    const float minDistanceSq = 0.01f * 0.01f;
+
+    // Nol tepat di jangkauan — itu yang membuat penyaringan bola berjari-jari
+    // `range` eksak alih-alih pendekatan.
+    CHECK(PunctualFalloff(range * range, invRangeSq, minDistanceSq) == doctest::Approx(0.0f));
+    CHECK(PunctualFalloff(range * range * 1.5f, invRangeSq, minDistanceSq) ==
+          doctest::Approx(0.0f));
+
+    // Setengah jangkauan: (1 - 0,5^4)^2 / 5^2 = 0,9375^2 / 25.
+    const float half = PunctualFalloff(25.0f, invRangeSq, minDistanceSq);
+    CHECK(half == doctest::Approx(0.9375f * 0.9375f / 25.0f));
+
+    // Di dalam jari-jari sumber, jaraknya dijepit: dua titik yang sama-sama di
+    // dalam lampu tidak boleh berbeda tak hingga.
+    const float inside = PunctualFalloff(1e-8f, invRangeSq, minDistanceSq);
+    CHECK(std::isfinite(inside));
+    CHECK(inside == doctest::Approx(1.0f / minDistanceSq).epsilon(0.001));
+}
+
+TEST_CASE("Jangkauan berguna sebuah lampu tumbuh bersama intensitasnya") {
+    // Yang digambar gizmo lampu titik: jari-jari tempat cahayanya masih seterang
+    // ambang. `range` sendiri tidak membedakan lampu redup dari lampu
+    // menyilaukan — keduanya berakhir di tempat yang sama.
+    LightInstance light;
+    light.kind = LightKind::Point;
+    light.color = Vec3(1.0f);
+    light.range = 10.0f;
+    light.sourceRadius = 0.1f;
+
+    light.intensity = 1.0f;
+    const float dim = LightUsefulRadius(light, 1.0f);
+    light.intensity = 100.0f;
+    const float bright = LightUsefulRadius(light, 1.0f);
+    INFO("redup " << dim << ", terang " << bright);
+    CHECK(bright > dim);
+    // Selalu di dalam jangkauannya: di luar sana peredupannya sudah nol.
+    CHECK(bright < light.range);
+    CHECK(dim > 0.0f);
+
+    // Dan jaraknya benar-benar tempat radiansinya sama dengan ambangnya.
+    const float invRangeSq = 1.0f / (light.range * light.range);
+    const float minDistanceSq = light.sourceRadius * light.sourceRadius;
+    CHECK(100.0f * PunctualFalloff(bright * bright, invRangeSq, minDistanceSq) ==
+          doctest::Approx(1.0f).epsilon(0.01));
+
+    // Lampu yang tidak pernah setera ambangnya tidak menggambar apa pun, bukan
+    // menggambar lingkaran sebesar nol yang terbaca sebagai lampu mati.
+    light.intensity = 1e-6f;
+    CHECK(LightUsefulRadius(light, 1.0f) == doctest::Approx(0.0f));
+}
+
+TEST_CASE("Matahari adegan adalah directional pertama, dan hanya itu") {
+    // **Aturan yang diminta, ditulis sebagai uji.** Cascade bayangan hanya ada
+    // satu himpunan; directional kedua tidak bisa dipenuhi tanpa membuang
+    // bayangan salah satunya. Yang tidak boleh terjadi adalah keduanya
+    // dijumlahkan diam-diam — arah yang dihasilkan tidak dimiliki lampu mana
+    // pun, dan bayangannya tidak cocok dengan apa pun di layar.
+    std::vector<LightInstance> lights;
+
+    // Tanpa lampu sama sekali: tidak ada matahari, dan yang menggambarnya gelap.
+    CHECK(FindSunLight(lights) == nullptr);
+
+    // Lampu punctual saja juga bukan matahari.
+    LightInstance point;
+    point.kind = LightKind::Point;
+    point.color = Vec3(1.0f, 0.0f, 0.0f);
+    lights.push_back(point);
+    CHECK(FindSunLight(lights) == nullptr);
+
+    LightInstance first;
+    first.kind = LightKind::Directional;
+    first.direction = Vec3(0.0f, 1.0f, 0.0f);
+    first.color = Vec3(1.0f, 0.9f, 0.8f);
+    lights.push_back(first);
+
+    LightInstance second;
+    second.kind = LightKind::Directional;
+    second.direction = Vec3(1.0f, 0.0f, 0.0f);
+    second.color = Vec3(0.0f, 0.0f, 1.0f);
+    lights.push_back(second);
+
+    const LightInstance* sun = FindSunLight(lights);
+    REQUIRE(sun != nullptr);
+    // Yang pertama, bukan yang terakhir dan bukan campurannya.
+    CHECK(sun->direction.y == doctest::Approx(1.0f));
+    CHECK(sun->color.b == doctest::Approx(0.8f));
+}
+
 TEST_CASE("Lampu di belakang kamera tidak masuk cluster mana pun") {
     const ClusterGridSettings settings;
     const ClusterGrid grid = MakeGrid(settings);
+    // Kamera menghadap +Z, lampunya 50 m di belakang punggungnya.
+    const Mat4 view = LookAt(Vec3(0.0f), Vec3(0.0f, 0.0f, 1.0f));
     const std::array<ClusterLight, 1> lights{PointAt(Vec3(0.0f, 0.0f, -50.0f), 5.0f)};
-    const ClusterAssignment assignment = AssignLights(grid, Mat4(1.0f), lights, settings);
+    const ClusterAssignment assignment = AssignLights(grid, view, lights, settings);
 
     for (uint32_t i = 0; i < grid.ClusterCount(); ++i) {
         CHECK(assignment.ranges[i].count == 0);
     }
+}
+
+TEST_CASE("Kamera yang diputar tetap menemukan cluster lampunya") {
+    // Kamera menghadap −X dari samping, lampu 12 m di depannya. Yang diuji di
+    // sini bukan penyaringannya melainkan **ruangnya**: sebuah konversi yang
+    // hanya benar untuk kamera yang menghadap satu arah tertentu akan lolos uji
+    // di atas dan gagal di sini.
+    ClusterGridSettings settings;
+    settings.tilesX = 8;
+    settings.tilesY = 6;
+    settings.slices = 12;
+    const ClusterGrid grid = MakeGrid(settings);
+
+    const Vec3 eye(20.0f, 3.0f, -5.0f);
+    const Vec3 target = eye + Vec3(-1.0f, 0.0f, 0.0f);
+    const Mat4 view = LookAt(eye, target);
+    const Vec3 lightPosition = eye + Vec3(-12.0f, 0.0f, 0.0f);
+    const std::array<ClusterLight, 1> lights{PointAt(lightPosition, 1.0f)};
+    const ClusterAssignment assignment = AssignLights(grid, view, lights, settings);
+
+    const uint32_t slice = grid.SliceOf(12.0f);
+    const uint32_t centre = grid.IndexOf(settings.tilesX / 2, settings.tilesY / 2, slice);
+    CHECK(assignment.LightsOf(centre).size() == 1);
+}
+
+TEST_CASE("Ruang kisi cluster mengukur kedalaman ke arah pandang, positif") {
+    // Kontrak `ToClusterView` ditulis sebagai uji karena ia satu-satunya tempat
+    // dua konvensi bertemu, dan karena selisihnya satu tanda yang tidak pernah
+    // terlihat sebagai galat — hanya sebagai lampu yang tidak menyala.
+    const Mat4 view = LookAt(Vec3(0.0f, 2.0f, 0.0f), Vec3(0.0f, 2.0f, 5.0f));
+
+    const ClusterViewLight front = ToClusterView(view, Vec3(0.0f, 2.0f, 7.0f),
+                                                 Vec3(0.0f, 0.0f, 1.0f));
+    CHECK(front.position.z == doctest::Approx(7.0f));
+    CHECK(front.position.x == doctest::Approx(0.0f));
+    CHECK(front.position.y == doctest::Approx(0.0f));
+    // Arah pancar yang searah pandangan juga menunjuk ke kedalaman positif.
+    CHECK(front.direction.z == doctest::Approx(1.0f));
+
+    const ClusterViewLight behind = ToClusterView(view, Vec3(0.0f, 2.0f, -3.0f),
+                                                 Vec3(0.0f, 0.0f, 1.0f));
+    CHECK(behind.position.z == doctest::Approx(-3.0f));
 }
 
 TEST_CASE("Daftar cluster dipotong dan pemotongannya dilaporkan") {

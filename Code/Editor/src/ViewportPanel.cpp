@@ -4,6 +4,8 @@
 #include "Sim/Core/Math.h"
 #include "Sim/Editor/Command.h"
 #include "Sim/Editor/EditorContext.h"
+#include "Sim/Physics/PhysicsScene.h"
+#include "Sim/Render/LightCluster.h"
 #include "Sim/Editor/Gizmo.h"
 #include "Sim/Editor/Icons.h"
 #include "Sim/Editor/Notifications.h"
@@ -11,11 +13,11 @@
 #include "Sim/Editor/PanelIds.h"
 #include "Sim/Editor/PanelRegistry.h"
 #include "Sim/Editor/SceneCommands.h"
-#include "Sim/Editor/SceneView.h"
-#include "Sim/Editor/Selection.h"
+#include "Sim/SceneView/SceneView.h"
+#include "Sim/SceneView/Selection.h"
 #include "Sim/Editor/Widgets.h"
 #include "Sim/Editor/WhiteboxCommands.h"
-#include "Sim/Editor/WhiteboxStore.h"
+#include "Sim/SceneView/WhiteboxStore.h"
 #include "Sim/Terrain/TerrainBrush.h"
 #include "Sim/Terrain/TerrainPicking.h"
 #include "Sim/Render/IViewportRenderer.h"
@@ -106,12 +108,140 @@ constexpr float kIconScale = 1.6f;
 /// Warna entity terpilih, sama dengan yang dipakai renderer untuk wireframe.
 constexpr Vec4 kSelectionColor{1.0f, 0.62f, 0.20f, 1.0f};
 
+// --- saringan tampilan viewport ---------------------------------------------
+//
+// **Ikon dan nama menyebut mode yang sedang berlaku, bukan mode berikutnya.**
+// Tombol berputar mudah ditulis terbalik — "tekan untuk jadi Wireframe" — dan
+// yang dicari mata saat melihat viewport orang lain adalah "sedang apa ini",
+// bukan "kalau kutekan jadi apa". Tombol perspektif/ortografi di sebelahnya
+// sudah memakai kesepakatan yang sama.
+
+const char* ShadingIcon(render::DrawMode mode) {
+    switch (mode) {
+        case render::DrawMode::Unlit: return icons::kShadingUnlit;
+        case render::DrawMode::Clay: return icons::kShadingClay;
+        case render::DrawMode::MaterialWireframe: return icons::kShadingMaterialWireframe;
+        case render::DrawMode::Wireframe: return icons::kShadingWireframe;
+        case render::DrawMode::Material: break;
+    }
+    return icons::kShadingMaterial;
+}
+
+const char* ShadingLabel(render::DrawMode mode) {
+    switch (mode) {
+        case render::DrawMode::Unlit: return "Unlit";
+        case render::DrawMode::Clay: return "Clay (lighting only)";
+        case render::DrawMode::MaterialWireframe: return "Material + wireframe";
+        case render::DrawMode::Wireframe: return "Wireframe";
+        case render::DrawMode::Material: break;
+    }
+    return "Material";
+}
+
+/// Berkelompok, bukan berderet: tiga mode permukaan lebih dulu — material apa
+/// adanya, material tanpa cahaya, lalu cahaya tanpa material — baru dua mode
+/// rusuk. Yang mengelompokkan mode menurut pertanyaan yang dijawabnya adalah
+/// urutan yang bisa diingat; yang berurut menurut kapan modenya ditulis, tidak.
+///
+/// **Ini juga satu-satunya daftar urutan mode di panel ini.** Menu klik-kanan
+/// dibangun dengan memanggil fungsi ini sampai kembali ke titik awal, bukan dari
+/// larik kedua yang harus diingat untuk ikut diperbarui — dua daftar urutan
+/// adalah dua daftar yang suatu saat berselisih, dan yang berselisih adalah menu
+/// yang diam-diam kehilangan satu mode.
+///
+/// `switch` tanpa `default` yang menyebut setiap nilai membuat mode baru menjadi
+/// galat kompilasi di sini, bukan mode yang tidak pernah bisa terpilih.
+render::DrawMode NextDrawMode(render::DrawMode mode) {
+    switch (mode) {
+        case render::DrawMode::Material: return render::DrawMode::Unlit;
+        case render::DrawMode::Unlit: return render::DrawMode::Clay;
+        case render::DrawMode::Clay: return render::DrawMode::MaterialWireframe;
+        case render::DrawMode::MaterialWireframe: return render::DrawMode::Wireframe;
+        case render::DrawMode::Wireframe: break;
+    }
+    return render::DrawMode::Material;
+}
+
+/// Nama popup daftar mode. Tetap, walaupun ikon dan tooltip tombolnya berganti
+/// tiap mode: ID popup yang ikut berubah adalah popup yang menutup dirinya
+/// sendiri pada frame sesudah sebuah mode dipilih.
+constexpr const char* kShadingPopupId = "viewport-shading-modes";
+
+// --- rangka kawat fisika ----------------------------------------------------
+//
+// **Warnanya menyebut jenis bendanya, bukan sekadar "ini collider".** Yang
+// paling sering salah bukan ukurannya melainkan jenisnya: sebuah lantai yang
+// tidak sengaja Dynamic akan jatuh menembus dirinya sendiri pada frame pertama
+// Play, dan sampai frame itu tidak ada satu pun petunjuk di layar. Tiga warna
+// membuatnya terbaca sebelum Play ditekan.
+constexpr Vec4 kColliderStaticColor{0.35f, 0.90f, 0.45f, 0.85f};
+constexpr Vec4 kColliderKinematicColor{0.35f, 0.70f, 1.00f, 0.85f};
+constexpr Vec4 kColliderDynamicColor{1.00f, 0.85f, 0.30f, 0.85f};
+/// Collider tanpa RigidBody, dan benda tegar tanpa collider. Keduanya tidak
+/// pernah sampai ke solver.
+constexpr Vec4 kColliderInertColor{0.85f, 0.35f, 0.35f, 0.85f};
+constexpr Vec4 kJointColor{0.85f, 0.55f, 1.00f, 0.90f};
+constexpr Vec4 kVehicleColor{1.00f, 0.55f, 0.25f, 0.90f};
+
+/// Setengah-sisi kisi yang menggambarkan bidang tak hingga, meter.
+constexpr float kPlaneWireExtent = 5.0f;
+/// Setengah-panjang lengan salib penanda, meter.
+constexpr float kMarkerSize = 0.25f;
+/// Setengah-panjang garis sumbu sendi, meter.
+constexpr float kJointAxisLength = 0.5f;
+
+// --- gizmo lampu ------------------------------------------------------------
+//
+// **Radiansi ambang tempat "jangkauan berguna" diukur.** Satu, dalam satuan
+// radiansi yang sama yang dipakai shader — kira-kira seterang permukaan putih di
+// bawah matahari bawaan. Angkanya sendiri sembarang; yang tidak sembarang adalah
+// bahwa ia tetap, sehingga dua lampu bisa dibandingkan dari besar bolanya.
+constexpr float kLightUsefulThreshold = 1.0f;
+/// Panjang berkas lampu directional, meter. Ia tak hingga; yang digambar sekadar
+/// cukup untuk membaca arahnya.
+constexpr float kDirectionalRayLength = 2.0f;
+/// Jari-jari cincin tempat berkas directional berangkat.
+constexpr float kDirectionalRingRadius = 0.25f;
+/// Panjang sayap kepala panah, sebagai pecahan panjang berkasnya.
+constexpr float kArrowHeadFraction = 0.18f;
+
 /// Dorongan terkecil (meter) yang masih dianggap ekstrusi.
 ///
 /// Di bawahnya sisi barunya berupa dinding setipis itu — geometri yang tidak
 /// bisa dipilih lagi karena tidak ada piksel yang mengenainya, dan yang tetap
 /// ikut tersimpan ke berkas selamanya.
 constexpr float kWhiteboxExtrudeMin = 1e-3f;
+
+// --- sub-objek whitebox (W7.2) ----------------------------------------------
+//
+// **Ukurannya dalam piksel, bukan dalam meter.** Sebuah simpul tidak punya
+// ukuran di dunia, dan penanda yang berskala dunia menghilang begitu kamera
+// mundur — persis saat perancang sedang melihat keseluruhan ruangan dan paling
+// butuh melihat sudut mana yang bisa ditarik.
+constexpr float kVertexMarkerRadius = 3.5f;
+/// Jangkauan klik, piksel. Lebih besar dari penandanya: yang harus mudah dikenai
+/// adalah simpulnya, bukan gambarnya.
+constexpr float kVertexPickRadius = 9.0f;
+constexpr float kEdgePickRadius = 7.0f;
+
+constexpr Vec4 kSubObjectIdle{0.60f, 0.64f, 0.70f, 0.95f};
+constexpr Vec4 kSubObjectHovered{1.00f, 0.85f, 0.35f, 1.00f};
+constexpr Vec4 kSubObjectSelected{1.00f, 0.62f, 0.20f, 1.00f};
+
+ImU32 ToColor(const Vec4& color) {
+    return ImGui::GetColorU32(ImVec4(color.x, color.y, color.z, color.w));
+}
+
+/// Jarak titik ke ruas garis, ruang layar. Dipakai memilih rusuk.
+float DistanceToSegment(const Vec2& point, const Vec2& a, const Vec2& b) {
+    const Vec2 span = b - a;
+    const float lengthSquared = glm::dot(span, span);
+    if (lengthSquared < 1e-6f) {
+        return glm::length(point - a);
+    }
+    const float t = std::clamp(glm::dot(point - a, span) / lengthSquared, 0.0f, 1.0f);
+    return glm::length(point - (a + span * t));
+}
 
 /// Kamera editor bergaya orbit + fly.
 ///
@@ -186,7 +316,19 @@ class ViewportPanel final : public Panel {
 public:
     ViewportPanel()
         : Panel(panel_id::kViewport, std::string(icons::kPanelViewport) + "  Viewport",
-                PanelCategory::Scene) {}
+                PanelCategory::Scene) {
+        // **Glyph penanda diisi di sini, bukan di `SceneView`.** Modul itu
+        // dipakai player juga, dan sebuah player tidak punya font ikon untuk
+        // membaca `ICON_LC_SUN`. "Entity ini lampu, jadi gambarkan bohlam"
+        // memang selalu pengetahuan editor — komentar di `EntityIcon` sudah
+        // menyebutnya sejak lama; yang baru adalah kodenya ikut mengatakannya.
+        SceneView::IconGlyphs glyphs;
+        glyphs.directionalLight = icons::kSunLight;
+        glyphs.light = icons::kLight;
+        glyphs.camera = icons::kCamera;
+        glyphs.empty = icons::kEntity;
+        sceneView_.SetIconGlyphs(glyphs);
+    }
 
     bool WantsZeroPadding() const override { return true; }
 
@@ -205,6 +347,11 @@ public:
 
         const ImVec2 size = ImGui::GetContentRegionAvail();
         if (size.x < 8.0f || size.y < 8.0f) {
+            // Overlay tidak digambar frame ini, jadi ia tidak sedang menunjuk
+            // apa pun. Tanpa baris ini, panel yang dilipat sementara sebuah
+            // tombolnya ditunjuk membuka kembali dengan klaim yang tidak pernah
+            // dilepas.
+            overlayOwnsPointer_ = false;
             return;  // panel terlalu kecil atau sedang dilipat
         }
 
@@ -220,6 +367,7 @@ public:
         // dipasang sekali dari konteks setengah jadi adalah null selamanya.
         sceneView_.SetTextureBakery(context.textureBakery);
         sceneView_.SetMeshSdfBakery(context.meshSdfBakery);
+        sceneView_.SetMeshGeometryCache(context.meshGeometry);
         sceneView_.SetMaterialPrograms(context.materialPrograms);
         sceneView_.Build(*context.world, *context.selection, context.assets, renderer,
                          context.animation, context.builtinAssets, context.whiteboxes,
@@ -267,6 +415,9 @@ public:
             desc.volume.scatterAlbedo = context.volume.albedo;
             desc.volume.incomingLight = Vec3(context.volume.lightIntensity);
         }
+        // Rangka kawat komponen, hanya untuk yang sedang terpilih.
+        DrawSelectionWires(context);
+
         desc.clouds = context.clouds;
         camera_.ApplyTo(desc.camera);
         // Permintaan kamera dari luar panel — `viewport.capture` milik track AI.
@@ -337,6 +488,9 @@ public:
         const TerrainTarget terrainTarget = FindTerrainTarget(context);
         const bool overlayHovered =
             DrawOverlays(context, imagePos, size, *renderer, whiteboxTarget, terrainTarget);
+        // Dibaca `HandleCameraInput` pada frame BERIKUTNYA — alasannya di tempat
+        // medannya dideklarasikan.
+        overlayOwnsPointer_ = overlayHovered;
 
         // Permukaan viewport sebagai item sungguhan, bukan status mouse mentah:
         // dengan begitu ImGui sendiri yang memutuskan klik ini milik siapa.
@@ -377,13 +531,36 @@ public:
         // bentuknya berubah, dan bentuknya berubah persis saat sedang diseret.
         if (EditingSides(whiteboxTarget)) {
             whitebox::PolygonHandle hovered = whitebox::PolygonHandle::Invalid;
+            whitebox::VertexHandle hoveredVertex = whitebox::VertexHandle::Invalid;
+            whitebox::EdgeHandle hoveredEdge = whitebox::EdgeHandle::Invalid;
             const bool pointing = !flying_ && !overlayHovered && !gizmoOwnsPointer_ &&
                                   ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
+            // **Hanya yang sejenis mode aktif yang dicari.** Menyorot ketiganya
+            // sekaligus berarti kursor di dekat sebuah sudut menyalakan simpul,
+            // rusuk, dan sisi bersamaan — dan klik yang menyusul menjadi tebakan
+            // di antara tiga jawaban yang sama-sama masuk akal.
             if (pointing) {
-                hovered = PickWhiteboxSide(whiteboxTarget, view, projection, imagePos, size,
-                                           ImGui::GetMousePos())
-                              .polygon;
+                const SubObject mode = context.whiteboxes->SubObjectMode();
+                const Mat4 clip = projection * view;
+                const ImVec2 cursor = ImGui::GetMousePos();
+                switch (mode) {
+                    case SubObject::Vertex:
+                        hoveredVertex = PickWhiteboxVertex(whiteboxTarget, clip, imagePos, size,
+                                                           cursor);
+                        break;
+                    case SubObject::Edge:
+                        hoveredEdge =
+                            PickWhiteboxEdge(whiteboxTarget, clip, imagePos, size, cursor);
+                        break;
+                    case SubObject::Face:
+                        hovered = PickWhiteboxSide(whiteboxTarget, view, projection, imagePos,
+                                                   size, cursor)
+                                      .polygon;
+                        break;
+                }
             }
+            DrawWhiteboxSubObjects(context, whiteboxTarget, projection * view, imagePos, size,
+                                   hoveredVertex, hoveredEdge);
             DrawWhiteboxOverlay(context, whiteboxTarget, projection * view, imagePos, size,
                                 hovered);
         }
@@ -407,12 +584,26 @@ public:
             return;
         }
 
-        const bool gizmoBusy =
-            EditingSides(whiteboxTarget) &&
-                    whitebox::IsValid(SelectedSide(context, whiteboxTarget))
-                ? DrawWhiteboxGizmo(context, whiteboxTarget, imagePos, size, view, projection,
-                                    !overlayHovered)
-                : DrawGizmoAndApply(context, imagePos, size, view, projection, !overlayHovered);
+        // Gizmo mana yang berdiri ditentukan **jenis sub-objek yang terpilih**,
+        // bukan hanya oleh mode blockout. Satu gizmo untuk ketiganya akan
+        // menuntut sumbu yang berarti tiga hal berbeda menurut keadaan yang
+        // tidak terlihat di gizmonya sendiri.
+        bool gizmoBusy = false;
+        if (EditingSides(whiteboxTarget)) {
+            const SubObject mode = context.whiteboxes->SubObjectMode();
+            if (mode == SubObject::Face) {
+                gizmoBusy = whitebox::IsValid(SelectedSide(context, whiteboxTarget)) &&
+                            DrawWhiteboxGizmo(context, whiteboxTarget, imagePos, size, view,
+                                              projection, !overlayHovered);
+            } else {
+                gizmoBusy = DrawWhiteboxVertexGizmo(context, whiteboxTarget, imagePos, size,
+                                                    view, projection, !overlayHovered);
+            }
+        }
+        if (!gizmoBusy && !EditingSides(whiteboxTarget)) {
+            gizmoBusy = DrawGizmoAndApply(context, imagePos, size, view, projection,
+                                          !overlayHovered);
+        }
         gizmoOwnsPointer_ = gizmoBusy;
         HandleSelectionInput(context, whiteboxTarget, imagePos, size, view, projection, gizmoBusy,
                              surfacePressed, surfaceHeld);
@@ -422,14 +613,46 @@ public:
 private:
     // --- kamera -------------------------------------------------------------
 
+    /// Mencatat tombol mana yang ditekan sementara kursor berada di atas
+    /// overlay, dan melepasnya kembali begitu tombolnya lepas.
+    ///
+    /// **Klaimnya dipegang sampai tombol dilepas, bukan diperiksa ulang tiap
+    /// frame**, dan itu justru inti persoalannya. `IsMouseDragging` menjawab
+    /// menurut keadaan kursor sekarang, bukan menurut tempat seretan itu
+    /// dimulai — jadi syarat per-frame menyerahkan seretan kepada kamera persis
+    /// pada saat kursor bergeser keluar dari tombolnya. Tombol overlay
+    /// berukuran beberapa puluh piksel, jadi "bergeser keluar" itu yang biasa
+    /// terjadi, bukan pengecualian.
+    void UpdateOverlayPointerClaims() {
+        for (int button = 0; button < ImGuiMouseButton_COUNT; ++button) {
+            auto& claimed = overlayOwnsButton_[static_cast<std::size_t>(button)];
+            if (!ImGui::IsMouseDown(button)) {
+                claimed = false;
+            } else if (ImGui::IsMouseClicked(button)) {
+                claimed = overlayOwnsPointer_;
+            }
+        }
+    }
+
+    bool OverlayOwns(ImGuiMouseButton button) const {
+        return overlayOwnsButton_[static_cast<std::size_t>(button)];
+    }
+
     void HandleCameraInput() {
         ImGuiIO& io = ImGui::GetIO();
         const bool hovered = ImGui::IsWindowHovered(ImGuiHoveredFlags_ChildWindows);
+        UpdateOverlayPointerClaims();
 
         // Mode terbang bertahan selama tombol kanan ditahan, walaupun kursor
         // sudah keluar dari panel. Kalau syaratnya "hovered" terus-menerus,
         // memutar pandangan cepat akan terputus di tengah jalan.
-        if (hovered && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        //
+        // **Tidak dimulai kalau tombolnya ditekan di atas overlay.** Tombol
+        // overlay tidak dibuat dengan `ImGuiButtonFlags_MouseButtonRight`, jadi
+        // ImGui tidak pernah memberinya `ActiveId` untuk klik kanan — dan tanpa
+        // klaim di sini, klik kanan di atas tombol mana pun memutar pandangan.
+        if (hovered && !OverlayOwns(ImGuiMouseButton_Right) &&
+            ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
             flying_ = true;
         }
         if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
@@ -458,14 +681,23 @@ private:
             return;
         }
 
+        // **Roda tidak ikut diklaim, dan itu keputusan, bukan kelalaian.**
+        // Sebuah putaran roda selesai pada frame yang sama; ia tidak punya awal
+        // yang bisa jatuh di satu tempat dan akhir di tempat lain. Tombol
+        // overlay juga tidak melakukan apa-apa dengan roda, jadi menahannya
+        // hanya membuat menggulung di atas ikon sebesar dua puluh piksel
+        // berhenti bekerja — dan yang menggulung di sana memang sedang meminta
+        // viewport di belakangnya mendekat.
         if (io.MouseWheel != 0.0f) {
             camera_.Zoom(io.MouseWheel);
         }
-        if (io.KeyAlt && ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
+        if (io.KeyAlt && !OverlayOwns(ImGuiMouseButton_Left) &&
+            ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
             const ImVec2 delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
             ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
             camera_.Look(delta.x * kLookSensitivity, delta.y * kLookSensitivity);
-        } else if (ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
+        } else if (!OverlayOwns(ImGuiMouseButton_Middle) &&
+                   ImGui::IsMouseDragging(ImGuiMouseButton_Middle)) {
             const ImVec2 delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Middle);
             ImGui::ResetMouseDragDelta(ImGuiMouseButton_Middle);
             camera_.Pan(delta.x, delta.y);
@@ -641,6 +873,13 @@ private:
             Vec2 screen;
             if (!WorldToScreen(viewProjection, Vec2(imagePos.x, imagePos.y), Vec2(size.x, size.y),
                                icon.position, screen)) {
+                continue;
+            }
+            // Penanda tanpa glyph dilewati. `SceneView::IconGlyphs` boleh
+            // kosong — itulah yang membuatnya bisa dipakai player — dan
+            // `CalcTextSizeA(nullptr)` bukan gambar yang hilang melainkan
+            // segfault di dalam ImGui.
+            if (icon.glyph == nullptr) {
                 continue;
             }
             const Vec4 color = icon.selected ? kSelectionColor : icon.color;
@@ -849,7 +1088,7 @@ private:
     static whitebox::PolygonHandle SelectedSide(const EditorContext& context,
                                                 const WhiteboxTarget& target) {
         const SideSelection& side = context.whiteboxes->Selected();
-        return side.asset == target.guid ? side.polygon : whitebox::PolygonHandle::Invalid;
+        return side.asset == target.guid ? side.PrimaryPolygon() : whitebox::PolygonHandle::Invalid;
     }
 
     /// True bila klik di viewport berarti "pilih sisi", bukan "pilih entity".
@@ -869,6 +1108,160 @@ private:
         const Vec3 origin = Vec3(target.worldInverse * Vec4(ray.origin, 1.0f));
         const Vec3 direction = Vec3(target.worldInverse * Vec4(ray.direction, 0.0f));
         return whitebox::PickPolygon(*target.box, origin, direction);
+    }
+
+    /// Simpul dan rusuk whitebox di layar, beserta yang tersorot dan terpilih.
+    ///
+    /// **Rusuk yang digambar rusuk poligon, bukan rusuk face.** Diagonal yang
+    /// disembunyikan penggabungan sebidang adalah detail mesin; menunjukkannya
+    /// berarti membatalkan seluruh guna lapisan poligon — dan menawarkan
+    /// perancang memilih sesuatu yang tidak ia anggap ada.
+    ///
+    /// Keduanya tergambar di mode mana pun. Yang ditentukan mode hanyalah apa
+    /// yang bisa diklik; melihat bentuk yang sedang disunting selalu berguna.
+    void DrawWhiteboxSubObjects(const EditorContext& context, const WhiteboxTarget& target,
+                                const Mat4& viewProjection, const ImVec2& imagePos,
+                                const ImVec2& size, whitebox::VertexHandle hoveredVertex,
+                                whitebox::EdgeHandle hoveredEdge) {
+        const whitebox::HalfEdgeMesh& mesh = target.box->Mesh();
+        const SideSelection& side = context.whiteboxes->Selected();
+        const bool mine = side.asset == target.guid;
+        const Mat4 clip = viewProjection * target.world;
+        const Vec2 origin(imagePos.x, imagePos.y);
+        const Vec2 extent(size.x, size.y);
+
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        draw->PushClipRect(imagePos, ImVec2(imagePos.x + size.x, imagePos.y + size.y), true);
+
+        for (uint32_t e = 0; e < mesh.EdgeCount(); ++e) {
+            const whitebox::EdgeHandle edge = static_cast<whitebox::EdgeHandle>(e);
+            if (target.box->Polygons().IsEdgeHidden(edge)) {
+                continue;
+            }
+            const auto [halfA, halfB] = mesh.EdgeHalfEdges(edge);
+            if (!whitebox::IsValid(halfA) || !whitebox::IsValid(halfB)) {
+                continue;
+            }
+            Vec2 a;
+            Vec2 b;
+            if (!WorldToScreen(clip, origin, extent,
+                               mesh.GetVertex(mesh.GetHalfEdge(halfA).origin).position, a) ||
+                !WorldToScreen(clip, origin, extent,
+                               mesh.GetVertex(mesh.GetHalfEdge(halfB).origin).position, b)) {
+                continue;
+            }
+
+            Vec4 color = kSubObjectIdle;
+            float thickness = 1.4f;
+            if (mine && side.Contains(edge)) {
+                color = kSubObjectSelected;
+                thickness = 2.6f;
+            } else if (edge == hoveredEdge) {
+                color = kSubObjectHovered;
+                thickness = 2.2f;
+            }
+            draw->AddLine(ImVec2(a.x, a.y), ImVec2(b.x, b.y), ToColor(color), thickness);
+        }
+
+        for (uint32_t v = 0; v < mesh.VertexCount(); ++v) {
+            const whitebox::VertexHandle vertex = static_cast<whitebox::VertexHandle>(v);
+            Vec2 screen;
+            if (!WorldToScreen(clip, origin, extent, mesh.GetVertex(vertex).position, screen)) {
+                continue;
+            }
+
+            Vec4 color = kSubObjectIdle;
+            float radius = kVertexMarkerRadius;
+            if (mine && side.Contains(vertex)) {
+                color = kSubObjectSelected;
+                radius += 1.5f;
+            } else if (vertex == hoveredVertex) {
+                color = kSubObjectHovered;
+                radius += 1.0f;
+            }
+            // Persegi, bukan lingkaran: pada tiga piksel sebuah lingkaran
+            // menjadi gumpalan yang sudutnya tidak bisa dibaca, dan yang sedang
+            // dicari mata justru sudut.
+            draw->AddRectFilled(ImVec2(screen.x - radius, screen.y - radius),
+                                ImVec2(screen.x + radius, screen.y + radius), ToColor(color));
+            draw->AddRect(ImVec2(screen.x - radius, screen.y - radius),
+                          ImVec2(screen.x + radius, screen.y + radius),
+                          ToColor(Vec4(0.05f, 0.06f, 0.07f, 0.9f)));
+        }
+
+        draw->PopClipRect();
+    }
+
+    /// Simpul terdekat ke kursor, atau invalid bila tidak ada yang cukup dekat.
+    ///
+    /// **Di ruang layar, bukan dengan sinar.** Simpul tidak punya luas untuk
+    /// ditembak; yang menentukan mana yang dimaksud adalah jaraknya dari kursor
+    /// dalam piksel — aturan yang sama yang membuat ikon entity menang atas mesh
+    /// besar yang menaunginya.
+    whitebox::VertexHandle PickWhiteboxVertex(const WhiteboxTarget& target,
+                                              const Mat4& viewProjection,
+                                              const ImVec2& imagePos, const ImVec2& size,
+                                              const ImVec2& point) const {
+        const whitebox::HalfEdgeMesh& mesh = target.box->Mesh();
+        const Mat4 clip = viewProjection * target.world;
+        const Vec2 origin(imagePos.x, imagePos.y);
+        const Vec2 extent(size.x, size.y);
+        const Vec2 cursor(point.x, point.y);
+
+        whitebox::VertexHandle best = whitebox::VertexHandle::Invalid;
+        float nearest = kVertexPickRadius;
+        for (uint32_t v = 0; v < mesh.VertexCount(); ++v) {
+            const whitebox::VertexHandle vertex = static_cast<whitebox::VertexHandle>(v);
+            Vec2 screen;
+            if (!WorldToScreen(clip, origin, extent, mesh.GetVertex(vertex).position, screen)) {
+                continue;
+            }
+            const float distance = glm::length(cursor - screen);
+            if (distance < nearest) {
+                nearest = distance;
+                best = vertex;
+            }
+        }
+        return best;
+    }
+
+    /// Rusuk poligon terdekat ke kursor. Rusuk tersembunyi tidak ikut — ia tidak
+    /// digambar, dan yang tidak terlihat tidak boleh bisa terpilih.
+    whitebox::EdgeHandle PickWhiteboxEdge(const WhiteboxTarget& target,
+                                          const Mat4& viewProjection, const ImVec2& imagePos,
+                                          const ImVec2& size, const ImVec2& point) const {
+        const whitebox::HalfEdgeMesh& mesh = target.box->Mesh();
+        const Mat4 clip = viewProjection * target.world;
+        const Vec2 origin(imagePos.x, imagePos.y);
+        const Vec2 extent(size.x, size.y);
+        const Vec2 cursor(point.x, point.y);
+
+        whitebox::EdgeHandle best = whitebox::EdgeHandle::Invalid;
+        float nearest = kEdgePickRadius;
+        for (uint32_t e = 0; e < mesh.EdgeCount(); ++e) {
+            const whitebox::EdgeHandle edge = static_cast<whitebox::EdgeHandle>(e);
+            if (target.box->Polygons().IsEdgeHidden(edge)) {
+                continue;
+            }
+            const auto [halfA, halfB] = mesh.EdgeHalfEdges(edge);
+            if (!whitebox::IsValid(halfA) || !whitebox::IsValid(halfB)) {
+                continue;
+            }
+            Vec2 a;
+            Vec2 b;
+            if (!WorldToScreen(clip, origin, extent,
+                               mesh.GetVertex(mesh.GetHalfEdge(halfA).origin).position, a) ||
+                !WorldToScreen(clip, origin, extent,
+                               mesh.GetVertex(mesh.GetHalfEdge(halfB).origin).position, b)) {
+                continue;
+            }
+            const float distance = DistanceToSegment(cursor, a, b);
+            if (distance < nearest) {
+                nearest = distance;
+                best = edge;
+            }
+        }
+        return best;
     }
 
     void DrawWhiteboxOverlay(const EditorContext& context, const WhiteboxTarget& target,
@@ -953,6 +1346,135 @@ private:
         frame[2] = Vec4(normal, 0.0f);
         frame[3] = Vec4(Vec3(target.world * Vec4(outline.centroid, 1.0f)), 1.0f);
         return frame;
+    }
+
+    /// Simpul yang ikut bergerak untuk seleksi yang sedang aktif.
+    ///
+    /// Mode rusuk mengembalikan **kedua ujung** tiap rusuk terpilih: sebuah rusuk
+    /// tidak punya posisi sendiri di half-edge — ia sepasang simpul — jadi
+    /// menggesernya berarti menggeser keduanya. Rusuk yang berbagi ujung tidak
+    /// menggeser simpul itu dua kali; yang menjaganya adalah penyaringan kembar
+    /// di sini, bukan di `TranslateVertices`.
+    std::vector<whitebox::VertexHandle> SelectedVertices(const EditorContext& context,
+                                                         const WhiteboxTarget& target) const {
+        std::vector<whitebox::VertexHandle> result;
+        const SideSelection& side = context.whiteboxes->Selected();
+        if (side.asset != target.guid) {
+            return result;
+        }
+        const whitebox::HalfEdgeMesh& mesh = target.box->Mesh();
+
+        const auto append = [&](whitebox::VertexHandle vertex) {
+            if (!whitebox::IsValid(vertex) ||
+                static_cast<uint32_t>(vertex) >= mesh.VertexCount()) {
+                return;
+            }
+            if (std::find(result.begin(), result.end(), vertex) == result.end()) {
+                result.push_back(vertex);
+            }
+        };
+
+        switch (side.mode) {
+            case SubObject::Vertex:
+                for (const whitebox::VertexHandle vertex : side.vertices) {
+                    append(vertex);
+                }
+                break;
+            case SubObject::Edge:
+                for (const whitebox::EdgeHandle edge : side.edges) {
+                    if (static_cast<uint32_t>(edge) >= mesh.EdgeCount()) {
+                        continue;
+                    }
+                    const auto [halfA, halfB] = mesh.EdgeHalfEdges(edge);
+                    if (whitebox::IsValid(halfA)) {
+                        append(mesh.GetHalfEdge(halfA).origin);
+                    }
+                    if (whitebox::IsValid(halfB)) {
+                        append(mesh.GetHalfEdge(halfB).origin);
+                    }
+                }
+                break;
+            case SubObject::Face:
+                break;
+        }
+        return result;
+    }
+
+    /// Gizmo untuk seleksi simpul atau rusuk.
+    ///
+    /// **Berdiri di rata-rata simpulnya, bukan di titik berat berbobot luas.**
+    /// Pembobotan luas ada karena sebuah sisi punya luas; sekumpulan simpul
+    /// tidak, dan membobotinya dengan sesuatu berarti mengarang bobot.
+    ///
+    /// **Ruang dunia, bukan ruang lokal.** Sebuah sisi punya normal yang
+    /// memberi sumbu ketiga arti — "dorong keluar" — sementara sekumpulan simpul
+    /// tidak punya orientasi sama sekali. Sumbu yang diputar sesuai sesuatu yang
+    /// dikarang lebih sulit dipakai daripada sumbu dunia yang jujur.
+    bool DrawWhiteboxVertexGizmo(EditorContext& context, const WhiteboxTarget& target,
+                                 const ImVec2& imagePos, const ImVec2& size, const Mat4& view,
+                                 const Mat4& projection, bool interactive) {
+        const std::vector<whitebox::VertexHandle> vertices = SelectedVertices(context, target);
+        if (vertices.empty()) {
+            return false;
+        }
+
+        const whitebox::HalfEdgeMesh& mesh = target.box->Mesh();
+        Vec3 centre(0.0f);
+        for (const whitebox::VertexHandle vertex : vertices) {
+            centre += mesh.GetVertex(vertex).position;
+        }
+        centre /= static_cast<float>(vertices.size());
+        const Vec3 pivot = Vec3(target.world * Vec4(centre, 1.0f));
+
+        Mat4 frame(1.0f);
+        frame[3] = Vec4(pivot, 1.0f);
+
+        const GizmoResult result =
+            DrawGizmo(Vec2(imagePos.x, imagePos.y), Vec2(size.x, size.y), view, projection,
+                      GizmoOperation::Translate, GizmoSpace::World, snap_, frame, interactive);
+
+        if (result.active && !whiteboxDrag_.active) {
+            whiteboxDrag_ = WhiteboxDrag{};
+            whiteboxDrag_.active = true;
+            whiteboxDrag_.guid = target.guid;
+            whiteboxDrag_.vertices = vertices;
+            whiteboxDrag_.before = target.box->ToData();
+            whiteboxDrag_.pivot = pivot;
+        }
+        if (result.changed && whiteboxDrag_.active) {
+            ApplyWhiteboxVertexDrag(context, target, result.transform);
+        }
+        if (!result.active && whiteboxDrag_.active) {
+            whiteboxDrag_.active = false;
+            context.history->CloseMergeGroup();
+        }
+        return result.active || result.hovered;
+    }
+
+    void ApplyWhiteboxVertexDrag(EditorContext& context, const WhiteboxTarget& target,
+                                 const Mat4& transform) {
+        // Tiap frame dimulai dari keadaan awal seretan — alasan yang sama
+        // dengan seretan sisi: menumpuk pergeseran per frame membuat jarak yang
+        // ditempuh bergantung pada berapa frame yang sempat tergambar.
+        std::string error;
+        if (!whitebox::WhiteboxMesh::Build(*target.box, whiteboxDrag_.before, error)) {
+            SIM_ERROR("Whitebox", "seretan tidak bisa membangun ulang mesh: {}", error);
+            whiteboxDrag_.active = false;
+            return;
+        }
+
+        const Vec3 deltaWorld = Vec3(transform[3]) - whiteboxDrag_.pivot;
+        const Vec3 delta = Vec3(target.worldInverse * Vec4(deltaWorld, 0.0f));
+
+        const whitebox::EditResult moved =
+            target.box->TranslateVertices(whiteboxDrag_.vertices, delta);
+        if (!moved.ok) {
+            return;
+        }
+
+        context.history->Execute(std::make_unique<WhiteboxEditCommand>(
+            context.whiteboxes, whiteboxDrag_.guid, whiteboxDrag_.before, target.box->ToData(),
+            "Move Vertices"));
     }
 
     bool DrawWhiteboxGizmo(EditorContext& context, const WhiteboxTarget& target,
@@ -1046,6 +1568,81 @@ private:
             context.whiteboxes, whiteboxDrag_.guid, whiteboxDrag_.before, target.box->ToData(),
             whiteboxDrag_.extruding ? "Extrude Side" : "Move Side"));
         context.whiteboxes->Select(whiteboxDrag_.guid, polygon);
+    }
+
+    /// Menjatuhkan setiap entity terpilih ke permukaan di bawahnya.
+    ///
+    /// **Sinarnya ditembakkan dari titik asal masing-masing, ke bawah dunia**,
+    /// dan bukan dari kamera: yang diminta "letakkan ini di lantai", bukan
+    /// "letakkan ini di tempat yang sedang saya lihat".
+    ///
+    /// Seluruh seleksi dikecualikan dari sinarnya, bukan hanya benda yang sedang
+    /// dihitung. Menjatuhkan tumpukan kotak sekaligus akan membuat yang di atas
+    /// mendarat di yang di bawahnya — yang belum sempat turun — dan hasilnya
+    /// tumpukan yang tetap melayang dengan jarak yang sama.
+    void ConformSelectionToSurface(EditorContext& context, ConformOrientation orientation) {
+        if (context.world == nullptr || context.selection == nullptr ||
+            context.history == nullptr) {
+            return;
+        }
+
+        std::vector<scene::Entity> ignore;
+        for (const uint64_t id : context.selection->Items()) {
+            const scene::Entity entity = ToEntity(id);
+            if (context.world->IsAlive(entity)) {
+                ignore.push_back(entity);
+            }
+        }
+        if (ignore.empty()) {
+            return;
+        }
+
+        std::vector<SetTransformsCommand::Item> items;
+        std::size_t missed = 0;
+        for (const scene::Entity entity : ignore) {
+            const auto* transform = context.world->TryGet<scene::TransformComponent>(entity);
+            if (transform == nullptr) {
+                continue;
+            }
+            const Vec3 origin = Vec3(context.world->WorldMatrix(entity)[3]);
+            const Ray ray{origin, Vec3(0.0f, -1.0f, 0.0f)};
+            const SceneView::SurfaceHit hit = sceneView_.RaycastSurface(ray, ignore);
+            if (!hit) {
+                ++missed;
+                continue;
+            }
+
+            SetTransformsCommand::Item item;
+            item.guid = context.world->GuidOf(entity);
+            item.before = *transform;
+            // Transform lokal, permukaan dunia. Untuk entity berinduk keduanya
+            // bukan ruang yang sama, dan menyamakannya di sini menuntut membawa
+            // titik kena kembali ke ruang induknya.
+            const scene::Entity parent = context.world->ParentOf(entity);
+            Vec3 localPoint = hit.position;
+            Vec3 localNormal = hit.normal;
+            if (scene::IsValid(parent) && context.world->IsAlive(parent)) {
+                const Mat4 inverse = glm::inverse(context.world->WorldMatrix(parent));
+                localPoint = Vec3(inverse * Vec4(hit.position, 1.0f));
+                localNormal = glm::normalize(Vec3(inverse * Vec4(hit.normal, 0.0f)));
+            }
+            item.after = ConformToSurface(*transform, localPoint, localNormal, orientation);
+            items.push_back(item);
+        }
+
+        if (missed > 0 && context.notifications != nullptr) {
+            // **Disebutkan, bukan didiamkan.** Yang paling sering menyebabkannya
+            // adalah geometri yang masih dimuat — dan benda yang diam saja tanpa
+            // sepatah kata terbaca sebagai perintah yang rusak.
+            context.notifications->Info(std::to_string(missed) +
+                                        " tidak menemukan permukaan di bawahnya");
+        }
+        if (items.empty()) {
+            return;
+        }
+        context.history->Execute(std::make_unique<SetTransformsCommand>(
+            context.world, std::move(items), "Conform to Surface"));
+        context.history->CloseMergeGroup();
     }
 
     // --- terrain ------------------------------------------------------------
@@ -1268,17 +1865,68 @@ private:
         // mengklik benda lain tetap berpindah ke benda itu alih-alih terkunci
         // di dalam mode.
         if (dragged <= kDragThreshold && EditingSides(whiteboxTarget)) {
-            const whitebox::PolygonHit hit =
-                PickWhiteboxSide(whiteboxTarget, view, projection, imagePos, size, release);
-            if (hit) {
-                context.whiteboxes->Select(whiteboxTarget.guid, hit.polygon);
-                return;
+            // Ctrl/Shift menambah ke seleksi alih-alih menggantinya — aturan yang
+            // sama dengan seleksi entity, jadi tangan tidak perlu belajar dua
+            // kebiasaan untuk satu gerakan.
+            const bool additive = io.KeyCtrl || io.KeyShift;
+            const Mat4 clip = projection * view;
+
+            switch (context.whiteboxes->SubObjectMode()) {
+                case SubObject::Vertex: {
+                    const whitebox::VertexHandle vertex =
+                        PickWhiteboxVertex(whiteboxTarget, clip, imagePos, size, release);
+                    if (whitebox::IsValid(vertex)) {
+                        if (additive) {
+                            context.whiteboxes->Toggle(whiteboxTarget.guid, vertex);
+                        } else {
+                            context.whiteboxes->ClearSelection();
+                            context.whiteboxes->Add(whiteboxTarget.guid, vertex);
+                        }
+                        return;
+                    }
+                    break;
+                }
+                case SubObject::Edge: {
+                    const whitebox::EdgeHandle edge =
+                        PickWhiteboxEdge(whiteboxTarget, clip, imagePos, size, release);
+                    if (whitebox::IsValid(edge)) {
+                        if (additive) {
+                            context.whiteboxes->Toggle(whiteboxTarget.guid, edge);
+                        } else {
+                            context.whiteboxes->ClearSelection();
+                            context.whiteboxes->Add(whiteboxTarget.guid, edge);
+                        }
+                        return;
+                    }
+                    break;
+                }
+                case SubObject::Face: {
+                    const whitebox::PolygonHit hit = PickWhiteboxSide(whiteboxTarget, view,
+                                                                      projection, imagePos,
+                                                                      size, release);
+                    if (hit) {
+                        if (additive) {
+                            context.whiteboxes->Toggle(whiteboxTarget.guid, hit.polygon);
+                        } else {
+                            context.whiteboxes->Select(whiteboxTarget.guid, hit.polygon);
+                        }
+                        return;
+                    }
+                    break;
+                }
             }
-            context.whiteboxes->ClearSelection();
+
+            // **Meleset mengosongkan seleksi, bukan membiarkannya.** Yang
+            // mengklik ruang kosong sedang membatalkan pilihannya; membiarkannya
+            // membuat operasi berikutnya mengenai sesuatu yang sudah tidak
+            // dianggap terpilih oleh siapa pun kecuali mesin.
+            if (!additive) {
+                context.whiteboxes->ClearSelection();
+            }
         }
 
-        const bool additive = io.KeyCtrl || io.KeyShift;
-        if (!additive) {
+        const bool additiveEntity = io.KeyCtrl || io.KeyShift;
+        if (!additiveEntity) {
             context.selection->Clear();
         }
 
@@ -1352,6 +2000,27 @@ private:
         if (ImGui::IsKeyPressed(ImGuiKey_B, false) && whiteboxTarget) {
             ToggleWhiteboxMode(context);
         }
+        // 1/2/3 hanya berarti sesuatu selama blockout menyala — di luar itu
+        // keduanya milik siapa pun yang memakainya nanti, dan merebutnya di sini
+        // akan membuat pintasan itu diam-diam tidak pernah sampai.
+        if (whiteboxMode_ && whiteboxTarget && context.whiteboxes != nullptr) {
+            if (ImGui::IsKeyPressed(ImGuiKey_1, false)) {
+                context.whiteboxes->SetSubObject(SubObject::Vertex);
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_2, false)) {
+                context.whiteboxes->SetSubObject(SubObject::Edge);
+            }
+            if (ImGui::IsKeyPressed(ImGuiKey_3, false)) {
+                context.whiteboxes->SetSubObject(SubObject::Face);
+            }
+        }
+        // End, konvensi yang sama dengan editor lain. Shift meratakan sumbu
+        // atasnya ke normal permukaan; tanpa Shift ia hanya turun.
+        if (ImGui::IsKeyPressed(ImGuiKey_End, false)) {
+            ConformSelectionToSurface(context, ImGui::GetIO().KeyShift
+                                                   ? ConformOrientation::AlignToNormal
+                                                   : ConformOrientation::Keep);
+        }
         if (ImGui::IsKeyPressed(ImGuiKey_T, false) && terrainTarget) {
             ToggleTerrainMode(terrainTarget);
         }
@@ -1396,6 +2065,303 @@ private:
         // objek pipih tetap muat dari arah pandang mana pun.
         const float radius = glm::length(boundsMax - boundsMin) * 0.5f;
         camera_.distance = std::max(radius * 2.5f, 0.5f);
+    }
+
+    // --- rangka kawat fisika -------------------------------------------------
+
+    /// Menggambar rangka kawat komponen entity terpilih: bentuk tabrakan, sendi,
+    /// kendaraan, dan jangkauan lampu.
+    ///
+    /// **Hanya yang terpilih, dan itu keputusan biaya.** Sebuah level dengan
+    /// ribuan collider menghasilkan ratusan ribu ruas garis per frame — dan
+    /// hampir semuanya menggambarkan benda yang sedang tidak dikerjakan siapa
+    /// pun. Yang dicari orang yang membuka gizmo collider adalah ukuran benda
+    /// yang baru saja ia setel, dan benda itu selalu yang terpilih.
+    ///
+    /// Ukurannya tidak dihitung di sini melainkan diminta dari
+    /// `physics::DescribeCollider` — jalur yang sama persis yang memberi makan
+    /// solver. Menghitungnya sendiri berarti dua aritmetika untuk satu bentuk,
+    /// dan yang kedua akan menyimpang tepat di kasus yang paling sulit dilihat.
+    void DrawSelectionWires(EditorContext& context) {
+        if (context.world == nullptr || context.selection == nullptr) {
+            return;
+        }
+        scene::World& world = *context.world;
+        // **Tembus geometri.** Bentuk tabrakan hampir selalu berada di dalam mesh
+        // yang menggambarkannya — itu justru gunanya — jadi rangka kawat yang
+        // diuji kedalaman tertutup persis oleh benda yang ukurannya sedang
+        // diperiksa orang.
+        sceneView_.SetLinesThroughGeometry(true);
+        for (const SelectionId id : context.selection->Items()) {
+            const scene::Entity entity = ToEntity(id);
+            if (entity == scene::kNullEntity || !world.IsAlive(entity)) {
+                continue;
+            }
+            DrawColliderWire(world, entity);
+            DrawBodyMarker(world, entity);
+            DrawJointWire(world, entity);
+            DrawVehicleWire(world, entity);
+            DrawLightWire(world, entity);
+        }
+        sceneView_.SetLinesThroughGeometry(false);
+    }
+
+    /// Matriks bentuk: posisi dan putaran saja.
+    ///
+    /// **Skalanya sengaja ditinggalkan.** Ia sudah masuk ke ukuran bentuknya di
+    /// `DescribeCollider`, dengan aturan yang berbeda per sumbu untuk kotak dan
+    /// seragam untuk bola — memasukkannya lagi ke matriks berarti mengalikannya
+    /// dua kali, dan yang tergambar menjadi bentuk yang tidak pernah ada.
+    static Mat4 ShapeMatrix(const physics::ColliderPlacement& placement) {
+        Mat4 matrix = glm::mat4_cast(placement.rotation);
+        const Vec3 center =
+            placement.position + Vec3(matrix * Vec4(placement.shape.localPosition, 0.0f));
+        matrix[3] = Vec4(center, 1.0f);
+        return matrix;
+    }
+
+    void DrawColliderWire(scene::World& world, scene::Entity entity) {
+        physics::ColliderPlacement placement;
+        if (!physics::DescribeCollider(world, entity, placement)) {
+            return;
+        }
+        const auto* body = world.TryGet<scene::RigidBodyComponent>(entity);
+        Vec4 color = kColliderInertColor;
+        if (body != nullptr) {
+            switch (body->kind) {
+                case scene::RigidBodyKind::Static: color = kColliderStaticColor; break;
+                case scene::RigidBodyKind::Kinematic: color = kColliderKinematicColor; break;
+                case scene::RigidBodyKind::Dynamic: color = kColliderDynamicColor; break;
+            }
+        }
+
+        const Mat4 matrix = ShapeMatrix(placement);
+        const physics::ShapeDesc& shape = placement.shape;
+        switch (shape.kind) {
+            case physics::ShapeKind::Box:
+                sceneView_.AddWireBox(matrix, shape.halfExtents, color);
+                break;
+            case physics::ShapeKind::Sphere:
+                sceneView_.AddWireSphere(matrix, shape.radius, color);
+                break;
+            case physics::ShapeKind::Capsule:
+                sceneView_.AddWireCapsule(matrix, shape.radius, shape.halfExtents.x, color);
+                break;
+            case physics::ShapeKind::Cylinder:
+                sceneView_.AddWireCylinder(matrix, shape.radius, shape.halfExtents.x, color);
+                break;
+            case physics::ShapeKind::Plane:
+                sceneView_.AddWirePlane(matrix, kPlaneWireExtent, color);
+                break;
+            case physics::ShapeKind::ConvexHull:
+            case physics::ShapeKind::TriangleMesh:
+            case physics::ShapeKind::HeightField:
+                // Bentuknya datang dari aset — whitebox atau terrain — dan yang
+                // bisa membacanya adalah `ColliderGeometrySource` yang hanya
+                // dipegang `Build`. Yang digambar karena itu kotak batas
+                // geometri yang tergambar, dan itu jujur: collider ini memang
+                // mengikuti geometri itu, jadi kotak yang salah di sini berarti
+                // geometri yang salah di sana.
+                DrawEntityBounds(entity, color);
+                break;
+        }
+    }
+
+    /// Kotak batas geometri entity, diambil dari daftar pickable frame ini.
+    void DrawEntityBounds(scene::Entity entity, const Vec4& color) {
+        for (const SceneView::Pickable& pickable : sceneView_.Pickables()) {
+            if (pickable.entity != entity) {
+                continue;
+            }
+            const Vec3 half = (pickable.boundsMax - pickable.boundsMin) * 0.5f;
+            Mat4 matrix = pickable.worldMatrix;
+            matrix[3] = Vec4(Vec3(matrix * Vec4((pickable.boundsMin + pickable.boundsMax) * 0.5f,
+                                                1.0f)),
+                             1.0f);
+            sceneView_.AddWireBox(matrix, half, color);
+            return;
+        }
+    }
+
+    /// Penanda benda tegar yang tidak punya bentuk.
+    ///
+    /// **Yang digambar di sini adalah ketiadaan.** `PhysicsScene::Build`
+    /// melewatkan benda tanpa collider dan menyebutkannya di log — tetapi log
+    /// baru dibaca setelah ada yang aneh, sedangkan salib merah di tempat benda
+    /// itu terlihat sebelum Play ditekan.
+    void DrawBodyMarker(scene::World& world, scene::Entity entity) {
+        if (world.TryGet<scene::RigidBodyComponent>(entity) == nullptr ||
+            world.Has<scene::ColliderComponent>(entity)) {
+            return;
+        }
+        sceneView_.AddWireCross(Vec3(world.WorldMatrix(entity)[3]), kMarkerSize,
+                                kColliderInertColor);
+    }
+
+    /// Garis dari benda yang bergerak ke benda yang menahannya.
+    ///
+    /// Sendi tidak punya bentuk untuk digambar; yang perlu terlihat adalah
+    /// **pasangannya**, karena rujukannya GUID dan satu-satunya cara memeriksanya
+    /// hari ini adalah membaca Inspector dan mencocokkan nama.
+    void DrawJointWire(scene::World& world, scene::Entity entity) {
+        const auto* joint = world.TryGet<scene::JointComponent>(entity);
+        if (joint == nullptr) {
+            return;
+        }
+        const Mat4 worldMatrix = world.WorldMatrix(entity);
+        // Titik sendinya, bukan titik asal entity: `anchor` ruang lokal, dan
+        // engsel pintu duduk di tepinya — bukan di tengahnya.
+        const Vec3 anchor(worldMatrix * Vec4(joint->anchor, 1.0f));
+        sceneView_.AddWireCross(anchor, kMarkerSize, kJointColor);
+
+        // Sumbunya +X bingkai sendi, seperti yang tertulis di `JointComponent`.
+        // Engsel yang berputar pada sumbu yang salah terlihat benar sampai Play
+        // ditekan; garis ini membuatnya terlihat sebelum itu.
+        const Mat4 frame = worldMatrix * glm::mat4_cast(joint->frame);
+        const Vec3 axis = glm::normalize(Vec3(frame[0]));
+        sceneView_.AddLine(anchor - axis * kJointAxisLength, anchor + axis * kJointAxisLength,
+                           kJointColor);
+
+        if (!joint->connectedBody.IsValid()) {
+            // Kosong berarti dunia, dan itu bukan galat — pintu dan bandul
+            // memang tergantung pada titik tetap di ruang.
+            return;
+        }
+        const scene::Entity other = world.FindByGuid(joint->connectedBody);
+        if (other == scene::kNullEntity) {
+            // Menunjuk sesuatu yang tidak ada di level ini. Dibiarkan sebagai
+            // salib tanpa garis: sendi yang pasangannya hilang tidak menyambung
+            // ke mana pun, dan garis ke titik asal dunia akan berbohong bahwa ia
+            // tersambung ke sana.
+            return;
+        }
+        sceneView_.AddLine(anchor, Vec3(world.WorldMatrix(other)[3]), kJointColor);
+    }
+
+    /// Chassis dan keempat rodanya, pada ukuran yang benar-benar dipakai.
+    void DrawVehicleWire(scene::World& world, scene::Entity entity) {
+        const auto* vehicle = world.TryGet<scene::VehicleComponent>(entity);
+        if (vehicle == nullptr) {
+            return;
+        }
+        const Mat4 worldMatrix = world.WorldMatrix(entity);
+        Mat4 matrix(1.0f);
+        for (int axis = 0; axis < 3; ++axis) {
+            const Vec3 column(worldMatrix[axis]);
+            const float length = glm::length(column);
+            matrix[axis] = Vec4(length > 1e-8f ? column / length : Vec3(axis == 0, axis == 1,
+                                                                       axis == 2),
+                                0.0f);
+        }
+        matrix[3] = worldMatrix[3];
+
+        sceneView_.AddWireBox(matrix, vehicle->chassisHalfExtents, kVehicleColor);
+        // Titik berat: satu angka yang salah di sini membuat mobil terguling di
+        // tikungan pertama, dan itu terbaca sebagai fisika yang salah.
+        sceneView_.AddWireCross(Vec3(matrix * Vec4(vehicle->centerOfMassOffset, 1.0f)),
+                                kMarkerSize, kVehicleColor);
+
+        // **Posisi rodanya diminta, bukan diturunkan ulang di sini.** Empat
+        // koordinat yang dihitung dua kali adalah empat kesempatan menggambar
+        // roda di tempat yang bukan tempatnya dibangun — dan yang paling mudah
+        // luput justru tanda kiri-kanannya, karena mobil simetris terlihat sama
+        // saja ketika keduanya tertukar.
+        for (const physics::VehicleWheelDesc& wheel :
+             physics::DescribeVehicleWheels(*vehicle)) {
+            // Silinder bersumbu X, yaitu sumbu putar roda.
+            Mat4 wheelMatrix = matrix;
+            wheelMatrix[3] = Vec4(Vec3(matrix * Vec4(wheel.centerOffset, 1.0f)), 1.0f);
+            sceneView_.AddWireCylinder(wheelMatrix, wheel.radius, wheel.width * 0.5f,
+                                       kVehicleColor);
+        }
+    }
+
+    /// Jangkauan dan arah sebuah lampu.
+    ///
+    /// **Intensitas digambar sebagai jarak, bukan sebagai warna.** `range` hanya
+    /// menyebut di mana cahaya berakhir tepat nol, dan ia sama besar untuk lampu
+    /// redup dan lampu menyilaukan — dua bola sebesar itu tidak memberi tahu apa
+    /// pun tentang selisih keduanya. Bola kedua di dalamnya adalah sejauh mana
+    /// cahayanya masih seterang ambang tetap, dan ia bergerak saat intensitasnya
+    /// disetel. Jaraknya diminta dari `render::LightUsefulRadius`, yang memakai
+    /// peredupan yang sama dengan shader.
+    void DrawLightWire(scene::World& world, scene::Entity entity) {
+        const auto* light = world.TryGet<scene::LightComponent>(entity);
+        if (light == nullptr) {
+            return;
+        }
+        const Mat4 matrix = world.WorldMatrix(entity);
+        const Vec3 origin(matrix[3]);
+        // Arah pancar: -Z lokal, sama dengan `SceneView::AppendLight` dan sama
+        // dengan arah hadap kamera. Menurunkannya sendiri di sini berarti gizmo
+        // yang menunjuk ke arah lain daripada cahayanya begitu salah satu diubah.
+        const Vec3 forward = glm::normalize(Vec3(matrix * Vec4(0.0f, 0.0f, -1.0f, 0.0f)));
+
+        // Warna lampunya sendiri, dinaikkan sampai kanal terkuatnya penuh: dua
+        // lampu di adegan yang sama harus bisa dibedakan, dan lampu biru redup
+        // yang digambar biru redup tidak terlihat di atas latar gelap.
+        const float peak = std::max({light->color.r, light->color.g, light->color.b});
+        const Vec3 hue = peak > 1e-4f ? light->color / peak : Vec3(1.0f);
+        const Vec4 rangeColor(hue.r, hue.g, hue.b, 0.55f);
+        const Vec4 reachColor(hue.r, hue.g, hue.b, 0.95f);
+
+        render::LightInstance instance;
+        instance.color = light->color;
+        instance.intensity = light->intensity;
+        instance.range = light->range;
+        instance.sourceRadius = light->sourceRadius;
+        const float reach = render::LightUsefulRadius(instance, kLightUsefulThreshold);
+
+        switch (light->type) {
+            case scene::LightType::Directional: {
+                // Jangkauan tidak berarti untuk directional — ia menerangi
+                // seluruh adegan — jadi yang digambar hanya arahnya. Cincin
+                // beserta berkas sejajar: satu panah tunggal terbaca sebagai
+                // "cahaya datang dari titik ini", yang justru bukan sifatnya.
+                const Vec3 helper =
+                    std::abs(forward.y) < 0.99f ? Vec3(0.0f, 1.0f, 0.0f) : Vec3(1.0f, 0.0f, 0.0f);
+                const Vec3 side = glm::normalize(glm::cross(helper, forward));
+                const Vec3 up = glm::cross(forward, side);
+                sceneView_.AddWireCircle(origin, side, up, kDirectionalRingRadius, reachColor);
+                for (const Vec3& offset : {Vec3(0.0f), side * kDirectionalRingRadius,
+                                           -side * kDirectionalRingRadius,
+                                           up * kDirectionalRingRadius,
+                                           -up * kDirectionalRingRadius}) {
+                    const Vec3 from = origin + offset;
+                    const Vec3 to = from + forward * kDirectionalRayLength;
+                    sceneView_.AddLine(from, to, reachColor);
+                    // Kepala panah: tanpa ini kedua ujung berkas terlihat sama,
+                    // dan lampu yang terbalik 180° tidak bisa dibedakan.
+                    const float head = kDirectionalRayLength * kArrowHeadFraction;
+                    for (const Vec3& wing : {side, -side, up, -up}) {
+                        sceneView_.AddLine(to, to - forward * head + wing * (head * 0.5f),
+                                           reachColor);
+                    }
+                }
+                break;
+            }
+            case scene::LightType::Point:
+                sceneView_.AddWireSphere(matrix, light->range, rangeColor);
+                if (reach > 0.0f) {
+                    sceneView_.AddWireSphere(matrix, reach, reachColor);
+                }
+                break;
+            case scene::LightType::Spot: {
+                // Kerucut luar pada jangkauannya, kerucut dalam di sebelahnya:
+                // yang di antara keduanya adalah tepi yang memudar, dan itu
+                // satu-satunya bagian berkas yang tidak bisa ditebak dari angka.
+                const float outer = std::max(light->outerAngleRadians, light->innerAngleRadians);
+                const float inner = std::min(light->outerAngleRadians, light->innerAngleRadians);
+                sceneView_.AddWireCone(origin, forward, outer, light->range, rangeColor);
+                sceneView_.AddWireCone(origin, forward, inner, light->range, rangeColor);
+                if (reach > 0.0f) {
+                    // Mulut kerucut pada jangkauan bergunanya — sejauh itu
+                    // berkasnya masih seterang ambang.
+                    sceneView_.AddWireCone(origin, forward, outer, reach, reachColor);
+                }
+                break;
+            }
+        }
     }
 
     // --- overlay ------------------------------------------------------------
@@ -1450,6 +2416,23 @@ private:
                 ToggleWhiteboxMode(context);
             }
             track();
+
+            // Pemilih jenis sub-objek, dan **hanya saat menyunting**. Tiga tombol
+            // yang tidak berarti apa-apa selama mode blockout mati adalah tiga
+            // tombol yang mengajari orang bahwa menekannya percuma.
+            if (whiteboxMode_ && context.whiteboxes != nullptr) {
+                const SubObject mode = context.whiteboxes->SubObjectMode();
+                const auto modeButton = [&](const char* icon, const char* label,
+                                            SubObject value) {
+                    if (widgets::ViewportButton(icon, label, mode == value)) {
+                        context.whiteboxes->SetSubObject(value);
+                    }
+                    track();
+                };
+                modeButton(icons::kSubObjectVertex, "Vertices (1)", SubObject::Vertex);
+                modeButton(icons::kSubObjectEdge, "Edges (2)", SubObject::Edge);
+                modeButton(icons::kSubObjectFace, "Faces (3)", SubObject::Face);
+            }
         }
         if (terrainTarget) {
             ImGui::Spacing();
@@ -1474,12 +2457,34 @@ private:
             orthographic_ = !orthographic_;
         }
         track();
-        const bool wireframe = drawMode_ == render::DrawMode::Wireframe;
-        if (widgets::ViewportButton(wireframe ? icons::kShadingWireframe : icons::kShadingLit,
-                                    wireframe ? "Wireframe" : "Lit")) {
-            drawMode_ = wireframe ? render::DrawMode::Lit : render::DrawMode::Wireframe;
+        if (widgets::ViewportButton(ShadingIcon(drawMode_), ShadingLabel(drawMode_),
+                                    drawMode_ != render::DrawMode::Material)) {
+            drawMode_ = NextDrawMode(drawMode_);
         }
         track();
+        // **Klik kiri berputar, klik kanan membuka daftarnya.** Lima mode tidak
+        // muat di sebuah tombol berputar sendirian: tidak satu pun bisa dituju
+        // langsung, dan yang terjauh menuntut empat tekan. Yang berputar tetap
+        // ada karena itulah yang dipakai saat bolak-balik antara dua mode
+        // berdekatan; daftar ini yang dipakai saat tujuannya jauh.
+        //
+        // Klik kanannya tidak lagi ikut menyalakan mode terbang — lihat
+        // `UpdateOverlayPointerClaims`.
+        if (ImGui::BeginPopupContextItem(kShadingPopupId)) {
+            render::DrawMode mode = render::DrawMode::Material;
+            do {
+                if (ImGui::MenuItem(ShadingLabel(mode), nullptr, drawMode_ == mode)) {
+                    drawMode_ = mode;
+                }
+                mode = NextDrawMode(mode);
+            } while (mode != render::DrawMode::Material);
+            ImGui::EndPopup();
+        }
+        // Selama menunya terbuka, overlay tetap dianggap memegang pointer:
+        // kursornya sedang berada di atas menu, bukan di atas tombolnya, dan
+        // tanpa ini klik untuk memilih sebuah mode ikut terbaca sebagai klik di
+        // adegan di belakangnya.
+        hovered = hovered || ImGui::IsPopupOpen(kShadingPopupId);
         if (widgets::ViewportButton(icons::kGrid, showGrid_ ? "Hide grid" : "Show grid",
                                     showGrid_)) {
             showGrid_ = !showGrid_;
@@ -1590,7 +2595,14 @@ private:
         bool extruding = false;
         Uuid guid;
         whitebox::PolygonHandle polygon = whitebox::PolygonHandle::Invalid;
-        /// Bentuk sebelum seretan dimulai; setiap frame membangun ulang darinya.
+        /// Simpul yang ikut bergerak, untuk seretan sub-objek.
+        ///
+        /// **Dibekukan di awal seretan, bukan dibaca ulang tiap frame.** Setiap
+        /// frame membangun ulang mesh dari `before`, dan membaca seleksi lagi
+        /// sesudah itu berarti daftar yang menunjuk mesh yang berbeda dari yang
+        /// sedang disunting.
+        std::vector<whitebox::VertexHandle> vertices;
+        /// Bentuk sebelum seretan dimulai; setiap frame membangun kembali darinya.
         whitebox::WhiteboxData before;
         Vec3 normal{0.0f};
         Vec3 pivot{0.0f};
@@ -1598,7 +2610,7 @@ private:
 
     OrbitCamera camera_;
     SceneView sceneView_;
-    render::DrawMode drawMode_ = render::DrawMode::Lit;
+    render::DrawMode drawMode_ = render::DrawMode::Material;
     GizmoOperation operation_ = GizmoOperation::Translate;
     GizmoSpace space_ = GizmoSpace::World;
     GizmoSnap snap_;
@@ -1612,6 +2624,17 @@ private:
     /// Gizmo sedang ditunjuk atau dipakai pada frame LALU. Dipakai memutuskan
     /// apakah permukaan viewport diajukan sebagai item ImGui frame ini.
     bool gizmoOwnsPointer_ = false;
+    /// Kursor berada di atas sebuah tombol overlay pada frame LALU.
+    ///
+    /// **Frame lalu, dengan alasan yang sama seperti `gizmoOwnsPointer_`:**
+    /// `HandleCameraInput` berjalan sebelum overlay digambar, dan urutan
+    /// sebaliknya mustahil — overlay menggambar dirinya dari kamera frame ini.
+    /// Jeda satu frame tidak terasa: hover mendahului tekanan tombol yang
+    /// menyusulnya, selalu, sejauh apa pun tangan bergerak.
+    bool overlayOwnsPointer_ = false;
+    /// Tombol mouse yang saat ditekan berada di atas overlay, sampai dilepas.
+    /// Lihat `UpdateOverlayPointerClaims`.
+    std::array<bool, ImGuiMouseButton_COUNT> overlayOwnsButton_{};
     bool orthographic_ = false;
     bool showGrid_ = true;
     /// Klik memilih sisi, bukan entity. Menempel pada viewport, bukan pada

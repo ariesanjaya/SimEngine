@@ -36,7 +36,7 @@ class IViewportRenderer;
 /// gambar berarti editor yang membeku tepat pada frame sebuah level dibuka —
 /// yaitu frame yang paling terasa. Bentuknya meniru `assets::TextureBakery`, dan
 /// karena alasan yang sama persis.
-namespace sim::editor {
+namespace sim::view {
 
 enum class MaterialProgramState : uint8_t {
     /// Sedang dikompilasi, atau baru diantre. **Bukan galat** — yang menerimanya
@@ -179,4 +179,4 @@ private:
     material::ShaderCache cache_;
 };
 
-}  // namespace sim::editor
+}  // namespace sim::view

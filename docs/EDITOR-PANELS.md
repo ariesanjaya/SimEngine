@@ -96,7 +96,7 @@ dan ia tidak punya title bar sendiri untuk ditempati.
 - **Help** — Dokumentasi, About
 
 Toolbar kiri: mode transform, ruang gizmo (world/local), snapping, pivot.
-Toolbar kanan: **Play / Pause / Stop** untuk simulasi in-editor.
+Toolbar kanan: **Play / Pause / Step / Stop** untuk simulasi in-editor (F5 · F6 · F7 · Shift+F5). Pause menahan jam dunia — pose animasi, matahari, skrip, solver — sementara editor tetap berjalan penuh; Step memajukannya satu langkah tetap 1/60 detik lalu menahannya lagi.
 
 ## (B) Entity Outliner
 
@@ -141,6 +141,42 @@ pembuatan aset baru (Material, Material Instance, Particle, Terrain, Lua Script)
 - **(D2) Overlay orientasi** kanan-atas: kubus arah yang bisa diklik untuk melihat
   dari sumbu tertentu, plus tombol **W**(wireframe) / **P**(perspective) / **L**(lit).
 - **Grid** adaptif terhadap jarak kamera, dengan sumbu berwarna.
+- **Rangka kawat komponen fisika**, hanya untuk entity yang sedang **terpilih**.
+  Collider digambar pada bentuk dan ukuran yang benar-benar dipakai solver —
+  kotak, bola, kapsul, silinder, dan bidang, dengan kapsul dan silinder
+  berbaring di sumbu **X** lokal dan bidang bernormal **+X** lokal, karena itulah
+  konvensi PhysX. Collider whitebox dan terrain digambar sebagai kotak batas
+  geometrinya.
+
+  Warnanya menyebut jenis bendanya: hijau statis, biru kinematik, kuning
+  dinamis, dan **merah untuk yang tidak disimulasikan sama sekali** — collider
+  tanpa RigidBody, dan RigidBody tanpa collider (yang terakhir sebagai salib,
+  karena ia memang tidak punya bentuk untuk digambar). Sendi menggambar titik
+  sendinya, sumbu putarnya, dan garis ke benda pasangannya; kendaraan
+  menggambar chassis, titik beratnya, dan keempat rodanya.
+
+  Ukurannya diminta dari `physics::DescribeCollider` dan
+  `physics::DescribeVehicleWheels` — jalur yang sama yang memberi makan solver,
+  bukan aritmetika kedua yang kebetulan mirip.
+
+  **Lampu ikut menggambar jangkauannya**, dengan warna lampunya sendiri:
+  directional sebuah cincin beserta berkas sejajar berkepala panah — arahnya
+  saja, karena jangkauan tidak berarti untuknya; point dua bola sepusat; spot
+  kerucut luar, kerucut dalam, dan kerucut jangkauan-bergunanya.
+
+  **Intensitas digambar sebagai jarak, bukan sebagai warna.** `range` hanya
+  menyebut di mana cahaya berakhir tepat nol, dan ia sama besar untuk lampu redup
+  dan lampu menyilaukan. Bola (atau kerucut) yang lebih rapat di dalamnya adalah
+  sejauh mana cahayanya masih seterang ambang tetap — ia tumbuh saat intensitas
+  dinaikkan, dan dua lampu bisa dibandingkan dari besarnya. Jaraknya dihitung
+  `render::LightUsefulRadius`, yang memakai peredupan yang sama dengan shader.
+
+  **Digambar menembus geometri**, tanpa uji kedalaman. Bentuk tabrakan hampir
+  selalu berada di dalam mesh yang menggambarkannya — itu justru gunanya — jadi
+  rangka yang diuji kedalaman tertutup persis oleh benda yang ukurannya sedang
+  diperiksa. Garis yang menggambarkan sesuatu yang **ada** di dunia (batas volume
+  asap) tetap diuji kedalaman; pilihannya per ruas, di
+  `render::LineSegment::throughGeometry`.
 - **Picking**: klik untuk memilih, Ctrl+klik untuk menambah, drag pada ruang kosong
   untuk seleksi kotak.
 - **Snapping**: grid (nilai bisa diatur), sudut, skala.
@@ -230,7 +266,7 @@ Sumber log ditandai kategori (`[Asset]`, `[Lua]`, `[RHI]`).
 
 | Panel | Susunan |
 |---|---|
-| **Material Editor** | kiri: daftar `.simmat`/`.simmatinst` · tengah: node graph (palet lewat klik kanan) · kanan atas: dua tab — **Details** (parameter yang diekspos, properti node terpilih) dan **Compiled Slang** (kode yang dihasilkan, galat bisa diklik untuk menuju node penyebabnya) · kanan bawah (tetap, bukan tab): preview bola/kubus/bidang yang di-shading shader material itu sendiri — seret kiri memindahkan cahaya, seret kanan mengorbit kamera, roda untuk zoom · toolbar: Save, Fit, Group selection, New Instance |
+| **Material Editor** | kiri: daftar `.simmat`/`.simmatinst` · tengah: node graph (palet lewat klik kanan) · kanan atas: dua tab — **Details** (parameter yang diekspos, properti node terpilih) dan **Compiled Slang** (kode yang dihasilkan, galat bisa diklik untuk menuju node penyebabnya) · kanan bawah (tetap, bukan tab): preview bola/kubus/bidang yang di-shading shader material itu sendiri — seret kiri memindahkan cahaya, seret kanan mengorbit kamera, roda untuk zoom · **pratinjau di dalam node**: node yang sedang terpilih menggambar nilai pin keluarannya sendiri sebagai kotak di badannya — tekstur tampil sebagai gambarnya, UV sebagai gradien merah-hijau, skalar sebagai abu-abu — digambar tanpa cahaya (albedo nol, spekular mati) supaya yang terlihat angkanya dan bukan angkanya di bawah lampu, dan jamnya ikut berjalan sehingga UV yang digeser `Time` benar-benar bergerak di dalam kotak itu · toolbar: Save, Fit, Group selection, New Instance |
 | **Particle Editor** | kiri: daftar efek · tengah: preview + timeline + statistik di bawahnya · kanan: daftar emitter (baris bertumpuk, tiap baris punya sakelar dan jumlah partikelnya sendiri) lalu tumpukan modul emitter terpilih, dengan kurva & gradient inline |
 | **Terrain Editor** | kiri: daftar terrain · tengah: peta 2D dari atas (sculpt dan paint langsung di sini) + status · kanan: tiga tab alat — Sculpt (pemilih alat, brush + profilnya, erosi), Paint (daftar layer material + propertinya, kuas bobot), Holes (kuas lubang + jumlah quad terpotong) — lalu impor/ekspor heightmap dan pilihan tampilan peta (Relief / Layers / Weight) · viewport 3D menyusul di E8 |
 | **Vegetation Editor** | kiri: daftar `.simveg` · tengah: peta 2D dari atas — relief abu-abu (warna disisakan untuk membedakan layer) bertabur titik instance, dengan langkah gambar yang melebar mengikuti perkiraan jumlah yang terlihat dan disebutkan di status · kanan: tiga tab alat — Layers (daftar layer + mesh, aturan penempatan, setting instance, jarak LOD/billboard/cull), Density (kuas kepadatan + profilnya, resolusi kisi, impor/ekspor mask 8-bit), Instances (tanam per klik / hapus per seretan) — lalu bagian Terrain (nama, "Reload & reseat", peringatan kalau berkasnya berubah di disk) dan pilihan tampilan peta (Relief / Density) · toolbar: Save, undo/redo goresan, Scatter · viewport 3D menyusul di E8 |
@@ -244,6 +280,19 @@ Sumber log ditandai kategori (`[Asset]`, `[Lua]`, `[RHI]`).
   Detail: [PLAN-AI.md](PLAN-AI.md) A4.
 - **AI Bridge** — status MCP server: port, token, klien yang tersambung, daftar
   request masuk beserta waktu eksekusinya, tombol start/stop. Detail: PLAN-AI.md A0.
+- **Prefabs** — palet template siap tempat, dikelompokkan menurut subfoldernya:
+  bawaan editor dari `Resources/Prefabs`, plus prefab milik project. Diklik
+  berarti ditempatkan di bawah entity terpilih (atau sebagai akar), lewat
+  perintah yang sama dengan paste — jadi bisa di-undo.
+
+  Grup **Whitebox** tidak datang dari berkas: lima bentuk awal blockout — Box,
+  Ramp, Stairs, Cylinder, Cone, semuanya 1×1×1 — yang **membuat aset
+  `.simwhitebox` baru** di `Whitebox/` setiap kali diklik, lalu menempatkan blok
+  yang memakainya. Aset per klik, bukan satu aset bersama: sepuluh blok dari satu
+  prefab whitebox akan menunjuk aset yang sama, dan menyunting salah satunya
+  mengubah kesepuluhnya — kebalikan dari gunanya blockout. Undo mengembalikan
+  entity-nya; berkas asetnya tetap ada, aturan yang sama dengan setiap pembuatan
+  aset di editor ini.
 - **History** — daftar command, klik untuk melompat ke titik tertentu. Command yang
   berasal dari agen diberi awalan `AI:` supaya mudah dibedakan.
 - **Preferences** — tema, font & skala, pintasan, path project, setting editor.

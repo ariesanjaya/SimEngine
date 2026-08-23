@@ -280,6 +280,12 @@ int main(int argc, char** argv) {
         SIM_WARN("Editor", "Material preview unavailable; the Material Editor will say so");
     }
 
+    // Pratinjau untuk thumbnail di dalam node. Kecil: yang digambar sebesar
+    // kotak di dalam sebuah node, dan target sebesar pratinjau besar berarti
+    // membayar 27 kali piksel yang tidak pernah sampai ke layar.
+    std::unique_ptr<render::IMaterialPreview> materialNodePreview =
+        render::CreateMaterialPreview(device, imguiLayer.Textures(), 128, 128);
+
     // Kolam dan cache dideklarasikan di sini, sebelum EditorApp, supaya
     // keduanya dihancurkan belakangan: editor menjadwalkan pekerjaan ke kolam
     // dan meminta thumbnail dari cache sepanjang hidupnya.
@@ -309,6 +315,7 @@ int main(int argc, char** argv) {
     appConfig.shaderDir = rendererDesc.shaderDirectory;
     appConfig.viewportRenderer = renderer.get();
     appConfig.materialPreview = materialPreview.get();
+    appConfig.materialNodePreview = materialNodePreview.get();
     appConfig.meshPreview = meshPreview.get();
     appConfig.frameLimiter = &frameLimiter;
     appConfig.lockedFps = frameLock.hz;

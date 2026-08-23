@@ -9,7 +9,7 @@
 #include "Sim/Editor/Notifications.h"
 #include "Sim/Editor/PropertyGrid.h"
 #include "Sim/Editor/SceneCommands.h"
-#include "Sim/Editor/Selection.h"
+#include "Sim/SceneView/Selection.h"
 #include "Sim/Editor/Widgets.h"
 #include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Scene/ComponentRegistry.h"

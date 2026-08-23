@@ -139,10 +139,24 @@ struct ShadowUniforms {
     /// Penutup rekursi untuk permukaan yang belum dikenal cache radiansi:
     /// xyz albedo yang ditebak, w 1 kalau tebakan itu dipakai.
     Vec4 giBounce{0.0f};
+    /// Keadaan tampilan per-frame: x 1 kalau `DrawMode::Unlit`, y 1 kalau
+    /// `DrawMode::Clay`, z detik sejak adegan dibuka.
+    ///
+    /// **Dua bendera, bukan satu nomor mode.** Keduanya dibaca di tempat yang
+    /// berbeda di dalam shader — yang satu memilih cabang di ujung, yang lain
+    /// mengganti permukaan di awal — dan sebuah nomor menuntut keduanya
+    /// membandingkan angka yang artinya tertulis di berkas lain.
+    ///
+    /// **Sebuah angka per frame, bukan konstanta spesialisasi.** Alasan
+    /// lengkapnya di `shadow_common.slang`: pipeline pass forward dibuat satu per
+    /// material oleh kompiler graph, jadi varian `kUnlit` berarti seluruh
+    /// material di project dikompilasi dua kali — dan sakelar di viewport
+    /// menunggu kompilasi itu.
+    Vec4 viewParams{0.0f};
 };
-// 7 mat4 + 22 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
+// 7 mat4 + 23 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
 // memperbarui shader-nya menjadi galat kompilasi, bukan bayangan yang bergeser.
-static_assert(sizeof(ShadowUniforms) == 7 * 64 + 22 * 16,
+static_assert(sizeof(ShadowUniforms) == 7 * 64 + 23 * 16,
               "ShadowUniforms harus cocok dengan blok ShadowParams di shadow_common.slang");
 
 /// Cermin dari `GpuLight` di Shaders/cluster_common.glsl. std430.
@@ -321,6 +335,26 @@ constexpr std::size_t kPipelineVariants = 2;
 using PipelineVariants = std::array<VkPipeline, kPipelineVariants>;
 
 constexpr Vec4 kSelectedColor{1.0f, 0.62f, 0.20f, 1.0f};
+
+/// Bias kedalaman rangka kawat, dalam satuan ULP kedalaman.
+///
+/// **Bukan hiasan, dan tanpanya rangka kawat separuh hilang.** Rusuk yang
+/// digambar `VK_POLYGON_MODE_LINE` dan permukaan yang digambar prepass adalah
+/// primitif yang sama, tapi kedalamannya diinterpolasi di tempat yang berbeda:
+/// yang satu di sepanjang garisnya, yang lain di pusat piksel segitiganya.
+/// Selisihnya beberapa ULP, tandanya berganti-ganti dari piksel ke piksel — dan
+/// uji `GREATER_OR_EQUAL` terhadap kedalaman prepass karena itu lulus dan gagal
+/// berselang-seling di sepanjang rusuk yang sama.
+///
+/// Positif berarti mendekat ke kamera: kedalamannya terbalik (reversed-Z), jadi
+/// yang lebih besar yang lebih dekat. Angkanya dikali `r` — untuk depth float,
+/// 2^(eksponen terbesar primitif − 23) — sehingga besarnya ikut menyesuaikan
+/// dengan ketelitian kedalaman setempat, bukan tetap dalam meter.
+constexpr float kWireDepthBias = 16.0f;
+/// Bagian bias yang ikut kemiringan primitif terhadap layar. Permukaan yang
+/// hampir sejajar arah pandang punya gradien kedalaman yang besar dalam satu
+/// piksel, dan di sanalah bias tetap saja tidak cukup.
+constexpr float kWireDepthSlope = 1.5f;
 
 constexpr VkFormat kShadowFormat = VK_FORMAT_D32_SFLOAT;
 constexpr uint32_t kShadowResolution = 2048;
@@ -826,11 +860,23 @@ public:
         // Menghitungnya dari kamera frame sebelumnya menghemat satu ketergantungan
         // dan menukarnya dengan bayangan yang tertinggal satu frame — terlihat
         // sebagai bayangan yang "berenang" saat kamera bergerak cepat.
-        // Directional pertama dari scene menjadi matahari; `desc.sunDirection`
-        // adalah nilai mundurnya. Cascade hanya ada satu himpunan, jadi
-        // directional kedua dan seterusnya diabaikan — dan mengabaikannya
-        // diam-diam lebih baik daripada menjumlahkan arah, yang menghasilkan
-        // bayangan yang tidak cocok dengan lampu mana pun.
+        // **Matahari datang dari scene, dan hanya dari scene.** Directional
+        // pertama yang ditemukan menjadi matahari; kalau tidak ada satu pun,
+        // radiansinya nol dan adegan gelap.
+        //
+        // Sampai E8 ada nilai mundur di `ViewportDesc` — arah dan radiansi tetap
+        // yang dipakai "selama scene belum benar-benar punya lampu directional".
+        // Syarat itu sudah lama terpenuhi, dan yang tersisa dari nilai mundur itu
+        // adalah cacat: **menghapus lampu terakhir sebuah level tidak
+        // menggelapkan apa pun.** Adegan tetap tersinari matahari yang tidak
+        // dimiliki entity mana pun, tidak muncul di Outliner, dan tidak bisa
+        // disunting — dan orang yang mencari dari mana cahayanya datang tidak
+        // akan menemukannya, karena ia memang tidak ada di level itu.
+        //
+        // Cascade hanya ada satu himpunan, jadi directional kedua dan seterusnya
+        // diabaikan — dan mengabaikannya diam-diam lebih baik daripada
+        // menjumlahkan arah, yang menghasilkan bayangan yang tidak cocok dengan
+        // lampu mana pun.
         // Backend GI diselesaikan tiap frame dari kemampuan perangkat dan
         // permintaan pengguna. Murah, dan menyimpannya berarti pertanyaan
         // "yang mana yang berlaku sekarang" setiap kali preferensinya berubah.
@@ -838,20 +884,20 @@ public:
         caps.rayQuery = device_.SupportsRayQuery();
         giBackend_ = SelectTraceBackend(caps, desc.gi.backend);
 
-        sunDirection_ = desc.sunDirection;
-        sunRadiance_ = desc.sunRadiance;
-        sunCastsShadows_ = desc.castShadows;
-        for (const LightInstance& light : scene.lights) {
-            if (light.kind == LightKind::Directional) {
-                sunDirection_ = light.direction;
-                // Warna dikali intensitas — keduanya sampai ke shader sekarang.
-                // Sebelumnya hanya arahnya yang dipakai, jadi menyunting warna
-                // matahari di Inspector tidak mengubah apa pun: antarmuka yang
-                // berbohong, dan itu lebih buruk daripada tombol yang belum ada.
-                sunRadiance_ = light.color * light.intensity;
-                sunCastsShadows_ = desc.castShadows && light.castShadows;
-                break;
-            }
+        // Tegak lurus ke atas, dan radiansinya nol: arah yang tidak dipakai
+        // siapa pun tetap harus sah, karena cascade dan LUT langit dihitung dari
+        // sana sebelum ada yang memeriksa apakah mataharinya menyala.
+        sunDirection_ = Vec3(0.0f, 1.0f, 0.0f);
+        sunRadiance_ = Vec3(0.0f);
+        sunCastsShadows_ = false;
+        if (const LightInstance* sun = FindSunLight(scene.lights)) {
+            sunDirection_ = sun->direction;
+            // Warna dikali intensitas — keduanya sampai ke shader sekarang.
+            // Sebelumnya hanya arahnya yang dipakai, jadi menyunting warna
+            // matahari di Inspector tidak mengubah apa pun: antarmuka yang
+            // berbohong, dan itu lebih buruk daripada tombol yang belum ada.
+            sunRadiance_ = sun->color * sun->intensity;
+            sunCastsShadows_ = desc.castShadows && sun->castShadows;
         }
         CascadeSettings cascadeSettings;
         cascadeSettings.resolution = kShadowResolution;
@@ -914,8 +960,24 @@ public:
         partTextures_.assign(scene.partTextures.begin(), scene.partTextures.end());
         partMaterials_.assign(scene.partMaterials.begin(), scene.partMaterials.end());
 
+        // **Dua kelompok dalam satu buffer, yang diuji kedalaman lebih dulu.**
+        // Keduanya memakai vertex buffer yang sama dan berbeda hanya pada
+        // pipeline-nya, jadi memisahkannya menjadi dua buffer berarti dua
+        // alokasi dan dua unggahan untuk data yang bentuknya identik. Yang
+        // dibutuhkan hanya batasnya, dan batas itu satu angka.
         lineVertices_.clear();
         for (const LineSegment& line : scene.lines) {
+            if (line.throughGeometry) {
+                continue;
+            }
+            lineVertices_.push_back({line.a, line.color});
+            lineVertices_.push_back({line.b, line.color});
+        }
+        depthTestedLineVertices_ = lineVertices_.size();
+        for (const LineSegment& line : scene.lines) {
+            if (!line.throughGeometry) {
+                continue;
+            }
             lineVertices_.push_back({line.a, line.color});
             lineVertices_.push_back({line.b, line.color});
         }
@@ -982,7 +1044,7 @@ public:
                 lastFrameTime_ = now;
                 hasLastFrameTime_ = true;
             }
-            cloudTimeSeconds_ += deltaSeconds_;
+            sceneTimeSeconds_ += deltaSeconds_;
         }
         sdfVoxelsWritten_ = 0;
         sdfUpdateMs_ = 0.0f;
@@ -1101,6 +1163,16 @@ public:
         const auto opaqueCount = static_cast<uint32_t>(opaque_.size());
         const auto transparentCount = static_cast<uint32_t>(transparent_.size());
         const BoxPush push{viewProj};
+        // Mode rangka kawat murni membungkam pass forward, dan **hanya pass
+        // forward.** Prepass tetap berjalan: kedalaman yang ditulisnya itulah
+        // yang menyembunyikan rusuk di sisi jauh sebuah benda, dan tanpanya
+        // sebuah kotak menjadi dua belas garis yang saling menembus.
+        //
+        // Keduanya tetap ada di graph walaupun tidak menggambar apa pun. Yang
+        // dibawa pass kosong bukan pekerjaan melainkan perpindahan layout — dan
+        // perpindahan yang sama persis itu dibutuhkan pass `wireframe`
+        // sesudahnya, jadi tidak ada yang bisa dihemat dengan membuangnya.
+        const bool drawSurfaces = desc.mode != DrawMode::Wireframe;
 
         const Mat4 invViewProj = glm::inverse(viewProj);
         // Ukurannya diambil dari graph, bukan dihitung tangan. Bentuk pertama
@@ -1181,7 +1253,7 @@ public:
         recorders[opaqueId_] = [&](VkCommandBuffer command) {
             BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/true,
                            /*writeColor=*/true);
-            if (slotReady && opaqueCount > 0) {
+            if (drawSurfaces && slotReady && opaqueCount > 0) {
                 DrawInstances(command, opaquePipelines_, push, slot, MainViewRuns(), 0,
                               /*materialVariant=*/0, OpaqueCommandBuffer());
             }
@@ -1190,7 +1262,7 @@ public:
         recorders[transparentId_] = [&](VkCommandBuffer command) {
             BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/true,
                            /*writeColor=*/true);
-            if (slotReady && transparentCount > 0) {
+            if (drawSurfaces && slotReady && transparentCount > 0) {
                 DrawInstances(command, transparentPipelines_, push, slot, transparentRuns_,
                               opaqueCount, /*materialVariant=*/1);
             }
@@ -1245,6 +1317,16 @@ public:
                 vkCmdEndRendering(command);
             };
         }
+        if (wireframeId_ != kInvalidPass) {
+            recorders[wireframeId_] = [&](VkCommandBuffer command) {
+                BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/true,
+                               /*writeColor=*/true);
+                if (slotReady) {
+                    RecordWireframe(command, push, slot, opaqueCount, transparentCount);
+                }
+                vkCmdEndRendering(command);
+            };
+        }
         recorders[linesId_] = [&](VkCommandBuffer command) {
             BeginRendering(command, desc, /*clearColor=*/false, /*loadDepth=*/true,
                            /*writeColor=*/true);
@@ -1256,7 +1338,19 @@ public:
                 const VkDeviceSize offset = 0;
                 const VkBuffer handle = slot.lineBuffer.Handle();
                 vkCmdBindVertexBuffers(command, 0, 1, &handle, &offset);
-                vkCmdDraw(command, static_cast<uint32_t>(lineVertices_.size()), 1, 0, 0);
+                if (depthTestedLineVertices_ > 0) {
+                    vkCmdDraw(command, static_cast<uint32_t>(depthTestedLineVertices_), 1, 0, 0);
+                }
+                const std::size_t overlay = lineVertices_.size() - depthTestedLineVertices_;
+                if (overlay > 0 && lineOverlayPipeline_ != VK_NULL_HANDLE) {
+                    // Pipeline kedua, buffer yang sama, offset di `firstVertex`.
+                    vkCmdBindPipeline(command, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                      lineOverlayPipeline_);
+                    vkCmdPushConstants(command, lineLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0,
+                                       sizeof(LinePush), &linePush);
+                    vkCmdDraw(command, static_cast<uint32_t>(overlay), 1,
+                              static_cast<uint32_t>(depthTestedLineVertices_), 0);
+                }
             }
             vkCmdEndRendering(command);
         };
@@ -1267,7 +1361,7 @@ public:
                                /*writeColor=*/true, /*useDepth=*/false);
                 sky_.RecordClouds(command, invViewProj, desc.camera.position,
                                   desc.cameraHeightKm, sunDirection_, sunRadiance_,
-                                  desc.skyIntensity, desc.clouds, cloudTimeSeconds_);
+                                  desc.skyIntensity, desc.clouds, sceneTimeSeconds_);
                 vkCmdEndRendering(command);
             };
         }
@@ -2260,6 +2354,28 @@ private:
         graph_.Read(transparentId_, atlasId_, Access::ShaderRead);
         graph_.Write(transparentId_, sceneId_, Access::ColorWrite);
 
+        // **Sebelum `lines`, sesudah `forward-transparent`.** Rangka kawat
+        // menggambarkan geometri adegan, jadi ia harus berada di atas
+        // permukaannya; garis bantu editor — sorotan seleksi, gizmo, bentuk
+        // tabrakan — menggambarkan apa yang sedang dikerjakan *terhadap*
+        // geometri itu, jadi ia harus berada di atas keduanya.
+        //
+        // Dideklarasikan hanya kalau ada yang akan digambar — tidak seperti
+        // kedua pass forward di atas, yang tetap berdiri kosong di mode
+        // rangka kawat murni karena perpindahan layoutnya memang dibutuhkan
+        // pass ini. Di mode Material dan Unlit, pass ini tidak ada sama sekali.
+        wireframeId_ = kInvalidPass;
+        const bool wantWireframe = desc.mode == DrawMode::MaterialWireframe ||
+                                   desc.mode == DrawMode::Wireframe;
+        if (wantWireframe && wireframePipelines_[0] != VK_NULL_HANDLE) {
+            wireframeId_ = graph_.AddPass("wireframe");
+            if (drawCullLatePassId_ != kInvalidPass) {
+                graph_.Read(wireframeId_, visibleCommandId_, Access::IndirectRead);
+            }
+            graph_.Read(wireframeId_, depthId_, Access::DepthWrite);
+            graph_.Write(wireframeId_, sceneId_, Access::ColorWrite);
+        }
+
         linesId_ = graph_.AddPass("lines");
         graph_.Read(linesId_, depthId_, Access::DepthWrite);
         graph_.Write(linesId_, sceneId_, Access::ColorWrite);
@@ -2546,7 +2662,7 @@ private:
 
                 // **Dipadu diputuskan per ruas, tembus pandang per instance —
                 // dan keduanya bermuara ke daftar yang sama.** Alfa warna
-                // instance milik pemanggil; `alphaMode: blend` milik
+                // instance milik pemanggil; domain `transparent` milik
                 // materialnya. Sebuah dinding buram yang salah satu ruasnya
                 // decal kotoran adalah instance buram dengan satu ruas yang
                 // harus dipadu, dan memutuskannya per instance akan memindahkan
@@ -3002,6 +3118,44 @@ private:
                  /*bindsMaterial=*/true, materialVariant, indirectCommands, skipMasked);
     }
 
+    /// Menggambar rusuk seluruh geometri adegan, buram maupun tembus pandang.
+    ///
+    /// **Bukan lewat `DrawInstances`, dan bedanya bukan kerapian.** Pipeline
+    /// rangka kawat memakai `shadowLayout_`, yang hanya menyatakan satu
+    /// descriptor set — palet kulit beserta transform instance. Mengikat set
+    /// bayangan dan set bindless di sana adalah `firstSet + descriptorSetCount >
+    /// setLayoutCount`, yaitu perilaku tak terdefinisi, bukan galat.
+    ///
+    /// Materialnya sengaja diabaikan (`materialVariant = -1`): yang dicari mode
+    /// ini adalah topologi, dan sebuah pipeline material per ruas hanya
+    /// menghasilkan rusuk berwarna-warni yang lebih sulit dibaca daripada satu
+    /// warna — dengan perpindahan pipeline di setiap ruasnya.
+    void RecordWireframe(VkCommandBuffer cmd, const BoxPush& push, InstanceSlot& slot,
+                         uint32_t opaqueCount, uint32_t transparentCount) {
+        if (wireframePipelines_[0] == VK_NULL_HANDLE) {
+            return;
+        }
+        BindSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, shadowLayout_, 0, 1, &slot.skinSet, 0,
+                 nullptr);
+        vkCmdPushConstants(cmd, shadowLayout_, kBoxPushStages, 0, sizeof(BoxPush), &push);
+        if (opaqueCount > 0) {
+            // Daftar dan perintah indirect yang sama persis dengan pass
+            // forward: yang tersaring occlusion di sana tersaring di sini juga,
+            // dan dua penyaringan yang berbeda berarti rangka kawat yang
+            // memperlihatkan benda yang permukaannya tidak digambar.
+            DrawRuns(cmd, slot, MainViewRuns(), 0, wireframePipelines_, shadowLayout_,
+                     /*bindsMaterial=*/false, /*materialVariant=*/-1, OpaqueCommandBuffer());
+        }
+        if (transparentCount > 0) {
+            // **Tanpa `skipMasked`.** Kedua pass yang memakainya — prepass dan
+            // bayangan — melewatkan material bertopeng karena keduanya tidak
+            // menjalankan shader yang membuang fragmennya. Di sini bentuk yang
+            // dicari memang rusuk mesh-nya, bukan siluet topengnya.
+            DrawRuns(cmd, slot, transparentRuns_, opaqueCount, wireframePipelines_,
+                     shadowLayout_, /*bindsMaterial=*/false, /*materialVariant=*/-1);
+        }
+    }
+
     /// Mengikat geometri tiap ruas lalu menggambarnya. Dipakai bersama pass
     /// forward dan pass bayangan — keduanya menggambar geometri yang sama
     /// dengan pipeline yang berbeda, dan menyalin pengikatannya ke dua tempat
@@ -3346,11 +3500,17 @@ private:
         linePipeline_ = BuildOverlayPipeline(lineVertex, lineFragment, lineLayout_,
                                              VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
                                              /*useDepth=*/true, /*vertexInput=*/true);
+        // Kembarannya tanpa uji kedalaman, untuk garis yang menjelaskan sesuatu
+        // yang tersembunyi di dalam geometri — lihat `LineSegment::throughGeometry`.
+        lineOverlayPipeline_ = BuildOverlayPipeline(lineVertex, lineFragment, lineLayout_,
+                                                    VK_PRIMITIVE_TOPOLOGY_LINE_LIST,
+                                                    /*useDepth=*/false, /*vertexInput=*/true);
 
         for (VkShaderModule module : {gridVertex, gridFragment, lineVertex, lineFragment}) {
             vkDestroyShaderModule(device_.Handle(), module, nullptr);
         }
-        return gridPipeline_ != VK_NULL_HANDLE && linePipeline_ != VK_NULL_HANDLE;
+        return gridPipeline_ != VK_NULL_HANDLE && linePipeline_ != VK_NULL_HANDLE &&
+               lineOverlayPipeline_ != VK_NULL_HANDLE;
     }
 
     VkPipeline BuildOverlayPipeline(VkShaderModule vertex, VkShaderModule fragment,
@@ -3557,6 +3717,42 @@ private:
                 kShadowFormat, /*colorAttachment=*/VK_FORMAT_UNDEFINED,
                 /*attributeMask=*/0b0111'0000'0001u);
         }
+
+        // Rangka kawat viewport: tahap vertex yang sama persis dengan pass
+        // bayangan — termasuk `shadowLayout_` dan nomor set-nya, lihat
+        // catatannya di `wireframe.frag.slang` — dengan tahap fragment satu
+        // warna dan raster yang menggambar rusuk.
+        //
+        // **`GREATER_OR_EQUAL` dan tanpa menulis kedalaman.** Yang sudah ada di
+        // buffer kedalaman saat pass ini berjalan adalah permukaan terdepan
+        // yang ditulis prepass, jadi rusuk yang berada di belakangnya gugur
+        // sendiri: itulah penghapusan garis tersembunyi, tanpa satu pun draw
+        // tambahan. Menulisi kedalaman di sini justru merusaknya — rusuk sudah
+        // dibias mendekat ke kamera, dan yang tertinggal di buffer akan
+        // menutupi permukaannya sendiri bagi pass yang datang sesudahnya.
+        //
+        // Kosong bila perangkatnya tidak punya `fillModeNonSolid`, dan yang
+        // memeriksanya di sini dan bukan di tempat menggambar: sebuah pipeline
+        // yang tidak ada sudah menjadi jawaban yang benar untuk pass yang
+        // membacanya.
+        if (device_.SupportsWireframe()) {
+            VkShaderModule wireframeFragment =
+                CreateShaderModule(device_.Handle(), shaderDirectory / "wireframe.frag.spv");
+            if (wireframeFragment != VK_NULL_HANDLE) {
+                for (std::size_t skinned = 0; skinned < kPipelineVariants; ++skinned) {
+                    wireframePipelines_[skinned] = BuildPipeline(
+                        shadowVertex, wireframeFragment, /*depthWrite=*/false,
+                        VK_COMPARE_OP_GREATER_OR_EQUAL, /*blend=*/false, /*colorWrite=*/true,
+                        /*skinned=*/skinned != 0, shadowLayout_,
+                        /*depthFormat=*/VK_FORMAT_UNDEFINED,
+                        /*colorAttachment=*/VK_FORMAT_UNDEFINED,
+                        /*attributeMask=*/0b0111'0000'0001u, /*wireframe=*/true);
+                }
+                vkDestroyShaderModule(device_.Handle(), wireframeFragment, nullptr);
+            }
+        } else {
+            SIM_WARN("Render", "no fillModeNonSolid; the viewport wireframe modes are off");
+        }
         vkDestroyShaderModule(device_.Handle(), shadowVertex, nullptr);
 
         // Tiga pipeline dari satu pasang shader. Yang berbeda hanya keadaan
@@ -3631,7 +3827,7 @@ private:
                              bool skinned = false, VkPipelineLayout layout = VK_NULL_HANDLE,
                              VkFormat depthFormat = VK_FORMAT_UNDEFINED,
                              VkFormat colorAttachment = VK_FORMAT_UNDEFINED,
-                             uint32_t attributeMask = 0xFFC3u) {
+                             uint32_t attributeMask = 0xFFC3u, bool wireframe = false) {
         // `kSkinned`, konstanta spesialisasi 0 di `Shaders/skin_common.slang`.
         // Ukurannya empat byte walaupun tipenya bool: Vulkan menyatakan
         // konstanta spesialisasi boolean berukuran `VkBool32`, dan ukuran yang
@@ -3755,8 +3951,20 @@ private:
 
         VkPipelineRasterizationStateCreateInfo raster{};
         raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
-        raster.polygonMode = VK_POLYGON_MODE_FILL;
-        raster.cullMode = blend ? VK_CULL_MODE_NONE : VK_CULL_MODE_BACK_BIT;
+        // **Satu bendera, bukan `polygonMode` dan bias sebagai dua parameter
+        // lepas.** Ketiga keadaan di bawah menjawab satu pertanyaan yang sama —
+        // "pipeline ini menggambar rusuk, bukan permukaan" — dan yang dikirim
+        // terpisah suatu saat dikirim setengah.
+        raster.polygonMode = wireframe ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
+        // **Muka belakang ikut digambar.** Yang menyembunyikan rusuk di sisi
+        // jauh sebuah benda adalah uji kedalaman terhadap prepass, bukan
+        // penyaringan muka — dan penyaringan muka justru menghapus rangka kawat
+        // permukaan bersisi satu (bidang, patch terrain, kain) begitu dilihat
+        // dari sisi belakangnya.
+        raster.cullMode = (blend || wireframe) ? VK_CULL_MODE_NONE : VK_CULL_MODE_BACK_BIT;
+        raster.depthBiasEnable = wireframe ? VK_TRUE : VK_FALSE;
+        raster.depthBiasConstantFactor = wireframe ? kWireDepthBias : 0.0f;
+        raster.depthBiasSlopeFactor = wireframe ? kWireDepthSlope : 0.0f;
         // **COUNTER_CLOCKWISE, walaupun proyeksinya membalik Y.**
         //
         // Ini salah pada percobaan pertama, dan salahnya terlihat sebagai kotak
@@ -5126,6 +5334,12 @@ private:
             }
         }
 
+        // Dicatat SEBELUM entri boneka ditambahkan di bawah. Angka inilah yang
+        // sampai ke shader sebagai "berapa lampu punctual ada", dan sebuah
+        // adegan tanpa lampu harus terbaca sebagai nol — bukan sebagai satu
+        // lampu boneka yang radiansinya kebetulan nol.
+        punctualLightCount_ = static_cast<uint32_t>(gpuLights_.size());
+
         // Buffer kosong tidak sah, jadi keduanya selalu berisi minimal satu
         // entri boneka. Cluster yang jumlahnya nol tidak pernah membacanya.
         if (gpuLights_.empty()) {
@@ -5185,7 +5399,7 @@ private:
         uniforms.clusterCounts = Vec4(static_cast<float>(clusterGrid_.TilesX()),
                                       static_cast<float>(clusterGrid_.TilesY()),
                                       static_cast<float>(clusterGrid_.Slices()),
-                                      static_cast<float>(gpuLights_.size()));
+                                      static_cast<float>(punctualLightCount_));
         // Skala dan bias irisan datang dari CPU apa adanya, bukan diturunkan
         // ulang di shader dari near dan far. Dua rumus yang setara secara
         // matematis tapi ditulis berbeda berselisih satu irisan di tepinya.
@@ -5257,6 +5471,16 @@ private:
                  static_cast<float>(SkyAtmosphere::kSkyViewWidth),
                  static_cast<float>(SkyAtmosphere::kSkyViewHeight));
         uniforms.giBounce = Vec4(Vec3(kBounceAlbedo), 1.0f);
+        // **Rangka kawat tidak ikut di sini.** Kedua mode itu ditangani sebuah
+        // pass tersendiri dan tidak mengubah apa pun yang dilakukan pass
+        // forward; yang diubah bendera ini hanya isi shader fragmennya.
+        // **Jam yang sama dengan yang menggerakkan awan.** Dua akumulator untuk
+        // satu waktu adalah dua waktu yang bergeser satu terhadap yang lain, dan
+        // material yang beranimasi bersama langit akan diam-diam berjalan
+        // sendiri-sendiri.
+        uniforms.viewParams = Vec4(desc.mode == DrawMode::Unlit ? 1.0f : 0.0f,
+                                   desc.mode == DrawMode::Clay ? 1.0f : 0.0f,
+                                   sceneTimeSeconds_, 0.0f);
         slot.shadowUniform.Write(&uniforms, sizeof(uniforms));
     }
 
@@ -5376,7 +5600,8 @@ private:
         meshes_.clear();
         meshByPath_.clear();
         for (PipelineVariants* variants : {&prepassPipelines_, &opaquePipelines_,
-                                           &transparentPipelines_, &shadowPipelines_}) {
+                                           &transparentPipelines_, &shadowPipelines_,
+                                           &wireframePipelines_}) {
             for (VkPipeline& pipeline : *variants) {
                 if (pipeline != VK_NULL_HANDLE) {
                     vkDestroyPipeline(device_.Handle(), pipeline, nullptr);
@@ -5384,7 +5609,8 @@ private:
                 }
             }
         }
-        for (VkPipeline* pipeline : {&gridPipeline_, &linePipeline_, &sdfDebugPipeline_}) {
+        for (VkPipeline* pipeline :
+             {&gridPipeline_, &linePipeline_, &lineOverlayPipeline_, &sdfDebugPipeline_}) {
             if (*pipeline != VK_NULL_HANDLE) {
                 vkDestroyPipeline(device_.Handle(), *pipeline, nullptr);
                 *pipeline = VK_NULL_HANDLE;
@@ -5471,7 +5697,7 @@ private:
     /// dinding: awan yang bergerak mengikuti jam dinding akan meloncat setiap
     /// kali frame tersendat, dan yang meloncat pada lapisan sebesar itu terlihat
     /// sebagai seluruh langit yang bergeser.
-    float cloudTimeSeconds_ = 0.0f;
+    float sceneTimeSeconds_ = 0.0f;
     std::chrono::steady_clock::time_point lastFrameTime_{};
     bool hasLastFrameTime_ = false;
     /// Cache radiansi hash grid. Riwayat lintas frame, jadi ia bukan per slot —
@@ -5535,12 +5761,17 @@ private:
     PassId linesId_ = kInvalidPass;
     PassId opaqueId_ = kInvalidPass;
     PassId transparentId_ = kInvalidPass;
+    PassId wireframeId_ = kInvalidPass;
 
     VkPipelineLayout gridLayout_ = VK_NULL_HANDLE;
     VkPipeline gridPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout lineLayout_ = VK_NULL_HANDLE;
     VkPipeline linePipeline_ = VK_NULL_HANDLE;
+    /// Kembaran `linePipeline_` tanpa uji kedalaman.
+    VkPipeline lineOverlayPipeline_ = VK_NULL_HANDLE;
     std::vector<LineVertex> lineVertices_;
+    /// Berapa simpul pertama `lineVertices_` yang diuji kedalaman.
+    std::size_t depthTestedLineVertices_ = 0;
     /// Dipakai ulang tiap frame; ukurannya mengikuti jumlah pass graph.
     std::vector<FrameGraphExecutor::Recorder> recorders_;
 
@@ -5554,6 +5785,8 @@ private:
     /// sentimeter, dan lampu punctual memang tidak relevan di kejauhan.
     static constexpr float kClusterFar = 300.0f;
 
+    /// Berapa lampu punctual benar-benar ada frame ini, tanpa entri boneka.
+    uint32_t punctualLightCount_ = 0;
     Vec3 sunDirection_{0.0f, 1.0f, 0.0f};
     Vec3 sunRadiance_{0.75f};
     bool sunCastsShadows_ = true;
@@ -5648,6 +5881,10 @@ private:
     PipelineVariants prepassPipelines_{};
     PipelineVariants opaquePipelines_{};
     PipelineVariants transparentPipelines_{};
+    /// Rangka kawat viewport. **Memakai `shadowLayout_`, bukan
+    /// `pipelineLayout_`** — lihat tempat ia dibangun. Kosong pada perangkat
+    /// tanpa `fillModeNonSolid`.
+    PipelineVariants wireframePipelines_{};
 
     std::array<InstanceSlot, 3> slots_;
     // Penetapan cluster di GPU memegang buffer keluarannya sendiri, satu per

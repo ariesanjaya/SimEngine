@@ -21,7 +21,7 @@ struct NamedKey {
 /// Hanya tombol yang masuk akal sebagai pintasan editor. Sengaja tidak
 /// mencakup seluruh ImGuiKey: nama yang tidak pernah dipakai hanya menambah
 /// permukaan yang harus dijaga stabil selamanya.
-constexpr std::array<NamedKey, 34> kNamedKeys{{
+constexpr std::array<NamedKey, 38> kNamedKeys{{
     {"Tab", ImGuiKey_Tab},
     {"Left", ImGuiKey_LeftArrow},
     {"Right", ImGuiKey_RightArrow},
@@ -54,6 +54,15 @@ constexpr std::array<NamedKey, 34> kNamedKeys{{
     {"F4", ImGuiKey_F4},
     {"F5", ImGuiKey_F5},
     {"F6", ImGuiKey_F6},
+    // F7..F10 sempat bolong di sini, dan bolongnya tidak terlihat sampai ada
+    // aksi yang memakainya: tabel ini yang menerjemahkan pintasan ke teks dan
+    // sebaliknya, jadi tombol yang tidak ada namanya tetap berfungsi tapi tidak
+    // bisa ditulis ke `shortcuts.json` — pengguna yang mengubah pintasannya lalu
+    // kehilangan yang ini tanpa satu pun pesan.
+    {"F7", ImGuiKey_F7},
+    {"F8", ImGuiKey_F8},
+    {"F9", ImGuiKey_F9},
+    {"F10", ImGuiKey_F10},
     {"F11", ImGuiKey_F11},
     {"F12", ImGuiKey_F12},
 }};

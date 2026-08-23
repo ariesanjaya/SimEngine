@@ -1123,3 +1123,99 @@ TEST_CASE("L5: skala entity meregangkan kisinya, bukan sampelnya") {
     CHECK(PositionOf(world, ball).y == doctest::Approx(expected).epsilon(0.02));
 }
 
+
+TEST_CASE("Gizmo collider melaporkan ukuran yang sama dengan yang disimulasikan") {
+    // **Gizmo yang menghitung ukurannya sendiri akan berbohong, dan justru di
+    // kasus yang orang buka gizmo untuk memeriksanya.** Skala entity masuk ke
+    // ukuran bentuk dengan aturan yang berbeda per bentuk — per sumbu untuk
+    // kotak, sumbu terbesar untuk bola — dan aritmetika kedua yang "kira-kira
+    // sama" akan sepakat pada skala seragam lalu menyimpang pada yang lain.
+    //
+    // Uji ini mengikatnya ke satu-satunya kebenaran yang tidak bisa dibantah:
+    // di mana bolanya benar-benar berhenti.
+    scene::World world;
+    AddGround(world);
+    const scene::Entity ball = AddBall(world, Vec3(0.0f, 6.0f, 0.0f), 0.5f);
+    world.TryGet<scene::TransformComponent>(ball)->scale = Vec3(3.0f);
+    world.MarkTransformDirty(ball);
+
+    ColliderPlacement placement;
+    REQUIRE(DescribeCollider(world, ball, placement));
+    CHECK(placement.shape.kind == ShapeKind::Sphere);
+    CHECK(placement.shape.radius == doctest::Approx(1.5f));
+    CHECK(placement.simulated);
+    CHECK_FALSE(placement.nonUniformScale);
+
+    if (!Available()) {
+        return;
+    }
+    PhysicsScene physics;
+    REQUIRE(physics.Build(world));
+    physics.Step(world, 240);
+    // Bola berhenti setinggi jari-jarinya. Angka yang dibandingkan di sini
+    // adalah yang dilaporkan gizmo, bukan angka yang ditulis ulang di uji —
+    // jadi gizmo yang menyimpang menggagalkan baris ini.
+    INFO("digambar r = " << placement.shape.radius << ", berhenti di y = "
+                         << PositionOf(world, ball).y);
+    CHECK(PositionOf(world, ball).y ==
+          doctest::Approx(placement.shape.radius).epsilon(0.05));
+}
+
+TEST_CASE("Gizmo collider mengikuti aturan skala tiap bentuk, dan menyebut yang tidak muat") {
+    // Tidak menuntut PhysX: ini aritmetika penempatan, dan build tanpa PhysX
+    // tetap berhak menggambar collider yang sedang disetel orang.
+    scene::World world;
+
+    const scene::Entity box = world.Create("Box");
+    {
+        auto& collider = world.Add<scene::ColliderComponent>(box);
+        collider.shape = scene::ColliderShape::Box;
+        collider.halfExtents = Vec3(1.0f, 2.0f, 3.0f);
+        collider.offset = Vec3(0.0f, 1.0f, 0.0f);
+        auto& transform = *world.TryGet<scene::TransformComponent>(box);
+        transform.scale = Vec3(2.0f, 3.0f, 4.0f);
+        world.MarkTransformDirty(box);
+    }
+
+    ColliderPlacement placement;
+    REQUIRE(DescribeCollider(world, box, placement));
+    // Kotak boleh diregangkan per sumbu; setiap sumbu memakai skalanya sendiri.
+    CHECK(placement.shape.halfExtents.x == doctest::Approx(2.0f));
+    CHECK(placement.shape.halfExtents.y == doctest::Approx(6.0f));
+    CHECK(placement.shape.halfExtents.z == doctest::Approx(12.0f));
+    // Geserannya ikut berskala — kalau tidak, kapsul karakter yang asalnya di
+    // telapak kaki akan melayang begitu entity-nya diperbesar.
+    CHECK(placement.shape.localPosition.y == doctest::Approx(3.0f));
+    CHECK(placement.scale.y == doctest::Approx(3.0f));
+    // **Collider tanpa RigidBody tidak pernah sampai ke solver.** `Build`
+    // menelusuri benda tegar, bukan collider — dan yang menggambarnya harus bisa
+    // membedakan bentuk yang disimulasikan dari bentuk yang hanya digambar.
+    CHECK_FALSE(placement.simulated);
+    CHECK_FALSE(placement.nonUniformScale);
+
+    const scene::Entity capsule = world.Create("Capsule");
+    {
+        auto& collider = world.Add<scene::ColliderComponent>(capsule);
+        collider.shape = scene::ColliderShape::Capsule;
+        collider.radius = 0.4f;
+        collider.halfHeight = 0.6f;
+        world.Add<scene::RigidBodyComponent>(capsule);
+        auto& transform = *world.TryGet<scene::TransformComponent>(capsule);
+        transform.scale = Vec3(1.0f, 2.0f, 1.0f);
+        world.MarkTransformDirty(capsule);
+    }
+    REQUIRE(DescribeCollider(world, capsule, placement));
+    // Jari-jari tidak bisa diregangkan ke satu arah, jadi sumbu terbesar yang
+    // dipakai — dan itu dilaporkan, bukan didiamkan: yang tergambar memang
+    // bukan yang terlihat.
+    CHECK(placement.shape.radius == doctest::Approx(0.8f));
+    // Setengah-tinggi bagian silinder tinggal di `halfExtents.x`, konvensi
+    // PhysX — dan itu juga sumbu yang dipakai rangka kawatnya.
+    CHECK(placement.shape.halfExtents.x == doctest::Approx(1.2f));
+    CHECK(placement.simulated);
+    CHECK(placement.nonUniformScale);
+
+    // Entity tanpa collider tidak punya apa pun untuk digambar.
+    const scene::Entity empty = world.Create("Empty");
+    CHECK_FALSE(DescribeCollider(world, empty, placement));
+}

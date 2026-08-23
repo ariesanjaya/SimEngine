@@ -31,7 +31,19 @@ inline constexpr const char* kPivot = ICON_LC_CROSSHAIR;
 // --- Tampilan viewport -----------------------------------------------------
 inline constexpr const char* kPerspective = ICON_LC_AXIS_3D;
 inline constexpr const char* kOrthographic = ICON_LC_SQUARE_DASHED;
-inline constexpr const char* kShadingLit = ICON_LC_SUN_MEDIUM;
+/// Kelima saringan tampilan viewport. Urutannya di sini sama dengan urutan
+/// tombolnya berputar: tiga mode permukaan lalu dua mode rusuk.
+inline constexpr const char* kShadingMaterial = ICON_LC_SUN_MEDIUM;
+/// Palet, bukan bola lampu yang dicoret. Yang dijawab mode ini adalah "warna
+/// mana yang milik material", dan bola lampu sudah menjadi ikon entity lampu
+/// (`kLight`) — glyph yang sama di dua arti adalah dua arti yang tertukar.
+inline constexpr const char* kShadingUnlit = ICON_LC_PALETTE;
+/// Lingkaran separuh gelap: bidang yang sama, terang di satu sisi dan gelap di
+/// sisi lain. Itulah yang tersisa di mode ini setelah materialnya dibuang.
+inline constexpr const char* kShadingClay = ICON_LC_CONTRAST;
+/// Dua bentuk yang saling menimpa — dua lapis pada satu gambar, yang persis
+/// yang dilakukan mode ini.
+inline constexpr const char* kShadingMaterialWireframe = ICON_LC_BLEND;
 inline constexpr const char* kShadingWireframe = ICON_LC_COMPONENT;
 inline constexpr const char* kGrid = ICON_LC_GRID_3X3;
 inline constexpr const char* kFocus = ICON_LC_TARGET;
@@ -40,6 +52,7 @@ inline constexpr const char* kFocus = ICON_LC_TARGET;
 inline constexpr const char* kPlay = ICON_LC_PLAY;
 inline constexpr const char* kPause = ICON_LC_PAUSE;
 inline constexpr const char* kStop = ICON_LC_SQUARE;
+inline constexpr const char* kStepForward = ICON_LC_SKIP_FORWARD;
 
 // --- Panel -----------------------------------------------------------------
 inline constexpr const char* kPanelOutliner = ICON_LC_LIST_TREE;
@@ -57,6 +70,12 @@ inline constexpr const char* kEntityGroup = ICON_LC_BLOCKS;
 inline constexpr const char* kPrefab = ICON_LC_PACKAGE;
 inline constexpr const char* kMesh = ICON_LC_SHAPES;
 inline constexpr const char* kWhitebox = ICON_LC_BOXES;
+/// Mode sub-objek whitebox (W7.2). Titik-titik untuk simpul, ruas untuk rusuk,
+/// bidang untuk sisi — ketiganya menggambarkan **bentuk yang dipilih**, bukan
+/// alat yang dipakai memilihnya.
+inline constexpr const char* kSubObjectVertex = ICON_LC_GRIP;
+inline constexpr const char* kSubObjectEdge = ICON_LC_GIT_COMMIT_HORIZONTAL;
+inline constexpr const char* kSubObjectFace = ICON_LC_PENTAGON;
 inline constexpr const char* kLight = ICON_LC_LIGHTBULB;
 inline constexpr const char* kSunLight = ICON_LC_SUN;
 inline constexpr const char* kCamera = ICON_LC_VIDEO;

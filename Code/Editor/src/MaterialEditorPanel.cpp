@@ -450,6 +450,7 @@ private:
             }
         }
 
+        UpdateNodePreview(context);
         for (const MaterialNode& node : graph_.nodes) {
             DrawNode(node);
         }
@@ -526,6 +527,15 @@ private:
         // Kolom WAJIB menyesuaikan isi, bukan meregang — lihat catatan panjang
         // di GraphEditorPanel: node yang meregang tidak bisa digeser, hanya
         // melebar.
+        // Label keluaran terlebar node ini; yang lain diganjal supaya ikonnya
+        // sejajar di tepi kanan.
+        float outputLabelWidth = 0.0f;
+        for (const std::size_t index : outputs) {
+            const MaterialPin& pin = pins[index];
+            const std::string& text = pin.label.empty() ? pin.name : pin.label;
+            outputLabelWidth = std::max(outputLabelWidth, ImGui::CalcTextSize(text.c_str()).x);
+        }
+
         constexpr ImGuiTableFlags kPinTableFlags =
             ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoHostExtendX;
         if (ImGui::BeginTable("pins", 2, kPinTableFlags)) {
@@ -534,15 +544,16 @@ private:
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
                 if (row < inputs.size()) {
-                    DrawPin(node, pins[inputs[row]], PinId(id, inputs[row]));
+                    DrawPin(node, pins[inputs[row]], PinId(id, inputs[row]), outputLabelWidth);
                 }
                 ImGui::TableSetColumnIndex(1);
                 if (row < outputs.size()) {
-                    DrawPin(node, pins[outputs[row]], PinId(id, outputs[row]));
+                    DrawPin(node, pins[outputs[row]], PinId(id, outputs[row]), outputLabelWidth);
                 }
             }
             ImGui::EndTable();
         }
+        DrawNodePreviewImage(node);
         canvas_.EndNode();
 
         // Pita kepala setinggi isinya ditambah padding node di atas dan bawah.
@@ -693,7 +704,8 @@ private:
         }
     }
 
-    void DrawPin(const MaterialNode& node, const MaterialPin& pin, uint64_t pinId) {
+    void DrawPin(const MaterialNode& node, const MaterialPin& pin, uint64_t pinId,
+                 float outputLabelWidth) {
         const std::string label = pin.label.empty() ? pin.name : pin.label;
         const bool input = pin.direction == PinDirection::Input;
         // Tipe yang DISIMPULKAN, bukan yang dideklarasikan: sebuah Multiply
@@ -711,21 +723,50 @@ private:
         const widgets::PinShape shape = ShapeOf(pin.kind);
         const bool connected = connectedPins_.count(pinId) != 0;
 
+        // Pudar berarti "ada, tapi bukan untuk tipe material ini". Warnanya ikut
+        // diredupkan, bukan hanya labelnya — ikon berwarna penuh di sebelah
+        // label pudar terbaca seperti pin yang masih bisa ditarik.
+        const bool enabled = PinEnabled(node, pin);
+        const ImVec4 pinColor =
+            enabled ? color : ImVec4(color.x, color.y, color.z, color.w * 0.25f);
+        if (!enabled) {
+            ImGui::PushStyleVar(ImGuiStyleVar_Alpha, ImGui::GetStyle().Alpha * 0.4f);
+        }
+
         if (input) {
             canvas_.BeginInputPin(pinId);
-            widgets::PinIcon(shape, connected, color);
+            widgets::PinIcon(shape, connected, pinColor);
             ImGui::SameLine();
             ImGui::TextUnformatted(label.c_str());
         } else {
+            // **Ikonnya rata kanan.** Label keluaran sebuah node panjangnya
+            // berbeda-beda — "rgba" lawan "r" — dan ikon yang mengikuti
+            // panjang labelnya membuat tepi kanan node bergerigi, padahal di
+            // situlah mata mencari tempat menarik kabel.
             canvas_.BeginOutputPin(pinId);
+            const float pad = outputLabelWidth - ImGui::CalcTextSize(label.c_str()).x;
+            if (pad > 0.0f) {
+                ImGui::Dummy(ImVec2(pad, 0.0f));
+                ImGui::SameLine(0.0f, 0.0f);
+            }
             ImGui::TextUnformatted(label.c_str());
             ImGui::SameLine();
-            widgets::PinIcon(shape, connected, color);
+            widgets::PinIcon(shape, connected, pinColor);
         }
         canvas_.EndPin();
+        if (!enabled) {
+            ImGui::PopStyleVar();
+        }
 
         if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
-            ImGui::SetTooltip("%s", ToString(kind));
+            if (enabled) {
+                ImGui::SetTooltip("%s", ToString(kind));
+            } else {
+                // Menyebut sebabnya, bukan hanya menolak. Pin pudar tanpa
+                // penjelasan terbaca sebagai cacat editor.
+                ImGui::SetTooltip("%s — tidak berlaku untuk material %s", ToString(kind),
+                                  material::ToString(graph_.Domain()));
+            }
         }
     }
 
@@ -763,6 +804,19 @@ private:
         canvas_.EndCreate();
     }
 
+    /// Apakah pin ini boleh dikemudikan pada domain material yang sedang dipilih.
+    ///
+    /// **Dinonaktifkan, bukan disembunyikan.** Pin yang lenyap membuat orang
+    /// mencari-cari apa yang hilang dan mengira materialnya rusak; pin yang
+    /// pudar dan menolak kabel menjawab pertanyaannya sendiri — "ini ada, tapi
+    /// tidak untuk tipe ini".
+    bool PinEnabled(const MaterialNode& node, const MaterialPin& pin) const {
+        if (node.type != kSurfaceOutputType || pin.direction != PinDirection::Input) {
+            return true;
+        }
+        return SurfacePinApplies(pin.name, graph_.Domain());
+    }
+
     void TryConnect(uint64_t fromPinId, uint64_t toPinId) {
         MaterialPin fromPin;
         MaterialPin toPin;
@@ -785,6 +839,13 @@ private:
         if (fromPin.direction != PinDirection::Output ||
             toPin.direction != PinDirection::Input || fromNode == toNode ||
             !Accepts(toPin.kind, sourceKind)) {
+            canvas_.RejectLink();
+            return;
+        }
+        // Pin yang tidak berlaku untuk domain ini menolak kabel. Diperiksa di
+        // sini dan bukan hanya digambar pudar: yang menahan pengguna harus
+        // penolakannya, bukan warnanya.
+        if (!PinEnabled(*toNode, toPin)) {
             canvas_.RejectLink();
             return;
         }
@@ -1169,6 +1230,8 @@ private:
 
         if (node->type == "input.texture") {
             DrawSetting(*node, "name", "Name");
+        } else if (node->type == kSurfaceOutputType) {
+            DrawDomainCombo();
         } else if (node->type == "input.constant") {
             ValueKind kind = ValueKindFromString(node->Setting("kind", "float"));
             ImGui::SetNextItemWidth(ImGui::GetFontSize() * 7.0f);
@@ -1192,6 +1255,11 @@ private:
                 graph_.LinkInto(node->guid, pin.name) != nullptr) {
                 continue;
             }
+            // Nilai yang diketik sama sahnya dengan kabel, jadi ia harus ikut
+            // ditolak — menutup kabelnya saja meninggalkan pintu kedua yang
+            // terbuka lebar untuk masukan yang sama tidak berlakunya.
+            const bool enabled = PinEnabled(*node, pin);
+            ImGui::BeginDisabled(!enabled);
             std::string value = node->pinValues.count(pin.name) != 0
                                     ? node->pinValues.at(pin.name)
                                     : pin.defaultValue;
@@ -1207,7 +1275,78 @@ private:
             }
             RecompileOnCommit();
             ImGui::PopID();
+            ImGui::EndDisabled();
         }
+    }
+
+    /// Pemilih tipe material.
+    ///
+    /// **Di node keluaran, bukan di sisi panel.** Domain menentukan arti pin
+    /// node ini dan tidak berarti apa-apa untuk node lain; menaruhnya jauh dari
+    /// pin yang ia matikan membuat sebab dan akibatnya tidak pernah terlihat
+    /// bersamaan.
+    void DrawDomainCombo() {
+        struct Choice {
+            MaterialDomain domain;
+            const char* label;
+            const char* hint;
+        };
+        static const Choice kChoices[] = {
+            {MaterialDomain::Opaque, "Opaque", "Tanpa alfa. Opacity tidak dibaca siapa pun."},
+            {MaterialDomain::Masked, "Masked",
+             "Opacity menjadi ambang uji alfa — cahaya menembus lubangnya."},
+            {MaterialDomain::Transparent, "Transparent",
+             "Opacity mencampur warnanya dengan apa yang ada di belakangnya."},
+            {MaterialDomain::Decal, "Decal",
+             "Selembar kulit di atas permukaan lain. Coat, fuzz, dan anisotropi "
+             "tidak berlaku."},
+        };
+
+        const MaterialDomain current = graph_.Domain();
+        const char* label = "Opaque";
+        for (const Choice& choice : kChoices) {
+            if (choice.domain == current) {
+                label = choice.label;
+            }
+        }
+
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 9.0f);
+        if (ImGui::BeginCombo("Material type", label)) {
+            for (const Choice& choice : kChoices) {
+                if (ImGui::Selectable(choice.label, choice.domain == current)) {
+                    // **Kabel yang menjadi tidak berlaku tidak dibuang.** Yang
+                    // berpindah tipe untuk melihat-lihat lalu kembali akan
+                    // menemukan graph-nya utuh; membuangnya di sini membuat satu
+                    // klik salah menghapus pekerjaan yang tidak bisa dikembalikan
+                    // tanpa undo. Kompiler mengabaikan yang tidak berlaku.
+                    graph_.SetDomain(choice.domain);
+                    Touch();
+                }
+                if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
+                    ImGui::SetTooltip("%s", choice.hint);
+                }
+            }
+            ImGui::EndCombo();
+        }
+
+        // Ambang buang hanya berarti untuk yang bertopeng — di domain lain ia
+        // angka yang tidak pernah dibaca, dan angka yang tidak pernah dibaca
+        // adalah setelan yang mengajari orang bahwa mengubahnya percuma.
+        if (current == MaterialDomain::Masked) {
+            if (MaterialNode* output = SurfaceOutputNode()) {
+                DrawSetting(*output, "alphaCutoff", "Alpha cutoff");
+            }
+        }
+    }
+
+    /// Node keluaran. Tepat satu boleh ada, dan ia tidak bisa dihapus.
+    MaterialNode* SurfaceOutputNode() {
+        for (MaterialNode& node : graph_.nodes) {
+            if (node.type == kSurfaceOutputType) {
+                return &node;
+            }
+        }
+        return nullptr;
     }
 
     void DrawSetting(MaterialNode& node, const char* key, const char* label) {
@@ -1468,6 +1607,32 @@ private:
     /// sebuah node menandai dokumen kotor tanpa mengubah satu karakter pun kode
     /// yang dihasilkan, dan membangun ulang pipeline karenanya akan membuat
     /// menyeret node terasa tersendat.
+    /// Menyiapkan `slangc` dan prelude-nya, sekali seumur panel.
+    ///
+    /// **Dipisah dari `EnsurePreviewShaders` karena bukan hanya ia yang
+    /// membutuhkannya.** Thumbnail di dalam node mengompilasi shader-nya sendiri,
+    /// dan ia digambar sebelum pratinjau besar dalam urutan frame — kalau
+    /// penyiapan ini tetap tinggal di sana, thumbnail selalu tertinggal satu
+    /// frame dari graph yang sedang disunting orang.
+    void EnsureShaderCache(EditorContext& context) {
+        if (cacheReady_) {
+            return;
+        }
+        cacheReady_ = true;
+        const std::string identity = material::SlangCompilerIdentity();
+        if (identity.empty()) {
+            cacheUsable_ = false;
+            return;
+        }
+        cache_.Configure(context.shaderCacheDir, identity);
+        cache_.SetCompiler(material::MakeSlangCompiler());
+        prelude_ = material::LoadOpenPbrPrelude(context.shaderDir);
+        cacheUsable_ = !prelude_.empty();
+        if (!cacheUsable_) {
+            SIM_WARN("Editor", "openpbr.slang not found in {}", context.shaderDir);
+        }
+    }
+
     void EnsurePreviewShaders(EditorContext& context, render::IMaterialPreview& preview) {
         if (compiled_.slang == previewSource_ && (preview.HasMaterial() || !previewError_.empty())) {
             return;
@@ -1475,21 +1640,7 @@ private:
         previewSource_ = compiled_.slang;
         previewError_.clear();
 
-        if (!cacheReady_) {
-            cacheReady_ = true;
-            const std::string identity = material::SlangCompilerIdentity();
-            if (identity.empty()) {
-                cacheUsable_ = false;
-            } else {
-                cache_.Configure(context.shaderCacheDir, identity);
-                cache_.SetCompiler(material::MakeSlangCompiler());
-                prelude_ = material::LoadOpenPbrPrelude(context.shaderDir);
-                cacheUsable_ = !prelude_.empty();
-                if (!cacheUsable_) {
-                    SIM_WARN("Editor", "openpbr.slang not found in {}", context.shaderDir);
-                }
-            }
-        }
+        EnsureShaderCache(context);
         if (!cacheUsable_) {
             previewError_ = prelude_.empty() && !cache_.Statistics().compiles
                                 ? "Shader toolchain unavailable (slangc or openpbr.slang missing)."
@@ -1545,9 +1696,17 @@ private:
     /// yang sama dengan jalur tekstur viewport, dan alasan yang sama — yang
     /// mendekode gambar adalah baker, bukan yang menggambar.
     void UpdatePreviewTextures(EditorContext& context, render::IMaterialPreview& preview) {
+        UpdateTexturesFor(context, preview, compiled_.textures, previewTexturePaths_);
+    }
+
+    /// Sama untuk pratinjau mana pun: daftar binding-nya dan jalur yang sedang
+    /// terpasang untuknya diserahkan pemanggil.
+    void UpdateTexturesFor(EditorContext& context, render::IMaterialPreview& preview,
+                           const std::vector<material::TextureBinding>& bindings,
+                           std::vector<std::string>& cached) {
         std::vector<std::string> paths;
-        paths.reserve(compiled_.textures.size());
-        for (const material::TextureBinding& binding : compiled_.textures) {
+        paths.reserve(bindings.size());
+        for (const material::TextureBinding& binding : bindings) {
             Uuid image = binding.texture;
             // Slot yang diisi parameter diambil dari instance-nya; yang tidak,
             // dari node-nya sendiri.
@@ -1575,11 +1734,11 @@ private:
         // detik. Yang masih di-bake menjadi jalur kosong hari ini dan jalur
         // sungguhan beberapa frame lagi — dan perbandingan inilah yang membuat
         // pergantian itu terjadi tepat sekali.
-        if (paths == previewTexturePaths_) {
+        if (paths == cached) {
             return;
         }
-        previewTexturePaths_ = std::move(paths);
-        preview.SetTextures(previewTexturePaths_);
+        cached = std::move(paths);
+        preview.SetTextures(cached);
     }
 
     /// Menulis blok uniform dari nilai bawaan parameter, ditimpa override
@@ -1592,6 +1751,150 @@ private:
         block_.Fill(graph_.parameters, instanceMode_ ? instance_.overrides : kNoOverrides,
                     parameterBytes_);
         preview.SetParameters(parameterBytes_);
+    }
+
+    // --- pratinjau di dalam node --------------------------------------------
+
+    /// Pin keluaran yang dimaksud orang ketika ia memilih sebuah node.
+    ///
+    /// Yang pertama, dan itu bukan kompromi: katalog menyusun pin keluaran mulai
+    /// dari yang paling utuh — `rgba` sebelum `rgb`, `rgb` sebelum `r` — jadi
+    /// yang pertama adalah yang paling banyak isinya. Node tanpa keluaran (node
+    /// keluaran permukaan) tidak punya apa pun untuk dilihat, dan mengembalikan
+    /// kosong di sini yang membuatnya tidak menggambar kotak.
+    std::string PreviewablePin(const MaterialNode& node) const {
+        for (const MaterialPin& pin : PinsOf(graph_, node)) {
+            if (pin.direction == PinDirection::Output) {
+                return pin.name;
+            }
+        }
+        return {};
+    }
+
+    /// Menyiapkan thumbnail yang digambar di dalam node yang sedang dipilih.
+    ///
+    /// **Satu node per frame, bukan semuanya.** `IMaterialPreview` punya satu
+    /// target warna dan satu pipeline; menggambar lima node berarti lima
+    /// `SetMaterial` dan lima salinan target per frame, dan `SetMaterial`
+    /// membangun pipeline. Yang dipilih orang adalah yang sedang ia kerjakan,
+    /// dan itulah satu-satunya yang jawabannya sedang ia tunggu.
+    ///
+    /// Waktunya ikut berjalan, jadi UV yang digeser `input.time` benar-benar
+    /// bergerak di dalam kotak itu — yang justru menjadi alasan pratinjau ini
+    /// diminta: melihat hasil perpaduan sebelum menyambungkannya ke permukaan.
+    void UpdateNodePreview(EditorContext& context) {
+        nodePreviewTexture_ = render::kInvalidTexture;
+        render::IMaterialPreview* preview = context.materialNodePreview;
+        if (preview == nullptr) {
+            return;
+        }
+        EnsureShaderCache(context);
+        if (!cacheUsable_) {
+            return;
+        }
+
+        const std::vector<uint64_t> selected = canvas_.SelectedNodes();
+        const Uuid* guid = selected.size() == 1 ? GuidOf(selected.front()) : nullptr;
+        const MaterialNode* node = guid != nullptr ? graph_.FindNode(*guid) : nullptr;
+        const std::string pin = node != nullptr ? PreviewablePin(*node) : std::string{};
+        if (node == nullptr || pin.empty()) {
+            return;
+        }
+
+        // Kompilasi ulang hanya ketika ada yang berubah. `compiled_.slang`
+        // berganti setiap kali graph disunting, jadi ia dipakai sebagai cap
+        // revisi — membandingkan graph-nya sendiri berarti menyalinnya.
+        if (compiled_.slang != nodePreviewBase_ || node->guid != nodePreviewGuid_ ||
+            pin != nodePreviewPin_) {
+            nodePreviewBase_ = compiled_.slang;
+            nodePreviewGuid_ = node->guid;
+            nodePreviewPin_ = pin;
+            RebuildNodePreview(*preview);
+        }
+        if (!preview->HasMaterial()) {
+            return;
+        }
+
+        UpdateTexturesFor(context, *preview, nodePreviewTextures_, nodePreviewTexturePaths_);
+        nodeBlock_.Fill(graph_.parameters, instanceMode_ ? instance_.overrides : kNoOverrides,
+                        nodeParameterBytes_);
+        preview->SetParameters(nodeParameterBytes_);
+
+        render::MaterialPreviewDesc desc;
+        desc.width = kNodePreviewPixels;
+        desc.height = kNodePreviewPixels;
+        // Bidang datar, dilihat nyaris tegak lurus. Bukan tepat 90°: sumbu
+        // pandang dan sumbu atas berimpit di sana, dan matriks LookAt-nya
+        // menjadi tak terdefinisi — kotaknya berkedip hitam alih-alih rata.
+        desc.shape = render::PreviewShape::Plane;
+        desc.cameraYaw = 0.0f;
+        desc.cameraPitch = 1.55f;
+        // Bidangnya membentang -1..1 dan bukaan lensanya 40°, jadi 2,75 pas
+        // memenuhi tinggi kotak; sedikit lebih jauh menyisakan tepi.
+        desc.distance = 2.9f;
+        desc.lightDirection = Vec3(0.0f, 1.0f, 0.0f);
+        desc.lightRadiance = Vec3(1.0f);
+        desc.time = nodePreviewTime_;
+        nodePreviewTime_ += context.deltaSeconds;
+        preview->Render(desc);
+
+        nodePreviewTexture_ = preview->ColorTarget();
+        nodePreviewUv_ = preview->ColorTargetUvMax();
+    }
+
+    /// Mengompilasi ulang shader thumbnail untuk pasangan (node, pin) yang baru.
+    void RebuildNodePreview(render::IMaterialPreview& preview) {
+        nodePreviewTexturePaths_.clear();
+        nodePreviewTextures_.clear();
+        preview.ClearMaterial();
+
+        MaterialCompileOptions compileOptions;
+        compileOptions.moduleName = openName_.empty() ? "preview" : openName_;
+        compileOptions.previewNode = nodePreviewGuid_;
+        compileOptions.previewPin = nodePreviewPin_;
+        const MaterialCompileResult previewGraph = CompileMaterial(graph_, compileOptions);
+        if (!previewGraph.ok) {
+            return;
+        }
+
+        material::MaterialModuleOptions options;
+        options.prelude = prelude_;
+        options.lobes = previewGraph.lobes;
+        const material::CompileOutput vertex = cache_.Get(material::MakeMaterialRequest(
+            previewGraph.slang, material::ShaderStage::Vertex, options));
+        const material::CompileOutput fragment = cache_.Get(material::MakeMaterialRequest(
+            previewGraph.slang, material::ShaderStage::Fragment, options));
+        if (!vertex.ok || !fragment.ok) {
+            return;
+        }
+
+        nodeBlock_.Build(graph_.parameters);
+        nodePreviewTextures_ = previewGraph.textures;
+        render::MaterialPreviewShaders shaders;
+        shaders.vertexSpirv = vertex.spirv;
+        shaders.fragmentSpirv = fragment.spirv;
+        shaders.parameterBytes = nodeBlock_.Bytes();
+        shaders.textureCount = static_cast<uint32_t>(nodePreviewTextures_.size());
+        preview.SetMaterial(shaders);
+    }
+
+    /// Menggambar kotak pratinjau di dalam node, bila node inilah yang tergambar
+    /// frame ini.
+    void DrawNodePreviewImage(const MaterialNode& node) {
+        if (node.guid != nodePreviewGuid_ || nodePreviewTexture_ == render::kInvalidTexture) {
+            return;
+        }
+        ImGui::Dummy(ImVec2(0.0f, 2.0f));
+        const ImVec2 origin = ImGui::GetCursorScreenPos();
+        const ImVec2 size(kNodePreviewSize, kNodePreviewSize);
+        ImGui::Dummy(size);
+        ImDrawList* draw = ImGui::GetWindowDrawList();
+        const ImVec2 end(origin.x + size.x, origin.y + size.y);
+        draw->AddImage(static_cast<ImTextureID>(nodePreviewTexture_), origin, end,
+                       ImVec2(0.0f, 0.0f), ImVec2(nodePreviewUv_.x, nodePreviewUv_.y));
+        // Tepi tipis: tanpa itu, pratinjau yang kebetulan gelap di pinggirnya
+        // menyatu dengan badan node dan ukurannya tidak lagi terbaca.
+        draw->AddRect(origin, end, ImGui::GetColorU32(ImVec4(0.0f, 0.0f, 0.0f, 0.55f)), 2.0f);
     }
 
     // --- berkas -------------------------------------------------------------
@@ -1953,6 +2256,27 @@ private:
     material::MaterialParameterBlock block_;
     std::vector<uint8_t> parameterBytes_;
     render::PreviewShape previewShape_ = render::PreviewShape::Sphere;
+
+    // --- pratinjau di dalam node ---
+    /// Sisi kotaknya di kanvas, satuan logis ImGui.
+    static constexpr float kNodePreviewSize = 104.0f;
+    /// Sisi target rendernya, piksel. Lebih besar dari kotaknya supaya kanvas
+    /// yang di-zoom masuk tidak memperbesar piksel yang sudah kepalang kasar.
+    static constexpr uint32_t kNodePreviewPixels = 128u;
+    /// Node dan pin yang shader thumbnail-nya sedang terpasang.
+    Uuid nodePreviewGuid_;
+    std::string nodePreviewPin_;
+    /// Cap revisi graph saat shader itu dibangun: Slang milik material utuhnya.
+    std::string nodePreviewBase_;
+    std::vector<material::TextureBinding> nodePreviewTextures_;
+    std::vector<std::string> nodePreviewTexturePaths_;
+    material::MaterialParameterBlock nodeBlock_;
+    std::vector<uint8_t> nodeParameterBytes_;
+    /// Target yang sudah tergambar frame ini, atau kInvalidTexture.
+    render::TextureHandle nodePreviewTexture_ = render::kInvalidTexture;
+    Vec2 nodePreviewUv_{1.0f, 1.0f};
+    float nodePreviewTime_ = 0.0f;
+
     float previewYaw_ = 0.0f;
     float previewPitch_ = 0.2f;
     float previewDistance_ = 3.2f;

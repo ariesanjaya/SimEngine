@@ -1,4 +1,4 @@
-#include "Sim/Editor/SceneView.h"
+#include "Sim/SceneView/SceneView.h"
 
 #include "Sim/Assets/MeshSdfBakery.h"
 #include "Sim/Assets/TextureBakery.h"
@@ -9,10 +9,8 @@
 #include "Sim/Core/Log.h"
 #include "Sim/Material/MaterialInstance.h"
 #include "Sim/Material/MaterialNodeCatalog.h"
-#include "Sim/Editor/EditorContext.h"
 #include "Sim/Terrain/TerrainDecal.h"
-#include "Sim/Editor/Icons.h"
-#include "Sim/Editor/Selection.h"
+#include "Sim/SceneView/Selection.h"
 #include "Sim/Scene/Components.h"
 
 #include <algorithm>
@@ -20,7 +18,7 @@
 #include <charconv>
 #include <limits>
 
-namespace sim::editor {
+namespace sim::view {
 namespace {
 
 constexpr Vec4 kMeshColor{0.62f, 0.65f, 0.70f, 1.0f};
@@ -199,6 +197,11 @@ void SceneView::Build(scene::World& world, const Selection& selection,
             instance.boundsMax = Vec3(0.5f);
             instance.color = kMeshColor;
             instance.selected = selected;
+            // Kunci geometri CPU-nya, untuk picking presisi (R1). Sama dengan
+            // kunci yang dipakai renderer supaya keduanya tidak pernah menunjuk
+            // bentuk yang berbeda. **Di luar blok di bawah**, karena yang
+            // membacanya adalah daftar pickable di ujung.
+            std::string meshKey;
             {
                 // Warna mundur untuk ruas yang tidak punya material di mana pun:
                 // material bawaan editor.
@@ -235,6 +238,7 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                                 AppendPartColors(*meshRenderer, mesh.partCount, assets, renderer, instance);
                             }
                             fromWhitebox = true;
+                            meshKey = guid.ToString();
                         }
                     }
                 }
@@ -246,6 +250,9 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                             found.database->AbsolutePath(*found.record);
                         const render::MeshAsset mesh =
                             renderer->AcquireMesh(meshPath.string());
+                        if (mesh.loaded) {
+                            meshKey = meshPath.string();
+                        }
                         // **Medan jaraknya diminta di sini, di sebelah
                         // geometrinya.** Keduanya berkunci berkas yang sama, dan
                         // yang meminta salah satunya hampir selalu memerlukan
@@ -287,8 +294,8 @@ void SceneView::Build(scene::World& world, const Selection& selection,
             meshes_.push_back(instance);
 
             if (pickable) {
-                pickables_.push_back(
-                    Pickable{entity, matrix, instance.boundsMin, instance.boundsMax});
+                pickables_.push_back(Pickable{entity, matrix, instance.boundsMin,
+                                              instance.boundsMax, std::move(meshKey)});
             }
             continue;
         }
@@ -304,14 +311,15 @@ void SceneView::Build(scene::World& world, const Selection& selection,
             // Lampu directional dibedakan dari yang lain: ia menerangi seluruh
             // scene tanpa punya posisi bermakna, dan membedakannya sekilas
             // menghemat satu klik ke Inspector.
-            icon.glyph = light->type == scene::LightType::Directional ? icons::kSunLight
-                                                                     : icons::kLight;
+            icon.glyph = light->type == scene::LightType::Directional
+                             ? iconGlyphs_.directionalLight
+                             : iconGlyphs_.light;
             icon.color = kLightColor;
         } else if (world.Has<scene::CameraComponent>(entity)) {
-            icon.glyph = icons::kCamera;
+            icon.glyph = iconGlyphs_.camera;
             icon.color = kCameraColor;
         } else {
-            icon.glyph = icons::kEntity;
+            icon.glyph = iconGlyphs_.empty;
             icon.color = kEmptyColor;
         }
         icons_.push_back(icon);
@@ -703,7 +711,10 @@ void SceneView::AppendDecal(const scene::DecalComponent& component, scene::Entit
     meshes_.push_back(instance);
 
     if (pickable) {
-        pickables_.push_back(Pickable{entity, hostWorld, mesh.boundsMin, mesh.boundsMax});
+        // Kunci geometri sengaja kosong: decal selembar kulit di atas permukaan
+        // lain, dan memilihnya per segitiga berarti mengklik lantai di bawahnya
+        // memilih decal-nya.
+        pickables_.push_back(Pickable{entity, hostWorld, mesh.boundsMin, mesh.boundsMax, {}});
     }
 }
 
@@ -795,7 +806,11 @@ void SceneView::AppendTerrain(const scene::TerrainComponent& component, scene::E
             meshes_.push_back(instance);
 
             if (pickable) {
-                pickables_.push_back(Pickable{entity, matrix, mesh.boundsMin, mesh.boundsMax});
+                // Terrain punya jalur pickingnya sendiri lewat heightmap, yang
+                // eksak sekaligus lebih murah daripada ray cast mana pun —
+                // lihat batasnya di docs/PLAN-EMBREE.md.
+                pickables_.push_back(
+                    Pickable{entity, matrix, mesh.boundsMin, mesh.boundsMax, {}});
             }
         }
     }
@@ -863,9 +878,198 @@ void SceneView::AddWireBox(const Vec3& boxMin, const Vec3& boxMax, const Vec4& c
             if ((index & bit) != 0) {
                 continue;
             }
-            lines_.push_back(render::LineSegment{corner(index), corner(index | bit), color});
+            lines_.push_back(
+                render::LineSegment{corner(index), corner(index | bit), color,
+                                    linesThroughGeometry_});
         }
     }
+}
+
+void SceneView::AddLine(const Vec3& from, const Vec3& to, const Vec4& color) {
+    lines_.push_back(render::LineSegment{from, to, color, linesThroughGeometry_});
+}
+
+namespace {
+
+/// Titik lingkaran ke-`step` dari `steps`, di bidang yang direntang `axisA` dan
+/// `axisB`.
+Vec3 CirclePoint(const Vec3& center, const Vec3& axisA, const Vec3& axisB, float radius,
+                 int step, int steps) {
+    const float angle = 2.0f * kPi * static_cast<float>(step) / static_cast<float>(steps);
+    return center + axisA * (radius * std::cos(angle)) + axisB * (radius * std::sin(angle));
+}
+
+/// Sudut lingkaran, 32 ruas.
+///
+/// Cukup halus untuk terbaca sebagai lingkaran pada ukuran layar mana pun yang
+/// masuk akal, dan kebetulan sama dengan jumlah sisi yang dipakai
+/// `CookCylinder` — jadi rangka kawat silinder punya sebanyak sisi yang
+/// benar-benar dimasak PhysX, bukan lebih halus daripada bentuk aslinya.
+constexpr int kCircleSteps = 32;
+
+}  // namespace
+
+void SceneView::AddWireBox(const Mat4& transform, const Vec3& halfExtents, const Vec4& color) {
+    const auto corner = [&](int index) {
+        const Vec3 local((index & 1) != 0 ? halfExtents.x : -halfExtents.x,
+                         (index & 2) != 0 ? halfExtents.y : -halfExtents.y,
+                         (index & 4) != 0 ? halfExtents.z : -halfExtents.z);
+        return Vec3(transform * Vec4(local, 1.0f));
+    };
+    for (int index = 0; index < 8; ++index) {
+        for (int axis = 0; axis < 3; ++axis) {
+            const int bit = 1 << axis;
+            if ((index & bit) != 0) {
+                continue;
+            }
+            AddLine(corner(index), corner(index | bit), color);
+        }
+    }
+}
+
+void SceneView::AddWireSphere(const Mat4& transform, float radius, const Vec4& color) {
+    const Vec3 center(transform[3]);
+    const Vec3 axes[3] = {Vec3(transform[0]), Vec3(transform[1]), Vec3(transform[2])};
+    // Tiga lingkaran besar, satu per bidang sumbu. Bola yang digambar satu
+    // lingkaran terlihat sama dari segala arah dan karena itu tidak
+    // memperlihatkan putaran apa pun; tiga sudah cukup untuk membacanya sebagai
+    // bola tanpa menjadi bola benang.
+    for (int plane = 0; plane < 3; ++plane) {
+        const Vec3& a = axes[plane];
+        const Vec3& b = axes[(plane + 1) % 3];
+        for (int step = 0; step < kCircleSteps; ++step) {
+            AddLine(CirclePoint(center, a, b, radius, step, kCircleSteps),
+                    CirclePoint(center, a, b, radius, step + 1, kCircleSteps), color);
+        }
+    }
+}
+
+void SceneView::AddWireCapsule(const Mat4& transform, float radius, float halfHeight,
+                               const Vec4& color) {
+    const Vec3 center(transform[3]);
+    const Vec3 axis(transform[0]);   // sumbu X lokal: konvensi PhysX
+    const Vec3 up(transform[1]);
+    const Vec3 side(transform[2]);
+    const Vec3 capA = center - axis * halfHeight;
+    const Vec3 capB = center + axis * halfHeight;
+
+    // Dua lingkaran tudung, tegak lurus sumbunya.
+    for (int step = 0; step < kCircleSteps; ++step) {
+        AddLine(CirclePoint(capA, up, side, radius, step, kCircleSteps),
+                CirclePoint(capA, up, side, radius, step + 1, kCircleSteps), color);
+        AddLine(CirclePoint(capB, up, side, radius, step, kCircleSteps),
+                CirclePoint(capB, up, side, radius, step + 1, kCircleSteps), color);
+    }
+    // Empat garis sisi, di kedua bidang yang memuat sumbunya.
+    for (const Vec3& radial : {up, -up, side, -side}) {
+        AddLine(capA + radial * radius, capB + radial * radius, color);
+    }
+    // Tudung setengah bola. **Inilah yang membedakan kapsul dari silinder di
+    // layar**, dan tanpanya sebuah kapsul setinggi 2 m terbaca sebagai silinder
+    // setinggi 1,4 m — persis kesalahan yang membuat orang membuka gizmo.
+    constexpr int kCapSteps = kCircleSteps / 4;
+    for (int half = 0; half < 2; ++half) {
+        const Vec3 tip = half == 0 ? capA : capB;
+        const Vec3 outward = half == 0 ? -axis : axis;
+        for (const Vec3& radial : {up, side}) {
+            for (int step = 0; step < kCapSteps; ++step) {
+                const float angleA = 0.5f * kPi * static_cast<float>(step) /
+                                     static_cast<float>(kCapSteps);
+                const float angleB = 0.5f * kPi * static_cast<float>(step + 1) /
+                                     static_cast<float>(kCapSteps);
+                const auto at = [&](float angle, float sign) {
+                    return tip + outward * (radius * std::sin(angle)) +
+                           radial * (sign * radius * std::cos(angle));
+                };
+                AddLine(at(angleA, 1.0f), at(angleB, 1.0f), color);
+                AddLine(at(angleA, -1.0f), at(angleB, -1.0f), color);
+            }
+        }
+    }
+}
+
+void SceneView::AddWireCylinder(const Mat4& transform, float radius, float halfHeight,
+                                const Vec4& color) {
+    const Vec3 center(transform[3]);
+    const Vec3 axis(transform[0]);   // sumbu X lokal, sama dengan `CookCylinder`
+    const Vec3 up(transform[1]);
+    const Vec3 side(transform[2]);
+    const Vec3 capA = center - axis * halfHeight;
+    const Vec3 capB = center + axis * halfHeight;
+    for (int step = 0; step < kCircleSteps; ++step) {
+        const Vec3 a0 = CirclePoint(capA, up, side, radius, step, kCircleSteps);
+        const Vec3 a1 = CirclePoint(capA, up, side, radius, step + 1, kCircleSteps);
+        const Vec3 b0 = CirclePoint(capB, up, side, radius, step, kCircleSteps);
+        const Vec3 b1 = CirclePoint(capB, up, side, radius, step + 1, kCircleSteps);
+        AddLine(a0, a1, color);
+        AddLine(b0, b1, color);
+        // Rusuk sisi tiap seperempat lingkaran saja: tiga puluh dua rusuk
+        // membuat silinder tampak sebagai tabung padat dan menutupi apa yang ada
+        // di dalamnya.
+        if (step % (kCircleSteps / 4) == 0) {
+            AddLine(a0, b0, color);
+        }
+    }
+}
+
+void SceneView::AddWirePlane(const Mat4& transform, float extent, const Vec4& color) {
+    const Vec3 center(transform[3]);
+    const Vec3 normal(transform[0]);  // +X lokal: konvensi PxPlaneGeometry
+    const Vec3 up(transform[1]);
+    const Vec3 side(transform[2]);
+
+    // Kisi, bukan kotak kosong. Bidangnya tak hingga; sebuah kotak berpinggir
+    // terbaca sebagai lantai seukuran kotak itu, sementara kisi yang terpotong
+    // di tepinya terbaca sebagai "berlanjut".
+    constexpr int kGrid = 4;
+    for (int index = -kGrid; index <= kGrid; ++index) {
+        const float offset = extent * static_cast<float>(index) / static_cast<float>(kGrid);
+        AddLine(center + up * offset - side * extent, center + up * offset + side * extent,
+                color);
+        AddLine(center + side * offset - up * extent, center + side * offset + up * extent,
+                color);
+    }
+    // Normal: satu-satunya yang memberi tahu sisi mana yang padat.
+    AddLine(center, center + normal * (extent * 0.5f), color);
+}
+
+void SceneView::AddWireCircle(const Vec3& center, const Vec3& axisA, const Vec3& axisB,
+                              float radius, const Vec4& color) {
+    for (int step = 0; step < kCircleSteps; ++step) {
+        AddLine(CirclePoint(center, axisA, axisB, radius, step, kCircleSteps),
+                CirclePoint(center, axisA, axisB, radius, step + 1, kCircleSteps), color);
+    }
+}
+
+void SceneView::AddWireCone(const Vec3& apex, const Vec3& direction, float halfAngle,
+                            float length, const Vec4& color) {
+    const float axisLength = glm::length(direction);
+    if (axisLength < 1e-6f || length <= 0.0f) {
+        return;
+    }
+    const Vec3 axis = direction / axisLength;
+    // Bingkai tegak lurus sumbu. Sumbu bantu dipilih yang paling tidak sejajar,
+    // karena hasil silang dua vektor yang hampir sejajar panjangnya mendekati
+    // nol dan arahnya ditentukan pembulatan.
+    const Vec3 helper = std::abs(axis.y) < 0.99f ? Vec3(0.0f, 1.0f, 0.0f) : Vec3(1.0f, 0.0f, 0.0f);
+    const Vec3 side = glm::normalize(glm::cross(helper, axis));
+    const Vec3 up = glm::cross(axis, side);
+
+    const Vec3 rim = apex + axis * length;
+    const float radius = length * std::tan(std::clamp(halfAngle, 0.0f, 1.5f));
+    AddWireCircle(rim, side, up, radius, color);
+    // Empat rusuk saja. Setiap rusuk lingkaran menghasilkan kerucut padat yang
+    // menutupi apa yang ada di dalamnya — dan yang ada di dalamnya justru yang
+    // sedang disinari.
+    for (const Vec3& radial : {side, -side, up, -up}) {
+        AddLine(apex, rim + radial * radius, color);
+    }
+}
+
+void SceneView::AddWireCross(const Vec3& center, float size, const Vec4& color) {
+    AddLine(center - Vec3(size, 0.0f, 0.0f), center + Vec3(size, 0.0f, 0.0f), color);
+    AddLine(center - Vec3(0.0f, size, 0.0f), center + Vec3(0.0f, size, 0.0f), color);
+    AddLine(center - Vec3(0.0f, 0.0f, size), center + Vec3(0.0f, 0.0f, size), color);
 }
 
 render::ViewportScene SceneView::Scene() const {
@@ -907,7 +1111,48 @@ scene::Entity SceneView::Raycast(const Ray& ray) const {
     scene::Entity best = scene::kNullEntity;
     float bestDistance = std::numeric_limits<float>::max();
 
+    // **Geometri disusun di sini, bukan di `Build`.** Adegan menggambar enam
+    // puluh kali per detik dan diklik beberapa kali per menit; menyusunnya tiap
+    // frame berarti membayar seluruh biayanya untuk setiap kali ia benar-benar
+    // dipakai. `Sync` sendiri melewatkan pekerjaannya bila tidak ada yang
+    // bergeser sejak terakhir kali.
+    pickItems_.clear();
+    pickItems_.reserve(pickables_.size());
     for (const Pickable& pickable : pickables_) {
+        if (pickable.meshKey.empty()) {
+            continue;
+        }
+        PickItem item;
+        item.entity = pickable.entity;
+        item.worldMatrix = pickable.worldMatrix;
+        item.meshKey = pickable.meshKey;
+        // Kunci mesh impor **adalah** jalur berkasnya; whitebox memakai GUID,
+        // yang bukan jalur dan karena itu tidak punya sumber untuk dimuat.
+        if (pickable.meshKey.find('/') != std::string::npos ||
+            pickable.meshKey.find('\\') != std::string::npos) {
+            item.sourcePath = pickable.meshKey;
+        }
+        pickItems_.push_back(item);
+    }
+    picks_.Sync(pickItems_);
+
+    const raycast::RayHit hit = picks_.Raycast(ray.origin, ray.direction);
+    if (hit) {
+        best = ToEntity(hit.userData);
+        // **Jaraknya dibandingkan dalam satuan yang sama** dengan jalur kotak di
+        // bawah: keduanya mengukur sepanjang sinar dunia yang sama, jadi benda
+        // yang geometrinya belum dimuat tetap bisa menang bila memang lebih
+        // dekat — dan jawabannya tidak melompat begitu pemuatannya selesai.
+        bestDistance = hit.distance;
+    }
+
+    for (const Pickable& pickable : pickables_) {
+        // Yang sudah terwakili segitiga tidak diuji kotaknya lagi: kotaknya
+        // selalu lebih besar daripada bentuknya, dan mengujinya kembali berarti
+        // mengembalikan persis positif palsu yang baru saja dibuang.
+        if (picks_.Covers(pickable.entity)) {
+            continue;
+        }
         // Sinar dibawa ke ruang lokal objek, bukan sebaliknya. Dengan begitu
         // ujinya tetap AABB sederhana walau objeknya diputar dan diskala, dan
         // dua objek bertumpuk terpisah tepat pada bentuk masing-masing.
@@ -930,6 +1175,49 @@ scene::Entity SceneView::Raycast(const Ray& ray) const {
         }
     }
     return best;
+}
+
+SceneView::SurfaceHit SceneView::RaycastSurface(const Ray& ray,
+                                                std::span<const scene::Entity> ignore) const {
+    SurfaceHit result;
+
+    // Daftar yang sama dengan `Raycast`, disusun ulang di sini karena keduanya
+    // dipanggil terpisah dan `Sync` sendiri melewatkan pekerjaannya bila tidak
+    // ada yang bergeser.
+    pickItems_.clear();
+    pickItems_.reserve(pickables_.size());
+    for (const Pickable& pickable : pickables_) {
+        if (pickable.meshKey.empty()) {
+            continue;
+        }
+        PickItem item;
+        item.entity = pickable.entity;
+        item.worldMatrix = pickable.worldMatrix;
+        item.meshKey = pickable.meshKey;
+        if (pickable.meshKey.find('/') != std::string::npos ||
+            pickable.meshKey.find('\\') != std::string::npos) {
+            item.sourcePath = pickable.meshKey;
+        }
+        pickItems_.push_back(item);
+    }
+    picks_.Sync(pickItems_);
+
+    const raycast::RayHit hit = picks_.RaycastExcluding(
+        ray.origin, ray.direction, raycast::kUnbounded, ignore);
+    if (!hit) {
+        return result;
+    }
+
+    result.hit = true;
+    result.entity = ToEntity(hit.userData);
+    result.position = hit.position;
+    result.distance = hit.distance;
+    // Dibalik bila menghadap searah sinar: sisi belakang sebuah permukaan tetap
+    // permukaan, dan benda yang dijatuhkan ke sana harus tetap berdiri di
+    // atasnya — bukan tertanam menembusnya.
+    const Vec3 normal = glm::normalize(hit.normal);
+    result.normal = glm::dot(normal, ray.direction) > 0.0f ? -normal : normal;
+    return result;
 }
 
 std::vector<scene::Entity> SceneView::RectSelect(const Mat4& viewProjection, const Vec2& origin,
@@ -1059,4 +1347,4 @@ bool WorldToScreen(const Mat4& viewProjection, const Vec2& origin, const Vec2& s
     return true;
 }
 
-}  // namespace sim::editor
+}  // namespace sim::view

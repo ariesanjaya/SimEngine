@@ -11,6 +11,7 @@ sim_add_library(Assets
         src/MeshImport.cpp
         src/MeshSdfBake.cpp
         src/MeshSdfBakery.cpp
+        src/MeshGeometryCache.cpp
         src/UsdImport.cpp
         src/MeshSettings.cpp
         src/TextureBake.cpp

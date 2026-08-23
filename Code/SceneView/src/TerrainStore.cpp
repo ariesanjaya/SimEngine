@@ -1,10 +1,10 @@
-#include "Sim/Editor/TerrainStore.h"
+#include "Sim/SceneView/TerrainStore.h"
 
 #include "Sim/Core/Log.h"
 
 #include <utility>
 
-namespace sim::editor {
+namespace sim::view {
 
 terrain::Brush EffectiveSculptBrush(const terrain::Brush& brush, bool smooth, bool invert) {
     terrain::Brush result = brush;
@@ -196,4 +196,4 @@ uint64_t TerrainStore::TileUpload(const Uuid& guid, int tileX, int tileY) const 
 
 void TerrainStore::Clear() { entries_.clear(); }
 
-}  // namespace sim::editor
+}  // namespace sim::view

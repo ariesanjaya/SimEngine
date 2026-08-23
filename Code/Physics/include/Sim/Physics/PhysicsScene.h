@@ -93,6 +93,57 @@ struct ColliderGeometry {
 /// Mengembalikan false bila entity itu tidak punya bentuk untuk diberikan.
 using ColliderGeometrySource = std::function<bool(scene::Entity, ColliderGeometry&)>;
 
+/// Di mana dan sebesar apa bentuk tabrakan sebuah entity, tanpa membangun scene.
+struct ColliderPlacement {
+    /// Penempatan bendanya di dunia — sudah dipisahkan dari skalanya, karena
+    /// skala tidak masuk ke matriks bentuk melainkan ke ukurannya.
+    Vec3 position{0.0f};
+    Quat rotation{1.0f, 0.0f, 0.0f, 0.0f};
+    Vec3 scale{1.0f};
+
+    /// Ukurannya, sudah berskala. Untuk `ConvexHull`, `TriangleMesh`, dan
+    /// `HeightField` isinya kosong: bentuknya datang dari aset, dan yang
+    /// membacanya adalah `ColliderGeometrySource` yang hanya dipegang `Build`.
+    ShapeDesc shape;
+
+    /// Entity ini juga membawa `RigidBodyComponent`.
+    ///
+    /// **False berarti bentuknya tidak disimulasikan sama sekali.** `Build`
+    /// menelusuri benda tegar, bukan collider; sebuah collider sendirian tidak
+    /// pernah sampai ke solver. Itu tidak salah — collider yang belum dipasangi
+    /// benda adalah pekerjaan setengah jalan — tapi ia harus bisa dibedakan dari
+    /// yang sudah, dan satu-satunya petunjuk hari ini adalah ketiadaan.
+    bool simulated = false;
+    /// Bentuk yang menuntut skala seragam sedang tidak mendapatkannya, sehingga
+    /// sumbu terbesarnya yang dipakai — dan yang tergambar bukan yang terlihat.
+    bool nonUniformScale = false;
+};
+
+/// Menghitung penempatan bentuk tabrakan sebuah entity.
+///
+/// **Untuk yang menggambar collider, bukan untuk yang mensimulasikannya.**
+/// Jalurnya sama persis dengan yang dipakai `Build` memberi makan solver —
+/// pemisahan skala, aturan skala seragam untuk bola dan kapsul, geseran
+/// `offset` yang ikut berskala. Menghitungnya ulang di sisi editor berarti dua
+/// aritmetika untuk satu bentuk, dan yang kedua akan menyimpang tepat di kasus
+/// yang paling sulit dilihat: entity berskala tidak seragam dengan collider
+/// yang bergeser.
+///
+/// Mengembalikan false bila entity tidak punya `ColliderComponent`.
+///
+/// `world` tidak const karena `WorldMatrix` menghitung ulang matriks yang basi
+/// saat diminta — aturan yang sama yang berlaku untuk `Build`.
+bool DescribeCollider(scene::World& world, scene::Entity entity, ColliderPlacement& out);
+
+/// Penempatan keempat roda sebuah kendaraan, di ruang lokal chassis-nya.
+///
+/// **Diturunkan dari jarak sumbu dan jarak jejak, bukan diketik satu per satu**
+/// — dan diumumkan di sini dengan alasan yang sama seperti `DescribeCollider`:
+/// yang menggambar roda dan yang membangunnya harus memakai penurunan yang
+/// sama. Empat koordinat yang dihitung dua kali adalah empat kesempatan
+/// menggambar roda di tempat yang bukan tempatnya berada.
+std::vector<VehicleWheelDesc> DescribeVehicleWheels(const scene::VehicleComponent& vehicle);
+
 class PhysicsScene {
 public:
     /// Membangun benda dari seluruh entity ber-`RigidBodyComponent`.

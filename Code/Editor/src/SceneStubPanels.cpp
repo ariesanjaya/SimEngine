@@ -9,7 +9,7 @@
 #include "Sim/Editor/Panel.h"
 #include "Sim/Editor/PanelIds.h"
 #include "Sim/Editor/PanelRegistry.h"
-#include "Sim/Editor/Selection.h"
+#include "Sim/SceneView/Selection.h"
 #include "Sim/Editor/Widgets.h"
 
 #include "Sim/Scene/World.h"

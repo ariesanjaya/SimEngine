@@ -51,10 +51,25 @@ struct SurfaceLobes {
     bool fuzz = true;
     bool anisotropy = true;
     bool diffuseRoughness = true;
+    /// Material memutar sumbu anisotropinya lewat pin `tangent`.
+    bool tangent = true;
+    /// Material memberi coat bingkai sendiri lewat `coatNormal`/`coatTangent`.
+    ///
+    /// **Mati berarti coat memakai bingkai dasar apa adanya**, dan itu bukan
+    /// sekadar penghematan: bingkai coat yang dibangun dari normal geometri
+    /// membuat coat berhenti mengikuti peta normal dasarnya. Untuk material
+    /// yang memang tidak menyatakan apa-apa soal coat-nya, yang benar adalah
+    /// mengikuti — bukan diam-diam menjadi rata.
+    bool coatFrame = true;
 };
 
 struct MaterialCompileResult {
     bool ok = false;
+    /// Domain yang dinyatakan asetnya. `alphaTest` dan `alphaBlend` di bawah
+    /// **diturunkan darinya**, bukan sebaliknya — keduanya dipertahankan karena
+    /// itulah yang dibaca pembangun pipeline, dan mengubah tanda tangannya
+    /// bukan bagian dari perubahan ini.
+    MaterialDomain domain = MaterialDomain::Opaque;
     /// Sumber Slang yang dihasilkan. Terisi juga saat gagal, supaya panel bisa
     /// menampilkan sejauh mana kompilasi sempat berjalan.
     std::string slang;
@@ -124,6 +139,28 @@ struct MaterialCompileOptions {
     /// yang berbeda adalah bentuk descriptor set layout-nya. Lihat G5 di
     /// docs/PLAN-GPU-OPTIM.md.
     bool bindless = false;
+
+    /// Pin keluaran yang isinya ingin **dilihat**, bukan dipakai.
+    ///
+    /// Kosong berarti kompilasi biasa: yang keluar adalah permukaan yang ditulis
+    /// node keluaran. Terisi berarti seluruh permukaan itu diabaikan dan yang
+    /// digambar hanyalah nilai pin ini — sebagai `emissive`, dengan `baseColor`
+    /// nol, sehingga yang terlihat persis angkanya dan bukan angkanya setelah
+    /// dikali cahaya.
+    ///
+    /// **Sebuah pratinjau yang ikut dibayangi berbohong tentang isinya.** Sebuah
+    /// UV yang digeser terhadap x akan tetap bergeser di bawah pencahayaan, tapi
+    /// warnanya tidak lagi bisa dibaca sebagai koordinat, dan justru itu yang
+    /// dicari orang saat membuka pratinjau sebuah node.
+    ///
+    /// Pin bertipe `Texture` disampel lebih dulu dengan `uv0`: yang dimaksud
+    /// orang yang menunjuk node tekstur adalah gambarnya, bukan bahwa ia sebuah
+    /// binding.
+    Uuid previewNode;
+    std::string previewPin;
+
+    /// Apakah opsi ini meminta pratinjau sebuah pin.
+    bool WantsPreview() const { return previewNode.IsValid() && !previewPin.empty(); }
 };
 
 /// Mengompilasi graph material menjadi sumber Slang.

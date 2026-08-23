@@ -256,6 +256,15 @@ std::string AssembleMaterialModule(const std::string& generatedSlang,
     out << "    frame.bitangent = cross(frame.normal, tangent) *\n";
     out << "                      (varying.worldTangent.w < 0.0 ? -1.0 : 1.0);\n\n";
 
+    // **Bingkai coat dibangun sebelum peta normal dasar dipasang.** Spesifikasi
+    // memperlakukan keduanya sebagai dua pelekukan yang berdiri sendiri atas
+    // normal yang sama; membangunnya sesudah akan membuat coat mewarisi lekukan
+    // dasarnya, yaitu persis yang tidak terjadi pada pernis sungguhan.
+    if (options.lobes.coatFrame) {
+        out << "    const ShadingFrame coatFrame = makeCoatFrame(frame, m.coatNormal,\n";
+        out << "                                                 m.coatTangent);\n\n";
+    }
+
     // Normal map bekerja di ruang tangent, jadi ia dipasang sesudah bingkainya
     // ada — dan bingkainya sendiri tidak diputar ulang: yang berubah hanya arah
     // normal yang dipakai lobe, sedangkan sumbu anisotropi tetap milik permukaan.
@@ -265,8 +274,17 @@ std::string AssembleMaterialModule(const std::string& generatedSlang,
     out << "                                 inputs.worldNormal * n.z);\n";
     out << "    }\n\n";
 
-    out << "    float3 lit = evaluateOpenPBR(m.surface, frame, normalize(gLightDirection),\n";
-    out << "                                 gLightRadiance);\n\n";
+    // Sumbu anisotropi diputar sesudah normalnya dipasang, dan hanya kalau
+    // materialnya memang mengemudikannya — yang tidak, tidak membayar apa pun.
+    if (options.lobes.tangent) {
+        out << "    frame.tangent = rotatedTangent(frame, m.tangent);\n";
+        out << "    frame.bitangent = cross(frame.normal, frame.tangent) *\n";
+        out << "                      (varying.worldTangent.w < 0.0 ? -1.0 : 1.0);\n\n";
+    }
+
+    const char* const coatArgument = options.lobes.coatFrame ? "frame, coatFrame" : "frame";
+    out << "    float3 lit = evaluateOpenPBR(m.surface, " << coatArgument << ",\n";
+    out << "                                 normalize(gLightDirection), gLightRadiance);\n\n";
 
     // Lingkungan. Tanpa ini logam hitam di luar sorotannya — benar secara
     // fisika untuk satu cahaya langsung, dan salah sebagai gambar.
@@ -280,18 +298,27 @@ std::string AssembleMaterialModule(const std::string& generatedSlang,
     // Dua pengambilan dari peta yang sama pada mip yang berbeda: base dan coat
     // punya kekasarannya sendiri, dan memakai satu mip untuk keduanya membuat
     // coat yang licin tampak sekasar lapisan di bawahnya.
+    //
+    // Kekasaran dasarnya lewat `coatRoughenedSpecular`, bukan apa adanya —
+    // pengasaran oleh coat harus terlihat di bawah lingkungan persis seperti
+    // di bawah lampu, dan yang memilih mip di sinilah tempat satu-satunya
+    // keputusan itu bisa dipasang.
     out << "    const float3 prefilteredBase = gPrefilteredEnv.SampleLevel(\n";
     out << "        sPrefilteredEnv, reflection,\n";
-    out << "        prefilterMipForRoughness(m.surface.specularRoughness, gPrefilteredMips)).rgb;\n";
+    out << "        prefilterMipForRoughness(coatRoughenedSpecular(m.surface), "
+           "gPrefilteredMips)).rgb;\n";
     out << "    const float3 prefilteredCoat = gPrefilteredEnv.SampleLevel(\n";
-    out << "        sPrefilteredEnv, reflection,\n";
+    out << "        sPrefilteredEnv, "
+        << (options.lobes.coatFrame ? "prefilterDirection(coatFrame)" : "reflection") << ",\n";
     out << "        prefilterMipForRoughness(m.surface.coatRoughness, gPrefilteredMips)).rgb;\n";
     out << "    const float nv = saturate(dot(frame.normal, frame.view));\n";
     out << "    const float2 dfg = gDfgLut.SampleLevel(\n";
-    out << "        sDfgLut, float2(nv, saturate(m.surface.specularRoughness)), 0.0);\n";
-    out << "    lit += evaluateOpenPBR_IBL(m.surface, frame, irradiance, prefilteredBase,\n";
-    out << "                               prefilteredCoat, dfg);\n";
-    out << "    lit += m.emissive;\n";
+    out << "        sDfgLut, float2(nv, saturate(coatRoughenedSpecular(m.surface))), 0.0);\n";
+    out << "    lit += evaluateOpenPBR_IBL(m.surface, " << coatArgument << ", irradiance,\n";
+    out << "                               prefilteredBase, prefilteredCoat, dfg);\n";
+    // Emisi lewat coat, bukan di atasnya — lihat `coatedEmission` di
+    // openpbr.slang. Material tanpa coat mendapat nilainya apa adanya.
+    out << "    lit += coatedEmission(m.surface, m.emissive, nv);\n";
     out << "    return float4(lit, m.opacity);\n";
     out << "}\n";
 
@@ -388,11 +415,15 @@ std::string AssembleForwardMaterialModule(const std::string& generatedSlang,
     out << "    inputs.worldNormal = normalize(input.normal);\n";
     out << "    inputs.viewDirection =\n";
     out << "        normalize(shadowParams.cameraPosition.xyz - input.worldPosition);\n";
-    // Set 0 renderer tidak membawa jam. Material yang menganimasikan dirinya
-    // karena itu diam di viewport — dan yang salah bukan nilainya melainkan
-    // ketiadaannya, jadi ia ditulis nol dan disebutkan, bukan dikarang dari
-    // sesuatu yang kebetulan bergerak.
-    out << "    inputs.time = 0.0;\n\n";
+    // **Set 0 renderer membawa jam sekarang.** Sampai R3 medan ini nol, dan
+    // akibatnya material yang menganimasikan dirinya diam di viewport sementara
+    // pratinjaunya bergerak — dua jawaban untuk satu material, dan yang salah
+    // justru yang dipakai menggambar.
+    //
+    // Jamnya sama dengan yang menggerakkan awan, jadi ia maju menurut delta yang
+    // bisa dipaksakan mode ukur: material beranimasi tetap menghasilkan gambar
+    // yang sama persis di dua kali jalan.
+    out << "    inputs.time = sceneTime();\n\n";
 
     out << "    MaterialSurface m = evalMaterial(inputs);\n\n";
 
@@ -406,6 +437,36 @@ std::string AssembleForwardMaterialModule(const std::string& generatedSlang,
         out << "        discard;\n";
         out << "    }\n\n";
     }
+
+    // Mode clay: material diganti seluruhnya, cahayanya tidak disentuh.
+    //
+    // **Sesudah uji alfa, dan itu bukan kerapian.** Yang menentukan bentuk
+    // material bertopeng adalah fragmen yang dibuangnya; mengganti permukaan
+    // lebih dulu berarti daun pohon menjadi kuad penuh — dan bayangan yang
+    // sedang diperiksa jatuh dari siluet yang salah.
+    //
+    // Yang diganti bukan hanya `baseColor`. Logam memantulkan lingkungannya
+    // alih-alih menaunginya, sorotan spekular terbaca seperti sinar yang jatuh
+    // di tempat yang bukan tempatnya, dan peta normal melekukkan cahaya pada
+    // permukaan yang sebenarnya datar — ketiganya persis hal yang membuat
+    // sebaran bayangan tidak bisa dinilai. `defaults()` sudah menjawab logam,
+    // coat, dan fuzz sekaligus; spekular dimatikan lewat bobotnya karena ia
+    // bukan lobe pilihan, sama seperti yang dilakukan jalur pratinjau node.
+    //
+    // `emissive` ikut nol: permukaan yang menyala sendiri adalah permukaan yang
+    // tidak bisa dibaca bayangannya.
+    out << "    if (clayView()) {\n";
+    out << "        m.surface = OpenPBRSurface::defaults();\n";
+    out << "        m.surface.baseColor = kClayAlbedo;\n";
+    out << "        m.surface.specularWeight = 0.0;\n";
+    // Nol berarti "pakai normal geometri" — sentinel yang sama yang dipakai
+    // cabang normal map di bawah.
+    out << "        m.normal = float3(0.0);\n";
+    out << "        m.tangent = float3(1.0, 0.0, 0.0);\n";
+    out << "        m.coatNormal = float3(0.0, 0.0, 1.0);\n";
+    out << "        m.coatTangent = float3(1.0, 0.0, 0.0);\n";
+    out << "        m.emissive = float3(0.0);\n";
+    out << "    }\n\n";
 
     out << "    ShadingFrame frame;\n";
     out << "    frame.normal = inputs.worldNormal;\n";
@@ -423,16 +484,44 @@ std::string AssembleForwardMaterialModule(const std::string& generatedSlang,
     out << "    frame.bitangent = cross(frame.normal, tangent) *\n";
     out << "                      (input.worldTangent.w < 0.0 ? -1.0 : 1.0);\n\n";
 
+    // Bingkai coat dibangun sebelum peta normal dasar dipasang — lihat catatan
+    // yang sama di `AssembleMaterialModule`.
+    if (options.lobes.coatFrame) {
+        out << "    const ShadingFrame coatFrame = makeCoatFrame(frame, m.coatNormal,\n";
+        out << "                                                 m.coatTangent);\n\n";
+    }
+
     out << "    if (dot(m.normal, m.normal) > 1e-8) {\n";
     out << "        const float3 n = normalize(m.normal);\n";
     out << "        frame.normal = normalize(frame.tangent * n.x + frame.bitangent * n.y +\n";
     out << "                                 inputs.worldNormal * n.z);\n";
     out << "    }\n\n";
 
+    if (options.lobes.tangent) {
+        out << "    frame.tangent = rotatedTangent(frame, m.tangent);\n";
+        out << "    frame.bitangent = cross(frame.normal, frame.tangent) *\n";
+        out << "                      (input.worldTangent.w < 0.0 ? -1.0 : 1.0);\n\n";
+    }
+    const char* const forwardFrames = options.lobes.coatFrame ? "frame, coatFrame" : "frame";
+
     // Bayangan memakai normal **geometri**, bukan normal peta: bias normalnya
     // menggeser titik sampel keluar permukaan, dan menggesernya menurut normal
     // peta membuat bias itu ikut berlekuk — yang terlihat sebagai acne pada
     // permukaan yang normal map-nya kasar.
+    // **Adegan tanpa lampu digambar diffuse-nya apa adanya** — alasan lengkapnya
+    // di `box_shading.slang`, dan keduanya harus sepakat supaya ruas bermaterial
+    // dan ruas jalur-mundur tidak berbeda perlakuan di adegan yang sama.
+    //
+    // `baseWeight` ikut karena ia memang pengali albedo di OpenPBR; emissive ikut
+    // karena ia tidak menuntut cahaya untuk terlihat.
+    // **Mode Unlit masuk lewat cabang yang sama**, dan itu pula yang membuatnya
+    // tidak menuntut varian pipeline kedua per material. Lihat `unlitView()` di
+    // `cluster_common.slang`.
+    out << "    if (unlitView() || !anyLightInScene()) {\n";
+    out << "        return float4(m.surface.baseColor * m.surface.baseWeight + m.emissive,\n";
+    out << "                      m.opacity * input.color.a);\n";
+    out << "    }\n\n";
+
     out << "    const float shadow = (input.flags & kFlagReceiveShadows) != 0u\n";
     out << "                             ? sampleShadow(input.worldPosition, inputs.worldNormal)\n";
     out << "                             : 1.0;\n";
@@ -453,7 +542,8 @@ std::string AssembleForwardMaterialModule(const std::string& generatedSlang,
     out << "                            light)) {\n";
     out << "            continue;\n";
     out << "        }\n";
-    out << "        lit += evaluateOpenPBR(m.surface, frame, light.direction, light.radiance);\n";
+    out << "        lit += evaluateOpenPBR(m.surface, " << forwardFrames
+        << ", light.direction, light.radiance);\n";
     out << "    }\n\n";
 
     // Iradiansi tak-langsung dari screen probe, sama sumbernya dengan
@@ -467,9 +557,11 @@ std::string AssembleForwardMaterialModule(const std::string& generatedSlang,
     // Nol untuk prafilter dan DFG: set 0 renderer tidak memuat keduanya. Lihat
     // catatan di header — yang tersisa suku difusnya, dan logam gelap di luar
     // sorotan langsungnya sampai renderer ikut memanggang IBL.
-    out << "    lit += evaluateOpenPBR_IBL(m.surface, frame, irradiance, float3(0.0),\n";
+    out << "    lit += evaluateOpenPBR_IBL(m.surface, " << forwardFrames
+        << ", irradiance, float3(0.0),\n";
     out << "                               float3(0.0), float2(0.0));\n";
-    out << "    lit += m.emissive;\n";
+    out << "    const float nv = saturate(dot(frame.normal, frame.view));\n";
+    out << "    lit += coatedEmission(m.surface, m.emissive, nv);\n";
     out << "    return float4(lit, m.opacity * input.color.a);\n";
     out << "}\n";
 

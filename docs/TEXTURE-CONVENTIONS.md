@@ -110,18 +110,20 @@ pembaginya harus bekerja di ruang yang sama. Membalik urutannya menghasilkan
 tepi yang salah terang pada setiap tekstur beralfa — dan itu, sekali lagi,
 kesalahan yang tidak muncul sebagai galat.
 
-### Tiga mode, dan material yang menentukannya
+### Empat domain, dan material yang menentukannya
 
 Alfa sebuah tekstur belum menyatakan apa yang harus dilakukan dengannya. Yang
-menyatakannya adalah `alphaMode` di node `output.surface` material:
+menyatakannya adalah **domain** material, dipilih di inspector node
+`output.surface` dan tersimpan sebagai setting `domain`:
 
-| Mode | Yang terjadi | Jalur gambarnya |
+| Domain | Yang terjadi | Jalur gambarnya |
 | --- | --- | --- |
-| *(tidak disetel)* | alfa diabaikan; permukaan pejal | daftar buram |
-| `mask` | fragmen di bawah `alphaCutoff` **dibuang** | daftar buram, keluar dari prepass dan bayangan |
-| `blend` | warnanya **dicampur** menurut alfanya | daftar tersortir, belakang ke depan |
+| `opaque` | alfa diabaikan; permukaan pejal | daftar buram |
+| `masked` | fragmen di bawah `alphaCutoff` **dibuang** | daftar buram, keluar dari prepass dan bayangan |
+| `transparent` | warnanya **dicampur** menurut alfanya | daftar tersortir, belakang ke depan |
+| `decal` | dicampur, dan hanya menawarkan pin yang dimiliki selembar tempelan | daftar tersortir, belakang ke depan |
 
-**Ketiganya berangkat dari alfa yang sama dan berakhir sangat berbeda, jadi
+**Semuanya berangkat dari alfa yang sama dan berakhir sangat berbeda, jadi
 memilih yang salah bukan soal selera.** Yang dibuang kehilangan seluruh
 gradasinya menjadi tepi biner; yang dipadu mempertahankannya. Untuk kotoran,
 noda, dan sapuan tipis bedanya menentukan: yang dipadu mencampur *sedikit*

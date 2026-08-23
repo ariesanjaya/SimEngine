@@ -1,4 +1,4 @@
-#include "Sim/Editor/MaterialPrograms.h"
+#include "Sim/SceneView/MaterialPrograms.h"
 
 #include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Core/Log.h"
@@ -9,7 +9,7 @@
 
 #include <utility>
 
-namespace sim::editor {
+namespace sim::view {
 
 MaterialPrograms::MaterialPrograms(std::filesystem::path shaderCacheDir,
                                    std::filesystem::path shaderDir, TaskPool* tasks)
@@ -282,4 +282,4 @@ std::size_t MaterialPrograms::PendingCount() const {
     return pending;
 }
 
-}  // namespace sim::editor
+}  // namespace sim::view

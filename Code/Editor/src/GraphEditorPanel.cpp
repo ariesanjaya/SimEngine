@@ -474,6 +474,15 @@ private:
         // NoHostExtendX yang menutupnya: tanpa itu lebar luar tabel tetap
         // mengambil ruang yang tersedia walau kolomnya sudah menyesuaikan isi,
         // dan node tetap terukur selebar kanvas.
+        // Label keluaran terlebar node ini; yang lain diganjal supaya ikonnya
+        // sejajar di tepi kanan.
+        float outputLabelWidth = 0.0f;
+        for (const std::size_t index : outputs) {
+            const GraphPin& pin = pins[index];
+            const std::string& text = pin.label.empty() ? pin.name : pin.label;
+            outputLabelWidth = std::max(outputLabelWidth, ImGui::CalcTextSize(text.c_str()).x);
+        }
+
         constexpr ImGuiTableFlags kPinTableFlags =
             ImGuiTableFlags_SizingFixedFit | ImGuiTableFlags_NoHostExtendX;
         if (ImGui::BeginTable("pins", 2, kPinTableFlags)) {
@@ -482,11 +491,11 @@ private:
                 ImGui::TableNextRow();
                 ImGui::TableSetColumnIndex(0);
                 if (row < inputs.size()) {
-                    DrawPin(node, pins[inputs[row]], PinId(id, inputs[row]));
+                    DrawPin(node, pins[inputs[row]], PinId(id, inputs[row]), outputLabelWidth);
                 }
                 ImGui::TableSetColumnIndex(1);
                 if (row < outputs.size()) {
-                    DrawPin(node, pins[outputs[row]], PinId(id, outputs[row]));
+                    DrawPin(node, pins[outputs[row]], PinId(id, outputs[row]), outputLabelWidth);
                 }
             }
             ImGui::EndTable();
@@ -617,17 +626,35 @@ private:
         renamingNode_ = Uuid{};
     }
 
-    void DrawPin(const GraphNode& node, const GraphPin& pin, uint64_t pinId) {
+    void DrawPin(const GraphNode& node, const GraphPin& pin, uint64_t pinId,
+                 float outputLabelWidth) {
         const std::string label = pin.label.empty() ? pin.name : pin.label;
         const bool input = pin.direction == PinDirection::Input;
+        const widgets::PinShape shape = ShapeOf(pin.kind);
+        const bool connected = connectedPins_.count(pinId) != 0;
+
         if (input) {
             canvas_.BeginInputPin(pinId);
+            widgets::PinIcon(shape, connected, ColorOf(pin.kind));
+            ImGui::SameLine();
+            ImGui::TextUnformatted(label.c_str());
         } else {
+            // **Label di kiri ikonnya, dan ikonnya rata kanan.** Sebuah pin
+            // keluaran mengirim ke kanan; ikon yang berada di kiri labelnya
+            // menunjuk balik ke dalam node. Dan ikon yang tidak sejajar —
+            // karena label "result" lebih panjang daripada "a" — membuat tepi
+            // kanan node bergerigi, padahal di situlah mata mencari tempat
+            // menarik kabel.
             canvas_.BeginOutputPin(pinId);
+            const float pad = outputLabelWidth - ImGui::CalcTextSize(label.c_str()).x;
+            if (pad > 0.0f) {
+                ImGui::Dummy(ImVec2(pad, 0.0f));
+                ImGui::SameLine(0.0f, 0.0f);
+            }
+            ImGui::TextUnformatted(label.c_str());
+            ImGui::SameLine();
+            widgets::PinIcon(shape, connected, ColorOf(pin.kind));
         }
-        widgets::PinIcon(ShapeOf(pin.kind), connectedPins_.count(pinId) != 0, ColorOf(pin.kind));
-        ImGui::SameLine();
-        ImGui::TextUnformatted(label.c_str());
         canvas_.EndPin();
 
         // Pin data masukan yang tidak tersambung menampilkan nilainya di sini,

@@ -211,9 +211,9 @@ def main() -> int:
         surface = {"guid": output, "type": "output.surface", "position": [240.0, 80.0]}
         if masked:
             cutoff = material.get("alphaCutoff", 0.5)
-            surface["settings"] = {"alphaMode": "mask", "alphaCutoff": f"{cutoff:.4f}"}
+            surface["settings"] = {"domain": "masked", "alphaCutoff": f"{cutoff:.4f}"}
         elif blended:
-            surface["settings"] = {"alphaMode": "blend"}
+            surface["settings"] = {"domain": "transparent"}
         if pins:
             surface["pins"] = pins
         nodes.insert(0, surface)

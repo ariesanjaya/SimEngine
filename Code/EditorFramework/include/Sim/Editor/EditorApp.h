@@ -12,9 +12,9 @@
 #include "Sim/Editor/Notifications.h"
 #include "Sim/Editor/PanelManager.h"
 #include "Sim/Editor/ProjectLibrary.h"
-#include "Sim/Editor/Selection.h"
+#include "Sim/SceneView/Selection.h"
 #include "Sim/Editor/ToolApproval.h"
-#include "Sim/Editor/SkinnedPreview.h"
+#include "Sim/SceneView/SkinnedPreview.h"
 #include "Sim/Scene/World.h"
 
 #include <filesystem>
@@ -54,6 +54,7 @@ public:
         std::filesystem::path shaderDir;
         render::IViewportRenderer* viewportRenderer = nullptr;
         render::IMaterialPreview* materialPreview = nullptr;
+        render::IMaterialPreview* materialNodePreview = nullptr;
         /// Perender kedua untuk Mesh Editor. Boleh null.
         render::IViewportRenderer* meshPreview = nullptr;
         const FrameLimiter* frameLimiter = nullptr;
@@ -165,6 +166,27 @@ public:
     void Stop();
     bool IsPlaying() const { return playing_; }
 
+    /// Menahan simulasi tanpa membongkarnya.
+    ///
+    /// **Pause bukan Stop yang lebih halus.** Stop membangun ulang dunia dari
+    /// cuplikan yang diambil sebelum Play; Pause tidak menyentuh dunia sama
+    /// sekali — ia hanya berhenti memajukan waktunya. Itulah yang membuatnya
+    /// berguna: keadaan yang sedang diperiksa orang adalah keadaan yang membuat
+    /// ia menekan Pause, dan keadaan itu tidak boleh ikut hilang.
+    ///
+    /// Editor tetap berjalan penuh selama tertahan — panel menggambar, kamera
+    /// terbang, pratinjau material berputar. Yang berhenti hanya jam dunia.
+    void Pause();
+    void Resume();
+    void TogglePause();
+    /// Memajukan simulasi tepat satu langkah, lalu menahannya lagi.
+    ///
+    /// Menahan tanpa bisa melangkah adalah setengah alat: yang dicari orang
+    /// biasanya bukan "apa yang terjadi sekarang" melainkan "apa yang terjadi
+    /// berikutnya". Memanggilnya saat belum tertahan akan menahannya lebih dulu.
+    void StepFrame();
+    bool IsPaused() const { return paused_; }
+
     void CreateStarterLevel();
     bool SaveLevel(const std::filesystem::path& path);
     bool LoadLevel(const std::filesystem::path& path);
@@ -233,6 +255,10 @@ private:
     /// `TaskPool`, dan hasilnya diserahkan ke renderer alih-alih dihitung di
     /// dalamnya.
     std::unique_ptr<assets::MeshSdfBakery> meshSdfBakery_;
+    /// Geometri CPU untuk picking presisi. Umurnya sepanjang aplikasi, seperti
+    /// kedua bakery di atasnya — yang memegangnya adalah BVH yang hidup selama
+    /// level terbuka.
+    std::unique_ptr<assets::MeshGeometryCache> meshGeometry_;
     /// Penjaga shader material, dengan alasan yang sama: ia bekerja di CPU dan
     /// di `TaskPool`, dan yang menyentuh GPU hanyalah langkah terakhirnya di
     /// main thread.
@@ -327,9 +353,16 @@ private:
     WhiteboxStore whiteboxes_;
     TerrainStore terrains_;
     bool playing_ = false;
-    /// Play sedang tertahan sebuah breakpoint graph. Scene tetap tergambar,
-    /// yang berhenti hanyalah OnUpdate.
-    bool pausedAtBreakpoint_ = false;
+    /// Simulasi tertahan — oleh orang lewat Pause, atau oleh breakpoint graph.
+    /// Scene tetap tergambar; yang berhenti adalah jam yang memajukannya.
+    ///
+    /// **Satu bendera untuk kedua sebabnya, dan itu disengaja.** Yang menekan
+    /// Resume setelah sebuah breakpoint dan yang menekan Resume setelah Pause
+    /// meminta hal yang sama persis, dan dua bendera berarti dua jalan untuk
+    /// tertahan sementara hanya satu yang diperiksa di suatu tempat.
+    bool paused_ = false;
+    /// Satu langkah diminta selagi tertahan; dibersihkan begitu dijalankan.
+    bool stepRequested_ = false;
     float autosaveTimer_ = 0.0f;
     bool exitRequested_ = false;
     bool wantsExit_ = false;

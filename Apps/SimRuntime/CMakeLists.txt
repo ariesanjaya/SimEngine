@@ -1,7 +1,12 @@
-# SimRuntime: player. Menautkan EditorFramework hanya karena terjemahan
-# `World` → `ViewportScene` masih tinggal di `SceneView` — utang lapisan yang
-# dicatat di src/main.cpp dan di docs/PLAN-RENDER.md, dan yang harus dibayar
-# sebelum E9 dianggap selesai. Sebuah player tidak seharusnya membawa ImGui.
+# SimRuntime: player.
+#
+# **Tidak ada Sim::EditorFramework di daftar ini, dan itu intinya.** Sampai E9 ia
+# ada di sana — bukan karena player membutuhkan editor, melainkan karena
+# terjemahan `World` → `ViewportScene` kebetulan tinggal di `SceneView` yang ada
+# di dalamnya. Akibatnya sebuah player yang menautkan ImGui, riwayat undo, dan
+# `PanelManager` yang tidak pernah dipanggilnya. Terjemahan itu sekarang punya
+# modulnya sendiri, `Sim::SceneView`, dan yang tersisa di sini adalah yang
+# benar-benar dipakai player.
 set(_sim_runtime_deps
     Sim::Core
     Sim::Platform
@@ -11,7 +16,7 @@ set(_sim_runtime_deps
     Sim::Assets
     Sim::Physics
     Sim::ImageIO
-    Sim::EditorFramework
+    Sim::SceneView
     SDL3::SDL3)
 
 if(SIM_WITH_LUA)

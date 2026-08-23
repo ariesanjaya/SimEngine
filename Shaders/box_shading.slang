@@ -67,6 +67,39 @@ float4 main(BoxVarying input) : SV_Target {
     // persis seperti sebelum jalur ini ada.
     float4 albedo = boxBaseColor(input);
     float3 surface = input.color.rgb * albedo.rgb;
+    // Mode clay: satu albedo untuk semuanya, cahayanya utuh. Di jalur ini itu
+    // saja yang perlu diganti — `box.frag` tidak punya spekular, logam, maupun
+    // peta normal yang bisa ikut mengaburkan bentuk bayangan.
+    //
+    // **Warna instance ikut dibuang, bukan tetap dikalikan.** Ia yang membedakan
+    // warna kotak satu dari kotak lain, dan mode ini ada justru supaya tidak ada
+    // beda warna yang bisa dikira beda pencahayaan.
+    if (clayView()) {
+        surface = kClayAlbedo;
+    }
+
+    // **Adegan tanpa lampu digambar diffuse-nya apa adanya.**
+    //
+    // Sampai sekarang ia tersinari matahari bawaan `ViewportDesc` — cahaya yang
+    // tidak dimiliki entity mana pun, tidak muncul di Outliner, dan tidak bisa
+    // dimatikan. Menghapus lampu terakhir sebuah level karena itu tidak mengubah
+    // apa pun di layar, dan yang mencari dari mana cahayanya datang tidak akan
+    // menemukannya.
+    //
+    // Yang menggantikannya bukan layar hitam. Hitam memang jujur — tanpa cahaya
+    // tidak ada yang dipantulkan — tapi ia menghapus satu-satunya hal yang masih
+    // bisa dikerjakan orang di adegan yang belum punya lampu: melihat bentuk dan
+    // warna yang sudah ia susun. Diffuse datar menjawab keduanya: tidak ada
+    // cahaya yang dikarang, dan tidak ada yang hilang dari layar.
+    //
+    // **Mode Unlit masuk lewat cabang yang sama.** Yang diminta sakelar viewport
+    // persis yang sudah dilakukan cabang ini — albedo datar, tanpa cahaya yang
+    // dikarang — dan menuliskannya sebagai jalur kedua berarti dua definisi
+    // "tanpa cahaya" yang suatu saat berselisih.
+    if (unlitView() || !anyLightInScene()) {
+        return float4(surface, input.color.a * albedo.a);
+    }
+
     float3 lit = surface *
                  (indirect + shadowParams.sunRadiance.rgb * (ndotl * shadow) + punctual);
     return float4(lit, input.color.a * albedo.a);

@@ -2750,6 +2750,64 @@ menerima `irradiance` terpisah, sudah mengalikannya dengan `(1 - E_spec)`, dan
 sudah mengecualikan logam dari lobe difus lewat `lerp(..., metalness)`. Yang
 tersisa hanya menyambungkan sumbernya.
 
+### Cahaya: satu tanda, dan lampu titik yang tidak pernah menyala
+
+**Setiap lampu titik dan sorot di engine ini tidak pernah menyala sejak jalur
+cluster ada**, dan penyebabnya satu tanda. `AssignLights` dan
+`ClusterAssign::Upload` memindahkan lampu ke ruang pandang dengan
+`view * position` — dan `glm::lookAt` tangan-kanan, jadi yang di depan kamera
+bernilai z **negatif**. Kisi cluster mengukur kedalaman sebagai jarak
+**positif**: `ClusterBounds` menulis `box.min.z = depth.x` dari near ke far, dan
+fragment shader menghitung kedalamannya sebagai
+`dot(worldPos - cameraPos, cameraForward)`. Kedua ruang itu cermin satu sama lain.
+
+**Gagalnya tidak terlihat seperti bug.** Lampu di depan kamera pada jarak 8 m
+diuji terhadap kotak yang membentang z = 0,1..100: ia memotong sekumpulan
+cluster di dekat bidang dekat, jadi daftar penetapannya **tidak kosong** dan
+tidak ada satu pun peringatan. Diukur pada Cornell: CPU melaporkan 1.728 dari
+3.456 cluster "berlampu", sementara hanya 0,2% fragmen yang cluster-nya berisi
+lampu. Sapuan brute-force atas seluruh lampu — melewati cluster sepenuhnya —
+menerangi 29,0% fragmen dari kamera yang sama. Selisih 0,2% lawan 29,0% itu yang
+memisahkan "data lampunya salah" dari "pencariannya yang salah".
+
+**Dan dua jalur yang sepakat bukan bukti.** Jalur CPU dan jalur GPU menghasilkan
+gambar yang identik piksel-per-piksel sebelum maupun sesudah perbaikan, karena
+keduanya menyalin aritmetika yang sama — termasuk tandanya. Sekarang keduanya
+memanggil `ToClusterView`, satu konversi untuk satu ruang.
+
+**Uji yang ada tidak bisa menangkapnya** karena semuanya memberi `Mat4(1.0f)`
+sebagai matriks pandang dan menaruh lampunya di z positif — memeriksa penyaringan
+kotak-bola tanpa pernah melewati konversi ruangnya. Sekarang mereka memakai
+`LookAt` sungguhan, ditambah uji kamera yang diputar 90° dan uji kontrak
+`ToClusterView` sendiri. Melepas tandanya menggagalkan 11 assertion.
+
+### Cahaya yang tidak dimiliki siapa pun
+
+`ViewportDesc` membawa `sunDirection` dan `sunRadiance` sebagai nilai mundur
+"selama scene belum benar-benar punya lampu directional". Syarat itu sudah lama
+terpenuhi, dan yang tersisa adalah cacat: **menghapus lampu terakhir sebuah level
+tidak menggelapkan apa pun.** Adegan tetap tersinari matahari radiance 3,0 yang
+tidak dimiliki entity mana pun, tidak muncul di Outliner, dan tidak bisa
+dimatikan — dan orang yang mencari dari mana cahayanya datang tidak akan
+menemukannya.
+
+Keduanya dihapus. Matahari datang dari `FindSunLight(scene.lights)` — directional
+**pertama**, karena cascade hanya ada satu himpunan — dan tidak ada berarti
+radiansi nol.
+
+**Yang menggantikannya bukan layar hitam melainkan diffuse datar.** Hitam memang
+jujur — tanpa cahaya tidak ada yang dipantulkan — tapi ia menghapus satu-satunya
+hal yang masih bisa dikerjakan orang di adegan yang belum punya lampu: melihat
+bentuk dan warna yang sudah ia susun. Adegan tanpa lampu karena itu digambar
+albedo-nya apa adanya: tanpa bayangan, tanpa sorotan, tanpa gradasi. Kedua jalur
+melakukannya di tempat yang sama — `anyLightInScene()` di `cluster_common.slang`,
+dipanggil `box_shading.slang` dan modul material — supaya ruas bermaterial dan
+ruas jalur-mundur tidak berbeda perlakuan di adegan yang sama.
+
+Diukur pada Cornell dari dalam, eksposur tetap: tanpa lampu luminansi maksimumnya
+177 dan permukaannya seragam sempurna (tidak ada gradasi sama sekali); dengan
+lampu titiknya, maksimumnya 255 dengan gradasi dan bayangan.
+
 ## E9 — Runtime & distribusi
 
 **Keadaan · 17 Agustus 2026.** `SimRuntime` dan `SimCook` sudah ada dan
@@ -2762,10 +2820,21 @@ terverifikasi ujung-ke-ujung: cook sebuah project, lalu mainkan hasilnya.
   ImGui, jadi tidak ada player yang mungkin. `--screenshot` membuat player
   memotret dirinya sendiri, yang membuat regresi visual bisa jalan di CI.
 
-  **Utang lapisan yang harus dibayar sebelum E9 selesai:** terjemahan `World` →
-  `ViewportScene` tinggal di `SceneView`, yang ada di `EditorFramework` — jadi
-  player menautkan ImGui, riwayat undo, dan PanelManager yang tidak dipakainya.
-  Yang benar adalah memindahkannya ke modul yang dipakai bersama editor.
+  **Utang lapisannya sudah dibayar.** Terjemahan `World` → `ViewportScene` dulu
+  tinggal di `SceneView` yang ada di `EditorFramework`, jadi player menautkan
+  ImGui, riwayat undo, dan PanelManager yang tidak dipakainya. Sekarang ia modul
+  sendiri, `Sim::SceneView`, bersama simpanan yang dibutuhkannya —
+  `SkinnedPreview`, `TerrainStore`, `WhiteboxStore`, `MaterialPrograms`, dan
+  `Selection` — yang ternyata memang sudah tidak menyebut satu pun tipe editor.
+  Yang tersisa hanya glyph penanda entity, dan itu diisi pemanggilnya sekarang:
+  "entity ini lampu, jadi gambarkan bohlam" adalah pengetahuan editor, seperti
+  yang sudah tertulis di komentar `EntityIcon` bertahun-tahun.
+
+  Diverifikasi dengan cara yang bisa gagal: `SimRuntime` keluar dari gerbang
+  `SIM_BUILD_EDITOR`, dan `EditorFramework` beserta panelnya masuk ke dalamnya.
+  Build `-DSIM_BUILD_EDITOR=OFF` karena itu tidak punya editor untuk dibawa —
+  107 target alih-alih 807 — dan player yang keluar darinya membuka level yang
+  sama dan memotretnya. **Nol simbol `ImGui::` di dalam binarinya.**
 
 - ◐ **Cook/packaging**: pemangkasan aset lewat graf ketergantungan E5 sudah ada
   (`assets::PlanCook` + `SimCook`), ditelusuri dari level yang benar-benar
@@ -2807,7 +2876,8 @@ terverifikasi ujung-ke-ujung: cook sebuah project, lalu mainkan hasilnya.
 - **Audio** (OpenAL Soft di `/home/arie/SDK/openal-soft-1.25.2`): sumber suara 3D,
   bus, mixing.
 - ✅ **Play-in-Editor** yang sesungguhnya: menjalankan world sungguhan dalam proses
-  editor, dengan pemisahan state agar Stop mengembalikan scene ke keadaan awal.
+  editor, dengan pemisahan state agar Stop mengembalikan scene ke keadaan awal,
+  dan **Pause / Step** yang menahan jam dunia tanpa menahan jam editor.
 
   Sudah ada sejak sebelumnya — `Play()` mengambil cuplikan sebelum satu baris
   skrip berjalan, `Stop()` membangun ulang dunia dan seleksi dari cuplikan itu —
@@ -2818,7 +2888,87 @@ terverifikasi ujung-ke-ujung: cook sebuah project, lalu mainkan hasilnya.
   Perbandingannya byte-per-byte, bukan jumlah entity: dunia yang jumlahnya sama
   tapi transform-nya bergeser adalah dunia yang tidak dikembalikan. Diperiksa
   bisa merah — melepas restore-nya menggagalkan tujuh assertion.
+
+  **Dan sampai sekarang tujuh assertion itu tidak pernah benar-benar berjalan di
+  suite penuh.** Sebuah uji lain di binari yang sama memanggil
+  `MainThreadQueue::Drain()` tanpa pernah memanggil `BindMainThread()`; assert-nya
+  memanggil `abort()`, jadi prosesnya mati sebelum uji Play/Stop giliran — dan
+  yang terlihat di terminal bukan uji merah melainkan perintah yang menggantung,
+  karena core dump proses Debug 226 MB butuh menit. Satu baris memperbaikinya;
+  `SimAiToolsTests` sekarang 36/36, 1028 assertion.
+
+  **Pause bukan Stop yang lebih halus.** Stop membangun ulang dunia dari
+  cuplikan; Pause tidak menyentuh dunia sama sekali, ia berhenti memajukan
+  waktunya. Tombolnya mati sejak E2 dengan komentar "menunggu pemisahan waktu
+  simulasi dari waktu editor" — dan itu memang syaratnya: selama `deltaSeconds`
+  satu angka untuk keduanya, Pause hanya bisa berarti "bekukan editornya juga",
+  sehingga keadaan yang ingin diperiksa orang justru tidak bisa diperiksa.
+  Sekarang `Tick` memegang dua jam. Panel, kamera, dan pratinjau material tetap
+  hidup pada `deltaSeconds`; pose animasi, matahari, skrip, dan solver berjalan
+  pada jam dunia yang berhenti saat tertahan.
+
+  Step memajukan jam dunia **satu langkah tetap** (1/60 detik), bukan sebesar
+  frame terakhir: dua langkah yang tidak sama besarnya tidak bisa dipakai
+  membandingkan dua frame berurutan, yang justru gunanya. Diuji dengan bola yang
+  jatuh — satu detik penuh berlalu di editor sementara y-nya tidak bergeser
+  sedikit pun, lalu satu Step menggesernya sekali dan berhenti lagi. Diperiksa
+  bisa merah: melepas gerbangnya menggagalkan dua assertion.
 - Profiler (Tracy), build Windows, dan skrip rilis.
+
+## Garis dasar terukur — Sponza, 23 Agustus 2026
+
+Diukur `SimHeadless --bench`, `linux-clang-release`, RTX 2060, 1280×720, 120 frame
+sesudah 60 pemanasan, GI mati. Adegan `gi-sponza` (NewSponza_Main glTF).
+
+| Pass | Median (ms) | Primitif |
+| --- | ---: | ---: |
+| `shadow-cascades` | **2,438** | 14.955.512 |
+| `forward-opaque` | 0,769 | 3.738.878 |
+| `depth-prepass` | 0,672 | 3.738.878 |
+| `frame` | **4,188** | |
+
+Tiga hal yang dijawab angka ini, dicatat supaya tidak ditemukan ulang dengan
+harga yang sama:
+
+**1. Bayangan adalah pos terbesar, dan bukan tipis-tipis.** `shadow-cascades`
+memakan 58% frame dan menggambar **empat kali** geometri yang terlihat — setiap
+kaskade menggambar ulang seluruh caster. Arah yang belum diperiksa: apakah
+kaskade directional menyaring caster dengan ketelitian yang sama seperti atlas
+point/spot, apakah kaskade jauh perlu digambar ulang setiap frame, dan apakah
+resolusi seragam 2048 untuk keempatnya sudah tepat. **Belum diukur** — ini
+daftar dugaan, bukan temuan.
+
+**2. Tidak ada satu pun geometri bertopeng di adegan ini.** `depth-prepass` dan
+`forward-opaque` memproses primitif yang **sama persis**; kalau ada yang
+bertopeng, prepass akan lebih kecil dan selisihnya adalah geometri yang
+kehilangan early-Z. Sebabnya: **1 dari 28** material Sponza punya opacity
+(`dirt_decal`), dan ia tidak tergambar.
+
+Konsekuensinya untuk keputusan yang sempat ditimbang — membagi material menjadi
+`Opaque | Masked | Transparent | Decal` demi performa: **adegan ini tidak bisa
+membuktikan apa pun tentangnya.** Alasan yang tersisa untuk melakukannya adalah
+kebenaran, bukan kecepatan: material bertopeng hari ini dilewatkan dari prepass
+*dan* dari pass bayangan, jadi ia tidak punya early-Z, tidak menjatuhkan
+bayangan, dan tidak menulis kedalaman — dua permukaan bertopeng yang bertumpuk
+saling menutupi menurut urutan gambar, bukan jarak. Obatnya satu: varian shader
+depth-only ber-uji-alfa, yang justru dibenarkan oleh tipe yang **dinyatakan**
+alih-alih disimpulkan dari graph seperti sekarang (`masked = compiled.alphaTest`).
+
+**3. Importir glTF tidak membaca `alphaMode` sama sekali.** Tidak ada satu pun
+kemunculan `alpha_mode`, `MASK`, atau `BLEND` di `Code/Assets`; yang dibaca hanya
+`material.opacity = pbr.base_color_factor[3]` — sebuah skalar. Alfa dedaunan
+sungguhan tinggal di kanal alfa tekstur base color, dan itu tidak dibaca siapa
+pun.
+
+Akibatnya paket dedaunan Sponza (`pkg_c_trees`, cemara) **tidak bisa dipakai
+menguji jalur bertopeng apa adanya**: materialnya `alphaMode: BLEND` tanpa
+`baseColorFactor`, jadi ia terimpor buram penuh dan setiap kartu daun tergambar
+sebagai persegi panjang solid. Yang harus mendahului uji itu: importir membaca
+`alphaMode`, dan alfa diambil dari kanal tekstur — plus keputusan pengarangan
+apakah dedaunan ber-BLEND boleh ditimpa menjadi MASK lewat `.simmeshcfg`, karena
+BLEND untuk dedaunan lebat mahal sekaligus salah secara visual.
+
+---
 
 ## Keputusan yang sudah dikunci sejak fase editor
 

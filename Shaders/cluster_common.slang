@@ -127,6 +127,72 @@ float sampleAtlasShadow(GpuLight light, float3 worldPosition, float3 normal, flo
     return sum / 9.0;
 }
 
+/// Apakah adegan ini punya sumber cahaya sama sekali.
+///
+/// **Dipakai memutuskan apakah suku ambient penambal berlaku.** Sebuah konstanta
+/// ambient yang menyala tanpa satu pun lampu adalah cahaya yang tidak dimiliki
+/// entity mana pun — tidak muncul di Outliner, tidak bisa disunting, dan tidak
+/// bisa dimatikan. Yang mencarinya tidak akan menemukannya.
+///
+/// Matahari dibaca dari radiansinya, bukan dari arahnya: arah selalu ada (ia
+/// dipakai cascade dan LUT langit apa pun keadaannya), sedangkan radiansi nol
+/// berarti tidak ada directional di scene.
+bool anyLightInScene() {
+    return dot(shadowParams.sunRadiance.rgb, float3(1.0, 1.0, 1.0)) > 0.0 ||
+           shadowParams.clusterCounts.w > 0.5;
+}
+
+/// Apakah viewport sedang meminta tampilan tanpa cahaya.
+///
+/// **Jawabannya dipakai di cabang yang sama dengan `anyLightInScene()`**, dan
+/// itu bukan kebetulan melainkan seluruh alasan mode ini bisa ada tanpa satu pun
+/// shader baru: adegan tanpa lampu sudah digambar albedo datar sejak cahaya
+/// berhenti datang dari matahari bawaan. Jalur itu sudah ditulis, sudah dipakai
+/// `box.frag` maupun setiap material hasil kompilasi graph, dan keduanya sudah
+/// sepakat. Mode Unlit hanyalah jalur yang sama, diminta alih-alih disimpulkan.
+///
+/// Yang tidak ikut hilang: uji alfa. Ia dijalankan sebelum cabang ini di kedua
+/// jalur, jadi material bertopeng tetap berlubang di tempat yang sama —
+/// tampilan tanpa cahaya yang mengubah siluet benda bukan lagi tampilan benda
+/// yang sama.
+bool unlitView() { return shadowParams.viewParams.x > 0.5; }
+
+/// Apakah viewport sedang meminta permukaan seragam — "clay".
+///
+/// **Kebalikan `unlitView()`, dan keduanya memang saling melengkapi.** Yang satu
+/// membuang cahaya dan menyisakan material; yang ini membuang material dan
+/// menyisakan cahaya. Pertanyaan yang dijawabnya juga kebalikan: bukan "warna
+/// mana yang milik material", melainkan "bayangan ini jatuh di mana" — dan
+/// tekstur adalah persis hal yang membuat pertanyaan kedua tidak bisa dijawab,
+/// karena mata tidak bisa memisahkan bercak gelap sebuah peta albedo dari
+/// bercak gelap sebuah bayangan.
+bool clayView() { return shadowParams.viewParams.y > 0.5; }
+
+/// Detik sejak adegan dibuka.
+///
+/// **Nol sampai sekarang, dan itu celah yang disebut sendiri oleh kode yang
+/// membacanya.** Material yang menganimasikan dirinya diam di viewport sementara
+/// pratinjaunya bergerak — dua jawaban untuk satu material, dan yang salah
+/// justru yang dipakai menggambar.
+///
+/// Jamnya sama dengan yang menggerakkan awan, dan itu bukan kebetulan: ia maju
+/// menurut delta yang bisa dipaksakan `ViewportDesc::fixedDeltaSeconds`, jadi
+/// material yang beranimasi tetap menghasilkan gambar yang sama persis di mode
+/// ukur. Jam dinding tersendiri akan membuat setiap gambar acuan berbeda.
+float sceneTime() { return shadowParams.viewParams.z; }
+
+/// Albedo mode clay.
+///
+/// **0,8 dan bukan 1,0.** Tidak ada bahan nyata yang memantulkan seluruh cahaya
+/// yang jatuh padanya, dan permukaan ber-albedo satu memantul berkali-kali di
+/// dalam pantulan tak-langsung tanpa pernah kehilangan energi — yang terlihat
+/// sebagai sudut ruangan yang justru lebih terang daripada bidang terbukanya.
+/// Angka ini juga sudah menjadi `baseColor` bawaan `OpenPBRSurface::defaults()`,
+/// dan keduanya harus tetap sama: jalur bermaterial memakai yang di sana, jalur
+/// mundur memakai yang di sini, dan dua abu-abu yang berbeda di satu adegan
+/// terbaca sebagai dua material.
+static const float3 kClayAlbedo = float3(0.8);
+
 /// Cluster untuk sebuah fragmen. `viewDepth` jarak sepanjang sumbu pandang.
 uint clusterOf(float2 fragCoord, float viewDepth) {
     uint3 counts = uint3(shadowParams.clusterCounts.xyz);

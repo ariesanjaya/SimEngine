@@ -6,7 +6,7 @@
 #include "Sim/Editor/Icons.h"
 #include "Sim/Editor/PanelIds.h"
 #include "Sim/Editor/PanelManager.h"
-#include "Sim/Editor/Selection.h"
+#include "Sim/SceneView/Selection.h"
 #include "Sim/Editor/Widgets.h"
 
 #include <imgui.h>
@@ -234,21 +234,49 @@ void EditorShell::DrawMenuBar(EditorContext& context, PanelManager& panels) {
     }
 
     // Kontrol Play didorong ke kanan menu bar, seperti pada tata letak acuan.
-    const float playControlsWidth = ImGui::GetFontSize() * 7.0f;
+    // Empat tombol sekarang, bukan tiga: sebuah Pause yang tidak bisa dilangkahi
+    // hanya menjawab "apa yang terjadi sekarang", dan yang dicari orang yang
+    // menahan simulasi hampir selalu "apa yang terjadi berikutnya".
+    const float playControlsWidth = ImGui::GetFontSize() * 9.0f;
     ImGui::SameLine(ImGui::GetWindowWidth() - playControlsWidth);
     const bool playing = context.playing;
-    ImGui::BeginDisabled(playing || context.scripts == nullptr);
+    const bool paused = context.paused;
+
+    // **Tidak lagi menuntut Lua.** Aksi `play.start` berhenti menuntutnya ketika
+    // Play mulai menjalankan fisika juga; tombol ini tertinggal, dan akibatnya
+    // sebuah build tanpa Lua punya aksi Play yang hidup di balik tombol Play
+    // yang mati.
+    ImGui::BeginDisabled(playing);
     if (ImGui::SmallButton(icons::kPlay) && context.requestPlay) {
         context.requestPlay();
     }
     ImGui::EndDisabled();
-    widgets::Tooltip(context.scripts == nullptr ? "Lua is not built in" : "Play");
+    widgets::Tooltip("Play (F5)");
 
     ImGui::SameLine();
-    // Pause masih menunggu pemisahan waktu simulasi dari waktu editor (E9).
-    ImGui::BeginDisabled();
-    ImGui::SmallButton(icons::kPause);
+    ImGui::BeginDisabled(!playing);
+    // Ditandai saat tertahan: tanpa itu, satu-satunya petunjuk bahwa simulasi
+    // berhenti adalah bahwa tidak ada yang bergerak — yang tidak bisa dibedakan
+    // dari level yang memang diam.
+    if (paused) {
+        ImGui::PushStyleColor(ImGuiCol_Button, ImGui::GetStyleColorVec4(ImGuiCol_ButtonActive));
+    }
+    if (ImGui::SmallButton(icons::kPause) && context.requestTogglePause) {
+        context.requestTogglePause();
+    }
+    if (paused) {
+        ImGui::PopStyleColor();
+    }
     ImGui::EndDisabled();
+    widgets::Tooltip(paused ? "Resume (F6)" : "Pause (F6)");
+
+    ImGui::SameLine();
+    ImGui::BeginDisabled(!playing);
+    if (ImGui::SmallButton(icons::kStepForward) && context.requestStep) {
+        context.requestStep();
+    }
+    ImGui::EndDisabled();
+    widgets::Tooltip("Step one frame (F7)");
 
     ImGui::SameLine();
     ImGui::BeginDisabled(!playing);
@@ -256,7 +284,7 @@ void EditorShell::DrawMenuBar(EditorContext& context, PanelManager& panels) {
         context.requestStop();
     }
     ImGui::EndDisabled();
-    widgets::Tooltip("Stop and restore the scene");
+    widgets::Tooltip("Stop and restore the scene (Shift+F5)");
 
     ImGui::EndMenuBar();
 }

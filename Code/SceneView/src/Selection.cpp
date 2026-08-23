@@ -1,8 +1,8 @@
-#include "Sim/Editor/Selection.h"
+#include "Sim/SceneView/Selection.h"
 
 #include <algorithm>
 
-namespace sim::editor {
+namespace sim::view {
 
 void Selection::Clear() {
     if (items_.empty()) {
@@ -70,4 +70,4 @@ bool Selection::Contains(SelectionId id) const {
     return std::find(items_.begin(), items_.end(), id) != items_.end();
 }
 
-}  // namespace sim::editor
+}  // namespace sim::view

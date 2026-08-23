@@ -1,12 +1,47 @@
 #include "Sim/Editor/SceneCommands.h"
 
+#include <cmath>
+
 #include "Sim/Editor/EditorContext.h"
-#include "Sim/Editor/Selection.h"
+#include "Sim/SceneView/Selection.h"
 #include "Sim/Scene/Serialization.h"
 
 #include <algorithm>
 
 namespace sim::editor {
+
+scene::TransformComponent ConformToSurface(const scene::TransformComponent& transform,
+                                           const Vec3& surfacePoint, const Vec3& surfaceNormal,
+                                           ConformOrientation orientation, float pivotOffset) {
+    scene::TransformComponent result = transform;
+
+    const float length = glm::length(surfaceNormal);
+    // Normal yang tidak masuk akal tidak boleh menghasilkan rotasi NaN yang
+    // menyebar ke seluruh hierarki di bawahnya. Yang dilakukan: turunkan saja,
+    // tanpa memutar.
+    const Vec3 normal = length > 1e-6f ? surfaceNormal / length : Vec3(0.0f, 1.0f, 0.0f);
+
+    result.position = surfacePoint + normal * pivotOffset;
+
+    if (orientation == ConformOrientation::AlignToNormal) {
+        const Vec3 up = glm::normalize(transform.rotation * Vec3(0.0f, 1.0f, 0.0f));
+        const float alignment = glm::clamp(glm::dot(up, normal), -1.0f, 1.0f);
+        if (alignment < 0.9999f) {
+            // Sudah berlawanan arah persis: sumbu putarnya tidak tertentu, jadi
+            // dipilih satu yang pasti tegak lurus alih-alih menghasilkan
+            // kuaternion NaN.
+            const Vec3 axis = alignment < -0.9999f
+                                  ? glm::normalize(glm::cross(up, std::abs(up.x) < 0.9f
+                                                                     ? Vec3(1.0f, 0.0f, 0.0f)
+                                                                     : Vec3(0.0f, 0.0f, 1.0f)))
+                                  : glm::normalize(glm::cross(up, normal));
+            const float angle = std::acos(alignment);
+            result.rotation = glm::normalize(glm::angleAxis(angle, axis) * transform.rotation);
+        }
+    }
+    return result;
+}
+
 namespace {
 
 /// Mencari entity dari GUID, atau kNullEntity bila sudah tidak ada.

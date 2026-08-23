@@ -1,9 +1,10 @@
 #include "Sim/Editor/EditorApp.h"
 #include "Sim/Editor/ToolApproval.h"
 
+#include "Sim/Assets/MeshGeometryCache.h"
 #include "Sim/Assets/MeshSdfBakery.h"
 #include "Sim/Assets/TextureBakery.h"
-#include "Sim/Editor/MaterialPrograms.h"
+#include "Sim/SceneView/MaterialPrograms.h"
 
 #include "Sim/Platform/FileDialog.h"
 
@@ -38,6 +39,16 @@ namespace {
 
 /// Nama folder skrip editor, relatif terhadap folder aset.
 constexpr std::string_view kEditorScriptFolder = "Editor";
+
+/// Besar satu langkah "Step", detik.
+///
+/// **Tetap, bukan `deltaSeconds` frame terakhir.** Melangkah sebesar frame
+/// terakhir membuat besar langkah bergantung pada seberapa sibuk editor saat
+/// tombolnya ditekan — dan dua langkah yang tidak sama besarnya tidak bisa
+/// dipakai membandingkan dua frame yang berurutan, yang justru gunanya. Angkanya
+/// 60 Hz karena itu laju yang diasumsikan seluruh nilai gameplay yang disetel
+/// orang di editor ini.
+constexpr float kStepSeconds = 1.0f / 60.0f;
 
 extern "C" void OnFatalSignal(int signal) {
     // Ini pelanggaran aturan async-signal-safety yang disengaja dan diketahui:
@@ -77,6 +88,7 @@ bool EditorApp::Initialize(const Config& config) {
     context_.world = &world_;
     context_.viewportRenderer = config.viewportRenderer;
     context_.materialPreview = config.materialPreview;
+    context_.materialNodePreview = config.materialNodePreview;
     context_.meshPreview = config.meshPreview;
     context_.thumbnails = config.thumbnails;
     context_.animation = &animation_;
@@ -105,6 +117,12 @@ bool EditorApp::Initialize(const Config& config) {
                                                             config.tasks,
                                                             assets::MeshSdfSettings{});
     context_.meshSdfBakery = meshSdfBakery_.get();
+    // Ikut `TaskPool`, dengan alasan yang sama seperti bake SDF di atasnya:
+    // mengurai satu FBX memakan ratusan milidetik, dan ratusan milidetik di
+    // dalam penanganan klik adalah editor yang membeku tepat saat seseorang
+    // menunjuk sesuatu.
+    meshGeometry_ = std::make_unique<assets::MeshGeometryCache>(config.tasks);
+    context_.meshGeometry = meshGeometry_.get();
     // Shader material ikut ke `TaskPool`. Satu panggilan `slangc` adalah detik,
     // dan detik di dalam jalur gambar adalah editor yang membeku tepat pada
     // frame sebuah level dibuka — yaitu frame yang paling terasa.
@@ -155,6 +173,8 @@ bool EditorApp::Initialize(const Config& config) {
     context_.requestResetLayout = [this]() { shell_.RequestResetLayout(); };
     context_.requestPlay = [this]() { Play(); };
     context_.requestStop = [this]() { Stop(); };
+    context_.requestTogglePause = [this]() { TogglePause(); };
+    context_.requestStep = [this]() { StepFrame(); };
 
     history_.SetMemoryBudget(64u * 1024u * 1024u);
 
@@ -349,6 +369,24 @@ void EditorApp::RegisterCoreActions() {
                              // fisika juga, dan build tanpa Lua tetap berhak
                              // melihat levelnya bergerak.
                              [this]() { return !playing_; }});
+
+    // F6 dan F7 mengikuti Play di F5, berurutan dan tanpa modifier: yang menekan
+    // ketiganya sedang menatap viewport, bukan mengingat kombinasi.
+    actions_.Register(Action{"play.pause",
+                             "Pause / Resume",
+                             "Run",
+                             icons::kPause,
+                             ImGuiKey_F6,
+                             [this]() { TogglePause(); },
+                             [this]() { return playing_; }});
+
+    actions_.Register(Action{"play.step",
+                             "Step One Frame",
+                             "Run",
+                             icons::kStepForward,
+                             ImGuiKey_F7,
+                             [this]() { StepFrame(); },
+                             [this]() { return playing_; }});
 
     actions_.Register(Action{"play.stop",
                              "Stop",
@@ -1202,6 +1240,26 @@ void EditorApp::Tick(float deltaSeconds) {
         return;
     }
 
+    // **Dua jam, dan inilah yang selama ini hilang.** `deltaSeconds` adalah waktu
+    // editor: panel menggambar dengannya, kamera terbang dengannya, pratinjau
+    // material berputar dengannya. Yang berhak berhenti saat orang menekan Pause
+    // bukan itu melainkan waktu DUNIA — pose animasi, matahari, skrip, solver.
+    // Selama keduanya satu angka, Pause hanya bisa berarti "bekukan editornya
+    // juga", dan tombolnya karena itu dibiarkan mati sejak E2.
+    //
+    // Satu langkah dijalankan dengan durasi tetap, bukan `deltaSeconds`.
+    // Melangkah sebesar frame terakhir membuat besar langkah bergantung pada
+    // seberapa sibuk editor saat tombolnya ditekan — dan sebuah langkah yang
+    // tidak bisa diulang sama besarnya tidak bisa dipakai membandingkan dua
+    // frame yang berurutan, yang justru gunanya.
+    if (stepRequested_ && (!playing_ || !paused_)) {
+        stepRequested_ = false;  // hanya berarti selagi tertahan
+    }
+    const bool stepping = stepRequested_;
+    stepRequested_ = false;
+    const bool frozen = playing_ && paused_ && !stepping;
+    const float worldDelta = stepping ? kStepSeconds : (frozen ? 0.0f : deltaSeconds);
+
     // Mendahului panel: hasil pemindaian latar diterapkan di sini, sehingga
     // seluruh panel dalam frame ini melihat daftar aset yang sama.
     assets_.Update(deltaSeconds);
@@ -1209,14 +1267,14 @@ void EditorApp::Tick(float deltaSeconds) {
     // dikerjakan, editor yang tidak melihat perubahannya menuntut restart untuk
     // setiap suntingan.
     builtinAssets_.Update(deltaSeconds);
-    ApplyTimeOfDay(deltaSeconds);
+    ApplyTimeOfDay(worldDelta);
     if (context_.thumbnails != nullptr) {
         context_.thumbnails->Update();
     }
     // Mendahului panel juga, dan alasannya sama: panel Viewport membaca palet
     // yang dihasilkannya, jadi memajukan waktu SESUDAH panel digambar berarti
     // yang tergambar selalu pose frame sebelumnya.
-    animation_.Update(world_, &assets_, deltaSeconds);
+    animation_.Update(world_, &assets_, worldDelta);
 #if SIM_WITH_LUA
     // Dipasang di frame pertama, bukan di Initialize(). Runtime Lua baru
     // di-Initialize SETELAH EditorApp — ia butuh World dan AssetDatabase yang
@@ -1238,10 +1296,11 @@ void EditorApp::Tick(float deltaSeconds) {
         // yang sedang berjalan tetap diselesaikan, karena menghentikan Lua di
         // tengah tumpukan panggilan butuh debug hook yang belum ada.
         context_.scripts->SetBreakpointHandler([this](const std::string& node) {
-            if (pausedAtBreakpoint_) {
+            if (paused_) {
                 return;
             }
-            pausedAtBreakpoint_ = true;
+            paused_ = true;
+            context_.paused = true;
             notifications_.Info("Paused at graph node " + node.substr(0, 6));
         });
         context_.drawScriptMenu = [this]() { scripting_.DrawMenu(); };
@@ -1251,8 +1310,8 @@ void EditorApp::Tick(float deltaSeconds) {
     // sini, di luar penelusuran daftar panel.
     scripting_.FlushPending();
     ReloadChangedScripts();
-    if (playing_ && !pausedAtBreakpoint_ && context_.scripts != nullptr) {
-        context_.scripts->Update(deltaSeconds);
+    if (playing_ && !frozen && context_.scripts != nullptr) {
+        context_.scripts->Update(worldDelta);
     }
 #endif
 
@@ -1263,8 +1322,8 @@ void EditorApp::Tick(float deltaSeconds) {
     //
     // `Advance` sendiri yang memutuskan berapa langkah muat di dalam
     // `deltaSeconds`, dan sering jawabannya nol.
-    if (playing_ && !pausedAtBreakpoint_) {
-        physics_.Advance(world_, deltaSeconds);
+    if (playing_ && !frozen) {
+        physics_.Advance(world_, worldDelta);
     }
 
 }
@@ -1756,8 +1815,10 @@ void EditorApp::Play() {
     StartPhysics();
 
     playing_ = true;
-    pausedAtBreakpoint_ = false;
+    paused_ = false;
+    stepRequested_ = false;
     context_.playing = true;
+    context_.paused = false;
     notifications_.Info("Play");
 }
 
@@ -1863,6 +1924,47 @@ void EditorApp::StartPhysics() {
     SIM_INFO("Editor", "Physics: {} bodies", stats.bodies);
 }
 
+void EditorApp::Pause() {
+    if (!playing_ || paused_) {
+        return;
+    }
+    paused_ = true;
+    context_.paused = true;
+    stepRequested_ = false;
+    notifications_.Info("Paused");
+}
+
+void EditorApp::Resume() {
+    if (!playing_ || !paused_) {
+        return;
+    }
+    paused_ = false;
+    context_.paused = false;
+    stepRequested_ = false;
+    notifications_.Info("Resumed");
+}
+
+void EditorApp::TogglePause() {
+    if (paused_) {
+        Resume();
+    } else {
+        Pause();
+    }
+}
+
+void EditorApp::StepFrame() {
+    if (!playing_) {
+        return;
+    }
+    // Melangkah dari keadaan berjalan berarti menahannya lebih dulu: yang
+    // diminta orang adalah satu frame, bukan satu frame ditambah semua yang
+    // menyusul sesudahnya.
+    if (!paused_) {
+        Pause();
+    }
+    stepRequested_ = true;
+}
+
 void EditorApp::Stop() {
     if (!playing_) {
         return;
@@ -1901,8 +2003,10 @@ void EditorApp::Stop() {
 
     playSnapshot_.clear();
     playing_ = false;
-    pausedAtBreakpoint_ = false;
+    paused_ = false;
+    stepRequested_ = false;
     context_.playing = false;
+    context_.paused = false;
 
     // Riwayat undo dibersihkan: entri di dalamnya menunjuk keadaan scene sebelum
     // Play, sedangkan scene baru saja dibangun ulang dari nol. Membiarkannya

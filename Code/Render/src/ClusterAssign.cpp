@@ -232,12 +232,14 @@ void ClusterAssign::Upload(uint32_t slot, const ClusterGrid& grid, const Mat4& v
     viewLights_.reserve(lights.size());
     for (const ClusterLight& light : lights) {
         GpuViewLight entry;
-        // Posisi memakai matriks penuh, arah hanya bagian 3x3-nya: translasi
-        // tidak boleh ikut pada vektor arah. Sama persis dengan `AssignLights`.
-        const Vec3 position = Vec3(view * Vec4(light.position, 1.0f));
-        const Vec3 direction = glm::normalize(Mat3(view) * light.direction);
-        entry.positionRange = Vec4(position, std::max(light.range, 0.0f));
-        entry.directionCosOuter = Vec4(direction, light.cosOuterAngle);
+        // **Fungsi yang sama dengan `AssignLights`, bukan salinan yang mirip.**
+        // Yang berbeda di antara keduanya dulu tidak ada — dan justru itu
+        // masalahnya: keduanya salah dengan cara yang sama persis, sehingga
+        // membandingkan jalur CPU dengan jalur GPU menghasilkan gambar yang
+        // identik dan menyimpulkan "keduanya sepakat, berarti benar".
+        const ClusterViewLight placed = ToClusterView(view, light.position, light.direction);
+        entry.positionRange = Vec4(placed.position, std::max(light.range, 0.0f));
+        entry.directionCosOuter = Vec4(placed.direction, light.cosOuterAngle);
         entry.flags = Vec4(light.type == ClusterLightType::Spot ? 1.0f : 0.0f, 0.0f, 0.0f, 0.0f);
         viewLights_.push_back(entry);
     }

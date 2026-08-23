@@ -11,9 +11,9 @@
 #include "Sim/Editor/Panel.h"
 #include "Sim/Editor/PanelIds.h"
 #include "Sim/Editor/PanelRegistry.h"
-#include "Sim/Editor/Selection.h"
+#include "Sim/SceneView/Selection.h"
 #include "Sim/Editor/WhiteboxCommands.h"
-#include "Sim/Editor/WhiteboxStore.h"
+#include "Sim/SceneView/WhiteboxStore.h"
 #include "Sim/Editor/Widgets.h"
 #include "Sim/Scene/Components.h"
 #include "Sim/Whitebox/WhiteboxExport.h"
@@ -73,6 +73,7 @@ public:
 
         DrawSummary(*box);
         ImGui::Separator();
+        DrawSubObjectTools(context, *box, component->whitebox.guid);
         DrawSides(context, *box, component->whitebox.guid);
         ImGui::Separator();
         DrawActions(context, *box, component->whitebox.guid, path);
@@ -86,7 +87,108 @@ private:
     /// juga sah di sini — sorotan akan pindah ke sisi yang tidak pernah diklik.
     static whitebox::PolygonHandle Selected(const EditorContext& context, const Uuid& guid) {
         const SideSelection& side = context.whiteboxes->Selected();
-        return side.asset == guid ? side.polygon : whitebox::PolygonHandle::Invalid;
+        return side.asset == guid ? side.PrimaryPolygon() : whitebox::PolygonHandle::Invalid;
+    }
+
+    /// Operasi yang muncul **menurut jenis yang terpilih**, dan hanya itu.
+    ///
+    /// Perataan tidak berarti apa-apa untuk sebuah sisi, dan penyisipan rusuk
+    /// tidak berarti apa-apa untuk sebuah simpul. Menampilkan seluruhnya dalam
+    /// keadaan setengah-aktif mengajari orang bahwa separuh panel ini memang
+    /// selalu mati — dan yang mereka pelajari berikutnya adalah berhenti
+    /// membacanya.
+    void DrawSubObjectTools(EditorContext& context, whitebox::WhiteboxMesh& box,
+                            const Uuid& guid) {
+        const SideSelection& side = context.whiteboxes->Selected();
+        if (side.asset != guid || side.mode == SubObject::Face) {
+            return;
+        }
+
+        const std::size_t count = side.Count();
+        ImGui::TextUnformatted(side.mode == SubObject::Vertex ? "Vertices" : "Edges");
+        ImGui::SameLine();
+        ImGui::TextDisabled("%zu selected", count);
+
+        if (side.mode == SubObject::Vertex) {
+            DrawVertexTools(context, box, guid, side);
+        } else {
+            DrawEdgeTools(context, box, guid, side);
+        }
+        ImGui::Separator();
+    }
+
+    void DrawVertexTools(EditorContext& context, whitebox::WhiteboxMesh& box, const Uuid& guid,
+                        const SideSelection& side) {
+        // **Ditolak sebelum tombolnya ditekan, bukan sesudahnya.** Perataan
+        // menuntut sekurangnya dua simpul; tombol yang bisa ditekan lalu
+        // menjawab "tidak bisa" adalah tombol yang mengajari orang mengabaikan
+        // pesannya.
+        if (side.vertices.size() < 2) {
+            ImGui::TextDisabled("Align needs at least two vertices.");
+            return;
+        }
+
+        ImGui::TextUnformatted("Align");
+        static const char* kAxisNames[] = {"X", "Y", "Z"};
+        static const char* kModeNames[] = {"Mean", "Min", "Max"};
+        static const whitebox::AlignMode kModes[] = {whitebox::AlignMode::Mean,
+                                                     whitebox::AlignMode::Minimum,
+                                                     whitebox::AlignMode::Maximum};
+        for (int mode = 0; mode < 3; ++mode) {
+            for (int axis = 0; axis < 3; ++axis) {
+                char label[32];
+                std::snprintf(label, sizeof(label), "%s %s##align%d%d", kModeNames[mode],
+                              kAxisNames[axis], mode, axis);
+                if (ImGui::Button(label)) {
+                    ApplyEdit(context, box, guid, "Align Vertices", [&] {
+                        return box.AlignVertices(side.vertices, axis, kModes[mode]);
+                    });
+                }
+                if (axis < 2) {
+                    ImGui::SameLine();
+                }
+            }
+        }
+    }
+
+    void DrawEdgeTools(EditorContext& context, whitebox::WhiteboxMesh& box, const Uuid& guid,
+                       const SideSelection& side) {
+        if (side.edges.size() < 2) {
+            ImGui::TextDisabled("Connect needs at least two edges on one side.");
+            return;
+        }
+        if (ImGui::Button("Connect edges")) {
+            ApplyEdit(context, box, guid, "Connect Edges",
+                      [&] { return box.ConnectEdges(side.edges); });
+        }
+        if (ImGui::IsItemHovered(ImGuiHoveredFlags_ForTooltip)) {
+            ImGui::SetTooltip(
+                "Menyisipkan rusuk yang menghubungkan rusuk terpilih, membelah sisi di "
+                "antaranya menjadi dua — masing-masing bisa dipilih dan diekstrusi sendiri.");
+        }
+    }
+
+    /// Menjalankan sebuah operasi sebagai satu entri undo.
+    ///
+    /// Bentuk sebelum dan sesudah diambil di sini, bukan di dalam operasinya:
+    /// `Operations.h` tidak tahu apa-apa tentang history, dan tidak boleh tahu.
+    template <typename Operation>
+    void ApplyEdit(EditorContext& context, whitebox::WhiteboxMesh& box, const Uuid& guid,
+                   const char* label, Operation&& operation) {
+        const whitebox::WhiteboxData before = box.ToData();
+        const whitebox::EditResult result = operation();
+        if (!result.ok) {
+            if (context.notifications != nullptr && !result.error.empty()) {
+                context.notifications->Warning(result.error);
+            }
+            return;
+        }
+        context.history->Execute(std::make_unique<WhiteboxEditCommand>(
+            context.whiteboxes, guid, before, box.ToData(), label));
+        // Topologi bisa berubah — nomor rusuk dan simpul sesudahnya belum tentu
+        // menunjuk yang sama. Seleksi yang dibiarkan akan menunjuk sesuatu yang
+        // tidak pernah ditunjuk siapa pun.
+        context.whiteboxes->ClearSelection();
     }
 
     void DrawSummary(const whitebox::WhiteboxMesh& box) const {

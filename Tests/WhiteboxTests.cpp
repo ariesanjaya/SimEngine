@@ -1163,3 +1163,494 @@ TEST_CASE("blockout yang diekspor bisa dimuat kembali sebagai mesh biasa") {
 
     std::filesystem::remove_all(directory, ec);
 }
+
+TEST_CASE("Bentuk awal blockout tertutup, menghadap keluar, dan setiap sisinya cembung") {
+    // **Tiga invarian, dan ketiganya tidak terlihat sebagai galat saat dilanggar.**
+    // Tertutup: rumus Euler V - E + F = 2 — bentuk yang salah rakit meninggalkan
+    // rusuk yang hanya dipakai satu sisi, dan yang terlihat adalah lubang.
+    // Menghadap keluar: satu sisi terbalik terbaca sebagai lubang juga, bukan
+    // sebagai galat. Cembung: `BuildMeshData` menyegitiga dengan kipas dari
+    // simpul pertama, jadi sisi bertakik menghasilkan segitiga yang menembus
+    // dirinya sendiri — bentuk yang salah, tanpa satu pun pesan.
+    struct Shape {
+        std::string name;
+        HalfEdgeMesh mesh;
+        /// Volume yang seharusnya, dihitung tangan dari bentuknya.
+        float volume;
+    };
+    std::vector<Shape> shapes;
+    shapes.push_back({"Ramp", MakeUnitRamp(), 0.5f});
+    // Tinggi anak tangga ke-i adalah (i+1)/6 dari alas; jumlahnya 21/36.
+    shapes.push_back({"Stairs", MakeUnitStairs(6), 21.0f / 36.0f});
+    // Segi-12 beraturan berjari-jari 0,5: (1/2)·n·r²·sin(2pi/n) = 0,75.
+    shapes.push_back({"Cylinder", MakeUnitCylinder(12), 0.75f});
+    shapes.push_back({"Cone", MakeUnitCone(12), 0.25f});
+    // Satu anak tangga adalah kotak, dan itu kasus tepi yang paling mudah salah.
+    shapes.push_back({"Stairs(1)", MakeUnitStairs(1), 1.0f});
+    shapes.push_back({"Cylinder(3)", MakeUnitCylinder(3), 0.5f * 3.0f * 0.25f *
+                                                              std::sin(2.0f * kPi / 3.0f)});
+
+    for (const Shape& shape : shapes) {
+        INFO("bentuk " << shape.name);
+        const HalfEdgeMesh& mesh = shape.mesh;
+
+        const MeshCheck check = mesh.CheckInvariants();
+        INFO(check.error);
+        CHECK(check.ok);
+
+        const int euler = static_cast<int>(mesh.VertexCount()) -
+                          static_cast<int>(mesh.EdgeCount()) + static_cast<int>(mesh.FaceCount());
+        INFO("V - E + F = " << euler);
+        CHECK(euler == 2);
+        // Tertutup: tiap rusuk dipakai dua face, tidak ada half-edge batas.
+        CHECK(mesh.HalfEdgeCount() == mesh.EdgeCount() * 2);
+
+        // **Menghadap keluar diuji lewat volume bertandanya, bukan per sisi.**
+        // Bentuk pertama uji ini menanyakan "apakah normal tiap sisi menjauhi
+        // sebuah titik di dalam" — dan itu hanya benar untuk benda cembung.
+        // Tangga tidak cembung: normal tegak anak tangga keempat menunjuk
+        // kembali ke arah titik mana pun yang dipilih di bawahnya, dan uji yang
+        // benar terbaca gagal. Volume bertanda tidak menuntut kecembungan, dan
+        // ia sekaligus mengunci ukurannya: satu sisi terbalik menggeser
+        // angkanya sebesar dua kali sumbangan sisi itu.
+        float volume = 0.0f;
+        for (uint32_t f = 0; f < mesh.FaceCount(); ++f) {
+            const FaceHandle face = static_cast<FaceHandle>(f);
+            const std::vector<VertexHandle> loop = mesh.FaceVertices(face);
+            REQUIRE(loop.size() >= 3);
+
+            const Vec3 first = mesh.GetVertex(loop[0]).position;
+            for (std::size_t i = 1; i + 1 < loop.size(); ++i) {
+                const Vec3 b = mesh.GetVertex(loop[i]).position;
+                const Vec3 c = mesh.GetVertex(loop[i + 1]).position;
+                volume += glm::dot(first, glm::cross(b, c)) / 6.0f;
+            }
+
+            const Vec3 normal = mesh.FaceNormal(face);
+            INFO("sisi " << f);
+
+            // Cembung: setiap belokan berputar ke arah yang sama.
+            for (std::size_t i = 0; i < loop.size(); ++i) {
+                const Vec3 p0 = mesh.GetVertex(loop[i]).position;
+                const Vec3 p1 = mesh.GetVertex(loop[(i + 1) % loop.size()]).position;
+                const Vec3 p2 = mesh.GetVertex(loop[(i + 2) % loop.size()]).position;
+                const Vec3 turn = glm::cross(p1 - p0, p2 - p1);
+                INFO("belokan " << i << " di sisi " << f);
+                CHECK(glm::dot(turn, normal) >= -1e-5f);
+            }
+        }
+
+        INFO("volume " << volume << ", seharusnya " << shape.volume);
+        CHECK(volume == doctest::Approx(shape.volume).epsilon(0.001));
+    }
+}
+
+TEST_CASE("Bentuk awal blockout menghasilkan segitiga yang bisa digambar") {
+    // Topologi yang sah belum tentu menghasilkan mesh: `BuildMeshData` yang
+    // memutuskan, dan ia jalur yang sama yang dipakai viewport dan eksportir.
+    for (const WhiteboxMesh& box : {WhiteboxMesh::MakeRamp(), WhiteboxMesh::MakeStairs(6),
+                                    WhiteboxMesh::MakeCylinder(12), WhiteboxMesh::MakeCone(12)}) {
+        const assets::MeshData data = box.BuildMeshData();
+        CHECK(data.vertices.size() >= 3);
+        REQUIRE(data.indices.size() % 3 == 0);
+        CHECK(data.indices.size() >= 3);
+        CHECK_FALSE(data.parts.empty());
+        for (const uint32_t index : data.indices) {
+            REQUIRE(index < data.vertices.size());
+        }
+    }
+}
+
+// --- W7.1: operasi simpul dan rusuk ------------------------------------------
+
+namespace {
+
+/// Kubus whitebox beserta PolygonSet-nya, siap disunting.
+struct EditableCube {
+    WhiteboxMesh box = WhiteboxMesh::MakeCube();
+};
+
+/// Simpul-simpul yang koordinat sumbunya paling besar. Untuk kubus satuan itu
+/// keempat simpul sisi atas.
+std::vector<VertexHandle> TopVertices(const HalfEdgeMesh& mesh, int axis) {
+    float top = -1e30f;
+    for (uint32_t v = 0; v < mesh.VertexCount(); ++v) {
+        top = std::max(top, mesh.GetVertex(static_cast<VertexHandle>(v)).position[axis]);
+    }
+    std::vector<VertexHandle> result;
+    for (uint32_t v = 0; v < mesh.VertexCount(); ++v) {
+        const VertexHandle handle = static_cast<VertexHandle>(v);
+        if (std::abs(mesh.GetVertex(handle).position[axis] - top) < 1e-5f) {
+            result.push_back(handle);
+        }
+    }
+    return result;
+}
+
+}  // namespace
+
+TEST_CASE("menggeser simpul menggeser tiap sisi yang menyentuhnya") {
+    EditableCube cube;
+    const std::size_t facesBefore = cube.box.Mesh().FaceCount();
+    const std::vector<VertexHandle> top = TopVertices(cube.box.Mesh(), 1);
+    REQUIRE(top.size() == 4);
+
+    const EditResult result =
+        cube.box.TranslateVertices(top,
+                          Vec3(0.0f, 2.0f, 0.0f));
+    REQUIRE(result.ok);
+
+    // Topologinya tidak berubah — yang bergeser bentuknya, bukan susunannya.
+    CHECK(cube.box.Mesh().FaceCount() == facesBefore);
+    CHECK(cube.box.Mesh().VertexCount() == 8);
+    CHECK(cube.box.Mesh().CheckInvariants().ok);
+
+    const std::vector<VertexHandle> movedTop = TopVertices(cube.box.Mesh(), 1);
+    CHECK(movedTop.size() == 4);
+    for (const VertexHandle vertex : movedTop) {
+        CHECK(cube.box.Mesh().GetVertex(vertex).position.y == doctest::Approx(2.5f));
+    }
+}
+
+TEST_CASE("handle kembar tidak menggeser simpul dua kali") {
+    EditableCube cube;
+    const std::vector<VertexHandle> top = TopVertices(cube.box.Mesh(), 1);
+    REQUIRE(!top.empty());
+
+    // Simpul yang sama disebut tiga kali — persis yang bisa keluar dari kotak
+    // seleksi yang menyapu bolak-balik.
+    const std::vector<VertexHandle> repeated{top[0], top[0], top[0]};
+    REQUIRE(cube.box.TranslateVertices(repeated,
+                              Vec3(0.0f, 1.0f, 0.0f))
+                .ok);
+    CHECK(cube.box.Mesh().GetVertex(top[0]).position.y == doctest::Approx(1.5f));
+}
+
+TEST_CASE("perataan simpul punya tiga arti, dan ketiganya berbeda") {
+    const std::vector<VertexHandle> selection{static_cast<VertexHandle>(0),
+                                              static_cast<VertexHandle>(1),
+                                              static_cast<VertexHandle>(2)};
+
+    SUBCASE("ke rata-rata") {
+        EditableCube cube;
+        // Digeser dulu supaya ketiganya punya y yang berbeda: 0.0, 1.0, 2.0.
+        for (int i = 0; i < 3; ++i) {
+            const std::vector<VertexHandle> one{selection[static_cast<std::size_t>(i)]};
+            REQUIRE(cube.box.TranslateVertices(one,
+                                      Vec3(0.0f, static_cast<float>(i), 0.0f))
+                        .ok);
+        }
+        std::array<float, 3> before{};
+        for (int i = 0; i < 3; ++i) {
+            before[static_cast<std::size_t>(i)] =
+                cube.box.Mesh().GetVertex(selection[static_cast<std::size_t>(i)]).position.y;
+        }
+        const float mean = (before[0] + before[1] + before[2]) / 3.0f;
+
+        REQUIRE(cube.box.AlignVertices(selection, 1,
+                              AlignMode::Mean)
+                    .ok);
+        for (const VertexHandle vertex : selection) {
+            CHECK(cube.box.Mesh().GetVertex(vertex).position.y == doctest::Approx(mean));
+        }
+        CHECK(cube.box.Mesh().CheckInvariants().ok);
+    }
+
+    SUBCASE("ke minimum dan ke maksimum menjawab beda") {
+        EditableCube low;
+        EditableCube high;
+        for (int i = 0; i < 3; ++i) {
+            const std::vector<VertexHandle> one{selection[static_cast<std::size_t>(i)]};
+            const Vec3 push(0.0f, static_cast<float>(i), 0.0f);
+            REQUIRE(low.box.TranslateVertices(one, push).ok);
+            REQUIRE(high.box.TranslateVertices(one, push).ok);
+        }
+
+        float minimum = 1e30f;
+        float maximum = -1e30f;
+        for (const VertexHandle vertex : selection) {
+            const float y = low.box.Mesh().GetVertex(vertex).position.y;
+            minimum = std::min(minimum, y);
+            maximum = std::max(maximum, y);
+        }
+        REQUIRE(minimum < maximum);  // kalau sama, uji di bawah tidak menguji apa pun
+
+        REQUIRE(low.box.AlignVertices(selection, 1,
+                              AlignMode::Minimum)
+                    .ok);
+        REQUIRE(high.box.AlignVertices(selection, 1,
+                              AlignMode::Maximum)
+                    .ok);
+        for (const VertexHandle vertex : selection) {
+            CHECK(low.box.Mesh().GetVertex(vertex).position.y == doctest::Approx(minimum));
+            CHECK(high.box.Mesh().GetVertex(vertex).position.y == doctest::Approx(maximum));
+        }
+    }
+
+    SUBCASE("kurang dari dua simpul ditolak, bukan diam-diam tidak melakukan apa-apa") {
+        EditableCube cube;
+        const std::vector<VertexHandle> one{selection[0]};
+        const EditResult result = cube.box.AlignVertices(one, 1, AlignMode::Mean);
+        CHECK_FALSE(result.ok);
+        CHECK_FALSE(result.error.empty());
+    }
+
+    SUBCASE("sumbu di luar 0..2 ditolak") {
+        EditableCube cube;
+        CHECK_FALSE(cube.box.AlignVertices(selection,
+                                  3, AlignMode::Mean)
+                        .ok);
+    }
+}
+
+TEST_CASE("menggeser simpul sepanjang rusuk menaruhnya tepat di garis rusuk itu") {
+    EditableCube cube;
+    const HalfEdgeMesh& mesh = cube.box.Mesh();
+
+    // Rusuk pertama beserta kedua ujungnya.
+    const EdgeHandle edge = static_cast<EdgeHandle>(0);
+    const auto [halfA, halfB] = mesh.EdgeHalfEdges(edge);
+    const VertexHandle moving = mesh.GetHalfEdge(halfA).origin;
+    const VertexHandle anchor = mesh.GetHalfEdge(halfB).origin;
+    const Vec3 start = mesh.GetVertex(moving).position;
+    const Vec3 fixed = mesh.GetVertex(anchor).position;
+
+    REQUIRE(cube.box.SlideVertexAlongEdge(moving,
+                                 edge, 0.25f)
+                .ok);
+
+    const Vec3 after = cube.box.Mesh().GetVertex(moving).position;
+    const Vec3 expected = fixed + (start - fixed) * 0.25f;
+    CHECK(glm::length(after - expected) == doctest::Approx(0.0f).epsilon(1e-5));
+    // Masih di garis rusuknya: selisihnya sejajar arah rusuk semula.
+    CHECK(glm::length(glm::cross(after - fixed, start - fixed)) ==
+          doctest::Approx(0.0f).epsilon(1e-5));
+    CHECK(cube.box.Mesh().CheckInvariants().ok);
+}
+
+TEST_CASE("geser sepanjang rusuk dijepit, dan menolak rusuk yang tidak menyentuhnya") {
+    EditableCube cube;
+    const HalfEdgeMesh& mesh = cube.box.Mesh();
+    const EdgeHandle edge = static_cast<EdgeHandle>(0);
+    const auto [halfA, halfB] = mesh.EdgeHalfEdges(edge);
+    const VertexHandle moving = mesh.GetHalfEdge(halfA).origin;
+    const VertexHandle anchor = mesh.GetHalfEdge(halfB).origin;
+    const Vec3 fixed = mesh.GetVertex(anchor).position;
+
+    SUBCASE("t negatif dijepit ke ujung seberangnya, bukan melewatinya") {
+        REQUIRE(cube.box.SlideVertexAlongEdge(moving,
+                                     edge, -5.0f)
+                    .ok);
+        const Vec3 after = cube.box.Mesh().GetVertex(moving).position;
+        CHECK(glm::length(after - fixed) == doctest::Approx(0.0f).epsilon(1e-5));
+    }
+
+    SUBCASE("rusuk yang tidak menyentuh simpul itu ditolak") {
+        // Cari rusuk yang tidak memuat `moving` sama sekali.
+        EdgeHandle unrelated = EdgeHandle::Invalid;
+        for (uint32_t e = 0; e < mesh.EdgeCount(); ++e) {
+            const auto [x, y] = mesh.EdgeHalfEdges(static_cast<EdgeHandle>(e));
+            if (mesh.GetHalfEdge(x).origin != moving && mesh.GetHalfEdge(y).origin != moving) {
+                unrelated = static_cast<EdgeHandle>(e);
+                break;
+            }
+        }
+        REQUIRE(IsValid(unrelated));
+        const EditResult result =
+            cube.box.SlideVertexAlongEdge(moving, unrelated, 0.5f);
+        CHECK_FALSE(result.ok);
+        CHECK_FALSE(result.error.empty());
+    }
+}
+
+TEST_CASE("memecah rusuk menambah satu simpul dan menaikkan derajat kedua tetangganya") {
+    EditableCube cube;
+    const std::size_t verticesBefore = cube.box.Mesh().VertexCount();
+    const std::size_t facesBefore = cube.box.Mesh().FaceCount();
+
+    const EdgeHandle edge = static_cast<EdgeHandle>(0);
+    const auto [faceA, faceB] = cube.box.Mesh().EdgeFaces(edge);
+    REQUIRE(IsValid(faceA));
+    REQUIRE(IsValid(faceB));
+    const std::size_t degreeA = cube.box.Mesh().FaceVertices(faceA).size();
+    const std::size_t degreeB = cube.box.Mesh().FaceVertices(faceB).size();
+
+    const std::array<EdgeHandle, 1> edges{edge};
+    REQUIRE(cube.box.SplitEdges(edges).ok);
+
+    CHECK(cube.box.Mesh().VertexCount() == verticesBefore + 1);
+    // **Face tidak bertambah**: yang disisipkan simpul, bukan rusuk yang memecah
+    // sisinya. Itu yang membedakan operasi ini dari penyisipan loop.
+    CHECK(cube.box.Mesh().FaceCount() == facesBefore);
+    CHECK(cube.box.Mesh().FaceVertices(faceA).size() == degreeA + 1);
+    CHECK(cube.box.Mesh().FaceVertices(faceB).size() == degreeB + 1);
+    CHECK(cube.box.Mesh().CheckInvariants().ok);
+}
+
+TEST_CASE("memecah dua rusuk pada face yang sama menaikkan derajatnya dua") {
+    EditableCube cube;
+    const FaceHandle face = static_cast<FaceHandle>(0);
+    const std::size_t degree = cube.box.Mesh().FaceVertices(face).size();
+
+    // Dua rusuk berbeda milik face yang sama.
+    const std::vector<HalfEdgeHandle> loop = cube.box.Mesh().FaceHalfEdges(face);
+    REQUIRE(loop.size() >= 4);
+    const std::array<EdgeHandle, 2> edges{cube.box.Mesh().HalfEdgeEdge(loop[0]),
+                                          cube.box.Mesh().HalfEdgeEdge(loop[2])};
+    REQUIRE(edges[0] != edges[1]);
+
+    REQUIRE(cube.box.SplitEdges(edges).ok);
+    CHECK(cube.box.Mesh().FaceVertices(face).size() == degree + 2);
+    CHECK(cube.box.Mesh().VertexCount() == 10);
+    CHECK(cube.box.Mesh().CheckInvariants().ok);
+}
+
+TEST_CASE("rusuk yang sama disebut dua kali hanya dipecah sekali") {
+    EditableCube cube;
+    const std::array<EdgeHandle, 2> repeated{static_cast<EdgeHandle>(0),
+                                             static_cast<EdgeHandle>(0)};
+    REQUIRE(cube.box.SplitEdges(repeated).ok);
+    CHECK(cube.box.Mesh().VertexCount() == 9);
+    CHECK(cube.box.Mesh().CheckInvariants().ok);
+}
+
+TEST_CASE("suntingan simpul mempertahankan pengelompokan poligon") {
+    // Kubus tersegitigakan: enam poligon dari dua belas face. Menggeser simpul
+    // tidak boleh memecahnya kembali menjadi dua belas — seleksi dan material
+    // per-sisi keduanya bergantung padanya.
+    WhiteboxMesh box = WhiteboxMesh::MakeTriangulatedCube();
+    // Lahir dengan satu poligon per face; penggabungan sebidang yang
+    // mengembalikan keenam sisinya adalah operasi tersendiri — lihat W1.
+    REQUIRE(box.Polygons().PolygonCount() == 12);
+    REQUIRE(box.MergeCoplanar() == 6);
+    const std::size_t polygonsBefore = box.Polygons().PolygonCount();
+    REQUIRE(polygonsBefore == 6);
+
+    const std::vector<VertexHandle> top = TopVertices(box.Mesh(), 1);
+    REQUIRE(box.TranslateVertices(top,
+                              Vec3(0.0f, 1.0f, 0.0f))
+                .ok);
+    CHECK(box.Polygons().PolygonCount() == polygonsBefore);
+    CHECK(box.Mesh().CheckInvariants().ok);
+}
+
+TEST_CASE("menghubungkan dua rusuk berseberangan membelah quad menjadi dua quad") {
+    // **Inilah alur kerja yang diminta**: belah dinding, lalu ekstrusi salah satu
+    // belahannya menjadi kusen. Kalau uji ini lulus, alurnya berjalan.
+    EditableCube cube;
+    const std::size_t facesBefore = cube.box.Mesh().FaceCount();
+
+    const FaceHandle face = static_cast<FaceHandle>(0);
+    const std::vector<HalfEdgeHandle> loop = cube.box.Mesh().FaceHalfEdges(face);
+    REQUIRE(loop.size() == 4);
+
+    // Rusuk 0 dan 2: berseberangan pada quad.
+    const std::array<EdgeHandle, 2> opposite{cube.box.Mesh().HalfEdgeEdge(loop[0]),
+                                             cube.box.Mesh().HalfEdgeEdge(loop[2])};
+    REQUIRE(opposite[0] != opposite[1]);
+
+    const EditResult connected = cube.box.ConnectEdges(opposite);
+    INFO(connected.error);
+    REQUIRE(connected.ok);
+
+    // Satu face menjadi dua; kedua tetangga rusuk yang dipecah naik derajatnya.
+    CHECK(cube.box.Mesh().FaceCount() == facesBefore + 1);
+    CHECK(cube.box.Mesh().VertexCount() == 10);
+    CHECK(cube.box.Mesh().CheckInvariants().ok);
+
+    // **Keduanya quad**, bukan segitiga plus segilima — itu yang membuatnya
+    // berguna untuk diekstrusi.
+    CHECK(cube.box.Mesh().FaceVertices(face).size() == 4);
+    const FaceHandle sibling = static_cast<FaceHandle>(cube.box.Mesh().FaceCount() - 1);
+    CHECK(cube.box.Mesh().FaceVertices(sibling).size() == 4);
+
+    // Rusuk barunya sungguhan: dua belas rusuk kubus, plus dua dari pemecahan,
+    // plus satu yang menghubungkannya.
+    CHECK(cube.box.Mesh().EdgeCount() == 15);
+}
+
+TEST_CASE("belahan menjadi poligon terpisah, dan masing-masing bisa diekstrusi") {
+    EditableCube cube;
+    const FaceHandle face = static_cast<FaceHandle>(0);
+    const std::vector<HalfEdgeHandle> loop = cube.box.Mesh().FaceHalfEdges(face);
+    const std::array<EdgeHandle, 2> opposite{cube.box.Mesh().HalfEdgeEdge(loop[0]),
+                                             cube.box.Mesh().HalfEdgeEdge(loop[2])};
+    REQUIRE(cube.box.ConnectEdges(opposite).ok);
+
+    const FaceHandle sibling = static_cast<FaceHandle>(cube.box.Mesh().FaceCount() - 1);
+    const PolygonHandle first = cube.box.Polygons().FacePolygon(face);
+    const PolygonHandle second = cube.box.Polygons().FacePolygon(sibling);
+    REQUIRE(IsValid(first));
+    REQUIRE(IsValid(second));
+    // **Terpisah**: kalau keduanya satu poligon, rusuk barunya tersembunyi dan
+    // tidak ada yang bisa memilih separuh dinding.
+    CHECK(first != second);
+
+    // Dan separuhnya benar-benar bisa didorong sendiri.
+    const std::size_t before = cube.box.Mesh().FaceCount();
+    const EditResult extruded = cube.box.Extrude(second, 0.5f);
+    INFO(extruded.error);
+    REQUIRE(extruded.ok);
+    CHECK(cube.box.Mesh().FaceCount() > before);
+    CHECK(cube.box.Mesh().CheckInvariants().ok);
+}
+
+TEST_CASE("menghubungkan dua rusuk bersebelahan menghasilkan segitiga dan segilima") {
+    EditableCube cube;
+    const FaceHandle face = static_cast<FaceHandle>(0);
+    const std::vector<HalfEdgeHandle> loop = cube.box.Mesh().FaceHalfEdges(face);
+    const std::array<EdgeHandle, 2> adjacent{cube.box.Mesh().HalfEdgeEdge(loop[0]),
+                                             cube.box.Mesh().HalfEdgeEdge(loop[1])};
+    REQUIRE(cube.box.ConnectEdges(adjacent).ok);
+
+    const FaceHandle sibling = static_cast<FaceHandle>(cube.box.Mesh().FaceCount() - 1);
+    const std::size_t a = cube.box.Mesh().FaceVertices(face).size();
+    const std::size_t b = cube.box.Mesh().FaceVertices(sibling).size();
+    CHECK(std::min(a, b) == 3);
+    CHECK(std::max(a, b) == 5);
+    CHECK(cube.box.Mesh().CheckInvariants().ok);
+}
+
+TEST_CASE("sisi yang menyentuh lebih dari dua rusuk terpilih ditolak seluruhnya") {
+    EditableCube cube;
+    const FaceHandle face = static_cast<FaceHandle>(0);
+    const std::vector<HalfEdgeHandle> loop = cube.box.Mesh().FaceHalfEdges(face);
+    REQUIRE(loop.size() == 4);
+
+    std::array<EdgeHandle, 3> tooMany{cube.box.Mesh().HalfEdgeEdge(loop[0]),
+                                      cube.box.Mesh().HalfEdgeEdge(loop[1]),
+                                      cube.box.Mesh().HalfEdgeEdge(loop[2])};
+    const std::size_t facesBefore = cube.box.Mesh().FaceCount();
+    const std::size_t verticesBefore = cube.box.Mesh().VertexCount();
+
+    const EditResult result = cube.box.ConnectEdges(tooMany);
+    CHECK_FALSE(result.ok);
+    CHECK_FALSE(result.error.empty());
+    // **Dibatalkan seluruhnya**, bukan setengah diterapkan: mesh yang separuh
+    // tersunting adalah mesh yang tidak bisa dikembalikan dengan satu Ctrl+Z.
+    CHECK(cube.box.Mesh().FaceCount() == facesBefore);
+    CHECK(cube.box.Mesh().VertexCount() == verticesBefore);
+    CHECK(cube.box.Mesh().CheckInvariants().ok);
+}
+
+TEST_CASE("membelah berulang membangun kisi") {
+    // Kisi dibuat dengan memanggilnya berulang, bukan dengan memilih empat rusuk
+    // sekaligus — itu yang ditolak uji di atas. Di sinilah alasannya terbayar.
+    EditableCube cube;
+    FaceHandle face = static_cast<FaceHandle>(0);
+
+    for (int round = 0; round < 3; ++round) {
+        const std::vector<HalfEdgeHandle> loop = cube.box.Mesh().FaceHalfEdges(face);
+        REQUIRE(loop.size() == 4);
+        const std::array<EdgeHandle, 2> opposite{cube.box.Mesh().HalfEdgeEdge(loop[0]),
+                                                 cube.box.Mesh().HalfEdgeEdge(loop[2])};
+        const EditResult result = cube.box.ConnectEdges(opposite);
+        INFO("putaran " << round << ": " << result.error);
+        REQUIRE(result.ok);
+        CHECK(cube.box.Mesh().CheckInvariants().ok);
+        // Belahan pertama mewarisi nomornya, jadi ia tetap bisa dibelah lagi.
+    }
+
+    // Enam sisi kubus, satu di antaranya terbelah tiga kali menjadi empat.
+    CHECK(cube.box.Mesh().FaceCount() == 9);
+}

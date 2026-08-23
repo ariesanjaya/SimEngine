@@ -31,6 +31,24 @@ WhiteboxMesh WhiteboxMesh::MakeCube() {
     return box;
 }
 
+WhiteboxMesh WhiteboxMesh::FromMesh(HalfEdgeMesh mesh) {
+    WhiteboxMesh out;
+    out.mesh_ = std::move(mesh);
+    out.polygons_.Reset(out.mesh_);
+    out.polygonMaterial_.assign(out.mesh_.FaceCount(), kNoMaterial);
+    return out;
+}
+
+WhiteboxMesh WhiteboxMesh::MakeRamp() { return FromMesh(MakeUnitRamp()); }
+
+WhiteboxMesh WhiteboxMesh::MakeStairs(uint32_t steps) { return FromMesh(MakeUnitStairs(steps)); }
+
+WhiteboxMesh WhiteboxMesh::MakeCylinder(uint32_t sides) {
+    return FromMesh(MakeUnitCylinder(sides));
+}
+
+WhiteboxMesh WhiteboxMesh::MakeCone(uint32_t sides) { return FromMesh(MakeUnitCone(sides)); }
+
 WhiteboxMesh WhiteboxMesh::MakeTriangulatedCube() {
     WhiteboxMesh box;
     box.mesh_ = MakeUnitCubeTriangulated();
@@ -65,6 +83,53 @@ EditResult WhiteboxMesh::Extrude(PolygonHandle polygon, float distance) {
 EditResult WhiteboxMesh::Translate(PolygonHandle polygon, const Vec3& displacement) {
     const std::vector<uint32_t> before = Snapshot(mesh_, polygons_);
     EditResult result = TranslatePolygon(mesh_, polygons_, polygon, displacement);
+    if (result.ok) {
+        RemapMaterials(before);
+    }
+    return result;
+}
+
+EditResult WhiteboxMesh::TranslateVertices(std::span<const VertexHandle> vertices,
+                                           const Vec3& displacement) {
+    const std::vector<uint32_t> before = Snapshot(mesh_, polygons_);
+    EditResult result = whitebox::TranslateVertices(mesh_, polygons_, vertices, displacement);
+    if (result.ok) {
+        RemapMaterials(before);
+    }
+    return result;
+}
+
+EditResult WhiteboxMesh::AlignVertices(std::span<const VertexHandle> vertices, int axis,
+                                       AlignMode mode) {
+    const std::vector<uint32_t> before = Snapshot(mesh_, polygons_);
+    EditResult result = whitebox::AlignVertices(mesh_, polygons_, vertices, axis, mode);
+    if (result.ok) {
+        RemapMaterials(before);
+    }
+    return result;
+}
+
+EditResult WhiteboxMesh::SlideVertexAlongEdge(VertexHandle vertex, EdgeHandle edge, float t) {
+    const std::vector<uint32_t> before = Snapshot(mesh_, polygons_);
+    EditResult result = whitebox::SlideVertexAlongEdge(mesh_, polygons_, vertex, edge, t);
+    if (result.ok) {
+        RemapMaterials(before);
+    }
+    return result;
+}
+
+EditResult WhiteboxMesh::SplitEdges(std::span<const EdgeHandle> edges) {
+    const std::vector<uint32_t> before = Snapshot(mesh_, polygons_);
+    EditResult result = whitebox::SplitEdges(mesh_, polygons_, edges);
+    if (result.ok) {
+        RemapMaterials(before);
+    }
+    return result;
+}
+
+EditResult WhiteboxMesh::ConnectEdges(std::span<const EdgeHandle> edges) {
+    const std::vector<uint32_t> before = Snapshot(mesh_, polygons_);
+    EditResult result = whitebox::ConnectEdges(mesh_, polygons_, edges);
     if (result.ok) {
         RemapMaterials(before);
     }

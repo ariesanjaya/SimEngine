@@ -15,22 +15,21 @@ sim_add_library(EditorFramework
         src/NodeGraph.cpp
         src/Notifications.cpp
         src/SceneCommands.cpp
-        src/MaterialPrograms.cpp
-        src/SceneView.cpp
-        src/SkinnedPreview.cpp
         src/SourceImport.cpp
         src/PanelManager.cpp
         src/PropertyGrid.cpp
         src/PanelRegistry.cpp
         src/ProjectLibrary.cpp
-        src/Selection.cpp
-        src/TerrainStore.cpp
         src/TextureSettingsCommand.cpp
         src/ToolApproval.cpp
         src/Widgets.cpp
         src/WhiteboxCommands.cpp
-        src/WhiteboxStore.cpp
     PUBLIC_DEPS
+        # Terjemahan `World` → `ViewportScene` beserta simpanannya. PUBLIC karena
+        # `EditorContext.h` memegang penunjuk ke `view::Selection`,
+        # `view::TerrainStore`, dan `view::WhiteboxStore` — setiap panel
+        # melihatnya.
+        Sim::SceneView
         # Tool MCP yang dilayani editor didaftarkan di sini. PUBLIC karena
         # `AiTools.h` menyebut `ai::ToolRegistry` di tanda tangannya — yang
         # memanggilnya adalah composition root, dan ia perlu tipe itu.

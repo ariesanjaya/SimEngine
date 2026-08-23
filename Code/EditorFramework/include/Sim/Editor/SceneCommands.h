@@ -9,9 +9,13 @@
 #include <string>
 #include <vector>
 
+namespace sim::view {
+class Selection;
+}
+
 namespace sim::editor {
 
-class Selection;
+using view::Selection;
 
 /// Perintah yang dipakai bersama oleh Outliner, Inspector, dan Viewport.
 ///
@@ -19,6 +23,33 @@ class Selection;
 /// menghidupkan kembali entity yang sudah dihapus, dan entt boleh memakai ulang
 /// nomor entity yang sama untuk objek yang sama sekali berbeda. GUID adalah
 /// satu-satunya identitas yang bertahan melewati siklus hapus–undo.
+
+/// Ke mana sebuah benda menghadap sesudah dijatuhkan.
+enum class ConformOrientation : uint8_t {
+    /// Rotasinya dibiarkan. Yang dijatuhkan hanya turun.
+    Keep,
+    /// Sumbu atasnya diputar mengikuti normal permukaan.
+    ///
+    /// **Putaran terpendek, bukan bingkai baru.** Menyusun bingkai dari normal
+    /// dan sebuah sumbu bantu membuang seluruh orientasi yang sudah disetel
+    /// orang — sebuah kursi yang menghadap pintu akan menghadap ke arah acak
+    /// begitu dijatuhkan. Putaran terpendek dari sumbu atas lama ke normal
+    /// mempertahankan arah hadapnya sebisa mungkin.
+    AlignToNormal,
+};
+
+/// Transform baru sebuah benda yang dijatuhkan ke sebuah permukaan.
+///
+/// Fungsi bebas, dan bukan bagian perintahnya: yang di sini murni geometri, dan
+/// memisahkannya membuat perilakunya bisa diuji tanpa dunia, tanpa seleksi, dan
+/// tanpa history.
+///
+/// `pivotOffset` adalah jarak dari titik asal transform ke sisi bawah bendanya,
+/// sepanjang normal — nol berarti titik asalnya menempel di permukaan.
+scene::TransformComponent ConformToSurface(const scene::TransformComponent& transform,
+                                           const Vec3& surfacePoint, const Vec3& surfaceNormal,
+                                           ConformOrientation orientation,
+                                           float pivotOffset = 0.0f);
 
 /// Mengubah transform sejumlah entity sekaligus.
 ///

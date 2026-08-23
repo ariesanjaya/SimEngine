@@ -1,7 +1,11 @@
 #include "Sim/Whitebox/HalfEdgeMesh.h"
 
 #include <algorithm>
+#include <cmath>
+#include <map>
 #include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace sim::whitebox {
 namespace {
@@ -407,6 +411,130 @@ HalfEdgeMesh MakeUnitCube() {
     mesh.AddFace({v[0], v[4], v[7], v[3]});  // -X kiri
     mesh.AddFace({v[7], v[6], v[2], v[3]});  // +Y atas
     mesh.AddFace({v[0], v[1], v[5], v[4]});  // -Y bawah
+
+    mesh.FinalizeBoundaries();
+    return mesh;
+}
+
+HalfEdgeMesh MakeUnitRamp() {
+    HalfEdgeMesh mesh;
+    // Enam simpul: alas persegi, ditambah satu rusuk di atas sisi belakang.
+    const VertexHandle v[6] = {
+        mesh.AddVertex(Vec3(-0.5f, -0.5f, -0.5f)),  // 0 alas depan kiri
+        mesh.AddVertex(Vec3(0.5f, -0.5f, -0.5f)),   // 1 alas depan kanan
+        mesh.AddVertex(Vec3(0.5f, -0.5f, 0.5f)),    // 2 alas belakang kanan
+        mesh.AddVertex(Vec3(-0.5f, -0.5f, 0.5f)),   // 3 alas belakang kiri
+        mesh.AddVertex(Vec3(-0.5f, 0.5f, 0.5f)),    // 4 puncak kiri
+        mesh.AddVertex(Vec3(0.5f, 0.5f, 0.5f)),     // 5 puncak kanan
+    };
+
+    mesh.AddFace({v[0], v[1], v[2], v[3]});  // -Y alas
+    mesh.AddFace({v[3], v[2], v[5], v[4]});  // +Z dinding belakang
+    mesh.AddFace({v[0], v[4], v[5], v[1]});  // bidang miring
+    mesh.AddFace({v[0], v[3], v[4]});        // -X sisi kiri
+    mesh.AddFace({v[1], v[5], v[2]});        // +X sisi kanan
+
+    mesh.FinalizeBoundaries();
+    return mesh;
+}
+
+HalfEdgeMesh MakeUnitStairs(uint32_t steps) {
+    const uint32_t count = std::clamp(steps, 1u, 64u);
+    const auto n = static_cast<float>(count);
+    HalfEdgeMesh mesh;
+
+    // Bidang z dan tingkat y, keduanya `count + 1` buah dan berjarak sama.
+    const auto planeZ = [n](uint32_t j) { return -0.5f + static_cast<float>(j) / n; };
+    const auto levelY = [n](uint32_t k) { return -0.5f + static_cast<float>(k) / n; };
+
+    // Simpul dibuat saat diminta, bukan sebagai kisi penuh: kisi penuh
+    // meninggalkan simpul yang tidak dipakai sisi mana pun, dan simpul terpencil
+    // merusak V - E + F = 2 tanpa mengubah apa pun yang terlihat.
+    std::map<std::pair<uint32_t, uint32_t>, VertexHandle> left;
+    std::map<std::pair<uint32_t, uint32_t>, VertexHandle> right;
+    const auto at = [&](bool onLeft, uint32_t j, uint32_t k) {
+        auto& table = onLeft ? left : right;
+        const auto key = std::make_pair(j, k);
+        const auto found = table.find(key);
+        if (found != table.end()) {
+            return found->second;
+        }
+        const VertexHandle handle =
+            mesh.AddVertex(Vec3(onLeft ? -0.5f : 0.5f, levelY(k), planeZ(j)));
+        table.emplace(key, handle);
+        return handle;
+    };
+
+    for (uint32_t i = 0; i < count; ++i) {
+        // Sisi kiri dan kanan kolom ini, satu quad per tingkat sampai puncaknya.
+        for (uint32_t k = 0; k <= i; ++k) {
+            mesh.AddFace({at(true, i, k), at(true, i + 1, k), at(true, i + 1, k + 1),
+                          at(true, i, k + 1)});
+            mesh.AddFace({at(false, i + 1, k), at(false, i, k), at(false, i, k + 1),
+                          at(false, i + 1, k + 1)});
+        }
+        // Alas, tapak, dan tegaknya.
+        mesh.AddFace({at(true, i, 0), at(false, i, 0), at(false, i + 1, 0), at(true, i + 1, 0)});
+        mesh.AddFace({at(true, i + 1, i + 1), at(false, i + 1, i + 1), at(false, i, i + 1),
+                      at(true, i, i + 1)});
+        mesh.AddFace({at(false, i, i), at(true, i, i), at(true, i, i + 1), at(false, i, i + 1)});
+    }
+    // Dinding belakang, ikut dibagi per tingkat supaya rusuknya bertemu penuh
+    // dengan quad sisi kolom terakhir.
+    for (uint32_t k = 0; k < count; ++k) {
+        mesh.AddFace({at(true, count, k), at(false, count, k), at(false, count, k + 1),
+                      at(true, count, k + 1)});
+    }
+
+    mesh.FinalizeBoundaries();
+    return mesh;
+}
+
+namespace {
+
+/// Cincin `sides` simpul berjari-jari 0,5 pada ketinggian `y`, sudut menaik.
+std::vector<VertexHandle> AddRing(HalfEdgeMesh& mesh, uint32_t sides, float y) {
+    std::vector<VertexHandle> ring;
+    ring.reserve(sides);
+    for (uint32_t i = 0; i < sides; ++i) {
+        const float angle = kTwoPi * static_cast<float>(i) / static_cast<float>(sides);
+        ring.push_back(mesh.AddVertex(Vec3(0.5f * std::cos(angle), y, 0.5f * std::sin(angle))));
+    }
+    return ring;
+}
+
+}  // namespace
+
+HalfEdgeMesh MakeUnitCylinder(uint32_t sides) {
+    const uint32_t count = std::clamp(sides, 3u, 64u);
+    HalfEdgeMesh mesh;
+    const std::vector<VertexHandle> bottom = AddRing(mesh, count, -0.5f);
+    const std::vector<VertexHandle> top = AddRing(mesh, count, 0.5f);
+
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint32_t next = (i + 1) % count;
+        mesh.AddFace({bottom[i], top[i], top[next], bottom[next]});
+    }
+    // Alas mengikuti sudut menaik; tutupnya kebalikannya. Segi-n beraturan itu
+    // cembung, jadi kipas dari simpul pertamanya sah.
+    mesh.AddFace(bottom);
+    std::vector<VertexHandle> cap(top.rbegin(), top.rend());
+    mesh.AddFace(cap);
+
+    mesh.FinalizeBoundaries();
+    return mesh;
+}
+
+HalfEdgeMesh MakeUnitCone(uint32_t sides) {
+    const uint32_t count = std::clamp(sides, 3u, 64u);
+    HalfEdgeMesh mesh;
+    const std::vector<VertexHandle> base = AddRing(mesh, count, -0.5f);
+    const VertexHandle apex = mesh.AddVertex(Vec3(0.0f, 0.5f, 0.0f));
+
+    for (uint32_t i = 0; i < count; ++i) {
+        mesh.AddFace({base[i], apex, base[(i + 1) % count]});
+    }
+    mesh.AddFace(base);
 
     mesh.FinalizeBoundaries();
     return mesh;

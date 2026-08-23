@@ -6,16 +6,17 @@
 #include "Sim/Editor/EditorContext.h"
 #include "Sim/Editor/Gizmo.h"
 #include "Sim/Editor/SceneCommands.h"
-#include "Sim/Editor/SceneView.h"
+#include "Sim/SceneView/SceneView.h"
 #include "Sim/Editor/ProjectLibrary.h"
-#include "Sim/Editor/Selection.h"
-#include "Sim/Editor/SkinnedPreview.h"
+#include "Sim/SceneView/Selection.h"
+#include "Sim/SceneView/SkinnedPreview.h"
 #include "Sim/Editor/WhiteboxCommands.h"
-#include "Sim/Editor/TerrainStore.h"
+#include "Sim/SceneView/TerrainStore.h"
 #include "Sim/Editor/TextureSettingsCommand.h"
 #include "Sim/Terrain/TerrainBrush.h"
 #include "Sim/Terrain/TerrainPicking.h"
-#include "Sim/Editor/WhiteboxStore.h"
+#include "Sim/SceneView/PickScene.h"
+#include "Sim/SceneView/WhiteboxStore.h"
 #include "Sim/Physics/PhysicsScene.h"
 #include "Sim/Whitebox/WhiteboxIo.h"
 #include "Sim/Scene/AssetUsage.h"
@@ -1330,6 +1331,111 @@ TEST_CASE("Play menjalankan fisika, Stop mengembalikan level seperti semula") {
     app.Shutdown();
 }
 
+TEST_CASE("Pause menahan jam dunia, Step memajukannya tepat satu langkah") {
+    // **Tombol Pause mati sejak E2, dan komentarnya menyebut alasannya:**
+    // "menunggu pemisahan waktu simulasi dari waktu editor". Selama keduanya
+    // satu angka, satu-satunya arti Pause adalah "bekukan editornya juga" —
+    // panel berhenti menggambar, kamera berhenti bergerak, dan keadaan yang
+    // ingin diperiksa orang justru tidak bisa diperiksa.
+    //
+    // Yang diuji di sini bahwa keduanya benar-benar dua jam: fisika berhenti
+    // sementara `deltaSeconds` yang dilihat panel tetap berjalan.
+    if (!physics::Available()) {
+        return;
+    }
+
+    ScratchDir scratch;
+    EditorApp app;
+    EditorApp::Config config;
+    config.configDir = scratch.path / "config";
+    config.projectsRoot = scratch.path / "Documents" / "SimEngine";
+    REQUIRE(app.Initialize(config));
+    // Tick tidak melakukan apa pun tanpa project — dan sebuah uji Pause yang
+    // lolos karena Tick-nya keluar lebih awal adalah uji yang selalu hijau.
+    REQUIRE(app.CreateProject(config.projectsRoot, "Jeda"));
+
+    scene::World& world = app.GetWorld();
+    const scene::Entity ground = world.Create("Ground");
+    {
+        auto& body = world.Add<scene::RigidBodyComponent>(ground);
+        body.kind = scene::RigidBodyKind::Static;
+        auto& collider = world.Add<scene::ColliderComponent>(ground);
+        collider.shape = scene::ColliderShape::Plane;
+    }
+    const scene::Entity ball = world.Create("Ball");
+    {
+        world.Add<scene::RigidBodyComponent>(ball);
+        auto& collider = world.Add<scene::ColliderComponent>(ball);
+        collider.shape = scene::ColliderShape::Sphere;
+        collider.radius = 0.5f;
+        world.TryGet<scene::TransformComponent>(ball)->position = Vec3(0.0f, 20.0f, 0.0f);
+        world.MarkTransformDirty(ball);
+    }
+    const Uuid ballGuid = world.GuidOf(ball);
+
+    constexpr float kFrame = 1.0f / 60.0f;
+    const auto ballY = [&app, &ballGuid]() {
+        const scene::Entity entity = app.GetWorld().FindByGuid(ballGuid);
+        REQUIRE(entity != scene::kNullEntity);
+        return app.GetWorld().TryGet<scene::TransformComponent>(entity)->position.y;
+    };
+
+    // Menahan yang tidak berjalan tidak berarti apa-apa: Pause bukan sakelar
+    // editor, ia sakelar simulasi.
+    app.Pause();
+    CHECK_FALSE(app.IsPaused());
+
+    app.Play();
+    REQUIRE(app.IsPlaying());
+    CHECK_FALSE(app.IsPaused());
+    for (int frame = 0; frame < 30; ++frame) {
+        app.Tick(kFrame);
+    }
+    const float running = ballY();
+    CHECK(running < 20.0f);
+
+    app.Pause();
+    CHECK(app.IsPaused());
+    for (int frame = 0; frame < 60; ++frame) {
+        app.Tick(kFrame);
+    }
+    // Satu detik penuh berlalu di editor, nol di dunia.
+    CHECK(ballY() == doctest::Approx(running));
+    CHECK(app.Context().deltaSeconds == doctest::Approx(kFrame));
+
+    // **Satu langkah, dan tepat satu.** Sebuah Step yang membuka gerbangnya
+    // sampai frame berikutnya akan terlihat benar di frame pertama dan salah
+    // sesudahnya — dan selisihnya tidak akan pernah dicari orang, karena
+    // keduanya sama-sama "bergerak sedikit".
+    app.StepFrame();
+    app.Tick(kFrame);
+    const float stepped = ballY();
+    CHECK(stepped < running);
+    CHECK(app.IsPaused());
+    for (int frame = 0; frame < 30; ++frame) {
+        app.Tick(kFrame);
+    }
+    CHECK(ballY() == doctest::Approx(stepped));
+
+    app.Resume();
+    CHECK_FALSE(app.IsPaused());
+    for (int frame = 0; frame < 30; ++frame) {
+        app.Tick(kFrame);
+    }
+    CHECK(ballY() < stepped);
+
+    // Stop mengembalikan dunia; ia juga melepaskan tahanannya, supaya Play
+    // berikutnya tidak dimulai dalam keadaan berhenti tanpa ada yang memintanya.
+    app.Pause();
+    REQUIRE(app.IsPaused());
+    app.Stop();
+    CHECK_FALSE(app.IsPlaying());
+    CHECK_FALSE(app.IsPaused());
+    CHECK(ballY() == doctest::Approx(20.0f));
+
+    app.Shutdown();
+}
+
 TEST_CASE("entity berwhitebox tanpa MeshRenderer tetap tergambar dan bisa diklik") {
     // Menjatuhkan whitebox ke viewport membuat entity dengan satu komponen.
     // Menuntut komponen kedua yang tidak menunjuk mesh apa pun berarti blok
@@ -2043,4 +2149,618 @@ TEST_CASE("T1: mengubah pengaturan tekstur bisa dibatalkan") {
     CHECK(history.Entries().size() == entries + 1);
 
     std::filesystem::remove_all(directory, ec);
+}
+
+// --- W7.2: seleksi sub-objek whitebox ----------------------------------------
+
+TEST_CASE("seleksi sub-objek menyimpan ketiga jenis berdampingan") {
+    WhiteboxStore store;
+    const Uuid guid = Uuid::Generate();
+    store.Adopt(guid, whitebox::WhiteboxMesh::MakeCube());
+
+    store.SetSubObject(SubObject::Vertex);
+    store.Add(guid, static_cast<whitebox::VertexHandle>(0));
+    store.Add(guid, static_cast<whitebox::VertexHandle>(1));
+    CHECK(store.Selected().Count() == 2);
+
+    // Berpindah ke rusuk: cacahnya berganti jenis, tetapi simpulnya tidak hilang.
+    store.SetSubObject(SubObject::Edge);
+    CHECK(store.Selected().Count() == 0);
+    store.Add(guid, static_cast<whitebox::EdgeHandle>(3));
+    CHECK(store.Selected().Count() == 1);
+
+    // **Kembali ke simpul mengembalikan yang tadi.** Seleksi yang hilang hanya
+    // karena mata melirik mode lain adalah pekerjaan yang diulang.
+    store.SetSubObject(SubObject::Vertex);
+    CHECK(store.Selected().Count() == 2);
+    CHECK(store.Selected().Contains(static_cast<whitebox::VertexHandle>(0)));
+}
+
+TEST_CASE("toggle membalik keanggotaan, dan yang terakhir tetap yang terakhir") {
+    WhiteboxStore store;
+    const Uuid guid = Uuid::Generate();
+    store.Adopt(guid, whitebox::WhiteboxMesh::MakeCube());
+    const std::vector<whitebox::PolygonHandle> sides =
+        store.Find(guid)->Polygons().Polygons();
+    REQUIRE(sides.size() == 6);
+
+    store.Select(guid, sides[0]);
+    store.Toggle(guid, sides[1]);
+    CHECK(store.Selected().Count() == 2);
+    // Yang terakhir ditambahkan menjadi acuan — di situlah gizmo sisi berdiri.
+    CHECK(store.Selected().PrimaryPolygon() == sides[1]);
+
+    store.Toggle(guid, sides[1]);
+    CHECK(store.Selected().Count() == 1);
+    CHECK(store.Selected().PrimaryPolygon() == sides[0]);
+    CHECK_FALSE(store.Selected().Contains(sides[1]));
+}
+
+TEST_CASE("berpindah aset mengosongkan seleksi lama") {
+    WhiteboxStore store;
+    const Uuid first = Uuid::Generate();
+    const Uuid second = Uuid::Generate();
+    store.Adopt(first, whitebox::WhiteboxMesh::MakeCube());
+    store.Adopt(second, whitebox::WhiteboxMesh::MakeCube());
+
+    store.SetSubObject(SubObject::Vertex);
+    store.Add(first, static_cast<whitebox::VertexHandle>(0));
+    store.Add(first, static_cast<whitebox::VertexHandle>(1));
+    REQUIRE(store.Selected().Count() == 2);
+
+    // **Seleksi yang separuhnya milik whitebox lain adalah seleksi yang
+    // operasinya tidak punya arti** — dan tidak ada pesan yang bisa menjelaskan
+    // kenapa perataan menolak.
+    store.Add(second, static_cast<whitebox::VertexHandle>(4));
+    CHECK(store.Selected().asset == second);
+    CHECK(store.Selected().Count() == 1);
+    CHECK(store.Selected().Contains(static_cast<whitebox::VertexHandle>(4)));
+    CHECK_FALSE(store.Selected().Has(first));
+}
+
+TEST_CASE("mengosongkan seleksi tidak mengembalikan mode ke sisi") {
+    // **Regresi.** Klik di ruang kosong membatalkan pilihan, bukan membatalkan
+    // mode — perancang yang sedang menyunting simpul dan meleset sekali tidak
+    // sedang meminta kembali ke mode sisi.
+    WhiteboxStore store;
+    const Uuid guid = Uuid::Generate();
+    store.Adopt(guid, whitebox::WhiteboxMesh::MakeCube());
+
+    store.SetSubObject(SubObject::Vertex);
+    store.Add(guid, static_cast<whitebox::VertexHandle>(2));
+    REQUIRE(store.SubObjectMode() == SubObject::Vertex);
+
+    store.ClearSelection();
+    CHECK(store.Selected().Count() == 0);
+    CHECK(store.SubObjectMode() == SubObject::Vertex);
+}
+
+TEST_CASE("seretan simpul menghasilkan satu entri undo, dan membatalkannya persis") {
+    // **Kriteria terima W7.3.** Aturan yang sama dengan seretan sisi di W5:
+    // empat puluh frame seretan adalah satu perubahan bagi pengguna, dan
+    // membatalkannya harus sekali tekan — bukan empat puluh.
+    WhiteboxStore store;
+    const Uuid guid = Uuid::Generate();
+    whitebox::WhiteboxMesh& box = store.Adopt(guid, whitebox::WhiteboxMesh::MakeCube());
+    const whitebox::WhiteboxData start = box.ToData();
+    const uint64_t versionAtStart = store.Version(guid);
+
+    // Lima simpul: keempat sudut sisi atas plus satu di bawahnya, supaya yang
+    // diuji benar-benar himpunan dan bukan satu simpul yang kebetulan jalan.
+    std::vector<whitebox::VertexHandle> moving;
+    for (uint32_t v = 0; v < 5 && v < box.Mesh().VertexCount(); ++v) {
+        moving.push_back(static_cast<whitebox::VertexHandle>(v));
+    }
+    REQUIRE(moving.size() == 5);
+
+    CommandHistory history;
+    for (int frame = 1; frame <= 40; ++frame) {
+        // Tiap frame membangun ulang dari keadaan awal seretan, persis seperti
+        // `ApplyWhiteboxVertexDrag` — kalau ditumpuk, jarak yang ditempuh
+        // bergantung pada berapa frame yang sempat tergambar.
+        whitebox::WhiteboxMesh preview;
+        std::string error;
+        REQUIRE(whitebox::WhiteboxMesh::Build(preview, start, error));
+        const whitebox::WhiteboxData before = box.ToData();
+        REQUIRE(preview.TranslateVertices(moving,
+                                          Vec3(0.0f, static_cast<float>(frame) * 0.02f, 0.0f))
+                    .ok);
+        history.Execute(std::make_unique<WhiteboxEditCommand>(&store, guid, before,
+                                                              preview.ToData(),
+                                                              "Move Vertices"));
+    }
+    history.CloseMergeGroup();
+
+    INFO(history.Entries().size() << " entri");
+    CHECK(history.Entries().size() == 1);
+
+    REQUIRE(history.Undo());
+    CHECK(store.Version(guid) > versionAtStart);
+    CHECK(whitebox::SaveToString(box) ==
+          [&] {
+              whitebox::WhiteboxMesh original;
+              std::string error;
+              whitebox::WhiteboxMesh::Build(original, start, error);
+              return whitebox::SaveToString(original);
+          }());
+
+    // Mengulanginya membawa ke ujung seretan, bukan ke tengahnya.
+    REQUIRE(history.Redo());
+    CHECK(box.Mesh().GetVertex(moving.front()).position.y ==
+          doctest::Approx(-0.5f + 40.0f * 0.02f));
+    CHECK(box.CheckInvariants().ok);
+}
+
+TEST_CASE("operasi sub-objek yang mengubah topologi tetap satu entri undo") {
+    WhiteboxStore store;
+    const Uuid guid = Uuid::Generate();
+    whitebox::WhiteboxMesh& box = store.Adopt(guid, whitebox::WhiteboxMesh::MakeCube());
+    const whitebox::WhiteboxData start = box.ToData();
+    const std::size_t facesAtStart = box.Mesh().FaceCount();
+
+    const whitebox::FaceHandle face = static_cast<whitebox::FaceHandle>(0);
+    const std::vector<whitebox::HalfEdgeHandle> loop = box.Mesh().FaceHalfEdges(face);
+    REQUIRE(loop.size() == 4);
+    const std::array<whitebox::EdgeHandle, 2> opposite{box.Mesh().HalfEdgeEdge(loop[0]),
+                                                       box.Mesh().HalfEdgeEdge(loop[2])};
+
+    CommandHistory history;
+    const whitebox::WhiteboxData before = box.ToData();
+    REQUIRE(box.ConnectEdges(opposite).ok);
+    history.Execute(std::make_unique<WhiteboxEditCommand>(&store, guid, before, box.ToData(),
+                                                          "Connect Edges"));
+    history.CloseMergeGroup();
+
+    CHECK(history.Entries().size() == 1);
+    CHECK(box.Mesh().FaceCount() == facesAtStart + 1);
+
+    // Membatalkannya mengembalikan topologinya, bukan hanya posisinya.
+    REQUIRE(history.Undo());
+    CHECK(box.Mesh().FaceCount() == facesAtStart);
+    CHECK(whitebox::SaveToString(box) ==
+          [&] {
+              whitebox::WhiteboxMesh original;
+              std::string error;
+              whitebox::WhiteboxMesh::Build(original, start, error);
+              return whitebox::SaveToString(original);
+          }());
+}
+
+// --- R1: geometri adegan yang bisa ditanyai sinar ----------------------------
+
+namespace {
+
+/// Kubus satuan sebagai `MeshData`, untuk diadopsi cache.
+assets::MeshData CubeMeshData(float half = 0.5f) {
+    assets::MeshData mesh;
+    const Vec3 corners[8] = {
+        Vec3(-half, -half, -half), Vec3(half, -half, -half), Vec3(half, half, -half),
+        Vec3(-half, half, -half),  Vec3(-half, -half, half), Vec3(half, -half, half),
+        Vec3(half, half, half),    Vec3(-half, half, half),
+    };
+    for (const Vec3& corner : corners) {
+        mesh.vertices.push_back(
+            assets::MeshVertex{corner, glm::normalize(corner), Vec2(0.0f)});
+    }
+    mesh.indices = {0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7, 0, 1, 5, 0, 5, 4,
+                    3, 7, 6, 3, 6, 2, 0, 4, 7, 0, 7, 3, 1, 2, 6, 1, 6, 5};
+    return mesh;
+}
+
+}  // namespace
+
+TEST_CASE("PickScene memetakan segitiga yang kena kembali ke entity-nya") {
+    assets::MeshGeometryCache cache(nullptr);
+    cache.Adopt("kubus", CubeMeshData());
+
+    PickScene picks(&cache);
+    std::vector<PickItem> items;
+    for (int i = 0; i < 3; ++i) {
+        PickItem item;
+        item.entity = static_cast<scene::Entity>(10 + i);
+        item.worldMatrix = glm::translate(Mat4(1.0f), Vec3(static_cast<float>(i) * 4.0f, 0, 0));
+        item.meshKey = "kubus";
+        items.push_back(item);
+    }
+    picks.Sync(items);
+
+    CHECK(picks.ReadyCount() == 3);
+    CHECK(picks.PendingCount() == 0);
+    // Satu geometri untuk tiga instance — itulah guna dua tingkat.
+    CHECK(picks.Scene().GeometryCount() == 1);
+    CHECK(picks.Scene().InstanceCount() == 3);
+
+    const scene::Entity hit =
+        picks.RaycastEntity(Vec3(4.0f, 0.0f, -5.0f), Vec3(0.0f, 0.0f, 1.0f));
+    CHECK(hit == static_cast<scene::Entity>(11));
+
+    // Meleset menjawab kNullEntity, bukan entity pertama.
+    CHECK(picks.RaycastEntity(Vec3(0.0f, 50.0f, -5.0f), Vec3(0.0f, 0.0f, 1.0f)) ==
+          scene::kNullEntity);
+}
+
+TEST_CASE("entity pertama tidak tertukar dengan ketiadaan") {
+    // **Regresi yang mudah terjadi.** `userData` nol berarti "tidak ada" bagi
+    // siapa pun yang membacanya sembarangan, dan entity pertama entt bernomor
+    // nol. Itulah kenapa yang disimpan `SelectionId`, yang digeser satu.
+    assets::MeshGeometryCache cache(nullptr);
+    cache.Adopt("kubus", CubeMeshData());
+
+    PickScene picks(&cache);
+    PickItem item;
+    item.entity = static_cast<scene::Entity>(0);
+    item.meshKey = "kubus";
+    picks.Sync(std::span<const PickItem>(&item, 1));
+
+    CHECK(picks.RaycastEntity(Vec3(0.0f, 0.0f, -5.0f), Vec3(0.0f, 0.0f, 1.0f)) ==
+          static_cast<scene::Entity>(0));
+}
+
+TEST_CASE("geometri yang belum siap dilewati, bukan menggagalkan seluruhnya") {
+    assets::MeshGeometryCache cache(nullptr);
+    cache.Adopt("siap", CubeMeshData());
+
+    PickScene picks(&cache);
+    std::vector<PickItem> items;
+
+    PickItem ready;
+    ready.entity = static_cast<scene::Entity>(1);
+    ready.meshKey = "siap";
+    items.push_back(ready);
+
+    // Whitebox yang belum diadopsi: tidak punya berkas, jadi ia hanya belum ada.
+    PickItem waiting;
+    waiting.entity = static_cast<scene::Entity>(2);
+    waiting.worldMatrix = glm::translate(Mat4(1.0f), Vec3(10.0f, 0.0f, 0.0f));
+    waiting.meshKey = "belum-diadopsi";
+    items.push_back(waiting);
+
+    // Tanpa kunci sama sekali — decal dan terrain.
+    PickItem skipped;
+    skipped.entity = static_cast<scene::Entity>(3);
+    items.push_back(skipped);
+
+    picks.Sync(items);
+
+    CHECK(picks.ReadyCount() == 1);
+    CHECK(picks.PendingCount() == 1);
+    // Yang siap tetap bisa ditembak; yang belum jatuh ke jalur kotak di pemanggil.
+    CHECK(picks.RaycastEntity(Vec3(0.0f, 0.0f, -5.0f), Vec3(0.0f, 0.0f, 1.0f)) ==
+          static_cast<scene::Entity>(1));
+    CHECK(picks.RaycastEntity(Vec3(10.0f, 0.0f, -5.0f), Vec3(0.0f, 0.0f, 1.0f)) ==
+          scene::kNullEntity);
+}
+
+TEST_CASE("memindahkan seribu instance tidak membangun ulang BVH mesh-nya") {
+    // **Kriteria terima R1**, dan alasan `ClearInstances` ada. Kalau angka ini
+    // meleset jauh, yang salah hampir pasti bukan BVH tingkat atasnya melainkan
+    // geometri yang diam-diam dibangun ulang.
+    assets::MeshGeometryCache cache(nullptr);
+    cache.Adopt("kubus", CubeMeshData());
+
+    PickScene picks(&cache);
+    std::vector<PickItem> items;
+    items.reserve(1000);
+    for (int i = 0; i < 1000; ++i) {
+        PickItem item;
+        item.entity = static_cast<scene::Entity>(i + 1);
+        item.worldMatrix =
+            glm::translate(Mat4(1.0f), Vec3(static_cast<float>(i % 40) * 3.0f,
+                                            static_cast<float>(i / 40) * 3.0f, 0.0f));
+        item.meshKey = "kubus";
+        items.push_back(item);
+    }
+
+    picks.Sync(items);
+    REQUIRE(picks.ReadyCount() == 1000);
+    REQUIRE(picks.Scene().GeometryCount() == 1);
+
+    // Geser semuanya, lalu susun ulang. Yang diukur hanya penyusunan ulangnya.
+    for (PickItem& item : items) {
+        item.worldMatrix[3].z += 1.0f;
+    }
+    const auto start = std::chrono::steady_clock::now();
+    picks.Sync(items);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    const double milliseconds =
+        std::chrono::duration<double, std::milli>(elapsed).count();
+
+    INFO("penyusunan ulang 1000 instance: " << milliseconds << " ms");
+    CHECK(picks.Scene().GeometryCount() == 1);  // bukan 1000
+
+    // **Ambangnya berbeda per konfigurasi, dan angka kriterianya milik Release.**
+    // Kriteria R1 menyebut < 1 ms; terukur 0,57 ms di `linux-clang-release`.
+    // Build Debug menjalankan glm tanpa satu pun inline dan berjalan sekitar
+    // empat puluh kali lebih lambat — memaksakan ambang Release di sana berarti
+    // uji yang merah di setiap mesin pengembang, dan uji merah yang wajar adalah
+    // uji yang berhenti dibaca.
+    //
+    // Yang dijaga ambang longgar ini tetap nyata: kalau geometrinya diam-diam
+    // dibangun ulang, angkanya melonjak dua orde, bukan beberapa persen.
+#if SIM_DEBUG
+    CHECK(milliseconds < 200.0);
+#else
+    CHECK(milliseconds < 1.0);
+#endif
+
+    // Dan hasilnya masih benar sesudah digeser.
+    CHECK(picks.RaycastEntity(Vec3(0.0f, 0.0f, -5.0f), Vec3(0.0f, 0.0f, 1.0f)) ==
+          static_cast<scene::Entity>(1));
+}
+
+// --- R2: picking presisi menggantikan AABB -----------------------------------
+
+namespace {
+
+/// Torus, karena lubangnya justru yang diuji: kotak batasnya menutupi lubang
+/// itu seluruhnya, jadi sinar yang lewat tengahnya adalah kasus yang uji AABB
+/// selalu salah jawab.
+assets::MeshData TorusMeshData(float major = 1.0f, float minor = 0.25f, int rings = 24,
+                               int sides = 12) {
+    assets::MeshData mesh;
+    for (int i = 0; i < rings; ++i) {
+        const float u = static_cast<float>(i) / static_cast<float>(rings) * 2.0f * kPi;
+        for (int j = 0; j < sides; ++j) {
+            const float v = static_cast<float>(j) / static_cast<float>(sides) * 2.0f * kPi;
+            const Vec3 position((major + minor * std::cos(v)) * std::cos(u),
+                                minor * std::sin(v),
+                                (major + minor * std::cos(v)) * std::sin(u));
+            const Vec3 centre(major * std::cos(u), 0.0f, major * std::sin(u));
+            mesh.vertices.push_back(assets::MeshVertex{
+                position, glm::normalize(position - centre), Vec2(0.0f)});
+        }
+    }
+    for (int i = 0; i < rings; ++i) {
+        for (int j = 0; j < sides; ++j) {
+            const auto a = static_cast<uint32_t>(i * sides + j);
+            const auto b = static_cast<uint32_t>(((i + 1) % rings) * sides + j);
+            const auto c = static_cast<uint32_t>(((i + 1) % rings) * sides + (j + 1) % sides);
+            const auto d = static_cast<uint32_t>(i * sides + (j + 1) % sides);
+            mesh.indices.insert(mesh.indices.end(), {a, b, c, a, c, d});
+        }
+    }
+    return mesh;
+}
+
+}  // namespace
+
+TEST_CASE("klik menembus lubang torus tidak memilih torusnya") {
+    // **Kriteria terima R2**, dan inilah cacat yang membuat R2 ada: kotak batas
+    // sebuah torus menutupi lubangnya, jadi klik tepat di tengah donat memilih
+    // donat itu.
+    assets::MeshGeometryCache cache(nullptr);
+    cache.Adopt("torus", TorusMeshData());
+
+    PickScene picks(&cache);
+    PickItem item;
+    item.entity = static_cast<scene::Entity>(5);
+    item.meshKey = "torus";
+    picks.Sync(std::span<const PickItem>(&item, 1));
+    REQUIRE(picks.ReadyCount() == 1);
+
+    // Menembus lubangnya sepanjang sumbu Y — torusnya terhampar di bidang XZ.
+    CHECK(picks.RaycastEntity(Vec3(0.0f, -5.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f)) ==
+          scene::kNullEntity);
+    // Menembus dagingnya, pada jari-jari mayornya.
+    CHECK(picks.RaycastEntity(Vec3(1.0f, -5.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f)) ==
+          static_cast<scene::Entity>(5));
+}
+
+TEST_CASE("dua benda bertumpuk terpilih sesuai bentuknya, bukan kotaknya") {
+    assets::MeshGeometryCache cache(nullptr);
+    cache.Adopt("torus", TorusMeshData());
+    cache.Adopt("kubus", CubeMeshData(0.2f));
+
+    PickScene picks(&cache);
+    std::vector<PickItem> items;
+
+    // Torus di depan, kubus kecil tepat di lubangnya — lebih jauh dari kamera.
+    PickItem torus;
+    torus.entity = static_cast<scene::Entity>(1);
+    torus.meshKey = "torus";
+    items.push_back(torus);
+
+    PickItem cube;
+    cube.entity = static_cast<scene::Entity>(2);
+    cube.worldMatrix = glm::translate(Mat4(1.0f), Vec3(0.0f, 2.0f, 0.0f));
+    cube.meshKey = "kubus";
+    items.push_back(cube);
+
+    picks.Sync(items);
+    REQUIRE(picks.ReadyCount() == 2);
+
+    // Menembus lubang torus, mengenai kubus di belakangnya. Kotak torus
+    // menutupi jalur ini seluruhnya — uji AABB akan menjawab torus.
+    CHECK(picks.RaycastEntity(Vec3(0.0f, -5.0f, 0.0f), Vec3(0.0f, 1.0f, 0.0f)) ==
+          static_cast<scene::Entity>(2));
+}
+
+TEST_CASE("sepuluh ribu entity: satu picking di bawah satu milidetik") {
+    assets::MeshGeometryCache cache(nullptr);
+    cache.Adopt("kubus", CubeMeshData());
+
+    PickScene picks(&cache);
+    std::vector<PickItem> items;
+    items.reserve(10000);
+    for (int i = 0; i < 10000; ++i) {
+        PickItem item;
+        item.entity = static_cast<scene::Entity>(i + 1);
+        item.worldMatrix =
+            glm::translate(Mat4(1.0f), Vec3(static_cast<float>(i % 100) * 3.0f,
+                                            static_cast<float>(i / 100) * 3.0f, 0.0f));
+        item.meshKey = "kubus";
+        items.push_back(item);
+    }
+    picks.Sync(items);
+    REQUIRE(picks.ReadyCount() == 10000);
+
+    // **Yang diukur picking berikutnya, bukan penyusunan pertamanya.** Adegan
+    // yang tidak bergeser tidak menuntut pohonnya dibangun ulang, dan itulah
+    // keadaan sebuah klik: kamera berputar, benda diam.
+    const auto start = std::chrono::steady_clock::now();
+    picks.Sync(items);  // dilewati: sidik jarinya sama
+    const scene::Entity hit =
+        picks.RaycastEntity(Vec3(150.0f, 150.0f, -50.0f), Vec3(0.0f, 0.0f, 1.0f));
+    const double milliseconds =
+        std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start)
+            .count();
+
+    INFO("picking di antara 10.000 entity: " << milliseconds << " ms");
+    CHECK(hit != scene::kNullEntity);
+#if SIM_DEBUG
+    CHECK(milliseconds < 50.0);
+#else
+    CHECK(milliseconds < 1.0);
+#endif
+}
+
+TEST_CASE("adegan yang tidak bergeser tidak menyusun ulang pohonnya") {
+    assets::MeshGeometryCache cache(nullptr);
+    cache.Adopt("kubus", CubeMeshData());
+
+    PickScene picks(&cache);
+    std::vector<PickItem> items;
+    for (int i = 0; i < 200; ++i) {
+        PickItem item;
+        item.entity = static_cast<scene::Entity>(i + 1);
+        item.worldMatrix = glm::translate(Mat4(1.0f), Vec3(static_cast<float>(i) * 2.0f, 0, 0));
+        item.meshKey = "kubus";
+        items.push_back(item);
+    }
+
+    picks.Sync(items);
+    const auto measure = [&] {
+        const auto start = std::chrono::steady_clock::now();
+        picks.Sync(items);
+        return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() -
+                                                          start)
+            .count();
+    };
+    const double skipped = measure();
+
+    // Satu benda bergeser: sidik jarinya berubah, pohonnya disusun ulang.
+    items[100].worldMatrix[3].x += 0.5f;
+    const double rebuilt = measure();
+
+    INFO("dilewati " << skipped << " ms, disusun ulang " << rebuilt << " ms");
+    // Yang dilewati harus jauh lebih murah. Kalau tidak, sidik jarinya tidak
+    // bekerja — dan setiap klik membayar penyusunan yang tidak perlu.
+    CHECK(skipped < rebuilt);
+    // Dan hasilnya tetap benar sesudah digeser.
+    CHECK(picks.RaycastEntity(Vec3(200.5f, 0.0f, -5.0f), Vec3(0.0f, 0.0f, 1.0f)) ==
+          static_cast<scene::Entity>(101));
+}
+
+// --- R3: query authoring (conform ke permukaan) ------------------------------
+
+TEST_CASE("menjatuhkan benda ke permukaan miring menempatkannya menyinggung") {
+    scene::TransformComponent transform;
+    transform.position = Vec3(0.0f, 10.0f, 0.0f);
+
+    // Bidang miring 45°.
+    const Vec3 point(1.0f, 2.0f, 3.0f);
+    const Vec3 normal = glm::normalize(Vec3(0.0f, 1.0f, 1.0f));
+
+    SUBCASE("tanpa memutar, hanya turun") {
+        const scene::TransformComponent placed =
+            ConformToSurface(transform, point, normal, ConformOrientation::Keep);
+        CHECK(glm::length(placed.position - point) == doctest::Approx(0.0f).epsilon(1e-5));
+        // Rotasinya tidak tersentuh.
+        CHECK(glm::length(Vec4(placed.rotation.x, placed.rotation.y, placed.rotation.z,
+                               placed.rotation.w) -
+                          Vec4(transform.rotation.x, transform.rotation.y, transform.rotation.z,
+                               transform.rotation.w)) == doctest::Approx(0.0f).epsilon(1e-5));
+    }
+
+    SUBCASE("sumbu atasnya mengikuti normal permukaan") {
+        const scene::TransformComponent placed =
+            ConformToSurface(transform, point, normal, ConformOrientation::AlignToNormal);
+        const Vec3 up = glm::normalize(placed.rotation * Vec3(0.0f, 1.0f, 0.0f));
+        CHECK(glm::dot(up, normal) == doctest::Approx(1.0f).epsilon(1e-4));
+    }
+
+    SUBCASE("offset pivot mengangkatnya sepanjang normal, bukan sepanjang Y") {
+        const scene::TransformComponent placed =
+            ConformToSurface(transform, point, normal, ConformOrientation::Keep, 2.0f);
+        CHECK(glm::length(placed.position - (point + normal * 2.0f)) ==
+              doctest::Approx(0.0f).epsilon(1e-5));
+    }
+}
+
+TEST_CASE("perataan ke normal mempertahankan arah hadap sebisa mungkin") {
+    // **Inilah alasan putaran terpendek dipakai, bukan bingkai baru.** Sebuah
+    // benda yang menghadap +Z lalu dijatuhkan ke lantai datar tidak boleh
+    // berubah arah hadapnya sama sekali.
+    scene::TransformComponent transform;
+    transform.rotation = glm::angleAxis(0.7f, Vec3(0.0f, 1.0f, 0.0f));
+    const Vec3 facingBefore = glm::normalize(transform.rotation * Vec3(0.0f, 0.0f, 1.0f));
+
+    const scene::TransformComponent placed =
+        ConformToSurface(transform, Vec3(0.0f), Vec3(0.0f, 1.0f, 0.0f),
+                         ConformOrientation::AlignToNormal);
+    const Vec3 facingAfter = glm::normalize(placed.rotation * Vec3(0.0f, 0.0f, 1.0f));
+
+    CHECK(glm::dot(facingBefore, facingAfter) == doctest::Approx(1.0f).epsilon(1e-4));
+}
+
+TEST_CASE("permukaan terbalik dan normal rusak tidak menghasilkan rotasi NaN") {
+    scene::TransformComponent transform;
+
+    SUBCASE("normal berlawanan persis dengan sumbu atas") {
+        const scene::TransformComponent placed =
+            ConformToSurface(transform, Vec3(0.0f), Vec3(0.0f, -1.0f, 0.0f),
+                             ConformOrientation::AlignToNormal);
+        const Vec3 up = glm::normalize(placed.rotation * Vec3(0.0f, 1.0f, 0.0f));
+        CHECK(std::isfinite(up.x));
+        CHECK(std::isfinite(up.y));
+        CHECK(std::isfinite(up.z));
+        CHECK(glm::dot(up, Vec3(0.0f, -1.0f, 0.0f)) == doctest::Approx(1.0f).epsilon(1e-3));
+    }
+
+    SUBCASE("normal nol hanya menurunkan, tanpa memutar") {
+        const scene::TransformComponent placed =
+            ConformToSurface(transform, Vec3(1.0f, 2.0f, 3.0f), Vec3(0.0f),
+                             ConformOrientation::AlignToNormal);
+        CHECK(std::isfinite(placed.rotation.w));
+        CHECK(glm::length(placed.position - Vec3(1.0f, 2.0f, 3.0f)) ==
+              doctest::Approx(0.0f).epsilon(1e-5));
+    }
+}
+
+TEST_CASE("sinar yang menjatuhkan benda melewatkan benda itu sendiri") {
+    // **Tanpa pengecualian, yang pertama dikenainya adalah dirinya sendiri**,
+    // dan ia mendarat di tempatnya berdiri.
+    assets::MeshGeometryCache cache(nullptr);
+    cache.Adopt("kubus", CubeMeshData());
+
+    PickScene picks(&cache);
+    std::vector<PickItem> items;
+
+    PickItem falling;
+    falling.entity = static_cast<scene::Entity>(1);
+    falling.worldMatrix = glm::translate(Mat4(1.0f), Vec3(0.0f, 5.0f, 0.0f));
+    falling.meshKey = "kubus";
+    items.push_back(falling);
+
+    PickItem ground;
+    ground.entity = static_cast<scene::Entity>(2);
+    ground.worldMatrix = glm::scale(Mat4(1.0f), Vec3(20.0f, 0.2f, 20.0f));
+    ground.meshKey = "kubus";
+    items.push_back(ground);
+
+    picks.Sync(items);
+
+    const Vec3 origin(0.0f, 5.0f, 0.0f);
+    const Vec3 down(0.0f, -1.0f, 0.0f);
+
+    // Tanpa pengecualian: mengenai dirinya sendiri.
+    CHECK(ToEntity(picks.Raycast(origin, down).userData) == static_cast<scene::Entity>(1));
+
+    // Dengan pengecualian: mengenai lantainya.
+    const std::array<scene::Entity, 1> ignore{static_cast<scene::Entity>(1)};
+    const raycast::RayHit hit =
+        picks.RaycastExcluding(origin, down, raycast::kUnbounded, ignore);
+    REQUIRE(hit);
+    CHECK(ToEntity(hit.userData) == static_cast<scene::Entity>(2));
+    CHECK(hit.position.y == doctest::Approx(0.1f));
 }

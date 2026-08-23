@@ -2,6 +2,8 @@
 
 #include "Sim/Core/Math.h"
 #include "Sim/Render/Frustum.h"
+// `FindSunLight` menyebut `LightInstance` di tanda tangannya.
+#include "Sim/Render/Types.h"
 
 #include <cstdint>
 #include <span>
@@ -125,6 +127,72 @@ struct ClusterAssignment {
         return {indices.data() + range.offset, range.count};
     }
 };
+
+/// Matahari adegan: lampu directional **pertama**, atau null bila tidak ada.
+///
+/// **Satu, dan hanya satu.** Cascade bayangan hanya ada satu himpunan, jadi
+/// directional kedua dan seterusnya diabaikan — menjumlahkan arahnya
+/// menghasilkan bayangan yang tidak cocok dengan lampu mana pun, dan memilih
+/// yang "paling terang" membuat adegan berubah arah cahaya ketika seseorang
+/// menaikkan intensitas lampu yang bukan mataharinya.
+///
+/// Null berarti adegan tidak punya matahari, dan itu bukan keadaan darurat: ia
+/// berarti tidak ada cahaya directional, dan yang menggambarnya harus gelap.
+const LightInstance* FindSunLight(std::span<const LightInstance> lights);
+
+/// Peredupan jarak sebuah lampu punctual, satu angka tanpa warna.
+///
+/// **Kembaran `distanceAttenuation` di `Shaders/cluster_common.slang`, dan
+/// keduanya harus diubah bersama.** Pola yang sama dengan `AutoExposure` di
+/// `ToneMap.h`: yang di CPU diuji, yang di shader terlihat. Sebuah gizmo yang
+/// menggambar jangkauan cahaya dari rumus kedua akan sepakat di tengah dan
+/// meleset di tepinya — dan tepinya justru yang sedang dilihat orang.
+///
+/// Jendelanya kuartik, bentuk Frostbite; alasannya lengkap di shader.
+float PunctualFalloff(float distanceSq, float invRangeSq, float minDistanceSq);
+
+/// Jarak tempat radiansi sebuah lampu turun ke `threshold`.
+///
+/// **Supaya intensitas bisa digambar sebagai jarak, bukan sebagai warna.**
+/// Jangkauan (`range`) hanya menyebut di mana cahaya berakhir tepat nol; ia sama
+/// besar untuk lampu redup dan lampu menyilaukan. Yang membedakan keduanya
+/// adalah seberapa jauh cahayanya masih berarti, dan itu sebuah jarak — bisa
+/// dilihat, bisa dibandingkan antar lampu, dan bergerak saat intensitasnya
+/// disetel.
+///
+/// Nol bila lampunya tidak pernah setera `threshold` bahkan di permukaannya
+/// sendiri. Dicari dengan bagi-dua: peredupannya turun sepanjang jarak tanpa
+/// pernah naik, jadi akarnya tunggal.
+float LightUsefulRadius(const LightInstance& light, float threshold = 1.0f);
+
+/// Sebuah lampu di ruang yang dipakai kisi cluster.
+struct ClusterViewLight {
+    Vec3 position{0.0f};
+    Vec3 direction{0.0f, 0.0f, 1.0f};
+};
+
+/// Memindahkan lampu ke ruang kisi cluster.
+///
+/// **Bukan ruang pandang GLM apa adanya, dan selisihnya satu tanda.**
+/// `glm::lookAt` tangan-kanan: yang ada di depan kamera bernilai z **negatif**.
+/// Kisi cluster mengukur kedalaman sebagai jarak **positif** sepanjang arah
+/// pandang — `ClusterGrid::ClusterBounds` menulis `box.min.z = depth.x` dengan
+/// `depth` dari near ke far — dan fragment shader menghitung kedalamannya
+/// sebagai `dot(worldPos - cameraPos, cameraForward)`, yang juga positif di
+/// depan. Kedua ruang itu cermin satu sama lain pada z.
+///
+/// **Tanpa pembalikan ini lampu tidak pernah ketemu, dan gagalnya tidak terlihat
+/// seperti bug melainkan seperti lampu yang tidak pernah dinyalakan.** Lampu di
+/// depan kamera pada jarak 8 m diuji terhadap kotak yang membentang z = 0,1
+/// sampai 100: ia memotong sekumpulan cluster di dekat bidang dekat — jadi
+/// daftar penetapannya tidak kosong, dan tidak ada satu pun peringatan — tetapi
+/// bukan cluster tempat fragmen yang disinarinya berada. Setiap lampu titik dan
+/// sorot di engine ini karena itu tidak pernah menyala sejak jalur cluster ada,
+/// sementara CPU melaporkan 1.728 dari 3.456 cluster "berlampu".
+///
+/// Dipakai kedua jalur penetapan — yang di CPU dan yang di compute shader —
+/// karena dua konversi untuk satu ruang adalah dua tanda yang bisa berselisih.
+ClusterViewLight ToClusterView(const Mat4& view, const Vec3& position, const Vec3& direction);
 
 /// Menetapkan lampu ke cluster. `view` mengubah ruang dunia ke ruang pandang.
 ClusterAssignment AssignLights(const ClusterGrid& grid, const Mat4& view,

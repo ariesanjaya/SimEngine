@@ -6,14 +6,14 @@
 #include "Sim/Editor/Command.h"
 #include "Sim/Editor/EditorApp.h"
 #include "Sim/Editor/EditorContext.h"
-#include "Sim/Editor/Selection.h"
+#include "Sim/SceneView/Selection.h"
 #include "Sim/Scene/Serialization.h"
 #include "Sim/Script/ScriptRuntime.h"
 #include "Sim/Animation/AnimationIo.h"
 #include "Sim/Animation/Clip.h"
 #include "Sim/Terrain/Terrain.h"
 #include "Sim/Terrain/TerrainIo.h"
-#include "Sim/Editor/TerrainStore.h"
+#include "Sim/SceneView/TerrainStore.h"
 #include "Sim/Scene/World.h"
 
 #include <nlohmann/json.hpp>
@@ -1414,7 +1414,19 @@ TEST_CASE("Yang menentukan viewport.capture didaftarkan adalah perendernya, buka
     harness.app.Context().viewportRect.mainSize = Vec2(4.0f, 2.0f);
     const ai::ToolDefinition* capture = tools.Find("viewport.capture");
     REQUIRE(capture != nullptr);
-    // Handler-nya mengantre ke main thread; uji ini adalah main thread-nya.
+    // Handler-nya mengantre ke main thread; uji ini adalah main thread-nya —
+    // dan sejak sekarang ia juga MENGATAKANNYA. `MainThreadQueue` tidak menebak
+    // siapa main thread-nya, ia diberi tahu lewat `BindMainThread`, dan tanpa itu
+    // `mainThread_` tetap id kosong yang tidak sama dengan thread mana pun.
+    //
+    // **Akibatnya bukan uji yang merah melainkan binari yang mati.** `Drain()`
+    // menegakkannya dengan `SIM_ASSERT`, yang di Debug memanggil `abort()` —
+    // jadi uji ini menjatuhkan seluruh proses, dan setiap uji sesudahnya tidak
+    // pernah dijalankan. Salah satunya "Stop mengembalikan scene persis ke
+    // keadaan sebelum Play": bukti Play-in-Editor yang dicatat sebagai ada,
+    // tidak pernah benar-benar berjalan di suite penuh.
+    MainThreadQueue::Get().BindMainThread();
+
     std::atomic<bool> done{false};
     ai::ToolResult result;
     std::thread caller([&] {

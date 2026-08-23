@@ -511,6 +511,7 @@ bool Device::CreateLogicalDevice() {
     features.multiDrawIndirect &= supported.multiDrawIndirect;
     features.drawIndirectFirstInstance &= supported.drawIndirectFirstInstance;
     supportsBlockCompression_ = features.textureCompressionBC == VK_TRUE;
+    supportsWireframe_ = features.fillModeNonSolid == VK_TRUE;
 
     // **Ketiadaannya dicatat, bukan didiamkan.** Perangkat tanpa BC tetap
     // menjalankan editor — teksturnya jatuh ke RGBA8 — tetapi itu berarti empat

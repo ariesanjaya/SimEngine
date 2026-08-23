@@ -212,6 +212,36 @@ void CollectDepthFirst(const scene::World& world, scene::Entity entity,
 
 }  // namespace
 
+std::vector<VehicleWheelDesc> DescribeVehicleWheels(const scene::VehicleComponent& vehicle) {
+    return WheelsFrom(vehicle);
+}
+
+bool DescribeCollider(scene::World& world, scene::Entity entity,
+                      ColliderPlacement& out) {
+    const auto* collider = world.TryGet<scene::ColliderComponent>(entity);
+    if (collider == nullptr) {
+        return false;
+    }
+
+    const Decomposed placement = Decompose(world.WorldMatrix(entity));
+    out.position = placement.position;
+    out.rotation = placement.rotation;
+    out.scale = placement.scale;
+    // Jalur yang sama persis dengan `Build`, dan itu bukan kerapian: yang
+    // digambar harus yang disimulasikan. Sebuah gizmo yang menghitung ukurannya
+    // sendiri akan sepakat pada kasus yang mudah dan menyimpang pada yang sulit —
+    // entity berskala tidak seragam dengan collider yang bergeser — yaitu justru
+    // kasus yang orang buka gizmo untuk memeriksanya.
+    out.shape = ToShapeDesc(*collider, placement.scale);
+    out.simulated = world.TryGet<scene::RigidBodyComponent>(entity) != nullptr;
+
+    const bool needsUniform = collider->shape == scene::ColliderShape::Sphere ||
+                              collider->shape == scene::ColliderShape::Capsule ||
+                              collider->shape == scene::ColliderShape::Cylinder;
+    out.nonUniformScale = needsUniform && IsNonUniform(placement.scale);
+    return true;
+}
+
 bool PhysicsScene::Build(scene::World& world, const WorldDesc& desc,
                          const ColliderGeometrySource& geometry) {
     Clear();

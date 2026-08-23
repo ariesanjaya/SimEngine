@@ -6,22 +6,22 @@
 /// membuat apa yang dilihat orang di editor sama dengan apa yang dilihatnya di
 /// sini.
 ///
-/// **Utang lapisan yang disengaja, dan harus dibayar sebelum E9 selesai.**
-/// Terjemahan `World` menjadi `ViewportScene` tinggal di `SceneView`, yang ada
-/// di `EditorFramework` — jadi player ini menautkan ImGui, riwayat undo, dan
-/// PanelManager yang tidak pernah dipakainya. Itu salah untuk sesuatu yang
-/// dikirim ke pemain. Yang benar adalah memindahkan terjemahan itu ke modul
-/// sendiri yang dipakai bersama editor; dicatat di docs/PLAN-RENDER.md.
-/// Dijalankan dulu, dirapikan kemudian — bukan sebaliknya, karena terjemahan
-/// yang dipindah sebelum ada yang memakainya adalah terjemahan yang dipindah
-/// menurut tebakan.
+/// **Utang lapisannya sudah dibayar.** Terjemahan `World` → `ViewportScene`
+/// dulu tinggal di `SceneView` yang ada di `EditorFramework`, jadi player ini
+/// menautkan ImGui, riwayat undo, dan `PanelManager` yang tidak pernah
+/// dipakainya. Sekarang terjemahan itu punya modulnya sendiri, `Sim::SceneView`,
+/// dan player dibangun juga di build tanpa editor — yang membuat klaim "player
+/// tidak membawa editornya" bisa gagal, bukan sekadar diucapkan.
+///
+/// Dijalankan dulu, dirapikan kemudian: sebuah terjemahan yang dipindah sebelum
+/// ada dua pemakai adalah terjemahan yang dipindah menurut tebakan.
 
 #include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Core/Log.h"
 #include "Sim/Core/TaskPool.h"
-#include "Sim/Editor/SceneView.h"
+#include "Sim/SceneView/SceneView.h"
 #include "Sim/ImageIO/ImageIO.h"
-#include "Sim/Editor/Selection.h"
+#include "Sim/SceneView/Selection.h"
 #include "Sim/Physics/PhysicsScene.h"
 #include "Sim/Platform/Window.h"
 #include "Sim/RHI/Device.h"
@@ -269,8 +269,8 @@ int main(int argc, char** argv) {
         SIM_WARN("Runtime", "physics did not start: {}", physics.Error());
     }
 
-    editor::Selection selection;
-    editor::SceneView sceneView;
+    view::Selection selection;
+    view::SceneView sceneView;
 
     // **Player yang bisa memotret dirinya sendiri.** Itu yang membuat regresi
     // visual bisa dijalankan di CI tanpa seorang pun menatap layar — dan yang

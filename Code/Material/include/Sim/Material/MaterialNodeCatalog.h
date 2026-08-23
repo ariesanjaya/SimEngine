@@ -11,6 +11,15 @@
 
 namespace sim::material {
 
+/// Apakah pin node keluaran ini berada **di luar** `OpenPBRSurface`.
+///
+/// **Satu daftar, bukan tiga.** Yang di luar struct itu tidak punya
+/// `defaults()` untuk bersandar, jadi kompiler harus menulisnya walau tidak
+/// dikemudikan, dan uji kesamaan nilai bawaan harus melewatinya. Ketika
+/// daftarnya tersebar, menambah satu pin geometri berarti dua tempat yang
+/// diam-diam berselisih — dan yang muncul adalah float3 tak berisi, bukan galat.
+bool SurfacePinIsExtra(std::string_view pin);
+
 /// Kunci node keluaran. Tepat satu node bertipe ini boleh ada di sebuah graph —
 /// ia yang menentukan apa arti graph itu.
 inline constexpr std::string_view kSurfaceOutputType = "output.surface";
@@ -68,6 +77,13 @@ private:
 ///
 /// Kosong bila tipe node-nya tidak ada di katalog.
 std::vector<MaterialPin> PinsOf(const MaterialGraph& graph, const MaterialNode& node);
+
+/// Apakah sebuah pin node keluaran permukaan berlaku untuk domain ini.
+///
+/// **Dipakai kanvas, bukan kompiler.** Yang dijawabnya "boleh ditawarkan kepada
+/// pengguna", bukan "boleh ada di kode yang dihasilkan" — kode itu tetap wajib
+/// menginisialisasi setiap medan `MaterialSurface`, berapa pun yang ditawarkan.
+bool SurfacePinApplies(std::string_view pin, MaterialDomain domain);
 
 /// Tipe konkret setiap pin keluaran, setelah penyimpulan.
 ///

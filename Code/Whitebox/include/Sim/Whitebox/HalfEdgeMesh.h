@@ -166,4 +166,33 @@ HalfEdgeMesh MakeUnitCube();
 /// poligon — di sinilah "12 face menjadi 6 sisi" punya arti.
 HalfEdgeMesh MakeUnitCubeTriangulated();
 
+// --- bentuk awal blockout lain ----------------------------------------------
+//
+// **Semua sisinya cembung, dan itu bukan selera.** `WhiteboxMesh::BuildMeshData`
+// menyegitiga sisi dengan kipas dari simpul pertama — sah hanya untuk sisi
+// cembung. Sebuah profil tangga yang ditulis sebagai satu poligon tunggal
+// memang lebih ringkas dan menghasilkan segitiga yang menembus dirinya sendiri,
+// dan itu tidak terlihat sebagai galat melainkan sebagai bentuk yang salah.
+//
+// Semuanya berpusat di titik asal dan berukuran 1×1×1, sama dengan kubusnya,
+// supaya skala entity berarti hal yang sama untuk bentuk mana pun.
+
+/// Bidang miring: naik sepanjang +Z, tegak di sisi belakangnya.
+HalfEdgeMesh MakeUnitRamp();
+
+/// Tangga naik sepanjang +Z. `steps` dijepit ke [1, 64].
+///
+/// Sisi kiri dan kanannya dibagi menjadi quad per-tingkat, bukan satu poligon
+/// bertakik — lihat catatan cembung di atas. Pembagian itu juga yang membuat
+/// rusuknya bertemu penuh antar kolom: kolom yang tingginya berbeda dan bertemu
+/// di satu rusuk panjang meninggalkan T-junction, dan T-junction adalah retakan
+/// setebal satu piksel yang muncul pada sudut pandang tertentu saja.
+HalfEdgeMesh MakeUnitStairs(uint32_t steps = 6);
+
+/// Prisma bersegi `sides`, sumbu Y. `sides` dijepit ke [3, 64].
+HalfEdgeMesh MakeUnitCylinder(uint32_t sides = 12);
+
+/// Kerucut bersegi `sides` dengan puncak di +Y. `sides` dijepit ke [3, 64].
+HalfEdgeMesh MakeUnitCone(uint32_t sides = 12);
+
 }  // namespace sim::whitebox

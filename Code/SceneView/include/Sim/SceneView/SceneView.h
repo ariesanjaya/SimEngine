@@ -3,11 +3,12 @@
 #include "Sim/Core/Math.h"
 #include "Sim/Render/IViewportRenderer.h"
 #include "Sim/Render/Types.h"
-#include "Sim/Editor/SkinnedPreview.h"
-#include "Sim/Editor/TerrainStore.h"
+#include "Sim/SceneView/SkinnedPreview.h"
+#include "Sim/SceneView/TerrainStore.h"
 #include "Sim/Terrain/TerrainDecal.h"
-#include "Sim/Editor/WhiteboxStore.h"
-#include "Sim/Editor/MaterialPrograms.h"
+#include "Sim/SceneView/WhiteboxStore.h"
+#include "Sim/SceneView/MaterialPrograms.h"
+#include "Sim/SceneView/PickScene.h"
 #include "Sim/Scene/World.h"
 
 #include <filesystem>
@@ -23,7 +24,7 @@ struct AssetRecord;
 class AssetDatabase;
 }
 
-namespace sim::editor {
+namespace sim::view {
 
 class Selection;
 class TerrainStore;
@@ -102,11 +103,34 @@ bool ApplySceneSky(const scene::World& world, render::ViewportDesc& desc);
 class SceneView {
 public:
     /// Satu objek bergeometri yang bisa diklik, sudah dalam ruang dunia.
+    /// Satu titik di permukaan geometri, beserta pemiliknya.
+    struct SurfaceHit {
+        bool hit = false;
+        scene::Entity entity = scene::kNullEntity;
+        Vec3 position{0.0f};
+        /// Normal geometri ruang dunia, sudah dinormalkan dan **menghadap ke
+        /// arah datangnya sinar** — sehingga benda yang dijatuhkan berdiri di
+        /// atas permukaan, bukan menembusnya.
+        Vec3 normal{0.0f, 1.0f, 0.0f};
+        float distance = 0.0f;
+
+        explicit operator bool() const { return hit; }
+    };
+
     struct Pickable {
         scene::Entity entity = scene::kNullEntity;
         Mat4 worldMatrix{1.0f};
         Vec3 boundsMin{-0.5f, -0.5f, -0.5f};
         Vec3 boundsMax{0.5f, 0.5f, 0.5f};
+        /// Kunci geometri CPU-nya di `assets::MeshGeometryCache` — jalur berkas
+        /// untuk mesh yang diimpor, dan kunci sintetis untuk bentuk yang lahir di
+        /// editor. Kosong berarti entity ini tidak punya segitiga untuk
+        /// ditembak, dan picking presisi melewatkannya.
+        ///
+        /// **Kunci, bukan geometrinya.** Yang menyusun daftar ini berjalan tiap
+        /// frame; menaruh segitiga di sini berarti menyalin adegan enam puluh
+        /// kali per detik.
+        std::string meshKey;
     };
 
     /// Penanda untuk entity tanpa geometri — lampu, kamera, node kosong.
@@ -122,6 +146,27 @@ public:
         bool selected = false;
         bool pickable = true;
     };
+
+    /// Glyph penanda per jenis entity, diisi pemanggilnya.
+    ///
+    /// **Nama glyph-nya milik yang menggambarnya, bukan modul ini.** Komentar di
+    /// `EntityIcon` di atas sudah menyebutnya bertahun-tahun: "entity ini lampu,
+    /// jadi gambarkan bohlam" adalah pengetahuan editor. Sampai E9 kalimat itu
+    /// benar sementara kodenya tidak — modul ini menyebut `icons::kLight`
+    /// sendiri, dan font ikon lalu ikut terseret ke mana pun terjemahan
+    /// `World` → `ViewportScene` dipakai, player termasuk.
+    ///
+    /// Yang membiarkannya kosong tetap mendapat seluruh daftar penanda beserta
+    /// posisi, warna, dan status pickable-nya; yang hilang hanya glyph-nya. Dan
+    /// yang tidak menggambar penanda memang tidak punya font untuk membacanya.
+    struct IconGlyphs {
+        const char* directionalLight = nullptr;
+        const char* light = nullptr;
+        const char* camera = nullptr;
+        const char* empty = nullptr;
+    };
+
+    void SetIconGlyphs(const IconGlyphs& glyphs) { iconGlyphs_ = glyphs; }
 
     /// Menyusun ulang seluruh daftar dari isi world.
     /// Membangun daftar gambar dan daftar pickable untuk frame ini.
@@ -162,6 +207,16 @@ public:
     /// `box.frag`, seperti sebelum jalur ini ada.
     void SetMaterialPrograms(MaterialPrograms* programs) { materialPrograms_ = programs; }
 
+    /// Salinan CPU geometri, untuk picking presisi (R2).
+    ///
+    /// Null berarti setiap picking memakai jalur kotak batas — keadaan sebelum
+    /// R2, dan keadaan yang benar untuk build tanpa cache.
+    void SetMeshGeometryCache(assets::MeshGeometryCache* cache) { picks_.SetCache(cache); }
+
+    /// Berapa benda yang geometrinya masih dimuat. Nol berarti picking sudah
+    /// presisi untuk seluruh isi adegan.
+    std::size_t PendingPickGeometry() const { return picks_.PendingCount(); }
+
     /// Menambahkan kotak wireframe sejajar sumbu, sesudah `Build`.
     ///
     /// Terbuka karena tidak semua yang perlu digambar berasal dari dunia:
@@ -170,6 +225,59 @@ public:
     /// dan `Scene()` menyusun span-nya saat itu juga, jadi menambah di antara
     /// keduanya aman.
     void AddWireBox(const Vec3& boxMin, const Vec3& boxMax, const Vec4& color);
+
+    /// Satu ruas garis di ruang dunia.
+    void AddLine(const Vec3& from, const Vec3& to, const Vec4& color);
+
+    /// Menggambar ruas berikutnya menembus geometri, sampai dikembalikan.
+    ///
+    /// **Sakelar, bukan parameter di setiap fungsi.** Rangka kawat sebuah kapsul
+    /// adalah seratus ruas yang semuanya menginginkan jawaban yang sama; menaruh
+    /// pilihannya di tanda tangan setiap primitif berarti seratus kesempatan
+    /// meneruskannya salah, dan yang salah tidak terlihat sebagai galat melainkan
+    /// sebagai satu bagian rangka yang tertutup dinding.
+    void SetLinesThroughGeometry(bool through) { linesThroughGeometry_ = through; }
+
+    // --- rangka kawat bentuk tabrakan ---------------------------------------
+    //
+    // **Sumbunya mengikuti PhysX, bukan selera.** Kapsul dan silinder berbaring
+    // di sumbu **X** lokal dan bidang tak hingga bernormal **+X** lokal, karena
+    // itulah yang dibuat `PxCapsuleGeometry` dan `PxPlaneGeometry`. Rangka kawat
+    // yang memakai sumbu lain akan terlihat masuk akal dan berbohong — dan yang
+    // membukanya adalah orang yang sedang memeriksa apakah bentuknya benar.
+    //
+    // `transform` membawa posisi dan putaran saja. Skala tidak masuk ke sana
+    // melainkan ke ukurannya, mengikuti `physics::DescribeCollider`: sebuah
+    // jari-jari tidak bisa diregangkan ke satu arah, jadi menskalakan matriksnya
+    // akan menggambar telur di tempat bola disimulasikan.
+
+    void AddWireBox(const Mat4& transform, const Vec3& halfExtents, const Vec4& color);
+    void AddWireSphere(const Mat4& transform, float radius, const Vec4& color);
+    /// Setengah-tinggi **bagian silindernya**, tidak termasuk kedua tudung —
+    /// konvensi `ColliderComponent::halfHeight` dan `PxCapsuleGeometry`.
+    void AddWireCapsule(const Mat4& transform, float radius, float halfHeight,
+                        const Vec4& color);
+    void AddWireCylinder(const Mat4& transform, float radius, float halfHeight,
+                         const Vec4& color);
+    /// Bidang tak hingga digambar sepotong: `extent` setengah-sisi kotaknya.
+    /// Ditambah satu garis normal, karena kotak tanpa normal tidak memberi tahu
+    /// sisi mana yang padat.
+    void AddWirePlane(const Mat4& transform, float extent, const Vec4& color);
+    /// Salib tiga sumbu. Untuk yang tidak punya bentuk untuk digambar.
+    void AddWireCross(const Vec3& center, float size, const Vec4& color);
+
+    /// Lingkaran pada bidang yang direntang `axisA` dan `axisB`, keduanya
+    /// diharapkan satuan dan saling tegak lurus.
+    void AddWireCircle(const Vec3& center, const Vec3& axisA, const Vec3& axisB, float radius,
+                       const Vec4& color);
+
+    /// Kerucut terbuka: puncak, empat rusuk, dan lingkaran mulutnya.
+    ///
+    /// `halfAngle` sudut dari sumbu ke rusuknya — separuh bukaan penuh, mengikuti
+    /// `LightComponent::outerAngleRadians`. `length` diukur sepanjang sumbu, bukan
+    /// sepanjang rusuknya: itu yang membuat mulutnya tepat di jangkauan lampu.
+    void AddWireCone(const Vec3& apex, const Vec3& direction, float halfAngle, float length,
+                     const Vec4& color);
 
 private:
     /// Mesh decal yang sudah dibangun, beserta keadaan yang menghasilkannya.
@@ -263,6 +371,20 @@ public:
     /// objek yang diputar tetap bisa diklik tepat pada bentuknya.
     scene::Entity Raycast(const Ray& ray) const;
 
+    /// Permukaan yang tertembus sinar: titiknya, normalnya, dan pemiliknya.
+    ///
+    /// **Hanya jalur presisi — kotak batas sengaja tidak dipakai di sini**, dan
+    /// itu perbedaan yang menentukan terhadap `Raycast` di atas. Memilih benda
+    /// dari kotaknya sedikit terlalu murah hati dan hasilnya tetap benda yang
+    /// dimaksud; menaruh sesuatu di *permukaan* sebuah kotak menaruhnya di udara,
+    /// dengan orientasi mengikuti sisi kotak yang tidak ada di bentuk aslinya.
+    /// Yang geometrinya belum dimuat karena itu menjawab "tidak kena", dan
+    /// pemanggil melewatkannya alih-alih memindahkannya ke tempat yang salah.
+    ///
+    /// `ignore` melewatkan entity tertentu — benda yang sedang dijatuhkan tidak
+    /// boleh mendarat di dirinya sendiri.
+    SurfaceHit RaycastSurface(const Ray& ray, std::span<const scene::Entity> ignore = {}) const;
+
     /// Ikon terdekat dari sebuah titik layar, dalam radius tertentu.
     ///
     /// Diuji di ruang layar, bukan ruang dunia: ikon digambar dengan ukuran
@@ -303,6 +425,14 @@ private:
     std::vector<render::LineSegment> lines_;
     std::vector<render::LightInstance> lights_;
     std::vector<Pickable> pickables_;
+    /// Geometri yang bisa ditembak. **`mutable` karena ia cache**: `Raycast`
+    /// tidak mengubah apa yang dilihat pemanggil, ia hanya menyiapkan jawaban
+    /// yang sama dengan lebih teliti.
+    mutable PickScene picks_;
+    /// Dipakai ulang tiap picking supaya tidak mengalokasi di dalam klik.
+    mutable std::vector<PickItem> pickItems_;
+    IconGlyphs iconGlyphs_;
+    bool linesThroughGeometry_ = false;
     std::vector<EntityIcon> icons_;
     /// Warna dasar per material, supaya `.simmat` tidak diurai tiap frame untuk
     /// jawaban yang tidak berubah. Kunci GUID; jalur yang gagal dibaca dicatat
@@ -324,4 +454,4 @@ Ray ScreenPointToRay(const Mat4& view, const Mat4& projection, const Vec2& size,
 bool WorldToScreen(const Mat4& viewProjection, const Vec2& origin, const Vec2& size,
                    const Vec3& world, Vec2& outScreen);
 
-}  // namespace sim::editor
+}  // namespace sim::view

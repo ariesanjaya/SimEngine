@@ -1,7 +1,8 @@
 #pragma once
 
-#include "Sim/Editor/TerrainStore.h"
-#include "Sim/Editor/WhiteboxStore.h"
+#include "Sim/SceneView/Selection.h"
+#include "Sim/SceneView/TerrainStore.h"
+#include "Sim/SceneView/WhiteboxStore.h"
 #include "Sim/Render/IMaterialPreview.h"
 #include "Sim/Render/IViewportRenderer.h"
 #include "Sim/Render/TimeOfDay.h"
@@ -19,6 +20,7 @@ class FrameLimiter;
 }
 
 namespace sim::assets {
+class MeshGeometryCache;
 class MeshSdfBakery;
 class TextureBakery;
 class AssetDatabase;
@@ -28,27 +30,34 @@ namespace sim::script {
 class ScriptRuntime;
 }
 
-namespace sim::editor {
+namespace sim::view {
 class MaterialPrograms;
-
 class SkinnedPreview;
+class SceneView;
+}
 
-/// Menjembatani Entity dan SelectionId.
-///
-/// Digeser satu supaya nilai 0 tetap berarti "tidak ada": entity pertama entt
-/// bernilai 0, dan tanpa pergeseran ini objek pertama di scene akan selalu
-/// tampak tidak terpilih.
-inline uint64_t ToSelectionId(scene::Entity entity) {
-    return static_cast<uint64_t>(entity) + 1;
-}
-inline scene::Entity ToEntity(uint64_t id) {
-    return id == 0 ? scene::kNullEntity : static_cast<scene::Entity>(id - 1);
-}
+namespace sim::editor {
+
+// **Milik `Sim::SceneView`, dipakai di sini dengan namanya sendiri.** Terjemahan
+// `World` → `ViewportScene` beserta simpanannya bukan lagi milik editor — player
+// menjawab pertanyaan yang sama dan berhak memakainya tanpa menyeret ImGui,
+// riwayat undo, dan PanelManager. Yang tidak ikut berubah adalah panel: ia
+// menulis `Selection` dan `TerrainView` seperti sejak E2.
+//
+// **Satu arahan, bukan daftar nama.** Daftar `using view::X;` per nama memang
+// lebih sempit, dan justru itu masalahnya: setiap tipe baru di `Sim::SceneView`
+// harus ditambahkan di sini juga, dan yang lupa menambahkannya tidak mendapat
+// galat di modulnya sendiri melainkan di panel yang kebetulan memakainya. Yang
+// bisa usang diam-diam lebih buruk daripada yang lebih luas dari perlunya.
+//
+// Cakupannya tetap `sim::editor` — tidak ada yang bocor ke lingkup global — dan
+// tabrakan nama, bila suatu saat ada, menjadi galat kompilasi yang menyebut
+// kedua kandidatnya.
+using namespace view;  // NOLINT(google-build-using-namespace)
 
 class ActionRegistry;
 class CommandHistory;
 class Notifications;
-class Selection;
 
 /// Segala sesuatu yang dibutuhkan panel dari luar dirinya.
 ///
@@ -86,6 +95,9 @@ struct EditorContext {
     /// True selama Play berjalan. Panel memakainya untuk menonaktifkan
     /// penyuntingan yang akan hilang begitu Stop ditekan.
     bool playing = false;
+    /// True selama Play tertahan — oleh Pause, atau oleh breakpoint graph.
+    /// Selalu false saat `playing` false.
+    bool paused = false;
 
     render::IViewportRenderer* viewportRenderer = nullptr;
     /// Preview material untuk Material Editor. Target rendernya sendiri, karena
@@ -93,6 +105,18 @@ struct EditorContext {
     /// target berarti yang belakangan menimpa yang duluan. Null bila perangkat
     /// tidak mendukungnya — panel wajib memeriksa.
     render::IMaterialPreview* materialPreview = nullptr;
+    /// Pratinjau untuk thumbnail **di dalam** node graph material.
+    ///
+    /// Instance ketiga, dan alasannya sama seperti yang kedua ada: ia memegang
+    /// material yang berbeda dari pratinjau besar — satu pin, bukan seluruh
+    /// permukaan — dan `SetMaterial` membangun pipeline. Satu instance untuk
+    /// keduanya berarti membangun ulang dua pipeline setiap frame, bergantian,
+    /// selamanya.
+    ///
+    /// Kecil dengan sengaja: yang digambar sebesar kotak di dalam node, dan
+    /// target 512² untuk kotak 96 px adalah 27 kali piksel yang tidak pernah
+    /// terlihat.
+    render::IMaterialPreview* materialNodePreview = nullptr;
     /// Pratinjau aset untuk Asset Browser. Dimiliki pemanggil EditorApp.
     render::IThumbnailCache* thumbnails = nullptr;
     /// Baker tekstur: dari berkas sumber ke `.ktx2` di cache. Dimiliki pemanggil
@@ -107,6 +131,9 @@ struct EditorContext {
     /// renderer karena yang membakenya OpenVDB — pengondisi aset yang tidak
     /// pernah ikut ke jalur yang dikirim ke pemain.
     assets::MeshSdfBakery* meshSdfBakery = nullptr;
+    /// Salinan CPU geometri mesh, untuk picking presisi dan query authoring.
+    /// Null berarti picking kembali ke jalur kotak batas.
+    assets::MeshGeometryCache* meshGeometry = nullptr;
     /// Penjaga shader material untuk pass forward. Dimiliki pemanggil EditorApp,
     /// dan seperti baker tekstur ia mengerjakan pekerjaannya di `TaskPool`.
     MaterialPrograms* materialPrograms = nullptr;
@@ -328,6 +355,11 @@ struct EditorContext {
     std::function<void()> requestResetLayout;
     std::function<void()> requestPlay;
     std::function<void()> requestStop;
+    /// Menahan atau melanjutkan simulasi. Dunia tidak disentuh — lihat
+    /// `EditorApp::Pause`.
+    std::function<void()> requestTogglePause;
+    /// Memajukan simulasi tepat satu langkah tetap, lalu menahannya lagi.
+    std::function<void()> requestStep;
     /// Isi menu Scripts, diisi EditorApp dari registrasi Lua. Null bila editor
     /// dibangun tanpa Lua.
     std::function<void()> drawScriptMenu;

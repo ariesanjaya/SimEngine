@@ -79,9 +79,69 @@ struct MeshAsset {
     uint32_t vertexCount = 0;
 };
 
+/// Saringan tampilan viewport.
+///
+/// **Lima, dan setiap satunya benar-benar digambar.** Enum ini berdiri sejak E1
+/// dengan nama-nama yang menggambarkan rencana, bukan jalur yang ada — dan
+/// sampai belum lama ini tidak ada satu pun perender yang membacanya: tombol
+/// "Lit/Wireframe" di viewport mengubah medan ini dan tidak mengubah apa pun di
+/// layar.
+///
+/// **Tidak satu pun dari keempatnya menuntut pipeline dibangun ulang, dan itu
+/// syarat, bukan kebetulan.** Pipeline pass forward dibuat satu per material
+/// oleh kompiler graph material; sebuah mode yang menjadi varian pipeline
+/// berarti setiap material di project dikompilasi ulang saat sakelarnya
+/// ditekan. Semuanya karena itu masuk lewat jalan lain: rangka kawat lewat pass
+/// tambahan sesudah forward, dan `Unlit` maupun `Clay` lewat satu angka di blok
+/// uniform per-frame yang dibaca setiap shader fragmen.
 enum class DrawMode : uint8_t {
-    Lit,
+    /// Material apa adanya. Bentuk viewport sejak E8, dan bawaannya.
+    Material,
+    /// Material tanpa satu pun cahaya: albedo datar beserta emissive-nya.
+    ///
+    /// **Cabang yang sama dengan adegan tanpa lampu**, diminta alih-alih
+    /// disimpulkan — lihat `unlitView()` di `Shaders/cluster_common.slang`.
+    /// Itulah yang membuat ruas bermaterial dan ruas jalur-mundur sepakat di
+    /// mode ini tanpa dua definisi "tanpa cahaya" yang harus dijaga sinkron.
+    ///
+    /// Yang dijawabnya: warna mana yang benar-benar milik material, dan mana
+    /// yang datang dari cahaya. Tekstur yang terlalu gelap dan lampu yang
+    /// terlalu redup menghasilkan gambar yang sama, dan mode ini yang
+    /// memisahkan keduanya. Uji alfa tetap berlaku, jadi siluet benda tidak
+    /// berubah.
     Unlit,
+    /// Cahaya tanpa material: seluruh permukaan menjadi satu abu-abu netral yang
+    /// matte, dan penyinaran, bayangan, serta GI berjalan utuh di atasnya.
+    ///
+    /// **Kebalikan `Unlit`, dan dipakai untuk pertanyaan yang kebalikan pula:**
+    /// bukan warna mana yang milik material, melainkan bayangan ini jatuh di
+    /// mana. Peta albedo adalah persis hal yang membuat pertanyaan itu tidak
+    /// bisa dijawab — mata tidak memisahkan bercak gelap sebuah tekstur dari
+    /// bercak gelap sebuah bayangan, jadi kaskade yang beresolusi kurang, acne,
+    /// dan bayangan yang lepas dari kakinya semuanya tenggelam di dalam
+    /// permukaan yang ramai.
+    ///
+    /// Yang dibuang bukan hanya warna dasar. Logam memantulkan lingkungannya
+    /// alih-alih menaunginya, sorotan spekular terbaca seperti cahaya yang
+    /// jatuh di tempat yang bukan tempatnya, dan peta normal melekukkan cahaya
+    /// pada permukaan yang sebenarnya datar. Uji alfa tetap berlaku, dengan
+    /// alasan yang sama seperti di `Unlit`: bayangan yang diperiksa harus jatuh
+    /// dari siluet yang sungguhan.
+    Clay,
+    /// Material, lalu rangka kawat di atasnya.
+    ///
+    /// Inilah mode yang dipakai saat memeriksa topologi sambil tetap melihat
+    /// permukaannya: rangka kawat sendirian menyembunyikan justru hal yang
+    /// sedang dinilai — bahwa sebuah lipatan halus ternyata datang dari
+    /// segitiga yang panjang sekali.
+    MaterialWireframe,
+    /// Hanya rangka kawat.
+    ///
+    /// **Garis yang tersembunyi tetap tersembunyi.** Prepass tetap berjalan
+    /// walaupun tidak ada permukaan yang digambar, dan kedalaman yang
+    /// ditulisnya itulah yang membuat rusuk di sisi jauh sebuah benda tidak
+    /// ikut terlihat. Tanpa itu, sebuah kotak menjadi dua belas garis yang
+    /// saling menembus dan bentuknya tidak lagi terbaca.
     Wireframe,
 };
 
@@ -288,22 +348,22 @@ struct ViewportDesc {
     /// bisa diperiksa selama perbandingannya tenggelam dalam derau yang
     /// besarnya tidak diketahui.
     float fixedDeltaSeconds = -1.0f;
-    DrawMode mode = DrawMode::Lit;
+    DrawMode mode = DrawMode::Material;
     Vec4 clearColor{0.13f, 0.14f, 0.16f, 1.0f};
     bool showGrid = true;
     float gridCellSize = 1.0f;   ///< meter per petak kecil
     float gridFadeDistance = 120.0f;
 
-    /// Arah **dari permukaan ke matahari**, tidak harus ternormalisasi.
+    /// Bayangan matahari boleh digambar sama sekali.
     ///
-    /// Di sini, bukan di `ViewportScene`: ia pengaturan tampilan viewport
-    /// selama scene belum benar-benar punya lampu directional. Begitu komponen
-    /// lampu dibaca renderer, medan ini yang menjadi nilai mundurnya.
-    Vec3 sunDirection{-0.4f, 0.8f, 0.45f};
-    /// Radiance matahari — warna dikali intensitas — saat scene tidak punya
-    /// lampu directional. Angkanya sama dengan matahari yang disemai editor,
-    /// jadi scene tanpa matahari tampak seperti scene dengan matahari bawaan.
-    Vec3 sunRadiance{3.0f};
+    /// **Arah dan radiansi mataharinya tidak ada di sini lagi.** Keduanya dulu
+    /// medan `ViewportDesc` dengan alasan yang tertulis di tempatnya: "pengaturan
+    /// tampilan viewport selama scene belum benar-benar punya lampu
+    /// directional". Syarat itu sudah lama terpenuhi, dan yang tersisa adalah
+    /// matahari yang menyala tanpa dimiliki entity mana pun — sehingga menghapus
+    /// lampu terakhir sebuah level tidak menggelapkan apa pun, dan tidak ada
+    /// tempat untuk mematikannya. Sekarang keduanya datang dari
+    /// `ViewportScene::lights`, dan adegan tanpa lampu memang gelap.
     bool castShadows = true;
 
     /// Langit atmosferik. Saat mati, latar viewport tetap `clearColor`.
@@ -561,6 +621,17 @@ struct LineSegment {
     Vec3 a{0.0f};
     Vec3 b{0.0f};
     Vec4 color{1.0f};
+    /// Digambar menembus geometri, tanpa uji kedalaman.
+    ///
+    /// **Untuk garis yang menjelaskan sesuatu yang tidak terlihat.** Rangka
+    /// kawat collider adalah contohnya: bentuk tabrakan hampir selalu berada di
+    /// dalam mesh yang menggambarkannya, jadi garis yang diuji kedalaman
+    /// tertutup persis oleh benda yang ukurannya sedang diperiksa orang.
+    ///
+    /// Bawaannya false: garis yang menggambarkan sesuatu yang **ada** di dunia —
+    /// batas volume asap, sumbu, kisi bantu — harus tertutup benda di depannya,
+    /// karena kalau tidak ia terbaca melayang di depan segalanya.
+    bool throughGeometry = false;
 };
 
 /// Isi yang harus digambar frame ini.
