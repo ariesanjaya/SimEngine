@@ -192,6 +192,19 @@ SurfaceLobes Emitter::DetectLobes(const MaterialNode& output) const {
     // maupun coat, jadi mematikannya menuntut kedua-duanya isotropik.
     lobes.anisotropy = MaybeNonZero(output, "specularRoughnessAnisotropy") ||
                        MaybeNonZero(output, "coatRoughnessAnisotropy");
+
+    // Yang geometris ditanyakan "dikemudikan atau tidak", bukan "mungkin bukan
+    // nol": nilai bawaannya bukan nol melainkan sumbu identitas, jadi
+    // membandingkannya dengan nol tidak menjawab apa pun.
+    const MaterialNodeType* type = MaterialNodeCatalog::Get().Find(output.type);
+    if (type != nullptr) {
+        const MaterialPin* tangent = type->FindPin("tangent");
+        const MaterialPin* coatNormal = type->FindPin("coatNormal");
+        const MaterialPin* coatTangent = type->FindPin("coatTangent");
+        lobes.tangent = tangent != nullptr && IsDriven(output, *tangent);
+        lobes.coatFrame = (coatNormal != nullptr && IsDriven(output, *coatNormal)) ||
+                          (coatTangent != nullptr && IsDriven(output, *coatTangent));
+    }
     return lobes;
 }
 
@@ -507,8 +520,18 @@ MaterialCompileResult Emitter::Run() {
     // Mode alfa material tidak berlaku untuk pratinjau sebuah pin: sebuah
     // material bertopeng akan membuang fragmen pratinjaunya menurut opasitas yang
     // sedang tidak dihitung, dan yang terlihat adalah kotak kosong.
-    result_.alphaTest = !options_.WantsPreview() && output.Setting("alphaMode") == "mask";
-    result_.alphaBlend = !options_.WantsPreview() && output.Setting("alphaMode") == "blend";
+    //
+    // **Dibaca dari domain, bukan dari setting mentahnya.** Keduanya sekarang
+    // satu keputusan yang dinyatakan di aset — dan `MaterialGraph::Domain()`
+    // pula yang menutup pin yang tidak berlaku, jadi kompiler dan kanvas tidak
+    // mungkin berselisih tentang apa arti material ini.
+    const MaterialDomain domain = graph_.Domain();
+    result_.domain = domain;
+    result_.alphaTest = !options_.WantsPreview() && domain == MaterialDomain::Masked;
+    // Decal ikut dicampur: ia selembar kulit di atas permukaan lain, dan tepinya
+    // memudar alih-alih berhenti mendadak.
+    result_.alphaBlend = !options_.WantsPreview() && (domain == MaterialDomain::Transparent ||
+                                                      domain == MaterialDomain::Decal);
     if (result_.alphaTest) {
         const std::string cutoff = output.Setting("alphaCutoff");
         if (!cutoff.empty()) {
@@ -540,7 +563,7 @@ MaterialCompileResult Emitter::Run() {
         // mengalikannya dengan cahaya lebih dulu, dan yang sampai ke mata bukan
         // lagi nilai itu melainkan nilai itu di bawah lampu tertentu.
         //
-        // Ketiga pin di luar `OpenPBRSurface` ditulis semua, karena tidak ada
+        // Pin di luar `OpenPBRSurface` ditulis semua, karena tidak ada
         // `defaults()` yang bisa mengisinya — dan sebuah `normal` yang tidak
         // ditulis adalah float3 tak berisi, bukan normal identitas.
         tail << "    result.surface.baseColor = float3(0.0, 0.0, 0.0);\n";
@@ -550,6 +573,9 @@ MaterialCompileResult Emitter::Run() {
         // nilainya.
         tail << "    result.surface.specularWeight = 0.0;\n";
         tail << "    result.normal = float3(0.0, 0.0, 1.0);\n";
+        tail << "    result.tangent = float3(1.0, 0.0, 0.0);\n";
+        tail << "    result.coatNormal = float3(0.0, 0.0, 1.0);\n";
+        tail << "    result.coatTangent = float3(1.0, 0.0, 0.0);\n";
         tail << "    result.emissive = " << PreviewExpression() << ";\n";
         tail << "    result.opacity = 1.0;\n";
         tail << "    return result;\n";
@@ -562,11 +588,11 @@ MaterialCompileResult Emitter::Run() {
         if (pin.direction != PinDirection::Input) {
             continue;
         }
-        const bool extra =
-            pin.name == "normal" || pin.name == "emissive" || pin.name == "opacity";
-        // Yang tidak dikemudikan dibiarkan pada nilai defaults() — kecuali tiga
-        // pin di luar OpenPBRSurface, yang tidak punya defaults() untuk
-        // bersandar.
+        const bool extra = SurfacePinIsExtra(pin.name);
+        // Yang tidak dikemudikan dibiarkan pada nilai defaults() — kecuali pin
+        // di luar OpenPBRSurface, yang tidak punya defaults() untuk bersandar.
+        // Sebuah `tangent` yang tidak ditulis adalah float3 tak berisi, bukan
+        // sumbu identitas.
         if (!extra && !IsDriven(output, pin)) {
             continue;
         }
@@ -701,6 +727,9 @@ MaterialCompileResult Emitter::Run() {
     head << "struct MaterialSurface\n{\n";
     head << "    OpenPBRSurface surface;\n";
     head << "    float3 normal;\n";
+    head << "    float3 tangent;\n";
+    head << "    float3 coatNormal;\n";
+    head << "    float3 coatTangent;\n";
     head << "    float3 emissive;\n";
     head << "    float  opacity;\n";
     head << "};\n\n";

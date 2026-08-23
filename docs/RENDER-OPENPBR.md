@@ -13,6 +13,11 @@ ada di sana, dan ketiganya justru yang paling sering dianggap "mahal":
 Dokumen ini memilih teknik untuk masing-masing, dan — yang lebih menentukan —
 menetapkan **cara membayarnya hanya ketika dipakai**.
 
+> Untuk lobe yang **sudah** ada tetapi menyimpang dari spesifikasi — anisotropi,
+> Fresnel logam, arti `coat_darkening`, difus EON, dan lainnya — lihat
+> [`AUDIT-OPENPBR.md`](AUDIT-OPENPBR.md). Keduanya melengkapi: yang di sana
+> tentang yang salah dibaca, yang di sini tentang yang belum ada.
+
 ---
 
 ## Yang sebenarnya membuat fitur ini mahal

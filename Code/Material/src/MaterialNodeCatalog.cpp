@@ -91,11 +91,22 @@ MaterialNodeCatalog::MaterialNodeCatalog() {
              In("fuzzColor", ValueKind::Float3, "float3(1.0)", "Fuzz Color"),
              In("fuzzRoughness", ValueKind::Float, "0.5", "Fuzz Roughness"),
 
-             // Di luar OpenPBRSurface: ketiganya tidak ikut dalam campuran lobe.
-             // Normal membelokkan bingkai shading sebelum BRDF dievaluasi,
+             // Di luar OpenPBRSurface: tidak ikut dalam campuran lobe. Yang
+             // geometris membelokkan bingkai shading sebelum BRDF dievaluasi,
              // emissive ditambahkan setelahnya, dan opacity dipakai saat
              // menggabungkan ke target.
+             //
+             // **`tangent` yang membuat anisotropi bisa diarahkan.** Tanpanya
+             // sumbu panjang selalu mengikuti tangent mesh, dan logam sikat
+             // melingkar — dasar panci, pelek roda — tidak bisa dibuat sama
+             // sekali. `coatNormal` dan `coatTangent` memberi coat bingkainya
+             // sendiri, yaitu yang membuat kulit jeruk pada cat mobil mungkin.
              In("normal", ValueKind::Float3, "float3(0.0, 0.0, 1.0)", "Normal (tangent space)"),
+             In("tangent", ValueKind::Float3, "float3(1.0, 0.0, 0.0)", "Tangent (tangent space)"),
+             In("coatNormal", ValueKind::Float3, "float3(0.0, 0.0, 1.0)",
+                "Coat Normal (tangent space)"),
+             In("coatTangent", ValueKind::Float3, "float3(1.0, 0.0, 0.0)",
+                "Coat Tangent (tangent space)"),
              In("emissive", ValueKind::Float3, "float3(0.0)", "Emissive"),
              In("opacity", ValueKind::Float, "1.0", "Opacity"),
          }});
@@ -276,6 +287,47 @@ const MaterialNodeType* MaterialNodeCatalog::Find(std::string_view key) const {
     const auto it = std::find_if(types_.begin(), types_.end(),
                                  [key](const MaterialNodeType& type) { return type.key == key; });
     return it == types_.end() ? nullptr : &*it;
+}
+
+/// Apakah sebuah pin keluaran permukaan berlaku untuk domain ini.
+///
+/// **Ini pertanyaan pengarangan, bukan pertanyaan kompilasi**, dan itu batas yang
+/// mahal dipelajari: percobaan pertama menyaring di dalam `PinsOf`, dan
+/// akibatnya `result.opacity` tidak pernah ditulis di kode yang dihasilkan —
+/// sebuah float tak berisi — sementara berkas lama yang menyambungkan opacity
+/// berhenti bisa dikompilasi sama sekali. Kompiler dan validasi harus tetap
+/// melihat seluruh pin; yang tidak boleh menawarkannya adalah kanvas.
+///
+/// **Dua alasan menutup pin, dan keduanya sah.** Yang pertama: pin itu tidak
+/// dibaca siapa pun — `opacity` pada material buram tidak sampai ke mana-mana,
+/// jadi mengisinya adalah pekerjaan yang hasilnya dibuang tanpa satu pun pesan.
+/// Yang kedua: pin itu bekerja tetapi tidak berarti untuk bendanya — decal
+/// adalah selembar kulit yang diproyeksikan, dan coat, fuzz, serta anisotropi
+/// adalah sifat lapisan dan mikrostruktur yang tidak dimiliki sebuah tempelan.
+///
+/// **Daftar ini keputusan, bukan hukum.** Yang kedua di atas adalah kurasi, dan
+/// mengubahnya cukup menyunting tabel ini — bukan menyentuh kompiler, kanvas,
+/// atau inspector, karena ketiganya membaca pin lewat `PinsOf`.
+bool SurfacePinIsExtra(std::string_view pin) {
+    return pin == "normal" || pin == "tangent" || pin == "coatNormal" ||
+           pin == "coatTangent" || pin == "emissive" || pin == "opacity";
+}
+
+bool SurfacePinApplies(std::string_view pin, MaterialDomain domain) {
+    if (pin == "opacity") {
+        // Buram tidak punya alfa, titik. Ini satu-satunya penutupan yang murni
+        // "tidak dibaca siapa pun".
+        return domain != MaterialDomain::Opaque;
+    }
+    if (domain != MaterialDomain::Decal) {
+        return true;
+    }
+    // Yang tersisa untuk decal: warna dasar, spekular sederhana, normal, dan
+    // emissive. Decal tidak punya coat, jadi bingkai coat ikut tertutup — dan
+    // tanpa anisotropi, `tangent` tidak mengarahkan apa pun.
+    return pin == "baseWeight" || pin == "baseColor" || pin == "baseMetalness" ||
+           pin == "specularWeight" || pin == "specularColor" || pin == "specularRoughness" ||
+           pin == "normal" || pin == "emissive";
 }
 
 std::vector<MaterialPin> PinsOf(const MaterialGraph& graph, const MaterialNode& node) {

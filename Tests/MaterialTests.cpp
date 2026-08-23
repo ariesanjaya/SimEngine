@@ -1387,6 +1387,204 @@ float4 probeMain(float3 normal : NORMAL, float3 view : TEXCOORD0) : SV_Target {
     CHECK(out.ok);
 }
 
+TEST_CASE("Pin geometri OpenPBR ada, dan berada di luar OpenPBRSurface") {
+    const MaterialNodeType* output = MaterialNodeCatalog::Get().Find(kSurfaceOutputType);
+    REQUIRE(output != nullptr);
+
+    // `geometry_tangent`, `geometry_coat_normal`, dan `geometry_coat_tangent`
+    // di spesifikasi. Tanpa yang pertama, `specularRoughnessAnisotropy` tidak
+    // bisa diarahkan sama sekali — sorotnya selalu meregang menurut tangent
+    // mesh, bukan menurut goresan yang digambar pengarangnya.
+    for (const char* name : {"tangent", "coatNormal", "coatTangent"}) {
+        INFO("pin ", name);
+        const MaterialPin* pin = output->FindPin(name);
+        REQUIRE(pin != nullptr);
+        CHECK(pin->kind == ValueKind::Float3);
+        // Bawaannya sumbu identitas, bukan nol: nol berarti "tidak menunjuk ke
+        // mana pun", dan itu bukan hal yang sama.
+        CHECK(SurfacePinIsExtra(name));
+    }
+    CHECK(output->FindPin("tangent")->defaultValue == "float3(1.0, 0.0, 0.0)");
+    CHECK(output->FindPin("coatNormal")->defaultValue == "float3(0.0, 0.0, 1.0)");
+
+    // Decal tidak punya coat, dan tanpa anisotropi tidak punya sumbu untuk
+    // diarahkan.
+    CHECK_FALSE(SurfacePinApplies("tangent", MaterialDomain::Decal));
+    CHECK_FALSE(SurfacePinApplies("coatNormal", MaterialDomain::Decal));
+    CHECK(SurfacePinApplies("coatNormal", MaterialDomain::Opaque));
+}
+
+TEST_CASE("Bingkai geometri dibangun hanya untuk material yang memintanya") {
+    MaterialGraph graph;
+    MaterialNode output;
+    output.guid = Uuid::Generate();
+    output.type = std::string(kSurfaceOutputType);
+    graph.nodes.push_back(output);
+
+    MaterialCompileOptions options;
+    options.moduleName = "uji.simmat";
+
+    // **Ditanya "dikemudikan atau tidak", bukan "mungkin bukan nol".** Nilai
+    // bawaan pin ini sumbu identitas, jadi membandingkannya dengan nol tidak
+    // menjawab apa pun — dan lobe yang dinyalakan karena salah tanya akan
+    // membuat coat berhenti mengikuti peta normal dasarnya tanpa satu pun galat.
+    const MaterialCompileResult plain = CompileMaterial(graph, options);
+    REQUIRE(plain.ok);
+    CHECK_FALSE(plain.lobes.tangent);
+    CHECK_FALSE(plain.lobes.coatFrame);
+
+    graph.nodes[0].pinValues["tangent"] = "float3(0.0, 1.0, 0.0)";
+    const MaterialCompileResult rotated = CompileMaterial(graph, options);
+    REQUIRE(rotated.ok);
+    CHECK(rotated.lobes.tangent);
+    CHECK_FALSE(rotated.lobes.coatFrame);
+
+    // Salah satu dari keduanya sudah cukup: bingkai coat dibangun utuh atau
+    // tidak sama sekali.
+    graph.nodes[0].pinValues["coatTangent"] = "float3(0.0, 1.0, 0.0)";
+    CHECK(CompileMaterial(graph, options).lobes.coatFrame);
+}
+
+TEST_CASE("Modul forward memasang bingkai coat hanya ketika materialnya memintanya") {
+    if (SlangCompilerIdentity().empty()) {
+        MESSAGE("slangc tidak ditemukan — bagian integrasi dilewati");
+        return;
+    }
+    MaterialGraph graph;
+    MaterialNode output;
+    output.guid = Uuid::Generate();
+    output.type = std::string(kSurfaceOutputType);
+    graph.nodes.push_back(output);
+
+    MaterialCompileOptions options;
+    options.moduleName = "uji.simmat";
+
+    ForwardMaterialOptions moduleOptions;
+    moduleOptions.prelude = LoadOpenPbrPrelude(SIM_SHADER_DIR);
+    moduleOptions.frameDeclarations = InlineShaderIncludes(
+        SIM_SHADER_DIR, {"box_varyings.slang", "cluster_common.slang", "gi_resolve.slang"});
+    REQUIRE(!moduleOptions.prelude.empty());
+    REQUIRE(!moduleOptions.frameDeclarations.empty());
+
+    const MaterialCompileResult plain = CompileMaterial(graph, options);
+    REQUIRE(plain.ok);
+    moduleOptions.lobes = plain.lobes;
+    const std::string plainModule =
+        AssembleForwardMaterialModule(plain.slang, moduleOptions);
+    // **Dicari pemanggilannya, bukan namanya.** Prelude ikut ditanam ke dalam
+    // modul, jadi definisi kedua fungsi itu selalu ada di sana — yang menandakan
+    // materialnya benar-benar membayarnya adalah baris yang memanggilnya.
+    CHECK(plainModule.find("ShadingFrame coatFrame = makeCoatFrame") == std::string::npos);
+    CHECK(plainModule.find("frame.tangent = rotatedTangent") == std::string::npos);
+    CHECK(plainModule.find("evaluateOpenPBR(m.surface, frame, light.direction") !=
+          std::string::npos);
+
+    graph.nodes[0].pinValues["coatNormal"] = "float3(0.0, 0.2, 1.0)";
+    graph.nodes[0].pinValues["tangent"] = "float3(0.0, 1.0, 0.0)";
+    const MaterialCompileResult driven = CompileMaterial(graph, options);
+    REQUIRE(driven.ok);
+    moduleOptions.lobes = driven.lobes;
+    const std::string drivenModule =
+        AssembleForwardMaterialModule(driven.slang, moduleOptions);
+    CHECK(drivenModule.find("ShadingFrame coatFrame = makeCoatFrame") != std::string::npos);
+    CHECK(drivenModule.find("frame.tangent = rotatedTangent") != std::string::npos);
+    CHECK(drivenModule.find("evaluateOpenPBR(m.surface, frame, coatFrame") != std::string::npos);
+
+    // Dan yang dihasilkan benar-benar bisa dikompilasi, bukan sekadar
+    // mengandung teks yang benar.
+    ShaderCache cache;
+    cache.Configure({}, "x");
+    cache.SetCompiler(MakeSlangCompiler());
+    CompileRequest request;
+    request.stage = ShaderStage::Fragment;
+    // Entry point modul forward bernama `main`, bukan `fragmentMain`.
+    request.entryPoint = "main";
+    request.source = drivenModule;
+    const CompileOutput out = cache.Get(request);
+    INFO("slangc: ", out.error);
+    CHECK(out.ok);
+}
+
+TEST_CASE("openpbr.slang bisa dikompilasi pada keenam belas kombinasi lapisan") {
+    if (SlangCompilerIdentity().empty()) {
+        MESSAGE("slangc tidak ditemukan — bagian integrasi dilewati");
+        return;
+    }
+    const std::string prelude = LoadOpenPbrPrelude(SIM_SHADER_DIR);
+    REQUIRE(!prelude.empty());
+
+    // **Lapisan yang dimatikan adalah kode yang tidak ada, bukan cabang yang
+    // tidak diambil** — dan itulah yang membuat kombinasinya perlu diuji satu
+    // per satu. Sebuah nama yang hanya dideklarasikan di dalam `#if` yang menyala
+    // akan tetap lolos pada material yang memakai seluruh lapisan, dan baru
+    // gagal pada material pertama yang mematikan salah satunya. Itu bentuk
+    // kegagalan yang menunjuk ke material, padahal salahnya di sini.
+    ShaderCache cache;
+    cache.Configure({}, "x");
+    cache.SetCompiler(MakeSlangCompiler());
+
+    for (int mask = 0; mask < 16; ++mask) {
+        const int coat = (mask >> 0) & 1;
+        const int fuzz = (mask >> 1) & 1;
+        const int aniso = (mask >> 2) & 1;
+        const int diffuseRoughness = (mask >> 3) & 1;
+
+        std::string defines;
+        defines += "#define OPENPBR_HAS_COAT " + std::to_string(coat) + "\n";
+        defines += "#define OPENPBR_HAS_FUZZ " + std::to_string(fuzz) + "\n";
+        defines += "#define OPENPBR_HAS_ANISOTROPY " + std::to_string(aniso) + "\n";
+        defines += "#define OPENPBR_HAS_DIFFUSE_ROUGHNESS " +
+                   std::to_string(diffuseRoughness) + "\n";
+
+        CompileRequest request;
+        request.stage = ShaderStage::Fragment;
+        request.entryPoint = "probeMain";
+        request.source = defines + prelude + R"(
+[shader("fragment")]
+float4 probeMain(float3 normal : NORMAL, float3 view : TEXCOORD0) : SV_Target {
+    OpenPBRSurface surface = OpenPBRSurface::defaults();
+    surface.baseMetalness = 1.0;
+    surface.baseWeight = 0.75;
+    surface.specularColor = float3(0.6, 0.7, 0.9);
+    surface.specularRoughnessAnisotropy = 0.8;
+    surface.baseDiffuseRoughness = 0.5;
+    surface.coatWeight = 0.5;
+    surface.fuzzWeight = 0.25;
+    ShadingFrame frame;
+    frame.normal = normalize(normal);
+    frame.view = normalize(view);
+    frame.tangent = float3(1, 0, 0);
+    frame.bitangent = float3(0, 1, 0);
+    float3 direct = evaluateOpenPBR(surface, frame, float3(0, 1, 0), float3(1));
+    float3 ambient = evaluateOpenPBR_IBL(surface, frame, float3(0.4), float3(0.6),
+                                         float3(0.7), float2(0.9, 0.02));
+    // Ketiganya dipanggil langsung supaya tanda tangannya ikut terkunci: yang
+    // hanya dipakai di dalam `#if` yang mati tidak akan diperiksa slangc.
+    float3 edge = fresnelF82(float3(0.9), surface.specularColor, 0.25);
+    float ratio = specularIorRatio(surface);
+    float ax, ay;
+    anisotropicAlpha(surface.specularRoughness, surface.specularRoughnessAnisotropy, ax, ay);
+    float ca, cb;
+    orenNayarCoefficients(surface.baseDiffuseRoughness, ca, cb);
+    ShadingFrame coatFrame = makeCoatFrame(frame, float3(0.1, 0.0, 1.0), float3(0, 1, 0));
+    float3 probe = float3(rotatedTangent(frame, float3(0, 1, 0)).x) +
+                   evaluateOpenPBR(surface, frame, coatFrame, float3(0, 1, 0), float3(1)) +
+                   coatUnderlayer(surface, 0.05) +
+                   diffuseAlbedo(surface, 0.6) * orenNayarAlbedo(ca, cb, 0.6) +
+                   float3(fresnelAverageAlbedo(surface.coatIor) *
+                          zeltnerSheenAlbedo(0.6, 0.4) *
+                          zeltnerSheenLobe(float3(0, 1, 0), frame, 0.6, 0.4));
+    return float4(direct + ambient + edge * ratio * (ax + ay) + probe, 1);
+}
+)";
+        INFO("coat=", coat, " fuzz=", fuzz, " aniso=", aniso, " diffuseRoughness=",
+             diffuseRoughness);
+        const CompileOutput out = cache.Get(request);
+        INFO("slangc: ", out.error);
+        CHECK(out.ok);
+    }
+}
+
 TEST_CASE("Nilai bawaan OpenPBRSurface sama dengan nilai bawaan pin") {
     // Satu keputusan yang tertulis di dua tempat: katalog node dan
     // openpbr.slang. Yang membuatnya bertahan bukan kedisiplinan melainkan test
@@ -1401,8 +1599,10 @@ TEST_CASE("Nilai bawaan OpenPBRSurface sama dengan nilai bawaan pin") {
         if (pin.direction != PinDirection::Input || pin.defaultValue.empty()) {
             continue;
         }
-        // Ketiga pin di luar OpenPBRSurface tidak punya padanan di struct-nya.
-        if (pin.name == "normal" || pin.name == "emissive" || pin.name == "opacity") {
+        // Pin di luar OpenPBRSurface tidak punya padanan di struct-nya.
+        // Daftarnya dibaca dari katalog, bukan disalin ke sini — menyalinnya
+        // berarti pin geometri berikutnya lolos dari uji ini tanpa suara.
+        if (SurfacePinIsExtra(pin.name)) {
             continue;
         }
         const std::string assignment = "s." + pin.name + " = " + pin.defaultValue + ";";
@@ -2218,10 +2418,10 @@ TEST_CASE("T-mask: mode alfa dibaca dari node keluaran, dan uji buangnya masuk m
         CHECK(module.find("discard") == std::string::npos);
     }
 
-    SUBCASE("mask menyalakannya, beserta ambangnya") {
+    SUBCASE("domain masked menyalakannya, beserta ambangnya") {
         auto& output = graph.nodes[0];
         REQUIRE(output.type == "output.surface");
-        output.settings["alphaMode"] = "mask";
+        output.settings["domain"] = "masked";
         output.settings["alphaCutoff"] = "0.25";
 
         const MaterialCompileResult compiled = CompileMaterial(graph);
@@ -2245,9 +2445,9 @@ TEST_CASE("T-mask: mode alfa dibaca dari node keluaran, dan uji buangnya masuk m
         CHECK(at < frame);
     }
 
-    SUBCASE("blend menyalakan padu, dan justru tidak boleh menyalakan topeng") {
+    SUBCASE("domain transparent menyalakan padu, dan justru tidak boleh menyalakan topeng") {
         auto& output = graph.nodes[0];
-        output.settings["alphaMode"] = "blend";
+        output.settings["domain"] = "transparent";
         const MaterialCompileResult compiled = CompileMaterial(graph);
         REQUIRE(compiled.ok);
         CHECK(compiled.alphaBlend);
@@ -2432,7 +2632,7 @@ TEST_CASE("G5: modul material bindless dikompilasi slangc sungguhan") {
 TEST_CASE("Pratinjau pin: yang digambar nilainya, bukan nilainya di bawah lampu") {
     MaterialGraph graph;
     graph.nodes.push_back(Node(1, std::string(kSurfaceOutputType)));
-    graph.nodes.back().settings["alphaMode"] = "mask";
+    graph.nodes.back().settings["domain"] = "masked";
     graph.nodes.push_back(Node(2, "input.texture"));
     graph.nodes.back().settings["texture"] = Id(900).ToString();
     graph.nodes.back().settings["name"] = "Albedo";
@@ -2516,4 +2716,131 @@ TEST_CASE("Pratinjau pin: pin yang tidak ada ditolak dengan pesan, bukan digamba
     CHECK_FALSE(preview.ok);
     REQUIRE_FALSE(preview.errors.empty());
     CHECK(preview.errors.front().message.find("no value to preview") != std::string::npos);
+}
+
+// --- Domain material ---------------------------------------------------------
+
+TEST_CASE("domain dibaca dari node keluaran") {
+    MaterialGraph graph = MinimalGraph();
+
+    SUBCASE("tanpa setting apa pun, buram") {
+        // Bukan sekadar nilai awal yang nyaman: buram adalah satu-satunya
+        // domain yang menggambar benar tanpa alfa sama sekali, jadi ia jawaban
+        // yang paling tidak merusak untuk berkas yang tidak menyatakan apa pun.
+        CHECK(graph.Domain() == MaterialDomain::Opaque);
+    }
+
+    SUBCASE("keempat nama terbaca") {
+        const std::pair<const char*, MaterialDomain> cases[] = {
+            {"opaque", MaterialDomain::Opaque},
+            {"masked", MaterialDomain::Masked},
+            {"transparent", MaterialDomain::Transparent},
+            {"decal", MaterialDomain::Decal},
+        };
+        for (const auto& [text, expected] : cases) {
+            for (MaterialNode& node : graph.nodes) {
+                if (node.type == kSurfaceOutputType) {
+                    node.settings["domain"] = text;
+                }
+            }
+            CAPTURE(text);
+            CHECK(graph.Domain() == expected);
+        }
+    }
+
+    SUBCASE("nama yang tidak dikenali jatuh ke buram, bukan menggagalkan") {
+        // **Satu setting salah ketik tidak boleh membuat material menolak
+        // terbuka.** Yang keliru menggambar buram, dan itu terbaca di viewport
+        // sebagai sesuatu yang salah — jauh lebih berguna daripada aset yang
+        // hilang.
+        for (MaterialNode& node : graph.nodes) {
+            if (node.type == kSurfaceOutputType) {
+                node.settings["domain"] = "mask";  // ejaan yang bukan nama domain
+            }
+        }
+        CHECK(graph.Domain() == MaterialDomain::Opaque);
+    }
+
+    SUBCASE("SetDomain menulis satu setting, dan hanya itu") {
+        graph.SetDomain(MaterialDomain::Masked);
+        const MaterialNode* output = nullptr;
+        for (const MaterialNode& node : graph.nodes) {
+            if (node.type == kSurfaceOutputType) {
+                output = &node;
+            }
+        }
+        REQUIRE(output != nullptr);
+        CHECK(output->Setting("domain") == "masked");
+
+        graph.SetDomain(MaterialDomain::Decal);
+        CHECK(output->Setting("domain") == "decal");
+
+        // Bolak-balik kembali ke asal, bukan menumpuk sisa.
+        graph.SetDomain(MaterialDomain::Opaque);
+        CHECK(output->Setting("domain") == "opaque");
+    }
+}
+
+TEST_CASE("domain menentukan pin mana yang boleh dikemudikan") {
+    // Opacity satu-satunya yang benar-benar tidak dibaca siapa pun saat buram.
+    CHECK_FALSE(SurfacePinApplies("opacity", MaterialDomain::Opaque));
+    CHECK(SurfacePinApplies("opacity", MaterialDomain::Masked));
+    CHECK(SurfacePinApplies("opacity", MaterialDomain::Transparent));
+    CHECK(SurfacePinApplies("opacity", MaterialDomain::Decal));
+
+    // Base color berlaku di mana-mana.
+    for (const MaterialDomain domain :
+         {MaterialDomain::Opaque, MaterialDomain::Masked, MaterialDomain::Transparent,
+          MaterialDomain::Decal}) {
+        CHECK(SurfacePinApplies("baseColor", domain));
+    }
+
+    // Decal: selembar kulit, bukan bahan berlapis.
+    CHECK_FALSE(SurfacePinApplies("coatWeight", MaterialDomain::Decal));
+    CHECK_FALSE(SurfacePinApplies("fuzzWeight", MaterialDomain::Decal));
+    CHECK_FALSE(SurfacePinApplies("specularRoughnessAnisotropy", MaterialDomain::Decal));
+    CHECK(SurfacePinApplies("coatWeight", MaterialDomain::Opaque));
+}
+
+TEST_CASE("penyaringan domain tidak menyentuh kode yang dihasilkan") {
+    // **Regresi, dan pelajarannya mahal.** Percobaan pertama menyaring pin di
+    // dalam `PinsOf`, dan akibatnya `result.opacity` tidak pernah ditulis —
+    // sebuah float tak berisi di setiap material buram — sementara berkas lama
+    // yang menyambungkan opacity berhenti bisa dikompilasi sama sekali.
+    MaterialGraph graph = MinimalGraph();
+    graph.SetDomain(MaterialDomain::Opaque);
+
+    const MaterialCompileResult result = CompileMaterial(graph);
+    REQUIRE(result.ok);
+    CHECK(result.domain == MaterialDomain::Opaque);
+    // Ketiga medan di luar OpenPBRSurface tetap ditulis, berapa pun yang
+    // ditawarkan kanvas.
+    CHECK(result.slang.find("result.opacity =") != std::string::npos);
+    CHECK(result.slang.find("result.normal =") != std::string::npos);
+    CHECK(result.slang.find("result.emissive =") != std::string::npos);
+    CHECK_FALSE(result.alphaTest);
+    CHECK_FALSE(result.alphaBlend);
+}
+
+TEST_CASE("uji alfa dan pencampuran diturunkan dari domain") {
+    MaterialGraph graph = MinimalGraph();
+
+    graph.SetDomain(MaterialDomain::Masked);
+    const MaterialCompileResult masked = CompileMaterial(graph);
+    REQUIRE(masked.ok);
+    CHECK(masked.alphaTest);
+    CHECK_FALSE(masked.alphaBlend);
+
+    graph.SetDomain(MaterialDomain::Transparent);
+    const MaterialCompileResult blended = CompileMaterial(graph);
+    REQUIRE(blended.ok);
+    CHECK_FALSE(blended.alphaTest);
+    CHECK(blended.alphaBlend);
+
+    // Decal ikut dicampur: tepinya memudar, bukan berhenti mendadak.
+    graph.SetDomain(MaterialDomain::Decal);
+    const MaterialCompileResult decal = CompileMaterial(graph);
+    REQUIRE(decal.ok);
+    CHECK_FALSE(decal.alphaTest);
+    CHECK(decal.alphaBlend);
 }

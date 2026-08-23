@@ -51,10 +51,25 @@ struct SurfaceLobes {
     bool fuzz = true;
     bool anisotropy = true;
     bool diffuseRoughness = true;
+    /// Material memutar sumbu anisotropinya lewat pin `tangent`.
+    bool tangent = true;
+    /// Material memberi coat bingkai sendiri lewat `coatNormal`/`coatTangent`.
+    ///
+    /// **Mati berarti coat memakai bingkai dasar apa adanya**, dan itu bukan
+    /// sekadar penghematan: bingkai coat yang dibangun dari normal geometri
+    /// membuat coat berhenti mengikuti peta normal dasarnya. Untuk material
+    /// yang memang tidak menyatakan apa-apa soal coat-nya, yang benar adalah
+    /// mengikuti — bukan diam-diam menjadi rata.
+    bool coatFrame = true;
 };
 
 struct MaterialCompileResult {
     bool ok = false;
+    /// Domain yang dinyatakan asetnya. `alphaTest` dan `alphaBlend` di bawah
+    /// **diturunkan darinya**, bukan sebaliknya — keduanya dipertahankan karena
+    /// itulah yang dibaca pembangun pipeline, dan mengubah tanda tangannya
+    /// bukan bagian dari perubahan ini.
+    MaterialDomain domain = MaterialDomain::Opaque;
     /// Sumber Slang yang dihasilkan. Terisi juga saat gagal, supaya panel bisa
     /// menampilkan sejauh mana kompilasi sempat berjalan.
     std::string slang;
