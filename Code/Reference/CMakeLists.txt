@@ -49,6 +49,8 @@ sim_add_library(Reference
         src/Shading.cpp
         src/Lights.cpp
         src/PathTracer.cpp
+        src/Scene.cpp
+        src/ImageCompare.cpp
     PUBLIC_DEPS
         Sim::Core
         Sim::Raycast)

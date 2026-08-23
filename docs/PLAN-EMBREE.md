@@ -35,7 +35,9 @@ dan C (kain) di [ROADMAP.md](ROADMAP.md).
 > dari `openpbr.slang` — ternyata tidak perlu ditulis sama sekali: `slangc
 > -target cpp` memancarkannya dari sumber yang sama yang dijalankan GPU.
 > Integratornya berdiri di `Code/Reference`, tak-bias, dan diuji terhadap
-> jawaban analitik. Tinggal adegan acuannya.
+> jawaban analitik — termasuk `E/(1-ρ)` di rongga tertutup, yang menguji energi
+> pantulan ke-n. Yang tinggal butuh GPU atau penulis EXR, jadi keduanya alat,
+> bukan uji.
 >
 > `PLAN-EMBREE-GI.md` — usulan terpisah yang memakai Embree sebagai builder BVH
 > untuk traversal compute — **dihapus**, sudah terjawab lain oleh arsitektur GI
@@ -579,7 +581,73 @@ sana**, karena langit seragam memang jawabannya. Yang menemukannya uji albedo,
 tiga uji kemudian. Sekarang kameranya punya sumbu cadangan, dan uji tungku
 putihnya membuktikan lebih dulu bahwa lantainya benar-benar kena.
 
-#### Langkah 3 — adegan acuan
+#### Langkah 3 — adegan acuan · ✅ sebagian
+
+`Scene` menyusun geometri, material per segitiga, dan daftar lampunya sekaligus.
+**Lampu masuk ke dua tempat lewat satu panggilan** — `AddQuadLight` menaruhnya
+di geometri *dan* di daftar — supaya keadaan setengah itu tidak bisa terjadi
+karena lupa: yang hanya ada di daftar tidak akan pernah menerangi apa pun, yang
+hanya ada di geometri tidak akan pernah disampel langsung.
+
+`ImageCompare` menjawab **angka**: RMSE, selisih mutlak terbesar beserta
+letaknya, dan rata-rata kedua gambar — yang terakhir yang membedakan bias dari
+derau, karena derau tidak menggeser rata-rata. Daerah bernama ada karena RMSE
+seluruh gambar menyembunyikan justru yang dicari: kebocoran lewat dinding
+menyentuh beberapa persen piksel, dan ditenggelamkan rata-rata ia terbaca
+sebagai selisih kecil yang bisa diabaikan.
+
+**Dua adegan, dan yang pertama jawabannya eksak.**
+
+`MakeEnclosedFurnace(ρ, E)` — rongga tertutup yang setiap dindingnya memancar
+dan memantul. Radiansi kesetimbangannya deret geometri `E/(1-ρ)`. Itu menguji
+energi pantulan ke-**n**, bukan pantulan pertama, dan ia yang memisahkan
+integrator tak-bias dari yang memotong kedalaman: pada ρ = 0,8 pantulan kelima
+ke atas masih menyumbang sepertiga jawabannya.
+
+`MakeCornellBox()` — kotak tertutup, kameranya di dalam.
+
+#### Kriteria terima yang sudah terpenuhi
+
+| Kriteria | Keadaan |
+| --- | --- |
+| Uji tungku lulus (albedo 1, langit seragam 1) | ✅ tepat 1,0 |
+| Menggandakan `max_depth` tidak menggeser rata-rata | ✅ 32 lawan 64, dalam 2% |
+| Energi bounce kedua | ✅ `E/(1-ρ)` pada ρ = 0 / 0,5 / 0,8 |
+| Kebocoran cahaya Cornell box | ✅ langit 50× lebih terang tidak menembus |
+| Laporan perbandingan sebagai angka, bukan gambar | ✅ `ImageCompare`, RMSE per daerah |
+
+#### Yang belum, dan kenapa
+
+| Kriteria | Kenapa belum |
+| --- | --- |
+| `SimHeadless --reference-render <level> --spp N` menghasilkan EXR | Butuh penulis EXR dan jembatan dari level SimEngine ke `Scene`; keduanya pekerjaan tersendiri |
+| Perbandingan GI runtime lawan acuan | **Butuh GPU**, jadi ia tidak bisa menjadi uji CI. Bentuknya alat, bukan uji |
+| Nilai analitik faktor bentuk Cornell box | Yang dipakai `E/(1-ρ)`, yang lebih ketat *dan* lebih mudah dibaca ulang daripada faktor bentuk dinding |
+| Satu bias diketahui, terdokumentasi dengan angkanya | Belum ada pembanding runtime, jadi belum ada bias yang bisa diukur |
+
+**Satu bias yang sudah diketahui, dan disebut di sini karena harus:** sampling
+BSDF-nya kosinus, bukan menurut lobe-nya. Itu **tidak** membuat hasilnya bias —
+pembaginya PDF yang sama — tetapi ia membuat lobe spekular sempit konvergen
+sangat lambat. Adegan acuan yang berisi logam licin akan berderau lama, dan
+itu batas yang diketahui, bukan yang ditemukan nanti.
+
+#### Dua kelulusan palsu, dan bagaimana keduanya ketahuan
+
+Ditulis di sini karena polanya berulang, bukan karena kejadiannya menarik.
+
+1. **Kamera yang melihat lurus ke bawah** menghasilkan basis NaN, setiap sinar
+   meleset, gambarnya menjadi langit seluruhnya — dan uji tungku putih **lulus**
+   di sana, karena langit seragam memang jawabannya. Ditemukan uji albedo, tiga
+   uji kemudian. Uji tungku putihnya sekarang membuktikan lebih dulu bahwa
+   lantainya benar-benar kena.
+2. **Sisi mana yang merah ditebak, bukan dibuktikan.** Dengan pandangan ke +z
+   dan `up` +y, sumbu kanan layar menunjuk ke dunia **-x**, jadi dinding di
+   `x = 0` muncul di sisi kanan gambar. Uji kebocoran warnanya menebak
+   terbalik. Sekarang warna dindingnya diperiksa lebih dulu, jadi tebakan yang
+   salah gagal di baris yang mengatakan sebabnya.
+
+Keduanya bentuk yang sama: **sebuah uji yang lulus untuk alasan yang salah lebih
+buruk daripada tidak ada uji.**
 
 Sengaja dibatasi: tidak ada volume, tidak ada SSS, tidak ada dispersi. Yang
 divalidasi adalah GI difus dan spekular kasar — persis yang diaproksimasi

@@ -1,7 +1,9 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include "Sim/Reference/ImageCompare.h"
 #include "Sim/Reference/Lights.h"
+#include "Sim/Reference/Scene.h"
 #include "Sim/Reference/PathTracer.h"
 #include "Sim/Raycast/Query.h"
 #include "Sim/Reference/Shading.h"
@@ -382,4 +384,198 @@ TEST_CASE("Stratifikasi menurunkan derau dibanding sampel yang tidak ditata") {
     // Derau turun ketika sampelnya bertambah — kalau tidak, ada yang bias, dan
     // yang bias tidak akan pernah konvergen berapa pun sampelnya ditambah.
     CHECK(spread(many) < spread(few));
+}
+
+TEST_CASE("Rongga tertutup konvergen ke E/(1-rho)") {
+    // **Uji energi pantulan ke-n, dan jawabannya deret geometri yang eksak.**
+    // Di dalam rongga tertutup ber-albedo seragam yang setiap dindingnya
+    // memancarkan E, radiansi kesetimbangannya `E + rho*E + rho^2*E + ...`,
+    // yaitu `E / (1 - rho)`.
+    //
+    // Ini yang membedakan integrator tak-bias dari yang memotong kedalamannya:
+    // pada rho = 0,8 pantulan kelima ke atas masih menyumbang 33% jawabannya,
+    // dan sebuah renderer yang berhenti di pantulan keempat akan menjawab 3,36
+    // alih-alih 5,0 — meleset sepertiga, tanpa satu pun galat.
+    for (const float albedo : {0.0f, 0.5f, 0.8f}) {
+        const float emission = 1.0f;
+        const Scene scene = MakeEnclosedFurnace(albedo, emission);
+
+        raycast::RayScene rayScene;
+        scene.Commit(rayScene);
+
+        Camera camera;
+        camera.position = Vec3(0.0f, 0.0f, 0.0f);
+        camera.target = Vec3(0.3f, 0.2f, 1.0f);
+        camera.focusDistance = 1.0f;
+        camera.verticalFov = 50.0f;
+
+        TraceSettings settings;
+        settings.width = 6;
+        settings.height = 6;
+        settings.samplesPerPixel = 900;
+        settings.skyRadiance = Vec3(0.0f);  // tertutup: tidak ada langit sama sekali
+
+        const Image image = Render(rayScene, scene.Resolver(), scene.Lights(), camera, settings);
+        const float expected = emission / (1.0f - albedo);
+
+        CAPTURE(albedo);
+        CAPTURE(expected);
+        CHECK(Luminance(image.Mean()) == doctest::Approx(expected).epsilon(0.05));
+    }
+}
+
+TEST_CASE("Menggandakan maxDepth tidak menggeser rata-rata gambar") {
+    // **Bukti Russian roulette-nya tak-bias, bukan sekadar ada.** Sebuah
+    // integrator yang memotong kedalaman akan menjawab berbeda ketika batasnya
+    // dinaikkan; yang menghentikan jalur dengan roulette berbobot menjawab sama,
+    // hanya dengan derau yang sedikit berbeda.
+    //
+    // Diuji di adegan ber-albedo tinggi, karena di sanalah pantulan dalam masih
+    // menyumbang banyak — di adegan gelap perbedaannya tenggelam.
+    const Scene scene = MakeEnclosedFurnace(0.8f, 1.0f);
+    raycast::RayScene rayScene;
+    scene.Commit(rayScene);
+
+    Camera camera;
+    camera.position = Vec3(0.0f);
+    camera.target = Vec3(0.3f, 0.2f, 1.0f);
+    camera.focusDistance = 1.0f;
+    camera.verticalFov = 50.0f;
+
+    TraceSettings shallow;
+    shallow.width = 6;
+    shallow.height = 6;
+    shallow.samplesPerPixel = 900;
+    shallow.skyRadiance = Vec3(0.0f);
+    shallow.maxDepth = 32;
+
+    TraceSettings deep = shallow;
+    deep.maxDepth = 64;
+
+    const Image a = Render(rayScene, scene.Resolver(), scene.Lights(), camera, shallow);
+    const Image b = Render(rayScene, scene.Resolver(), scene.Lights(), camera, deep);
+
+    const ImageDifference difference = Compare(a, b);
+    INFO(difference.ToString());
+    // Selisih rata-rata yang besar berarti bias; derau tidak menggeser rata-rata.
+    CHECK(Luminance(difference.meanA) ==
+          doctest::Approx(Luminance(difference.meanB)).epsilon(0.02));
+}
+
+TEST_CASE("Cornell box: dinding berwarna membocorkan warnanya ke lantai") {
+    // **Perpindahan cahaya tak-langsung, diuji sebagai perbandingan bukan
+    // sebagai nilai mutlak.** Lantai putih di dekat dinding merah harus lebih
+    // merah daripada yang di dekat dinding hijau, dan sebaliknya. Yang
+    // membuatnya begitu hanya pantulan kedua — pantulan pertama dari lampu
+    // putih tidak membawa warna dinding sama sekali.
+    //
+    // Sebuah renderer yang GI-nya mati lulus setiap uji energi di atas dan
+    // gagal di sini, dan itulah gunanya uji ini berdiri terpisah.
+    const CornellBox box = MakeCornellBox();
+    raycast::RayScene rayScene;
+    box.scene.Commit(rayScene);
+
+    TraceSettings settings;
+    settings.width = 32;
+    settings.height = 32;
+    settings.samplesPerPixel = 256;
+    settings.skyRadiance = Vec3(0.0f);
+
+    const Image image =
+        Render(rayScene, box.scene.Resolver(), box.scene.Lights(), box.camera, settings);
+
+    // **Sisi mana yang merah dibuktikan lebih dulu, bukan diandaikan.** Dengan
+    // pandangan ke +z dan `up` +y, sumbu kanan layar menunjuk ke dunia -x —
+    // sehingga dinding merah di `x = 0` muncul di sisi **kanan** gambar. Versi
+    // pertama uji ini menebaknya terbalik dan gagal dengan pesan yang tidak
+    // menyebut sebabnya; sekarang dindingnya diperiksa sendiri, jadi tebakan
+    // yang salah gagal di baris yang mengatakannya.
+    const Region rightWall{"dinding kanan gambar", 28, 12, 3, 8};
+    const Region leftWall{"dinding kiri gambar", 1, 12, 3, 8};
+    const Vec3 rightWallColour = RegionMean(image, rightWall);
+    const Vec3 leftWallColour = RegionMean(image, leftWall);
+    INFO("dinding kanan: ", rightWallColour.x, " ", rightWallColour.y);
+    INFO("dinding kiri : ", leftWallColour.x, " ", leftWallColour.y);
+    REQUIRE(rightWallColour.x > rightWallColour.y);  // kanan gambar = merah
+    REQUIRE(leftWallColour.y > leftWallColour.x);    // kiri gambar = hijau
+
+    // Lantai di dekat masing-masing dinding, di sisi yang baru dibuktikan itu.
+    const Region nearRed{"lantai dekat dinding merah", 25, 26, 6, 4};
+    const Region nearGreen{"lantai dekat dinding hijau", 1, 26, 6, 4};
+
+    const Vec3 red = RegionMean(image, nearRed);
+    const Vec3 green = RegionMean(image, nearGreen);
+
+    INFO("dekat merah: ", red.x, " ", red.y, " ", red.z);
+    INFO("dekat hijau: ", green.x, " ", green.y, " ", green.z);
+
+    REQUIRE(red.x > 0.0f);
+    REQUIRE(green.y > 0.0f);
+    // Perbandingan merah-terhadap-hijau, bukan nilai mutlaknya: yang dinilai
+    // warnanya, dan kecerahan kedua sudut memang tidak sama.
+    CHECK(red.x / red.y > green.x / green.y);
+    CHECK(green.y / green.x > red.y / red.x);
+}
+
+TEST_CASE("Cornell box tertutup tidak menerima cahaya dari luar") {
+    // **Uji kebocoran cahaya.** Kotak yang tertutup rapat tidak boleh menerima
+    // apa pun dari langit, dan setiap aproksimasi GI yang bekerja dengan jarak
+    // — SDF, probe berjarak, screen-space — punya caranya sendiri membocorkan
+    // cahaya lewat dinding. Acuan ini yang menjadi pembandingnya nanti, jadi ia
+    // sendiri harus bebas dari kebocoran itu.
+    const CornellBox box = MakeCornellBox();
+    raycast::RayScene rayScene;
+    box.scene.Commit(rayScene);
+
+    TraceSettings dark;
+    dark.width = 16;
+    dark.height = 16;
+    dark.samplesPerPixel = 100;
+    dark.skyRadiance = Vec3(0.0f);
+
+    TraceSettings bright = dark;
+    bright.skyRadiance = Vec3(50.0f);
+
+    const Image a = Render(rayScene, box.scene.Resolver(), box.scene.Lights(), box.camera, dark);
+    const Image b =
+        Render(rayScene, box.scene.Resolver(), box.scene.Lights(), box.camera, bright);
+
+    // Langit lima puluh kali lebih terang daripada lampunya. Kotak yang bocor
+    // akan menunjukkannya; yang tidak, tidak.
+    //
+    // Kotaknya tertutup rapat dan kameranya di dalam, jadi seluruh gambar
+    // adalah bagian dalam.
+    const Region interior{"bagian dalam", 2, 2, 12, 12};
+    const Vec3 sealed = RegionMean(a, interior);
+    const Vec3 leaked = RegionMean(b, interior);
+
+    INFO("tertutup: ", sealed.x, "  langit terang: ", leaked.x);
+    CHECK(leaked.x == doctest::Approx(sealed.x).epsilon(0.1));
+}
+
+TEST_CASE("Pembanding gambar melaporkan angka, bukan gambar") {
+    Image a;
+    a.width = 2;
+    a.height = 2;
+    a.pixels = {Vec3(1.0f), Vec3(1.0f), Vec3(1.0f), Vec3(1.0f)};
+
+    Image b = a;
+    CHECK(Compare(a, b).rmse == doctest::Approx(0.0f));
+
+    // Satu piksel satu kanal meleset 0,5: RMSE-nya sqrt(0.25 / 12).
+    b.pixels[3].x = 0.5f;
+    const ImageDifference difference = Compare(a, b);
+    CHECK(difference.rmse == doctest::Approx(std::sqrt(0.25f / 12.0f)).epsilon(0.001));
+    CHECK(difference.maxAbsolute == doctest::Approx(0.5f));
+    CHECK(difference.maxX == 1);
+    CHECK(difference.maxY == 1);
+    CHECK(!difference.ToString().empty());
+
+    // Ukuran yang tidak sama bukan galat, tetapi juga bukan nol yang berarti
+    // "sama" — pemanggil harus bisa membedakannya, dan ukurannya ada padanya.
+    Image different;
+    different.width = 3;
+    different.height = 1;
+    different.pixels = {Vec3(0.0f), Vec3(0.0f), Vec3(0.0f)};
+    CHECK(Compare(a, different).rmse == doctest::Approx(0.0f));
 }
