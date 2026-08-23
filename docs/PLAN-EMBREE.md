@@ -31,9 +31,10 @@ dan C (kain) di [ROADMAP.md](ROADMAP.md).
 > magnitudo. Antarmukanya tetap berdiri, jadi keputusan ini bisa dibalik tanpa
 > membongkar apa pun.
 >
-> **Jalur kritis berikutnya bukan intersector, melainkan kembaran CPU dari
-> `openpbr.slang`** — dan berkas itu tumbuh dari 374 menjadi 920 baris ketika
-> audit spesifikasi dikerjakan. Lihat [AUDIT-OPENPBR.md](AUDIT-OPENPBR.md).
+> **R4 langkah 1 selesai.** Yang disebut jalur kritisnya — kembaran CPU dari
+> `openpbr.slang` — ternyata tidak perlu ditulis sama sekali: `slangc -target
+> cpp` memancarkannya dari sumber yang sama yang dijalankan GPU. Lihat R4 di
+> bawah dan [AUDIT-OPENPBR.md](AUDIT-OPENPBR.md).
 >
 > `PLAN-EMBREE-GI.md` — usulan terpisah yang memakai Embree sebagai builder BVH
 > untuk traversal compute — **dihapus**, sudah terjawab lain oleh arsitektur GI
@@ -479,19 +480,48 @@ Path tracer unidirectional sederhana: Lambert + GGX yang **parameternya
 disamakan dengan OpenPBR** ([RENDER-OPENPBR.md](RENDER-OPENPBR.md)), next-event
 estimation, tanpa denoise. Tidak perlu cepat; perlu benar dan tak-bias.
 
-> **Ongkosnya naik, dan naiknya bukan di intersector.** Ketika rencana ini
-> ditulis, `openpbr.slang` 374 baris. Setelah audit spesifikasi ia 920 baris,
-> dan yang bertambah justru bagian yang paling sulit dikembarkan: sheen LTC
-> Zeltner dengan fit rasionalnya, EON beserta albedo terarah bentuk tertutup,
-> Fresnel F82, kompensasi energi GGX, dan penggelapan coat lewat albedo
-> hemisferis Fresnel.
->
-> Kembaran yang **meleset** dari salah satunya bukan referensi melainkan
-> renderer kedua yang kebetulan mirip — dan selisih yang muncul akan dibaca
-> sebagai galat GI, padahal asalnya BSDF. Karena itu langkah pertama R4 bukan
-> integrator melainkan **uji kesamaan lobe demi lobe** antara kembaran CPU dan
-> shader-nya, di satu titik dan satu arah cahaya, sebelum satu piksel pun
-> dirender.
+#### Langkah 1 — kembaran CPU · ✅ **selesai, dan tidak ditulis tangan**
+
+Ini yang selama ini disebut jalur kritis R4, dan ongkosnya ternyata **nol**.
+
+Ketika rencana ini ditulis, kekhawatirannya jelas: `openpbr.slang` harus punya
+kembaran CPU, dan berkas itu sudah 920 baris — termasuk sheen LTC Zeltner
+dengan fit rasionalnya, EON beserta albedo terarah bentuk tertutup, Fresnel
+F82, kompensasi energi GGX, dan penggelapan coat lewat albedo hemisferis
+Fresnel. Kembaran yang meleset di salah satunya bukan acuan melainkan renderer
+kedua yang kebetulan mirip, dan selisihnya akan terbaca sebagai galat GI
+padahal asalnya BSDF.
+
+**`slangc -target cpp` memancarkan C++ dari sumber yang sama yang dikompilasi
+ke SPIR-V.** Tidak ada transkripsi, jadi tidak ada yang bisa meleset: drift
+bukan sesuatu yang diuji, melainkan sesuatu yang **tidak bisa terjadi**.
+
+- `Shaders/openpbr_cpu.slang` — pembungkus tanpa satu baris matematika pun.
+  Entry point compute, karena itu bentuk yang bisa dipancarkan slangc ke CPU;
+  ia tidak pernah dijalankan di GPU.
+- `Tests/CMakeLists.txt` membangkitkannya saat build, dengan `openpbr.slang`
+  sebagai dependensi eksplisit — tanpa itu uji ini akan lulus atas model
+  shading yang sudah tidak ada, bug yang sama persis dengan yang dijaga
+  identitas kompilator di `ShaderCache`.
+- `Tests/OpenPbrCpuTests.cpp` — sebelas uji, mengunci temuan audit sebagai
+  angka. Yang paling tajam: rasio antara logam bertepi warna dan logam bertepi
+  putih di sudut `acos(1/7)` harus **tepat** `specularColor`, bukan sekadar
+  "lebih gelap".
+
+Dilewati bersih tanpa `slangc`, seperti target shader lainnya.
+
+**Satu jebakan yang mahal, dan sudah dipasang penjaganya.** Koreksi F82
+memuncak di `mu = 1/7` dan meluruh ke nol di kedua ujungnya — pada insidensi
+tegak lurus bobotnya `3e-7`. Uji pertama yang saya tulis memeriksa
+`specularColor` menghadap kamera, dan ia **lulus untuk material yang pin-nya
+mati sama sekali**. Sudut ujinya sekarang disebut eksplisit di harness-nya,
+beserta alasannya.
+
+C++ yang sama inilah yang ditautkan path tracer acuan di langkah berikutnya,
+jadi acuan dan runtime berbagi satu sumber model shading — bukan dua yang
+dijaga tetap sama.
+
+#### Langkah 2 — integrator
 
 Sengaja dibatasi: tidak ada volume, tidak ada SSS, tidak ada dispersi. Yang
 divalidasi adalah GI difus dan spekular kasar — persis yang diaproksimasi
