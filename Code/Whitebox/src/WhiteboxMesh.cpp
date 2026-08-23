@@ -89,6 +89,53 @@ EditResult WhiteboxMesh::Translate(PolygonHandle polygon, const Vec3& displaceme
     return result;
 }
 
+EditResult WhiteboxMesh::TranslateVertices(std::span<const VertexHandle> vertices,
+                                           const Vec3& displacement) {
+    const std::vector<uint32_t> before = Snapshot(mesh_, polygons_);
+    EditResult result = whitebox::TranslateVertices(mesh_, polygons_, vertices, displacement);
+    if (result.ok) {
+        RemapMaterials(before);
+    }
+    return result;
+}
+
+EditResult WhiteboxMesh::AlignVertices(std::span<const VertexHandle> vertices, int axis,
+                                       AlignMode mode) {
+    const std::vector<uint32_t> before = Snapshot(mesh_, polygons_);
+    EditResult result = whitebox::AlignVertices(mesh_, polygons_, vertices, axis, mode);
+    if (result.ok) {
+        RemapMaterials(before);
+    }
+    return result;
+}
+
+EditResult WhiteboxMesh::SlideVertexAlongEdge(VertexHandle vertex, EdgeHandle edge, float t) {
+    const std::vector<uint32_t> before = Snapshot(mesh_, polygons_);
+    EditResult result = whitebox::SlideVertexAlongEdge(mesh_, polygons_, vertex, edge, t);
+    if (result.ok) {
+        RemapMaterials(before);
+    }
+    return result;
+}
+
+EditResult WhiteboxMesh::SplitEdges(std::span<const EdgeHandle> edges) {
+    const std::vector<uint32_t> before = Snapshot(mesh_, polygons_);
+    EditResult result = whitebox::SplitEdges(mesh_, polygons_, edges);
+    if (result.ok) {
+        RemapMaterials(before);
+    }
+    return result;
+}
+
+EditResult WhiteboxMesh::ConnectEdges(std::span<const EdgeHandle> edges) {
+    const std::vector<uint32_t> before = Snapshot(mesh_, polygons_);
+    EditResult result = whitebox::ConnectEdges(mesh_, polygons_, edges);
+    if (result.ok) {
+        RemapMaterials(before);
+    }
+    return result;
+}
+
 bool WhiteboxMesh::HideEdge(EdgeHandle edge, float toleranceDegrees) {
     const std::vector<uint32_t> before = Snapshot(mesh_, polygons_);
     if (!polygons_.HideEdge(mesh_, edge, toleranceDegrees)) {

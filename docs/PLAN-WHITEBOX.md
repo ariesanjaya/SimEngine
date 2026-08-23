@@ -1,4 +1,4 @@
-# Plan Whitebox (W0 → W6)
+# Plan Whitebox (W0 → W7)
 
 Blok yang bisa disunting langsung di viewport untuk merancang level — dorong
 sebuah sisi dan ruangan bertambah panjang, bukan kembali ke DCC untuk mengekspor
@@ -452,6 +452,125 @@ bermaterial berbeda menjadi satu. Angkanya ditulis dengan `%.6g`, bukan
 `v 0,5 0,5 0,5` — berkas yang tampak wajar dan ditolak setiap pembaca OBJ di
 dunia, dengan kegagalan yang bergantung pada mesin yang mengekspor sehingga tak
 pernah muncul di mesin yang mengujinya.
+
+---
+
+### W7 — Penyuntingan sub-objek: simpul, rusuk, sisi · ✅
+
+W5 mengirim seleksi **poligon** dan tidak lebih. Yang belum ada sama sekali:
+melihat simpul dan rusuknya, memilihnya, dan memindahkannya. Untuk blockout itu
+batas yang terasa cepat — sebuah ruangan yang sudah berdiri hampir selalu perlu
+satu sudutnya digeser, bukan seluruh sisinya.
+
+**Lapisan mesh sudah menyediakan topologinya.** `EdgeCount`, `GetEdge`,
+`EdgeHalfEdges`, `EdgeFaces`, dan `VertexOutgoing` semuanya sudah ada sejak W0;
+yang tidak ada adalah operasi yang menyuntingnya dan cara melihatnya. Jadi W7
+tidak menyentuh `HalfEdgeMesh` sama sekali.
+
+#### W7.1 — Operasi simpul dan rusuk · ✅
+
+`TranslateVertices`, `AlignVertices`, `SlideVertexAlongEdge`, dan `SplitEdge`,
+semuanya mengikuti pola `Operations.cpp` yang sudah ada: ekstrak face, sunting,
+`Rebuild`, `RegroupPolygons`. **Nomor face dipertahankan**, jadi seleksi poligon
+bertahan melewati operasi simpul — aturan yang sama yang membuat ekstrusi tidak
+menghilangkan sorotan.
+
+**Kriteria terima**
+- Menggeser satu simpul menggeser **setiap** face yang menyentuhnya, dan
+  invarian half-edge tetap lulus sesudahnya.
+- Meratakan simpul pada satu sumbu membuat koordinat sumbu itu sama persis untuk
+  seluruh simpul terpilih; dua mode lain — ke minimum dan ke maksimum — diuji
+  terpisah, karena "rata" yang berarti rata-rata dan "rata" yang berarti sejajar
+  dinding adalah dua permintaan berbeda.
+- Menggeser simpul sepanjang rusuk menaruhnya **tepat di garis rusuk itu** untuk
+  `t` berapa pun, dan menjepit di kedua ujungnya alih-alih melewatinya.
+- Memecah rusuk menambah **satu** simpul dan menaikkan derajat kedua face yang
+  bertetangga padanya satu-satu; poligon yang memuat keduanya tidak pecah.
+
+**Penyisipan rusuk dipilih bentuknya: `ConnectEdges`, bukan pemotong loop.**
+Yang diminta adalah menghubungkan rusuk-rusuk yang benar-benar ditunjuk, berhenti
+di situ — bukan merambat sendiri menelusuri strip quad sampai mentok. Untuk
+blockout itu yang benar: dinding yang diam-diam ikut terbelah sampai ujung
+ruangan adalah operasi yang harus dibatalkan, bukan disyukuri. Face yang
+menyentuh lebih dari dua rusuk terpilih **ditolak seluruhnya**, karena
+menghubungkan empat rusuk pada satu quad tidak punya satu jawaban; kisi dibuat
+dengan memanggilnya berulang.
+
+**Hasil.** Kelima operasi ada di `Operations.h` beserta pembungkusnya di
+`WhiteboxMesh` — dan pembungkus itu bukan kerapian: ia yang memanggil
+`RemapMaterials`, dan memanggil fungsi bebasnya langsung akan membuat material
+per-sisi berpindah sendiri sesudah sebuah simpul digeser. Tiga belas test case baru, 51/51 lulus di `SimWhiteboxTests` — termasuk alur
+yang menjadi alasan operasi ini ada: belah sebuah quad, kedua belahannya menjadi
+poligon terpisah, lalu salah satunya diekstrusi sendiri.
+
+Yang ikut terbukti dan tidak diminta: menggeser simpul kubus tersegitigakan
+mempertahankan keenam poligon hasil penggabungan sebidang, karena `Rebuild`
+mempertahankan nomor face dan `RegroupPolygons` memulihkan pengelompokannya.
+
+#### W7.2 — Melihat dan memilih sub-objek · ✅
+
+Mode sub-objek — simpul / rusuk / sisi — beserta gambarannya di viewport: titik
+untuk simpul, garis untuk rusuk, batas poligon untuk sisi (yang terakhir sudah
+ada sejak W5). Seleksi menjadi **himpunan**, bukan satu handle: `SideSelection`
+hari ini memuat satu `PolygonHandle`, dan setiap operasi di W7.3 menuntut lebih
+dari satu.
+
+Pemilihannya **di ruang layar, bukan dengan sinar**. Sebuah simpul tidak punya
+luas untuk ditembak dan sebuah rusuk hanya setebal nol; yang menentukan mana yang
+terpilih adalah jaraknya dari kursor dalam piksel — aturan yang sama dengan ikon
+entity, yang sudah menang atas geometri di belakangnya karena alasan itu.
+
+**Kriteria terima**
+- Simpul di belakang geometri tidak ikut terpilih saat mode tembus-pandang mati.
+- Kotak seleksi mengambil seluruh sub-objek di dalamnya, bukan yang terdekat.
+- Berpindah mode **tidak** mengosongkan bentuk yang sedang disunting, dan
+  seleksi lama yang tidak berlaku di mode baru dibuang alih-alih ditafsirkan
+  ulang menjadi sub-objek yang tidak pernah ditunjuk siapa pun.
+
+#### W7.3 — Operasi yang muncul menurut yang terpilih · ✅
+
+Gizmo memindahkan apa pun yang terpilih. Di samping itu, opsi yang hanya masuk
+akal untuk jenisnya: perataan dan geser-sepanjang-rusuk untuk simpul, ekstrusi
+untuk sisi (sudah ada, tinggal dipanggil dari seleksi baru), dan penyisipan
+rusuk untuk rusuk.
+
+**Satu seretan tetap satu entri undo**, aturan yang sudah dipegang W5.
+
+**Kriteria terima**
+- Satu seretan gizmo atas lima simpul menghasilkan satu entri undo, dan
+  membatalkannya mengembalikan berkas yang byte-nya sama persis.
+- Opsi yang tidak berlaku untuk jenis yang terpilih tidak ditampilkan
+  setengah-aktif — ia tidak ada.
+
+**Hasil W7.2 & W7.3.**
+
+- Simpul dan rusuk digambar di ruang layar lewat `ImDrawList`, sehingga
+  penandanya tetap seukuran itu berapa pun jarak kamera. Rusuk yang disembunyikan
+  penggabungan sebidang tidak digambar dan tidak bisa dipilih.
+- Pemilihan memakai jarak piksel, bukan sinar. Jangkauan kliknya sengaja lebih
+  besar daripada penandanya.
+- Gizmo sub-objek berdiri di **rata-rata simpul** dan memakai sumbu **dunia** —
+  sekumpulan simpul tidak punya luas untuk dibobot maupun normal untuk memberi
+  sumbu ketiga arti, dan mengarang keduanya lebih sulit dipakai daripada sumbu
+  yang jujur.
+- Perataan dan penyisipan rusuk tinggal di panel Whitebox, muncul hanya untuk
+  jenis yang terpilih. Keduanya menolak sebelum tombolnya bisa ditekan bila
+  seleksinya kurang.
+- Enam test case baru di `SimLevelEditorTests` (61/61): ketiga jenis tersimpan
+  berdampingan, toggle, berpindah aset mengosongkan, **mode bertahan melewati
+  pengosongan**, empat puluh frame seretan simpul menjadi satu entri undo, dan
+  operasi yang mengubah topologi tetap satu entri yang membatalkannya utuh.
+
+**Satu cacat ditangkap uji regresinya sendiri:** `ClearSelection()` semula
+melakukan `selected_ = {}`, yang ikut mengembalikan mode ke `Face`. Artinya satu
+klik meleset saat menyunting simpul melempar perancang kembali ke mode sisi, dan
+klik berikutnya mengenai jenis yang salah. Mode sekarang dipertahankan.
+
+**Yang belum terverifikasi dengan mata:** gambar dan pemilihannya. Mode blockout
+hanya menyala lewat tombol B atau tombol overlay, dan tidak ada jalan otomatis
+menekannya — jadi titik, garis, dan gizmo sub-objek belum pernah dilihat berjalan.
+Yang sudah pasti: seluruhnya kompilasi dengan `-Werror`, model seleksinya benar
+lewat uji, dan editor berjalan tanpa assert dengan level whitebox terbuka.
 
 ---
 

@@ -78,6 +78,19 @@ public:
     EditResult Extrude(PolygonHandle polygon, float distance);
     EditResult Translate(PolygonHandle polygon, const Vec3& displacement);
 
+    // --- sub-objek (W7.1) ---------------------------------------------------
+    //
+    // Pembungkus tipis atas `Operations.h`, dan gunanya satu: memetakan ulang
+    // material per-poligon sesudahnya. Memanggil fungsi bebasnya langsung akan
+    // melewatkan pemetaan itu — dan sisi yang materialnya berpindah sendiri
+    // sesudah sebuah simpul digeser adalah cacat yang muncul jauh dari sebabnya.
+    EditResult TranslateVertices(std::span<const VertexHandle> vertices,
+                                 const Vec3& displacement);
+    EditResult AlignVertices(std::span<const VertexHandle> vertices, int axis, AlignMode mode);
+    EditResult SlideVertexAlongEdge(VertexHandle vertex, EdgeHandle edge, float t);
+    EditResult SplitEdges(std::span<const EdgeHandle> edges);
+    EditResult ConnectEdges(std::span<const EdgeHandle> edges);
+
     // --- operasi yang mengubah pengelompokan ----------------------------------
 
     bool HideEdge(EdgeHandle edge, float toleranceDegrees = 1.0f);

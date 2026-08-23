@@ -1,5 +1,7 @@
 #include "Sim/SceneView/WhiteboxStore.h"
 
+#include <algorithm>
+
 #include "Sim/Core/Log.h"
 #include "Sim/Whitebox/WhiteboxIo.h"
 
@@ -87,9 +89,85 @@ const assets::MeshData* WhiteboxStore::BuiltMesh(const Uuid& guid) {
     return &entry.built;
 }
 
+namespace {
+
+/// Membalik keanggotaan sebuah handle di dalam daftar.
+///
+/// Yang baru masuk di **belakang**, dan itu yang membuat "yang terakhir dipilih"
+/// punya arti — gizmo sisi berdiri di poligon itu, sama seperti seleksi entity
+/// memakai yang terakhir sebagai acuan.
+template <typename Handle>
+void ToggleIn(std::vector<Handle>& list, Handle handle) {
+    const auto found = std::find(list.begin(), list.end(), handle);
+    if (found != list.end()) {
+        list.erase(found);
+        return;
+    }
+    list.push_back(handle);
+}
+
+}  // namespace
+
 void WhiteboxStore::Select(const Uuid& guid, whitebox::PolygonHandle polygon) {
+    // Mengganti seluruh seleksi, bukan menambah: inilah jalur klik biasa, dan
+    // klik biasa selalu berarti "hanya ini".
     selected_.asset = guid;
-    selected_.polygon = polygon;
+    selected_.polygons.clear();
+    selected_.edges.clear();
+    selected_.vertices.clear();
+    if (whitebox::IsValid(polygon)) {
+        selected_.polygons.push_back(polygon);
+    }
+}
+
+void WhiteboxStore::Toggle(const Uuid& guid, whitebox::PolygonHandle polygon) {
+    if (selected_.asset != guid) {
+        Select(guid, polygon);
+        return;
+    }
+    if (whitebox::IsValid(polygon)) {
+        ToggleIn(selected_.polygons, polygon);
+    }
+}
+
+void WhiteboxStore::Toggle(const Uuid& guid, whitebox::EdgeHandle edge) {
+    if (selected_.asset != guid) {
+        Select(guid, whitebox::PolygonHandle::Invalid);
+        selected_.asset = guid;
+    }
+    if (whitebox::IsValid(edge)) {
+        ToggleIn(selected_.edges, edge);
+    }
+}
+
+void WhiteboxStore::Toggle(const Uuid& guid, whitebox::VertexHandle vertex) {
+    if (selected_.asset != guid) {
+        Select(guid, whitebox::PolygonHandle::Invalid);
+        selected_.asset = guid;
+    }
+    if (whitebox::IsValid(vertex)) {
+        ToggleIn(selected_.vertices, vertex);
+    }
+}
+
+void WhiteboxStore::Add(const Uuid& guid, whitebox::EdgeHandle edge) {
+    if (selected_.asset != guid) {
+        Select(guid, whitebox::PolygonHandle::Invalid);
+        selected_.asset = guid;
+    }
+    if (whitebox::IsValid(edge) && !selected_.Contains(edge)) {
+        selected_.edges.push_back(edge);
+    }
+}
+
+void WhiteboxStore::Add(const Uuid& guid, whitebox::VertexHandle vertex) {
+    if (selected_.asset != guid) {
+        Select(guid, whitebox::PolygonHandle::Invalid);
+        selected_.asset = guid;
+    }
+    if (whitebox::IsValid(vertex) && !selected_.Contains(vertex)) {
+        selected_.vertices.push_back(vertex);
+    }
 }
 
 void WhiteboxStore::Clear() {
