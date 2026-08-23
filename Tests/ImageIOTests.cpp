@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
@@ -997,4 +998,107 @@ TEST_CASE("PNG RGBA kembali dengan alfa lurus, warnanya utuh") {
     // Setiap byte kembali apa adanya — alfa maupun warna, termasuk di piksel
     // yang alfanya nol.
     CHECK(decoded.bytes == source.bytes);
+}
+
+TEST_CASE("EXR ditulis sebagai radiansi linier, bukan yang terjepit") {
+    // **Ini alasan penulis EXR ada sama sekali.** Keluaran path tracer acuan
+    // dan readback HDR keduanya radiansi linier yang melewati 1,0, dan PNG
+    // menjepitnya di sana lalu memetakan nadanya. Sebuah uji tungku yang
+    // jawabannya "tepat 1,0" tidak bisa dibaca kembali dari PNG sama sekali —
+    // yang tersimpan bukan angkanya melainkan rupanya.
+    if (!imageio::CanWrite(".exr")) {
+        MESSAGE("build ini tanpa tinyexr — bagian EXR dilewati");
+        return;
+    }
+
+    TempDir dir("exr-write");
+    const std::filesystem::path path = dir / "radiance.exr";
+
+    imageio::Image image;
+    image.desc.width = 4;
+    image.desc.height = 2;
+    image.desc.channels = 3;
+    image.desc.type = imageio::PixelType::Float32;
+    image.desc.colorSpace = imageio::ColorSpace::Linear;
+
+    // Nilai yang sengaja melewati 1,0 di kedua arah: yang di atas dijepit PNG,
+    // yang sangat kecil hilang di 8 bit.
+    const std::vector<float> pixels = {
+        0.0f,   0.5f,   1.0f,     12.5f, 0.25f,  0.125f,
+        100.0f, 0.001f, 3.5f,     1.0f,  1.0f,   1.0f,
+        0.75f,  60.0f,  0.03f,    2.0f,  0.5f,   8.0f,
+        0.2f,   0.4f,   0.6f,     255.0f, 0.0f,  0.5f,
+    };
+    image.bytes.resize(pixels.size() * sizeof(float));
+    std::memcpy(image.bytes.data(), pixels.data(), image.bytes.size());
+
+    const imageio::ImageIoResult written = imageio::Write(path, image);
+    INFO(written.error);
+    REQUIRE(written.ok);
+    REQUIRE(std::filesystem::exists(path));
+
+    imageio::Image loaded;
+    const imageio::ImageIoResult read = imageio::Read(path, {}, loaded);
+    INFO(read.error);
+    REQUIRE(read.ok);
+    CHECK(loaded.desc.width == 4);
+    CHECK(loaded.desc.height == 2);
+    CHECK(loaded.desc.type == imageio::PixelType::Float32);
+    REQUIRE(loaded.desc.channels >= 3);
+
+    const float* back = reinterpret_cast<const float*>(loaded.bytes.data());
+    for (std::size_t i = 0; i < 8; ++i) {
+        for (uint32_t c = 0; c < 3; ++c) {
+            const float expected = pixels[i * 3 + c];
+            const float actual = back[i * loaded.desc.channels + c];
+            CAPTURE(i);
+            CAPTURE(c);
+            CAPTURE(expected);
+            // Toleransinya presisi half — sekitar tiga digit desimal berarti —
+            // bukan kelonggaran terhadap penjepitan. Nilai 100 dan 255 harus
+            // kembali sebagai 100 dan 255, bukan sebagai 1.
+            CHECK(actual == doctest::Approx(expected).epsilon(0.002));
+        }
+    }
+
+    // Dan yang menentukan, disebut sendiri supaya tidak tenggelam di gelung
+    // di atas: nilai jauh di atas satu benar-benar bertahan. Piksel 2 bernilai
+    // 100 dan piksel 7 bernilai 255 di kanal merah; PNG mengembalikan keduanya
+    // sebagai 1.
+    CHECK(back[2 * loaded.desc.channels + 0] > 90.0f);
+    CHECK(back[7 * loaded.desc.channels + 0] > 250.0f);
+}
+
+TEST_CASE("EXR menolak yang memang tidak bisa ditulisnya") {
+    if (!imageio::CanWrite(".exr")) {
+        return;
+    }
+    TempDir dir("exr-reject");
+
+    imageio::Image bytes8;
+    bytes8.desc.width = 2;
+    bytes8.desc.height = 2;
+    bytes8.desc.channels = 3;
+    bytes8.desc.type = imageio::PixelType::UInt8;
+    bytes8.bytes.assign(12, 0);
+    // **Ditolak dengan menyebut sebabnya, bukan diam-diam dikonversi.** Sebuah
+    // gambar 8-bit yang ditulis sebagai EXR menghasilkan berkas yang tampak
+    // HDR dan isinya sudah terjepit sejak sebelum ditulis — bentuk kesalahan
+    // yang paling sulit ditemukan, karena berkasnya sah.
+    const imageio::ImageIoResult wrong = imageio::Write(dir / "a.exr", bytes8);
+    CHECK_FALSE(wrong.ok);
+    CHECK(wrong.error.find("float") != std::string::npos);
+
+    imageio::Image single;
+    single.desc.width = 2;
+    single.desc.height = 2;
+    single.desc.channels = 1;
+    single.desc.type = imageio::PixelType::Float32;
+    single.bytes.assign(16, 0);
+    CHECK_FALSE(imageio::Write(dir / "b.exr", single).ok);
+
+    imageio::Image empty;
+    empty.desc.channels = 3;
+    empty.desc.type = imageio::PixelType::Float32;
+    CHECK_FALSE(imageio::Write(dir / "c.exr", empty).ok);
 }

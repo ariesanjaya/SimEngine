@@ -3,6 +3,7 @@
 #include "Sim/Reference/PathTracer.h"
 
 #include <cstdint>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -58,5 +59,17 @@ std::vector<RegionDifference> CompareRegions(const Image& a, const Image& b,
 /// Rata-rata sebuah daerah. Dipakai uji yang menilai perbandingan antar-daerah
 /// alih-alih nilai mutlaknya.
 Vec3 RegionMean(const Image& image, const Region& region);
+
+/// Menulis gambar acuan sebagai EXR.
+///
+/// **EXR, dan bukan pilihan.** Keluaran acuan radiansi linier yang melewati 1,0
+/// dengan bebas — sebuah lampu bidang menghasilkan ratusan. PNG menjepitnya di
+/// satu lalu memetakan nadanya, sehingga yang tersimpan bukan angkanya
+/// melainkan rupanya, dan gambar acuan yang tidak bisa dibaca kembali sebagai
+/// angka tidak menyelesaikan apa pun.
+///
+/// Mengembalikan pesan galat, atau string kosong bila berhasil. Build tanpa
+/// tinyexr menjawab pesan yang menyebutkannya alih-alih diam.
+std::string WriteExr(const std::filesystem::path& path, const Image& image);
 
 }  // namespace sim::reference

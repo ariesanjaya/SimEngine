@@ -373,7 +373,9 @@ if(TARGET Sim::Reference)
         SOURCES
             ReferenceTests.cpp
         DEPS
-            Sim::Reference)
+            Sim::Reference
+            # Uji EXR membaca kembali gambar yang ditulisnya.
+            Sim::ImageIO)
 endif()
 
 # --- Model shading OpenPBR dijalankan di CPU ---------------------------------

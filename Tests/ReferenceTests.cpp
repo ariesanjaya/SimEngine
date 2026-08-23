@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include "Sim/ImageIO/ImageIO.h"
 #include "Sim/Reference/ImageCompare.h"
 #include "Sim/Reference/Lights.h"
 #include "Sim/Reference/Scene.h"
@@ -9,6 +10,7 @@
 #include "Sim/Reference/Shading.h"
 
 #include <cmath>
+#include <filesystem>
 #include <vector>
 
 // Path tracer acuan — R4 di docs/PLAN-EMBREE.md.
@@ -578,4 +580,55 @@ TEST_CASE("Pembanding gambar melaporkan angka, bukan gambar") {
     different.height = 1;
     different.pixels = {Vec3(0.0f), Vec3(0.0f), Vec3(0.0f)};
     CHECK(Compare(a, different).rmse == doctest::Approx(0.0f));
+}
+
+TEST_CASE("Gambar acuan keluar sebagai EXR, dan angkanya bertahan") {
+    // **Bukti bahwa gambar acuan bisa dibaca kembali sebagai angka.** Sebuah
+    // acuan yang keluarannya sudah dipetakan nada tidak bisa dibandingkan
+    // dengan apa pun — dan lampu bidang di adegan Cornell menghasilkan radiansi
+    // ratusan kali di atas satu, yang PNG jepit tanpa suara.
+    const CornellBox box = MakeCornellBox();
+    raycast::RayScene rayScene;
+    box.scene.Commit(rayScene);
+
+    TraceSettings settings;
+    settings.width = 8;
+    settings.height = 8;
+    settings.samplesPerPixel = 64;
+    settings.skyRadiance = Vec3(0.0f);
+
+    const Image image =
+        Render(rayScene, box.scene.Resolver(), box.scene.Lights(), box.camera, settings);
+
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "sim-reference-cornell.exr";
+    std::filesystem::remove(path);
+
+    const std::string error = WriteExr(path, image);
+    if (!error.empty() && error.find("tinyexr") != std::string::npos) {
+        MESSAGE("build ini tanpa tinyexr — bagian EXR dilewati");
+        return;
+    }
+    INFO(error);
+    REQUIRE(error.empty());
+    REQUIRE(std::filesystem::exists(path));
+
+    // Dibaca kembali lewat jalur yang sama yang dipakai siapa pun nanti.
+    imageio::Image loaded;
+    const imageio::ImageIoResult read = imageio::Read(path, {}, loaded);
+    INFO(read.error);
+    REQUIRE(read.ok);
+    REQUIRE(loaded.desc.width == settings.width);
+    REQUIRE(loaded.desc.type == imageio::PixelType::Float32);
+
+    const float* pixels = reinterpret_cast<const float*>(loaded.bytes.data());
+    float loadedMean = 0.0f;
+    for (std::size_t i = 0; i < image.pixels.size(); ++i) {
+        loadedMean += pixels[i * loaded.desc.channels + 0];
+    }
+    loadedMean /= static_cast<float>(image.pixels.size());
+
+    // Rata-ratanya bertahan dalam presisi half.
+    CHECK(loadedMean == doctest::Approx(image.Mean().x).epsilon(0.01));
+    std::filesystem::remove(path);
 }

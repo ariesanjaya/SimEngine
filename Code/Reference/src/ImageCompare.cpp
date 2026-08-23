@@ -1,5 +1,7 @@
 #include "Sim/Reference/ImageCompare.h"
 
+#include "Sim/ImageIO/ImageIO.h"
+
 #include <algorithm>
 #include <cmath>
 #include <sstream>
@@ -94,5 +96,35 @@ std::vector<RegionDifference> CompareRegions(const Image& a, const Image& b,
 }
 
 Vec3 RegionMean(const Image& image, const Region& region) { return MeanOf(image, region); }
+
+std::string WriteExr(const std::filesystem::path& path, const Image& image) {
+    if (image.pixels.empty()) {
+        return "gambarnya kosong: " + path.string();
+    }
+    if (!imageio::CanWrite(".exr")) {
+        return "build ini tidak bisa menulis EXR; tinyexr tidak ikut dibangun";
+    }
+
+    imageio::Image out;
+    out.desc.width = image.width;
+    out.desc.height = image.height;
+    out.desc.channels = 3;
+    out.desc.type = imageio::PixelType::Float32;
+    // **Linier, dan dinyatakan.** Yang membuka berkas ini nanti tidak boleh
+    // menebak apakah nadanya sudah dipetakan; menebaknya salah menggeser
+    // seluruh perbandingannya.
+    out.desc.colorSpace = imageio::ColorSpace::Linear;
+
+    out.bytes.resize(image.pixels.size() * 3 * sizeof(float));
+    float* target = reinterpret_cast<float*>(out.bytes.data());
+    for (std::size_t i = 0; i < image.pixels.size(); ++i) {
+        target[i * 3 + 0] = image.pixels[i].x;
+        target[i * 3 + 1] = image.pixels[i].y;
+        target[i * 3 + 2] = image.pixels[i].z;
+    }
+
+    const imageio::ImageIoResult written = imageio::Write(path, out);
+    return written.ok ? std::string{} : written.error;
+}
 
 }  // namespace sim::reference
