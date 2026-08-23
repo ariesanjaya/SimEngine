@@ -25,6 +25,7 @@
 #include "Sim/Core/FileWatcher.h"
 #include "Sim/Core/TaskPool.h"
 
+#include "Sim/Core/SdfGrid.h"
 #include <doctest/doctest.h>
 
 #include <algorithm>
@@ -2899,4 +2900,152 @@ TEST_CASE("geometri yang lahir di editor diadopsi tanpa membaca berkas") {
     cache.Invalidate("whitebox#1");
     CHECK(cache.ReadyCount() == 0);
     CHECK(ref.data->vertices.size() == 3);
+}
+
+TEST_CASE("Okupansi grid SDF hasil bake — batas atas penghematan brick sparse") {
+    // **Kriteria terima R5 menuntut angka ini dari adegan sungguhan, bukan dari
+    // bola.** Brick sparse menyimpan hanya blok yang punya voxel di dalam band;
+    // yang di luarnya jenuh dan bisa diganti satu nilai. Berapa yang dihemat
+    // karena itu **bukan pilihan desain melainkan sifat geometrinya**, dan
+    // mengukurnya lebih dulu adalah yang membedakan optimasi dari tebakan.
+    const std::filesystem::path meshDir(SIM_MESH_DIR);
+
+    struct Occupancy {
+        std::size_t voxels = 0;
+        double inBandPercent = 0.0;
+        double brick4Percent = 0.0;
+        double brick8Percent = 0.0;
+    };
+
+    const auto measure = [](const SdfGrid& grid) {
+        Occupancy out;
+        out.voxels = grid.distances.size();
+        if (out.voxels == 0) {
+            return out;
+        }
+        const float threshold = grid.band * 0.999f;
+        const auto inBand = [&](uint32_t x, uint32_t y, uint32_t z) {
+            const std::size_t at =
+                (static_cast<std::size_t>(z) * grid.sizeY + y) * grid.sizeX + x;
+            return std::abs(grid.distances[at]) < threshold;
+        };
+
+        std::size_t hits = 0;
+        for (const float d : grid.distances) {
+            if (std::abs(d) < threshold) {
+                ++hits;
+            }
+        }
+        out.inBandPercent = 100.0 * static_cast<double>(hits) / static_cast<double>(out.voxels);
+
+        const auto bricks = [&](uint32_t side) {
+            const uint32_t bx = (grid.sizeX + side - 1) / side;
+            const uint32_t by = (grid.sizeY + side - 1) / side;
+            const uint32_t bz = (grid.sizeZ + side - 1) / side;
+            std::size_t used = 0;
+            for (uint32_t z = 0; z < bz; ++z) {
+                for (uint32_t y = 0; y < by; ++y) {
+                    for (uint32_t x = 0; x < bx; ++x) {
+                        bool any = false;
+                        for (uint32_t k = 0; k < side && !any; ++k) {
+                            for (uint32_t j = 0; j < side && !any; ++j) {
+                                for (uint32_t i = 0; i < side && !any; ++i) {
+                                    const uint32_t vx = x * side + i;
+                                    const uint32_t vy = y * side + j;
+                                    const uint32_t vz = z * side + k;
+                                    if (vx < grid.sizeX && vy < grid.sizeY && vz < grid.sizeZ &&
+                                        inBand(vx, vy, vz)) {
+                                        any = true;
+                                    }
+                                }
+                            }
+                        }
+                        if (any) {
+                            ++used;
+                        }
+                    }
+                }
+            }
+            const std::size_t all = static_cast<std::size_t>(bx) * by * bz;
+            return all == 0 ? 0.0 : 100.0 * static_cast<double>(used) / static_cast<double>(all);
+        };
+        out.brick4Percent = bricks(4);
+        out.brick8Percent = bricks(8);
+        return out;
+    };
+
+    std::vector<std::filesystem::path> subjects;
+    for (const char* name : {"unitSphere.obj", "unitCylinder.obj", "shaderBall.fbx"}) {
+        subjects.push_back(meshDir / name);
+    }
+    // **Adegan sungguhan diukur lewat variabel lingkungan, bukan ditanam.**
+    // Kriteria terima R5 menuntut rasionya dari adegan sungguhan, dan adegan
+    // sungguhan tinggal di proyek orang — bukan di repo ini. Menanam jalurnya
+    // membuat uji ini lulus di satu mesin saja.
+    if (const char* extra = std::getenv("SIM_SDF_OCCUPANCY_MESH"); extra != nullptr) {
+        subjects.emplace_back(extra);
+    }
+
+    for (const std::filesystem::path& path : subjects) {
+        const std::string name = path.filename().string();
+        if (!std::filesystem::exists(path)) {
+            continue;
+        }
+        std::string error;
+        const MeshData mesh = LoadMesh(path, error);
+        INFO("mesh ", name, ": ", error);
+        REQUIRE(mesh.IsValid());
+
+        std::vector<Vec3> positions;
+        positions.reserve(mesh.vertices.size());
+        Vec3 lo(1e30f);
+        Vec3 hi(-1e30f);
+        for (const MeshVertex& v : mesh.vertices) {
+            positions.push_back(v.position);
+            lo = glm::min(lo, v.position);
+            hi = glm::max(hi, v.position);
+        }
+
+        // **Ukuran voxel menentukan jawabannya, jadi ia bisa disebut.** Band
+        // selebar empat voxel menutupi porsi volume yang makin kecil ketika
+        // voxelnya makin halus — jadi okupansi yang diukur pada grid kasar
+        // melebih-lebihkannya, dan kesimpulan tentang brick sparse ikut salah.
+        // Bawaannya 64 voxel di sisi terpanjang; `SIM_SDF_OCCUPANCY_VOXEL`
+        // memakai ukuran voxel sungguhan dalam meter.
+        volume::SdfBakeSettings settings;
+        const Vec3 extent = hi - lo;
+        settings.voxelSize = std::max({extent.x, extent.y, extent.z}) / 64.0f;
+        if (const char* voxel = std::getenv("SIM_SDF_OCCUPANCY_VOXEL"); voxel != nullptr) {
+            const float requested = std::strtof(voxel, nullptr);
+            if (requested > 0.0f) {
+                settings.voxelSize = requested;
+            }
+        }
+
+        SdfGrid grid;
+        const volume::SdfBakeResult baked =
+            volume::BakeMeshSdf(positions, mesh.indices, settings, grid);
+        if (!baked) {
+            MESSAGE("bake dilewati untuk ", name, ": ", baked.error);
+            continue;
+        }
+
+        const Occupancy o = measure(grid);
+        MESSAGE(name, ": ", grid.sizeX, "x", grid.sizeY, "x", grid.sizeZ, " = ", o.voxels,
+                " voxel | dalam band ", o.inBandPercent, "% | brick 4^3 ", o.brick4Percent,
+                "% | brick 8^3 ", o.brick8Percent, "%");
+
+        // Yang dikunci uji ini bukan angkanya — angkanya milik geometrinya —
+        // melainkan bahwa pengukurannya masuk akal. Brick tidak boleh lebih
+        // hemat daripada voxel: sebuah brick yang menyimpan satu voxel berguna
+        // ikut menyimpan yang di sekitarnya.
+        CHECK(o.voxels > 0);
+        CHECK(o.inBandPercent > 0.0);
+        CHECK(o.brick4Percent >= o.inBandPercent);
+        // **Brick 8^3 tidak selalu lebih penuh daripada 4^3, dan dugaan saya
+        // bahwa ia selalu begitu keliru** — pada Sponza 80,7% lawan 82,1%.
+        // Blok yang lebih besar lebih sering memuat permukaan, tetapi jumlahnya
+        // jauh lebih sedikit, dan persentasenya bisa bergerak ke dua arah.
+        CHECK(o.brick8Percent >= o.inBandPercent);
+    }
 }

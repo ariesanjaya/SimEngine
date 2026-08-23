@@ -729,7 +729,66 @@ di atas bidang (oklusi kontak).
 - **Menggandakan `max_depth` tidak menggeser rata-rata gambar** di luar derau —
   bukti Russian roulette-nya tak-bias, bukan sekadar ada.
 
-### R5 — Brick sparse & AO bake · ⬜
+### R5 — Brick sparse & AO bake · 🟡 **premisnya berubah, terukur 24 Agustus 2026**
+
+> **Bagian pertamanya sudah ada, dan bukan di bawah nama R5.** Rencana ini
+> menulis "yang kurang adalah pengemasannya" ketika clipmap masih memakai
+> `BoxSceneField`. Sejak itu `BakedSceneField` dibangun, `MeshSdfBakery`
+> disambungkan lewat `SceneView`, dan hasilnya diunggah sebagai `GpuGrid` ke
+> kaskade. **Rantai bake → clipmap hidup hari ini.** Yang tersisa dari R5 hanya
+> pengemasan sparse-nya, dan itu optimasi memori — bukan fitur yang membuka
+> apa pun.
+
+#### Berapa yang sebenarnya dihemat brick sparse
+
+Diukur, bukan diperkirakan. `Tests/AssetTests.cpp` membakar grid dan menghitung
+berapa bagian voxelnya benar-benar di dalam band; adegan sungguhan lewat
+`SIM_SDF_OCCUPANCY_MESH` dan `SIM_SDF_OCCUPANCY_VOXEL`, karena adegan sungguhan
+tinggal di proyek orang dan bukan di repo ini.
+
+Sponza pada ukuran voxel yang benar-benar dipakai kaskade — 12,7 cm:
+
+| | |
+| --- | --- |
+| Grid | 293 × 164 × 196 = **9.418.192 voxel** |
+| `R8_UNORM` padat | **9,4 MB** |
+| Di dalam band | **33,0%** |
+| Brick 4³ | 148.666 blok, 39,9% terpakai → 3,8 MB + tabel 0,59 MB = **4,4 MB, hemat 53%** |
+| Brick 8³ | 19.425 blok, 49,7% terpakai → 4,9 MB + tabel 0,08 MB = **5,0 MB, hemat 47%** |
+
+**Ukuran voxelnya yang menentukan jawabannya, dan itu hampir menyesatkan saya.**
+Pengukuran pertama menormalkan setiap mesh ke 64 voxel di sisi terpanjang, dan
+di sana Sponza terbaca **82% terpakai** — brick nyaris tidak menghemat apa pun.
+Band selebar empat voxel menutupi porsi volume yang makin kecil ketika voxelnya
+makin halus; pada grid kasar ia menutupi hampir semuanya. Angka yang berlaku
+adalah yang diukur pada resolusi yang benar-benar dipakai.
+
+**Jadi: hemat 53%, yaitu 5 MB untuk Sponza hari ini.** Batas atasnya
+`kMaxGrids = 16` slot × 9,4 MB = 150 MB, di mana 53% menjadi 80 MB — tetapi
+level yang ada hanya punya 2–5 aset mesh berbeda, jadi angka yang berlaku
+sekarang 5 MB. Keputusan mengerjakannya milik yang memegang anggaran memori.
+
+#### AO bake — belum ada yang membacanya
+
+Tidak ada satu pun konsumen ambient occlusion di seluruh mesin: bukan di
+material, bukan di shader, bukan di katalog node. Membangun pemanggangnya
+sekarang berarti menghasilkan tekstur yang tidak dibaca siapa pun — bentuk yang
+sama persis dengan yang membuat R6 ditutup.
+
+`Sim::Raycast` sudah punya `FindClosestPoint`, jadi ketika ada yang
+membutuhkannya, yang kurang tinggal integratornya — bukan infrastrukturnya.
+
+#### Kriteria terima yang perlu ditulis ulang
+
+- ~~"Brick hasilnya dikonsumsi jalur SDF clipmap yang sudah ada **tanpa
+  perubahan format**"~~ — tidak mungkin apa adanya. Format yang ada `GpuGrid`:
+  satu slot tekstur 3D padat per mesh. Brick menggantinya dengan kolam brick
+  plus tabel indireksi, dan itu **perubahan format menurut definisinya**,
+  beserta shader `sdf_fill` yang membacanya.
+- "Rasio penghematannya dicatat untuk satu adegan sungguhan" — **sudah**, di
+  tabel di atas.
+
+#### ~~R5 asli~~
 
 Membuka yang tersumbat di GI M1. **Jaraknya tidak dihitung di sini** — itu sudah
 dilakukan `BakeMeshSdf` di atas OpenVDB, lengkap dengan tanda dan indeks poligon
