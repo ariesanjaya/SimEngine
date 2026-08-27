@@ -383,7 +383,12 @@ if(TARGET Sim::Reference)
         DEPS
             Sim::Reference
             # Uji EXR membaca kembali gambar yang ditulisnya.
-            Sim::ImageIO)
+            Sim::ImageIO
+            # B5 membandingkan tingkat panggang terhadap jalur acuan, jadi ia
+            # butuh pemanggangnya sendiri — `AtmosphereSky`, `ProjectIrradiance`,
+            # `EvaluateIrradiance`. Acuan yang membandingkan dirinya dengan
+            # tiruan pemanggang tidak membandingkan apa pun.
+            Sim::Render)
 endif()
 
 # --- Model shading OpenPBR dijalankan di CPU ---------------------------------

@@ -54,6 +54,15 @@ struct SurfaceHit {
 using SurfaceResolver =
     std::function<SurfaceHit(const raycast::RayHit& hit, const Vec3& origin, const Vec3& direction)>;
 
+/// Radiansi langit pada sebuah arah pandang.
+///
+/// Arahnya ternormalisasi dan menunjuk **menjauhi** permukaan, yaitu arah sinar
+/// yang lolos dari adegan.
+using SkySampler = std::function<Vec3(const Vec3& direction)>;
+
+/// Langit satu warna, untuk adegan yang tidak sedang menguji langitnya.
+SkySampler ConstantSky(const Vec3& radiance);
+
 struct TraceSettings {
     uint32_t width = 128;
     uint32_t height = 128;
@@ -68,7 +77,17 @@ struct TraceSettings {
     /// dihematnya.
     uint32_t minRouletteDepth = 3;
     /// Radiansi langit untuk sinar yang tidak mengenai apa pun.
-    Vec3 skyRadiance{0.0f};
+    ///
+    /// **Sebuah fungsi, bukan `render::IEnvironmentSampler`.** Antarmuka itu
+    /// tinggal di `Sim::Render`, dan menautkannya dari sini akan menyeret
+    /// seluruh rantai Vulkan ke dalam path tracer yang seluruh gunanya berjalan
+    /// di CPU — sebuah acuan yang menuntut perangkat grafis berhenti bisa
+    /// dijalankan di tempat yang paling membutuhkannya. Yang dibutuhkan cuma
+    /// "arah → radiansi", dan itu satu tanda tangan; yang menjembatani keduanya
+    /// pemanggil, dalam satu lambda.
+    ///
+    /// Kosong berarti langit hitam — keadaan setiap adegan tertutup.
+    SkySampler sky;
     uint32_t seed = 1u;
 };
 
