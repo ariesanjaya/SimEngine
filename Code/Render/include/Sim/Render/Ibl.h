@@ -191,6 +191,37 @@ public:
 /// bukan peta RGB; pemanggil memeriksa `IsValid()`.
 EquirectEnvironment LoadHdrEquirect(const std::filesystem::path& path);
 
+/// Cubemap yang sudah jadi, dibaca per arah.
+///
+/// **Ada karena prefilter tidak boleh mencuplik pencuplik analitik.** Menyaring
+/// satu texel prefilter menuntut puluhan cuplikan lingkungan, dan untuk langit
+/// atmosferik satu cuplikan adalah satu ray march: menyaring 8160 texel dengan
+/// 64 sampel berarti 16 juta ray march, yang terukur **33 detik** (Debug). Dari
+/// cubemap, ia pencarian tekstur — dan mip 0 memang sudah berisi lingkungan yang
+/// sama, dicuplik sekali per texel.
+///
+/// **Bukan pengganti pencuplik aslinya, melainkan cuplikan sekalinya.** Yang
+/// hilang ketelitian di bawah satu texel muka; yang didapat prefilter yang biaya
+/// pembangunannya tidak lagi berlipat dengan biaya lingkungannya.
+class CubemapEnvironment final : public IEnvironmentSampler {
+public:
+    uint32_t size = 0;
+    /// Enam muka berurutan, tiap muka `size * size` texel, empat float per texel
+    /// — tata letak mip 0 yang ditulis `BakeIbl`.
+    const float* texels = nullptr;
+
+    bool IsValid() const { return size > 0 && texels != nullptr; }
+
+    /// Cuplikan bilinear di dalam satu muka, tanpa memadu antar-muka.
+    ///
+    /// **Jahitan antar-muka tidak dipadu**, dan itu batas yang diterima: yang
+    /// membacanya prefilter, yang setiap texelnya sudah merata-ratakan puluhan
+    /// arah — sebuah jahitan selebar setengah texel pada mip 0 tidak bertahan
+    /// melewati perataan itu. Memadunya menuntut penelusuran tetangga per muka,
+    /// yaitu tabel yang harus benar di dua puluh empat tepi.
+    Vec3 Sample(const Vec3& direction) const override;
+};
+
 /// Enam muka cubemap, urutan Vulkan: +X, −X, +Y, −Y, +Z, −Z.
 inline constexpr int kCubeFaceCount = 6;
 
@@ -201,6 +232,14 @@ inline constexpr int kCubeFaceCount = 6;
 /// OpenGL di sini menghasilkan lingkungan yang terbalik atas-bawah pada dua
 /// mukanya saja, yang jauh lebih membingungkan daripada terbalik seluruhnya.
 Vec3 CubeFaceDirection(int face, float u, float v);
+
+/// Kebalikannya: arah dunia → muka beserta uv-nya, keduanya 0..1.
+///
+/// **Keduanya harus saling membalik dengan tepat.** Pemetaan yang meleset tidak
+/// menghasilkan galat apa pun, hanya lingkungan yang isinya benar di muka yang
+/// salah — dan itu terlihat sebagai pantulan yang "arahnya aneh", bukan sebagai
+/// kesalahan. Aturan yang sama sudah dipegang pasangan equirect di atas.
+void DirectionToCubeFace(const Vec3& direction, int& face, float& u, float& v);
 
 // --- LUT DFG -----------------------------------------------------------------
 

@@ -49,6 +49,15 @@ bool BakeIbl(rhi::Device& device, const IEnvironmentSampler& environment,
         rhi::TextureCube::TexelBytes(cubeSize, mipCount, kCubeBytesPerTexel) / sizeof(float),
         0.0f);
 
+    // **Mip 0 lebih dulu, lalu ia yang menjadi sumber mip sisanya.**
+    // Menyaring satu texel prefilter menuntut puluhan cuplikan lingkungan, dan
+    // untuk langit atmosferik satu cuplikan adalah satu ray march: menyaring
+    // 8160 texel dengan 64 sampel dari pencuplik analitik terukur 33 detik
+    // (Debug). Dari mip 0 ia pencarian tekstur, dan mip 0 memang sudah berisi
+    // lingkungan yang sama — dicuplik sekali per texel, bukan puluhan kali.
+    CubemapEnvironment base;
+    base.size = cubeSize;
+
     std::size_t at = 0;
     for (uint32_t mip = 0; mip < mipCount; ++mip) {
         const uint32_t extent = std::max(cubeSize >> mip, 1u);
@@ -58,6 +67,11 @@ bool BakeIbl(rhi::Device& device, const IEnvironmentSampler& environment,
         // selalu sedikit buram.
         const uint32_t samples = mip == 0 ? 1u : std::max(settings.prefilterSamples, 1u);
 
+        if (mip == 1) {
+            // Mip 0 sudah lengkap di awal `texels`, jadi pencupliknya baru sah
+            // di sini — bukan sebelum gelungnya berjalan.
+            base.texels = texels.data();
+        }
         for (int face = 0; face < kCubeFaceCount; ++face) {
             for (uint32_t y = 0; y < extent; ++y) {
                 for (uint32_t x = 0; x < extent; ++x) {
@@ -67,7 +81,7 @@ bool BakeIbl(rhi::Device& device, const IEnvironmentSampler& environment,
                     const Vec3 direction = CubeFaceDirection(face, u, v);
                     const Vec3 radiance =
                         mip == 0 ? environment.Sample(direction)
-                                 : PrefilterSpecular(environment, direction, roughness, samples);
+                                 : PrefilterSpecular(base, direction, roughness, samples);
                     texels[at++] = radiance.x;
                     texels[at++] = radiance.y;
                     texels[at++] = radiance.z;
