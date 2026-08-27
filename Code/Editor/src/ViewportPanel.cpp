@@ -389,6 +389,12 @@ public:
         // membuat adegan interior berhenti membayar empat pass LUT untuk sesuatu
         // yang tidak pernah terlihat. Prefab "Sky Dome" yang menyalakannya.
         editor::ApplySceneSky(*context.world, desc);
+        // Jalur HDR yang relatif dilengkapi di sisi editor, bukan di renderer:
+        // yang tahu di mana `Resources` bawaan berada adalah aplikasi yang
+        // menyalinnya ke sebelah executable-nya. `hdriPath` hidup sampai
+        // `Render` di bawah — `desc` hanya menunjuknya.
+        const std::string hdriPath = editor::ResolveHdriPath(desc.hdriPath, context.builtinDir);
+        desc.hdriPath = hdriPath;
 
         // Volume dimuat di sini, bukan di renderer: OpenVDB adalah pengondisi
         // aset. `LoadVolumeIfChanged` tidak melakukan apa-apa bila jalur dan

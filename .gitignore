@@ -62,3 +62,11 @@ Third-Party/OpenUSD/
 Third-Party/OpenImageIO/
 Third-Party/OpenVDB/
 Third-Party/PhysX/
+
+# Berkas HDRI lingkungan: puluhan megabyte per berkas, dan tidak satu pun
+# dibutuhkan untuk membangun atau menguji mesin ini. Bawaan prefab "Sky Dome"
+# adalah langit atmosferik prosedural justru supaya project baru tidak menuntut
+# satu unduhan sebelum menggambar apa pun; yang memang pra-GI memilih berkasnya
+# sendiri lewat satu dropdown di Inspector. Alasan lengkapnya di docs/PLAN-IBL.md.
+Resources/Environment/*.hdr
+Resources/Environment/*.exr

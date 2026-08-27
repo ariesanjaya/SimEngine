@@ -12,6 +12,7 @@ Dokumen ini adalah peta besar. Detail per milestone ada di:
 - [PLAN-AI.md](PLAN-AI.md) — A0..A4, engine sebagai MCP server untuk agentic AI (paralel)
 - [PLAN-RENDER.md](PLAN-RENDER.md) — E8..E9, fase rendering & runtime
 - [PLAN-GPU-OPTIM.md](PLAN-GPU-OPTIM.md) — G0..G8, optimasi GPU: compute, bindless, GPU-driven, async compute
+- [PLAN-IBL.md](PLAN-IBL.md) — B0..B6, dua skenario pencahayaan: IBL panggang untuk project pra-GI, probe real-time untuk yang menuntut oklusi benar
 - [PLAN-PHYSICS.md](PLAN-PHYSICS.md) — P0..P8, PhysX 5 untuk E9 (CPU dulu, CUDA opsional)
 - [PLAN-WHITEBOX.md](PLAN-WHITEBOX.md) — W0..W6, blok yang disunting di viewport untuk merancang level (selesai)
 - [PLAN-TERRAIN.md](PLAN-TERRAIN.md) — L0..L7, terrain sebagai benda di dunia: mesh, LOD, sculpt 3D, collider, cat, decal

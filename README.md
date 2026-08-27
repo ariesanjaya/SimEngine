@@ -332,6 +332,7 @@ antarmuka `IViewportRenderer`. Rinciannya di
 - [PLAN-EDITOR.md](docs/PLAN-EDITOR.md) — E0..E7 dengan kriteria terima
 - [PLAN-AI.md](docs/PLAN-AI.md) — A0..A4, engine sebagai MCP server
 - [PLAN-RENDER.md](docs/PLAN-RENDER.md) — E8..E9
+- [PLAN-IBL.md](docs/PLAN-IBL.md) — B0..B6, dua tingkat pencahayaan tak-langsung (IBL panggang dan GI real-time) dan World Settings yang memilih di antaranya
 - [RENDER-OPENPBR.md](docs/RENDER-OPENPBR.md) — lobe OpenPBR yang belum ada (subsurface, transmission, thin film) dan cara menjalankannya real time
 - [PLAN-MATERIALX.md](docs/PLAN-MATERIALX.md) — impor material dari 3ds Max lewat dokumen MaterialX, dan blok parameter Max di dalam FBX sebagai cadangannya
 - [EDITOR-PANELS.md](docs/EDITOR-PANELS.md) — spesifikasi tiap panel

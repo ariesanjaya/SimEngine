@@ -125,6 +125,27 @@ bool ApplySceneSky(const scene::World& world, render::ViewportDesc& desc) {
     return true;
 }
 
+std::string ResolveHdriPath(std::string_view hdriPath, std::string_view builtinDir) {
+    if (hdriPath.empty() || builtinDir.empty()) {
+        return std::string(hdriPath);
+    }
+    const std::filesystem::path written(hdriPath);
+    if (written.is_absolute()) {
+        return std::string(hdriPath);
+    }
+    // Keberadaannya diperiksa di sini, bukan diserahkan ke renderer: yang tidak
+    // ada di bawah `Resources` bawaan boleh jadi memang relatif terhadap sesuatu
+    // yang lain, dan menempelkan akar di depannya hanya menukar satu jalur yang
+    // gagal dengan jalur lain yang gagal — dengan pesan yang tidak lagi menyebut
+    // apa yang tertulis di level.
+    std::error_code code;
+    const std::filesystem::path candidate = std::filesystem::path(builtinDir) / written;
+    if (!std::filesystem::exists(candidate, code)) {
+        return std::string(hdriPath);
+    }
+    return candidate.string();
+}
+
 void SceneView::Build(scene::World& world, const Selection& selection,
                       const assets::AssetDatabase* assets,
                       render::IViewportRenderer* renderer,

@@ -1164,6 +1164,13 @@ int main(int argc, char** argv) {
             // yang langitnya berbeda seratus kali menghasilkan gambar yang sama
             // persis. Ditemukan begitu.
             editor::ApplySceneSky(*app.Context().world, desc);
+            // Jalur HDR relatif dilengkapi dengan akar `Resources`, alasan
+            // yang sama dengan di viewport editor: yang tertulis di level
+            // relatif terhadap Resources, bukan terhadap folder tempat bench
+            // ini dijalankan.
+            const std::string hdriPath =
+                editor::ResolveHdriPath(desc.hdriPath, app.Context().builtinDir);
+            desc.hdriPath = hdriPath;
             desc.fixedDeltaSeconds = kFixedDelta;
             camera.position = eye;
             camera.rotation = glm::quatLookAt(glm::normalize(forward), Vec3(0.0f, 1.0f, 0.0f));
