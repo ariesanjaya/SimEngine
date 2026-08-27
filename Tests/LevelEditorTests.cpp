@@ -1,5 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 
+#include "TestProcess.h"
+
 #include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Editor/Command.h"
 #include "Sim/Editor/EditorApp.h"
@@ -74,19 +76,19 @@ TEST_CASE("picking memilih objek terdepan di antara yang bertumpuk") {
 
     // Dua kotak persis segaris pandang: yang dekat harus menang, dan itu tidak
     // boleh bergantung pada urutan penyusunan daftar.
-    const scene::Entity far = MakeBox(world, "Far", Vec3(0.0f, 0.0f, -5.0f));
-    const scene::Entity near = MakeBox(world, "Near", Vec3(0.0f, 0.0f, 2.0f));
+    const scene::Entity farBox = MakeBox(world, "Far", Vec3(0.0f, 0.0f, -5.0f));
+    const scene::Entity nearBox = MakeBox(world, "Near", Vec3(0.0f, 0.0f, 2.0f));
 
     SceneView view;
     view.Build(world, selection);
     CHECK(view.Pickables().size() == 2);
 
     const Ray ray{Vec3(0.0f, 0.0f, 10.0f), Vec3(0.0f, 0.0f, -1.0f)};
-    CHECK(view.Raycast(ray) == near);
+    CHECK(view.Raycast(ray) == nearBox);
 
     // Dari sisi berlawanan, pemenangnya harus ikut berbalik.
     const Ray back{Vec3(0.0f, 0.0f, -10.0f), Vec3(0.0f, 0.0f, 1.0f)};
-    CHECK(view.Raycast(back) == far);
+    CHECK(view.Raycast(back) == farBox);
 }
 
 TEST_CASE("picking menghormati rotasi dan skala objek") {
@@ -611,7 +613,7 @@ struct MeshFixture {
         static std::atomic<int> counter{0};
         root = std::filesystem::temp_directory_path() /
                ("simskin_" + std::to_string(counter.fetch_add(1)) + "_" +
-                std::to_string(::getpid()));
+                std::to_string(sim::tests::ProcessId()));
         std::filesystem::create_directories(root);
         std::ofstream(root / "rig.fbx") << "bukan fbx sungguhan";
         database.Initialize({root, nullptr, 1.0f});
@@ -719,7 +721,7 @@ TEST_CASE("Animator memutar klip FBX pada mesh ber-rig dan paletnya berubah terh
     static std::atomic<int> counter{0};
     const std::filesystem::path root =
         std::filesystem::temp_directory_path() /
-        ("simanim_" + std::to_string(counter.fetch_add(1)) + "_" + std::to_string(::getpid()));
+        ("simanim_" + std::to_string(counter.fetch_add(1)) + "_" + std::to_string(sim::tests::ProcessId()));
     std::filesystem::create_directories(root);
     std::error_code copyError;
     std::filesystem::copy_file(rigPath, root / "rig.fbx", copyError);
@@ -820,7 +822,7 @@ struct ScratchDir {
         static std::atomic<int> counter{0};
         path = std::filesystem::temp_directory_path() /
                ("simproj_" + std::to_string(counter.fetch_add(1)) + "_" +
-                std::to_string(::getpid()));
+                std::to_string(sim::tests::ProcessId()));
         std::filesystem::create_directories(path);
     }
     ~ScratchDir() {

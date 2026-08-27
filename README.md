@@ -25,7 +25,14 @@ konsekuensinya ada di [docs/ROADMAP.md](docs/ROADMAP.md).
 
 ## Membangun
 
-Prasyarat: clang 18+, CMake 3.25+, Ninja, dan Vulkan SDK.
+Prasyarat: clang 18+, CMake 3.25+, Ninja, Vulkan SDK, dan **Autodesk FBX SDK**.
+
+Dua yang terakhir dicari di sistem, tidak diunduh, dan keduanya menggagalkan
+konfigurasi bila tidak ada. FBX SDK harus dipasang sendiri karena unduhannya
+menuntut penerimaan lisensi Autodesk per orang — caranya di
+[docs/DEPENDENCIES.md](docs/DEPENDENCIES.md#autodesk-fbx-sdk--wajib-dan-tidak-bisa-diambil-sendiri).
+
+### Linux
 
 ```sh
 source /home/arie/SDK/vulkan-sdk-1.4.350.1/setup-env.sh
@@ -39,12 +46,44 @@ ctest --preset linux-clang-debug
 
 Preset lain: `linux-clang-release`, `linux-clang-asan`, `linux-clang-tsan`.
 
+### Windows
+
+Compiler-nya **clang yang sama**, hanya menargetkan ABI MSVC — bukan `cl.exe`.
+Alasannya ada di `cmake/SimTargets.cmake`: flag peringatan di sana ditulis dalam
+ejaan GCC/Clang, dan `cl.exe` mengabaikan semuanya tanpa memberi tahu siapa pun.
+Header, pustaka, dan linker MSVC tetap dipakai, dan itu datang dari **Developer
+PowerShell for VS 2022** — yang sekaligus menyediakan `cmake` dan `ninja` bundel
+Visual Studio, sehingga tidak ada yang perlu dipasang terpisah selain LLVM dan
+Vulkan SDK.
+
+```powershell
+& 'C:\Program Files\Microsoft Visual Studio\2022\Community\Common7\Tools\Launch-VsDevShell.ps1' -Arch amd64 -HostArch amd64
+
+cmake --preset windows-clang-debug
+cmake --build --preset windows-clang-debug
+ctest --preset windows-clang-debug
+
+.\build\windows-clang-debug\bin\SimEditor.exe
+```
+
+`-Arch amd64` wajib ditulis. Bawaannya x86, dan yang salah karenanya bukan
+konfigurasi melainkan tautan — jauh belakangan, dengan pesan yang tidak
+menyebut arsitektur sama sekali.
+
+Preset lain: `windows-clang-release`. **Tidak ada padanan ASan/TSan di sini**:
+ThreadSanitizer tidak didukung di Windows sama sekali, dan ASan menuntut
+`clang_rt.asan_dynamic-x86_64.dll` ikut disalin ke sebelah setiap executable.
+Keduanya dijalankan di Linux.
+
+Kalau `clang++` belum ada di `PATH`, tambahkan `C:\Program Files\LLVM\bin`
+— installer LLVM tidak melakukannya kecuali diminta.
+
 Konfigurasi kedua dan seterusnya tidak menyentuh jaringan. Untuk memaksa build
 sepenuhnya offline: tambahkan `-DFETCHCONTENT_FULLY_DISCONNECTED=ON`.
 
 Semua dependensi diambil lewat `FetchContent` dengan versi terkunci — daftar
-lengkapnya di [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md). Satu-satunya yang
-diambil dari sistem adalah Vulkan SDK.
+lengkapnya di [docs/DEPENDENCIES.md](docs/DEPENDENCIES.md). Yang diambil dari
+sistem hanya dua, dan keduanya wajib: Vulkan SDK dan Autodesk FBX SDK.
 
 ## Menjalankan editor
 

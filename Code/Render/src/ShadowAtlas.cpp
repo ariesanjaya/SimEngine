@@ -131,8 +131,8 @@ float ShadowImportance(const LightInstance& light, const Vec3& eye) {
 }
 
 Mat4 ShadowFaceMatrix(const LightInstance& light, uint32_t face, float nearZ) {
-    const float far = std::max(light.range, nearZ * 2.0f);
-    const float near = std::max(nearZ, 1e-3f);
+    const float farPlane = std::max(light.range, nearZ * 2.0f);
+    const float nearPlane = std::max(nearZ, 1e-3f);
 
     Vec3 forward;
     float fovY = kHalfPi;
@@ -149,7 +149,7 @@ Mat4 ShadowFaceMatrix(const LightInstance& light, uint32_t face, float nearZ) {
 
     const Mat4 view = LookAt(light.position, light.position + forward, FaceUp(face));
     // Perspektif biasa, bukan reversed-Z — lihat catatan di header.
-    Mat4 projection = glm::perspective(fovY, 1.0f, near, far);
+    Mat4 projection = glm::perspective(fovY, 1.0f, nearPlane, farPlane);
     projection[1][1] *= -1.0f;
     return projection * view;
 }

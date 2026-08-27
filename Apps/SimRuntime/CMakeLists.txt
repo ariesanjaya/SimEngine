@@ -33,8 +33,6 @@ endif()
 
 add_dependencies(SimRuntime SimShadersGrid)
 
-# Shader dan Resources disalin ke sebelah executable, alasan yang sama dengan
-# SimEditor: player harus bisa dijalankan dari folder build apa adanya.
-add_custom_command(TARGET SimRuntime POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-            ${CMAKE_SOURCE_DIR}/Resources $<TARGET_FILE_DIR:SimRuntime>/Resources)
+# Resources disalin oleh target SimResources di CMakeLists akar, alasan yang sama
+# dengan SimEditor: player harus bisa dijalankan dari folder build apa adanya.
+add_dependencies(SimRuntime SimResources)

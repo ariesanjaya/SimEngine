@@ -117,7 +117,15 @@ private:
 std::string IdFromTitle(std::string_view title) {
     std::string id = "lua.";
     for (const char c : title) {
-        id += (c == ' ' || c == '\t') ? '_' : static_cast<char>(std::tolower(c));
+        // **`unsigned char`, dan itu bukan formalitas.** `std::tolower` hanya
+        // menerima nilai yang muat di `unsigned char` atau EOF; memberinya
+        // `char` bertanda yang negatif adalah perilaku tak terdefinisi. Judul
+        // panel di editor ini memuat ikon Lucide, yang codepoint-nya ada di
+        // Private Use Area — setiap byte UTF-8-nya lewat 0x7F, jadi negatif.
+        // Di Linux ia lolos tanpa suara; di Windows CRT Debug menangkapnya dan
+        // memunculkan dialog modal yang membekukan editor.
+        const auto uc = static_cast<unsigned char>(c);
+        id += (c == ' ' || c == '\t') ? '_' : static_cast<char>(std::tolower(uc));
     }
     return id;
 }

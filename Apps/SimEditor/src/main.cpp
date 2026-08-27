@@ -10,6 +10,7 @@
 #include "Sim/Core/FrameLimiter.h"
 #include "Sim/Core/Log.h"
 #include "Sim/Core/MainThreadQueue.h"
+#include "Sim/Core/UserPaths.h"
 #include "Sim/Editor/AiTools.h"
 #include "Sim/Editor/EditorApp.h"
 #include "Sim/Editor/Icons.h"
@@ -88,18 +89,7 @@ std::filesystem::path FindUiFont() {
 /// tinggal di tempat yang ia sendiri bisa temukan, backup, dan taruh di kontrol
 /// versi tanpa harus tahu editor menyimpan apa pun di mana.
 std::filesystem::path ProjectsRoot() {
-    const char* home = SDL_getenv("HOME");
-    std::filesystem::path base =
-        home != nullptr ? std::filesystem::path(home) : std::filesystem::current_path();
-    return base / "Documents" / "SimEngine";
-}
-
-/// Folder konfigurasi per-pengguna: layout dock, preferensi, log.
-std::filesystem::path ConfigDirectory() {
-    const char* home = SDL_getenv("HOME");
-    std::filesystem::path base =
-        home != nullptr ? std::filesystem::path(home) : std::filesystem::current_path();
-    return base / ".simengine";
+    return sim::DocumentsDirectory() / "SimEngine";
 }
 
 /// Menghitung laju frame yang dipakai mengunci editor.
@@ -145,7 +135,7 @@ int main(int argc, char** argv) {
 
     MainThreadQueue::Get().BindMainThread();
 
-    const std::filesystem::path configDir = ConfigDirectory();
+    const std::filesystem::path configDir = sim::ConfigDirectory();
     Log::Init(configDir / "Logs" / "editor.log");
     SIM_INFO("Editor", "SimEditor 0.1.0 starting");
     // Backend gambar dicatat beserta versinya. Berkas yang terbaca di satu

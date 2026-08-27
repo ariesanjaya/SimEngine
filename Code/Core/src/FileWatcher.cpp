@@ -183,9 +183,11 @@ bool FileWatcher::Poll(std::vector<Event>& out) {
 /// ReadDirectoryChangesW memantau seluruh sub-pohon lewat satu handle, jadi
 /// tidak ada padanan dari pekerjaan mendaftar per direktori seperti di Linux.
 ///
-/// CATATAN: jalur ini belum pernah dijalankan — mesin pengembangan saat ini
-/// hanya Linux. Ia ditulis mengikuti dokumentasi dan wajib diuji sebelum build
-/// Windows di E9 dianggap selesai.
+/// Konsekuensinya terlihat di test: karena sub-pohon ikut terpantau, direktori
+/// baru tidak pernah membuat perubahan di dalamnya hilang, sehingga jalur ini
+/// tidak punya alasan meminta pemindaian ulang di tempat inotify memintanya.
+/// Yang tetap bisa meminta pemindaian ulang adalah buffer yang meluap
+/// (`ERROR_NOTIFY_ENUM_DIR`) — kontrak `Poll()` di header tidak berubah.
 struct FileWatcher::Impl {
     HANDLE directory = INVALID_HANDLE_VALUE;
     OVERLAPPED overlapped{};

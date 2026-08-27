@@ -1,8 +1,17 @@
 # Dependensi
 
 Semua dependensi diambil lewat `FetchContent` di `cmake/SimDeps.cmake` dengan tag
-versi pasti. Tidak ada dependensi yang diambil dari sistem kecuali **Vulkan SDK**
-(sudah ada di `/home/arie/SDK/vulkan-sdk-1.4.350.1`).
+versi pasti, kecuali **dua yang wajib ada di sistem lebih dulu**:
+
+| Dari sistem | Wajib | Tanpanya |
+|---|---|---|
+| **Vulkan SDK** | ya | `find_package(Vulkan REQUIRED)` gagal, dan tanpa `glslc` tidak ada shader yang dikompilasi |
+| **Autodesk FBX SDK** | ya | konfigurasi berhenti dengan `FATAL_ERROR` — lihat bagiannya di bawah |
+
+Keduanya dicari, bukan diunduh, dan keduanya menggagalkan konfigurasi bila tidak
+ada. Sisanya di berkas ini — termasuk OpenImageIO, OpenVDB, PhysX, dan OpenUSD —
+dilewati diam-diam bila tidak ada, jadi hanya dua baris di atas yang menentukan
+apakah `cmake --preset ...` bisa selesai di mesin bersih.
 
 Setelah konfigurasi pertama, `FETCHCONTENT_UPDATES_DISCONNECTED=ON` membuat build
 berikutnya tidak menyentuh jaringan. Untuk build sepenuhnya offline setelah itu:
@@ -169,22 +178,42 @@ yang tidak berlaku untuk yang lain di berkas ini:
   bila tidak ada. FBX adalah format yang dipakai aset contoh engine ini sendiri
   (`Resources/Meshes/shaderBall.fbx`), jadi build tanpanya tidak akan berguna.
 
-Pasang SDK-nya (Linux, x64) lalu arahkan build ke sana:
+Pasang SDK-nya lalu arahkan build ke sana.
+
+**Linux (x64):**
 
 ```bash
 # Pemasang dari Autodesk, dijalankan sekali per mesin.
 ./fbx20203_fbxsdk_linux ~/SDK/fbxsdk
 ```
 
-Bawaannya menunjuk `$HOME/SDK/fbxsdk`; folder lain disetel dengan
-`-DSIM_FBXSDK_ROOT=<folder>`. Baris `Autodesk FBX SDK dipakai dari ...` pada
-keluaran CMake menandakan ia ditemukan.
+Bawaannya menunjuk `$HOME/SDK/fbxsdk`.
 
-Yang ditautkan adalah `lib/release/libfbxsdk.a` yang **statis**, bukan `.so`-nya.
-Yang dinamis menuntut `libfbxsdk.so` ikut ditemukan saat dijalankan, dan
-satu-satunya tempat ia tinggal adalah folder pemasangan milik satu mesin — biner
-yang dipindah lalu berhenti bekerja dengan pesan dari loader, bukan dari mesin
-ini. Yang statis menyeret libxml2 dan zlib, dan keduanya memang ada di mana-mana.
+**Windows (x64):** jalankan pemasang `.exe` dari Autodesk dan terima bawaannya,
+yaitu `C:\Program Files\Autodesk\FBX\FBX SDK\<versi>`. Folder itu dicari
+sendiri oleh CMake — yang versinya tertinggi menang, dan tidak ada variabel
+lingkungan yang perlu disetel.
+
+Folder lain di kedua platform disetel dengan `-DSIM_FBXSDK_ROOT=<folder>`. Baris
+`Autodesk FBX SDK dipakai dari ...` pada keluaran CMake menandakan ia ditemukan;
+bila tidak, pesan galatnya menyebut root dan setiap folder pustaka yang sudah
+diperiksa.
+
+Yang ditautkan **statis**, bukan pustaka dinamisnya: `lib/release/libfbxsdk.a` di
+Linux, `lib/x64/<varian>/libfbxsdk-md.lib` di Windows. Yang dinamis menuntut
+`libfbxsdk.so`/`libfbxsdk.dll` ikut ditemukan saat dijalankan, dan satu-satunya
+tempat ia tinggal adalah folder pemasangan milik satu mesin — biner yang dipindah
+lalu berhenti bekerja dengan pesan dari loader, bukan dari mesin ini. Yang statis
+menyeret libxml2 dan zlib; di Linux keduanya memang ada di mana-mana, sementara
+di Windows yang dipakai adalah `libxml2-md.lib` dan `zlib-md.lib` yang dibundel
+SDK-nya sendiri.
+
+> **Varian CRT di Windows mengikuti `CMAKE_BUILD_TYPE`.** Autodesk membangun
+> `debug/` terhadap `/MDd` dan `release/` terhadap `/MD`. Menautkan yang salah
+> tetap lolos kompilasi dan tetap lolos tautan — yang pecah adalah objek yang
+> melintasi batas pustaka saat dijalankan, dengan crash yang tidak menunjuk ke
+> sini sama sekali. Build Debug karena itu memakai `lib/x64/debug`, sisanya
+> `lib/x64/release`.
 
 > **Membaca berkas tidak boleh menulis apa pun.** Bawaan SDK membongkar media
 > tertanam ke sebuah folder `<nama>.fbm/` di sebelah berkas FBX-nya — di dalam
@@ -395,6 +424,8 @@ OpenImageIO. Yang keluar dari `Sim::Volume` adalah `sim::SdfGrid`: float biasa
 di `Sim::Core`, tanpa satu pun tipe OpenVDB. `Sim::Render` memakai hasilnya dan
 tidak pernah menautkan pustakanya.
 
+#### Linux
+
 Membangunnya sekali per mesin, lalu menyalin hasilnya ke dalam pohon:
 
 ```bash
@@ -414,6 +445,67 @@ cp -a vdb-build/openvdb/openvdb/openvdb/version.h "$D/include/openvdb/"
 find "$D/include" \( -name "*.cc" -o -name "CMakeLists.txt" \) -delete
 cp -a vdb-build/openvdb/openvdb/libopenvdb.so* "$D/lib/"
 ```
+
+#### Windows
+
+Tidak ada paket sistem untuk keempat kebergantungannya, jadi semuanya dibangun
+sendiri ke satu prefix. **Debug, bukan Release**, bila yang dipakai preset
+`windows-clang-debug`: MSVC menanamkan `detect_mismatch` untuk
+`_ITERATOR_DEBUG_LEVEL`, sehingga OpenVDB Release yang ditautkan ke SimEngine
+Debug gagal di tautan alih-alih berjalan salah diam-diam. Dependensinya dibangun
+dengan MSVC `cl` — ABI-nya identik dengan clang yang menargetkan MSVC, dan
+jalurnya jauh lebih teruji untuk keempat pustaka ini.
+
+Jalankan dari **Developer PowerShell for VS 2022** (`-Arch amd64`), dengan
+`%PREFIX%` menunjuk satu folder pemasangan bersama:
+
+```powershell
+# 1. zlib, c-blosc, oneTBB — ketiganya CMake, ketiganya /MDd.
+#    Untuk masing-masing:
+cmake -G Ninja -S <sumber> -B <build> `
+  -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=%PREFIX% -DCMAKE_PREFIX_PATH=%PREFIX% `
+  -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebugDLL
+cmake --build <build> --target install
+
+# 2. Boost.iostreams — satu-satunya komponen Boost terkompilasi yang dituntut
+#    OpenVDB core. Filter kompresinya dimatikan: OpenVDB hanya memakai
+#    array_source, stream, copy, dan file_descriptor.
+.\bootstrap.bat vc143
+b2 --with-iostreams --prefix=%PREFIX% toolset=msvc address-model=64 `
+   variant=debug link=static runtime-link=shared threading=multi `
+   -sNO_ZLIB=1 -sNO_BZIP2=1 -sNO_LZMA=1 -sNO_ZSTD=1 install
+
+# 3. OpenVDB core, statis.
+cmake -G Ninja -S <sumber> -B <build> `
+  -DCMAKE_BUILD_TYPE=Debug -DCMAKE_INSTALL_PREFIX=%PREFIX% -DCMAKE_PREFIX_PATH=%PREFIX% `
+  -DCMAKE_POLICY_DEFAULT_CMP0091=NEW -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreadedDebugDLL `
+  -DOPENVDB_CORE_SHARED=OFF -DOPENVDB_CORE_STATIC=ON `
+  -DOPENVDB_BUILD_BINARIES=OFF -DOPENVDB_BUILD_UNITTESTS=OFF `
+  -DOPENVDB_BUILD_PYTHON_MODULE=OFF -DOPENVDB_BUILD_AX=OFF -DOPENVDB_BUILD_NANOVDB=OFF `
+  -DUSE_EXR=OFF -DUSE_PNG=OFF -DUSE_LOG4CPLUS=OFF -DBoost_USE_STATIC_LIBS=ON
+cmake --build <build> --target install
+```
+
+Lalu arahkan build ke prefix itu — di Windows tidak perlu menyalin apa pun ke
+dalam pohon, karena `install` sudah menghasilkan tata letak `include/` + `lib/`
+yang dicari SimDeps:
+
+```powershell
+cmake --preset windows-clang-debug -DSIM_OPENVDB_ROOT=%PREFIX%
+```
+
+> **`bootstrap.bat` gagal dengan "guess_toolset.bat is not recognized"?**
+> `VsDevCmd.bat` menyetel `NoDefaultCurrentDirectoryInExePath=1`, dan dengannya
+> cmd berhenti mencari batch file di direktori kerja. Kosongkan variabel itu
+> lebih dulu (`set "NoDefaultCurrentDirectoryInExePath="`).
+
+Tiga hal yang khusus Windows, dan ketiganya sudah ditangani `SimDeps.cmake`:
+
+| Hal | Kenapa |
+|---|---|
+| `OPENVDB_STATICLIB` didefinisikan pemakainya | `Platform.h` menyimpulkan "ini DLL" begitu melihat `_DLL` — yang disetel setiap build `/MD` dan `/MDd` — lalu menandai API-nya `__declspec(dllimport)`. Tanpa define ini yang dicari linker adalah simbol `__imp_*` yang tak pernah ada di pustaka statis |
+| blosc, zlib, dan Boost.iostreams ikut ditautkan | Pustaka statis tidak membawa kebergantungannya. Tanpa ketiganya yang muncul adalah puluhan simbol tak terselesaikan yang namanya tidak menyebut OpenVDB sama sekali |
+| `tbb*.dll` disalin ke sebelah executable | TBB tidak mendukung tautan statis secara resmi, jadi ia tetap DLL — sama seperti `SDL3.dll` |
 
 **`version.h` tidak ada di pohon sumber** — ia dihasilkan saat OpenVDB dibangun,
 dan `Types.h` meng-include-nya dengan tanda kutip. Salinan header dari pohon

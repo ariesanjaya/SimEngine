@@ -34,18 +34,18 @@ float RaySphereNearest(const Vec3& origin, const Vec3& direction, float radius) 
         return -1.0f;
     }
     const float root = SafeSqrt(discriminant);
-    const float near = (-b - root) / (2.0f * a);
-    const float far = (-b + root) / (2.0f * a);
-    if (near < 0.0f && far < 0.0f) {
+    const float tNear = (-b - root) / (2.0f * a);
+    const float tFar = (-b + root) / (2.0f * a);
+    if (tNear < 0.0f && tFar < 0.0f) {
         return -1.0f;
     }
-    if (near < 0.0f) {
-        return std::max(0.0f, far);
+    if (tNear < 0.0f) {
+        return std::max(0.0f, tFar);
     }
-    if (far < 0.0f) {
-        return std::max(0.0f, near);
+    if (tFar < 0.0f) {
+        return std::max(0.0f, tNear);
     }
-    return std::max(0.0f, std::min(near, far));
+    return std::max(0.0f, std::min(tNear, tFar));
 }
 
 MediumDensity SampleDensity(const AtmosphereParameters& atmosphere, float heightKm) {

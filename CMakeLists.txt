@@ -136,6 +136,26 @@ if(SIM_BUILD_EDITOR)
     add_subdirectory(Code/Editor)
 endif()
 
+# Resources (font, ikon, tema, aset contoh) disalin ke sebelah executable supaya
+# aplikasi bisa dijalankan langsung dari folder build tanpa tahu letak sumbernya.
+#
+# **Satu target, bukan satu aturan POST_BUILD per aplikasi.** Ketiga aplikasi
+# menulis ke folder tujuan yang sama, dan ninja menjalankan langkah POST_BUILD
+# mereka bersamaan — dua penyalinan ke berkas yang sama, yang di Windows berarti
+# sharing violation dan build yang gagal secara acak. Gagalnya juga tidak
+# menyebut penyebabnya: yang terbaca hanya "Error copying directory", pada
+# aplikasi yang berbeda-beda tiap kali.
+#
+# Sebagai target tersendiri ia juga tetap memenuhi alasan aturan POST_BUILD tadi
+# ada: ia dijalankan pada setiap build aplikasi mana pun, jadi tidak ada
+# aplikasi yang membaca salinan sisa build tetangganya.
+add_custom_target(SimResources
+    COMMAND ${CMAKE_COMMAND} -E copy_directory
+            "${CMAKE_SOURCE_DIR}/Resources" "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/Resources"
+    COMMENT "Menyalin Resources ke folder keluaran"
+    VERBATIM)
+set_target_properties(SimResources PROPERTIES FOLDER "SimEngine")
+
 if(SIM_BUILD_EDITOR)
     add_subdirectory(Apps/SimEditor)
     # Ikut SIM_BUILD_EDITOR karena ia menyusun inti editor yang sama. Ia tidak

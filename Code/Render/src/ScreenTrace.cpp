@@ -81,13 +81,13 @@ bool ClipToScreen(const Vec2& uv0, const Vec2& duv, float& sMin, float& sMax) {
             }
             continue;
         }
-        float near = (0.0f - uv0[axis]) / duv[axis];
-        float far = (1.0f - uv0[axis]) / duv[axis];
-        if (near > far) {
-            std::swap(near, far);
+        float tNear = (0.0f - uv0[axis]) / duv[axis];
+        float tFar = (1.0f - uv0[axis]) / duv[axis];
+        if (tNear > tFar) {
+            std::swap(tNear, tFar);
         }
-        sMin = std::max(sMin, near);
-        sMax = std::min(sMax, far);
+        sMin = std::max(sMin, tNear);
+        sMax = std::min(sMax, tFar);
     }
     return sMin <= sMax;
 }

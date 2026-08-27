@@ -32,6 +32,21 @@ function(sim_target_defaults target)
     target_compile_definitions(${target} PUBLIC
         $<$<CONFIG:Debug>:SIM_DEBUG=1>
         $<$<NOT:$<CONFIG:Debug>>:SIM_DEBUG=0>)
+    if(WIN32)
+        # CRT Microsoft menandai deprecated sederet fungsi C standar — `getenv`,
+        # `fopen`, `strcpy` — dan menawarkan penggantinya yang hanya ada di
+        # Windows. Menurutinya berarti setiap pemakaian bercabang dua, di kode
+        # yang seluruhnya portabel; membiarkannya berarti -Werror menggagalkan
+        # build atas fungsi yang dijamin standar. Definisi ini adalah jalan
+        # keluar resmi Microsoft untuk pilihan ketiga: pakai yang standar.
+        #
+        # Yang **bukan** ditutupinya: teks yang keluar dari fungsi-fungsi itu di
+        # Windows sudah dikonversi ke codepage ANSI mesin, jadi nilai yang memuat
+        # karakter di luar codepage itu kembali rusak. Path karena itu tetap
+        # tidak boleh melewatinya — lihat `Sim/Core/UserPaths.h`, yang memakai
+        # API lebar untuk alasan ini.
+        target_compile_definitions(${target} PRIVATE _CRT_SECURE_NO_WARNINGS)
+    endif()
     set_target_properties(${target} PROPERTIES FOLDER "SimEngine")
 endfunction()
 

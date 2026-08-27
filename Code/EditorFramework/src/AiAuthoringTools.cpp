@@ -35,6 +35,7 @@
 #include <fstream>
 #include <future>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 
@@ -112,11 +113,24 @@ const assets::AssetRecord* FindAsset(EditorApp& app, const json& arguments) {
 /// palsu di setiap baris.
 json DescribeValue(const script::EvalNode& node) {
     std::string value = node.value;
-    if (const std::size_t at = value.find(": 0x"); at != std::string::npos) {
-        value.erase(at);
+    // **Dikenali dari jenisnya, bukan dari bentuk alamatnya.** Sebelumnya yang
+    // dicari adalah literal `": 0x"` — dan itu bentuk `%p` milik glibc. MSVC
+    // mencetak pointer sebagai `0000027B4A639930`, tanpa awalan sama sekali,
+    // sehingga di Windows tidak satu pun alamat terbuang dan agen menerima
+    // kembali selisih palsu yang seluruh fungsi ini ada untuk mencegahnya.
+    // Daftar di bawah tidak bergantung pada platform mana pun: ia berasal dari
+    // `tostring` milik Lua.
+    static constexpr std::string_view kAddressed[] = {"table: ", "function: ", "userdata: ",
+                                                      "thread: "};
+    for (const std::string_view prefix : kAddressed) {
+        if (!value.starts_with(prefix)) {
+            continue;
+        }
+        value.erase(prefix.size() - 2);  // sisakan jenisnya, buang ": <alamat>"
         if (!node.children.empty()) {
             value += " (" + std::to_string(node.children.size()) + " fields)";
         }
+        break;
     }
 
     json described{{"label", node.label}, {"value", std::move(value)}};

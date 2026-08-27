@@ -34,10 +34,6 @@ endif()
 
 add_dependencies(SimEditor SimShadersGrid)
 
-# Resources (font, ikon, tema) disalin ke sebelah executable supaya editor bisa
-# dijalankan langsung dari folder build tanpa perlu tahu letak sumbernya.
-add_custom_command(TARGET SimEditor POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_SOURCE_DIR}/Resources" "$<TARGET_FILE_DIR:SimEditor>/Resources"
-    COMMENT "Menyalin Resources ke folder keluaran"
-    VERBATIM)
+# Resources disalin oleh target SimResources di CMakeLists akar — satu penyalinan
+# untuk seluruh aplikasi. Alasannya ada di sana.
+add_dependencies(SimEditor SimResources)

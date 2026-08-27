@@ -46,11 +46,11 @@ bool RayIntersectsAabb(const Vec3& origin, const Vec3& direction, const Vec3& bo
     const Vec3 inverse = 1.0f / direction;
     const Vec3 t0 = (boundsMin - origin) * inverse;
     const Vec3 t1 = (boundsMax - origin) * inverse;
-    const Vec3 near = glm::min(t0, t1);
-    const Vec3 far = glm::max(t0, t1);
+    const Vec3 slabMin = glm::min(t0, t1);
+    const Vec3 slabMax = glm::max(t0, t1);
 
-    const float tNear = glm::max(glm::max(near.x, near.y), near.z);
-    const float tFar = glm::min(glm::min(far.x, far.y), far.z);
+    const float tNear = glm::max(glm::max(slabMin.x, slabMin.y), slabMin.z);
+    const float tFar = glm::min(glm::min(slabMax.x, slabMax.y), slabMax.z);
 
     if (!(tNear <= tFar) || tFar < 0.0f) {
         return false;
