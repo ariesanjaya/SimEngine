@@ -167,6 +167,16 @@ public:
     uint32_t height = 0;
     /// RGB linear, baris demi baris, tiga float per texel.
     std::vector<float> pixels;
+    /// Pengali radiansi. Cerminan `scene::SkyComponent::hdriIntensity`, dan
+    /// terpisah dari pengali langit atmosferik dengan alasan yang tertulis di
+    /// komponennya: berkas HDR sudah berisi radiansi, jadi rentang bergunanya di
+    /// sekitar satu.
+    ///
+    /// **Rotasi sengaja tidak ada di sini.** Ia memutar arah cuplikan, bukan
+    /// lingkungannya — keputusan 4 di docs/PLAN-IBL.md — jadi ia diterapkan saat
+    /// membaca hasil panggangan, bukan saat memanggangnya. Menaruhnya di sini
+    /// akan menjadikan setiap geseran slider sebuah panggangan baru.
+    float intensity = 1.0f;
 
     bool IsValid() const {
         return width > 0 && height > 0 &&

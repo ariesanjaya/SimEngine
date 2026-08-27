@@ -1707,6 +1707,107 @@ TEST_CASE("B1: tabel transmitansi tidak mengubah jawaban, hanya mempercepatnya")
     }
 }
 
+// --- B3: berkas sebagai lingkungan ------------------------------------------
+
+namespace {
+
+/// Peta equirect kecil yang isinya menandai bujurnya sendiri.
+///
+/// Warna tiap texel diturunkan dari koordinat u-nya, jadi "peta ini terbaca di
+/// bujur yang mana" bisa dijawab dengan membaca satu piksel — dan pergeseran
+/// setengah peta terlihat sebagai warna yang berbeda, bukan sebagai gradien yang
+/// mirip.
+render::EquirectEnvironment LongitudeStripes(uint32_t width, uint32_t height) {
+    render::EquirectEnvironment map;
+    map.width = width;
+    map.height = height;
+    map.pixels.assign(static_cast<std::size_t>(width) * height * 3, 0.0f);
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(width);
+            const std::size_t at = (static_cast<std::size_t>(y) * width + x) * 3;
+            map.pixels[at] = u;
+            map.pixels[at + 1] = 1.0f - u;
+            map.pixels[at + 2] = 0.5f;
+        }
+    }
+    return map;
+}
+
+/// Putaran mendatar yang dipakai shader saat membaca lingkungan panggang.
+/// Cerminan `environmentDirection` di `shadow_common.slang`.
+Vec3 RotateForLookup(const Vec3& direction, float rotation) {
+    const float c = std::cos(rotation);
+    const float s = std::sin(rotation);
+    return Vec3(direction.x * c - direction.z * s, direction.y,
+                direction.x * s + direction.z * c);
+}
+
+}  // namespace
+
+TEST_CASE("B3: pengali berkas menskala radiansinya, bukan bentuknya") {
+    render::EquirectEnvironment map = LongitudeStripes(32, 16);
+    const Vec3 direction = glm::normalize(Vec3(0.7f, 0.2f, -0.6f));
+
+    const Vec3 unit = map.Sample(direction);
+    map.intensity = 3.0f;
+    const Vec3 tripled = map.Sample(direction);
+
+    CHECK(tripled.x == doctest::Approx(unit.x * 3.0f));
+    CHECK(tripled.y == doctest::Approx(unit.y * 3.0f));
+    CHECK(tripled.z == doctest::Approx(unit.z * 3.0f));
+}
+
+TEST_CASE("B3: putaran lingkungan sepakat dengan langit yang tergambar") {
+    // **Uji tanda, dan tandanya yang paling mudah salah.** Pass langit HDRI
+    // menambahkan sudutnya ke bujur (`sky_hdri.frag.slang`), jadi peta yang
+    // terlihat pada arah d adalah peta pada bujur φ(d)+θ. Membaca peta yang
+    // dipanggang tanpa putaran karena itu harus terjadi pada arah Ry(−θ)·d.
+    //
+    // Tanda yang salah tidak menghasilkan galat apa pun — hanya pantulan yang
+    // berputar berlawanan dengan langit yang memantulkannya, dan itu terlihat
+    // sebagai "arahnya aneh" alih-alih sebagai kesalahan.
+    const render::EquirectEnvironment map = LongitudeStripes(64, 32);
+
+    for (const float rotation : {0.3f, 1.5708f, -0.9f}) {
+        for (const Vec3 direction : {glm::normalize(Vec3(1.0f, 0.1f, 0.0f)),
+                                     glm::normalize(Vec3(-0.3f, 0.2f, -0.9f))}) {
+            // Yang tergambar: bujur digeser, lalu dibaca sebagai uv.
+            const Vec2 uv = render::DirectionToEquirectUv(direction);
+            const Vec2 shifted(uv.x + rotation / (2.0f * kPi), uv.y);
+            const Vec3 drawn = map.SampleUv(shifted);
+
+            // Yang dipantulkan: arahnya diputar, petanya tidak.
+            const Vec3 reflected = map.Sample(RotateForLookup(direction, rotation));
+
+            INFO("rotasi ", rotation);
+            CHECK(reflected.x == doctest::Approx(drawn.x).epsilon(0.02));
+            CHECK(reflected.y == doctest::Approx(drawn.y).epsilon(0.02));
+        }
+    }
+}
+
+TEST_CASE("B3: putaran tidak mengubah apa pun yang dipanggang") {
+    // Keputusan 4 dalam bentuk yang bisa diuji: panggangan tidak menerima
+    // putaran sama sekali, jadi menggeser slidernya tidak punya jalan untuk
+    // membuat hasilnya usang. Yang menjaga itu bukan sebuah pemeriksaan
+    // melainkan ketiadaan medannya.
+    render::EquirectEnvironment map = LongitudeStripes(64, 32);
+    render::IblBakeSettings settings;
+    settings.cubeSize = 16;
+    settings.mipCount = 3;
+    settings.irradianceSamples = 256;
+
+    const render::IblBakeCpu baked = render::BakeIblCpu(map, settings);
+    REQUIRE(baked.IsValid());
+
+    // Satu-satunya yang bisa mengubahnya pengali dan berkasnya sendiri.
+    map.intensity = 2.0f;
+    const render::IblBakeCpu scaled = render::BakeIblCpu(map, settings);
+    CHECK(scaled.irradiance.coefficients[0].x ==
+          doctest::Approx(baked.irradiance.coefficients[0].x * 2.0f).epsilon(0.01));
+}
+
 // --- B2: spekular panggang -------------------------------------------------
 
 TEST_CASE("B2: arah cubemap dan muka-uv saling membalik") {

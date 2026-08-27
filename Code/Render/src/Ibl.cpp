@@ -213,7 +213,7 @@ Vec3 EquirectEnvironment::SampleUv(const Vec2& uv) const {
 }
 
 Vec3 EquirectEnvironment::Sample(const Vec3& direction) const {
-    return SampleUv(DirectionToEquirectUv(direction));
+    return SampleUv(DirectionToEquirectUv(direction)) * intensity;
 }
 
 /// Apakah tiga kanal pertama benar-benar merah, hijau, biru.
