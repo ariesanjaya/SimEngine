@@ -18,6 +18,7 @@
 #include "Sim/Core/Assert.h"
 #include "Sim/Core/Log.h"
 #include "Sim/Core/TaskPool.h"
+#include "Sim/Core/UserPaths.h"
 #include "Sim/RHI/Buffer.h"
 #include "Sim/RHI/Device.h"
 #include "Sim/RHI/GpuProfiler.h"
@@ -25,6 +26,7 @@
 #include "PresentSource.h"
 #include "Sim/RHI/TextureRegistry.h"
 #include "IblBaker.h"
+#include "IblCache.h"
 #include "Sim/Render/Ibl.h"
 #include "Sim/Render/FrameGraph.h"
 #include "Sim/Render/DrawRun.h"
@@ -170,10 +172,17 @@ struct ShadowUniforms {
     /// `None` — dan bukan keadaan bawaan: renderer mengisinya dari langit
     /// adegan.
     std::array<Vec4, 9> skyIrradianceSh{};
+    /// Putaran lingkungan panggang: x kosinus, y sinus, zw cadangan.
+    ///
+    /// **Diterapkan saat membaca, bukan saat memanggang** — keputusan 4 di
+    /// docs/PLAN-IBL.md. Memanggangnya ke dalam petanya membuat setiap geseran
+    /// slider sebuah panggangan baru; memutar arah cuplikannya membuat slidernya
+    /// mulus dan panggangannya tidak tersentuh.
+    Vec4 environmentRotation{1.0f, 0.0f, 0.0f, 0.0f};
 };
-// 7 mat4 + 32 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
+// 7 mat4 + 33 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
 // memperbarui shader-nya menjadi galat kompilasi, bukan bayangan yang bergeser.
-static_assert(sizeof(ShadowUniforms) == 7 * 64 + 32 * 16,
+static_assert(sizeof(ShadowUniforms) == 7 * 64 + 33 * 16,
               "ShadowUniforms harus cocok dengan blok ShadowParams di shadow_common.slang");
 
 /// Cermin dari `GpuLight` di Shaders/cluster_common.glsl. std430.
@@ -5509,6 +5518,14 @@ private:
     /// salah satunya berubah.
     struct SkyBakeKey {
         bool atmosphere = false;
+        /// Lingkungan datang dari berkas, bukan dari langit prosedural (B3).
+        bool fromFile = false;
+        /// Jalur berkasnya, dan pengalinya. **Rotasi sengaja tidak di sini** —
+        /// keputusan 4 di docs/PLAN-IBL.md: ia memutar arah cuplikan, bukan
+        /// lingkungannya, jadi menggesernya tidak boleh memicu panggangan.
+        std::string filePath;
+        float fileIntensity = 1.0f;
+
         float intensity = 0.0f;
         float cameraHeightKm = 0.0f;
         Vec3 sunDirection{0.0f, 1.0f, 0.0f};
@@ -5519,10 +5536,37 @@ private:
         /// frame, selamanya. Ambangnya kira-kira setengah derajat — di bawah itu
         /// iradiansi SH tidak bergerak sejauh satu tingkat pun pada 8 bit.
         bool Matches(const SkyBakeKey& other) const {
+            if (fromFile != other.fromFile) {
+                return false;
+            }
+            // **Lingkungan dari berkas tidak peduli matahari bergeser sama
+            // sekali.** Sebuah foto tidak berubah saat Time-of-Day berjalan, dan
+            // memanggangnya ulang karena itu hanya menghasilkan byte yang sama —
+            // itulah yang membuat level pra-GI tidak memanggang apa pun sesudah
+            // panggangan pertamanya.
+            if (fromFile) {
+                return filePath == other.filePath && fileIntensity == other.fileIntensity;
+            }
             return atmosphere == other.atmosphere && intensity == other.intensity &&
                    cameraHeightKm == other.cameraHeightKm &&
                    glm::dot(sunDirection, other.sunDirection) > 0.99996f;
         }
+
+        /// Ambang kasar untuk panggangan prefilter. Untuk berkas ia sama persis
+        /// dengan ambang halusnya: tidak ada yang bergeser perlahan di sana.
+        bool MatchesCoarse(const SkyBakeKey& other) const {
+            if (fromFile != other.fromFile) {
+                return false;
+            }
+            if (fromFile) {
+                return filePath == other.filePath && fileIntensity == other.fileIntensity;
+            }
+            return atmosphere == other.atmosphere && intensity == other.intensity &&
+                   cameraHeightKm == other.cameraHeightKm &&
+                   glm::dot(sunDirection, other.sunDirection) > 0.996f;
+        }
+
+        bool HasEnvironment() const { return fromFile || atmosphere; }
     };
 
     /// Kotak hasil yang dibagi worker dan main thread.
@@ -5542,6 +5586,10 @@ private:
     struct SkySpecularResult {
         std::atomic<bool> ready{false};
         IblBakeCpu baked;
+        /// True bila tugasnya sekaligus memproyeksikan SH — jalur berkas, yang
+        /// tidak punya alasan memisahkan keduanya karena tidak ada matahari yang
+        /// bergeser di sana.
+        bool carriesIrradiance = false;
     };
 
     /// Memanggang ulang iradiansi langit bila langitnya berubah.
@@ -5552,7 +5600,15 @@ private:
     /// yang murah untuk diulang setiap matahari bergeser.
     void UpdateSkyIrradiance(const ViewportDesc& desc) {
         SkyBakeKey key;
-        key.atmosphere = desc.skyEnabled && desc.skySource != SkySource::HdrMap;
+        // **Berkas menang bila level memintanya**, dan itu bukan urutan yang
+        // sembarang: `environment` menjawab "adegan ini disinari apa", sedangkan
+        // `skySource` menjawab "langit yang mana yang tergambar". Sebuah level
+        // boleh menggambar langit atmosferik sambil disinari sebuah foto.
+        key.fromFile = desc.environment == EnvironmentSource::File && !desc.hdriPath.empty();
+        key.filePath = key.fromFile ? std::string(desc.hdriPath) : std::string{};
+        key.fileIntensity = desc.hdriIntensity;
+
+        key.atmosphere = !key.fromFile && desc.skyEnabled && desc.skySource != SkySource::HdrMap;
         key.intensity = key.atmosphere ? desc.skyIntensity : 0.0f;
         key.cameraHeightKm = desc.cameraHeightKm;
         key.sunDirection = glm::length(sunDirection_) > 1e-6f ? glm::normalize(sunDirection_)
@@ -5565,9 +5621,9 @@ private:
             skyBake_.reset();
         }
 
-        if (!key.atmosphere) {
-            // Langit mati atau HDRI. Yang kedua adalah B3; sampai itu ada, tidak
-            // ada lingkungan yang bisa dipanggang, dan nol adalah jawaban yang
+        if (!key.HasEnvironment()) {
+            // Tidak ada lingkungan yang bisa dipanggang: langit mati, atau
+            // `environment: Sky` di atas langit HDRI. Nol adalah jawaban yang
             // jujur — bukan sebuah konstanta yang berpura-pura menjadi langit.
             skyIrradiance_ = Sh9{};
             bakedSkyKey_ = key;
@@ -5580,6 +5636,11 @@ private:
             // berikutnya, sesudah device diam dan sebelum satu perintah pun
             // direkam.
             releaseSkyIbl_ = true;
+            return;
+        }
+
+        if (key.fromFile) {
+            UpdateFileEnvironment(key);
             return;
         }
 
@@ -5621,6 +5682,97 @@ private:
         UpdateSkySpecular(key, sky);
     }
 
+    /// Folder artefak masak lingkungan.
+    ///
+    /// Di bawah folder konfigurasi pengguna, sejajar dengan `MeshSdfCache` —
+    /// bukan di sebelah berkas sumbernya. Alasannya di `IblCache.h`: membaca
+    /// sebuah berkas tidak boleh menulis apa pun ke folder aset milik orang
+    /// lain.
+    static std::filesystem::path EnvironmentCacheDirectory() {
+        return ConfigDirectory() / "EnvironmentCache";
+    }
+
+    /// Memanggang lingkungan dari sebuah berkas HDR/EXR (B3).
+    ///
+    /// **Satu tugas untuk SH dan prefilter sekaligus, bukan dua.** Yang memisah
+    /// keduanya di jalur atmosferik adalah matahari yang bergeser — SH murah
+    /// cukup untuk mengikutinya, prefilter tidak. Sebuah foto tidak punya
+    /// matahari yang bergeser: ia dipanggang sekali per berkas, dan sesudah itu
+    /// tidak ada yang bisa membuatnya usang selain berkas lain.
+    ///
+    /// **Rotasi tidak menyentuh fungsi ini sama sekali.** Ia memutar arah
+    /// cuplikan saat membaca hasilnya, bukan lingkungannya saat memanggangnya —
+    /// keputusan 4 di docs/PLAN-IBL.md, dan itulah yang membuat slider rotasi
+    /// mulus alih-alih menghentikan editor tiap kali digeser.
+    void UpdateFileEnvironment(const SkyBakeKey& key) {
+        if (skySpecularBake_ != nullptr || bakedSpecularKey_.Matches(key)) {
+            return;
+        }
+        bakedSkyKey_ = key;
+        bakedSpecularKey_ = key;
+
+        IblBakeSettings settings;
+        settings.irradianceSamples = kSkyIrradianceSamples;
+
+        auto result = std::make_shared<SkySpecularResult>();
+        skySpecularBake_ = result;
+        // **Pemuatan berkasnya ikut di dalam tugas.** Mendekode HDR 4096x2048
+        // memakan sekitar seratus megabyte dan ratusan milidetik; melakukannya
+        // di main thread berarti editor yang membeku tepat saat orang mengetik
+        // jalur berkas — yaitu cacat yang keputusan 6 cegah.
+        auto bake = [path = key.filePath, intensity = key.fileIntensity, settings,
+                     cacheDir = EnvironmentCacheDirectory(), result]() mutable {
+            const std::filesystem::path source(path);
+            const uint64_t cacheKey = IblCacheKey(source, settings, intensity);
+            const std::filesystem::path cached =
+                cacheKey != 0 ? IblCachePath(cacheDir, cacheKey) : std::filesystem::path{};
+
+            const auto started = std::chrono::steady_clock::now();
+            const auto elapsedMs = [started]() {
+                return std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now() - started)
+                    .count();
+            };
+
+            std::string cacheError;
+            if (!cached.empty() && ReadIblCache(cached, result->baked, cacheError)) {
+                // **Inilah kriteria B3.** Membuka level pra-GI berikutnya tidak
+                // mendekode satu byte pun HDR dan tidak menyaring satu texel pun
+                // — 525 KB dibaca dari disk, dan selesai.
+                result->carriesIrradiance = true;
+                SIM_INFO("Render", "environment loaded from cache in {} ms ({})", elapsedMs(),
+                         cached.filename().string());
+                result->ready.store(true, std::memory_order_release);
+                return;
+            }
+
+            EquirectEnvironment map = LoadHdrEquirect(path);
+            if (map.IsValid()) {
+                map.intensity = intensity;
+                result->baked = BakeIblCpu(map, settings);
+                result->carriesIrradiance = true;
+                if (!cached.empty() && !WriteIblCache(cached, result->baked, cacheError)) {
+                    // Disebutkan, bukan didiamkan: yang gagal menulis cache
+                    // tetap menggambar dengan benar, hanya memanggang ulang
+                    // setiap kali — dan itu terbaca sebagai "membuka level ini
+                    // selalu lambat" tanpa satu pun petunjuk kenapa.
+                    SIM_WARN("Render", "cannot cache the baked environment: {}", cacheError);
+                }
+                SIM_INFO("Render", "environment baked from {} in {} ms", path, elapsedMs());
+            }
+            // Berkas yang gagal dimuat sudah menjelaskan dirinya di log —
+            // `LoadHdrEquirect` menyebut backend yang kurang, bukan "format
+            // tidak dikenal". Yang tersisa di sini panggangan tak sah, dan
+            // pemungutnya yang mengosongkan lingkungannya.
+            result->ready.store(true, std::memory_order_release);
+        };
+        if (tasks_ != nullptr) {
+            tasks_->Submit(std::move(bake));
+        } else {
+            bake();
+        }
+    }
+
     /// Memanggang ulang peta prefilter, **jauh lebih malas daripada SH**.
     ///
     /// Selisih biayanya yang memaksa: SH adalah 1024 cuplikan, 64 ms; peta
@@ -5633,11 +5785,7 @@ private:
     /// pantulan yang mataharinya berada beberapa piksel dari tempatnya di peta
     /// 64² — dan peta itu sendiri sudah menyaring puluhan arah per texel.
     void UpdateSkySpecular(const SkyBakeKey& key, AtmosphereSky sky) {
-        if (skySpecularBake_ != nullptr ||
-            (bakedSpecularKey_.atmosphere == key.atmosphere &&
-             bakedSpecularKey_.intensity == key.intensity &&
-             bakedSpecularKey_.cameraHeightKm == key.cameraHeightKm &&
-             glm::dot(bakedSpecularKey_.sunDirection, key.sunDirection) > 0.996f)) {
+        if (skySpecularBake_ != nullptr || bakedSpecularKey_.MatchesCoarse(key)) {
             return;
         }
         bakedSpecularKey_ = key;
@@ -5680,9 +5828,21 @@ private:
             return;
         }
         const IblBakeCpu baked = std::move(skySpecularBake_->baked);
+        const bool carriesIrradiance = skySpecularBake_->carriesIrradiance;
         skySpecularBake_.reset();
         if (!baked.IsValid()) {
+            // Panggangan yang gagal — berkas yang tidak bisa dibaca — melepas
+            // lingkungan yang lama alih-alih membiarkannya. Yang tersisa di
+            // layar lalu adegan tanpa cahaya tak-langsung, yaitu keadaan yang
+            // jujur untuk sebuah berkas yang tidak ada.
+            if (carriesIrradiance || skyIbl_.IsValid()) {
+                skyIrradiance_ = Sh9{};
+                releaseSkyIbl_ = true;
+            }
             return;
+        }
+        if (carriesIrradiance) {
+            skyIrradiance_ = baked.irradiance;
         }
 
         // LUT DFG dipanggang sekali seumur proses: ia tidak bergantung pada
@@ -5830,6 +5990,12 @@ private:
         for (std::size_t i = 0; i < uniforms.skyIrradianceSh.size(); ++i) {
             uniforms.skyIrradianceSh[i] = Vec4(skyIrradiance_.coefficients[i], 0.0f);
         }
+        // Hanya lingkungan dari berkas yang punya putaran; langit prosedural
+        // dipanggang pada orientasi dunia yang sama dengan yang tergambar.
+        const float rotation = desc.environment == EnvironmentSource::File ? desc.hdriRotation
+                                                                          : 0.0f;
+        uniforms.environmentRotation =
+            Vec4(std::cos(rotation), std::sin(rotation), 0.0f, 0.0f);
         slot.shadowUniform.Write(&uniforms, sizeof(uniforms));
     }
 

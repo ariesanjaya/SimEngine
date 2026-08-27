@@ -90,6 +90,8 @@ struct ShadowParams {
     // pita di atas orde dua sampai di bawah satu persen; alasan lengkapnya di
     // `Sh9` pada `Sim/Render/Ibl.h`.
     float4 skyIrradianceSh[9];
+    // Putaran lingkungan panggang: x kosinus, y sinus, zw cadangan (B3).
+    float4 environmentRotation;
 };
 
 [[vk::binding(0, 0)]] ConstantBuffer<ShadowParams> shadowParams;
@@ -103,8 +105,27 @@ struct ShadowParams {
 /// mendapat radiansi keluar permukaan Lambert. Kesalahan pi di sini tidak pernah
 /// terlihat salah; ia hanya membuat seluruh adegan terlalu terang sebesar faktor
 /// tetap, yang paling mudah dikira masalah eksposur.
+/// Arah dunia → arah baca lingkungan panggang.
+///
+/// **Putaran diterapkan di sini, bukan dipanggang ke dalam petanya.** Keputusan
+/// 4 di docs/PLAN-IBL.md: memanggangnya membuat setiap geseran slider sebuah
+/// panggangan baru, memutar arah cuplikannya membuat slidernya mulus.
+///
+/// Arahnya diputar dengan **minus** sudutnya, dan itu bukan pilihan: pass langit
+/// HDRI menambahkan sudutnya ke bujur (`sky_hdri.frag.slang`), sehingga peta
+/// yang terlihat pada arah d adalah peta pada bujur φ(d)+θ. Membaca peta yang
+/// dipanggang tanpa putaran pada bujur itu berarti membacanya pada arah
+/// Ry(−θ)·d. Tanda yang salah tidak menghasilkan galat apa pun — hanya pantulan
+/// yang berputar berlawanan dengan langit yang memantulkannya.
+float3 environmentDirection(float3 direction) {
+    const float c = shadowParams.environmentRotation.x;
+    const float s = shadowParams.environmentRotation.y;
+    return float3(direction.x * c - direction.z * s, direction.y,
+                  direction.x * s + direction.z * c);
+}
+
 float3 skyIrradiance(float3 normal) {
-    const float3 n = normalize(normal);
+    const float3 n = environmentDirection(normalize(normal));
     // Konvolusi lobe kosinus: Â₀ = π, Â₁ = 2π/3, Â₂ = π/4.
     const float a0 = 3.141593;
     const float a1 = 2.094395;

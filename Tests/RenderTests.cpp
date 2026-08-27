@@ -38,6 +38,7 @@
 
 #include <algorithm>
 #include <array>
+#include <unistd.h>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -1705,6 +1706,252 @@ TEST_CASE("B1: tabel transmitansi tidak mengubah jawaban, hanya mempercepatnya")
         CHECK(b.y == doctest::Approx(a.y).epsilon(0.03));
         CHECK(b.z == doctest::Approx(a.z).epsilon(0.03));
     }
+}
+
+// --- B3: berkas sebagai lingkungan ------------------------------------------
+
+namespace {
+
+/// Peta equirect kecil yang isinya menandai bujurnya sendiri.
+///
+/// Warna tiap texel diturunkan dari koordinat u-nya, jadi "peta ini terbaca di
+/// bujur yang mana" bisa dijawab dengan membaca satu piksel — dan pergeseran
+/// setengah peta terlihat sebagai warna yang berbeda, bukan sebagai gradien yang
+/// mirip.
+render::EquirectEnvironment LongitudeStripes(uint32_t width, uint32_t height) {
+    render::EquirectEnvironment map;
+    map.width = width;
+    map.height = height;
+    map.pixels.assign(static_cast<std::size_t>(width) * height * 3, 0.0f);
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(width);
+            const std::size_t at = (static_cast<std::size_t>(y) * width + x) * 3;
+            map.pixels[at] = u;
+            map.pixels[at + 1] = 1.0f - u;
+            map.pixels[at + 2] = 0.5f;
+        }
+    }
+    return map;
+}
+
+/// Putaran mendatar yang dipakai shader saat membaca lingkungan panggang.
+/// Cerminan `environmentDirection` di `shadow_common.slang`.
+Vec3 RotateForLookup(const Vec3& direction, float rotation) {
+    const float c = std::cos(rotation);
+    const float s = std::sin(rotation);
+    return Vec3(direction.x * c - direction.z * s, direction.y,
+                direction.x * s + direction.z * c);
+}
+
+}  // namespace
+
+TEST_CASE("B3: pengali berkas menskala radiansinya, bukan bentuknya") {
+    render::EquirectEnvironment map = LongitudeStripes(32, 16);
+    const Vec3 direction = glm::normalize(Vec3(0.7f, 0.2f, -0.6f));
+
+    const Vec3 unit = map.Sample(direction);
+    map.intensity = 3.0f;
+    const Vec3 tripled = map.Sample(direction);
+
+    CHECK(tripled.x == doctest::Approx(unit.x * 3.0f));
+    CHECK(tripled.y == doctest::Approx(unit.y * 3.0f));
+    CHECK(tripled.z == doctest::Approx(unit.z * 3.0f));
+}
+
+TEST_CASE("B3: putaran lingkungan sepakat dengan langit yang tergambar") {
+    // **Uji tanda, dan tandanya yang paling mudah salah.** Pass langit HDRI
+    // menambahkan sudutnya ke bujur (`sky_hdri.frag.slang`), jadi peta yang
+    // terlihat pada arah d adalah peta pada bujur φ(d)+θ. Membaca peta yang
+    // dipanggang tanpa putaran karena itu harus terjadi pada arah Ry(−θ)·d.
+    //
+    // Tanda yang salah tidak menghasilkan galat apa pun — hanya pantulan yang
+    // berputar berlawanan dengan langit yang memantulkannya, dan itu terlihat
+    // sebagai "arahnya aneh" alih-alih sebagai kesalahan.
+    const render::EquirectEnvironment map = LongitudeStripes(64, 32);
+
+    for (const float rotation : {0.3f, 1.5708f, -0.9f}) {
+        for (const Vec3 direction : {glm::normalize(Vec3(1.0f, 0.1f, 0.0f)),
+                                     glm::normalize(Vec3(-0.3f, 0.2f, -0.9f))}) {
+            // Yang tergambar: bujur digeser, lalu dibaca sebagai uv.
+            const Vec2 uv = render::DirectionToEquirectUv(direction);
+            const Vec2 shifted(uv.x + rotation / (2.0f * kPi), uv.y);
+            const Vec3 drawn = map.SampleUv(shifted);
+
+            // Yang dipantulkan: arahnya diputar, petanya tidak.
+            const Vec3 reflected = map.Sample(RotateForLookup(direction, rotation));
+
+            INFO("rotasi ", rotation);
+            CHECK(reflected.x == doctest::Approx(drawn.x).epsilon(0.02));
+            CHECK(reflected.y == doctest::Approx(drawn.y).epsilon(0.02));
+        }
+    }
+}
+
+TEST_CASE("B3: putaran tidak mengubah apa pun yang dipanggang") {
+    // Keputusan 4 dalam bentuk yang bisa diuji: panggangan tidak menerima
+    // putaran sama sekali, jadi menggeser slidernya tidak punya jalan untuk
+    // membuat hasilnya usang. Yang menjaga itu bukan sebuah pemeriksaan
+    // melainkan ketiadaan medannya.
+    render::EquirectEnvironment map = LongitudeStripes(64, 32);
+    render::IblBakeSettings settings;
+    settings.cubeSize = 16;
+    settings.mipCount = 3;
+    settings.irradianceSamples = 256;
+
+    const render::IblBakeCpu baked = render::BakeIblCpu(map, settings);
+    REQUIRE(baked.IsValid());
+
+    // Satu-satunya yang bisa mengubahnya pengali dan berkasnya sendiri.
+    map.intensity = 2.0f;
+    const render::IblBakeCpu scaled = render::BakeIblCpu(map, settings);
+    CHECK(scaled.irradiance.coefficients[0].x ==
+          doctest::Approx(baked.irradiance.coefficients[0].x * 2.0f).epsilon(0.01));
+}
+
+TEST_CASE("B3: artefak masak lingkungan bolak-balik tanpa berubah") {
+    // **Kriteria terima B3:** membuka level pra-GI berikutnya tidak memanggang
+    // apa pun. Yang membuatnya sah adalah bahwa yang dibaca kembali sama persis
+    // dengan yang ditulis — sebuah artefak yang isinya "mirip" adalah adegan
+    // yang disinari berbeda antara jalan pertama dan jalan kedua, tanpa satu pun
+    // galat yang menyebutkannya.
+    const render::EquirectEnvironment map = LongitudeStripes(64, 32);
+    render::IblBakeSettings settings;
+    settings.cubeSize = 16;
+    settings.mipCount = 3;
+    settings.irradianceSamples = 256;
+
+    const render::IblBakeCpu baked = render::BakeIblCpu(map, settings);
+    REQUIRE(baked.IsValid());
+
+    const std::filesystem::path file =
+        std::filesystem::temp_directory_path() /
+        ("sim-ibl-" + std::to_string(::getpid()) + ".simibl");
+
+    std::string error;
+    REQUIRE_MESSAGE(render::WriteIblCache(file, baked, error), error);
+
+    render::IblBakeCpu loaded;
+    REQUIRE_MESSAGE(render::ReadIblCache(file, loaded, error), error);
+
+    CHECK(loaded.cubeSize == baked.cubeSize);
+    CHECK(loaded.mipCount == baked.mipCount);
+    REQUIRE(loaded.cubeTexels.size() == baked.cubeTexels.size());
+    // Byte demi byte: ini serialisasi, bukan pendekatan.
+    CHECK(std::equal(loaded.cubeTexels.begin(), loaded.cubeTexels.end(),
+                     baked.cubeTexels.begin()));
+    for (std::size_t i = 0; i < loaded.irradiance.coefficients.size(); ++i) {
+        INFO("koefisien ", i);
+        CHECK(loaded.irradiance.coefficients[i].x ==
+              doctest::Approx(baked.irradiance.coefficients[i].x));
+    }
+
+    std::error_code cleanup;
+    std::filesystem::remove(file, cleanup);
+}
+
+TEST_CASE("B3: artefak ditulis atomik — tidak ada berkas setengah jadi yang terlihat") {
+    // Konvensi yang sama dengan `WriteMeshSdf`, dan dua alasannya nyata:
+    // sebuah proses yang mati di tengah tulis meninggalkan berkas terpotong yang
+    // jalan berikutnya temukan sebagai cache yang sah, dan dua renderer yang
+    // memanggang lingkungan yang sama menulis ke nama berkas yang sama —
+    // kuncinya isi berkas sumbernya, bukan siapa yang memanggangnya.
+    const render::EquirectEnvironment map = LongitudeStripes(32, 16);
+    render::IblBakeSettings settings;
+    settings.cubeSize = 8;
+    settings.mipCount = 2;
+    settings.irradianceSamples = 64;
+    const render::IblBakeCpu baked = render::BakeIblCpu(map, settings);
+
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / ("sim-ibl-atomic-" + std::to_string(::getpid()));
+    std::error_code code;
+    std::filesystem::remove_all(dir, code);
+
+    const std::filesystem::path file = dir / "env.simibl";
+    std::string error;
+    REQUIRE_MESSAGE(render::WriteIblCache(file, baked, error), error);
+
+    // Yang tersisa hanya berkas jadinya: berkas sementaranya sudah dipindahkan,
+    // bukan ditinggalkan di sebelahnya.
+    CHECK(std::filesystem::exists(file));
+    CHECK_FALSE(std::filesystem::exists(std::filesystem::path(file.string() + ".tmp")));
+
+    std::size_t entries = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        (void)entry;
+        ++entries;
+    }
+    CHECK(entries == 1);
+
+    std::filesystem::remove_all(dir, code);
+}
+
+TEST_CASE("B3: artefak yang rusak ditolak, bukan dipercaya") {
+    // **Gagal membaca bukan galat, tapi membaca yang salah adalah.** Artefak
+    // masak boleh hilang, usang, dan ditulis versi lain — yang benar lalu
+    // memanggang ulang. Yang tidak boleh: mempercayai angka dari berkas yang
+    // isinya bukan milik kita, karena `texelCount` di header-nya menentukan
+    // berapa memori yang dialokasikan sebelum satu byte pun isinya dibaca.
+    const std::filesystem::path file =
+        std::filesystem::temp_directory_path() /
+        ("sim-ibl-bad-" + std::to_string(::getpid()) + ".simibl");
+
+    render::IblBakeCpu out;
+    std::string error;
+
+    // Tidak ada berkasnya.
+    CHECK_FALSE(render::ReadIblCache(file, out, error));
+    CHECK_FALSE(error.empty());
+
+    // Ada, tapi bukan milik kita.
+    std::ofstream(file, std::ios::binary) << "ini bukan artefak lingkungan";
+    CHECK_FALSE(render::ReadIblCache(file, out, error));
+
+    // Header kita, tapi isinya lebih pendek daripada yang dijanjikannya.
+    {
+        const render::EquirectEnvironment map = LongitudeStripes(32, 16);
+        render::IblBakeSettings settings;
+        settings.cubeSize = 8;
+        settings.mipCount = 2;
+        settings.irradianceSamples = 64;
+        const render::IblBakeCpu baked = render::BakeIblCpu(map, settings);
+        REQUIRE(render::WriteIblCache(file, baked, error));
+    }
+    const auto full = std::filesystem::file_size(file);
+    std::filesystem::resize_file(file, full / 2);
+    CHECK_FALSE(render::ReadIblCache(file, out, error));
+
+    // Header yang berbohong tentang bentuknya: `texelCount` yang tidak cocok
+    // dengan `cubeSize`/`mipCount`. Lapisan RHI memang menolak span yang terlalu
+    // pendek, tapi ditolak di sini berarti pesannya menyebut artefak yang rusak
+    // alih-alih "cubemap upload needs N bytes but got M" dari lapisan yang tidak
+    // tahu berkas mana penyebabnya.
+    {
+        const render::EquirectEnvironment map = LongitudeStripes(32, 16);
+        render::IblBakeSettings settings;
+        settings.cubeSize = 8;
+        settings.mipCount = 2;
+        settings.irradianceSamples = 64;
+        render::IblBakeCpu baked = render::BakeIblCpu(map, settings);
+        REQUIRE(render::WriteIblCache(file, baked, error));
+
+        // Sunting `mipCount` di header menjadi bentuk yang menuntut texel lebih
+        // banyak daripada yang benar-benar ada di berkasnya.
+        std::fstream patch(file, std::ios::binary | std::ios::in | std::ios::out);
+        REQUIRE(patch);
+        patch.seekp(12);  // magic(4) + version(4) + cubeSize(4)
+        const uint32_t lie = 4;
+        patch.write(reinterpret_cast<const char*>(&lie), sizeof(lie));
+        patch.close();
+
+        CHECK_FALSE(render::ReadIblCache(file, out, error));
+        INFO(error);
+        CHECK(error.find("cube shape") != std::string::npos);
+    }
+
+    std::error_code cleanup;
+    std::filesystem::remove(file, cleanup);
 }
 
 // --- B2: spekular panggang -------------------------------------------------

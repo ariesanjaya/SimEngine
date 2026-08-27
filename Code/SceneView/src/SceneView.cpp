@@ -134,6 +134,13 @@ void ApplyWorldSettings(const scene::World& world, render::ViewportDesc& desc) {
     // ini dengan benar sekali.
     desc.gi.enabled = settings.indirect == scene::IndirectLighting::RealTime;
 
+    // **`environment` diteruskan sejak B3.** Sebelum itu ia tersimpan di berkas
+    // tapi tidak berpengaruh, karena yang memakainya panggangannya dan
+    // panggangannya baru bisa membaca berkas di B3.
+    desc.environment = settings.environment == scene::EnvironmentSource::File
+                           ? render::EnvironmentSource::File
+                           : render::EnvironmentSource::Sky;
+
     desc.post.exposureMode = settings.exposureMode == scene::ExposureModeKind::Manual
                                  ? render::ExposureMode::Manual
                                  : render::ExposureMode::Automatic;

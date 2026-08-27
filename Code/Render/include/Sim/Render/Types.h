@@ -193,6 +193,14 @@ struct PostProcessSettings {
     BloomSettings bloom;
 };
 
+/// Apa yang menyinari tingkat pencahayaan panggang. Cerminan
+/// `scene::EnvironmentSource`, disalin dengan alasan yang sama seperti
+/// `SkySource`: `Sim::Scene` tidak boleh melihat `Sim::Render`.
+enum class EnvironmentSource : uint8_t {
+    Sky,
+    File,
+};
+
 /// Dari mana langit datang.
 enum class SkySource : uint8_t {
     /// Atmosfer Bruneton-Hillaire: dihitung dari fisika, berubah terhadap
@@ -398,6 +406,17 @@ struct ViewportDesc {
     /// Putaran mendatar peta HDR, radian. Yang dipakai menyelaraskan matahari di
     /// dalam petanya dengan matahari yang menyinari adegan.
     float hdriRotation = 0.0f;
+    /// Apa yang **menyinari** tingkat panggang: langit yang tergambar, atau
+    /// berkas HDR yang disebut `hdriPath`.
+    ///
+    /// **Terpisah dari `skySource`, dan keduanya memang bisa berbeda.** Yang
+    /// satu menjawab "langit yang mana yang tergambar", yang lain "adegan ini
+    /// disinari apa" — sebuah level boleh menggambar langit atmosferik sambil
+    /// disinari sebuah foto, dan sebaliknya. Cerminan
+    /// `scene::WorldSettings::environment`; pemetaannya sekali, di
+    /// `Sim::SceneView`.
+    EnvironmentSource environment = EnvironmentSource::Sky;
+
     /// Pengali radiansi peta HDR.
     ///
     /// **Terpisah dari `skyIntensity`, dan itu bukan duplikasi.** Atmosfer

@@ -7,6 +7,7 @@ sim_add_library(Render
         src/Frustum.cpp
         src/Ibl.cpp
         src/IblBaker.cpp
+        src/IblCache.cpp
         src/LightCluster.cpp
         src/Atmosphere.cpp
         src/Bloom.cpp

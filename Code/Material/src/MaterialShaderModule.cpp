@@ -581,13 +581,13 @@ std::string AssembleForwardMaterialModule(const std::string& generatedSlang,
     out << "    float2 envDfg = float2(0.0);\n";
     out << "    if (envMips >= 0.5) {\n";
     out << "        prefilteredBase = prefilteredEnv.SampleLevel(\n";
-    out << "            prefilterDirection(frame),\n";
+    out << "            environmentDirection(prefilterDirection(frame)),\n";
     out << "            prefilterMipForRoughness(m.surface.specularRoughness, envMips)).rgb;\n";
     // Bingkai coat hanya ada bila materialnya memang punya lapisan itu; tanpa
     // coat, `forwardFrames` cuma "frame" dan overload lain yang dipanggil.
     if (options.lobes.coatFrame) {
         out << "        prefilteredCoat = prefilteredEnv.SampleLevel(\n";
-        out << "            prefilterDirection(coatFrame),\n";
+        out << "            environmentDirection(prefilterDirection(coatFrame)),\n";
         out << "            prefilterMipForRoughness(m.surface.coatRoughness, envMips)).rgb;\n";
     }
     out << "        const float envNv = saturate(dot(frame.normal, frame.view));\n";
