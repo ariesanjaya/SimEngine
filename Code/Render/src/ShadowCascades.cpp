@@ -20,23 +20,23 @@ Vec3 StableUp(const Vec3& direction) {
 void ComputeCascadeSplits(const CascadeSettings& settings, float nearZ,
                           std::array<float, kMaxCascades>& out) {
     const int count = std::clamp(settings.count, 1, kMaxCascades);
-    const float near = std::max(nearZ, 0.001f);
-    const float far = std::max(settings.maxDistance, near * 1.001f);
+    const float nearPlane = std::max(nearZ, 0.001f);
+    const float farPlane = std::max(settings.maxDistance, nearPlane * 1.001f);
     const float lambda = std::clamp(settings.splitLambda, 0.0f, 1.0f);
-    const float ratio = far / near;
+    const float ratio = farPlane / nearPlane;
 
     out.fill(0.0f);
     for (int i = 0; i < count; ++i) {
         const float t = static_cast<float>(i + 1) / static_cast<float>(count);
-        const float logarithmic = near * std::pow(ratio, t);
-        const float uniform = near + (far - near) * t;
+        const float logarithmic = nearPlane * std::pow(ratio, t);
+        const float uniform = nearPlane + (farPlane - nearPlane) * t;
         out[static_cast<size_t>(i)] = lambda * logarithmic + (1.0f - lambda) * uniform;
     }
     // Yang terakhir dipaksa tepat, bukan dibiarkan hasil interpolasi. Selisih
     // sepersekian meter di sini berarti pita sempit di ujung jangkauan yang
     // tidak ditutupi cascade mana pun — dan yang terlihat di sana adalah
     // bayangan yang tiba-tiba hilang, bukan bayangan yang memudar.
-    out[static_cast<size_t>(count - 1)] = far;
+    out[static_cast<size_t>(count - 1)] = farPlane;
 }
 
 BoundingSphere FrustumSliceSphere(const Camera& camera, float aspect, float nearDistance,

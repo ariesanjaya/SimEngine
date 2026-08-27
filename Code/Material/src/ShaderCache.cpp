@@ -58,6 +58,21 @@ struct Hash128 {
     }
 };
 
+/// Mengutip sebuah path untuk shell yang akan menjalankannya.
+///
+/// **Shell-nya berbeda, dan begitu juga aturan kutipnya.** `std::system`
+/// menjalankan `/bin/sh` di POSIX dan `cmd /c` di Windows, dan cmd tidak
+/// mengenal kutip tunggal sama sekali — `'C:\...\slangc.exe'` dibacanya sebagai
+/// nama berkas yang memang mengandung apostrof, lalu menjawab "The filename,
+/// directory name, or volume label syntax is incorrect". Yang terlihat dari
+/// dalam editor hanyalah slangc yang seolah tidak ada.
+#if defined(_WIN32)
+std::string Quote(const std::filesystem::path& path) {
+    // Windows melarang '"' di dalam nama berkas, jadi tidak ada yang perlu
+    // di-escape di dalamnya — berbeda dengan POSIX di bawah.
+    return "\"" + path.string() + "\"";
+}
+#else
 std::string Quote(const std::filesystem::path& path) {
     std::string out = "'";
     for (const char c : path.string()) {
@@ -72,6 +87,23 @@ std::string Quote(const std::filesystem::path& path) {
     }
     out += '\'';
     return out;
+}
+#endif
+
+/// Menjalankan perintah shell, mengembalikan kode keluarnya.
+///
+/// **Bungkus kutip tambahan di Windows bukan hiasan.** `cmd /c` membuang kutip
+/// pertama dan kutip terakhir dari seluruh baris begitu baris itu diawali kutip
+/// dan memuat karakter khusus seperti `>` — jadi `"exe" -v > "log"` sampai ke
+/// cmd sebagai `exe" -v > log`, yang bukan perintah apa pun. Membungkusnya
+/// sekali lagi membuat yang dibuang justru bungkus itu, dan yang tersisa persis
+/// perintah yang dimaksud.
+int RunShell(const std::string& command) {
+#if defined(_WIN32)
+    return std::system(("\"" + command + "\"").c_str());
+#else
+    return std::system(command.c_str());
+#endif
 }
 
 std::string ReadTextFile(const std::filesystem::path& path) {
@@ -91,8 +123,16 @@ std::string Trim(std::string text) {
 
 #if defined(_WIN32)
 constexpr const char* kExeSuffix = ".exe";
+// **Pemisah PATH, dan di Windows ia bukan ':'.** Memakai ':' di sana tidak
+// sekadar gagal memecah — ia memecah di tempat yang salah, karena setiap path
+// Windows memuat ':' pada huruf drive-nya. `C:\VulkanSDK\1.4.357.0\Bin` menjadi
+// potongan `C` dan `\VulkanSDK\1.4.357.0\Bin`, dan tidak satu pun dari keduanya
+// menunjuk ke mana-mana. Akibatnya slangc tak pernah ditemukan walau ia ada di
+// PATH, dan yang terbaca hanyalah mesh yang digambar dengan shader cadangan.
+constexpr char kPathSeparator = ';';
 #else
 constexpr const char* kExeSuffix = "";
+constexpr char kPathSeparator = ':';
 #endif
 
 std::filesystem::path ResolveSlangc(const std::filesystem::path& hint) {
@@ -110,7 +150,7 @@ std::filesystem::path ResolveSlangc(const std::filesystem::path& hint) {
     if (const char* path = std::getenv("PATH"); path != nullptr) {
         std::string_view rest(path);
         while (!rest.empty()) {
-            const size_t split = rest.find(':');
+            const size_t split = rest.find(kPathSeparator);
             const std::string_view entry = rest.substr(0, split);
             if (!entry.empty()) {
                 const std::filesystem::path candidate = std::filesystem::path(entry) / name;
@@ -310,7 +350,7 @@ std::string SlangCompilerIdentity(const std::filesystem::path& slangcPath) {
     const std::filesystem::path out =
         std::filesystem::temp_directory_path(ec) / "sim-slangc-version.txt";
     const std::string command = Quote(exe) + " -v > " + Quote(out) + " 2>&1";
-    if (std::system(command.c_str()) != 0) {
+    if (RunShell(command) != 0) {
         std::filesystem::remove(out, ec);
         return {};
     }
@@ -374,7 +414,7 @@ ShaderCache::Compiler MakeSlangCompiler(std::filesystem::path slangcPath) {
                                     std::string(SlangArguments()) + " -entry " + entry +
                                     " -stage " + ToString(request.stage) + " -o " + Quote(spv) +
                                     " > " + Quote(log) + " 2>&1";
-        const int status = std::system(command.c_str());
+        const int status = RunShell(command);
         out.error = Trim(ReadTextFile(log));
 
         if (status == 0) {

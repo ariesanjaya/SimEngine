@@ -7,12 +7,13 @@
 #include "Sim/RHI/Ktx2.h"
 #include "Sim/RHI/Texture.h"
 
+#include "TestProcess.h"
+
 #include <doctest/doctest.h>
 
 #include <atomic>
 #include <filesystem>
 #include <string>
-#include <unistd.h>
 #include <vector>
 
 using namespace sim;
@@ -40,7 +41,7 @@ public:
         static std::atomic<int> counter{0};
         path_ = std::filesystem::temp_directory_path() /
                 ("simupload_" + std::to_string(counter.fetch_add(1)) + "_" +
-                 std::to_string(::getpid()));
+                 std::to_string(sim::tests::ProcessId()));
         std::filesystem::create_directories(path_);
     }
     ~TempDir() {

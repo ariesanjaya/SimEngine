@@ -98,11 +98,11 @@ inline bool RayAabb(const Vec3& origin, const Vec3& inverseDirection, const Vec3
     const Vec3 t0 = (boundsMin - origin) * inverseDirection;
     const Vec3 t1 = (boundsMax - origin) * inverseDirection;
 
-    const Vec3 near = glm::min(t0, t1);
-    const Vec3 far = glm::max(t0, t1);
+    const Vec3 tNear = glm::min(t0, t1);
+    const Vec3 tFar = glm::max(t0, t1);
 
-    const float enter = glm::max(glm::max(near.x, near.y), glm::max(near.z, 0.0f));
-    const float exit = glm::min(glm::min(far.x, far.y), glm::min(far.z, maxDistance));
+    const float enter = glm::max(glm::max(tNear.x, tNear.y), glm::max(tNear.z, 0.0f));
+    const float exit = glm::min(glm::min(tFar.x, tFar.y), glm::min(tFar.z, maxDistance));
 
     if (enter > exit) {
         return false;

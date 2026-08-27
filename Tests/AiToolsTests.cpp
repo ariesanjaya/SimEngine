@@ -31,7 +31,7 @@
 #include <fstream>
 #include <filesystem>
 #include <string>
-#include <unistd.h>
+#include "TestProcess.h"
 
 // Tool MCP diuji di tingkat semantiknya: apa yang dilakukan sebuah tool call
 // terhadap `World`, `Selection`, dan `CommandHistory`.
@@ -58,7 +58,7 @@ struct ScratchDir {
         static std::atomic<int> counter{0};
         path = std::filesystem::temp_directory_path() /
                ("simai_" + std::to_string(counter.fetch_add(1)) + "_" +
-                std::to_string(::getpid()));
+                std::to_string(sim::tests::ProcessId()));
         std::filesystem::create_directories(path);
     }
     ~ScratchDir() {

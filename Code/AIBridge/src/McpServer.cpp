@@ -412,11 +412,19 @@ struct McpServer::Impl {
         if (config.advertisePath.empty()) {
             return;
         }
-        std::ifstream file(config.advertisePath);
-        if (file) {
-            const json existing = json::parse(file, nullptr, /*allow_exceptions=*/false);
-            if (existing.is_object() && existing.value("pid", int64_t{0}) != ProcessId()) {
-                return;
+        // **Berkasnya ditutup sebelum dihapus, dan kurung ini yang menutupnya.**
+        // Di POSIX menghapus berkas yang masih terbuka adalah hal biasa; di
+        // Windows `DeleteFile` menolak selama masih ada handle yang memegangnya,
+        // dan penolakan itu masuk ke `ec` yang tidak dibaca siapa pun. Yang
+        // tertinggal adalah berkas pengumuman milik editor yang sudah mati —
+        // dan agen berikutnya menyambung ke port yang tidak ada lagi.
+        {
+            std::ifstream file(config.advertisePath);
+            if (file) {
+                const json existing = json::parse(file, nullptr, /*allow_exceptions=*/false);
+                if (existing.is_object() && existing.value("pid", int64_t{0}) != ProcessId()) {
+                    return;
+                }
             }
         }
         std::error_code ec;
@@ -461,10 +469,24 @@ bool McpServer::Start(const ToolRegistry& tools, const ResourceRegistry& resourc
     // SO_REUSEADDR tetap dipasang: tanpanya, editor yang baru ditutup
     // meninggalkan soket dalam TIME_WAIT dan yang dijalankan ulang beberapa
     // detik kemudian naik ke port berikutnya tanpa alasan yang terlihat.
+    //
+    // **Di Windows yang dipasang justru kebalikannya.** SO_REUSEADDR di sana
+    // tidak berarti "boleh pakai ulang port yang baru dilepas" melainkan "boleh
+    // rebut port yang sedang dipegang orang lain" — persis akibat yang dua
+    // paragraf di atas ada untuk mencegah, dan di sana ia berlaku untuk proses
+    // mana pun di mesin ini, bukan hanya editor kedua. Padanan yang benar adalah
+    // SO_EXCLUSIVEADDRUSE. Soket yang mendengarkan juga tidak tertinggal di
+    // TIME_WAIT di Windows — yang tertinggal di sana adalah koneksi, bukan
+    // pendengarnya — jadi alasan memasang SO_REUSEADDR tidak berlaku sejak awal.
     impl_->server.set_socket_options([](socket_t sock) {
         const int enable = 1;
+#if defined(_WIN32)
+        setsockopt(sock, SOL_SOCKET, SO_EXCLUSIVEADDRUSE, reinterpret_cast<const char*>(&enable),
+                   static_cast<int>(sizeof(enable)));
+#else
         setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, reinterpret_cast<const char*>(&enable),
                    static_cast<socklen_t>(sizeof(enable)));
+#endif
     });
 
     uint16_t bound = 0;

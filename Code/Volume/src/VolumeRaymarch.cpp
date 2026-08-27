@@ -39,12 +39,12 @@ RaymarchResult Raymarch(const VolumeGrid& grid, const Vec3& origin, const Vec3& 
     boxMin -= pad;
     boxMax += pad;
 
-    float near = 0.0f;
-    float far = 0.0f;
-    if (!IntersectBox(origin, direction, boxMin, boxMax, near, far)) {
+    float tNear = 0.0f;
+    float tFar = 0.0f;
+    if (!IntersectBox(origin, direction, boxMin, boxMax, tNear, tFar)) {
         return result;  // ray ini tidak menyentuh volumenya sama sekali
     }
-    near = std::max(near, 0.0f);
+    tNear = std::max(tNear, 0.0f);
 
     const Vec3 unit = glm::normalize(direction);
     for (uint32_t step = 0; step < settings.maxSteps; ++step) {
@@ -52,8 +52,8 @@ RaymarchResult Raymarch(const VolumeGrid& grid, const Vec3& origin, const Vec3& 
         // menggeser seluruh hasil setengah langkah, dan pergeseran itu tumbuh
         // bersama besar langkah — sehingga menaikkan kualitas memindahkan
         // asapnya, bukan hanya menghaluskannya.
-        const float distance = near + (static_cast<float>(step) + 0.5f) * settings.stepSize;
-        if (distance >= far) {
+        const float distance = tNear + (static_cast<float>(step) + 0.5f) * settings.stepSize;
+        if (distance >= tFar) {
             break;
         }
         result.steps = step + 1;

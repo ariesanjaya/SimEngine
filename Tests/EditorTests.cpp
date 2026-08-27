@@ -29,7 +29,7 @@
 #include <memory>
 #include <string>
 #include <utility>
-#include <unistd.h>
+#include "TestProcess.h"
 #include <vector>
 #include <cstdlib>
 
@@ -362,7 +362,7 @@ public:
     ImportDir() {
         static int counter = 0;
         path_ = std::filesystem::temp_directory_path() /
-                ("simimport_" + std::to_string(counter++) + "_" + std::to_string(::getpid()));
+                ("simimport_" + std::to_string(counter++) + "_" + std::to_string(sim::tests::ProcessId()));
         std::filesystem::create_directories(path_);
     }
     ~ImportDir() {
@@ -510,7 +510,7 @@ public:
         static std::atomic<int> counter{0};
         path_ = std::filesystem::temp_directory_path() /
                 ("simeditor_" + std::to_string(counter.fetch_add(1)) + "_" +
-                 std::to_string(::getpid()));
+                 std::to_string(sim::tests::ProcessId()));
         std::filesystem::create_directories(path_);
     }
     ~TempDir() {
