@@ -41,6 +41,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <optional>
 #include <fstream>
 #include <limits>
 #include <sstream>
@@ -812,6 +813,14 @@ int main(int argc, char** argv) {
         // lebih terang. Dengan eksposur manual, yang dibandingkan kembali isinya.
         bool fixedExposure = false;
         float manualEv = 0.0f;
+        // **Kosong berarti level yang menentukan.** Itu arti yang dijanjikan
+        // catatan `--bench-gi` di bawah, dan sebelum World Settings ada ia tidak
+        // bisa ditepati: tidak ada tempat di dalam level yang menyatakannya.
+        std::optional<bool> giOverride;
+        // **Yang benar-benar dipakai, bukan yang diminta.** Laporan bench
+        // membacanya, dan sesudah tingkat pencahayaan datang dari level, "yang
+        // diminta" tidak lagi menjawab pertanyaannya.
+        bool giEffective = false;
         for (int at = 1; at < argc; ++at) {
             if (argv[at] == nullptr) {
                 continue;
@@ -864,11 +873,6 @@ int main(int argc, char** argv) {
             fixedExposure = true;
         }
 
-        // **GI dipaksa dari baris perintah, bukan hanya dari level.** Anggaran
-        // GI adalah 3,0 ms dari 16,6 ms — sepertiga dari seluruh pekerjaan yang
-        // G0 ingin ukur — jadi garis dasar yang diam-diam mengukur adegan tanpa
-        // GI adalah garis dasar yang menjawab pertanyaan lain. Levelnya sendiri
-        // tetap yang menentukan bila benderanya tidak ada.
         if (const std::string_view value = FlagValue(argc, argv, "--bench-camera");
             !value.empty()) {
             std::array<float, 6> numbers{};
@@ -898,11 +902,18 @@ int main(int argc, char** argv) {
             captureFrame = static_cast<uint32_t>(std::strtoul(std::string(value).c_str(), nullptr, 10));
             captureFrameSet = true;
         }
+        // **GI dipaksa dari baris perintah, bukan hanya dari level.** Anggaran
+        // GI adalah 3,0 ms dari 16,6 ms — sepertiga dari seluruh pekerjaan yang
+        // G0 ingin ukur — jadi garis dasar yang diam-diam mengukur adegan tanpa
+        // GI adalah garis dasar yang menjawab pertanyaan lain. Levelnya sendiri
+        // tetap yang menentukan bila benderanya tidak ada — dan sejak World
+        // Settings ada, kalimat itu akhirnya benar: yang menentukannya
+        // `indirect` di dalam berkas levelnya.
         if (const std::string_view value = FlagValue(argc, argv, "--bench-gi"); !value.empty()) {
             if (value == "on") {
-                app.Context().gi.enabled = true;
+                giOverride = true;
             } else if (value == "off") {
-                app.Context().gi.enabled = false;
+                giOverride = false;
             } else {
                 SIM_ERROR("Bench", "--bench-gi wants on or off, got \"{}\"", std::string(value));
                 app.Shutdown();
@@ -1149,10 +1160,6 @@ int main(int argc, char** argv) {
                 desc.cullLimit =
                     static_cast<uint32_t>(std::strtoul(std::string(value).c_str(), nullptr, 10));
             }
-            if (fixedExposure) {
-                desc.post.exposureMode = render::ExposureMode::Manual;
-                desc.post.manualEv100 = manualEv;
-            }
             // Delta yang sama dengan yang diberikan ke `app.Tick`, dan karena
             // alasan yang sama: yang maju menurut waktu — eksposur, awan,
             // akumulasi temporal — harus maju sama jauhnya di tiap jalan, kalau
@@ -1163,6 +1170,28 @@ int main(int argc, char** argv) {
             // yang langitnya berbeda seratus kali menghasilkan gambar yang sama
             // persis. Ditemukan begitu.
             editor::ApplySceneSky(*app.Context().world, desc);
+            // **Tingkat pencahayaan juga datang dari adegan**, dengan alasan
+            // yang persis sama dengan langit di atas: tanpa baris ini setiap
+            // pengukuran headless mengukur tingkat pencahayaan yang bukan milik
+            // level itu, berapa pun yang tertulis di berkasnya.
+            editor::ApplyWorldSettings(*app.Context().world, desc);
+
+            // **Paksaan baris perintah datang sesudah level, tanpa kecuali.**
+            // Keduanya di bawah ini menimpa apa yang tertulis di berkasnya, dan
+            // urutan itulah artinya: bendera adalah alat ukur untuk satu jalan,
+            // level adalah kebenaran untuk semua yang lain. Menaruhnya lebih
+            // dulu membuat benderanya diam-diam tidak berlaku —
+            // `--bench-fixed-exposure` justru bendera yang paling tidak boleh
+            // gagal diam-diam, karena tanpa eksposur tetap dua gambar tidak bisa
+            // dibandingkan sama sekali.
+            if (giOverride.has_value()) {
+                desc.gi.enabled = *giOverride;
+            }
+            if (fixedExposure) {
+                desc.post.exposureMode = render::ExposureMode::Manual;
+                desc.post.manualEv100 = manualEv;
+            }
+            giEffective = desc.gi.enabled;
             // Jalur HDR relatif dilengkapi dengan akar `Resources`, alasan
             // yang sama dengan di viewport editor: yang tertulis di level
             // relatif terhadap Resources, bukan terhadap folder tempat bench
@@ -1269,8 +1298,7 @@ int main(int argc, char** argv) {
                           "- Frame: %u pemanasan + %u diukur (%u sampel GPU)\n", warmup,
                           measured, gpuSamples);
             report += line;
-            std::snprintf(line, sizeof(line), "- GI: %s\n",
-                          app.Context().gi.enabled ? "menyala" : "mati");
+            std::snprintf(line, sizeof(line), "- GI: %s\n", giEffective ? "menyala" : "mati");
             report += line;
             // **Jalur material dan harganya, di baris yang sama.** Kriteria
             // selesai G5 adalah sebuah hitungan, bukan sebuah waktu — dan
@@ -1360,6 +1388,10 @@ int main(int argc, char** argv) {
             desc.width = renderWidth;
             desc.height = renderHeight;
             desc.gi = app.Context().gi;
+            // Yang dilihat agen lewat `viewport.capture` adalah level ini
+            // disinari sebagaimana levelnya sendiri menyatakannya — bukan
+            // sebagaimana bawaan renderer kebetulan menyinarinya.
+            editor::ApplyWorldSettings(*app.Context().world, desc);
             // Kamera datang dari `viewport.capture`, atau tetap di tempatnya.
             // Tidak ada orbit di sini: tidak ada mouse untuk menggerakkannya.
             editor::EditorContext::ViewportCameraRequest& request =

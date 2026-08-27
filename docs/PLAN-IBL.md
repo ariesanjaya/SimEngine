@@ -178,7 +178,7 @@ Tiap milestone punya kriteria selesai yang bisa diuji. Urutannya bukan selera:
 B0 adalah tempat menyimpan jawaban, dan tanpanya B1–B6 hanya menambah centang
 viewport yang tidak tercatat di berkas mana pun.
 
-### B0 — World Settings
+### B0 — World Settings · ✅
 
 - `scene::WorldSettings`, dipegang `World`, terdaftar di `TypeRegistry`
 - Blok `"world"` sebagai saudara `"entities"`; `kLevelSchemaVersion` naik ke 4
@@ -200,6 +200,87 @@ disimpan dari sub-pohon tidak memuat blok itu.
 > pengukuran headless dulu menggambar langit bawaan berapa pun angka yang
 > tertulis di level. Kalau `SimHeadless` tidak membaca `world.indirect`, setiap
 > bench mengukur tingkat pencahayaan yang bukan milik level itu.
+
+#### Keadaannya sesudah B0
+
+`scene::WorldSettings` ada di `Code/Scene/include/Sim/Scene/WorldSettings.h`,
+dipegang `World`, dan terdaftar di `TypeRegistry` — **tidak** di
+`ComponentRegistry`, dan keduanya disengaja: yang pertama membuat PropertyGrid
+merendernya tanpa satu widget pun ditulis tangan, yang kedua adalah daftar yang
+menentukan apa yang boleh menempel di entity dan apa yang ikut ke `.simprefab`.
+
+Yang menjembatani level ke renderer adalah satu fungsi,
+`view::ApplyWorldSettings`, dipanggil viewport editor, jalur bench headless, dan
+player. Satu aturan di satu tempat: kalau masing-masing menurunkannya sendiri,
+"level yang sama disinari sama di mana pun" berhenti berlaku tanpa satu pun
+galat. `--bench-gi` tetap ada sebagai paksaan eksplisit untuk satu jalan ukur,
+dan bawaannya sekarang benar-benar mengikuti level — kalimat yang sudah tertulis
+di teks bantuannya sejak G0, dan baru sekarang bisa ditepati.
+
+Panelnya sendiri, `World Settings`, ter-dock sebagai tab di samping Entity
+Inspector di ketiga workspace. Ia bukan bagian Inspector karena tidak dimiliki
+entity mana pun: menempelkannya di keadaan "tidak ada yang terpilih" berarti
+setelan level yang hanya bisa dicapai dengan lebih dulu membatalkan seleksi, dan
+hilang lagi begitu ada yang diklik. Penempatannya dikunci uji di
+`SimEditorTests`, bukan diingat.
+
+Sakelar "GI enabled" di panel Statistics menjadi baris keadaan; mode eksposur dan
+kompensasinya tetap di sana tapi sekarang menyunting World Settings lewat
+`SetWorldSettingsCommand`, jadi keduanya ikut undo/redo. Dua widget yang merender
+satu nilai tidak apa-apa; dua tempat yang menyimpannya yang tidak.
+
+**Yang diuji:** enam kasus di `SimSceneTests` (bolak-balik lewat berkas, blok
+yang tidak ada, tidak mewarisi level sebelumnya, prefab tanpa blok, kombinasi
+tidak sah, terdaftar sebagai tipe bukan komponen), empat di `SimLevelEditorTests`
+(jembatan ke `ViewportDesc`, dan undo perintahnya), satu di `SimEditorTests`
+(dock di samping Inspector). 25 dari 25 suite lulus.
+
+**Kriteria bench-nya diverifikasi ujung-ke-ujung**, sesudah sebuah crash yang
+memblokirnya dilacak dan diperbaiki (lihat di bawah). Dua level yang bedanya
+tepat satu kata di blok `"world"`, dijalankan tanpa satu bendera pun:
+
+```
+--level-file baked.simlevel     →  - GI: mati
+--level-file realtime.simlevel  →  - GI: menyala
+--level-file realtime.simlevel --bench-gi off  →  - GI: mati
+```
+
+Baris ketiga yang menyatakan sisanya: level adalah kebenaran, bendera adalah
+paksaan eksplisit di atasnya.
+
+> **Crash `--bench` yang menghalangi, dan sebabnya.** `--bench` crash pada mesin
+> ini sejak sebelum B0 — diperiksa dengan binary yang dibangun tanpa satu pun
+> perubahan B0. Penyebabnya bukan pencahayaan sama sekali: FBX SDK tidak
+> thread-safe, dan satu `FbxManager` per thread **tidak cukup** karena
+> `FbxObject::Construct` menyunting `FbxPropertyPage` yang milik proses. Main
+> thread memuat `shaderBall.fbx` lewat `VulkanRenderer::AcquireMesh` sementara
+> sebuah worker `TaskPool` memuat `unitCylinder.obj` untuk `MeshSdfBakery`;
+> keduanya di dalam `FbxPropertyPage` pada saat yang sama. Seluruh pemakaian SDK
+> kini diserialkan lewat `sim::FbxSdkMutex()`, dan bench lulus 5 dari 5 jalan.
+> Rinciannya di [DEPENDENCIES.md](DEPENDENCIES.md).
+
+**Tiga hal yang belum tuntas, dan sebaiknya tidak ditemukan sebagai kejutan:**
+
+1. **`None` dan `Baked` belum bisa dibedakan.** Keduanya mematikan probe, dan
+   cahaya tak-langsung di jalur itu masih konstanta 0,25 yang tidak berasal dari
+   langit mana pun. Yang membedakannya adalah iradiansi panggang yang
+   menggantikan konstanta itu — B1. Begitu pula `environment`: ia tersimpan di
+   berkas tapi belum berpengaruh, karena yang memakainya panggangannya.
+2. **`manualEv100` tidak ikut di blok `"world"`.** Skema di dokumen ini menyebut
+   `exposureMode` dan `exposureCompensation` saja, dan B0 menulis persis itu.
+   Akibatnya sebuah level yang disimpan pada mode `Manual` terbuka kembali pada
+   `Manual` tetapi dengan EV100 bawaan editor, bukan angka yang disetel
+   pengarangnya. Memasukkannya berarti menambah satu field ke skema — murah,
+   tapi mengubah bentuk berkas yang baru saja ditetapkan, jadi ia keputusan
+   tersendiri.
+3. **Alat MCP belum melihatnya.** Rencana ini menyebut refleksi membuat World
+   Settings terjangkau alat MCP "lewat refleksi yang sama"; ternyata tidak.
+   `AiSceneTools` menelusuri `ComponentRegistry`, bukan `TypeRegistry`, jadi
+   sebuah agen belum bisa membaca atau mengubah tingkat pencahayaan sebuah
+   level. Yang dibutuhkan sepasang tool tersendiri — `world.settings.get`/`set`
+   — dan **bukan** memasukkan World Settings ke `ComponentRegistry`, karena itu
+   akan membuatnya ikut ke setiap `.simprefab`: persis cacat yang keputusan 5
+   cegah.
 
 ### B1 — Iradiansi panggang dari langit prosedural (`Baked` + `Sky`)
 

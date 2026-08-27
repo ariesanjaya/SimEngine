@@ -389,6 +389,18 @@ public:
         // membuat adegan interior berhenti membayar empat pass LUT untuk sesuatu
         // yang tidak pernah terlihat. Prefab "Sky Dome" yang menyalakannya.
         editor::ApplySceneSky(*context.world, desc);
+        // **Tingkat pencahayaan datang dari level, bukan dari sakelar viewport**
+        // — dan ia sengaja dipanggil sesudah `desc.gi = context.gi` di atas,
+        // supaya yang tertulis di berkas yang menang. Panel Statistics menyunting
+        // World Settings, bukan `context.gi.enabled`; yang tersisa di sana
+        // hanyalah alat ukur, yang memang tidak disimpan ke mana pun.
+        editor::ApplyWorldSettings(*context.world, desc);
+        // **Satu turunan, di satu tempat.** Panel lain — Statistics — membaca
+        // `context.gi.enabled` untuk memutuskan apa yang ditampilkannya, dan
+        // menurunkannya sendiri di sana berarti dua tempat yang harus sepakat
+        // tentang arti `indirect`. Yang di sini cerminan; yang di berkas level
+        // kebenarannya.
+        context.gi.enabled = desc.gi.enabled;
         // Jalur HDR yang relatif dilengkapi di sisi editor, bukan di renderer:
         // yang tahu di mana `Resources` bawaan berada adalah aplikasi yang
         // menyalinnya ke sebelah executable-nya. `hdriPath` hidup sampai

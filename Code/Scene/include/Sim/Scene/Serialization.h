@@ -15,11 +15,21 @@ namespace sim::scene {
 ///   1 — rotasi disimpan sebagai sudut Euler derajat [x, y, z]
 ///   2 — rotasi disimpan sebagai quaternion [w, x, y, z]
 ///   3 — rujukan mesh/material berupa GUID aset, bukan nama berkas
+///   4 — blok `"world"`: bagaimana level disinari (docs/PLAN-IBL.md B0)
 ///
 /// Naikkan setiap kali bentuk data berubah, dan tambahkan langkahnya di
 /// Migrate(). Berkas lama harus tetap bisa dibuka: level adalah hasil kerja
 /// pengguna, bukan artefak build.
-inline constexpr int kLevelSchemaVersion = 3;
+///
+/// **Versi 4 tidak punya langkah migrasi, dan itu bukan kelalaian.** Ia hanya
+/// menambah satu blok baru; tidak ada satu pun byte versi 3 yang berubah
+/// artinya. Berkas tanpa blok itu berarti bawaan `WorldSettings` — pola
+/// `root.value(...)` yang sudah dipakai `LoadProject` — dan bawaan itu dipilih
+/// supaya sama persis dengan perilaku sebelum blok ini ada. Versinya tetap naik
+/// karena berkas yang **ditulis** sekarang memuat sesuatu yang tidak dipahami
+/// editor lama, dan itulah yang dijawab pemeriksaan "ditulis editor yang lebih
+/// baru" di bawah.
+inline constexpr int kLevelSchemaVersion = 4;
 
 struct LevelIoResult {
     bool ok = false;

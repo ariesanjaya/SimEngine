@@ -87,6 +87,12 @@ void World::Clear() {
     registry_.clear();
     roots_.clear();
     byGuid_.clear();
+    // **Pengaturan ikut kembali ke bawaannya.** `Clear()` berarti dunia yang
+    // baru, dan sebuah dunia baru disinari dengan bawaan — bukan dengan tingkat
+    // pencahayaan milik level yang barusan ditutup. Kalau tidak, membuka level
+    // lama yang tidak punya blok `"world"` sesudah level ber-`RealTime` akan
+    // mewarisi `RealTime` tanpa satu baris pun yang menyebutkannya di berkasnya.
+    settings_ = {};
 }
 
 void World::DetachFromParent(Entity entity) {

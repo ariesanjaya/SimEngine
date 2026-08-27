@@ -22,6 +22,7 @@ inline constexpr const char* kAnimationEditor = "animationeditor";
 inline constexpr const char* kWhiteboxEditor = "whiteboxeditor";
 inline constexpr const char* kMeshEditor = "mesheditor";
 inline constexpr const char* kTimeOfDay = "timeofday";
+inline constexpr const char* kWorldSettings = "worldsettings";
 inline constexpr const char* kStatistics = "statistics";
 inline constexpr const char* kHistory = "history";
 inline constexpr const char* kAiBridge = "aibridge";

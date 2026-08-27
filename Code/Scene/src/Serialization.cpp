@@ -211,6 +211,39 @@ void ReadField(const reflect::FieldDesc& field, const Json& value, void* data) {
     }
 }
 
+/// Menulis dan membaca `WorldSettings` lewat deskripsi tipenya.
+///
+/// **Tidak ada satu pun nama field yang disebut di sini**, dan itu memang
+/// gunanya ia terdaftar di `TypeRegistry`: menambah setelan baru ke World
+/// Settings berarti satu baris di pendaftaran tipe, bukan satu baris di sini
+/// ditambah satu baris di sana yang suatu saat tidak sepakat.
+Json WriteWorldSettings(const WorldSettings& settings) {
+    Json object = Json::object();
+    const reflect::TypeDesc* type = reflect::TypeRegistry::Get().Find<WorldSettings>();
+    if (type == nullptr) {
+        return object;
+    }
+    for (const reflect::FieldDesc& field : type->fields) {
+        object[field.name] = WriteField(field, field.AccessConst(&settings));
+    }
+    return object;
+}
+
+/// Field yang tidak ada dibiarkan pada bawaannya — itulah yang membuat berkas
+/// versi 3, yang belum punya blok ini sama sekali, terbuka apa adanya.
+void ReadWorldSettings(const Json& value, WorldSettings& settings) {
+    const reflect::TypeDesc* type = reflect::TypeRegistry::Get().Find<WorldSettings>();
+    if (type == nullptr || !value.is_object()) {
+        return;
+    }
+    for (const reflect::FieldDesc& field : type->fields) {
+        const auto it = value.find(field.name);
+        if (it != value.end()) {
+            ReadField(field, *it, field.access(&settings));
+        }
+    }
+}
+
 /// Menelusuri hierarki dari akar, induk selalu sebelum anak.
 ///
 /// Urutan ini yang membuat pemuatan bisa satu lintasan: saat sebuah entity
@@ -222,8 +255,13 @@ void CollectDepthFirst(const World& world, Entity entity, std::vector<Entity>& o
     }
 }
 
-/// Menulis daftar entity yang sudah terurut menjadi dokumen level.
-Json WriteEntities(const World& world, const std::vector<Entity>& ordered) {
+/// Menulis daftar entity yang sudah terurut menjadi array JSON.
+///
+/// **Hanya array-nya, bukan dokumennya.** Yang membungkusnya adalah pemanggil,
+/// dan itu yang membuat "prefab tidak membawa World Settings" menjadi sifat
+/// struktur alih-alih sesuatu yang harus diingat: `SaveSubtreeToString` tidak
+/// punya tempat untuk menuliskannya sekalipun ia mau.
+Json WriteEntityArray(const World& world, const std::vector<Entity>& ordered) {
     Json entities = Json::array();
     entities.get_ref<Json::array_t&>().reserve(ordered.size());
 
@@ -251,11 +289,7 @@ Json WriteEntities(const World& world, const std::vector<Entity>& ordered) {
         record["components"] = std::move(components);
         entities.push_back(std::move(record));
     }
-
-    Json root;
-    root["schemaVersion"] = kLevelSchemaVersion;
-    root["entities"] = std::move(entities);
-    return root;
+    return entities;
 }
 
 /// Membuat entity dari array JSON. Berkas selalu menulis induk sebelum anak,
@@ -380,7 +414,16 @@ std::string SaveLevelToString(const World& world) {
     for (const Entity root : world.Roots()) {
         CollectDepthFirst(world, root, ordered);
     }
-    return WriteEntities(world, ordered).dump(2) + "\n";
+
+    // Urutannya bagian dari berkasnya: versi, lalu bagaimana adegan disinari,
+    // lalu isinya. `ordered_json` mempertahankan urutan penyisipan justru untuk
+    // ini — yang mengurutkan menurut abjad akan menaruh "world" sebelum
+    // "schemaVersion" dan membuat berkasnya lebih sulit dibaca tanpa alasan.
+    Json root;
+    root["schemaVersion"] = kLevelSchemaVersion;
+    root["world"] = WriteWorldSettings(world.Settings());
+    root["entities"] = WriteEntityArray(world, ordered);
+    return root.dump(2) + "\n";
 }
 
 LevelIoResult SaveLevelToFile(const World& world, const std::filesystem::path& path) {
@@ -440,6 +483,16 @@ LevelIoResult LoadLevelFromString(World& world, const std::string& text) {
     }
 
     world.Clear();
+
+    // Sesudah `Clear()`, yang mengembalikan pengaturan ke bawaannya. Berkas
+    // tanpa blok `"world"` — yaitu setiap berkas versi 3 dan sebelumnya —
+    // karena itu terbuka dengan bawaan, bukan dengan sisa level sebelumnya.
+    WorldSettings settings;
+    if (const auto it = root.find("world"); it != root.end()) {
+        ReadWorldSettings(*it, settings);
+    }
+    world.SetSettings(settings);
+
     if (!ReadEntities(world, root["entities"], kNullEntity)) {
         result.error = "entity with a missing or malformed guid";
         return result;
@@ -453,7 +506,16 @@ LevelIoResult LoadLevelFromString(World& world, const std::string& text) {
 std::string SaveSubtreeToString(const World& world, Entity root) {
     std::vector<Entity> ordered;
     CollectDepthFirst(world, root, ordered);
-    return WriteEntities(world, ordered).dump(2) + "\n";
+
+    // **Tanpa blok `"world"`, dan itu keputusan 5 di docs/PLAN-IBL.md.** Format
+    // `.simprefab` sama persis dengan level, jadi sebuah prefab yang membawa
+    // World Settings akan diam-diam mengubah pencahayaan level tempat ia
+    // dijatuhkan — bug yang tidak akan dicari siapa pun di sana. Ia potongan
+    // adegan, bukan adegan.
+    Json document;
+    document["schemaVersion"] = kLevelSchemaVersion;
+    document["entities"] = WriteEntityArray(world, ordered);
+    return document.dump(2) + "\n";
 }
 
 bool RestoreSubtree(World& world, const std::string& text, Uuid parentGuid) {

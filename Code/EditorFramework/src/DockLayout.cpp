@@ -75,6 +75,14 @@ void BuildLevelLayout(ImGuiID dockspaceId) {
     Dock(panel_id::kAssetBrowser, leftBottom);
     Dock(panel_id::kPrefabs, leftBottom);
     Dock(panel_id::kInspector, right);
+    // **Di samping Inspector, sebagai tab di node yang sama.** Keduanya menjawab
+    // "apa properti dari yang sedang saya kerjakan" — yang satu untuk entity
+    // terpilih, yang satu untuk levelnya sendiri — jadi keduanya dicari di
+    // tempat yang sama. World Settings tidak bisa ditaruh *di dalam* Inspector
+    // karena ia tidak dimiliki entity mana pun: menempelkannya di keadaan "tidak
+    // ada yang terpilih" berarti setelan level yang hilang begitu ada yang
+    // diklik.
+    Dock(panel_id::kWorldSettings, right);
     Dock(panel_id::kConsole, bottom);
     Dock(panel_id::kLuaConsole, bottom);
     Dock(panel_id::kStatistics, bottom);
@@ -99,6 +107,7 @@ void BuildAuthoringLayout(ImGuiID dockspaceId) {
     Dock(panel_id::kPrefabs, left);
     Dock(panel_id::kOutliner, left);
     Dock(panel_id::kInspector, right);
+    Dock(panel_id::kWorldSettings, right);
     Dock(panel_id::kHistory, right);
     Dock(panel_id::kConsole, bottom);
     Dock(panel_id::kLuaConsole, bottom);
@@ -127,6 +136,7 @@ void BuildDebugLayout(ImGuiID dockspaceId) {
     Dock(panel_id::kHistory, bottomRight);
     Dock(panel_id::kPreferences, bottomRight);
     Dock(panel_id::kInspector, center);
+    Dock(panel_id::kWorldSettings, center);
     Dock(panel_id::kViewport, center);
     DockDocumentEditors(center);
 

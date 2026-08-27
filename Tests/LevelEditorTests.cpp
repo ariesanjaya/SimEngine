@@ -1116,6 +1116,108 @@ TEST_CASE("setiap template prefab bawaan bisa dimuat dan berisi yang dijanjikann
     }
 }
 
+TEST_CASE("B0: menyunting World Settings bisa dibatalkan, dan satu seretan satu entri") {
+    scene::World world;
+    CommandHistory history;
+
+    const scene::WorldSettings original = world.Settings();
+
+    scene::WorldSettings realtime = original;
+    realtime.indirect = scene::IndirectLighting::RealTime;
+    history.Execute(std::make_unique<SetWorldSettingsCommand>(&world, original, realtime));
+    CHECK(world.Settings().indirect == scene::IndirectLighting::RealTime);
+
+    REQUIRE(history.Undo());
+    CHECK(world.Settings().indirect == original.indirect);
+    REQUIRE(history.Redo());
+    CHECK(world.Settings().indirect == scene::IndirectLighting::RealTime);
+
+    // Seretan slider: tiap frame sebuah perintah, dan seluruhnya harus menjadi
+    // satu entri. Yang dipertahankan `before` milik perintah pertama — undo
+    // harus mengembalikan keadaan sebelum seretan dimulai, bukan sebelum frame
+    // terakhirnya.
+    const std::size_t entriesBefore = history.Entries().size();
+    scene::WorldSettings dragged = world.Settings();
+    for (int step = 1; step <= 4; ++step) {
+        scene::WorldSettings next = dragged;
+        next.exposureCompensation = static_cast<float>(step);
+        history.Execute(std::make_unique<SetWorldSettingsCommand>(&world, dragged, next));
+    }
+    CHECK(history.Entries().size() == entriesBefore + 1);
+    CHECK(world.Settings().exposureCompensation == doctest::Approx(4.0f));
+
+    REQUIRE(history.Undo());
+    CHECK(world.Settings().exposureCompensation == doctest::Approx(0.0f));
+
+    // Kelompok yang ditutup berarti entri baru, bukan lanjutan seretan.
+    history.Redo();
+    history.CloseMergeGroup();
+    const std::size_t entriesAfterDrag = history.Entries().size();
+    scene::WorldSettings separate = world.Settings();
+    separate.exposureCompensation = -3.0f;
+    history.Execute(
+        std::make_unique<SetWorldSettingsCommand>(&world, world.Settings(), separate));
+    CHECK(history.Entries().size() == entriesAfterDrag + 1);
+}
+
+TEST_CASE("B0: tingkat pencahayaan sampai ke renderer dari berkas levelnya") {
+    // **Kriteria terima B0.** Yang diperiksa di sini bukan serialisasinya —
+    // SimSceneTests sudah — melainkan jembatan yang dipakai ketiganya: viewport
+    // editor, `SimHeadless --bench`, dan player. Satu fungsi, satu aturan; kalau
+    // masing-masing menurunkannya sendiri, "level yang sama disinari sama di
+    // mana pun" berhenti berlaku tanpa satu pun galat.
+    const auto levelWith = [](const char* indirect, const char* exposure) {
+        return std::string(R"({
+  "schemaVersion": 4,
+  "world": { "indirect": ")") + indirect + R"(", "environment": "Sky",
+             "exposureMode": ")" + exposure + R"(", "exposureCompensation": -2.0 },
+  "entities": []
+})";
+    };
+
+    SUBCASE("RealTime menyalakan probe") {
+        scene::World world;
+        REQUIRE(scene::LoadLevelFromString(world, levelWith("RealTime", "Manual")).ok);
+
+        render::ViewportDesc desc;
+        ApplyWorldSettings(world, desc);
+        CHECK(desc.gi.enabled);
+        CHECK(desc.post.exposureMode == render::ExposureMode::Manual);
+        CHECK(desc.post.exposureCompensation == doctest::Approx(-2.0f));
+    }
+
+    SUBCASE("Baked tidak, dan None juga tidak") {
+        // Keduanya mematikan probe, dan sampai B1 keduanya memang belum bisa
+        // dibedakan: cahaya tak-langsung di jalur itu masih konstanta 0,25 yang
+        // tidak berasal dari langit mana pun. Yang membedakannya iradiansi
+        // panggang yang menggantikan konstanta itu.
+        for (const char* tier : {"Baked", "None"}) {
+            scene::World world;
+            REQUIRE(scene::LoadLevelFromString(world, levelWith(tier, "Automatic")).ok);
+
+            render::ViewportDesc desc;
+            desc.gi.enabled = true;  // sengaja dinyalakan dulu: levelnya yang menang
+            ApplyWorldSettings(world, desc);
+            CHECK_FALSE(desc.gi.enabled);
+            CHECK(desc.post.exposureMode == render::ExposureMode::Automatic);
+        }
+    }
+
+    SUBCASE("level lama tanpa blok world disinari seperti sebelum B0 ada") {
+        // Bawaan `Baked` dipilih supaya berkas versi 3 terlihat persis seperti
+        // sebelumnya: GI mati, dan itu memang keadaan setiap level yang sudah
+        // ada di repo ini.
+        scene::World world;
+        REQUIRE(scene::LoadLevelFromString(
+                    world, R"({"schemaVersion": 3, "entities": []})").ok);
+
+        render::ViewportDesc desc;
+        desc.gi.enabled = true;
+        ApplyWorldSettings(world, desc);
+        CHECK_FALSE(desc.gi.enabled);
+    }
+}
+
 TEST_CASE("jalur HDR relatif dilengkapi dengan akar Resources") {
     // Jalur di `SkyComponent` sampai ke renderer apa adanya, jadi yang relatif
     // akan dicari relatif terhadap folder kerja — dan folder kerja editor bukan

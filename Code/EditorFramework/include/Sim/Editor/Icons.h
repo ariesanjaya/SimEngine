@@ -63,6 +63,7 @@ inline constexpr const char* kPanelConsole = ICON_LC_TERMINAL;
 inline constexpr const char* kPanelLuaConsole = ICON_LC_SQUARE_TERMINAL;
 inline constexpr const char* kPanelStatistics = ICON_LC_ACTIVITY;
 inline constexpr const char* kPanelTimeOfDay = ICON_LC_SUN;
+inline constexpr const char* kPanelWorldSettings = ICON_LC_GLOBE;
 
 // --- Tipe entity & komponen ------------------------------------------------
 inline constexpr const char* kEntity = ICON_LC_BOX;
