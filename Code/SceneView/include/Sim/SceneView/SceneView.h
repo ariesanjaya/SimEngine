@@ -101,6 +101,26 @@ struct ScreenRect {
 /// LUT untuk sesuatu yang tidak pernah terlihat.
 bool ApplySceneSky(const scene::World& world, render::ViewportDesc& desc);
 
+/// Menyalin tingkat pencahayaan level ke `desc`.
+///
+/// **Satu tempat, dipakai viewport editor, jalur bench headless, dan player.**
+/// Itu bukan kerapian melainkan kriteria terima B0: sebuah level yang disimpan
+/// dengan `indirect: RealTime` harus memakai tingkat itu di mesin mana pun yang
+/// membukanya, tanpa satu klik pun. Cacat yang sama bentuknya pernah terjadi
+/// sekali dan tercatat di atas — setiap pengukuran headless dulu menggambar
+/// langit bawaan berapa pun angka yang tertulis di level.
+///
+/// **`indirect` menjadi `gi.enabled`, dan hanya `RealTime` yang menyalakannya.**
+/// `None` dan `Baked` sama-sama mematikan probe, dan sampai B1 keduanya memang
+/// belum bisa dibedakan: cahaya tak-langsung di jalur itu masih konstanta 0,25
+/// yang tidak berasal dari langit mana pun. Yang membedakannya adalah iradiansi
+/// panggang yang menggantikan konstanta itu, dan itu pekerjaan B1.
+///
+/// `environment` belum berpengaruh sama sekali di sini, dengan alasan yang sama:
+/// yang memakainya adalah panggangannya, dan panggangannya belum ada. Ia sudah
+/// tersimpan di berkas justru supaya B1–B3 tidak perlu menaikkan skema lagi.
+void ApplyWorldSettings(const scene::World& world, render::ViewportDesc& desc);
+
 /// Melengkapi jalur HDR yang ditulis relatif dengan akar `Resources` bawaan.
 ///
 /// **Jalur di dalam `SkyComponent` sampai ke renderer apa adanya**, jadi yang

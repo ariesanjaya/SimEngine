@@ -903,11 +903,14 @@ TEST_CASE("Setiap panel yang disusun layout benar-benar mendapat node dock") {
         ImGuiID assetBrowser;
         ImGuiID viewport;
         ImGuiID console;
+        ImGuiID inspector;
+        ImGuiID worldSettings;
     };
     const auto place = [&](Workspace workspace) {
         BuildLayout(dockspaceId, workspace);
-        return Placement{dockOf(panel_id::kPrefabs), dockOf(panel_id::kAssetBrowser),
-                         dockOf(panel_id::kViewport), dockOf(panel_id::kConsole)};
+        return Placement{dockOf(panel_id::kPrefabs),    dockOf(panel_id::kAssetBrowser),
+                         dockOf(panel_id::kViewport),   dockOf(panel_id::kConsole),
+                         dockOf(panel_id::kInspector),  dockOf(panel_id::kWorldSettings)};
     };
 
     // Diperiksa per workspace dengan pesan literal: argumen pesan doctest yang
@@ -927,6 +930,21 @@ TEST_CASE("Setiap panel yang disusun layout benar-benar mendapat node dock") {
     CHECK_MESSAGE(authoring.prefabs == authoring.assetBrowser,
                   "Prefabs lepas dari Asset Browser: Authoring");
     CHECK_MESSAGE(debug.prefabs == debug.assetBrowser, "Prefabs lepas dari Asset Browser: Debug");
+
+    // World Settings mendarat di node yang sama dengan Inspector, di ketiga
+    // workspace. Keduanya menjawab "apa properti dari yang sedang saya kerjakan"
+    // — yang satu untuk entity terpilih, yang satu untuk levelnya sendiri — jadi
+    // keduanya dicari di tempat yang sama. Ia panel tersendiri dan bukan bagian
+    // Inspector karena World Settings tidak dimiliki entity mana pun:
+    // menempelkannya di keadaan "tidak ada yang terpilih" berarti setelan level
+    // yang hanya bisa dicapai dengan membatalkan seleksi, lalu hilang lagi
+    // begitu ada yang diklik.
+    CHECK_MESSAGE(level.worldSettings == level.inspector,
+                  "World Settings lepas dari Inspector: Level");
+    CHECK_MESSAGE(authoring.worldSettings == authoring.inspector,
+                  "World Settings lepas dari Inspector: Authoring");
+    CHECK_MESSAGE(debug.worldSettings == debug.inspector,
+                  "World Settings lepas dari Inspector: Debug");
 
     // Penjaga agar uji ini tidak lulus karena alasan yang salah: kalau dockOf
     // selalu mengembalikan nilai yang sama, seluruh CHECK di atas lulus palsu.

@@ -110,6 +110,37 @@ private:
     std::vector<Item> items_;
 };
 
+/// Mengubah World Settings sebuah level.
+///
+/// **Tidak memegang GUID, karena tidak ada entity yang memilikinya.** Itu satu
+/// perbedaan dari seluruh perintah lain di berkas ini, dan alasannya bukan
+/// kemalasan: sebuah adegan punya tepat satu tingkat pencahayaan, dan
+/// menaruhnya di sebuah entity berarti "yang mana yang berlaku kalau ada dua"
+/// harus dijawab di setiap tempat yang membacanya (lihat `scene::WorldSettings`).
+///
+/// Nilainya disalin apa adanya, bukan sebagai cuplikan JSON seperti
+/// `SetComponentsCommand`. Yang di sana perlu JSON karena komponen memuat
+/// `std::string` dan `std::vector`; `WorldSettings` seluruhnya angka dan enum,
+/// jadi menyalinnya sudah tepat dan tidak perlu melewati parser.
+///
+/// Merge-nya membuat satu seretan slider Compensation — berapa pun frame yang
+/// dilaluinya — menjadi tepat satu entri undo.
+class SetWorldSettingsCommand final : public ICommand {
+public:
+    SetWorldSettingsCommand(scene::World* world, scene::WorldSettings before,
+                            scene::WorldSettings after);
+
+    void Do() override;
+    void Undo() override;
+    std::string Name() const override { return "World Settings"; }
+    bool MergeWith(const ICommand& next) override;
+
+private:
+    scene::World* world_;
+    scene::WorldSettings before_;
+    scene::WorldSettings after_;
+};
+
 /// Membuat satu entity kosong dengan GUID yang tetap melewati undo–redo.
 ///
 /// **GUID dibangkitkan sekali di konstruktor, bukan di `Do()`.** Redo harus

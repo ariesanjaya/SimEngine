@@ -12,7 +12,9 @@
 #include "Sim/SceneView/Selection.h"
 #include "Sim/Editor/Widgets.h"
 
+#include "Sim/Editor/SceneCommands.h"
 #include "Sim/Scene/World.h"
+#include "Sim/Scene/WorldSettings.h"
 
 #include <imgui.h>
 
@@ -226,13 +228,17 @@ public:
         ImGui::Separator();
         ImGui::Checkbox("Post-process", &context.post.enabled);
         if (context.post.enabled) {
-            const char* modes[] = {"Automatic", "Manual"};
-            int mode = static_cast<int>(context.post.exposureMode);
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
-            if (ImGui::Combo("Exposure", &mode, modes, IM_ARRAYSIZE(modes))) {
-                context.post.exposureMode = static_cast<render::ExposureMode>(mode);
-            }
-            if (context.post.exposureMode == render::ExposureMode::Manual) {
+            // **Mode eksposur dan kompensasinya milik level, bukan panel ini.**
+            // Keduanya maksud pengarang — "adegan ini dinilai pada eksposur
+            // tetap" — dan maksud yang berubah saat berpindah mesin adalah
+            // pengarangan yang rusak. Sakelarnya tetap di sini, dan itu
+            // disengaja: eksposur otomatis justru menghalangi saat menyetel
+            // material dan lampu, jadi memindahkannya ke panel lain berarti
+            // alur kerja yang menjadi lebih jauh tanpa alasan. Dua widget yang
+            // merender satu nilai tidak apa-apa; dua tempat yang **menyimpannya**
+            // yang tidak.
+            DrawWorldExposure(context);
+            if (WorldExposureMode(context) == scene::ExposureModeKind::Manual) {
                 ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
                 ImGui::SliderFloat("EV100", &context.post.manualEv100, -8.0f, 8.0f, "%.1f");
             } else {
@@ -243,10 +249,6 @@ public:
                 ImGui::SliderFloat("Adapt dark", &context.post.adaptationDarkenSeconds, 0.0f,
                                    4.0f, "%.2f s");
             }
-            ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
-            ImGui::SliderFloat("Compensation", &context.post.exposureCompensation, -5.0f, 5.0f,
-                               "%.2f EV");
-
             ImGui::Checkbox("Bloom", &context.post.bloom.enabled);
             if (context.post.bloom.enabled) {
                 ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
@@ -269,7 +271,24 @@ public:
         // setiap GPU. Tanpa sakelar ini, ia berhenti diuji tanpa ada yang
         // menyadarinya.
         ImGui::Separator();
-        ImGui::Checkbox("GI enabled", &context.gi.enabled);
+        // **Tingkat pencahayaan tidak lagi punya sakelar di sini.** Yang
+        // menentukannya adalah `indirect` di World Settings, yaitu di dalam
+        // berkas levelnya — alasan yang sama persis dengan langit dua bagian di
+        // atas: dua tempat menyunting satu hal adalah dua tempat yang suatu saat
+        // tidak sepakat. Yang tersisa di panel ini semuanya alat ukur, dan alat
+        // ukur memang tidak disimpan ke mana pun.
+        {
+            const char* tier = "Baked";
+            if (context.world != nullptr) {
+                switch (context.world->Settings().indirect) {
+                    case scene::IndirectLighting::None: tier = "None"; break;
+                    case scene::IndirectLighting::Baked: tier = "Baked"; break;
+                    case scene::IndirectLighting::RealTime: tier = "RealTime"; break;
+                }
+            }
+            ImGui::Text("Indirect: %s", tier);
+            ImGui::TextDisabled("Edit it in World Settings.");
+        }
 
         const char* backends[] = {"Auto", "Force SDF", "Force ray query"};
         int backend = static_cast<int>(context.gi.backend);
@@ -357,6 +376,45 @@ public:
     }
 
 private:
+    /// Mode eksposur yang tertulis di level. Bawaan saat belum ada dunia, supaya
+    /// panel tetap menggambar sesuatu yang benar alih-alih membaca pointer null.
+    static scene::ExposureModeKind WorldExposureMode(const EditorContext& context) {
+        return context.world != nullptr ? context.world->Settings().exposureMode
+                                        : scene::ExposureModeKind::Automatic;
+    }
+
+    /// Mode eksposur dan kompensasinya, disunting lewat perintah supaya keduanya
+    /// ikut undo/redo seperti setiap suntingan level yang lain.
+    static void DrawWorldExposure(EditorContext& context) {
+        if (context.world == nullptr || context.history == nullptr) {
+            ImGui::TextDisabled("Exposure: no world.");
+            return;
+        }
+        const scene::WorldSettings before = context.world->Settings();
+        scene::WorldSettings edited = before;
+
+        const char* modes[] = {"Automatic", "Manual"};
+        int mode = static_cast<int>(edited.exposureMode);
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+        bool changed = false;
+        if (ImGui::Combo("Exposure", &mode, modes, IM_ARRAYSIZE(modes))) {
+            edited.exposureMode = static_cast<scene::ExposureModeKind>(mode);
+            changed = true;
+        }
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
+        if (ImGui::SliderFloat("Compensation", &edited.exposureCompensation, -5.0f, 5.0f,
+                               "%.2f EV")) {
+            changed = true;
+        }
+        if (changed) {
+            context.history->Execute<SetWorldSettingsCommand>(context.world, before, edited);
+        }
+        // Satu seretan slider adalah satu entri undo; yang berikutnya entri baru.
+        if (ImGui::IsItemDeactivatedAfterEdit()) {
+            context.history->CloseMergeGroup();
+        }
+    }
+
     struct SdfSample {
         float ms = 0.0f;
         uint64_t voxels = 0;

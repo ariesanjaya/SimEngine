@@ -2,6 +2,7 @@
 
 #include "Sim/Core/Uuid.h"
 #include "Sim/Scene/Components.h"
+#include "Sim/Scene/WorldSettings.h"
 
 #include <entt/entity/registry.hpp>
 
@@ -78,6 +79,17 @@ public:
         registry_.remove<T>(ToEntt(entity));
     }
 
+    // --- pengaturan level ---------------------------------------------------
+
+    /// Bagaimana level ini disinari.
+    ///
+    /// **Dipegang World, bukan sebuah entity.** Sebuah adegan punya tepat satu
+    /// tingkat pencahayaan; menaruhnya di entity berarti "yang mana yang berlaku
+    /// kalau ada dua" harus dijawab di setiap tempat yang membacanya. Alasan
+    /// lengkapnya di WorldSettings.h.
+    const WorldSettings& Settings() const { return settings_; }
+    void SetSettings(const WorldSettings& settings) { settings_ = settings; }
+
     Uuid GuidOf(Entity entity) const;
     Entity FindByGuid(Uuid guid) const;
     const std::string& NameOf(Entity entity) const;
@@ -94,6 +106,7 @@ private:
     void DestroyRecursive(Entity entity, std::vector<Entity>& scratch);
 
     entt::registry registry_;
+    WorldSettings settings_;
     std::vector<Entity> roots_;
     std::unordered_map<Uuid, Entity> byGuid_;
     /// Dikembalikan ChildrenOf() untuk entity tanpa anak, supaya pemanggil tidak

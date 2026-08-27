@@ -338,6 +338,13 @@ int main(int argc, char** argv) {
         // untuk orang yang sedang menempatkan benda — dan sebuah player yang
         // menampilkannya sedang menampilkan UI editor kepada pemain.
         desc.showGrid = false;
+        // **Adegan disinari sebagaimana levelnya menyatakannya.** Player bukan
+        // pengecualian: sebuah level yang dirancang dengan GI real-time harus
+        // memakai tingkat itu di tangan pemain, tanpa satu klik pun — dan
+        // langitnya sama, karena tingkat panggang tanpa langit adalah tingkat
+        // yang tidak disinari apa pun.
+        view::ApplySceneSky(world, desc);
+        view::ApplyWorldSettings(world, desc);
         bool hasCamera = false;
         desc.camera = CameraFor(world, hasCamera);
         renderer->Render(desc, sceneView.Scene());

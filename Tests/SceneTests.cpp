@@ -11,6 +11,8 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <iterator>
+#include <fstream>
 #include <string>
 #include <vector>
 
@@ -318,6 +320,144 @@ TEST_CASE("Prefab dibuat ulang dengan GUID baru tapi struktur sama") {
     CHECK(target.ParentOf(first) == host);
 
     std::filesystem::remove(path);
+}
+
+// --- B0: World Settings (docs/PLAN-IBL.md) ----------------------------------
+
+TEST_CASE("B0: World Settings bertahan lewat simpan-muat level") {
+    World world;
+    world.Create("Ground");
+
+    WorldSettings settings;
+    settings.indirect = IndirectLighting::RealTime;
+    settings.environment = EnvironmentSource::File;
+    settings.exposureMode = ExposureModeKind::Manual;
+    settings.exposureCompensation = -1.25f;
+    world.SetSettings(settings);
+
+    const std::string text = SaveLevelToString(world);
+
+    // Blok `"world"` adalah saudara `"entities"`, bukan komponen sebuah entity:
+    // sebuah adegan punya tepat satu tingkat pencahayaan.
+    CHECK(text.find("\"world\"") != std::string::npos);
+    // Enum ditulis sebagai nama. Menyisipkan tingkat baru di tengah daftar tidak
+    // boleh mengubah arti berkas yang sudah ada.
+    CHECK(text.find("\"RealTime\"") != std::string::npos);
+
+    World loaded;
+    REQUIRE(LoadLevelFromString(loaded, text).ok);
+    CHECK(loaded.Settings().indirect == IndirectLighting::RealTime);
+    CHECK(loaded.Settings().environment == EnvironmentSource::File);
+    CHECK(loaded.Settings().exposureMode == ExposureModeKind::Manual);
+    CHECK(loaded.Settings().exposureCompensation == doctest::Approx(-1.25f));
+
+    // Menyimpan ulang harus menghasilkan byte yang sama persis — kriteria yang
+    // sama yang sudah dipegang daftar entity.
+    CHECK(SaveLevelToString(loaded) == text);
+}
+
+TEST_CASE("B0: level tanpa blok world terbuka dengan bawaannya") {
+    // Setiap berkas versi 3 dan sebelumnya. Yang tidak menyebutkan tingkat
+    // pencahayaannya harus terbuka apa adanya, bukan ditolak — level adalah
+    // hasil kerja pengguna, bukan artefak build.
+    const std::string legacy = R"({
+  "schemaVersion": 3,
+  "entities": [
+    {
+      "guid": "11111111-2222-4333-8444-555555555555",
+      "components": { "Name": { "name": "Lama" } }
+    }
+  ]
+})";
+
+    World world;
+    const LevelIoResult result = LoadLevelFromString(world, legacy);
+    REQUIRE(result.ok);
+    CHECK(result.sourceVersion == 3);
+    CHECK(world.Count() == 1);
+
+    const WorldSettings defaults;
+    CHECK(world.Settings().indirect == defaults.indirect);
+    CHECK(world.Settings().environment == defaults.environment);
+    CHECK(world.Settings().exposureMode == defaults.exposureMode);
+}
+
+TEST_CASE("B0: memuat level tidak mewarisi pengaturan level sebelumnya") {
+    // **Cacat yang paling mudah ditulis dan paling sulit dilihat.** Membuka
+    // level lama sesudah level ber-RealTime tidak boleh mewarisi RealTime: tidak
+    // ada satu baris pun di berkasnya yang menyebutkan itu, jadi tidak ada satu
+    // pun cara pengguna bisa tahu dari mana angkanya datang.
+    World world;
+    WorldSettings settings;
+    settings.indirect = IndirectLighting::RealTime;
+    world.SetSettings(settings);
+
+    const std::string legacy =
+        R"({"schemaVersion": 3, "entities": []})";
+    REQUIRE(LoadLevelFromString(world, legacy).ok);
+    CHECK(world.Settings().indirect == WorldSettings{}.indirect);
+}
+
+TEST_CASE("B0: prefab tidak membawa World Settings") {
+    // Keputusan 5 di docs/PLAN-IBL.md. Format `.simprefab` sama persis dengan
+    // level, jadi prefab yang membawa bloknya akan diam-diam mengubah
+    // pencahayaan level tempat ia dijatuhkan — bug yang tidak akan dicari siapa
+    // pun di sana.
+    World source;
+    WorldSettings settings;
+    settings.indirect = IndirectLighting::RealTime;
+    source.SetSettings(settings);
+    const Entity root = source.Create("Turret");
+    source.Create("Barrel", root);
+
+    CHECK(SaveSubtreeToString(source, root).find("\"world\"") == std::string::npos);
+
+    const auto path = std::filesystem::temp_directory_path() / "simengine-b0.simprefab";
+    REQUIRE(SavePrefab(source, root, path));
+
+    std::ifstream stream(path);
+    REQUIRE(stream);
+    const std::string text((std::istreambuf_iterator<char>(stream)),
+                           std::istreambuf_iterator<char>());
+    CHECK(text.find("\"world\"") == std::string::npos);
+
+    // Dan menjatuhkannya tidak menyentuh pengaturan level tujuannya.
+    World target;
+    REQUIRE(IsValid(InstantiatePrefab(target, path)));
+    CHECK(target.Settings().indirect == WorldSettings{}.indirect);
+
+    std::filesystem::remove(path);
+}
+
+TEST_CASE("B0: kombinasi RealTime + File dinyatakan tidak sah") {
+    // Keputusan 1: berkas HDR adalah foto yang sudah berisi mataharinya, jadi ia
+    // tidak bisa menjadi masukan probe tanpa matahari terhitung dua kali. Yang
+    // memberitahu pengguna adalah B6; yang diperiksa di sini aturannya, supaya
+    // editor dan jalur headless memakai syarat yang sama persis.
+    WorldSettings settings;
+    settings.indirect = IndirectLighting::RealTime;
+    settings.environment = EnvironmentSource::File;
+    CHECK(IsUnsupported(settings));
+
+    settings.environment = EnvironmentSource::Sky;
+    CHECK_FALSE(IsUnsupported(settings));
+
+    // Berkas menyinari tingkat panggang, dan itu justru skenario yang dituju.
+    settings.indirect = IndirectLighting::Baked;
+    settings.environment = EnvironmentSource::File;
+    CHECK_FALSE(IsUnsupported(settings));
+}
+
+TEST_CASE("B0: WorldSettings terdaftar sebagai tipe, bukan sebagai komponen") {
+    // Keduanya disengaja. TypeRegistry yang membuat PropertyGrid merendernya dan
+    // serialisasi menulisnya tanpa satu widget pun ditulis tangan;
+    // ComponentRegistry adalah daftar yang menentukan apa yang boleh menempel di
+    // entity dan apa yang ikut ke `.simprefab` — dan World Settings bukan
+    // keduanya.
+    World world;  // konstruktornya yang mendaftarkan tipe inti
+    (void)world;
+    CHECK(reflect::TypeRegistry::Get().Find<WorldSettings>() != nullptr);
+    CHECK(ComponentRegistry::Get().Find("WorldSettings") == nullptr);
 }
 
 TEST_CASE("Project bolak-balik lewat berkas") {

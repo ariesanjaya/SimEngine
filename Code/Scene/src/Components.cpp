@@ -2,6 +2,7 @@
 
 #include "Sim/Core/Log.h"
 #include "Sim/Scene/ComponentRegistry.h"
+#include "Sim/Scene/WorldSettings.h"
 
 #include <mutex>
 
@@ -180,6 +181,35 @@ void RegisterCoreComponents() {
             .Label("HDR Gain")
             .Range(0.0f, 10.0f);
         components.Register<SkyComponent>();
+
+        // **Didaftarkan ke TypeRegistry, dan sengaja tidak ke ComponentRegistry.**
+        // Yang kedua adalah daftar yang menentukan apa yang boleh menempel di
+        // sebuah entity dan apa yang ikut tertulis ke `.simprefab`; World
+        // Settings bukan keduanya. Yang pertama sudah cukup untuk membuat
+        // PropertyGrid merendernya, serialisasi menulisnya, dan alat MCP
+        // melihatnya — tanpa satu widget pun yang ditulis tangan.
+        //
+        // Nama enum di sini adalah **nama yang tertulis di berkas level**, jadi
+        // mengubahnya mengubah arti berkas yang sudah ada. Skema JSON-nya ada di
+        // docs/PLAN-IBL.md.
+        types.Type<WorldSettings>("WorldSettings")
+            .Field<&WorldSettings::indirect>("indirect")
+            .Label("Indirect Lighting")
+            .EnumNames({"None", "Baked", "RealTime"})
+            .Tooltip("None mematikannya; Baked dipanggang sekali dari lingkungan; "
+                     "RealTime menelusuri probe tiap frame — satu-satunya yang punya oklusi")
+            .Field<&WorldSettings::environment>("environment")
+            .Label("Environment")
+            .EnumNames({"Sky", "File"})
+            .Tooltip("Yang menyinari tingkat panggang: langit yang tergambar, "
+                     "atau berkas HDR yang disebut Sky. Tidak berlaku untuk RealTime")
+            .Field<&WorldSettings::exposureMode>("exposureMode")
+            .Label("Exposure")
+            .EnumNames({"Automatic", "Manual"})
+            .Field<&WorldSettings::exposureCompensation>("exposureCompensation")
+            .Label("Compensation")
+            .Range(-5.0f, 5.0f)
+            .Tooltip("Stop; berlaku pada kedua mode. Positif berarti lebih terang");
 
         types.Type<RigidBodyComponent>("RigidBody")
             .Field<&RigidBodyComponent::kind>("kind")

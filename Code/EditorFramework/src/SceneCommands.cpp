@@ -151,6 +151,33 @@ bool SetComponentsCommand::MergeWith(const ICommand& next) {
     return true;
 }
 
+// --- SetWorldSettingsCommand ------------------------------------------------
+
+SetWorldSettingsCommand::SetWorldSettingsCommand(scene::World* world,
+                                                 scene::WorldSettings before,
+                                                 scene::WorldSettings after)
+    : world_(world), before_(before), after_(after) {}
+
+void SetWorldSettingsCommand::Do() {
+    world_->SetSettings(after_);
+}
+
+void SetWorldSettingsCommand::Undo() {
+    world_->SetSettings(before_);
+}
+
+bool SetWorldSettingsCommand::MergeWith(const ICommand& next) {
+    const auto* other = dynamic_cast<const SetWorldSettingsCommand*>(&next);
+    if (other == nullptr || other->world_ != world_) {
+        return false;
+    }
+    // `before_` yang dipertahankan adalah milik perintah pertama: undo harus
+    // mengembalikan keadaan sebelum seretan dimulai, bukan sebelum frame
+    // terakhirnya.
+    after_ = other->after_;
+    return true;
+}
+
 AddComponentCommand::AddComponentCommand(scene::World* world, Uuid guid,
                                          const scene::ComponentOps* ops)
     : world_(world), guid_(guid), ops_(ops) {}

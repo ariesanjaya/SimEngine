@@ -125,6 +125,21 @@ bool ApplySceneSky(const scene::World& world, render::ViewportDesc& desc) {
     return true;
 }
 
+void ApplyWorldSettings(const scene::World& world, render::ViewportDesc& desc) {
+    const scene::WorldSettings& settings = world.Settings();
+
+    // **Cerminan, bukan kebenaran kedua.** `desc.gi.enabled` diturunkan di sini
+    // dan tidak disunting di tempat lain — dua tempat menyunting satu hal adalah
+    // dua tempat yang suatu saat tidak sepakat, dan panel langit sudah memilih
+    // ini dengan benar sekali.
+    desc.gi.enabled = settings.indirect == scene::IndirectLighting::RealTime;
+
+    desc.post.exposureMode = settings.exposureMode == scene::ExposureModeKind::Manual
+                                 ? render::ExposureMode::Manual
+                                 : render::ExposureMode::Automatic;
+    desc.post.exposureCompensation = settings.exposureCompensation;
+}
+
 std::string ResolveHdriPath(std::string_view hdriPath, std::string_view builtinDir) {
     if (hdriPath.empty() || builtinDir.empty()) {
         return std::string(hdriPath);
