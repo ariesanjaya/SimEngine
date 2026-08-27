@@ -6,18 +6,6 @@
 
 namespace sim::render {
 
-struct IblBakeSettings {
-    /// Sisi muka cubemap prefilter pada mip 0.
-    uint32_t cubeSize = 64;
-    /// Banyaknya mip. Mip terakhir mewakili kekasaran 1.
-    uint32_t mipCount = 5;
-    uint32_t dfgSize = 64;
-    /// Sampel GGX per texel prefilter, di luar mip 0 yang cuma satu pengambilan.
-    uint32_t prefilterSamples = 64;
-    uint32_t dfgSamples = 256;
-    uint32_t irradianceSamples = 8192;
-};
-
 /// Hasil pembakaran IBL, siap diikat ke descriptor.
 struct BakedIbl {
     Sh9 irradiance;
@@ -27,6 +15,9 @@ struct BakedIbl {
     bool IsValid() const { return prefiltered.IsValid() && dfg.IsValid(); }
     void Destroy();
 };
+
+/// Mengunggah hasil `BakeIblCpu` beserta LUT DFG-nya. **Main thread.**
+bool UploadIbl(rhi::Device& device, const IblBakeCpu& baked, const DfgLut& dfg, BakedIbl& out);
 
 /// Membakar IBL sebuah lingkungan di CPU lalu mengunggahnya.
 ///

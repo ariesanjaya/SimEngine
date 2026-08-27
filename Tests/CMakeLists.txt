@@ -401,5 +401,10 @@ if(TARGET Sim::Reference)
         SOURCES
             OpenPbrCpuTests.cpp
         DEPS
-            Sim::Reference)
+            Sim::Reference
+            # Uji tungku menuntut LUT DFG yang **sungguhan**, bukan angka yang
+            # ditulis di ujinya: yang diperiksa adalah bahwa integral DFG mesin
+            # ini dan model shading mesin ini bersama-sama mengawetkan energi.
+            # Dua nilai karangan hanya menguji aritmatika penjumlahan.
+            Sim::Render)
 endif()

@@ -315,6 +315,86 @@ Vec3 CubeFaceDirection(int face, float u, float v) {
     }
 }
 
+/// Arah dunia → muka cubemap beserta uv-nya. **Kebalikan tepat
+/// `CubeFaceDirection`**, dan keduanya diuji saling membalik: pemetaan yang
+/// meleset tidak menghasilkan galat apa pun, hanya lingkungan yang isinya benar
+/// di muka yang salah.
+void DirectionToCubeFace(const Vec3& direction, int& face, float& u, float& v) {
+    const Vec3 d = glm::normalize(direction);
+    const Vec3 a(std::abs(d.x), std::abs(d.y), std::abs(d.z));
+
+    float s = 0.0f;
+    float t = 0.0f;
+    float major = 1.0f;
+    if (a.x >= a.y && a.x >= a.z) {
+        major = a.x;
+        if (d.x > 0.0f) {
+            face = 0;
+            s = -d.z;
+            t = d.y;
+        } else {
+            face = 1;
+            s = d.z;
+            t = d.y;
+        }
+    } else if (a.y >= a.z) {
+        major = a.y;
+        if (d.y > 0.0f) {
+            face = 2;
+            s = d.x;
+            t = -d.z;
+        } else {
+            face = 3;
+            s = d.x;
+            t = d.z;
+        }
+    } else {
+        major = a.z;
+        if (d.z > 0.0f) {
+            face = 4;
+            s = d.x;
+            t = d.y;
+        } else {
+            face = 5;
+            s = -d.x;
+            t = d.y;
+        }
+    }
+    major = std::max(major, 1e-9f);
+    u = (s / major + 1.0f) * 0.5f;
+    v = (1.0f - t / major) * 0.5f;
+}
+
+Vec3 CubemapEnvironment::Sample(const Vec3& direction) const {
+    if (!IsValid()) {
+        return Vec3(0.0f);
+    }
+    int face = 0;
+    float u = 0.0f;
+    float v = 0.0f;
+    DirectionToCubeFace(direction, face, u, v);
+
+    const auto extent = static_cast<float>(size);
+    const float fx = std::clamp(u * extent - 0.5f, 0.0f, extent - 1.0f);
+    const float fy = std::clamp(v * extent - 0.5f, 0.0f, extent - 1.0f);
+    const auto x0 = static_cast<uint32_t>(fx);
+    const auto y0 = static_cast<uint32_t>(fy);
+    const uint32_t x1 = std::min(x0 + 1, size - 1);
+    const uint32_t y1 = std::min(y0 + 1, size - 1);
+    const float tx = fx - static_cast<float>(x0);
+    const float ty = fy - static_cast<float>(y0);
+
+    const std::size_t faceBase =
+        static_cast<std::size_t>(face) * size * size * 4;
+    const auto at = [&](uint32_t x, uint32_t y) {
+        const std::size_t index = faceBase + (static_cast<std::size_t>(y) * size + x) * 4;
+        return Vec3(texels[index], texels[index + 1], texels[index + 2]);
+    };
+    const Vec3 top = glm::mix(at(x0, y0), at(x1, y0), tx);
+    const Vec3 bottom = glm::mix(at(x0, y1), at(x1, y1), tx);
+    return glm::mix(top, bottom, ty);
+}
+
 Vec2 Hammersley(uint32_t index, uint32_t count) {
     const float denominator = static_cast<float>(std::max(count, 1u));
     return {static_cast<float>(index) / denominator, RadicalInverse(index)};

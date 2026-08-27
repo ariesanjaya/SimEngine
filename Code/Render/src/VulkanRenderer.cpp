@@ -24,6 +24,7 @@
 #include "Sim/RHI/RenderTarget.h"
 #include "PresentSource.h"
 #include "Sim/RHI/TextureRegistry.h"
+#include "IblBaker.h"
 #include "Sim/Render/Ibl.h"
 #include "Sim/Render/FrameGraph.h"
 #include "Sim/Render/DrawRun.h"
@@ -707,6 +708,23 @@ public:
             probes_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(), kNormalFormat);
             probes_.AdoptLayouts();
         }
+        // Sebelum descriptor ditulis: `EnvironmentDescriptorImages` memakainya
+        // sebagai pengganti, dan sebuah view kosong di sana adalah pelanggaran
+        // pada setiap draw sejak frame pertama.
+        {
+            const std::array<float, 4> black{0.0f, 0.0f, 0.0f, 1.0f};
+            std::array<float, 6 * 4> faces{};
+            for (int face = 0; face < kCubeFaceCount; ++face) {
+                std::copy(black.begin(), black.end(), faces.begin() + face * 4);
+            }
+            const auto* bytes = reinterpret_cast<const std::byte*>(faces.data());
+            if (!fallbackCube_.Create(device_, 1, 1, VK_FORMAT_R32G32B32A32_SFLOAT, 16,
+                                      {bytes, faces.size() * sizeof(float)})) {
+                SIM_ERROR("Render", "cannot create the environment fallback cubemap");
+                return false;
+            }
+        }
+
         if (!WriteShadowDescriptors()) {
             return false;
         }
@@ -813,6 +831,10 @@ public:
         // angka terakhir yang benar — tabel yang berkedip kosong setiap kali
         // panel diubah ukurannya tidak bisa dibaca siapa pun.
         cpuTimings_.clear();
+        // **Di awal frame, sebelum satu pun perintah direkam.** Mengunggah peta
+        // lingkungan membuat tekstur dan menunggu device diam; melakukannya di
+        // tengah perekaman berarti menulisi descriptor set yang sedang dipakai.
+        AdoptSkySpecular();
         // **Dinolkan sebelum perekaman, bukan bersama angka yang lain.** Sisa
         // isi `stats_` diisi di ujung `Render`, sesudah frame graph selesai
         // merekam; kedua hitungan ini justru dijumlahkan *selama* perekaman itu,
@@ -4152,7 +4174,7 @@ private:
         samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
         SIM_VK_CHECK(vkCreateSampler(device_.Handle(), &samplerInfo, nullptr, &shadow_.sampler));
 
-        const std::array<VkDescriptorSetLayoutBinding, 24> bindings{
+        const std::array<VkDescriptorSetLayoutBinding, 26> bindings{
             VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
@@ -4202,6 +4224,13 @@ private:
             VkDescriptorSetLayoutBinding{23, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
                                          SdfClipmapResource::kMaxGrids,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            // Peta prefilter lingkungan dan LUT DFG-nya (B2).
+            VkDescriptorSetLayoutBinding{kPrefilteredBinding,
+                                         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{kDfgBinding,
+                                         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
         };
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -4214,7 +4243,7 @@ private:
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                  static_cast<uint32_t>(slots_.size())},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                 static_cast<uint32_t>(slots_.size()) * 16},
+                                 static_cast<uint32_t>(slots_.size()) * 18},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                  static_cast<uint32_t>(slots_.size()) * 6},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
@@ -4784,6 +4813,9 @@ private:
                                                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}
                            : hizImage;
         const std::array<VkDescriptorImageInfo, 9> probeImages = ProbeDescriptorImages();
+        VkDescriptorImageInfo prefilteredImage{};
+        VkDescriptorImageInfo dfgImage{};
+        EnvironmentDescriptorImages(prefilteredImage, dfgImage);
         // Cache radiansi dipakai bersama seluruh slot: ia riwayat lintas frame,
         // bukan data per frame. Kalau gagal dibuat, descriptor-nya menunjuk
         // buffer lampu — descriptor yang dibiarkan kosong adalah pelanggaran di
@@ -4881,6 +4913,20 @@ private:
             skyView.dstBinding = 21;
             skyView.pImageInfo = &skyImage;
             writes.push_back(skyView);
+
+            // Lingkungan panggang (B2). Sah sejak awal walaupun belum ada
+            // panggangan yang selesai: penggantinya cubemap kosong dan piramida
+            // HiZ, dan yang menjaga keduanya tidak pernah dipakai sebagai
+            // pantulan adalah `prefilteredMips` yang nol.
+            VkWriteDescriptorSet prefiltered = sampled;
+            prefiltered.dstBinding = kPrefilteredBinding;
+            prefiltered.pImageInfo = &prefilteredImage;
+            writes.push_back(prefiltered);
+
+            VkWriteDescriptorSet dfg = sampled;
+            dfg.dstBinding = kDfgBinding;
+            dfg.pImageInfo = &dfgImage;
+            writes.push_back(dfg);
         }
         vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
@@ -5080,6 +5126,63 @@ private:
                 write.pImageInfo = &probeImages[offset];
                 writes.push_back(write);
             }
+        }
+        vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
+                               writes.data(), 0, nullptr);
+    }
+
+    /// Peta prefilter dan LUT DFG, atau penggantinya kalau belum ada
+    /// panggangan yang selesai.
+    ///
+    /// **Penggantinya harus bertipe benar, bukan sekadar bukan-null.** Sebuah
+    /// `SamplerCube` yang dipasangi view 2D adalah pelanggaran walaupun tidak
+    /// ada satu pun shader yang membacanya — aturan yang sama yang sudah dipegang
+    /// LUT sky-view di atas. Karena itu cubemap memakai cubemap: peta prefilter
+    /// yang belum sah tetap sebuah `TextureCube`, hanya kosong.
+    void EnvironmentDescriptorImages(VkDescriptorImageInfo& prefiltered,
+                                     VkDescriptorImageInfo& dfg) const {
+        const bool ready = skyIbl_.IsValid();
+        prefiltered = {ready ? skyIbl_.prefiltered.Sampler() : fallbackCube_.Sampler(),
+                       ready ? skyIbl_.prefiltered.View() : fallbackCube_.View(),
+                       VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        // **Pasangan sampler-view penggantinya diambil utuh, bukan dirakit.**
+        // Versi pertama memasangkan `shadow_.sampler` dengan view HiZ — dan
+        // sampler itu `compareEnable = VK_TRUE`, dibuat untuk
+        // `Sampler2DArrayShadow`. Sebuah `Sampler2D` biasa yang dipasangi
+        // sampler pembanding adalah pelanggaran walaupun tidak ada satu pun
+        // shader yang membacanya, dengan alasan yang sama yang membuat LUT
+        // sky-view di atas tidak boleh memakai peta bayangan sebagai pengganti.
+        dfg = ready ? VkDescriptorImageInfo{skyIbl_.dfg.Sampler(), skyIbl_.dfg.View(),
+                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}
+                    : HizDescriptorImage();
+    }
+
+    /// Menulis ulang dua binding lingkungan pada set yang **sudah ada**.
+    ///
+    /// Bukan `WriteShadowDescriptors()`: yang itu mengalokasikan set baru dari
+    /// pool, dan pool ini dibuat tanpa `FREE_DESCRIPTOR_SET` — memanggilnya tiap
+    /// kali lingkungan selesai dipanggang akan menghabiskannya diam-diam.
+    void UpdateEnvironmentDescriptors() {
+        VkDescriptorImageInfo prefiltered{};
+        VkDescriptorImageInfo dfg{};
+        EnvironmentDescriptorImages(prefiltered, dfg);
+
+        std::vector<VkWriteDescriptorSet> writes;
+        writes.reserve(slots_.size() * 2);
+        for (const InstanceSlot& slot : slots_) {
+            VkWriteDescriptorSet write{};
+            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet = slot.shadowSet;
+            write.descriptorCount = 1;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+
+            write.dstBinding = kPrefilteredBinding;
+            write.pImageInfo = &prefiltered;
+            writes.push_back(write);
+
+            write.dstBinding = kDfgBinding;
+            write.pImageInfo = &dfg;
+            writes.push_back(write);
         }
         vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
@@ -5434,6 +5537,13 @@ private:
         Sh9 irradiance;
     };
 
+    /// Kotak hasil panggangan spekular. Aturan yang sama dengan SH: tugasnya
+    /// tidak menangkap `this`.
+    struct SkySpecularResult {
+        std::atomic<bool> ready{false};
+        IblBakeCpu baked;
+    };
+
     /// Memanggang ulang iradiansi langit bila langitnya berubah.
     ///
     /// **SH saja; prefilter menyusul lebih malas** (B2). Yang membedakan
@@ -5461,33 +5571,139 @@ private:
             // jujur — bukan sebuah konstanta yang berpura-pura menjadi langit.
             skyIrradiance_ = Sh9{};
             bakedSkyKey_ = key;
+            bakedSpecularKey_ = key;
+            // **Ditandai, bukan dibongkar di sini.** Fungsi ini berjalan di
+            // tengah perekaman frame: menghancurkan tekstur yang masih dipakai
+            // frame yang belum selesai adalah kerusakan memori, dan descriptor
+            // yang masih menunjuknya adalah pelanggaran pada setiap draw
+            // sesudahnya. Yang membongkarnya `AdoptSkySpecular` di awal frame
+            // berikutnya, sesudah device diam dan sebelum satu perintah pun
+            // direkam.
+            releaseSkyIbl_ = true;
             return;
         }
-        if (skyBake_ != nullptr || bakedSkyKey_.Matches(key)) {
-            return;
-        }
-        bakedSkyKey_ = key;
 
         AtmosphereSky sky;
         sky.sunDirection = key.sunDirection;
         sky.cameraHeightKm = key.cameraHeightKm;
         sky.intensity = key.intensity;
 
-        auto result = std::make_shared<SkyBakeResult>();
-        skyBake_ = result;
-        // Salinan nilai, bukan tangkapan `this`. Lihat catatan di SkyBakeResult.
-        auto bake = [sky = std::move(sky), result]() mutable {
+        // **Keduanya dinilai sendiri-sendiri.** SH yang sudah mutakhir tidak
+        // boleh menghalangi peta prefilter yang tertinggal: ambang keduanya
+        // berbeda seratus kali lipat, jadi ada keadaan tunak di mana yang satu
+        // sudah selesai dan yang lain masih harus berangkat.
+        if (skyBake_ == nullptr && !bakedSkyKey_.Matches(key)) {
+            bakedSkyKey_ = key;
+
+            auto result = std::make_shared<SkyBakeResult>();
+            skyBake_ = result;
+            // Salinan nilai, bukan tangkapan `this`. Lihat catatan di
+            // SkyBakeResult.
+            // **Tanpa `Prepare()`, dan itu diukur.** Tabel transmitansi membeli
+            // kecepatan per cuplikan dengan ~460 ms di muka, jadi ia baru
+            // menguntungkan di atas titik impas beberapa ribu cuplikan. Proyeksi
+            // SH ini 1024 cuplikan — di bawahnya: 418 ms tanpa tabel, 779 ms
+            // dengan. Panggangan prefilter di sebelah, yang 24.576 cuplikan,
+            // berada jauh di atasnya dan memakainya.
+            auto bake = [sky, result]() mutable {
+                result->irradiance = ProjectIrradiance(sky, kSkyIrradianceSamples);
+                result->ready.store(true, std::memory_order_release);
+            };
+            if (tasks_ != nullptr) {
+                tasks_->Submit(std::move(bake));
+            } else {
+                // Tanpa kolam, di main thread. Jalur uji dan alat baris
+                // perintah, yang memang tidak punya frame untuk ditahan.
+                bake();
+            }
+        }
+
+        UpdateSkySpecular(key, sky);
+    }
+
+    /// Memanggang ulang peta prefilter, **jauh lebih malas daripada SH**.
+    ///
+    /// Selisih biayanya yang memaksa: SH adalah 1024 cuplikan, 64 ms; peta
+    /// prefilter adalah 24576 cuplikan lingkungan untuk mip 0 ditambah 8160
+    /// texel penyaringan di atasnya, 2,4 detik (Debug). Memanggangnya pada
+    /// ambang yang sama dengan SH berarti sebuah antrean panggangan setiap kali
+    /// seseorang menggeser Time-of-Day.
+    ///
+    /// Ambangnya kira-kira lima derajat. Yang bergeser di bawah itu adalah
+    /// pantulan yang mataharinya berada beberapa piksel dari tempatnya di peta
+    /// 64² — dan peta itu sendiri sudah menyaring puluhan arah per texel.
+    void UpdateSkySpecular(const SkyBakeKey& key, AtmosphereSky sky) {
+        if (skySpecularBake_ != nullptr ||
+            (bakedSpecularKey_.atmosphere == key.atmosphere &&
+             bakedSpecularKey_.intensity == key.intensity &&
+             bakedSpecularKey_.cameraHeightKm == key.cameraHeightKm &&
+             glm::dot(bakedSpecularKey_.sunDirection, key.sunDirection) > 0.996f)) {
+            return;
+        }
+        bakedSpecularKey_ = key;
+
+        IblBakeSettings settings;
+        // SH sudah datang dari panggangan yang lebih sering; menghitungnya lagi
+        // di sini hanya menghasilkan angka yang sama, beberapa ratus milidetik
+        // kemudian.
+        settings.irradianceSamples = 0;
+
+        auto result = std::make_shared<SkySpecularResult>();
+        skySpecularBake_ = result;
+        auto bake = [sky, settings, result]() mutable {
             sky.Prepare();
-            result->irradiance = ProjectIrradiance(sky, kSkyIrradianceSamples);
+            result->baked = BakeIblCpu(sky, settings);
             result->ready.store(true, std::memory_order_release);
         };
         if (tasks_ != nullptr) {
             tasks_->Submit(std::move(bake));
         } else {
-            // Tanpa kolam, di main thread. Jalur uji dan alat baris perintah,
-            // yang memang tidak punya frame untuk ditahan.
             bake();
         }
+    }
+
+    /// Mengunggah peta yang sudah selesai dipanggang. **Main thread**, dan
+    /// karena itu terpisah dari tugasnya: membuat tekstur menyentuh device.
+    void AdoptSkySpecular() {
+        // Pembongkaran yang ditunda `UpdateSkyIrradiance` dikerjakan di sini,
+        // di awal frame dan sesudah device diam.
+        if (releaseSkyIbl_) {
+            releaseSkyIbl_ = false;
+            if (skyIbl_.IsValid()) {
+                device_.WaitIdle();
+                skyIbl_.Destroy();
+                UpdateEnvironmentDescriptors();
+            }
+        }
+        if (skySpecularBake_ == nullptr ||
+            !skySpecularBake_->ready.load(std::memory_order_acquire)) {
+            return;
+        }
+        const IblBakeCpu baked = std::move(skySpecularBake_->baked);
+        skySpecularBake_.reset();
+        if (!baked.IsValid()) {
+            return;
+        }
+
+        // LUT DFG dipanggang sekali seumur proses: ia tidak bergantung pada
+        // lingkungan sama sekali, hanya pada BRDF-nya.
+        if (dfgLut_.size == 0) {
+            dfgLut_ = BakeDfgLut();
+        }
+
+        // **Device ditunggu diam lebih dulu.** Membuang tekstur yang masih
+        // dipakai frame yang belum selesai adalah kerusakan memori, bukan pesan
+        // galat — dan peta lama memang harus dibuang sebelum yang baru dibuat,
+        // karena `rhi::TextureCube` tidak bisa dipindahkan.
+        device_.WaitIdle();
+        skyIbl_.Destroy();
+        if (!UploadIbl(device_, baked, dfgLut_, skyIbl_)) {
+            // `UploadIbl` sudah membereskan miliknya sendiri. Yang tersisa
+            // descriptor yang menunjuk pengganti, dan `prefilteredMips` nol yang
+            // menjaganya tidak pernah dipakai sebagai pantulan.
+            SIM_WARN("Render", "environment upload failed; reflections fall back to none");
+        }
+        UpdateEnvironmentDescriptors();
     }
 
     void UpdateShadowUniforms(const ViewportDesc& desc, const Mat4& viewProj,
@@ -5598,9 +5814,17 @@ private:
         // satu waktu adalah dua waktu yang bergeser satu terhadap yang lain, dan
         // material yang beranimasi bersama langit akan diam-diam berjalan
         // sendiri-sendiri.
+        // w: banyaknya mip peta prefilter, **nol berarti belum ada peta**. Di
+        // slot ini karena ia satu-satunya yang tersisa bebas di blok ini, dan
+        // sebuah Vec4 baru untuk satu float berarti dua belas byte padding.
+        // Nol yang menjaga descriptor pengganti tidak pernah terbaca sebagai
+        // pantulan — bukan sebuah cabang di dalam shader.
         uniforms.viewParams = Vec4(desc.mode == DrawMode::Unlit ? 1.0f : 0.0f,
                                    desc.mode == DrawMode::Clay ? 1.0f : 0.0f,
-                                   sceneTimeSeconds_, 0.0f);
+                                   sceneTimeSeconds_,
+                                   skyIbl_.IsValid()
+                                       ? static_cast<float>(skyIbl_.prefiltered.MipCount())
+                                       : 0.0f);
 
         UpdateSkyIrradiance(desc);
         for (std::size_t i = 0; i < uniforms.skyIrradianceSh.size(); ++i) {
@@ -5705,6 +5929,8 @@ private:
             slot.skinBuffer.Destroy();
             slot.instanceBuffer.Destroy();
         }
+        skyIbl_.Destroy();
+        fallbackCube_.Destroy();
         dummySkin_.Destroy();
         // **Ditambahkan di G4, dan ia menutup kebocoran yang sudah ada
         // sebelumnya.** Kaskade SDF tidak pernah ikut dibongkar di sini; yang
@@ -5933,6 +6159,27 @@ private:
     /// Langit yang menghasilkan `skyIrradiance_`, atau yang sedang dipanggang.
     SkyBakeKey bakedSkyKey_;
     std::shared_ptr<SkyBakeResult> skyBake_;
+
+    /// Langit yang menghasilkan `skyIbl_`, pada ambang yang jauh lebih kasar.
+    SkyBakeKey bakedSpecularKey_;
+    std::shared_ptr<SkySpecularResult> skySpecularBake_;
+    /// Peta lingkungan harus dilepas di awal frame berikutnya. Lihat catatan di
+    /// `UpdateSkyIrradiance`.
+    bool releaseSkyIbl_ = false;
+    /// Peta prefilter dan LUT DFG yang sedang terikat. Tidak sah berarti
+    /// pantulan lingkungan belum ada — dan descriptor-nya memakai pengganti,
+    /// bukan dibiarkan kosong.
+    BakedIbl skyIbl_;
+    /// LUT DFG sisi CPU, dipanggang sekali. Disimpan supaya panggangan
+    /// lingkungan berikutnya tidak mengulang 914 ms untuk byte yang sama.
+    DfgLut dfgLut_;
+    /// Cubemap 1x1 hitam, pengganti saat belum ada peta prefilter.
+    ///
+    /// **Cubemap, bukan tekstur 2D mana pun yang kebetulan ada.** Sebuah
+    /// `SamplerCube` yang dipasangi view 2D adalah pelanggaran walaupun tidak
+    /// ada satu pun shader yang membacanya — aturan yang sama yang membuat LUT
+    /// sky-view tidak boleh memakai peta bayangan sebagai pengganti.
+    rhi::TextureCube fallbackCube_;
     Vec3 sunRadiance_{0.75f};
     bool sunCastsShadows_ = true;
     ClusterGridSettings clusterSettings_;
@@ -5981,6 +6228,11 @@ private:
     /// lawan 1026 ms (Debug). Yang dibeli dengan enam belas kali kerja itu digit
     /// yang tidak pernah sampai ke sebuah piksel 8-bit.
     static constexpr uint32_t kSkyIrradianceSamples = 1024;
+
+    /// Binding lingkungan panggang di set 0. Angkanya harus sama dengan yang
+    /// tertulis di `material_forward` — dua tempat, satu keputusan.
+    static constexpr uint32_t kPrefilteredBinding = 24;
+    static constexpr uint32_t kDfgBinding = 25;
 
     static constexpr float kBounceAlbedo = 0.5f;
     /// Anggaran langkah lapis screen-space. Rencana GI menyebut 16, dan angka

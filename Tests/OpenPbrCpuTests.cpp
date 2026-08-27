@@ -15,6 +15,7 @@
 #include <doctest/doctest.h>
 
 #include "Sim/Reference/Shading.h"
+#include "Sim/Render/Ibl.h"
 
 #include <cmath>
 #include <initializer_list>
@@ -95,6 +96,102 @@ TEST_CASE("Model shading berjalan di CPU dari sumber yang sama dengan GPU") {
     // Permukaan abu-abu netral menjawab abu-abu netral.
     CHECK(r.direct.x == doctest::Approx(r.direct.y));
     CHECK(r.direct.y == doctest::Approx(r.direct.z));
+}
+
+namespace {
+
+/// Permukaan albedo satu di bawah lingkungan seragam berradiansi satu, dengan
+/// suku DFG dari LUT mesin ini sendiri.
+///
+/// **LUT yang sungguhan, bukan angka yang ditulis di uji.** Yang diperiksa uji
+/// tungku adalah bahwa integral DFG mesin ini dan model shading mesin ini
+/// bersama-sama mengawetkan energi; dua nilai karangan hanya menguji aritmatika
+/// penjumlahan.
+Vec3 FurnaceRadiance(const render::DfgLut& lut, float roughness, float metalness) {
+    Harness harness;
+    harness.surface.baseColor = F3(1.0f);
+    harness.surface.baseWeight = 1.0f;
+    harness.surface.baseMetalness = metalness;
+    harness.surface.specularRoughness = roughness;
+    harness.surface.specularColor = F3(1.0f);
+    harness.surface.specularWeight = 1.0f;
+
+    // Radiansi seragam 1 memberi iradiansi pi, dan prafilter 1 di setiap arah
+    // dan setiap kekasaran — lingkungan yang sama di mana pun tetap sama
+    // sesudah disaring.
+    harness.environment.irradiance = F3(sim::kPi);
+    harness.environment.prefilteredBase = F3(1.0f);
+    harness.environment.prefilteredCoat = F3(1.0f);
+
+    const float nv = std::max(glm::dot(harness.frame.normal, harness.frame.view), 1e-5f);
+    const render::DfgTerms dfg = lut.Sample(nv, roughness);
+    harness.environment.dfgScale = dfg.scale;
+    harness.environment.dfgBias = dfg.bias;
+
+    return harness.Run().ambient;
+}
+
+}  // namespace
+
+TEST_CASE("B2: uji tungku lulus di jalur panggang") {
+    // **Kriteria terima B2, dan kriteria yang sudah bernama sejak M4 GI**
+    // (`TraceBackend.h`): langit seragam berradiansi 1, albedo 1, tanpa
+    // matahari — setiap permukaan berradiansi tepat 1. Di bawah satu berarti
+    // transportnya bocor; di atas satu berarti ia menggandakan.
+    //
+    // **Yang menjalankannya di sini jalur panggang, bukan probe.** Yang diuji
+    // `evaluateOpenPBR_IBL` dengan iradiansi, prafilter, dan DFG persis seperti
+    // yang diterimanya dari lingkungan panggang — dan sebelum B2 angka ini nol
+    // untuk logam, karena prafilter dan DFG yang diterimanya memang nol.
+    //
+    // **Dua ujung metalness, bukan rentangnya.** Keduanya yang punya arti
+    // fisik: sebuah permukaan adalah dielektrik atau logam. Yang di antaranya
+    // adalah campuran yang tidak mengawetkan energi, dan angkanya diukur di uji
+    // berikutnya alih-alih dituntut di sini.
+    const render::DfgLut lut = render::BakeDfgLut(64, 1024);
+    REQUIRE(lut.size == 64);
+
+    for (const float roughness : {0.05f, 0.2f, 0.4f, 0.6f, 0.8f, 1.0f}) {
+        for (const float metalness : {0.0f, 1.0f}) {
+            const Vec3 ambient = FurnaceRadiance(lut, roughness, metalness);
+            INFO("roughness ", roughness, " metalness ", metalness);
+            // Ketat: yang diuji identitas, bukan kemiripan. Kekasaran 1,0 ikut
+            // di sini, dan justru di sanalah split-sum satu-pantulan sendirian
+            // kehilangan 63,9% — yang mengembalikannya kompensasi multiscatter.
+            CHECK(ambient.x == doctest::Approx(1.0f).epsilon(0.005));
+            CHECK(ambient.y == doctest::Approx(1.0f).epsilon(0.005));
+            CHECK(ambient.z == doctest::Approx(1.0f).epsilon(0.005));
+        }
+    }
+}
+
+TEST_CASE("Metalness di antara dua ujungnya kehilangan energi, dan ini angkanya") {
+    // **Diukur, bukan didiamkan, dan bukan pula dituntut hilang.** Alur kerja
+    // metalness menginterpolasi F0 — bukan kedua BSDF-nya — dan interpolasi itu
+    // memang tidak mengawetkan energi: spekularnya sudah memakai F0 campuran
+    // yang tinggi, sementara difusnya masih diskalakan `1 - metalness`. Yang
+    // tersisa jatuh di antara keduanya.
+    //
+    // Menuntutnya berjumlah satu berarti menuntut model ini menjadi model lain;
+    // membiarkannya tanpa angka berarti tidak ada yang tahu seberapa besar bila
+    // suatu saat seseorang memutuskan menginterpolasi lobe-nya alih-alih F0.
+    // Rinciannya bersama lobe OpenPBR yang belum ada di docs/RENDER-OPENPBR.md.
+    const render::DfgLut lut = render::BakeDfgLut(64, 1024);
+
+    // Kekasaran naik, kebocoran ikut naik: makin kasar permukaannya, makin
+    // besar bagian energi yang seharusnya dibawa difus.
+    const float smooth = FurnaceRadiance(lut, 0.05f, 0.5f).x;
+    const float rough = FurnaceRadiance(lut, 1.0f, 0.5f).x;
+
+    CHECK(smooth == doctest::Approx(0.76f).epsilon(0.02));
+    CHECK(rough == doctest::Approx(0.63f).epsilon(0.02));
+    CHECK(rough < smooth);
+
+    // Dan tidak pernah melebihi satu: yang bocor boleh, yang menggandakan
+    // tidak.
+    for (const float roughness : {0.05f, 0.4f, 1.0f}) {
+        CHECK(FurnaceRadiance(lut, roughness, 0.5f).x <= 1.0f);
+    }
 }
 
 TEST_CASE("F82: specularColor mewarnai tepi menyerempet logam, tepat sebagai pecahan") {

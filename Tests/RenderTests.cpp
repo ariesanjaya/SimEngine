@@ -1707,6 +1707,177 @@ TEST_CASE("B1: tabel transmitansi tidak mengubah jawaban, hanya mempercepatnya")
     }
 }
 
+// --- B2: spekular panggang -------------------------------------------------
+
+TEST_CASE("B2: arah cubemap dan muka-uv saling membalik") {
+    // Aturan yang sama yang sudah dipegang pasangan equirect: pemetaan yang
+    // meleset tidak menghasilkan galat apa pun, hanya lingkungan yang isinya
+    // benar di muka yang salah — terlihat sebagai pantulan yang "arahnya aneh",
+    // bukan sebagai kesalahan.
+    for (int face = 0; face < kCubeFaceCount; ++face) {
+        for (const float u : {0.05f, 0.5f, 0.95f}) {
+            for (const float v : {0.05f, 0.5f, 0.95f}) {
+                const Vec3 direction = CubeFaceDirection(face, u, v);
+
+                int backFace = -1;
+                float backU = 0.0f;
+                float backV = 0.0f;
+                render::DirectionToCubeFace(direction, backFace, backU, backV);
+
+                INFO("face ", face, " uv (", u, ",", v, ")");
+                CHECK(backFace == face);
+                CHECK(backU == doctest::Approx(u).epsilon(0.002));
+                CHECK(backV == doctest::Approx(v).epsilon(0.002));
+            }
+        }
+    }
+}
+
+TEST_CASE("B2: cubemap mengembalikan lingkungan yang menuliskannya") {
+    // Yang diperiksa bukan penyaringannya melainkan bahwa membaca kembali sebuah
+    // cubemap memberi lingkungan yang sama yang mengisinya. Kalau ini meleset,
+    // setiap mip prefilter di atasnya menyaring lingkungan yang salah.
+    const render::GradientSky sky;
+
+    constexpr uint32_t kSize = 64;
+    std::vector<float> texels(static_cast<std::size_t>(kCubeFaceCount) * kSize * kSize * 4, 0.0f);
+    std::size_t at = 0;
+    for (int face = 0; face < kCubeFaceCount; ++face) {
+        for (uint32_t y = 0; y < kSize; ++y) {
+            for (uint32_t x = 0; x < kSize; ++x) {
+                const Vec3 direction =
+                    CubeFaceDirection(face, (static_cast<float>(x) + 0.5f) / kSize,
+                                      (static_cast<float>(y) + 0.5f) / kSize);
+                const Vec3 radiance = sky.Sample(direction);
+                texels[at++] = radiance.x;
+                texels[at++] = radiance.y;
+                texels[at++] = radiance.z;
+                texels[at++] = 1.0f;
+            }
+        }
+    }
+
+    render::CubemapEnvironment cube;
+    cube.size = kSize;
+    cube.texels = texels.data();
+    REQUIRE(cube.IsValid());
+
+    for (const Vec3 direction : {Vec3(0.0f, 1.0f, 0.0f), Vec3(0.0f, -1.0f, 0.0f),
+                                 glm::normalize(Vec3(1.0f, 0.3f, 0.2f)),
+                                 glm::normalize(Vec3(-0.4f, 0.1f, -0.9f))}) {
+        const Vec3 exact = sky.Sample(direction);
+        const Vec3 sampled = cube.Sample(direction);
+        INFO("arah (", direction.x, ",", direction.y, ",", direction.z, ")");
+        // 4%: cubemap 64² menyimpan gradien yang mulus, dan yang tersisa
+        // kesalahan diskretisasi di dekat cakrawala tempat gradiennya paling
+        // tajam.
+        CHECK(sampled.x == doctest::Approx(exact.x).epsilon(0.04));
+        CHECK(sampled.y == doctest::Approx(exact.y).epsilon(0.04));
+        CHECK(sampled.z == doctest::Approx(exact.z).epsilon(0.04));
+    }
+}
+
+TEST_CASE("B2: prefilter dari cubemap sepadan dengan prefilter dari lingkungannya") {
+    // **Pertukaran yang membuat B2 mungkin, dan buktinya.** Menyaring dari
+    // pencuplik analitik terukur 33 detik untuk satu peta (Debug); dari mip 0
+    // yang sudah dibuat, 0,85 detik. Yang harus dijaga adalah bahwa keduanya
+    // menjawab hal yang sama — kalau tidak, yang dihemat waktu dan yang hilang
+    // pantulannya.
+    const render::GradientSky sky;
+
+    constexpr uint32_t kSize = 64;
+    std::vector<float> texels(static_cast<std::size_t>(kCubeFaceCount) * kSize * kSize * 4, 0.0f);
+    std::size_t at = 0;
+    for (int face = 0; face < kCubeFaceCount; ++face) {
+        for (uint32_t y = 0; y < kSize; ++y) {
+            for (uint32_t x = 0; x < kSize; ++x) {
+                const Vec3 radiance = sky.Sample(
+                    CubeFaceDirection(face, (static_cast<float>(x) + 0.5f) / kSize,
+                                      (static_cast<float>(y) + 0.5f) / kSize));
+                texels[at++] = radiance.x;
+                texels[at++] = radiance.y;
+                texels[at++] = radiance.z;
+                texels[at++] = 1.0f;
+            }
+        }
+    }
+    render::CubemapEnvironment cube;
+    cube.size = kSize;
+    cube.texels = texels.data();
+
+    for (const float roughness : {0.25f, 0.5f, 1.0f}) {
+        for (const Vec3 reflection : {Vec3(0.0f, 1.0f, 0.0f),
+                                      glm::normalize(Vec3(1.0f, 0.2f, 0.3f))}) {
+            const Vec3 direct = PrefilterSpecular(sky, reflection, roughness, 256);
+            const Vec3 fromCube = PrefilterSpecular(cube, reflection, roughness, 256);
+            INFO("roughness ", roughness);
+            // 6%: keduanya integral Monte Carlo atas lobe yang sama, dan yang
+            // satu membacanya lewat cubemap beresolusi hingga.
+            CHECK(fromCube.x == doctest::Approx(direct.x).epsilon(0.06));
+            CHECK(fromCube.y == doctest::Approx(direct.y).epsilon(0.06));
+            CHECK(fromCube.z == doctest::Approx(direct.z).epsilon(0.06));
+        }
+    }
+}
+
+TEST_CASE("B2: cermin kekasaran nol memantulkan langit yang dipanggang, apa adanya") {
+    // **Kriteria terima B2.** Sebuah bola logam kekasaran nol memantulkan
+    // lingkungan tanpa penyaringan sama sekali, dan di jalur panggang itu
+    // berarti mip 0 peta prefilter. Kalau mip 0 bukan langit yang dipanggang,
+    // pantulannya adalah langit yang lain — dan tidak ada satu pun galat yang
+    // menyebutkannya.
+    //
+    // Diperiksa di tingkat data, bukan di tingkat piksel: yang bisa salah di
+    // sini pemetaan muka, urutan mip, dan tata letak texel — dan ketiganya
+    // terlihat sebagai pantulan yang "arahnya aneh", bukan sebagai kesalahan.
+    render::AtmosphereSky sky;
+    sky.sunDirection = glm::normalize(Vec3(0.3f, 0.6f, 0.4f));
+    sky.Prepare();
+
+    render::IblBakeSettings settings;
+    settings.cubeSize = 64;
+    settings.mipCount = 5;
+    settings.irradianceSamples = 0;  // yang diuji spekularnya
+    const render::IblBakeCpu baked = render::BakeIblCpu(sky, settings);
+    REQUIRE(baked.IsValid());
+    REQUIRE(baked.cubeSize == 64);
+    REQUIRE(baked.mipCount == 5);
+
+    // Mip 0 berada di awal blok, enam muka berurutan — tata letak yang sama yang
+    // diminta `TextureCube::Create`.
+    render::CubemapEnvironment mirror;
+    mirror.size = baked.cubeSize;
+    mirror.texels = baked.cubeTexels.data();
+    REQUIRE(mirror.IsValid());
+
+    for (const Vec3 direction : {Vec3(0.0f, 1.0f, 0.0f),
+                                 glm::normalize(Vec3(1.0f, 0.25f, 0.0f)),
+                                 glm::normalize(Vec3(-0.6f, 0.5f, 0.62f)),
+                                 glm::normalize(Vec3(0.3f, 0.6f, 0.4f))}) {
+        const Vec3 drawn = sky.Sample(direction);
+        const Vec3 reflected = mirror.Sample(direction);
+        INFO("arah (", direction.x, ",", direction.y, ",", direction.z, ")");
+        // 3%: yang membedakan keduanya hanya diskretisasi 64² pada gradien
+        // langit yang mulus. Kalau pemetaan mukanya salah, selisihnya bukan
+        // persen melainkan kali lipat.
+        CHECK(reflected.x == doctest::Approx(drawn.x).epsilon(0.03));
+        CHECK(reflected.y == doctest::Approx(drawn.y).epsilon(0.03));
+        CHECK(reflected.z == doctest::Approx(drawn.z).epsilon(0.03));
+    }
+
+    // Dan mip yang lebih kasar memang lebih buram, bukan sekadar berbeda:
+    // radiansi di arah matahari meluruh saat kekasarannya naik, karena lobe-nya
+    // melebar melewati bagian langit yang lebih redup.
+    const std::size_t mip0Texels =
+        static_cast<std::size_t>(kCubeFaceCount) * baked.cubeSize * baked.cubeSize * 4;
+    render::CubemapEnvironment mip1;
+    mip1.size = baked.cubeSize / 2;
+    mip1.texels = baked.cubeTexels.data() + mip0Texels;
+
+    const Vec3 sunward = glm::normalize(Vec3(0.3f, 0.6f, 0.4f));
+    CHECK(mip1.Sample(sunward).y < mirror.Sample(sunward).y * 1.05f);
+}
+
 // --- B1: langit atmosferik sebagai sumber lingkungan ------------------------
 
 namespace {
