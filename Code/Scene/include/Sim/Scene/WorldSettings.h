@@ -59,11 +59,20 @@ enum class ExposureModeKind : uint8_t {
 /// berkas level.
 ///
 /// **Didaftarkan ke `reflect::TypeRegistry` seperti komponen**, dan itu yang
-/// membuatnya hampir gratis: PropertyGrid merender tipe terdaftar apa pun,
-/// `SetWorldSettingsCommand` memberinya undo/redo, dan alat MCP melihatnya lewat
-/// refleksi yang sama. Yang **tidak** dilakukan adalah mendaftarkannya ke
-/// `ComponentRegistry` — di sanalah daftar yang menentukan apa yang boleh
-/// menempel di entity dan apa yang ikut ke dalam `.simprefab`.
+/// membuatnya hampir gratis: PropertyGrid merender tipe terdaftar apa pun, dan
+/// `SetWorldSettingsCommand` memberinya undo/redo. Yang **tidak** dilakukan
+/// adalah mendaftarkannya ke `ComponentRegistry` — di sanalah daftar yang
+/// menentukan apa yang boleh menempel di entity dan apa yang ikut ke dalam
+/// `.simprefab`.
+///
+/// **Alat MCP karena itu belum melihatnya**, dan itu akibat langsung dari
+/// pilihan di atas: `AiSceneTools` menelusuri `ComponentRegistry`, bukan
+/// `TypeRegistry`. Sebuah agen belum bisa membaca atau mengubah tingkat
+/// pencahayaan sebuah level. Yang dibutuhkan sepasang tool tersendiri —
+/// `world.settings.get`/`set` — bukan pelonggaran aturan di atas: memasukkan
+/// World Settings ke `ComponentRegistry` demi MCP akan membuatnya ikut ke dalam
+/// setiap `.simprefab`, yaitu persis cacat yang keputusan 5 di
+/// docs/PLAN-IBL.md cegah.
 ///
 /// **`SkyComponent` tidak dipindahkan ke sini.** Ia tetap memegang langit yang
 /// *tergambar* — sumber, berkas, rotasi, gain — dan keberadaannya tetap yang

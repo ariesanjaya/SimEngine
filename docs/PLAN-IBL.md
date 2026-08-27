@@ -235,7 +235,7 @@ tidak sah, terdaftar sebagai tipe bukan komponen), tiga di `SimLevelEditorTests`
 (jembatan ke `ViewportDesc`), satu di `SimEditorTests` (dock di samping
 Inspector). 25 dari 25 suite lulus.
 
-**Tiga hal yang belum tuntas, dan sebaiknya tidak ditemukan sebagai kejutan:**
+**Empat hal yang belum tuntas, dan sebaiknya tidak ditemukan sebagai kejutan:**
 
 1. **`None` dan `Baked` belum bisa dibedakan.** Keduanya mematikan probe, dan
    cahaya tak-langsung di jalur itu masih konstanta 0,25 yang tidak berasal dari
@@ -249,7 +249,15 @@ Inspector). 25 dari 25 suite lulus.
    pengarangnya. Memasukkannya berarti menambah satu field ke skema — murah,
    tapi mengubah bentuk berkas yang baru saja ditetapkan, jadi ia keputusan
    tersendiri.
-3. **Kriteria `SimHeadless --bench` belum diverifikasi ujung-ke-ujung.**
+3. **Alat MCP belum melihatnya.** Rencana ini menyebut refleksi membuat World
+   Settings terjangkau alat MCP "lewat refleksi yang sama"; ternyata tidak.
+   `AiSceneTools` menelusuri `ComponentRegistry`, bukan `TypeRegistry`, jadi
+   sebuah agen belum bisa membaca atau mengubah tingkat pencahayaan sebuah
+   level. Yang dibutuhkan sepasang tool tersendiri — `world.settings.get`/`set`
+   — dan **bukan** memasukkan World Settings ke `ComponentRegistry`, karena itu
+   akan membuatnya ikut ke setiap `.simprefab`: persis cacat yang keputusan 5
+   cegah.
+4. **Kriteria `SimHeadless --bench` belum diverifikasi ujung-ke-ujung.**
    `--bench` crash (SIGSEGV/heap corruption, tepat sesudah mesh pertama dimuat)
    pada mesin ini, dan **crash itu sudah ada sebelum B0** — diperiksa dengan
    menjalankan binary yang dibangun tanpa satu pun perubahan B0, pada level

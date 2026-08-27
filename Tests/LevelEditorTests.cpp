@@ -1116,6 +1116,50 @@ TEST_CASE("setiap template prefab bawaan bisa dimuat dan berisi yang dijanjikann
     }
 }
 
+TEST_CASE("B0: menyunting World Settings bisa dibatalkan, dan satu seretan satu entri") {
+    scene::World world;
+    CommandHistory history;
+
+    const scene::WorldSettings original = world.Settings();
+
+    scene::WorldSettings realtime = original;
+    realtime.indirect = scene::IndirectLighting::RealTime;
+    history.Execute(std::make_unique<SetWorldSettingsCommand>(&world, original, realtime));
+    CHECK(world.Settings().indirect == scene::IndirectLighting::RealTime);
+
+    REQUIRE(history.Undo());
+    CHECK(world.Settings().indirect == original.indirect);
+    REQUIRE(history.Redo());
+    CHECK(world.Settings().indirect == scene::IndirectLighting::RealTime);
+
+    // Seretan slider: tiap frame sebuah perintah, dan seluruhnya harus menjadi
+    // satu entri. Yang dipertahankan `before` milik perintah pertama — undo
+    // harus mengembalikan keadaan sebelum seretan dimulai, bukan sebelum frame
+    // terakhirnya.
+    const std::size_t entriesBefore = history.Entries().size();
+    scene::WorldSettings dragged = world.Settings();
+    for (int step = 1; step <= 4; ++step) {
+        scene::WorldSettings next = dragged;
+        next.exposureCompensation = static_cast<float>(step);
+        history.Execute(std::make_unique<SetWorldSettingsCommand>(&world, dragged, next));
+    }
+    CHECK(history.Entries().size() == entriesBefore + 1);
+    CHECK(world.Settings().exposureCompensation == doctest::Approx(4.0f));
+
+    REQUIRE(history.Undo());
+    CHECK(world.Settings().exposureCompensation == doctest::Approx(0.0f));
+
+    // Kelompok yang ditutup berarti entri baru, bukan lanjutan seretan.
+    history.Redo();
+    history.CloseMergeGroup();
+    const std::size_t entriesAfterDrag = history.Entries().size();
+    scene::WorldSettings separate = world.Settings();
+    separate.exposureCompensation = -3.0f;
+    history.Execute(
+        std::make_unique<SetWorldSettingsCommand>(&world, world.Settings(), separate));
+    CHECK(history.Entries().size() == entriesAfterDrag + 1);
+}
+
 TEST_CASE("B0: tingkat pencahayaan sampai ke renderer dari berkas levelnya") {
     // **Kriteria terima B0.** Yang diperiksa di sini bukan serialisasinya —
     // SimSceneTests sudah — melainkan jembatan yang dipakai ketiganya: viewport

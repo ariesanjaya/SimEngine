@@ -397,8 +397,16 @@ private:
         int mode = static_cast<int>(edited.exposureMode);
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);
         bool changed = false;
+        // **Combo menutup kelompoknya sendiri, seketika.** Ia suntingan diskret,
+        // bukan seretan: tidak ada frame kedua yang perlu digabungkan, dan
+        // menyerahkannya ke `IsItemDeactivatedAfterEdit()` di bawah tidak akan
+        // berhasil — yang ditanyakan fungsi itu selalu item terakhir yang
+        // digambar, yaitu slidernya. Tanpa baris ini, mengubah mode lalu
+        // menyeret Compensation menjadi satu entri undo yang membatalkan
+        // keduanya.
         if (ImGui::Combo("Exposure", &mode, modes, IM_ARRAYSIZE(modes))) {
             edited.exposureMode = static_cast<scene::ExposureModeKind>(mode);
+            context.history->CloseMergeGroup();
             changed = true;
         }
         ImGui::SetNextItemWidth(ImGui::GetFontSize() * 10.0f);

@@ -1160,10 +1160,6 @@ int main(int argc, char** argv) {
                 desc.cullLimit =
                     static_cast<uint32_t>(std::strtoul(std::string(value).c_str(), nullptr, 10));
             }
-            if (fixedExposure) {
-                desc.post.exposureMode = render::ExposureMode::Manual;
-                desc.post.manualEv100 = manualEv;
-            }
             // Delta yang sama dengan yang diberikan ke `app.Tick`, dan karena
             // alasan yang sama: yang maju menurut waktu — eksposur, awan,
             // akumulasi temporal — harus maju sama jauhnya di tiap jalan, kalau
@@ -1179,8 +1175,21 @@ int main(int argc, char** argv) {
             // pengukuran headless mengukur tingkat pencahayaan yang bukan milik
             // level itu, berapa pun yang tertulis di berkasnya.
             editor::ApplyWorldSettings(*app.Context().world, desc);
+
+            // **Paksaan baris perintah datang sesudah level, tanpa kecuali.**
+            // Keduanya di bawah ini menimpa apa yang tertulis di berkasnya, dan
+            // urutan itulah artinya: bendera adalah alat ukur untuk satu jalan,
+            // level adalah kebenaran untuk semua yang lain. Menaruhnya lebih
+            // dulu membuat benderanya diam-diam tidak berlaku —
+            // `--bench-fixed-exposure` justru bendera yang paling tidak boleh
+            // gagal diam-diam, karena tanpa eksposur tetap dua gambar tidak bisa
+            // dibandingkan sama sekali.
             if (giOverride.has_value()) {
                 desc.gi.enabled = *giOverride;
+            }
+            if (fixedExposure) {
+                desc.post.exposureMode = render::ExposureMode::Manual;
+                desc.post.manualEv100 = manualEv;
             }
             giEffective = desc.gi.enabled;
             // Jalur HDR relatif dilengkapi dengan akar `Resources`, alasan
