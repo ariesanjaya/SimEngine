@@ -561,12 +561,45 @@ std::string AssembleForwardMaterialModule(const std::string& generatedSlang,
     out << "        irradiance = giIrradianceAt(input.position.xy, input.worldPosition,\n";
     out << "                                    frame.normal, shadowParams.giParams.y);\n";
     out << "    }\n";
-    // Nol untuk prafilter dan DFG: set 0 renderer tidak memuat keduanya. Lihat
-    // catatan di header — yang tersisa suku difusnya, dan logam gelap di luar
-    // sorotan langsungnya sampai renderer ikut memanggang IBL.
+    // **Prafilter dan DFG datang dari lingkungan panggang (B2).** Sebelum ini
+    // ketiganya nol, dan akibatnya logam gelap di luar sorotan langsungnya:
+    // suku spekular lingkungan sepenuhnya hilang, dan tidak ada penyetelan
+    // material yang bisa mengembalikannya.
+    //
+    // **Nol tetap jawabannya sebelum ada panggangan yang selesai**, dan itu
+    // bukan penambal melainkan yang benar: lingkungan yang belum ada tidak
+    // memantulkan apa pun. `prefilteredEnvMips()` yang nol menjaga cubemap
+    // pengganti tidak pernah terbaca sebagai pantulan.
+    //
+    // Coat dibaca pada bingkainya sendiri: lapisan bening punya normal dan
+    // kekasaran yang berbeda dari permukaan di bawahnya, dan membacanya pada
+    // satu arah membuat pantulan coat mengikuti permukaan yang seharusnya ia
+    // tutupi.
+    out << "    const float envMips = prefilteredEnvMips();\n";
+    out << "    float3 prefilteredBase = float3(0.0);\n";
+    out << "    float3 prefilteredCoat = float3(0.0);\n";
+    out << "    float2 envDfg = float2(0.0);\n";
+    out << "    if (envMips >= 0.5) {\n";
+    out << "        prefilteredBase = prefilteredEnv.SampleLevel(\n";
+    out << "            prefilterDirection(frame),\n";
+    out << "            prefilterMipForRoughness(m.surface.specularRoughness, envMips)).rgb;\n";
+    // Bingkai coat hanya ada bila materialnya memang punya lapisan itu; tanpa
+    // coat, `forwardFrames` cuma "frame" dan overload lain yang dipanggil.
+    if (options.lobes.coatFrame) {
+        out << "        prefilteredCoat = prefilteredEnv.SampleLevel(\n";
+        out << "            prefilterDirection(coatFrame),\n";
+        out << "            prefilterMipForRoughness(m.surface.coatRoughness, envMips)).rgb;\n";
+    }
+    out << "        const float envNv = saturate(dot(frame.normal, frame.view));\n";
+    out << "        envDfg = dfgLut.SampleLevel(\n";
+    out << "            float2(envNv, saturate(m.surface.specularRoughness)), 0.0).rg;\n";
+    out << "    }\n";
+    // Satu bentuk panggilan untuk keduanya: overload tanpa bingkai coat tetap
+    // menerima `prefilteredCoat`, dan ia yang meneruskan `frame` sebagai
+    // bingkai coat-nya sendiri.
     out << "    lit += evaluateOpenPBR_IBL(m.surface, " << forwardFrames
-        << ", irradiance, float3(0.0),\n";
-    out << "                               float3(0.0), float2(0.0));\n";
+        << ", irradiance, prefilteredBase,\n";
+    out << "                               prefilteredCoat, envDfg);\n";
     out << "    const float nv = saturate(dot(frame.normal, frame.view));\n";
     out << "    lit += coatedEmission(m.surface, m.emissive, nv);\n";
     out << "    return float4(lit, m.opacity * input.color.a);\n";

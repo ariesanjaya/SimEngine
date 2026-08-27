@@ -130,6 +130,27 @@ float3 skyIrradiance(float3 normal) {
 }
 [[vk::binding(1, 0)]] Sampler2DArrayShadow shadowMap;
 
+/// Peta lingkungan terprafilter dan LUT DFG-nya (B2).
+///
+/// **Keduanya selalu terikat, juga sebelum ada panggangan yang selesai.** Yang
+/// terikat saat itu cubemap 1x1 hitam dan piramida HiZ; descriptor yang
+/// dibiarkan kosong adalah pelanggaran pada setiap draw, bahkan pada draw yang
+/// tidak membacanya. Yang menjaga keduanya tidak pernah dipakai sebagai
+/// pantulan adalah `viewParams.w` yang nol.
+///
+/// **Yang membacanya kode material, bukan berkas ini.** Pemetaan kekasaran ke
+/// mip tinggal di `openpbr.slang`, dan berkas itu disertakan sesudah yang ini —
+/// jadi membungkusnya di sini menuntut salinan kedua pemetaan yang sama, yaitu
+/// dua rumus yang suatu saat berselisih.
+[[vk::binding(24, 0)]] SamplerCube prefilteredEnv;
+[[vk::binding(25, 0)]] Sampler2D dfgLut;
+
+/// Banyaknya mip peta prefilter. Nol berarti belum ada lingkungan yang
+/// dipanggang, dan pemakainya wajib memeriksanya: sebuah pantulan yang datang
+/// dari cubemap pengganti adalah pantulan yang tidak berasal dari langit mana
+/// pun, yaitu persis konstanta yang B1 buang.
+float prefilteredEnvMips() { return shadowParams.viewParams.w; }
+
 /// Cascade untuk sebuah kedalaman pandang, beserta bobot campur ke penerusnya.
 ///
 /// Bentuknya harus sama dengan `ChooseCascade` di sisi C++ — keduanya diuji
