@@ -18,7 +18,7 @@
 #include <iterator>
 #include <map>
 #include <string>
-#include <unistd.h>
+#include "TestProcess.h"
 
 using namespace sim;
 using namespace sim::script;
@@ -77,7 +77,7 @@ Graph SpinGraph() {
 struct TempDir {
     TempDir() {
         path = std::filesystem::temp_directory_path() /
-               ("simgraph_" + std::to_string(::getpid()) + "_" +
+               ("simgraph_" + std::to_string(sim::tests::ProcessId()) + "_" +
                 std::to_string(reinterpret_cast<std::uintptr_t>(this)));
         std::filesystem::create_directories(path);
     }

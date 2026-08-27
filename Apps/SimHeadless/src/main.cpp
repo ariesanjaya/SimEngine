@@ -16,6 +16,7 @@
 #include "Sim/Core/Log.h"
 #include "Sim/Core/MainThreadQueue.h"
 #include "Sim/Core/TaskPool.h"
+#include "Sim/Core/UserPaths.h"
 #include "Sim/Editor/AiTools.h"
 #include "Sim/Editor/EditorApp.h"
 #include "Sim/Editor/EditorContext.h"
@@ -305,9 +306,7 @@ int main(int argc, char** argv) {
 
     MainThreadQueue::Get().BindMainThread();
 
-    const std::filesystem::path configDir =
-        std::filesystem::path(std::getenv("HOME") == nullptr ? "." : std::getenv("HOME")) /
-        ".simengine";
+    const std::filesystem::path configDir = sim::ConfigDirectory();
     Log::Init(configDir / "Logs" / "headless.log");
 
     const std::string_view projectFlag = FlagValue(argc, argv, "--project");

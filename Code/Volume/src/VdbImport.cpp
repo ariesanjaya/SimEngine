@@ -20,11 +20,6 @@
 namespace sim::volume {
 namespace {
 
-/// Satu-satunya ekstensi volume yang dikenal, dan daftarnya tetap dibangkitkan
-/// alih-alih dipatok di `AssetTypes` — supaya build tanpa OpenVDB tidak
-/// menawarkan impor untuk berkas yang tidak bisa dibacanya.
-constexpr std::array<std::string_view, 1> kVdbExtensions{".vdb"};
-
 std::string ToLower(std::string_view text) {
     std::string lower(text);
     std::transform(lower.begin(), lower.end(), lower.begin(),
@@ -57,6 +52,16 @@ void EnsureInitialisedForIo() {
 }
 
 }  // namespace
+
+/// Satu-satunya ekstensi volume yang dikenal, dan daftarnya tetap dibangkitkan
+/// alih-alih dipatok di `AssetTypes` — supaya build tanpa OpenVDB tidak
+/// menawarkan impor untuk berkas yang tidak bisa dibacanya.
+///
+/// **Di dalam cabang ini, bukan di atas `#if`-nya.** Di luar sana ia tidak
+/// dipakai siapa pun ketika OpenVDB mati — cabang `#else` sengaja mengembalikan
+/// daftar kosong — dan `-Wunused-const-variable` menggagalkan build justru pada
+/// konfigurasi yang paling jarang dijalankan orang.
+constexpr std::array<std::string_view, 1> kVdbExtensions{".vdb"};
 
 std::span<const std::string_view> ReadableExtensions() { return kVdbExtensions; }
 

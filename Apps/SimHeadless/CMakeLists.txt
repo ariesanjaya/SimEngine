@@ -30,15 +30,9 @@ endif()
 
 add_dependencies(SimHeadless SimShadersGrid)
 
-# Resources disalin ke sebelah executable, alasan yang sama dengan SimEditor —
-# dan di sini bukan sekadar kenyamanan. `config.resourceDir` menunjuk folder ini,
-# jadi indeks aset bawaan yang dilihat mode headless adalah isi folder ini apa
-# adanya. Tanpa aturan salin sendiri, yang dibacanya adalah salinan yang
-# kebetulan ditinggalkan build SimEditor terakhir — aset yang ditambahkan
-# sesudahnya lalu tidak terlihat, dan yang mencarinya akan mencari di berkas
-# sumber yang isinya memang sudah benar.
-add_custom_command(TARGET SimHeadless POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-            "${CMAKE_SOURCE_DIR}/Resources" "$<TARGET_FILE_DIR:SimHeadless>/Resources"
-    COMMENT "Menyalin Resources ke folder keluaran"
-    VERBATIM)
+# Resources disalin oleh target SimResources di CMakeLists akar, dan di sini itu
+# bukan sekadar kenyamanan: `config.resourceDir` menunjuk folder itu, jadi indeks
+# aset bawaan yang dilihat mode headless adalah isinya apa adanya. SimResources
+# ikut dijalankan pada setiap build target ini, jadi yang dibacanya tidak pernah
+# salinan sisa build SimEditor terakhir.
+add_dependencies(SimHeadless SimResources)

@@ -325,8 +325,17 @@ if(SIM_WITH_LUA)
     target_include_directories(lua SYSTEM PUBLIC ${lua_SOURCE_DIR})
     # LUA_USE_LINUX menyalakan POSIX + dlopen. readline hanya dipakai lua.c,
     # yang sudah kita keluarkan, jadi tidak perlu link readline.
-    target_compile_definitions(lua PUBLIC LUA_USE_LINUX)
-    target_link_libraries(lua PUBLIC m ${CMAKE_DL_LIBS})
+    #
+    # **Tidak ada padanannya di Windows, dan itu disengaja.** `luaconf.h`
+    # menyalakan `LUA_USE_WINDOWS` sendiri begitu melihat `_WIN32`, jadi
+    # `package.loadlib` tetap bekerja — lewat LoadLibrary, bukan dlopen. Yang
+    # terjadi bila LUA_USE_LINUX ikut terpasang di sana adalah `sys/wait.h` yang
+    # dicari dan tidak ada. libm dan libdl juga tidak disebut: di Windows
+    # keduanya bagian dari CRT, dan `CMAKE_DL_LIBS` memang kosong di sana.
+    if(NOT WIN32)
+        target_compile_definitions(lua PUBLIC LUA_USE_LINUX)
+        target_link_libraries(lua PUBLIC m ${CMAKE_DL_LIBS})
+    endif()
     set_target_properties(lua PROPERTIES FOLDER "ThirdParty" C_STANDARD 11)
     add_library(Lua::Lua ALIAS lua)
 
@@ -501,6 +510,19 @@ foreach(_ktx_target ktx ktx_read obj_basisu_cbind objUtil)
     if(TARGET ${_ktx_target})
         target_compile_options(${_ktx_target} PRIVATE -w)
         set_target_properties(${_ktx_target} PROPERTIES FOLDER "ThirdParty")
+
+        # `-w` di atas hanya membungkam libktx saat **ia** dibangun. Yang
+        # tersisa adalah headernya, yang dikompilasi ulang di setiap berkas kita
+        # yang memakainya — dan `ktx.h` mengeja tipenya dengan `__int32`/`__int64`
+        # di jalur MSVC-nya, yang bagi -Wpedantic adalah token ekstensi. Menandai
+        # include dir-nya SYSTEM menyamakan perlakuannya dengan stb, cgltf, dan
+        # FBX SDK di berkas ini. Tidak berpengaruh di Linux: di sana jalur itu
+        # tidak pernah ikut terkompilasi.
+        get_target_property(_ktx_incs ${_ktx_target} INTERFACE_INCLUDE_DIRECTORIES)
+        if(_ktx_incs)
+            set_property(TARGET ${_ktx_target}
+                         PROPERTY INTERFACE_SYSTEM_INCLUDE_DIRECTORIES "${_ktx_incs}")
+        endif()
 
         # libktx menaruh `_DEBUG` dan `DEBUG` sebagai definisi **PUBLIC** pada
         # build Debug, jadi keduanya menular ke setiap target yang menautkannya.
@@ -769,11 +791,42 @@ add_library(Cgltf::Cgltf ALIAS cgltf)
 # ---------------------------------------------------------------------------
 find_package(Threads REQUIRED)
 
-set(SIM_FBXSDK_DEFAULT_ROOT "$ENV{HOME}/SDK/fbxsdk")
-if(EXISTS "${SIM_FBXSDK_DEFAULT_ROOT}/include/fbxsdk.h")
-    set(SIM_FBXSDK_ROOT "${SIM_FBXSDK_DEFAULT_ROOT}" CACHE PATH "Folder pemasangan Autodesk FBX SDK")
-else()
-    set(SIM_FBXSDK_ROOT "" CACHE PATH "Folder pemasangan Autodesk FBX SDK")
+# **Yang ditemukan sendiri tidak ikut masuk cache.** Sebelumnya folder bawaan
+# ditulis ke `SIM_FBXSDK_ROOT` sebagai entri cache — termasuk ketika yang
+# ditemukan tidak ada, yang berarti string kosong ikut tersimpan. Cache menang
+# atas `set(... CACHE ...)` berikutnya, jadi sekali sebuah build dikonfigurasi
+# tanpa SDK, memasang SDK-nya sesudah itu tidak mengubah apa pun: pencarian
+# tidak pernah dijalankan lagi, dan satu-satunya jalan keluar adalah menghapus
+# folder build. Yang di cache sekarang hanya nilai yang benar-benar diketikkan
+# orang lewat -DSIM_FBXSDK_ROOT; sisanya dihitung ulang tiap konfigurasi.
+set(SIM_FBXSDK_ROOT "" CACHE PATH "Folder pemasangan Autodesk FBX SDK")
+
+set(_sim_fbx_root "${SIM_FBXSDK_ROOT}")
+if(NOT _sim_fbx_root)
+    if(WIN32)
+        # Installer Autodesk menaruh tiap versi di folder bernomornya sendiri
+        # dan tidak menyetel variabel lingkungan apa pun, jadi versinya dicari —
+        # yang tertinggi menang, sama seperti Vulkan SDK di SimVulkan.cmake.
+        #
+        # TO_CMAKE_PATH lebih dulu: $ENV{ProgramFiles} berisi backslash, dan
+        # backslash di dalam pola GLOB adalah escape — polanya lalu tidak pernah
+        # cocok dengan apa pun, tanpa satu pun galat.
+        file(TO_CMAKE_PATH "$ENV{ProgramFiles}" _sim_program_files)
+        file(GLOB _sim_fbx_candidates "${_sim_program_files}/Autodesk/FBX/FBX SDK/*")
+        set(_sim_fbx_roots "")
+        foreach(_candidate ${_sim_fbx_candidates})
+            if(EXISTS "${_candidate}/include/fbxsdk.h")
+                list(APPEND _sim_fbx_roots "${_candidate}")
+            endif()
+        endforeach()
+        if(_sim_fbx_roots)
+            list(SORT _sim_fbx_roots)
+            list(REVERSE _sim_fbx_roots)   # versi tertinggi lebih dulu
+            list(GET _sim_fbx_roots 0 _sim_fbx_root)
+        endif()
+    else()
+        set(_sim_fbx_root "$ENV{HOME}/SDK/fbxsdk")
+    endif()
 endif()
 
 # **Yang statis lebih dulu.** Yang dinamis menuntut libfbxsdk.so ikut ditemukan
@@ -781,36 +834,102 @@ endif()
 # milik satu mesin — biner yang dipindah lalu berhenti bekerja dengan pesan dari
 # loader, bukan dari mesin ini. Yang statis menyeret libxml2 dan zlib, dan
 # keduanya memang ada di mana-mana.
+if(WIN32)
+    # **Varian CRT ikut konfigurasi, dan ini tidak boleh ditebak.** Autodesk
+    # membangun `debug/` terhadap /MDd dan `release/` terhadap /MD. Menautkan
+    # yang salah tetap lolos kompilasi dan tetap lolos tautan; yang pecah adalah
+    # setiap objek yang melintasi batas pustaka saat dijalankan — heap yang
+    # berbeda, dan crash yang menunjuk ke mana saja kecuali ke sini.
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        set(_sim_fbx_variant "debug")
+    else()
+        set(_sim_fbx_variant "release")
+    endif()
+    # Tata letak berubah antar-rilis SDK: yang lama menyisipkan folder toolset,
+    # yang baru tidak. Keduanya dicantumkan supaya yang memasang versi mana pun
+    # tidak perlu tahu bedanya.
+    set(_sim_fbx_libdirs
+        "${_sim_fbx_root}/lib/x64/${_sim_fbx_variant}"
+        "${_sim_fbx_root}/lib/vs2022/x64/${_sim_fbx_variant}"
+        "${_sim_fbx_root}/lib/vs2019/x64/${_sim_fbx_variant}"
+        "${_sim_fbx_root}/lib/vs2017/x64/${_sim_fbx_variant}")
+    # `-md`: varian statis yang menaut CRT secara dinamis. Yang tanpa akhiran
+    # adalah import library milik libfbxsdk.dll, dan memakainya berarti DLL itu
+    # harus ikut ke mana pun biner ini dibawa — persis yang dihindari di Linux.
+    set(_sim_fbx_names libfbxsdk-md)
+else()
+    set(_sim_fbx_libdirs "${_sim_fbx_root}/lib/release" "${_sim_fbx_root}/lib")
+    set(_sim_fbx_names fbxsdk libfbxsdk.a)
+endif()
+
 find_library(SIM_FBXSDK_LIBRARY
-             NAMES fbxsdk libfbxsdk.a
-             PATHS "${SIM_FBXSDK_ROOT}/lib/release" "${SIM_FBXSDK_ROOT}/lib"
+             NAMES ${_sim_fbx_names}
+             PATHS ${_sim_fbx_libdirs}
              NO_DEFAULT_PATH)
-find_path(SIM_FBXSDK_INCLUDE fbxsdk.h PATHS "${SIM_FBXSDK_ROOT}/include" NO_DEFAULT_PATH)
+find_path(SIM_FBXSDK_INCLUDE fbxsdk.h PATHS "${_sim_fbx_root}/include" NO_DEFAULT_PATH)
 
 if(SIM_FBXSDK_LIBRARY AND SIM_FBXSDK_INCLUDE)
-    find_package(LibXml2 QUIET)
-    find_package(ZLIB QUIET)
+    if(WIN32)
+        # libxml2 dan zlib **ikut dibundel SDK-nya** di folder yang sama, dan
+        # yang dipakai harus yang itu: find_package di Windows tidak menemukan
+        # apa pun pada mesin bersih, dan salinan lain belum tentu dibangun
+        # terhadap varian CRT yang sama.
+        find_library(SIM_FBXSDK_XML2 NAMES libxml2-md PATHS ${_sim_fbx_libdirs} NO_DEFAULT_PATH)
+        find_library(SIM_FBXSDK_ZLIB NAMES zlib-md PATHS ${_sim_fbx_libdirs} NO_DEFAULT_PATH)
+        # Alembic ikut ditaut kalau ada. Ia baru muncul di SDK 2020.3 dan
+        # pustaka statisnya merujuk simbol-simbolnya, jadi yang melewatkannya
+        # gagal di tautan — bukan di konfigurasi. Dicari, bukan diwajibkan:
+        # rilis lama tidak membundelnya sama sekali.
+        find_library(SIM_FBXSDK_ALEMBIC NAMES alembic-md PATHS ${_sim_fbx_libdirs} NO_DEFAULT_PATH)
+    else()
+        find_package(LibXml2 QUIET)
+        find_package(ZLIB QUIET)
+    endif()
 
     add_library(sim_fbxsdk INTERFACE)
     target_include_directories(sim_fbxsdk SYSTEM INTERFACE "${SIM_FBXSDK_INCLUDE}")
     target_link_libraries(sim_fbxsdk INTERFACE "${SIM_FBXSDK_LIBRARY}")
-    if(LibXml2_FOUND)
-        target_link_libraries(sim_fbxsdk INTERFACE LibXml2::LibXml2)
-    endif()
-    if(ZLIB_FOUND)
-        target_link_libraries(sim_fbxsdk INTERFACE ZLIB::ZLIB)
+    if(WIN32)
+        if(SIM_FBXSDK_XML2)
+            target_link_libraries(sim_fbxsdk INTERFACE "${SIM_FBXSDK_XML2}")
+        endif()
+        if(SIM_FBXSDK_ZLIB)
+            target_link_libraries(sim_fbxsdk INTERFACE "${SIM_FBXSDK_ZLIB}")
+        endif()
+        if(SIM_FBXSDK_ALEMBIC)
+            target_link_libraries(sim_fbxsdk INTERFACE "${SIM_FBXSDK_ALEMBIC}")
+        endif()
+        # bcrypt: libxml2 memakai BCryptGenRandom untuk mengacak benih tabel
+        # hash-nya. Ia tidak ikut di daftar pustaka bawaan yang ditautkan CMake,
+        # jadi tanpa baris ini setiap executable yang menyentuh FBX gagal di
+        # tautan atas satu simbol yang namanya tidak menyebut FBX maupun libxml2.
+        target_link_libraries(sim_fbxsdk INTERFACE bcrypt)
+    else()
+        if(LibXml2_FOUND)
+            target_link_libraries(sim_fbxsdk INTERFACE LibXml2::LibXml2)
+        endif()
+        if(ZLIB_FOUND)
+            target_link_libraries(sim_fbxsdk INTERFACE ZLIB::ZLIB)
+        endif()
     endif()
     target_link_libraries(sim_fbxsdk INTERFACE ${CMAKE_DL_LIBS} Threads::Threads)
     if(SIM_MATH_LIBRARY)
         target_link_libraries(sim_fbxsdk INTERFACE ${SIM_MATH_LIBRARY})
     endif()
     add_library(Fbx::Fbx ALIAS sim_fbxsdk)
-    message(STATUS "Autodesk FBX SDK dipakai dari ${SIM_FBXSDK_ROOT} — impor FBX aktif")
+    message(STATUS "Autodesk FBX SDK dipakai dari ${_sim_fbx_root} — impor FBX aktif")
 else()
+    # Pesannya menyebut yang sudah diperiksa, bukan hanya yang kurang. Yang
+    # sudah memasang SDK-nya lalu tetap melihat galat ini biasanya memasang
+    # varian atau arsitektur yang lain, dan tanpa daftar ini satu-satunya cara
+    # mengetahuinya adalah membaca berkas ini.
+    string(REPLACE ";" "\n  " _sim_fbx_searched "${_sim_fbx_libdirs}")
     message(FATAL_ERROR
         "Autodesk FBX SDK tidak ditemukan. Impor FBX memakainya, dan tidak ada "
         "jalur cadangan: pasang SDK-nya lalu setel -DSIM_FBXSDK_ROOT=<folder>. "
-        "Langkahnya ada di docs/DEPENDENCIES.md.")
+        "Langkahnya ada di docs/DEPENDENCIES.md.\n"
+        "Root yang dipakai: '${_sim_fbx_root}'\n"
+        "Pustaka dicari bernama '${_sim_fbx_names}' di:\n  ${_sim_fbx_searched}")
 endif()
 
 # ---------------------------------------------------------------------------
@@ -1032,33 +1151,37 @@ endif()
 #
 # Cara menyediakannya ada di docs/DEPENDENCIES.md.
 # ---------------------------------------------------------------------------
-set(SIM_OPENVDB_DEFAULT_ROOT "${CMAKE_CURRENT_LIST_DIR}/../Third-Party/OpenVDB")
-if(EXISTS "${SIM_OPENVDB_DEFAULT_ROOT}/include/openvdb/openvdb.h")
-    set(SIM_OPENVDB_ROOT "${SIM_OPENVDB_DEFAULT_ROOT}" CACHE PATH "Folder pemasangan OpenVDB")
-else()
-    set(SIM_OPENVDB_ROOT "" CACHE PATH "Folder pemasangan OpenVDB")
+# Cache hanya menyimpan yang benar-benar diketikkan orang — alasan yang sama
+# persis dengan FBX SDK di atas: bawaan yang ikut tersimpan sebagai string kosong
+# membuat pemasangan sesudahnya tidak pernah terlihat sampai folder build dihapus.
+set(SIM_OPENVDB_ROOT "" CACHE PATH "Folder pemasangan OpenVDB")
+set(_sim_vdb_root "${SIM_OPENVDB_ROOT}")
+if(NOT _sim_vdb_root)
+    set(_sim_vdb_root "${CMAKE_CURRENT_LIST_DIR}/../Third-Party/OpenVDB")
 endif()
 
 set(SIM_OPENVDB_READY FALSE)
-if(SIM_WITH_OPENVDB AND SIM_OPENVDB_ROOT
-   AND EXISTS "${SIM_OPENVDB_ROOT}/include/openvdb/openvdb.h")
+if(SIM_WITH_OPENVDB AND EXISTS "${_sim_vdb_root}/include/openvdb/openvdb.h")
     # Diperiksa dua sisi, dengan alasan yang sama seperti OIIO: header tanpa
     # pustaka kompilasi dengan sukses lalu gagal saat link.
-    find_library(SIM_OPENVDB_LIB NAMES openvdb
-                 PATHS "${SIM_OPENVDB_ROOT}/lib" NO_DEFAULT_PATH)
+    #
+    # `libopenvdb` ikut disebut: build Windows menamai pustaka statisnya begitu,
+    # dan awalan `lib` di sana bukan konvensi yang dijamin dikenali find_library.
+    find_library(SIM_OPENVDB_LIB NAMES openvdb libopenvdb
+                 PATHS "${_sim_vdb_root}/lib" NO_DEFAULT_PATH)
     # `version.h` dihasilkan saat OpenVDB dibangun, bukan bagian dari sumbernya,
     # dan `Types.h` meng-include-nya dengan tanda kutip — jadi ia harus duduk di
     # sebelah header lain, bukan di folder build yang terpisah. Pemeriksaan ini
     # menangkap salinan header yang diambil dari pohon sumber saja.
-    if(SIM_OPENVDB_LIB AND EXISTS "${SIM_OPENVDB_ROOT}/include/openvdb/version.h")
+    if(SIM_OPENVDB_LIB AND EXISTS "${_sim_vdb_root}/include/openvdb/version.h")
         set(SIM_OPENVDB_READY TRUE)
     elseif(NOT SIM_OPENVDB_LIB)
         message(STATUS
-            "Header OpenVDB ada di ${SIM_OPENVDB_ROOT}/include tapi pustakanya tidak — "
+            "Header OpenVDB ada di ${_sim_vdb_root}/include tapi pustakanya tidak — "
             "bake SDF dilewati. Langkahnya ada di docs/DEPENDENCIES.md.")
     else()
         message(STATUS
-            "OpenVDB di ${SIM_OPENVDB_ROOT} tidak punya version.h — ia dihasilkan saat "
+            "OpenVDB di ${_sim_vdb_root} tidak punya version.h — ia dihasilkan saat "
             "OpenVDB dibangun, jadi salinan dari pohon sumber saja tidak cukup. "
             "Langkahnya ada di docs/DEPENDENCIES.md.")
     endif()
@@ -1068,7 +1191,22 @@ if(SIM_OPENVDB_READY)
     # TBB dipakai OpenVDB untuk paralelisasi bake-nya. Ia sudah ada di sistem
     # sebagai kebergantungan pustaka lain; yang dibawa paket OpenUSD sengaja
     # tidak dipakai supaya tidak ada dua TBB di satu binary.
-    find_library(SIM_OPENVDB_TBB NAMES tbb libtbb.so.12)
+    if(WIN32)
+        # **Dicari di sebelah OpenVDB, bukan di sistem.** Windows tidak punya
+        # tempat baku untuk pustaka pengembangan, jadi TBB yang benar adalah yang
+        # dipasang bersama OpenVDB — yang lain belum tentu dibangun terhadap
+        # varian CRT yang sama. Nama Debug-nya juga berbeda: oneTBB menambahkan
+        # akhiran `_debug`, dan `find_library` tidak menebak akhiran.
+        if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+            set(_sim_tbb_names tbb12_debug tbb_debug tbb12 tbb)
+        else()
+            set(_sim_tbb_names tbb12 tbb)
+        endif()
+        find_library(SIM_OPENVDB_TBB NAMES ${_sim_tbb_names}
+                     PATHS "${_sim_vdb_root}/lib" NO_DEFAULT_PATH)
+    else()
+        find_library(SIM_OPENVDB_TBB NAMES tbb libtbb.so.12)
+    endif()
     if(NOT SIM_OPENVDB_TBB)
         message(STATUS "libtbb tidak ditemukan — bake SDF dilewati "
                        "(pasang libtbb-dev untuk mengaktifkannya)")
@@ -1076,20 +1214,83 @@ if(SIM_OPENVDB_READY)
     endif()
 endif()
 
+# Kebergantungan yang hanya muncul ketika OpenVDB ditautkan **statis**, dan di
+# Windows memang begitulah ia dibangun. Pustaka statis tidak membawa serta
+# kebergantungannya: yang menautkannya harus ikut menyebut blosc, zlib, dan
+# Boost.iostreams sendiri, kalau tidak yang muncul adalah puluhan simbol tak
+# terselesaikan dengan nama yang tidak menyebut OpenVDB sama sekali.
+if(SIM_OPENVDB_READY AND WIN32)
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        set(_sim_vdb_zlib_names zlibstaticd zlibd zlibstatic zlib)
+        set(_sim_vdb_boost_glob "${_sim_vdb_root}/lib/*boost_iostreams*-gd-*.lib")
+    else()
+        set(_sim_vdb_zlib_names zlibstatic zlib)
+        set(_sim_vdb_boost_glob "${_sim_vdb_root}/lib/*boost_iostreams*.lib")
+    endif()
+
+    find_library(SIM_OPENVDB_BLOSC NAMES blosc libblosc
+                 PATHS "${_sim_vdb_root}/lib" NO_DEFAULT_PATH)
+    find_library(SIM_OPENVDB_ZLIB NAMES ${_sim_vdb_zlib_names}
+                 PATHS "${_sim_vdb_root}/lib" NO_DEFAULT_PATH)
+    # Boost menamai pustakanya dengan toolset, varian, dan versi sekaligus
+    # (`libboost_iostreams-vc143-mt-gd-x64-1_88.lib`), jadi ia dicocokkan dengan
+    # pola alih-alih didaftar namanya.
+    file(GLOB _sim_vdb_boost_io "${_sim_vdb_boost_glob}")
+    if(_sim_vdb_boost_io)
+        list(GET _sim_vdb_boost_io 0 SIM_OPENVDB_BOOST_IOSTREAMS)
+    endif()
+
+    foreach(_needed SIM_OPENVDB_BLOSC SIM_OPENVDB_ZLIB SIM_OPENVDB_BOOST_IOSTREAMS)
+        if(NOT ${_needed})
+            message(STATUS
+                "OpenVDB ada tapi ${_needed} tidak ditemukan di ${_sim_vdb_root}/lib — "
+                "bake SDF dilewati. Ketiganya dipasang bersama OpenVDB; langkahnya "
+                "ada di docs/DEPENDENCIES.md.")
+            set(SIM_OPENVDB_READY FALSE)
+        endif()
+    endforeach()
+endif()
+
 if(SIM_OPENVDB_READY)
     add_library(sim_openvdb INTERFACE)
     target_link_libraries(sim_openvdb INTERFACE "${SIM_OPENVDB_LIB}" "${SIM_OPENVDB_TBB}")
+    if(WIN32)
+        target_link_libraries(sim_openvdb INTERFACE
+            "${SIM_OPENVDB_BLOSC}" "${SIM_OPENVDB_ZLIB}" "${SIM_OPENVDB_BOOST_IOSTREAMS}")
+        # OPENVDB_STATICLIB **wajib, dan diamnya mahal.** `Platform.h` menyimpulkan
+        # "ini DLL" begitu ia melihat `_DLL` — yang disetel setiap build /MD dan
+        # /MDd — lalu menandai seluruh API-nya `__declspec(dllimport)`. Yang
+        # menautkan pustaka statis tanpa define ini karena itu mencari simbol
+        # `__imp_*` yang tidak pernah ada di sana.
+        target_compile_definitions(sim_openvdb INTERFACE OPENVDB_STATICLIB)
+        # Boost memasang `#pragma comment(lib, ...)` di headernya sendiri. Header
+        # publik OpenVDB tidak menyentuh Boost, jadi autolink itu tidak pernah
+        # menyala di sini — tapi bila suatu saat ia menyala, yang dicarinya adalah
+        # nama berversi yang belum tentu ada. Yang eksplisit di atas sudah cukup.
+        target_compile_definitions(sim_openvdb INTERFACE BOOST_ALL_NO_LIB)
+    endif()
     # SYSTEM: header OpenVDB memancarkan peringatannya sendiri, dan -Werror
     # proyek ini akan menggagalkan build karenanya.
-    target_include_directories(sim_openvdb SYSTEM INTERFACE "${SIM_OPENVDB_ROOT}/include")
+    target_include_directories(sim_openvdb SYSTEM INTERFACE "${_sim_vdb_root}/include")
     add_library(OpenVdb::OpenVdb ALIAS sim_openvdb)
 
-    file(STRINGS "${SIM_OPENVDB_ROOT}/include/openvdb/version.h" simVdbVersionLines
+    # TBB tetap DLL — tautan statisnya tidak didukung resmi — jadi ia harus duduk
+    # di sebelah executable seperti SDL3.dll. Disalin saat konfigurasi, bukan saat
+    # build: berkasnya milik pemasangan di luar pohon ini dan tidak berubah di
+    # antara dua build.
+    if(WIN32)
+        file(GLOB _sim_vdb_dlls "${_sim_vdb_root}/bin/tbb*.dll")
+        if(_sim_vdb_dlls)
+            file(COPY ${_sim_vdb_dlls} DESTINATION "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}")
+        endif()
+    endif()
+
+    file(STRINGS "${_sim_vdb_root}/include/openvdb/version.h" simVdbVersionLines
          REGEX "^#define OPENVDB_LIBRARY_(MAJOR|MINOR|PATCH)_VERSION_NUMBER ")
     string(REGEX MATCHALL "[0-9]+" simVdbVersionParts "${simVdbVersionLines}")
     list(JOIN simVdbVersionParts "." SIM_OPENVDB_VERSION)
     set(SIM_OPENVDB_VERSION "${SIM_OPENVDB_VERSION}" CACHE INTERNAL "Versi OpenVDB yang aktif")
-    message(STATUS "OpenVDB ${SIM_OPENVDB_VERSION} dipakai dari ${SIM_OPENVDB_ROOT} — bake SDF mesh aktif")
+    message(STATUS "OpenVDB ${SIM_OPENVDB_VERSION} dipakai dari ${_sim_vdb_root} — bake SDF mesh aktif")
 elseif(NOT SIM_WITH_OPENVDB)
     message(STATUS "OpenVDB dimatikan (-DSIM_WITH_OPENVDB=OFF)")
 elseif(NOT SIM_OPENVDB_ROOT)

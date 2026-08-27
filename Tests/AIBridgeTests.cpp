@@ -12,7 +12,7 @@
 
 #include <filesystem>
 #include <fstream>
-#include <unistd.h>
+#include "TestProcess.h"
 #include <atomic>
 #include <vector>
 #include <mutex>
@@ -619,7 +619,7 @@ struct TempDir {
 
     TempDir() {
         path = std::filesystem::temp_directory_path() /
-               ("sim-mcp-" + std::to_string(::getpid()) + "-" +
+               ("sim-mcp-" + std::to_string(sim::tests::ProcessId()) + "-" +
                 std::to_string(reinterpret_cast<uintptr_t>(this)));
         std::filesystem::create_directories(path);
     }
@@ -648,7 +648,7 @@ TEST_CASE("Berkas pengumuman menyebut pemiliknya, dan hanya pemilik yang menghap
         CHECK(written.at("auth") == "none");
         // Inilah yang membuat berkas basi bisa dikenali: pembaca memeriksa
         // apakah proses ini masih ada sebelum mempercayai portnya.
-        CHECK(written.at("pid") == static_cast<int64_t>(::getpid()));
+        CHECK(written.at("pid") == static_cast<int64_t>(sim::tests::ProcessId()));
         // Token tidak pernah ikut — berkas ini bisa dibaca proses lain milik
         // pengguna yang sama, yaitu tepat yang hendak dihalangi token.
         CHECK_FALSE(written.contains("token"));
@@ -675,7 +675,7 @@ TEST_CASE("Berkas pengumuman menyebut pemiliknya, dan hanya pemilik yang menghap
         // masuk akal untuk ditemukan.
         {
             std::ifstream file(advert);
-            CHECK(json::parse(file).at("pid") == static_cast<int64_t>(::getpid()));
+            CHECK(json::parse(file).at("pid") == static_cast<int64_t>(sim::tests::ProcessId()));
         }
 
         // Sekarang tulis ulang seolah-olah proses lain merebutnya, lalu berhenti.

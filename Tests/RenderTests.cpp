@@ -2049,14 +2049,14 @@ TEST_CASE("Frustum spot mengikuti sudut kerucutnya") {
 
     // Di dalam kerucut 35°, masih di dalam peta.
     const float inside = std::tan(30.0f * kDegToRad) * 5.0f;
-    const Vec4 near = matrix * Vec4(inside, 0.0f, -5.0f, 1.0f);
-    CHECK(std::abs(near.x / near.w) < 1.0f);
+    const Vec4 nearCorner = matrix * Vec4(inside, 0.0f, -5.0f, 1.0f);
+    CHECK(std::abs(nearCorner.x / nearCorner.w) < 1.0f);
 
     // Jauh di luar kerucut: keluar peta. Frustum yang jauh lebih lebar daripada
     // kerucutnya membuang resolusi pada daerah yang tidak pernah tersinari.
     const float outside = std::tan(60.0f * kDegToRad) * 5.0f;
-    const Vec4 far = matrix * Vec4(outside, 0.0f, -5.0f, 1.0f);
-    CHECK(std::abs(far.x / far.w) > 1.0f);
+    const Vec4 farCorner = matrix * Vec4(outside, 0.0f, -5.0f, 1.0f);
+    CHECK(std::abs(farCorner.x / farCorner.w) > 1.0f);
 }
 
 TEST_CASE("Kepentingan bayangan naik saat lampu mendekat") {
@@ -2671,13 +2671,13 @@ bool RayBoxDistance(const Vec3& origin, const Vec3& direction, const Mat4& model
             continue;
         }
         const float inverseDirection = 1.0f / localDirection[axis];
-        float near = (-halfExtent[axis] - localOrigin[axis]) * inverseDirection;
-        float far = (halfExtent[axis] - localOrigin[axis]) * inverseDirection;
-        if (near > far) {
-            std::swap(near, far);
+        float tNear = (-halfExtent[axis] - localOrigin[axis]) * inverseDirection;
+        float tFar = (halfExtent[axis] - localOrigin[axis]) * inverseDirection;
+        if (tNear > tFar) {
+            std::swap(tNear, tFar);
         }
-        tMin = std::max(tMin, near);
-        tMax = std::min(tMax, far);
+        tMin = std::max(tMin, tNear);
+        tMax = std::min(tMax, tFar);
         if (tMin > tMax) {
             return false;
         }
@@ -3465,9 +3465,9 @@ TEST_CASE("Sel membesar mengikuti jarak ke kamera") {
 
     // Tingkatnya ikut ke kunci: sel halus dan sel kasar yang kebetulan
     // bertumpuk tidak boleh berbagi entri, karena isinya beda arti.
-    const RadianceCacheKey near = cache.KeyFor(Vec3(1.0f, 0.0f, 0.0f), normal, camera);
-    const RadianceCacheKey far = cache.KeyFor(Vec3(1.0f, 0.0f, 0.0f), normal, Vec3(100.0f, 0, 0));
-    CHECK(near.level != far.level);
+    const RadianceCacheKey nearKey = cache.KeyFor(Vec3(1.0f, 0.0f, 0.0f), normal, camera);
+    const RadianceCacheKey farKey = cache.KeyFor(Vec3(1.0f, 0.0f, 0.0f), normal, Vec3(100.0f, 0, 0));
+    CHECK(nearKey.level != farKey.level);
 }
 
 TEST_CASE("Hash menyebar sel bertetangga ke slot yang berjauhan") {
@@ -4547,13 +4547,13 @@ TEST_CASE("udara memakan biru dan mengembalikannya sebagai kabut biru") {
 
     // Dan kabut yang ditambahkannya biru: pada jarak jauh, biru jauh melebihi
     // merah.
-    const AerialSample far =
+    const AerialSample farSample =
         IntegrateAerialPerspective(atmosphere, origin, direction, sun, 32.0f, 256);
-    CHECK(far.inscatter.z > far.inscatter.x * 2.0f);
+    CHECK(farSample.inscatter.z > farSample.inscatter.x * 2.0f);
 
     // Permukaan hitam yang jauh karena itu tidak hitam melainkan biru — persis
     // yang membuat gunung di kejauhan tampak biru.
-    const Vec3 black = ApplyAerialPerspective(Vec3(0.0f), far);
+    const Vec3 black = ApplyAerialPerspective(Vec3(0.0f), farSample);
     CHECK(black.z > black.x);
     CHECK(black.z > 0.0f);
 }

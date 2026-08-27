@@ -298,11 +298,11 @@ TEST_CASE("Titik terdekat menemukan permukaan, bukan pusat bendanya") {
                       /*userData=*/10);
     scene.Commit();
 
-    const ClosestPoint near = FindClosestPoint(scene, Vec3(3.0f, 0.0f, 0.0f), 10.0f);
-    REQUIRE(near);
-    CHECK(near.userData == 9);
-    CHECK(near.distance == doctest::Approx(2.5f));
-    CHECK(near.position.x == doctest::Approx(0.5f));
+    const ClosestPoint nearest = FindClosestPoint(scene, Vec3(3.0f, 0.0f, 0.0f), 10.0f);
+    REQUIRE(nearest);
+    CHECK(nearest.userData == 9);
+    CHECK(nearest.distance == doctest::Approx(2.5f));
+    CHECK(nearest.position.x == doctest::Approx(0.5f));
 
     // Di luar jangkauan: tidak ditemukan, bukan dikembalikan yang terjauh.
     CHECK_FALSE(FindClosestPoint(scene, Vec3(1000.0f, 0.0f, 0.0f), 1.0f));

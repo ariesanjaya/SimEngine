@@ -6,6 +6,7 @@
     {
       "name": "base",
       "hidden": true,
+      "description": "Yang sama di semua platform. Compiler ikut di sini, bukan di turunannya: yang dipakai di Windows adalah clang++ yang sama, hanya saja menargetkan ABI MSVC — jadi flag peringatan di SimTargets.cmake berlaku apa adanya, sedangkan cl.exe tidak mengerti satu pun di antaranya.",
       "generator": "Ninja",
       "binaryDir": "${sourceDir}/build/${presetName}",
       "cacheVariables": {
@@ -15,14 +16,26 @@
         "SIM_BUILD_TESTS": "ON",
         "SIM_BUILD_EDITOR": "ON",
         "SIM_WITH_LUA": "ON"
-      },
+      }
+    },
+    {
+      "name": "linux-base",
+      "hidden": true,
+      "inherits": "base",
       "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Linux" }
+    },
+    {
+      "name": "windows-base",
+      "hidden": true,
+      "inherits": "base",
+      "description": "Dijalankan dari Developer PowerShell for VS 2022 dengan -Arch amd64. Lingkungan itu yang menyediakan header dan LIB MSVC yang dipakai clang, plus cmake dan ninja bundel VS. Tanpanya konfigurasi gagal saat menguji compiler, dan -Arch bawaan (x86) gagal jauh lebih belakangan — di tautan.",
+      "condition": { "type": "equals", "lhs": "${hostSystemName}", "rhs": "Windows" }
     },
 
     {
       "name": "linux-clang-debug",
       "displayName": "Linux Clang Debug",
-      "inherits": "base",
+      "inherits": "linux-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "SIM_WERROR": "ON"
@@ -31,7 +44,7 @@
     {
       "name": "linux-clang-release",
       "displayName": "Linux Clang RelWithDebInfo",
-      "inherits": "base",
+      "inherits": "linux-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "RelWithDebInfo",
         "SIM_WERROR": "ON"
@@ -40,7 +53,7 @@
     {
       "name": "linux-clang-asan",
       "displayName": "Linux Clang ASan+UBSan",
-      "inherits": "base",
+      "inherits": "linux-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_CXX_FLAGS": "-fsanitize=address,undefined -fno-omit-frame-pointer",
@@ -54,7 +67,7 @@
     {
       "name": "linux-clang-tsan",
       "displayName": "Linux Clang ThreadSanitizer",
-      "inherits": "base",
+      "inherits": "linux-base",
       "cacheVariables": {
         "CMAKE_BUILD_TYPE": "Debug",
         "CMAKE_CXX_FLAGS": "-fsanitize=thread -fno-omit-frame-pointer",
@@ -64,6 +77,25 @@
         "CMAKE_MODULE_LINKER_FLAGS": "-fsanitize=thread",
         "SIM_SDL_SHARED": "OFF"
       }
+    },
+
+    {
+      "name": "windows-clang-debug",
+      "displayName": "Windows Clang Debug",
+      "inherits": "windows-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "SIM_WERROR": "ON"
+      }
+    },
+    {
+      "name": "windows-clang-release",
+      "displayName": "Windows Clang RelWithDebInfo",
+      "inherits": "windows-base",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "RelWithDebInfo",
+        "SIM_WERROR": "ON"
+      }
     }
   ],
 
@@ -71,7 +103,9 @@
     { "name": "linux-clang-debug",   "configurePreset": "linux-clang-debug" },
     { "name": "linux-clang-release", "configurePreset": "linux-clang-release" },
     { "name": "linux-clang-asan",    "configurePreset": "linux-clang-asan" },
-    { "name": "linux-clang-tsan",    "configurePreset": "linux-clang-tsan" }
+    { "name": "linux-clang-tsan",    "configurePreset": "linux-clang-tsan" },
+    { "name": "windows-clang-debug",   "configurePreset": "windows-clang-debug" },
+    { "name": "windows-clang-release", "configurePreset": "windows-clang-release" }
   ],
 
   "testPresets": [
@@ -83,6 +117,11 @@
     {
       "name": "linux-clang-asan",
       "configurePreset": "linux-clang-asan",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "windows-clang-debug",
+      "configurePreset": "windows-clang-debug",
       "output": { "outputOnFailure": true }
     }
   ]

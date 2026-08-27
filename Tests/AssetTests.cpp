@@ -35,7 +35,7 @@
 #include <cstdlib>
 #include <filesystem>
 #include <cctype>
-#include <unistd.h>
+#include "TestProcess.h"
 #include <fstream>
 #include <string>
 #include <thread>
@@ -52,7 +52,7 @@ public:
         static std::atomic<int> counter{0};
         path_ = std::filesystem::temp_directory_path() /
                 ("simassets_" + std::to_string(counter.fetch_add(1)) + "_" +
-                 std::to_string(::getpid()));
+                 std::to_string(sim::tests::ProcessId()));
         std::filesystem::create_directories(path_);
     }
     ~TempDir() {
@@ -292,26 +292,44 @@ TEST_CASE("pemantau berkas melaporkan berkas baru tanpa pemindaian penuh") {
     CHECK(seen);
 }
 
-TEST_CASE("pemantau meminta pemindaian ulang saat direktori baru muncul") {
+TEST_CASE("perubahan di direktori yang baru muncul tidak hilang diam-diam") {
     TempDir temp;
     FileWatcher watcher;
     if (!watcher.Watch(temp.Path())) {
         return;
     }
 
-    // Berkas bisa masuk ke direktori baru sebelum watch-nya sempat terpasang,
-    // dan itu tidak akan pernah terlaporkan. Satu-satunya jawaban jujur adalah
-    // meminta pemindaian ulang — Poll() harus mengembalikan false.
+    // **Satu janji, dua cara memenuhinya.** Janjinya adalah kontrak `Poll()` di
+    // header: apa pun boleh terlewat, asalkan tidak terlewat tanpa kabar.
+    //
+    // inotify tidak punya mode rekursif, jadi berkas bisa masuk ke direktori
+    // baru sebelum watch-nya sempat terpasang. Yang jujur di sana adalah meminta
+    // pemindaian ulang — `Poll()` mengembalikan false.
+    //
+    // ReadDirectoryChangesW memantau seluruh sub-pohon lewat satu handle, jadi
+    // di Windows tidak ada yang terlewat dan tidak ada yang perlu dipindai
+    // ulang; berkasnya dilaporkan seperti berkas lain. Menuntut `false` di sana
+    // berarti menuntut pemantau melaporkan kehilangan yang tidak pernah terjadi
+    // — dan itu menguji inotify, bukan menguji kontraknya.
     std::filesystem::create_directories(temp.Path() / "Sub");
+    WriteFile(temp.Path() / "Sub" / "isi.txt", "1");
 
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
-    bool askedForRescan = false;
-    while (!askedForRescan && std::chrono::steady_clock::now() < deadline) {
+    bool accountedFor = false;
+    while (!accountedFor && std::chrono::steady_clock::now() < deadline) {
         std::vector<FileWatcher::Event> events;
-        askedForRescan = !watcher.Poll(events);
+        if (!watcher.Poll(events)) {
+            accountedFor = true;  // diminta memindai ulang: sah
+            break;
+        }
+        for (const FileWatcher::Event& event : events) {
+            if (event.path.find("isi.txt") != std::string::npos) {
+                accountedFor = true;
+            }
+        }
         std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
-    CHECK(askedForRescan);
+    CHECK(accountedFor);
 }
 
 TEST_CASE("versi hanya naik ketika isinya benar-benar berubah") {
@@ -2486,7 +2504,7 @@ TEST_CASE("PlanCook menelusuri dari level dan memisahkan yang tidak terjangkau")
     // yang dikarang uji.
     const std::filesystem::path root =
         std::filesystem::temp_directory_path() /
-        ("simcook_" + std::to_string(::getpid()));
+        ("simcook_" + std::to_string(sim::tests::ProcessId()));
     std::filesystem::remove_all(root);
     std::filesystem::create_directories(root / "Assets");
     std::filesystem::create_directories(root / "Levels");

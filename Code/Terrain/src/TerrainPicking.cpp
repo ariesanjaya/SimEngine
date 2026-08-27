@@ -40,13 +40,13 @@ bool ClipToBounds(const Terrain& terrain, const Vec3& origin, const Vec3& direct
             }
             continue;
         }
-        float near = (boxMin[axis] - from) / along;
-        float far = (boxMax[axis] - from) / along;
-        if (near > far) {
-            std::swap(near, far);
+        float tNear = (boxMin[axis] - from) / along;
+        float tFar = (boxMax[axis] - from) / along;
+        if (tNear > tFar) {
+            std::swap(tNear, tFar);
         }
-        enter = std::max(enter, near);
-        exit = std::min(exit, far);
+        enter = std::max(enter, tNear);
+        exit = std::min(exit, tFar);
         if (enter > exit) {
             return false;
         }

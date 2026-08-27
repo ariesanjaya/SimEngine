@@ -13,7 +13,7 @@
 #include <filesystem>
 #include <fstream>
 #include <thread>
-#include <unistd.h>
+#include "TestProcess.h"
 
 TEST_CASE("LuaVM menjalankan kode dan melaporkan versi") {
     sim::script::LuaVM lua;
@@ -152,7 +152,7 @@ namespace {
 struct TempScriptDir {
     TempScriptDir() {
         path = std::filesystem::temp_directory_path() /
-               ("simscripts_" + std::to_string(::getpid()) + "_" +
+               ("simscripts_" + std::to_string(sim::tests::ProcessId()) + "_" +
                 std::to_string(reinterpret_cast<std::uintptr_t>(this)));
         std::filesystem::create_directories(path);
     }
