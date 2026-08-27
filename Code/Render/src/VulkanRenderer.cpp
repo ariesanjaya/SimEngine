@@ -5525,6 +5525,11 @@ private:
         /// lingkungannya, jadi menggesernya tidak boleh memicu panggangan.
         std::string filePath;
         float fileIntensity = 1.0f;
+        /// **Bagian dari kunci, bukan sekadar bendera.** Peta yang dipanggang
+        /// dengan mataharinya dan tanpa mataharinya adalah dua peta yang
+        /// berbeda; memakai artefak yang salah menghasilkan adegan yang
+        /// mataharinya terhitung dua kali atau tidak sama sekali.
+        bool extractSun = false;
 
         float intensity = 0.0f;
         float cameraHeightKm = 0.0f;
@@ -5545,7 +5550,8 @@ private:
             // itulah yang membuat level pra-GI tidak memanggang apa pun sesudah
             // panggangan pertamanya.
             if (fromFile) {
-                return filePath == other.filePath && fileIntensity == other.fileIntensity;
+                return filePath == other.filePath && fileIntensity == other.fileIntensity &&
+                       extractSun == other.extractSun;
             }
             return atmosphere == other.atmosphere && intensity == other.intensity &&
                    cameraHeightKm == other.cameraHeightKm &&
@@ -5559,7 +5565,8 @@ private:
                 return false;
             }
             if (fromFile) {
-                return filePath == other.filePath && fileIntensity == other.fileIntensity;
+                return filePath == other.filePath && fileIntensity == other.fileIntensity &&
+                       extractSun == other.extractSun;
             }
             return atmosphere == other.atmosphere && intensity == other.intensity &&
                    cameraHeightKm == other.cameraHeightKm &&
@@ -5607,6 +5614,7 @@ private:
         key.fromFile = desc.environment == EnvironmentSource::File && !desc.hdriPath.empty();
         key.filePath = key.fromFile ? std::string(desc.hdriPath) : std::string{};
         key.fileIntensity = desc.hdriIntensity;
+        key.extractSun = desc.extractSunFromEnvironment;
 
         key.atmosphere = !key.fromFile && desc.skyEnabled && desc.skySource != SkySource::HdrMap;
         key.intensity = key.atmosphere ? desc.skyIntensity : 0.0f;
@@ -5720,10 +5728,16 @@ private:
         // memakan sekitar seratus megabyte dan ratusan milidetik; melakukannya
         // di main thread berarti editor yang membeku tepat saat orang mengetik
         // jalur berkas — yaitu cacat yang keputusan 6 cegah.
-        auto bake = [path = key.filePath, intensity = key.fileIntensity, settings,
+        auto bake = [path = key.filePath, intensity = key.fileIntensity,
+                     extractSun = key.extractSun, settings,
                      cacheDir = EnvironmentCacheDirectory(), result]() mutable {
             const std::filesystem::path source(path);
-            const uint64_t cacheKey = IblCacheKey(source, settings, intensity);
+            // Bendera ekstraksi ikut kuncinya lewat pengalinya: peta dengan dan
+            // tanpa mataharinya adalah dua artefak yang berbeda, dan memakai
+            // yang salah menghasilkan matahari yang terhitung dua kali atau
+            // tidak sama sekali.
+            const uint64_t cacheKey =
+                IblCacheKey(source, settings, extractSun ? -intensity : intensity);
             const std::filesystem::path cached =
                 cacheKey != 0 ? IblCachePath(cacheDir, cacheKey) : std::filesystem::path{};
 
@@ -5749,6 +5763,23 @@ private:
             EquirectEnvironment map = LoadHdrEquirect(path);
             if (map.IsValid()) {
                 map.intensity = intensity;
+                if (extractSun) {
+                    // **Sebelum dipanggang, bukan sesudah.** Mengeluarkannya
+                    // dari peta yang sudah menjadi SH dan prefilter tidak bisa
+                    // dilakukan sama sekali: keduanya sudah merata-ratakan
+                    // mataharinya ke seluruh arah.
+                    const ExtractedSun sun = ExtractSun(map);
+                    if (sun.found) {
+                        SIM_INFO("Render",
+                                 "sun extracted from environment: dir ({:.3f} {:.3f} {:.3f}), "
+                                 "irradiance ({:.1f} {:.1f} {:.1f}), {:.5f} sr",
+                                 sun.direction.x, sun.direction.y, sun.direction.z,
+                                 sun.irradiance.x, sun.irradiance.y, sun.irradiance.z,
+                                 sun.solidAngle);
+                    } else {
+                        SIM_INFO("Render", "no sun found in {} — nothing extracted", path);
+                    }
+                }
                 result->baked = BakeIblCpu(map, settings);
                 result->carriesIrradiance = true;
                 if (!cached.empty() && !WriteIblCache(cached, result->baked, cacheError)) {

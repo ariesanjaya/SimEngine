@@ -494,7 +494,7 @@ digambar `SkyComponent`, jadi sebuah level tidak bisa disinari satu berkas
 sambil menggambar berkas lain. Tidak ada yang memintanya, dan menambahkannya
 berarti satu jalur lagi di `SkyComponent` yang harus dijelaskan.
 
-### B4 — Ekstraksi matahari dari HDRI
+### B4 — Ekstraksi matahari dari HDRI · ✅
 
 Berkas HDR sudah berisi mataharinya. Kalau level juga punya `Sun`, ada dua.
 
@@ -505,6 +505,62 @@ Berkas HDR sudah berisi mataharinya. Kalau level juga punya `Sun`, ada dua.
 **Selesai kalau:** iradiansi total dari (lingkungan tanpa matahari + lampu hasil
 ekstraksi) sama dengan iradiansi dari peta utuh, dalam toleransi yang ditulis di
 ujinya. Tidak ada energi yang hilang, tidak ada yang dihitung dua kali.
+
+#### Keadaannya sesudah B4
+
+**Kriterianya dipenuhi dalam 3%, dan angkanya bisa dipenuhi tepat karena
+perumusannya diubah.** Yang dikeluarkan dari peta bukan seluruh radiansi
+kawasannya melainkan **kelebihannya di atas langit di sekitarnya**, dan texel
+kawasan itu diganti dengan langit tersebut alih-alih dengan nol. Kalau lampunya
+membawa seluruh radiansinya, langit di balik mataharinya terhitung dua kali dan
+petanya berlubang; dengan selisihnya, penjumlahan keduanya mengembalikan
+iradiansi peta utuh. Toleransi 3% yang tersisa bukan pembukuan melainkan bentuk:
+cakramnya punya lebar, dan menggantinya dengan satu arah memindahkan sedikit
+energi di tepi kawasannya.
+
+Pada HDR 4K sungguhan (`golden_gate_hills_4k`) yang ditemukannya: arah
+(0,432 0,679 −0,594), iradiansi (5,5 5,4 5,4), sudut ruang **8×10⁻⁵ sr** — orde
+yang sama dengan sudut ruang matahari sebenarnya, 6,8×10⁻⁵ sr.
+
+**Langit mendung tidak dilubangi.** Peta yang texel paling terangnya tidak
+menonjol jauh di atas rata-ratanya tidak punya matahari untuk dikeluarkan, dan
+mengeluarkan "kawasan paling terang" dari langit yang merata hanya meninggalkan
+bercak — sebuah cacat yang terlihat, bukan sebuah galat. Ujinya memeriksa petanya
+kembali byte demi byte tak tersentuh.
+
+**Sebuah tawaran, bukan sesuatu yang terjadi sendiri.** `WorldSettings::extractSun`
+mati secara bawaan, dan tombol di panel World Settings mengerjakan keduanya dalam
+satu transaksi: menyalakan ekstraksi **dan** mengisi lampu directional dengan
+arah serta iradiansi hasilnya. Menyalakan yang satu tanpa yang lain menghasilkan
+adegan yang kehilangan mataharinya sama sekali, atau adegan dengan dua matahari;
+satu transaksi berarti undo mengembalikan ketiganya sekaligus dan tidak ada
+keadaan setengah jalan yang bisa ditinggalkan siapa pun.
+
+Benderanya ikut kunci artefak masak — peta dengan dan tanpa mataharinya adalah
+dua artefak yang berbeda, dan memakai yang salah menghasilkan matahari yang
+terhitung dua kali atau tidak sama sekali. Diverifikasi: dua level yang bedanya
+hanya bendera itu menghasilkan dua `.simibl` yang berbeda.
+
+**Biaya ekstraksinya 920 ms** pada HDR 4096×2048 (Debug), di atas 1143 ms
+pemuatan dan panggangannya. Dua lintasan penuh atas 8,4 juta texel, dan
+keduanya memang perlu: yang pertama mencari puncak dan rata-ratanya, yang kedua
+mengumpulkan kawasannya. Sinus dan kosinusnya ditabelkan per baris dan per
+kolom — 6144 panggilan trigonometri, bukan 8,4 juta — dan itu memangkasnya dari
+1300 ms tanpa mengubah satu bit pun hasilnya.
+
+> **Tombolnya menolak bekerja selagi Time-of-Day menyala**, dan itu bukan
+> kehati-hatian berlebihan: `ApplyTimeOfDay` menimpa arah **dan** warna setiap
+> lampu directional pada tiap frame. Menekan tombol itu di sana membuat hasilnya
+> hilang pada frame berikutnya sementara `extractSun` tetap menyala — adegannya
+> lalu kehilangan matahari HDRI-nya, dan penggantinya tidak cocok dengan
+> fotonya. Yang gagal diam-diam lebih buruk daripada tombol yang jujur tidak
+> tersedia.
+
+**Yang belum:** ekstraksinya menemukan **satu** kawasan paling terang. Peta
+dengan dua sumber kuat — matahari dan pantulannya di air, atau lampu studio
+berganda — hanya kehilangan yang pertama. Menangani lebih dari satu berarti
+memutuskan berapa lampu yang boleh dibuat sebuah tombol, dan itu pertanyaan
+pengarangan, bukan pertanyaan energi.
 
 ### B5 — Validasi terhadap path tracer acuan
 

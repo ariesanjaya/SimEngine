@@ -85,6 +85,24 @@ struct WorldSettings {
     /// Kompensasi dalam stop, berlaku pada kedua mode. Positif berarti lebih
     /// terang.
     float exposureCompensation = 0.0f;
+
+    /// Keluarkan matahari dari berkas lingkungan sebelum ia dipanggang (B4).
+    ///
+    /// **Berkas HDR sudah berisi mataharinya.** Kalau level juga punya lampu
+    /// directional, ada dua — dan tidak ada satu pun galat yang menyebutkannya,
+    /// hanya bayangan yang dua kali lebih tegas daripada yang dimaksudkan
+    /// pengarangnya. Menyalakan ini memisahkan keduanya: petanya kehilangan
+    /// mataharinya, dan lampunya yang mengantarkannya.
+    ///
+    /// **Mati secara bawaan, dan itu disengaja.** Menyalakannya tanpa mengisi
+    /// lampu directional dengan hasil ekstraksinya menghasilkan adegan yang
+    /// kehilangan mataharinya sama sekali — jadi yang menyalakannya sebaiknya
+    /// tombol di World Settings yang mengerjakan keduanya sekaligus, bukan
+    /// sebuah centang yang berdiri sendiri.
+    ///
+    /// Hanya berlaku untuk `environment: File`; langit prosedural tidak pernah
+    /// memanggang cakram mataharinya sejak B1.
+    bool extractSun = false;
 };
 
 /// True bila kombinasinya tidak sah.

@@ -7,6 +7,7 @@
 #include <array>
 #include <cmath>
 #include <string>
+#include <utility>
 
 namespace sim::render {
 namespace {
@@ -243,6 +244,175 @@ bool IsRgbEquirect(const imageio::ImageDesc& desc, std::string& found) {
         found += found.empty() ? name : ", " + name;
     }
     return false;
+}
+
+ExtractedSun ExtractSun(EquirectEnvironment& map, const SunExtractionSettings& settings) {
+    ExtractedSun sun;
+    if (!map.IsValid()) {
+        return sun;
+    }
+
+    const uint32_t width = map.width;
+    const uint32_t height = map.height;
+    const auto texelAt = [&](uint32_t x, uint32_t y) {
+        const std::size_t at = (static_cast<std::size_t>(y) * width + x) * 3;
+        return Vec3(map.pixels[at], map.pixels[at + 1], map.pixels[at + 2]);
+    };
+    const auto luminance = [](const Vec3& c) {
+        return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+    };
+
+    // Sudut ruang satu texel: dω = cos(lat) · dlon · dlat. Faktor cos itulah yang
+    // membuat baris di dekat kutub — yang di peta selebar baris di khatulistiwa —
+    // menyumbang jauh lebih sedikit. Melewatkannya membuat matahari yang
+    // kebetulan tinggi terhitung berkali-kali lipat.
+    const float dLon = 2.0f * kPi / static_cast<float>(width);
+    const float dLat = kPi / static_cast<float>(height);
+    // **Sinus dan kosinusnya dihitung sekali per baris dan per kolom, bukan per
+    // texel.** Arah sebuah texel equirect hanya bergantung pada bujur kolomnya
+    // dan lintang barisnya, jadi tabel selebar `width + height` menggantikan
+    // `width * height` panggilan trigonometri — pada peta 4096x2048 itu 6144
+    // lawan 8,4 juta. Hasilnya bit-per-bit sama; yang berubah cuma berapa kali
+    // `std::sin` dipanggil.
+    std::vector<float> sinLon(width);
+    std::vector<float> cosLon(width);
+    for (uint32_t x = 0; x < width; ++x) {
+        const float longitude =
+            ((static_cast<float>(x) + 0.5f) / static_cast<float>(width) - 0.5f) * 2.0f * kPi;
+        sinLon[x] = std::sin(longitude);
+        cosLon[x] = std::cos(longitude);
+    }
+    std::vector<float> sinLat(height);
+    std::vector<float> cosLat(height);
+    for (uint32_t y = 0; y < height; ++y) {
+        const float latitude =
+            (0.5f - (static_cast<float>(y) + 0.5f) / static_cast<float>(height)) * kPi;
+        sinLat[y] = std::sin(latitude);
+        cosLat[y] = std::cos(latitude);
+    }
+    const auto directionAt = [&](uint32_t x, uint32_t y) {
+        return Vec3(cosLat[y] * sinLon[x], sinLat[y], -cosLat[y] * cosLon[x]);
+    };
+    const auto rowSolidAngle = [&](uint32_t y) {
+        return std::max(cosLat[y], 0.0f) * dLon * dLat;
+    };
+
+    // --- texel paling terang, dan apakah ia benar-benar menonjol -------------
+    float peak = -1.0f;
+    uint32_t peakX = 0;
+    uint32_t peakY = 0;
+    double weightedTotal = 0.0;
+    double weightTotal = 0.0;
+    for (uint32_t y = 0; y < height; ++y) {
+        const float solid = rowSolidAngle(y);
+        for (uint32_t x = 0; x < width; ++x) {
+            const float value = luminance(texelAt(x, y));
+            if (value > peak) {
+                peak = value;
+                peakX = x;
+                peakY = y;
+            }
+            weightedTotal += static_cast<double>(value) * solid;
+            weightTotal += solid;
+        }
+    }
+    if (peak <= 0.0f || weightTotal <= 0.0) {
+        return sun;
+    }
+    const auto mean = static_cast<float>(weightedTotal / weightTotal);
+    // Peta mendung tidak punya matahari untuk dikeluarkan, dan mengeluarkan
+    // "kawasan paling terang" dari langit yang merata hanya melubanginya.
+    if (settings.minPeakOverMean > 0.0f && peak < mean * settings.minPeakOverMean) {
+        return sun;
+    }
+
+    const Vec3 peakDirection = directionAt(peakX, peakY);
+    const float cosRadius = std::cos(std::max(settings.maxAngularRadius, 1e-4f));
+    const float threshold = peak * std::clamp(settings.relativeThreshold, 0.0f, 1.0f);
+
+    // --- kawasan matahari, dan langit tepat di sekitarnya --------------------
+    //
+    // Dua kumpulan dikumpulkan dalam satu lintasan: yang di dalam jari-jari DAN
+    // di atas ambang adalah mataharinya; yang di dalam jari-jari tapi di bawah
+    // ambang adalah langit di baliknya, dan rata-ratanya yang menggantikan
+    // mataharinya.
+    std::vector<std::pair<uint32_t, uint32_t>> region;
+    Vec3 backgroundTotal(0.0f);
+    float backgroundWeight = 0.0f;
+    for (uint32_t y = 0; y < height; ++y) {
+        const float solid = rowSolidAngle(y);
+        if (solid <= 0.0f) {
+            continue;
+        }
+        for (uint32_t x = 0; x < width; ++x) {
+            if (glm::dot(directionAt(x, y), peakDirection) < cosRadius) {
+                continue;
+            }
+            if (luminance(texelAt(x, y)) >= threshold) {
+                region.emplace_back(x, y);
+            } else {
+                backgroundTotal += texelAt(x, y) * solid;
+                backgroundWeight += solid;
+            }
+        }
+    }
+    if (region.empty()) {
+        return sun;
+    }
+    // Tanpa satu pun texel di bawah ambang, jari-jarinya seluruhnya matahari —
+    // langit penggantinya lalu diambil dari rata-rata seluruh peta, yang
+    // setidaknya bukan lubang hitam.
+    const Vec3 background = backgroundWeight > 0.0f
+                                ? backgroundTotal / backgroundWeight
+                                : Vec3(static_cast<float>(weightedTotal / weightTotal));
+
+    // --- keluarkan, dan catat apa yang dikeluarkan ---------------------------
+    Vec3 excessTotal(0.0f);
+    Vec3 directionTotal(0.0f);
+    float directionWeight = 0.0f;
+    float solidAngleTotal = 0.0f;
+    for (const auto& [x, y] : region) {
+        const float solid = rowSolidAngle(y);
+        // Dijepit di nol: sebuah texel di dalam kawasan yang kebetulan lebih
+        // redup daripada langit di sekitarnya tidak boleh mengurangi
+        // mataharinya.
+        const Vec3 excess = glm::max(texelAt(x, y) - background, Vec3(0.0f));
+
+        excessTotal += excess * solid;
+        solidAngleTotal += solid;
+
+        const float weight = luminance(excess) * solid;
+        directionTotal += directionAt(x, y) * weight;
+        directionWeight += weight;
+
+        const std::size_t at = (static_cast<std::size_t>(y) * width + x) * 3;
+        map.pixels[at] = background.x;
+        map.pixels[at + 1] = background.y;
+        map.pixels[at + 2] = background.z;
+    }
+    if (directionWeight <= 0.0f || glm::length(directionTotal) <= 1e-6f) {
+        return sun;
+    }
+
+    sun.found = true;
+    // Pusat massa kelebihannya, bukan texel paling terangnya: cakram yang
+    // tercuplik beberapa texel punya puncak yang meleset setengah texel dari
+    // pusatnya, dan setengah texel pada peta 4K adalah 0,04° — kecil, tapi
+    // gratis untuk diperbaiki.
+    sun.direction = glm::normalize(directionTotal / directionWeight);
+    // **Dikalikan pengali petanya.** Yang dibaca fungsi ini `pixels` mentah,
+    // sedangkan yang memanggangnya membaca lewat `Sample` yang menerapkan
+    // `intensity` — jadi peta meradiasikan `pixels × intensity`, dan yang harus
+    // dibawa lampunya kelebihan dalam satuan yang sama. Melewatkannya tidak
+    // menghasilkan satu pun galat: hanya adegan yang mataharinya terlalu redup
+    // persis sebanyak pengalinya, dan energi yang hilang dari pembukuan yang
+    // seharusnya tertutup.
+    //
+    // Penggantian texelnya tetap dalam satuan `pixels`, dan itu konsisten: ia
+    // menulis ke `pixels`, yang kemudian ikut dikalikan `Sample`.
+    sun.irradiance = excessTotal * map.intensity;
+    sun.solidAngle = solidAngleTotal;
+    return sun;
 }
 
 EquirectEnvironment LoadHdrEquirect(const std::filesystem::path& path) {
