@@ -5145,9 +5145,16 @@ private:
         prefiltered = {ready ? skyIbl_.prefiltered.Sampler() : fallbackCube_.Sampler(),
                        ready ? skyIbl_.prefiltered.View() : fallbackCube_.View(),
                        VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-        dfg = {ready ? skyIbl_.dfg.Sampler() : shadow_.sampler,
-               ready ? skyIbl_.dfg.View() : HizDescriptorImage().imageView,
-               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        // **Pasangan sampler-view penggantinya diambil utuh, bukan dirakit.**
+        // Versi pertama memasangkan `shadow_.sampler` dengan view HiZ — dan
+        // sampler itu `compareEnable = VK_TRUE`, dibuat untuk
+        // `Sampler2DArrayShadow`. Sebuah `Sampler2D` biasa yang dipasangi
+        // sampler pembanding adalah pelanggaran walaupun tidak ada satu pun
+        // shader yang membacanya, dengan alasan yang sama yang membuat LUT
+        // sky-view di atas tidak boleh memakai peta bayangan sebagai pengganti.
+        dfg = ready ? VkDescriptorImageInfo{skyIbl_.dfg.Sampler(), skyIbl_.dfg.View(),
+                                            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}
+                    : HizDescriptorImage();
     }
 
     /// Menulis ulang dua binding lingkungan pada set yang **sudah ada**.
@@ -5565,7 +5572,14 @@ private:
             skyIrradiance_ = Sh9{};
             bakedSkyKey_ = key;
             bakedSpecularKey_ = key;
-            skyIbl_.Destroy();
+            // **Ditandai, bukan dibongkar di sini.** Fungsi ini berjalan di
+            // tengah perekaman frame: menghancurkan tekstur yang masih dipakai
+            // frame yang belum selesai adalah kerusakan memori, dan descriptor
+            // yang masih menunjuknya adalah pelanggaran pada setiap draw
+            // sesudahnya. Yang membongkarnya `AdoptSkySpecular` di awal frame
+            // berikutnya, sesudah device diam dan sebelum satu perintah pun
+            // direkam.
+            releaseSkyIbl_ = true;
             return;
         }
 
@@ -5585,8 +5599,13 @@ private:
             skyBake_ = result;
             // Salinan nilai, bukan tangkapan `this`. Lihat catatan di
             // SkyBakeResult.
+            // **Tanpa `Prepare()`, dan itu diukur.** Tabel transmitansi membeli
+            // kecepatan per cuplikan dengan ~460 ms di muka, jadi ia baru
+            // menguntungkan di atas titik impas beberapa ribu cuplikan. Proyeksi
+            // SH ini 1024 cuplikan — di bawahnya: 418 ms tanpa tabel, 779 ms
+            // dengan. Panggangan prefilter di sebelah, yang 24.576 cuplikan,
+            // berada jauh di atasnya dan memakainya.
             auto bake = [sky, result]() mutable {
-                sky.Prepare();
                 result->irradiance = ProjectIrradiance(sky, kSkyIrradianceSamples);
                 result->ready.store(true, std::memory_order_release);
             };
@@ -5646,6 +5665,16 @@ private:
     /// Mengunggah peta yang sudah selesai dipanggang. **Main thread**, dan
     /// karena itu terpisah dari tugasnya: membuat tekstur menyentuh device.
     void AdoptSkySpecular() {
+        // Pembongkaran yang ditunda `UpdateSkyIrradiance` dikerjakan di sini,
+        // di awal frame dan sesudah device diam.
+        if (releaseSkyIbl_) {
+            releaseSkyIbl_ = false;
+            if (skyIbl_.IsValid()) {
+                device_.WaitIdle();
+                skyIbl_.Destroy();
+                UpdateEnvironmentDescriptors();
+            }
+        }
         if (skySpecularBake_ == nullptr ||
             !skySpecularBake_->ready.load(std::memory_order_acquire)) {
             return;
@@ -6134,6 +6163,9 @@ private:
     /// Langit yang menghasilkan `skyIbl_`, pada ambang yang jauh lebih kasar.
     SkyBakeKey bakedSpecularKey_;
     std::shared_ptr<SkySpecularResult> skySpecularBake_;
+    /// Peta lingkungan harus dilepas di awal frame berikutnya. Lihat catatan di
+    /// `UpdateSkyIrradiance`.
+    bool releaseSkyIbl_ = false;
     /// Peta prefilter dan LUT DFG yang sedang terikat. Tidak sah berarti
     /// pantulan lingkungan belum ada — dan descriptor-nya memakai pengganti,
     /// bukan dibiarkan kosong.

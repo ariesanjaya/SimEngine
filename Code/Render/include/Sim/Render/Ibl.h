@@ -109,12 +109,15 @@ public:
 
     /// Menghitung tabel transmitansi di muka.
     ///
-    /// **Panggil ini sebelum memanggang, dan biayanya kembali berlipat ganda.**
-    /// Transmitansi menuju matahari adalah gelung terdalam — sekali per sampel
-    /// per langkah — dan menghitungnya sebagai integral bersarang membuat
-    /// proyeksi SH 4096 sampel memakan 1150 ms (Debug). Dengan tabel ini 40 ms.
-    /// Angkanya terukur, dan selisih itulah yang memisahkan "panggang ulang tiap
-    /// matahari bergeser" dari editor yang tersendat tiap Time-of-Day digeser.
+    /// **Ia membeli kecepatan per cuplikan dengan sekitar 460 ms di muka**, jadi
+    /// ia menguntungkan hanya di atas titik impas beberapa ribu cuplikan.
+    /// Terukur (Debug): proyeksi SH 1024 cuplikan memakan 418 ms tanpa tabel dan
+    /// **779 ms dengan** — di bawah titik impas, dan memanggilnya di sana justru
+    /// memperlambat. Membangun mip 0 sebuah cubemap 64², yaitu 24.576 cuplikan,
+    /// memakan 7164 ms tanpa tabel dan **2016 ms dengan**.
+    ///
+    /// Aturannya karena itu: panggil untuk yang mencuplik puluhan ribu kali,
+    /// lewati untuk yang mencuplik seribu.
     ///
     /// **Melewatinya tetap benar, hanya lambat.** Tanpa tabel, `Sample`
     /// mengintegrasikan langsung dengan `sunStepCount` langkah — jawaban yang

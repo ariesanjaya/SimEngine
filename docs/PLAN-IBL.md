@@ -322,11 +322,20 @@ maupun codegen material lewat `skyIrradiance()` yang sama.
 E/π di `box_shading.slang` dan sebagai E di codegen material — satu angka dengan
 dua arti di dua berkas, dan selisih pi itu ikut lenyap bersamanya.
 
-**Tabel transmitansi di CPU, karena tanpanya panggangannya tidak layak.**
-Sebagai integral bersarang, satu proyeksi SH 1024 sampel memakan 289 ms (Debug);
-dengan tabel 64 ms. Rencana ini mengandaikan panggang ulang tiap matahari
-bergeser itu murah — angka pertama membuatnya tidak. Tabelnya hanya bergantung
-pada udaranya, bukan pada arah cahayanya, jadi matahari yang bergeser tidak
+**Tabel transmitansi di CPU, dan titik impasnya.** Tabelnya membeli kecepatan
+per cuplikan dengan sekitar 460 ms di muka, jadi ia menguntungkan hanya di atas
+beberapa ribu cuplikan. Angka pertama yang dicatat di sini keliru — ia
+membandingkan waktu bake tanpa menghitung waktu membangun tabelnya. Yang benar,
+terukur (Debug):
+
+| | tanpa tabel | dengan tabel |
+|---|---:|---:|
+| proyeksi SH, 1024 cuplikan | **418 ms** | 779 ms |
+| mip 0 cubemap 64², 24.576 cuplikan | 7164 ms | **2016 ms** |
+
+Jadi panggangan SH **tidak** memakainya dan panggangan prefilter memakainya —
+kebalikan dari yang tertulis semula. Tabelnya sendiri hanya bergantung pada
+udaranya, bukan pada arah cahayanya, jadi matahari yang bergeser tidak
 menyentuhnya sama sekali.
 
 **Panggangannya asinkron di editor dan player, sinkron di `SimHeadless`.** Yang
