@@ -53,7 +53,12 @@ sim_add_library(Reference
         src/ImageCompare.cpp
     PUBLIC_DEPS
         Sim::Core
-        Sim::Raycast)
+        Sim::Raycast
+    PRIVATE_DEPS
+        # Gambar acuan keluar sebagai EXR, dan hanya itu yang dipakainya dari
+        # sini. Privat: yang menautkan Sim::Reference tidak ikut menautkan
+        # seluruh rantai pembaca gambar.
+        Sim::ImageIO)
 
 target_include_directories(SimReference PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 

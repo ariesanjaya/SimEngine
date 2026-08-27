@@ -8,6 +8,8 @@ sim_add_library(Assets
         src/Ktx2Write.cpp
         src/GltfImport.cpp
         src/MaterialImport.cpp
+        src/MaterialXImport.cpp
+        src/MaxMaterial.cpp
         src/MeshImport.cpp
         src/MeshSdfBake.cpp
         src/MeshSdfBakery.cpp
@@ -41,6 +43,15 @@ sim_add_library(Assets
         Fbx::Fbx
         Cgltf::Cgltf
         nlohmann_json::nlohmann_json)
+
+# MaterialX hanya kalau ada, dengan pola yang sama seperti USD:
+# MaterialXImport.cpp tetap ikut dibangun tanpanya dan menolak dengan alasan yang
+# menyebut sakelarnya — bukan dengan diam, yang akan terbaca sebagai "berkasnya
+# memang tidak memuat material".
+if(TARGET MaterialX::MaterialX)
+    target_link_libraries(SimAssets PRIVATE MaterialX::MaterialX)
+    target_compile_definitions(SimAssets PRIVATE SIM_WITH_MATERIALX=1)
+endif()
 
 # USD hanya kalau ada; UsdImport.cpp tetap ikut dibangun tanpanya dan menyediakan
 # penolakan yang menyebut alasannya.

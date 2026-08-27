@@ -1098,12 +1098,56 @@ TEST_CASE("setiap template prefab bawaan bisa dimuat dan berisi yang dijanjikann
             const auto* sky = world.TryGet<scene::SkyComponent>(entity);
             REQUIRE(sky != nullptr);
             CHECK(sky->intensity > 0.0f);
+            // **Langit prosedural, dan itu yang membuat prefab ini berdiri
+            // sendiri.** Bawaan berupa berkas HDR menuntut sebuah unduhan
+            // puluhan megabyte sebelum level baru menggambar apa pun, dan yang
+            // tidak mengunduhnya tidak mendapat galat melainkan langit hitam:
+            // renderer hanya mencatat peringatan lalu melewati pass-nya.
+            // Project yang memang pra-GI memilih berkasnya sendiri lewat satu
+            // dropdown di Inspector — alasannya di docs/PLAN-IBL.md.
             CHECK(sky->source == scene::SkySourceKind::Atmosphere);
+            CHECK(sky->hdriPath.empty());
             CHECK_FALSE(world.Has<scene::MeshRendererComponent>(entity));
         }
         // Transform selalu ada; tanpanya prefab tidak bisa ditempatkan.
         CHECK(world.Has<scene::TransformComponent>(entity));
     }
+}
+
+TEST_CASE("jalur HDR relatif dilengkapi dengan akar Resources") {
+    // Jalur di `SkyComponent` sampai ke renderer apa adanya, jadi yang relatif
+    // akan dicari relatif terhadap folder kerja — dan folder kerja editor bukan
+    // sesuatu yang levelnya bisa tahu. Yang ditempelkan di sini akar `Resources`
+    // yang disalin ke sebelah executable.
+    //
+    // **Akarnya dibuat uji ini sendiri, bukan `SIM_BUILTIN_DIR`.** Berkas HDRI
+    // tidak ikut di repo — puluhan megabyte yang tidak dibutuhkan satu pun
+    // build (lihat .gitignore dan docs/PLAN-IBL.md) — jadi uji yang menuntut
+    // salah satunya ada di sana akan lulus hanya di mesin yang kebetulan pernah
+    // mengunduhnya. Yang diperiksa fungsi ini toh aritmatika jalur, bukan isi
+    // berkasnya.
+    const std::filesystem::path builtin =
+        std::filesystem::temp_directory_path() /
+        ("sim-hdri-" + std::to_string(::getpid()));
+    std::filesystem::create_directories(builtin / "Environment");
+    std::ofstream(builtin / "Environment" / "langit.hdr") << "bukan hdr sungguhan";
+
+    const std::string resolved = ResolveHdriPath("Environment/langit.hdr", builtin.string());
+    CHECK(std::filesystem::path(resolved).is_absolute());
+    CHECK(std::filesystem::exists(resolved));
+
+    // Jalur mutlak adalah berkas di luar proyek yang diketik pengguna sendiri;
+    // menempelkan akar di depannya hanya merusaknya.
+    const std::string absolute = (builtin / "Environment" / "langit.hdr").string();
+    CHECK(ResolveHdriPath(absolute, builtin.string()) == absolute);
+
+    // Yang tidak ada di bawah akar dikembalikan apa adanya, supaya peringatan
+    // renderer menyebut jalur yang tertulis di level.
+    CHECK(ResolveHdriPath("tidak-ada.hdr", builtin.string()) == "tidak-ada.hdr");
+    CHECK(ResolveHdriPath("", builtin.string()).empty());
+
+    std::error_code cleanup;
+    std::filesystem::remove_all(builtin, cleanup);
 }
 
 TEST_CASE("jenis lampu di template benar-benar berbeda") {

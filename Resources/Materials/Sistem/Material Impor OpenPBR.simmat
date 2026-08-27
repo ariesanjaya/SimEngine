@@ -1,0 +1,1136 @@
+{
+  "version": 1,
+  "parameters": [
+    {
+      "name": "baseWeight",
+      "kind": "float",
+      "default": "1.0",
+      "tooltip": "OpenPBR: base_weight",
+      "range": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "name": "baseColor",
+      "kind": "float3",
+      "default": "float3(0.8)",
+      "tooltip": "OpenPBR: base_color",
+      "color": true
+    },
+    {
+      "name": "baseColorTexture",
+      "kind": "texture",
+      "default": "",
+      "tooltip": "Peta warna dasar, dikalikan baseColor. Kosong berarti putih"
+    },
+    {
+      "name": "baseMetalness",
+      "kind": "float",
+      "default": "0.0",
+      "tooltip": "OpenPBR: base_metalness",
+      "range": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "name": "baseMetalnessTexture",
+      "kind": "texture",
+      "default": "",
+      "tooltip": "Peta kelogaman, kanal merah, dikalikan baseMetalness"
+    },
+    {
+      "name": "baseDiffuseRoughness",
+      "kind": "float",
+      "default": "0.0",
+      "tooltip": "OpenPBR: base_diffuse_roughness. 0 = Lambert",
+      "range": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "name": "specularWeight",
+      "kind": "float",
+      "default": "1.0",
+      "tooltip": "OpenPBR: specular_weight",
+      "range": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "name": "specularColor",
+      "kind": "float3",
+      "default": "float3(1.0)",
+      "tooltip": "OpenPBR: specular_color",
+      "color": true
+    },
+    {
+      "name": "specularRoughness",
+      "kind": "float",
+      "default": "0.3",
+      "tooltip": "OpenPBR: specular_roughness. Perseptual, dikuadratkan di shader",
+      "range": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "name": "specularRoughnessTexture",
+      "kind": "texture",
+      "default": "",
+      "tooltip": "Peta kekasaran, kanal merah, dikalikan specularRoughness"
+    },
+    {
+      "name": "specularRoughnessAnisotropy",
+      "kind": "float",
+      "default": "0.0",
+      "tooltip": "OpenPBR: specular_roughness_anisotropy",
+      "range": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "name": "specularIor",
+      "kind": "float",
+      "default": "1.5",
+      "tooltip": "OpenPBR: specular_ior. 1,5 = F0 0,04",
+      "range": [
+        1.0,
+        3.0
+      ]
+    },
+    {
+      "name": "coatWeight",
+      "kind": "float",
+      "default": "0.0",
+      "tooltip": "OpenPBR: coat_weight",
+      "range": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "name": "coatColor",
+      "kind": "float3",
+      "default": "float3(1.0)",
+      "tooltip": "OpenPBR: coat_color",
+      "color": true
+    },
+    {
+      "name": "coatRoughness",
+      "kind": "float",
+      "default": "0.0",
+      "tooltip": "OpenPBR: coat_roughness",
+      "range": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "name": "coatRoughnessAnisotropy",
+      "kind": "float",
+      "default": "0.0",
+      "tooltip": "OpenPBR: coat_roughness_anisotropy",
+      "range": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "name": "coatIor",
+      "kind": "float",
+      "default": "1.6",
+      "tooltip": "OpenPBR: coat_ior",
+      "range": [
+        1.0,
+        3.0
+      ]
+    },
+    {
+      "name": "coatDarkening",
+      "kind": "float",
+      "default": "1.0",
+      "tooltip": "OpenPBR: coat_darkening",
+      "range": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "name": "fuzzWeight",
+      "kind": "float",
+      "default": "0.0",
+      "tooltip": "OpenPBR: fuzz_weight",
+      "range": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "name": "fuzzColor",
+      "kind": "float3",
+      "default": "float3(1.0)",
+      "tooltip": "OpenPBR: fuzz_color",
+      "color": true
+    },
+    {
+      "name": "fuzzRoughness",
+      "kind": "float",
+      "default": "0.5",
+      "tooltip": "OpenPBR: fuzz_roughness",
+      "range": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "name": "emissive",
+      "kind": "float3",
+      "default": "float3(0.0)",
+      "tooltip": "OpenPBR: emission_color x emission_luminance",
+      "color": true
+    },
+    {
+      "name": "emissiveTexture",
+      "kind": "texture",
+      "default": "",
+      "tooltip": "Peta emisi, dikalikan emissive"
+    },
+    {
+      "name": "opacity",
+      "kind": "float",
+      "default": "1.0",
+      "tooltip": "OpenPBR: geometry_opacity",
+      "range": [
+        0.0,
+        1.0
+      ]
+    },
+    {
+      "name": "opacityTexture",
+      "kind": "texture",
+      "default": "",
+      "tooltip": "Peta opasitas, kanal merah, dikalikan opacity"
+    },
+    {
+      "name": "normalTexture",
+      "kind": "texture",
+      "default": "",
+      "tooltip": "Peta normal tangent-space"
+    },
+    {
+      "name": "normalTextureAmount",
+      "kind": "float",
+      "default": "0.0",
+      "tooltip": "0 = pakai normal mesh, 1 = pakai normalTexture. Disetel importir",
+      "range": [
+        0.0,
+        1.0
+      ]
+    }
+  ],
+  "nodes": [
+    {
+      "guid": "00000000-0000-4000-8000-000000000100",
+      "type": "output.surface",
+      "position": [
+        240.0,
+        400.0
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000101",
+      "type": "param.get",
+      "position": [
+        -520.0,
+        0.0
+      ],
+      "settings": {
+        "parameter": "baseColor"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000102",
+      "type": "param.texture",
+      "position": [
+        -520.0,
+        34.0
+      ],
+      "settings": {
+        "parameter": "baseColorTexture"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000103",
+      "type": "input.sample",
+      "position": [
+        -380.0,
+        34.0
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000104",
+      "type": "math.multiply",
+      "position": [
+        -230.0,
+        0.0
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000109",
+      "type": "param.get",
+      "position": [
+        -520.0,
+        110.0
+      ],
+      "settings": {
+        "parameter": "baseMetalness"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000010a",
+      "type": "param.texture",
+      "position": [
+        -520.0,
+        144.0
+      ],
+      "settings": {
+        "parameter": "baseMetalnessTexture"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000010b",
+      "type": "input.sample",
+      "position": [
+        -380.0,
+        144.0
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000010c",
+      "type": "math.multiply",
+      "position": [
+        -230.0,
+        110.0
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000111",
+      "type": "param.get",
+      "position": [
+        -520.0,
+        220.0
+      ],
+      "settings": {
+        "parameter": "specularRoughness"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000112",
+      "type": "param.texture",
+      "position": [
+        -520.0,
+        254.0
+      ],
+      "settings": {
+        "parameter": "specularRoughnessTexture"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000113",
+      "type": "input.sample",
+      "position": [
+        -380.0,
+        254.0
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000114",
+      "type": "math.multiply",
+      "position": [
+        -230.0,
+        220.0
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000119",
+      "type": "param.get",
+      "position": [
+        -520.0,
+        330.0
+      ],
+      "settings": {
+        "parameter": "emissive"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000011a",
+      "type": "param.texture",
+      "position": [
+        -520.0,
+        364.0
+      ],
+      "settings": {
+        "parameter": "emissiveTexture"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000011b",
+      "type": "input.sample",
+      "position": [
+        -380.0,
+        364.0
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000011c",
+      "type": "math.multiply",
+      "position": [
+        -230.0,
+        330.0
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000121",
+      "type": "param.get",
+      "position": [
+        -520.0,
+        440.0
+      ],
+      "settings": {
+        "parameter": "opacity"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000122",
+      "type": "param.texture",
+      "position": [
+        -520.0,
+        474.0
+      ],
+      "settings": {
+        "parameter": "opacityTexture"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000123",
+      "type": "input.sample",
+      "position": [
+        -380.0,
+        474.0
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000124",
+      "type": "math.multiply",
+      "position": [
+        -230.0,
+        440.0
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000129",
+      "type": "param.get",
+      "position": [
+        -260.0,
+        550.0
+      ],
+      "settings": {
+        "parameter": "baseWeight"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000012b",
+      "type": "param.get",
+      "position": [
+        -260.0,
+        620.0
+      ],
+      "settings": {
+        "parameter": "baseDiffuseRoughness"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000012d",
+      "type": "param.get",
+      "position": [
+        -260.0,
+        690.0
+      ],
+      "settings": {
+        "parameter": "specularWeight"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000012f",
+      "type": "param.get",
+      "position": [
+        -260.0,
+        760.0
+      ],
+      "settings": {
+        "parameter": "specularColor"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000131",
+      "type": "param.get",
+      "position": [
+        -260.0,
+        830.0
+      ],
+      "settings": {
+        "parameter": "specularRoughnessAnisotropy"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000133",
+      "type": "param.get",
+      "position": [
+        -260.0,
+        900.0
+      ],
+      "settings": {
+        "parameter": "specularIor"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000135",
+      "type": "param.get",
+      "position": [
+        -260.0,
+        970.0
+      ],
+      "settings": {
+        "parameter": "coatWeight"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000137",
+      "type": "param.get",
+      "position": [
+        -260.0,
+        1040.0
+      ],
+      "settings": {
+        "parameter": "coatColor"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000139",
+      "type": "param.get",
+      "position": [
+        -260.0,
+        1110.0
+      ],
+      "settings": {
+        "parameter": "coatRoughness"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000013b",
+      "type": "param.get",
+      "position": [
+        -260.0,
+        1180.0
+      ],
+      "settings": {
+        "parameter": "coatRoughnessAnisotropy"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000013d",
+      "type": "param.get",
+      "position": [
+        -260.0,
+        1250.0
+      ],
+      "settings": {
+        "parameter": "coatIor"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000013f",
+      "type": "param.get",
+      "position": [
+        -260.0,
+        1320.0
+      ],
+      "settings": {
+        "parameter": "coatDarkening"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000141",
+      "type": "param.get",
+      "position": [
+        -260.0,
+        1390.0
+      ],
+      "settings": {
+        "parameter": "fuzzWeight"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000143",
+      "type": "param.get",
+      "position": [
+        -260.0,
+        1460.0
+      ],
+      "settings": {
+        "parameter": "fuzzColor"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000145",
+      "type": "param.get",
+      "position": [
+        -260.0,
+        1530.0
+      ],
+      "settings": {
+        "parameter": "fuzzRoughness"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000147",
+      "type": "param.texture",
+      "position": [
+        -680.0,
+        1640.0
+      ],
+      "settings": {
+        "parameter": "normalTexture"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000148",
+      "type": "input.sample",
+      "position": [
+        -540.0,
+        1640.0
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000149",
+      "type": "math.multiply",
+      "position": [
+        -400.0,
+        1640.0
+      ],
+      "pins": {
+        "b": "float3(2.0)"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000014a",
+      "type": "math.subtract",
+      "position": [
+        -280.0,
+        1640.0
+      ],
+      "pins": {
+        "b": "float3(1.0)"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000014b",
+      "type": "math.normalize",
+      "position": [
+        -160.0,
+        1640.0
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000014c",
+      "type": "param.get",
+      "position": [
+        -400.0,
+        1720.0
+      ],
+      "settings": {
+        "parameter": "normalTextureAmount"
+      }
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000014d",
+      "type": "util.lerp",
+      "position": [
+        -40.0,
+        1640.0
+      ],
+      "pins": {
+        "a": "float3(0.0, 0.0, 1.0)"
+      }
+    }
+  ],
+  "links": [
+    {
+      "guid": "00000000-0000-4000-8000-000000000105",
+      "from": [
+        "00000000-0000-4000-8000-000000000102",
+        "texture"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000103",
+        "texture"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000106",
+      "from": [
+        "00000000-0000-4000-8000-000000000101",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000104",
+        "a"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000107",
+      "from": [
+        "00000000-0000-4000-8000-000000000103",
+        "rgb"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000104",
+        "b"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000108",
+      "from": [
+        "00000000-0000-4000-8000-000000000104",
+        "result"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000100",
+        "baseColor"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000010d",
+      "from": [
+        "00000000-0000-4000-8000-00000000010a",
+        "texture"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-00000000010b",
+        "texture"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000010e",
+      "from": [
+        "00000000-0000-4000-8000-000000000109",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-00000000010c",
+        "a"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000010f",
+      "from": [
+        "00000000-0000-4000-8000-00000000010b",
+        "r"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-00000000010c",
+        "b"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000110",
+      "from": [
+        "00000000-0000-4000-8000-00000000010c",
+        "result"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000100",
+        "baseMetalness"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000115",
+      "from": [
+        "00000000-0000-4000-8000-000000000112",
+        "texture"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000113",
+        "texture"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000116",
+      "from": [
+        "00000000-0000-4000-8000-000000000111",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000114",
+        "a"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000117",
+      "from": [
+        "00000000-0000-4000-8000-000000000113",
+        "r"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000114",
+        "b"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000118",
+      "from": [
+        "00000000-0000-4000-8000-000000000114",
+        "result"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000100",
+        "specularRoughness"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000011d",
+      "from": [
+        "00000000-0000-4000-8000-00000000011a",
+        "texture"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-00000000011b",
+        "texture"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000011e",
+      "from": [
+        "00000000-0000-4000-8000-000000000119",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-00000000011c",
+        "a"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000011f",
+      "from": [
+        "00000000-0000-4000-8000-00000000011b",
+        "rgb"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-00000000011c",
+        "b"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000120",
+      "from": [
+        "00000000-0000-4000-8000-00000000011c",
+        "result"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000100",
+        "emissive"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000125",
+      "from": [
+        "00000000-0000-4000-8000-000000000122",
+        "texture"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000123",
+        "texture"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000126",
+      "from": [
+        "00000000-0000-4000-8000-000000000121",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000124",
+        "a"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000127",
+      "from": [
+        "00000000-0000-4000-8000-000000000123",
+        "r"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000124",
+        "b"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000128",
+      "from": [
+        "00000000-0000-4000-8000-000000000124",
+        "result"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000100",
+        "opacity"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000012a",
+      "from": [
+        "00000000-0000-4000-8000-000000000129",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000100",
+        "baseWeight"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000012c",
+      "from": [
+        "00000000-0000-4000-8000-00000000012b",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000100",
+        "baseDiffuseRoughness"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000012e",
+      "from": [
+        "00000000-0000-4000-8000-00000000012d",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000100",
+        "specularWeight"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000130",
+      "from": [
+        "00000000-0000-4000-8000-00000000012f",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000100",
+        "specularColor"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000132",
+      "from": [
+        "00000000-0000-4000-8000-000000000131",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000100",
+        "specularRoughnessAnisotropy"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000134",
+      "from": [
+        "00000000-0000-4000-8000-000000000133",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000100",
+        "specularIor"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000136",
+      "from": [
+        "00000000-0000-4000-8000-000000000135",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000100",
+        "coatWeight"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000138",
+      "from": [
+        "00000000-0000-4000-8000-000000000137",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000100",
+        "coatColor"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000013a",
+      "from": [
+        "00000000-0000-4000-8000-000000000139",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000100",
+        "coatRoughness"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000013c",
+      "from": [
+        "00000000-0000-4000-8000-00000000013b",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000100",
+        "coatRoughnessAnisotropy"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000013e",
+      "from": [
+        "00000000-0000-4000-8000-00000000013d",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000100",
+        "coatIor"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000140",
+      "from": [
+        "00000000-0000-4000-8000-00000000013f",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000100",
+        "coatDarkening"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000142",
+      "from": [
+        "00000000-0000-4000-8000-000000000141",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000100",
+        "fuzzWeight"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000144",
+      "from": [
+        "00000000-0000-4000-8000-000000000143",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000100",
+        "fuzzColor"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000146",
+      "from": [
+        "00000000-0000-4000-8000-000000000145",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000100",
+        "fuzzRoughness"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000014e",
+      "from": [
+        "00000000-0000-4000-8000-000000000147",
+        "texture"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000148",
+        "texture"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-00000000014f",
+      "from": [
+        "00000000-0000-4000-8000-000000000148",
+        "rgb"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000149",
+        "a"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000150",
+      "from": [
+        "00000000-0000-4000-8000-000000000149",
+        "result"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-00000000014a",
+        "a"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000151",
+      "from": [
+        "00000000-0000-4000-8000-00000000014a",
+        "result"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-00000000014b",
+        "x"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000152",
+      "from": [
+        "00000000-0000-4000-8000-00000000014b",
+        "result"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-00000000014d",
+        "b"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000153",
+      "from": [
+        "00000000-0000-4000-8000-00000000014c",
+        "value"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-00000000014d",
+        "t"
+      ]
+    },
+    {
+      "guid": "00000000-0000-4000-8000-000000000154",
+      "from": [
+        "00000000-0000-4000-8000-00000000014d",
+        "result"
+      ],
+      "to": [
+        "00000000-0000-4000-8000-000000000100",
+        "normal"
+      ]
+    }
+  ]
+}

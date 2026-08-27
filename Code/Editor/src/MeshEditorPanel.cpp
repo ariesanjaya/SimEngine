@@ -199,8 +199,8 @@ private:
         std::vector<std::string> written;
         std::string error;
         const std::filesystem::path folder = std::filesystem::path(meshPath_).parent_path();
-        const Uuid parent = Uuid::Parse(assets::kImportedMaterialGuid);
-        if (!assets::WriteMaterialInstances(mesh_, folder, parent, written, error)) {
+        const assets::ImportedMaterialParents parents = assets::DefaultImportedMaterialParents();
+        if (!assets::WriteMaterialInstances(mesh_, folder, parents, written, error)) {
             if (context.notifications != nullptr) {
                 context.notifications->Error("Tidak bisa membuat material: " + error);
             }

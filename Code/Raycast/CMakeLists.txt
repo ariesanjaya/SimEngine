@@ -7,12 +7,22 @@
 # Sim::Assets juga tidak ada, dan itu disengaja: modul ini menerima posisi dan
 # indeks mentah, bukan `MeshData`. Yang menjembatani keduanya adalah R1, dan ia
 # tinggal di sisi pemanggil.
+# **Hanya satu backend yang ikut dibangun.** Keduanya mendefinisikan kelas
+# bernama sama, dan `src/SceneBackend.h` memilih yang mana — lihat catatannya di
+# sana. Yang tidak dipilih tidak dikompilasi sama sekali, jadi tidak ada kode
+# mati di dalam binary dan tidak ada dua definisi yang bisa bertemu.
+if(SIM_WITH_EMBREE)
+    set(_sim_raycast_backend src/EmbreeBackend.cpp)
+else()
+    set(_sim_raycast_backend src/BvhBackend.cpp)
+endif()
+
 sim_add_library(Raycast
     SOURCES
         src/Bvh.cpp
         src/RayScene.cpp
         src/Query.cpp
-        src/SceneBackend.cpp
+        ${_sim_raycast_backend}
     PUBLIC_DEPS
         # `Vec3`, `Mat4`, dan Möller–Trumbore bersama di Sim/Core/Intersect.h.
         Sim::Core)
@@ -39,5 +49,13 @@ function(sim_raycast_assert_no_gpu_deps target)
         endif()
     endforeach()
 endfunction()
+
+if(SIM_WITH_EMBREE)
+    # **Privat, dan definisinya juga.** Yang menautkan Sim::Raycast tidak boleh
+    # ikut menautkan Embree, dan tidak ada satu pun header publik yang
+    # menyebutnya — lihat catatan di src/EmbreeBackend.h.
+    target_link_libraries(SimRaycast PRIVATE embree)
+    target_compile_definitions(SimRaycast PRIVATE SIM_WITH_EMBREE=1)
+endif()
 
 sim_raycast_assert_no_gpu_deps(SimRaycast)

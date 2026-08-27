@@ -40,6 +40,23 @@ option(SIM_WITH_OIIO        "Backend OpenImageIO bila tersedia"          ON)
 # OpenVDB: bake mesh menjadi SDF untuk clipmap GI, dan nanti impor .vdb.
 # **Pengondisi aset, bukan pustaka runtime** — aturan yang sama dengan OIIO.
 option(SIM_WITH_OPENVDB     "Bake SDF dan impor volume lewat OpenVDB"   ON)
+# MaterialX: membaca dokumen `.mtlx` supaya material dari 3ds Max — yang di
+# sana memang OpenPBR/MaterialX — masuk apa adanya alih-alih diproyeksikan ke
+# lima angka. **Pengondisi aset, bukan pustaka runtime**: yang menggambar tetap
+# `Shaders/openpbr.slang`, dan tidak satu byte pun MaterialX ikut ke dalam game.
+option(SIM_WITH_MATERIALX   "Impor material MaterialX (.mtlx)"          ON)
+
+# Embree: backend ray query CPU alternatif — R6 di docs/PLAN-EMBREE.md.
+#
+# **Bawaannya OFF, dan itu keputusan yang diukur.** Pada adegan 250.646 segitiga
+# — orde yang sama dengan Sponza — penelusuran memakan 65% waktu render acuan,
+# jadi syarat masuk R6 terpenuhi. Embree menelusurinya 2,4x lebih cepat, yang
+# mempercepat render acuan seluruhnya 1,5x. Itu nyata, dan tetap bukan
+# keharusan: tidak ada satu pun jalur real-time yang melewatinya, dan BVH
+# sendiri menjawab hal yang sama dengan gambar yang sama.
+#
+# Angkanya dari `SimReferenceTests -tc="*R6*"`, dijalankan di kedua sisi.
+option(SIM_WITH_EMBREE      "Backend ray query Embree (R6); bawaannya BVH sendiri" OFF)
 # PhysX: simulasi E9. **CPU dulu** — tiga fitur PhysX (PBD, soft body FEM,
 # deformable surface) menuntut CUDA lewat tanda tangan API-nya dan tidak punya
 # jalur CPU sama sekali, jadi jalur GPU adalah lapisan tambahan yang absen di

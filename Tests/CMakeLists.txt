@@ -18,6 +18,14 @@ sim_add_test(SimRaycastTests
 target_compile_definitions(SimRaycastTests
     PRIVATE SIM_CODE_DIR="${CMAKE_SOURCE_DIR}/Code")
 
+if(SIM_WITH_EMBREE)
+    # **Satu-satunya tempat pilihan backend boleh terlihat dari luar modul.**
+    # `SimRaycast` menyimpan definisi ini PRIVATE justru supaya tidak ada
+    # pemanggil yang bercabang menurutnya; ujinya adalah pengecualian, karena
+    # yang diperiksanya memang bahwa `SelectedBackend()` menyebut yang benar.
+    target_compile_definitions(SimRaycastTests PRIVATE SIM_WITH_EMBREE=1)
+endif()
+
 sim_add_test(SimSceneTests
     SOURCES
         SceneTests.cpp
@@ -373,7 +381,9 @@ if(TARGET Sim::Reference)
         SOURCES
             ReferenceTests.cpp
         DEPS
-            Sim::Reference)
+            Sim::Reference
+            # Uji EXR membaca kembali gambar yang ditulisnya.
+            Sim::ImageIO)
 endif()
 
 # --- Model shading OpenPBR dijalankan di CPU ---------------------------------

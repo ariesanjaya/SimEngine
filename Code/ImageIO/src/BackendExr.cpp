@@ -280,6 +280,106 @@ public:
         return result;
     }
 
+    /// **Hanya `.exr`, dan hanya float.** Satu-satunya pemakainya keluaran
+    /// renderer: gambar acuan path tracer dan readback HDR. Keduanya radiansi
+    /// linier, dan justru itu alasannya harus EXR — PNG menjepitnya di 1,0 dan
+    /// memetakan nadanya, sehingga sebuah uji tungku yang jawabannya "tepat
+    /// 1,0" tidak bisa dibaca kembali dari sana sama sekali.
+    const std::vector<std::string>& WritableExtensions() const override {
+        return ExrExtensions();
+    }
+
+    /// Menulis EXR scanline, half, kompresi ZIP.
+    ///
+    /// **Half, bukan float.** Radiansi keluaran renderer punya rentang dinamis
+    /// besar tetapi presisi yang tidak menuntut 24 bit mantissa; half memotong
+    /// berkasnya separuh dan itu pilihan yang sama dengan yang diambil hampir
+    /// seluruh pipeline produksi. Yang membacanya kembali mendapat float —
+    /// `Read` di atas sudah mengonversinya.
+    ///
+    /// **tinyexr, bukan OpenEXR.** Yang ditulis di sini scanline RGB/RGBA satu
+    /// bagian, tanpa tile, tanpa deep, tanpa multipart — bagian EXR yang paling
+    /// sederhana, dan tinyexr sudah ada di build ini. Untuk berkas produksi
+    /// yang menuntut seluruh spesifikasinya, backend OpenImageIO sudah
+    /// didahulukan bila terpasang, dan ia memakai OpenEXR sungguhan.
+    ImageIoResult Write(const std::filesystem::path& path, const Image& image) const override {
+        ImageIoResult result;
+        if (image.desc.type != PixelType::Float32) {
+            result.error = "EXR is written from float pixels only, got " +
+                           std::string(ToString(image.desc.type));
+            return result;
+        }
+        if (image.desc.channels != 3 && image.desc.channels != 4) {
+            result.error = "EXR is written with 3 or 4 channels, got " +
+                           std::to_string(image.desc.channels);
+            return result;
+        }
+        if (image.desc.width == 0 || image.desc.height == 0) {
+            result.error = "cannot write an empty image to " + path.string();
+            return result;
+        }
+        if (image.bytes.size() < image.desc.ByteCount()) {
+            result.error = "pixel buffer is shorter than its description claims";
+            return result;
+        }
+
+        // **tinyexr menuntut kanal terpisah, bukan interleaved**, dan urutannya
+        // terbalik: A, B, G, R. Urutan itu bukan selera — pembaca EXR menyusun
+        // kanal menurut abjad, dan yang menulisnya dengan urutan lain
+        // menghasilkan berkas yang terbuka dengan warna tertukar di alat lain.
+        const std::size_t count =
+            static_cast<std::size_t>(image.desc.width) * image.desc.height;
+        const uint32_t channels = image.desc.channels;
+        const float* source = reinterpret_cast<const float*>(image.bytes.data());
+
+        std::vector<std::vector<float>> planes(channels, std::vector<float>(count));
+        for (std::size_t i = 0; i < count; ++i) {
+            for (uint32_t c = 0; c < channels; ++c) {
+                planes[c][i] = source[i * channels + c];
+            }
+        }
+
+        std::vector<float*> pointers(channels);
+        std::vector<EXRChannelInfo> infos(channels);
+        std::vector<int> pixelTypes(channels, TINYEXR_PIXELTYPE_FLOAT);
+        std::vector<int> requestedTypes(channels, TINYEXR_PIXELTYPE_HALF);
+
+        const char* const names[4] = {"R", "G", "B", "A"};
+        for (uint32_t c = 0; c < channels; ++c) {
+            const uint32_t reversed = channels - 1 - c;
+            pointers[c] = planes[reversed].data();
+            const char* name = names[reversed];
+            std::snprintf(infos[c].name, sizeof(infos[c].name), "%s", name);
+        }
+
+        EXRHeader header;
+        InitEXRHeader(&header);
+        header.num_channels = static_cast<int>(channels);
+        header.channels = infos.data();
+        header.pixel_types = pixelTypes.data();
+        header.requested_pixel_types = requestedTypes.data();
+        header.compression_type = TINYEXR_COMPRESSIONTYPE_ZIP;
+
+        EXRImage exr;
+        InitEXRImage(&exr);
+        exr.num_channels = static_cast<int>(channels);
+        exr.images = reinterpret_cast<unsigned char**>(pointers.data());
+        exr.width = static_cast<int>(image.desc.width);
+        exr.height = static_cast<int>(image.desc.height);
+
+        std::error_code code;
+        std::filesystem::create_directories(path.parent_path(), code);
+
+        const std::string name = path.string();
+        const char* message = nullptr;
+        if (SaveEXRImageToFile(&exr, &header, name.c_str(), &message) != TINYEXR_SUCCESS) {
+            result.error = "cannot write " + name + ": " + TakeError(message);
+            return result;
+        }
+        result.ok = true;
+        return result;
+    }
+
     ImageIoResult Probe(const std::filesystem::path& path, ImageDesc& out) const override {
         ImageIoResult result;
         const std::string name = path.string();

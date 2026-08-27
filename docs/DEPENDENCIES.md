@@ -104,6 +104,7 @@ Ditambahkan saat dibutuhkan, dicatat di sini supaya keputusannya tidak diulang:
 | **Autodesk FBX SDK** | impor FBX (mesh, rangka, klip). **Dicari, tidak diunduh, dan wajib** — lihat di bawah |
 | **meshoptimizer** | optimisasi vertex cache, generasi LOD, simplifikasi |
 | **OpenUSD** | impor `.usd/.usda/.usdc/.usdz`. **Opsional dan dicari, tidak diunduh** — lihat di bawah |
+| **MaterialX** | membaca dokumen `.mtlx` supaya material OpenPBR dari 3ds Max masuk utuh. **Opsional** (`SIM_WITH_MATERIALX`), dicari di `~/SDK/MaterialX`, dan hanya Core + Format — lihat di bawah |
 | **tinyexr** | impor OpenEXR untuk IBL (I2). **Opsional** (`SIM_WITH_EXR`), satu header lewat FetchContent |
 | **libtiff** | impor/ekspor heightmap TIFF 16/32-bit (I3). **Opsional** (`SIM_WITH_TIFF`), dicari di sistem |
 | **OpenVDB** | bake mesh → SDF untuk clipmap GI (V1), dan nanti impor `.vdb`. **Opsional** (`SIM_WITH_OPENVDB`), dicari, tidak dibangun — lihat di bawah |
@@ -190,6 +191,43 @@ ini. Yang statis menyeret libxml2 dan zlib, dan keduanya memang ada di mana-mana
 > folder aset milik orang lain — lalu menulis ulang jalur tekstur supaya menunjuk
 > ke sana. `IMP_FBX_EXTRACT_EMBEDDED_DATA` karena itu dimatikan di
 > `MeshImport.cpp`.
+
+### MaterialX — dicari, dan hanya dua modulnya
+
+`1.39.6`, Apache 2.0, sumbernya dipakai dari `~/SDK/MaterialX` (`SIM_MATERIALX_ROOT`).
+Opsional lewat `SIM_WITH_MATERIALX`, bawaannya ON.
+
+**Untuk apa.** 3ds Max mengirimkan material OpenPBR, dan bentuk yang dipakainya
+— seperti Arnold dan USD — adalah dokumen MaterialX. FBX tidak punya slot untuk
+itu, jadi dokumennya datang sebagai berkas kedua di sebelah berkas mesh-nya.
+Tanpa modul ini, material dari Max hanya bisa dibaca lewat blok properti kustom
+`3dsMax|Parameters` di dalam FBX-nya — sebuah daftar angka, yang tidak bisa
+menyatakan tekstur yang mengemudikan sebuah input. Rinciannya di
+[PLAN-MATERIALX.md](PLAN-MATERIALX.md).
+
+**Yang dibangun cuma `MaterialXCore` dan `MaterialXFormat`** — tujuh detik pada
+24 core. Sisanya dimatikan eksplisit: MaterialX membawa pembangkit shader untuk
+GLSL, OSL, MDL, MSL, dan Slang beserta modul rendernya sendiri, seluruhnya untuk
+pekerjaan yang sudah dikerjakan `Sim::Material` di sini. Tidak satu pun dari
+mereka dipanggil importir.
+
+> **Yang dibeli bukan "membaca XML".** pugixml sudah ada di mesin ini lewat OIIO,
+> dan sebuah pembaca datar muat dalam dua ratus baris. Yang dibeli dengan
+> menautkan pustakanya adalah hal-hal yang salah **diam-diam** kalau diurus
+> sendiri: pewarisan nodedef, `interfacename` yang menembus nodegraph, upgrade
+> dokumen 1.36/1.37/1.38 ke 1.39, dan satuan. Dokumen yang salah dibaca tidak
+> memunculkan galat — ia memunculkan material yang mirip.
+
+**Pustaka standarnya sengaja tidak dimuat saat berjalan.** `libraries/` dipakai
+untuk mengambil nilai bawaan tiap input dari nodedef-nya, dan nilai-nilai itu
+memang harus dipatok di mesin ini apa pun yang terjadi —
+`OpenPBRSurface::defaults()` di `openpbr.slang`, katalog node, dan
+`OpenPbrMaterial` sudah menuliskannya. Membaca dua ratus berkas untuk menurunkan
+ulang angka yang tetap harus ditulis di sini tidak membeli apa pun, dan harganya
+sebuah jalur folder yang dipanggang ke dalam biner.
+
+Yang membangun tanpanya tetap mendapat seluruh mesin; yang hilang hanya jalur
+`.mtlx`, dan berkas FBX dari Max jatuh ke blok `3dsMax|Parameters`-nya sendiri.
 
 ### OpenUSD — dicari, tidak dibangun
 

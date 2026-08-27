@@ -5593,6 +5593,16 @@ private:
         post_.Destroy();
         sky_.Destroy();
         probes_.Destroy();
+        // **Terlewat ketika `VolumePass` ditambahkan**, dan komentar di atas
+        // sudah menjelaskan kenapa itu mudah terjadi: tumpukan yang sudah bocor
+        // adalah tempat kebocoran baru bersembunyi. Yang ini enam objek —
+        // pipeline, layout, pool, set, set layout, dan shader modulnya.
+        //
+        // Modulnya ikut karena `VolumePass` **menyimpannya**, tidak seperti
+        // pass lain yang membuangnya begitu pipeline-nya jadi. Itu yang membuat
+        // kebocorannya terlihat berbeda dari yang lain di laporan validasi, dan
+        // itu pula yang membuatnya bisa dikenali.
+        volumePass_.Destroy();
         if (cache_.buffer != VK_NULL_HANDLE) {
             vmaDestroyBuffer(device_.Allocator(), cache_.buffer, cache_.allocation);
             cache_.buffer = VK_NULL_HANDLE;

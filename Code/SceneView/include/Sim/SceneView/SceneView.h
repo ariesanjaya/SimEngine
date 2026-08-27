@@ -14,6 +14,7 @@
 #include <filesystem>
 #include <span>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <vector>
 
@@ -99,6 +100,20 @@ struct ScreenRect {
 /// sekali, dan itulah yang membuat adegan interior berhenti membayar empat pass
 /// LUT untuk sesuatu yang tidak pernah terlihat.
 bool ApplySceneSky(const scene::World& world, render::ViewportDesc& desc);
+
+/// Melengkapi jalur HDR yang ditulis relatif dengan akar `Resources` bawaan.
+///
+/// **Jalur di dalam `SkyComponent` sampai ke renderer apa adanya**, jadi yang
+/// relatif dicari relatif terhadap folder kerja — dan folder kerja sebuah
+/// editor bukan sesuatu yang levelnya bisa tahu. Level yang memilih langit
+/// `HDR Map` menulis jalurnya relatif terhadap `Resources` yang disalin ke
+/// sebelah executable, bukan terhadap tempat editornya kebetulan dijalankan.
+///
+/// Jalur mutlak dikembalikan apa adanya — itu yang diketik pengguna sendiri di
+/// Inspector untuk berkas di luar proyek. Yang relatif tapi tidak ada di bawah
+/// `builtinDir` juga dikembalikan apa adanya, supaya peringatan renderer
+/// menyebut jalur yang tertulis di level alih-alih jalur karangan fungsi ini.
+std::string ResolveHdriPath(std::string_view hdriPath, std::string_view builtinDir);
 
 class SceneView {
 public:

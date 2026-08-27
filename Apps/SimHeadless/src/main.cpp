@@ -115,6 +115,7 @@ void PrintUsage() {
         "  --bench-no-screen-trace       matikan lapis screen-space; lihat SDF sendirian\n"
         "  --bench-furnace               uji tungku: langit seragam 1, albedo 1, tanpa matahari\n"
         "  --dump-mesh <file> --dump-out <json>  material dan ruas sebuah berkas mesh\n"
+        "  --dump-fbx-material <fbx>     setiap properti tiap material, apa adanya\n"
         "  --dump-uv <bin>               posisi+UV tiap titik, float32 x5\n"
         "  --dump-tri <bin>              posisi+UV tiap sudut segitiga, float32 x15\n"
         "  --bench-compute               ganti gambarnya dengan pass compute uji (G3)\n"
@@ -461,6 +462,32 @@ int main(int argc, char** argv) {
         }
     }
 
+    // **Setiap properti tiap material sebuah FBX, apa adanya, lalu keluar.**
+    //
+    // Ia menjawab pertanyaan yang tidak bisa dijawab dokumentasi: apa yang
+    // sungguh ditulis eksportir DCC ke dalam berkas ini. Importir memetakan blok
+    // `3dsMax|Parameters` menurut nama parameter yang terdokumentasi, dan daftar
+    // ini yang memperlihatkan apakah nama itu memang yang dipakai — sebelum
+    // sebuah aset masuk dengan nilai bawaan tanpa ada yang tahu.
+    //
+    // Ke stdout, bukan ke berkas: yang membacanya mata, bukan skrip.
+    if (const std::string_view file = FlagValue(argc, argv, "--dump-fbx-material");
+        !file.empty()) {
+        std::string error;
+        const std::vector<std::string> lines =
+            assets::DescribeFbxMaterials(std::filesystem::path(file), error);
+        if (!error.empty()) {
+            SIM_ERROR("Headless", "cannot read {}: {}", std::string(file), error);
+            app.Shutdown();
+            return 1;
+        }
+        for (const std::string& line : lines) {
+            std::printf("%s\n", line.c_str());
+        }
+        app.Shutdown();
+        return 0;
+    }
+
     // **Membaca isi sebuah berkas mesh, lalu keluar.** Bukan bagian dari jalur
     // ukur: ia alat untuk yang mengarang aset, dan yang dijawabnya pertanyaan
     // yang selama ini hanya bisa dijawab dengan menulis uji sementara — material
@@ -489,8 +516,33 @@ int main(int argc, char** argv) {
             json << "    {\"name\": \"" << material.name << "\", \"baseColor\": \""
                  << material.baseColorTexture << "\", \"normal\": \"" << material.normalTexture
                  << "\", \"roughness\": \"" << material.roughnessTexture
-                 << "\", \"metalness\": \"" << material.metalnessTexture << "\"}"
-                 << (i + 1 < mesh.materials.size() ? "," : "") << "\n";
+                 << "\", \"metalness\": \"" << material.metalnessTexture << "\"";
+            // **Blok OpenPBR-nya ikut, dan hanya bila memang ada.** Inilah cara
+            // memeriksa bahwa sebuah material dari Max sampai utuh alih-alih
+            // diproyeksikan: yang tidak membawa blok ini masuk lewat jalur lama,
+            // dan itu terlihat dari ketiadaannya, bukan dari nilai yang
+            // kebetulan sama dengan bawaan.
+            if (material.openPbr) {
+                const assets::OpenPbrMaterial& pbr = *material.openPbr;
+                json << ", \"openPbr\": {\"baseWeight\": " << pbr.baseWeight
+                     << ", \"baseColor\": [" << pbr.baseColor.x << ", " << pbr.baseColor.y
+                     << ", " << pbr.baseColor.z << "], \"baseMetalness\": " << pbr.baseMetalness
+                     << ", \"baseDiffuseRoughness\": " << pbr.baseDiffuseRoughness
+                     << ", \"specularWeight\": " << pbr.specularWeight
+                     << ", \"specularRoughness\": " << pbr.specularRoughness
+                     << ", \"specularRoughnessAnisotropy\": "
+                     << pbr.specularRoughnessAnisotropy
+                     << ", \"specularIor\": " << pbr.specularIor
+                     << ", \"coatWeight\": " << pbr.coatWeight
+                     << ", \"coatRoughness\": " << pbr.coatRoughness
+                     << ", \"coatIor\": " << pbr.coatIor
+                     << ", \"coatDarkening\": " << pbr.coatDarkening
+                     << ", \"fuzzWeight\": " << pbr.fuzzWeight
+                     << ", \"fuzzRoughness\": " << pbr.fuzzRoughness
+                     << ", \"emissive\": [" << pbr.emissive.x << ", " << pbr.emissive.y << ", "
+                     << pbr.emissive.z << "], \"opacity\": " << pbr.opacity << "}";
+            }
+            json << "}" << (i + 1 < mesh.materials.size() ? "," : "") << "\n";
         }
         json << "  ],\n  \"parts\": [";
         for (std::size_t i = 0; i < mesh.parts.size(); ++i) {
@@ -1112,6 +1164,13 @@ int main(int argc, char** argv) {
             // yang langitnya berbeda seratus kali menghasilkan gambar yang sama
             // persis. Ditemukan begitu.
             editor::ApplySceneSky(*app.Context().world, desc);
+            // Jalur HDR relatif dilengkapi dengan akar `Resources`, alasan
+            // yang sama dengan di viewport editor: yang tertulis di level
+            // relatif terhadap Resources, bukan terhadap folder tempat bench
+            // ini dijalankan.
+            const std::string hdriPath =
+                editor::ResolveHdriPath(desc.hdriPath, app.Context().builtinDir);
+            desc.hdriPath = hdriPath;
             desc.fixedDeltaSeconds = kFixedDelta;
             camera.position = eye;
             camera.rotation = glm::quatLookAt(glm::normalize(forward), Vec3(0.0f, 1.0f, 0.0f));

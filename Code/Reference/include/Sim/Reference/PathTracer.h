@@ -6,6 +6,7 @@
 #include "Sim/Reference/Lights.h"
 #include "Sim/Reference/Shading.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <vector>
@@ -80,6 +81,13 @@ struct Image {
 
     const Vec3& At(uint32_t x, uint32_t y) const { return pixels[y * width + x]; }
     Vec3 Mean() const;
+
+    /// **Berapa kerja yang benar-benar dilakukan, bukan berapa yang diminta.**
+    /// Russian roulette memotong jalur pada kedalaman yang berbeda-beda, jadi
+    /// `samplesPerPixel * maxDepth` bukan jawaban — dan tanpa angka yang
+    /// sebenarnya, "intersector mendominasi atau tidak" hanya bisa ditebak.
+    std::size_t raysTraced = 0;
+    std::size_t shadingCalls = 0;
 };
 
 /// Path tracer unidirectional dengan next-event estimation.

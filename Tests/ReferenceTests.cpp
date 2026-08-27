@@ -1,6 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 #include <doctest/doctest.h>
 
+#include "Sim/ImageIO/ImageIO.h"
 #include "Sim/Reference/ImageCompare.h"
 #include "Sim/Reference/Lights.h"
 #include "Sim/Reference/Scene.h"
@@ -8,7 +9,13 @@
 #include "Sim/Raycast/Query.h"
 #include "Sim/Reference/Shading.h"
 
+#include "Sim/Raycast/Backend.h"
+
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <filesystem>
+#include <utility>
 #include <vector>
 
 // Path tracer acuan — R4 di docs/PLAN-EMBREE.md.
@@ -578,4 +585,300 @@ TEST_CASE("Pembanding gambar melaporkan angka, bukan gambar") {
     different.height = 1;
     different.pixels = {Vec3(0.0f), Vec3(0.0f), Vec3(0.0f)};
     CHECK(Compare(a, different).rmse == doctest::Approx(0.0f));
+}
+
+TEST_CASE("Gambar acuan keluar sebagai EXR, dan angkanya bertahan") {
+    // **Bukti bahwa gambar acuan bisa dibaca kembali sebagai angka.** Sebuah
+    // acuan yang keluarannya sudah dipetakan nada tidak bisa dibandingkan
+    // dengan apa pun — dan lampu bidang di adegan Cornell menghasilkan radiansi
+    // ratusan kali di atas satu, yang PNG jepit tanpa suara.
+    const CornellBox box = MakeCornellBox();
+    raycast::RayScene rayScene;
+    box.scene.Commit(rayScene);
+
+    TraceSettings settings;
+    settings.width = 8;
+    settings.height = 8;
+    settings.samplesPerPixel = 64;
+    settings.skyRadiance = Vec3(0.0f);
+
+    const Image image =
+        Render(rayScene, box.scene.Resolver(), box.scene.Lights(), box.camera, settings);
+
+    const std::filesystem::path path =
+        std::filesystem::temp_directory_path() / "sim-reference-cornell.exr";
+    std::filesystem::remove(path);
+
+    const std::string error = WriteExr(path, image);
+    if (!error.empty() && error.find("tinyexr") != std::string::npos) {
+        MESSAGE("build ini tanpa tinyexr — bagian EXR dilewati");
+        return;
+    }
+    INFO(error);
+    REQUIRE(error.empty());
+    REQUIRE(std::filesystem::exists(path));
+
+    // Dibaca kembali lewat jalur yang sama yang dipakai siapa pun nanti.
+    imageio::Image loaded;
+    const imageio::ImageIoResult read = imageio::Read(path, {}, loaded);
+    INFO(read.error);
+    REQUIRE(read.ok);
+    REQUIRE(loaded.desc.width == settings.width);
+    REQUIRE(loaded.desc.type == imageio::PixelType::Float32);
+
+    const float* pixels = reinterpret_cast<const float*>(loaded.bytes.data());
+    float loadedMean = 0.0f;
+    for (std::size_t i = 0; i < image.pixels.size(); ++i) {
+        loadedMean += pixels[i * loaded.desc.channels + 0];
+    }
+    loadedMean /= static_cast<float>(image.pixels.size());
+
+    // Rata-ratanya bertahan dalam presisi half.
+    CHECK(loadedMean == doctest::Approx(image.Mean().x).epsilon(0.01));
+    std::filesystem::remove(path);
+}
+
+// ---------------------------------------------------------------------------
+// R6 — apakah penelusuran sinar mendominasi waktu render acuan.
+//
+// docs/PLAN-EMBREE.md menetapkan satu pemicu untuk mendatangkan Embree, dan
+// hanya satu: **penelusuran sinar mendominasi waktu render acuan.** Selama
+// angkanya tidak ada, "Embree 3,6x lebih cepat menelusuri" benar tetapi tidak
+// menjawab apa pun — yang menentukan bukan kecepatan intersector melainkan
+// porsinya. Uji di bawah mengukur porsi itu.
+// ---------------------------------------------------------------------------
+namespace {
+
+uint32_t EnvUint(const char* name, uint32_t fallback) {
+    const char* value = std::getenv(name);
+    if (value == nullptr) {
+        return fallback;
+    }
+    const unsigned long parsed = std::strtoul(value, nullptr, 10);
+    return parsed > 0 ? static_cast<uint32_t>(parsed) : fallback;
+}
+
+double Seconds(std::chrono::steady_clock::time_point from,
+               std::chrono::steady_clock::time_point to) {
+    return std::chrono::duration<double>(to - from).count();
+}
+
+/// Permukaan bergelombang di dalam kotak, dan **tidak koplanar**.
+///
+/// Grid datar adalah adegan yang paling ramah bagi BVH mana pun: seluruh
+/// segitiganya berbagi satu bidang, dan kotak pembatasnya pipih sempurna.
+/// Riaknya yang membuat penelusurannya berarti.
+void AddRippledSheet(Scene& scene, uint32_t side, float height, uint32_t material) {
+    const float step = 1.0f / static_cast<float>(side);
+    for (uint32_t z = 0; z < side; ++z) {
+        for (uint32_t x = 0; x < side; ++x) {
+            const float x0 = static_cast<float>(x) * step;
+            const float z0 = static_cast<float>(z) * step;
+            const float ripple =
+                height * (std::sin(x0 * 37.0f) * std::cos(z0 * 41.0f) + 1.0f) * 0.5f;
+            scene.AddQuad(Vec3(x0, 0.02f + ripple, z0), Vec3(step, 0.0f, 0.0f),
+                          Vec3(0.0f, 0.0f, step), material);
+        }
+    }
+}
+
+/// Satu titik permukaan yang benar-benar diteduhkan render itu, disimpan supaya
+/// ongkos shading-nya bisa diukur pada masukan yang sama — bukan pada material
+/// karangan yang lobe-nya kebetulan lebih murah.
+struct ShadePoint {
+    Surface surface;
+    Vec3 normal{0.0f, 1.0f, 0.0f};
+    Vec3 view{0.0f, 0.0f, 1.0f};
+};
+
+struct Split {
+    double renderSeconds = 0.0;
+    double traceSeconds = 0.0;
+    double shadeSeconds = 0.0;
+    std::size_t rays = 0;
+    std::size_t shades = 0;
+    Image image;
+
+    double Modelled() const { return traceSeconds + shadeSeconds; }
+    double TracePercent() const {
+        return Modelled() > 0.0 ? 100.0 * traceSeconds / Modelled() : 0.0;
+    }
+};
+
+/// Merender sekali untuk merekam kerjanya, sekali lagi untuk mengukurnya, lalu
+/// menimbang kedua sisinya secara terpisah.
+///
+/// **Cacah dikali ongkos satuan, bukan sampling profiler.** Sebuah pencacah jam
+/// di sekitar tiap sinar berongkos seperlima sinarnya sendiri; yang di bawah
+/// tidak menyentuh gelung render sama sekali. Jumlah kedua sisinya dibandingkan
+/// dengan waktu render sungguhan — kalau modelnya keliru, ketidakcocokan itu
+/// yang memberi tahu, dan uji ini memeriksanya.
+Split MeasureSplit(const Scene& scene, const Camera& camera, const TraceSettings& settings) {
+    raycast::RayScene rayScene;
+    scene.Commit(rayScene);
+
+    // Lintasan perekam: sinar yang benar-benar ditembakkan, dan permukaan yang
+    // benar-benar diteduhkan. Adegannya tertutup, jadi setiap sinar kena dan
+    // resolver melihat semuanya.
+    std::vector<std::pair<Vec3, Vec3>> rays;
+    std::vector<ShadePoint> shadePoints;
+    const SurfaceResolver inner = scene.Resolver();
+    const SurfaceResolver recording = [&](const raycast::RayHit& hit, const Vec3& origin,
+                                          const Vec3& direction) {
+        rays.emplace_back(origin, direction);
+        const SurfaceHit resolved = inner(hit, origin, direction);
+        if (shadePoints.size() < 65536) {
+            shadePoints.push_back({resolved.surface, resolved.normal, -direction});
+        }
+        return resolved;
+    };
+    const Image recorded = Render(rayScene, recording, scene.Lights(), camera, settings);
+
+    Split split;
+    split.rays = recorded.raysTraced;
+    split.shades = recorded.shadingCalls;
+
+    // Lintasan terukur: resolver apa adanya, benih yang sama, kerja yang sama.
+    const auto renderStart = std::chrono::steady_clock::now();
+    split.image = Render(rayScene, inner, scene.Lights(), camera, settings);
+    split.renderSeconds = Seconds(renderStart, std::chrono::steady_clock::now());
+
+    // Sisi penelusuran: sinar yang persis sama, diulang.
+    float sink = 0.0f;
+    const auto traceStart = std::chrono::steady_clock::now();
+    for (const auto& ray : rays) {
+        sink += raycast::Raycast(rayScene, ray.first, ray.second).distance;
+    }
+    split.traceSeconds = Seconds(traceStart, std::chrono::steady_clock::now());
+
+    // Sisi shading: sebanyak yang benar-benar dipanggil, atas titik permukaan
+    // yang benar-benar ditemukan.
+    Vec3 shadeSink(0.0f);
+    const auto shadeStart = std::chrono::steady_clock::now();
+    for (std::size_t i = 0; i < split.shades && !shadePoints.empty(); ++i) {
+        const ShadePoint& point = shadePoints[i % shadePoints.size()];
+        const Frame frame = Frame::FromNormal(point.normal, point.view);
+        // Arah hambur yang berputar pelan: `EvaluateDirect` tidak berongkos
+        // menurut arahnya, dan arah yang tetap mengundang optimiser mengangkat
+        // hitungannya keluar dari gelung.
+        const float angle = static_cast<float>(i) * 0.001f;
+        const Vec3 scattered = glm::normalize(
+            point.normal + Vec3(std::cos(angle), 0.0f, std::sin(angle)) * 0.5f);
+        shadeSink += EvaluateDirect(point.surface, frame, scattered, Vec3(1.0f));
+    }
+    split.shadeSeconds = Seconds(shadeStart, std::chrono::steady_clock::now());
+
+    // Dipakai supaya kedua gelung di atas tidak dibuang optimiser.
+    CHECK(std::isfinite(sink));
+    CHECK(std::isfinite(shadeSink.x));
+    return split;
+}
+
+void ReportSplit(const std::string& label, const Split& split) {
+    MESSAGE(label, ": ", split.rays, " sinar, ", split.shades, " panggilan shading");
+    MESSAGE(label, ": render ", split.renderSeconds, " s; menelusuri ", split.traceSeconds,
+            " s; meneduhkan ", split.shadeSeconds, " s");
+    MESSAGE(label, ": penelusuran ", split.TracePercent(), "% dari yang termodelkan (",
+            split.Modelled(), " s dari ", split.renderSeconds, " s render)");
+    if (split.traceSeconds > 0.0) {
+        MESSAGE(label, ": throughput ",
+                static_cast<double>(split.rays) / split.traceSeconds / 1.0e6,
+                " juta sinar/detik, satu thread");
+    }
+}
+
+}  // namespace
+
+TEST_CASE("R6: berapa porsi waktu render acuan yang dihabiskan menelusuri sinar") {
+    // **Angka ini yang memutuskan R6, dan tidak ada yang lain yang boleh.**
+    // Backend yang dipakai build ini disebutkan di keluarannya, jadi kedua
+    // sisinya bisa dijalankan dan dibandingkan tanpa menebak yang mana.
+    MESSAGE("backend: ", std::string(raycast::ToString(raycast::SelectedBackend())));
+
+    const uint32_t size = EnvUint("SIM_R6_SIZE", 64);
+    const uint32_t spp = EnvUint("SIM_R6_SPP", 16);
+
+    TraceSettings settings;
+    settings.width = size;
+    settings.height = size;
+    settings.samplesPerPixel = spp;
+    settings.skyRadiance = Vec3(0.0f);
+
+    SUBCASE("adegan acuan apa adanya — Cornell box, 32 segitiga") {
+        const CornellBox box = MakeCornellBox();
+        const Split split = MeasureSplit(box.scene, box.camera, settings);
+        ReportSplit("cornell", split);
+
+        // Model cacah-dikali-ongkos tidak boleh meleset jauh dari waktu render
+        // sungguhan; kalau ia meleset, porsinya tidak berarti apa-apa.
+        CHECK(split.Modelled() < split.renderSeconds * 2.5);
+        CHECK(split.rays > 0);
+        CHECK(split.shades > 0);
+
+        const std::filesystem::path out =
+            std::filesystem::temp_directory_path() /
+            (std::string("sim-r6-cornell-") + raycast::ToString(raycast::SelectedBackend()) +
+             ".exr");
+        const std::string error = WriteExr(out, split.image);
+        if (error.empty()) {
+            MESSAGE("gambar acuan ditulis ke ", out.string());
+        }
+
+        // **Kriteria terima R6: gambar kedua backend cocok dalam toleransi
+        // derau.** Backend yang menghasilkan gambar berbeda bukan backend,
+        // melainkan renderer kedua — dan selisih itu tidak bisa dilihat dari
+        // dalam satu build, karena backend-nya dipilih saat kompilasi. Jalur
+        // gambar sisi lain diberikan lewat SIM_R6_COMPARE_EXR.
+        const char* reference = std::getenv("SIM_R6_COMPARE_EXR");
+        if (reference == nullptr) {
+            MESSAGE("SIM_R6_COMPARE_EXR tidak disetel — pembandingan antar-backend dilewati");
+            return;
+        }
+
+        imageio::Image loaded;
+        imageio::ReadOptions options;
+        options.channels = 3;
+        options.type = imageio::PixelType::Float32;
+        const imageio::ImageIoResult read = imageio::Read(reference, options, loaded);
+        INFO(read.error);
+        REQUIRE(read.ok);
+        REQUIRE(loaded.desc.width == split.image.width);
+        REQUIRE(loaded.desc.height == split.image.height);
+
+        Image other;
+        other.width = loaded.desc.width;
+        other.height = loaded.desc.height;
+        other.pixels.resize(split.image.pixels.size());
+        const float* source = loaded.AsF32();
+        REQUIRE(source != nullptr);
+        for (std::size_t i = 0; i < other.pixels.size(); ++i) {
+            other.pixels[i] = Vec3(source[i * 3 + 0], source[i * 3 + 1], source[i * 3 + 2]);
+        }
+
+        const ImageDifference difference = Compare(split.image, other);
+        MESSAGE("selisih terhadap ", std::string(reference), ": ", difference.ToString());
+
+        // **Rata-rata yang bergeser berarti bias, bukan derau.** Dua
+        // intersektor yang menjawab geometri yang sama boleh berselisih di
+        // piksel tepi segitiga; yang tidak boleh adalah seluruh gambar
+        // bergeser terang atau gelap.
+        const float meanA = Luminance(difference.meanA);
+        const float meanB = Luminance(difference.meanB);
+        CHECK(meanA == doctest::Approx(meanB).epsilon(0.005));
+    }
+
+    SUBCASE("adegan padat — Cornell box berisi permukaan bergelombang") {
+        // Sekitar seperempat juta segitiga: orde yang sama dengan Sponza, dan
+        // itu memang pertanyaannya — porsi penelusuran tumbuh menurut ukuran
+        // adegan, sedangkan porsi shading tidak.
+        const uint32_t side = EnvUint("SIM_R6_DENSE_SIDE", 354);
+        CornellBox box = MakeCornellBox();
+        const uint32_t sheet = box.scene.AddMaterial(Diffuse(Vec3(0.6f, 0.55f, 0.5f)));
+        AddRippledSheet(box.scene, side, 0.08f, sheet);
+        MESSAGE("padat: ", box.scene.TriangleCount(), " segitiga");
+
+        const Split split = MeasureSplit(box.scene, box.camera, settings);
+        ReportSplit("padat", split);
+        CHECK(split.rays > 0);
+    }
 }

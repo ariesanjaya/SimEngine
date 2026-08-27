@@ -1,10 +1,12 @@
 #pragma once
 
+#include "Sim/Assets/OpenPbrMaterial.h"
 #include "Sim/Core/Math.h"
 
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <optional>
 #include <span>
 #include <string>
 #include <vector>
@@ -171,6 +173,22 @@ struct MeshMaterial {
                !roughnessTexture.empty() || !metalnessTexture.empty() ||
                !emissiveTexture.empty();
     }
+
+    /// Material OpenPBR yang **sungguh disebut berkasnya**, bila ada.
+    ///
+    /// **Berdampingan dengan medan datar di atas, bukan menggantikannya.**
+    /// Kelima angka di atas tetap diisi setiap importir, juga ketika yang ini
+    /// ada — sebagian pemakainya (thumbnail, `--dump-mesh`, panel mesh) hanya
+    /// butuh warna dan kekasaran, dan tidak ada gunanya memaksa mereka
+    /// membedakan dua bentuk. Yang membedakannya cuma penulis aset: material
+    /// dengan medan ini terisi ditulis di atas induk OpenPBR dan sampai utuh;
+    /// yang tanpanya memakai induk lama dan tetap lima angka.
+    ///
+    /// Diisi hanya oleh sumber yang benar-benar menyatakan OpenPBR — dokumen
+    /// `.mtlx` di sebelah berkas mesh, atau blok parameter 3ds Max di dalam
+    /// FBX-nya. Menebaknya dari Phong akan mengarang lapisan yang tidak pernah
+    /// dibuat siapa pun.
+    std::optional<OpenPbrMaterial> openPbr;
 };
 
 /// Satu ruas indeks yang digambar dengan satu material.
@@ -239,6 +257,34 @@ struct MeshData {
     /// vektor tegak lurus normalnya, supaya bingkai shading tetap sah.
     void ComputeTangents();
 };
+
+/// Menyebut setiap properti tiap material di sebuah berkas FBX, satu per baris.
+///
+/// **Alat pemeriksa, bukan bagian jalur impor.** Ia ada karena satu-satunya cara
+/// jujur untuk mengetahui apa yang sungguh ditulis eksportir sebuah DCC adalah
+/// melihatnya: nama parameter blok `3dsMax|Parameters` terdokumentasi, dan
+/// dokumentasi bukan berkas. Yang dicetak di sini adalah nama hierarkis, tipe,
+/// nilai, dan tekstur yang tersambung — cukup untuk mencocokkan tebakan importir
+/// terhadap kenyataan tanpa menulis uji sementara.
+///
+/// Dipanggil `SimHeadless --dump-fbx-material`. Berkas yang bukan FBX ditolak
+/// dengan alasan yang menyebutnya; blok kustom itu hanya ada di FBX.
+std::vector<std::string> DescribeFbxMaterials(const std::filesystem::path& path,
+                                              std::string& error);
+
+/// Menyalin nilai OpenPBR ke medan datar sebuah `MeshMaterial`.
+///
+/// **Dilakukan juga ketika yang lengkap sudah ada, dan itu bukan pengulangan
+/// yang mubazir.** Thumbnail, panel mesh, dan `--dump-mesh` membaca medan datar
+/// itu; memaksa mereka membedakan dua bentuk material demi warna dan kekasaran
+/// menambah percabangan di setiap pembacanya, dan cabang yang dilupakan salah
+/// satunya adalah panel yang menampilkan warna material yang berbeda dari yang
+/// digambar viewport. Yang lengkap tetap tersimpan utuh di sebelahnya.
+///
+/// `baseColor` dikalikan `baseWeight` karena medan datar tidak punya tempat
+/// untuk bobotnya, dan bobot yang hilang begitu saja membuat material redup
+/// tampak terang di thumbnail-nya.
+void ProjectOpenPbrToFlat(const OpenPbrMaterial& source, MeshMaterial& target);
 
 /// Menyatukan vertex kembar dan membangun indeksnya.
 ///
