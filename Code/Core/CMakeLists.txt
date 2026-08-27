@@ -8,10 +8,18 @@ sim_add_library(Core
         src/SdfGrid.cpp
         src/VolumeGrid.cpp
         src/TaskPool.cpp
+        src/UserPaths.cpp
         src/Uuid.cpp
     PUBLIC_DEPS
         glm::glm
         spdlog::spdlog)
+
+# shell32: `UserPaths.cpp` menanyakan folder Documents ke Windows lewat
+# SHGetKnownFolderPath alih-alih menebaknya dari nama. PRIVATE — yang menautkan
+# Sim::Core tidak ikut memanggilnya.
+if(WIN32)
+    target_link_libraries(SimCore PRIVATE shell32)
+endif()
 
 # Harus PUBLIC: setiap TU yang meng-include glm lewat Sim/Core/Math.h wajib
 # memakai konvensi yang sama, kalau tidak matriks proyeksinya diam-diam berbeda.
