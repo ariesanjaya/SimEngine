@@ -119,4 +119,22 @@ inline bool IsUnsupported(const WorldSettings& settings) {
            settings.environment == EnvironmentSource::File;
 }
 
+/// True bila tingkat `RealTime` diminta tetapi probe tidak punya langit yang
+/// bisa dicuplik (B6).
+///
+/// **Ini cacat yang sesungguhnya, dan ia berbeda dari yang di atas.** Yang di
+/// atas soal maksud yang bertentangan — "disinari berkas" sambil "disinari
+/// probe". Yang ini soal apa yang benar-benar terjadi saat digambar: probe GI
+/// mencuplik LUT sky-view atmosferik, dan sebuah langit HDRI tidak punya LUT
+/// itu. Sampai B6, yang dicuplik probe di keadaan itu adalah gradien analitik
+/// yang tidak ada hubungannya dengan langit yang tergambar — adegan disinari
+/// langit yang bukan langitnya, tanpa satu pun galat.
+///
+/// Sekarang yang dicuplik nol, dan adegan yang tiba-tiba gelap adalah pertanyaan
+/// yang diajukan alih-alih kesalahan yang disembunyikan. `proceduralSky` benar
+/// hanya bila adegan punya `SkyComponent` bersumber `Atmosphere` yang menyala.
+inline bool RealTimeHasNoSky(const WorldSettings& settings, bool proceduralSky) {
+    return settings.indirect == IndirectLighting::RealTime && !proceduralSky;
+}
+
 }  // namespace sim::scene
