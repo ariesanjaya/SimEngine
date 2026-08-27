@@ -2,6 +2,7 @@
 
 #include "MaxMaterial.h"
 #include "Sim/Assets/MaterialXImport.h"
+#include "Sim/Core/FbxSdkLock.h"
 #include "Sim/Core/Log.h"
 
 #include <fbxsdk.h>
@@ -10,6 +11,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstring>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -377,6 +379,12 @@ public:
     double UnitScale() const { return unitScale_; }
 
 private:
+    /// **Dideklarasikan pertama, jadi ia yang terakhir dilepas.** Destruktor
+    /// menjalankan badannya — `manager_->Destroy()`, yang juga menyentuh halaman
+    /// properti global — sebelum satu pun anggota dihancurkan, jadi kuncinya
+    /// masih dipegang saat pembongkaran itu terjadi. Alasan lengkapnya di
+    /// `Sim/Core/FbxSdkLock.h`.
+    std::unique_lock<std::mutex> lock_;
     FbxManager* manager_ = nullptr;
     FbxScene* scene_ = nullptr;
     double unitScale_ = 1.0;
@@ -384,6 +392,9 @@ private:
 
 bool FbxSceneHandle::Open(const std::filesystem::path& path, bool readAnimation,
                           std::string& error) {
+    // Diambil sebelum apa pun disentuh, dan dipegang sampai handle-nya mati.
+    lock_ = std::unique_lock<std::mutex>(FbxSdkMutex());
+
     manager_ = FbxManager::Create();
     if (manager_ == nullptr) {
         error = "cannot create the FBX SDK manager";

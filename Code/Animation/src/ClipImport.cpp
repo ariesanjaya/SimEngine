@@ -2,12 +2,14 @@
 
 #include "ClipImportBackends.h"
 
+#include "Sim/Core/FbxSdkLock.h"
 #include "Sim/Core/Log.h"
 
 #include <fbxsdk.h>
 
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -58,6 +60,13 @@ public:
     FbxSceneHandle& operator=(const FbxSceneHandle&) = delete;
 
     bool Open(const std::filesystem::path& path, std::string& error) {
+        // **Kunci yang sama dengan `assets::LoadMesh`, dan itu syarat.** FBX SDK
+        // menyimpan pendaftaran kelas dan properti bawaannya per proses, bukan
+        // per manajer, jadi importir klip yang berjalan bersamaan dengan
+        // importir mesh mengaduk struktur yang sama. Alasan lengkapnya beserta
+        // gejalanya di `Sim/Core/FbxSdkLock.h`.
+        lock_ = std::unique_lock<std::mutex>(FbxSdkMutex());
+
         manager_ = FbxManager::Create();
         if (manager_ == nullptr) {
             error = "cannot create the FBX SDK manager";
@@ -101,6 +110,9 @@ public:
     double UnitScale() const { return unitScale_; }
 
 private:
+    /// Pertama, jadi ia yang terakhir dilepas — destruktor menjalankan
+    /// `manager_->Destroy()` di badannya sebelum satu pun anggota dihancurkan.
+    std::unique_lock<std::mutex> lock_;
     FbxManager* manager_ = nullptr;
     FbxScene* scene_ = nullptr;
     double unitScale_ = 1.0;

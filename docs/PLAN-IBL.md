@@ -231,11 +231,35 @@ satu nilai tidak apa-apa; dua tempat yang menyimpannya yang tidak.
 
 **Yang diuji:** enam kasus di `SimSceneTests` (bolak-balik lewat berkas, blok
 yang tidak ada, tidak mewarisi level sebelumnya, prefab tanpa blok, kombinasi
-tidak sah, terdaftar sebagai tipe bukan komponen), tiga di `SimLevelEditorTests`
-(jembatan ke `ViewportDesc`), satu di `SimEditorTests` (dock di samping
-Inspector). 25 dari 25 suite lulus.
+tidak sah, terdaftar sebagai tipe bukan komponen), empat di `SimLevelEditorTests`
+(jembatan ke `ViewportDesc`, dan undo perintahnya), satu di `SimEditorTests`
+(dock di samping Inspector). 25 dari 25 suite lulus.
 
-**Empat hal yang belum tuntas, dan sebaiknya tidak ditemukan sebagai kejutan:**
+**Kriteria bench-nya diverifikasi ujung-ke-ujung**, sesudah sebuah crash yang
+memblokirnya dilacak dan diperbaiki (lihat di bawah). Dua level yang bedanya
+tepat satu kata di blok `"world"`, dijalankan tanpa satu bendera pun:
+
+```
+--level-file baked.simlevel     →  - GI: mati
+--level-file realtime.simlevel  →  - GI: menyala
+--level-file realtime.simlevel --bench-gi off  →  - GI: mati
+```
+
+Baris ketiga yang menyatakan sisanya: level adalah kebenaran, bendera adalah
+paksaan eksplisit di atasnya.
+
+> **Crash `--bench` yang menghalangi, dan sebabnya.** `--bench` crash pada mesin
+> ini sejak sebelum B0 — diperiksa dengan binary yang dibangun tanpa satu pun
+> perubahan B0. Penyebabnya bukan pencahayaan sama sekali: FBX SDK tidak
+> thread-safe, dan satu `FbxManager` per thread **tidak cukup** karena
+> `FbxObject::Construct` menyunting `FbxPropertyPage` yang milik proses. Main
+> thread memuat `shaderBall.fbx` lewat `VulkanRenderer::AcquireMesh` sementara
+> sebuah worker `TaskPool` memuat `unitCylinder.obj` untuk `MeshSdfBakery`;
+> keduanya di dalam `FbxPropertyPage` pada saat yang sama. Seluruh pemakaian SDK
+> kini diserialkan lewat `sim::FbxSdkMutex()`, dan bench lulus 5 dari 5 jalan.
+> Rinciannya di [DEPENDENCIES.md](DEPENDENCIES.md).
+
+**Tiga hal yang belum tuntas, dan sebaiknya tidak ditemukan sebagai kejutan:**
 
 1. **`None` dan `Baked` belum bisa dibedakan.** Keduanya mematikan probe, dan
    cahaya tak-langsung di jalur itu masih konstanta 0,25 yang tidak berasal dari
@@ -257,14 +281,6 @@ Inspector). 25 dari 25 suite lulus.
    — dan **bukan** memasukkan World Settings ke `ComponentRegistry`, karena itu
    akan membuatnya ikut ke setiap `.simprefab`: persis cacat yang keputusan 5
    cegah.
-4. **Kriteria `SimHeadless --bench` belum diverifikasi ujung-ke-ujung.**
-   `--bench` crash (SIGSEGV/heap corruption, tepat sesudah mesh pertama dimuat)
-   pada mesin ini, dan **crash itu sudah ada sebelum B0** — diperiksa dengan
-   menjalankan binary yang dibangun tanpa satu pun perubahan B0, pada level
-   bawaan `Resources/Levels/bench.simlevel` yang bahkan tidak punya blok
-   `"world"`. Jalur kodenya sendiri diuji lewat `ApplyWorldSettings`; yang belum
-   adalah menjalankan bench-nya sampai selesai. Crash-nya perlu dilacak
-   tersendiri — ia memblokir setiap pengukuran, bukan hanya yang ini.
 
 ### B1 — Iradiansi panggang dari langit prosedural (`Baked` + `Sky`)
 

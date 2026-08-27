@@ -2,6 +2,7 @@ sim_add_library(Core
     SOURCES
         src/Curve.cpp
         src/FileWatcher.cpp
+        src/FbxSdkLock.cpp
         src/FrameLimiter.cpp
         src/Log.cpp
         src/MainThreadQueue.cpp

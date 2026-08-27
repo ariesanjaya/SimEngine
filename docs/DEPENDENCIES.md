@@ -221,6 +221,27 @@ SDK-nya sendiri.
 > ke sana. `IMP_FBX_EXTRACT_EMBEDDED_DATA` karena itu dimatikan di
 > `MeshImport.cpp`.
 
+> **SDK-nya tidak thread-safe, dan satu `FbxManager` per thread tidak cukup.**
+> Itu tebakan yang wajar dan salah, dengan cara yang paling mahal: bukan galat,
+> melainkan korupsi heap. `FbxObject::Construct` menyunting `FbxPropertyPage` —
+> tempat SDK menyimpan pendaftaran kelas dan properti bawaannya — dan halaman itu
+> milik proses, bukan milik manajernya. Ditemukan sebagai `SimHeadless --bench`
+> yang crash: main thread memuat `shaderBall.fbx` untuk digambar sementara sebuah
+> worker `TaskPool` memuat `unitCylinder.obj` untuk bake SDF, keduanya di dalam
+> `FbxPropertyPage` pada saat yang sama. Gejalanya berpindah-pindah — SIGSEGV
+> pada satu jalan, "double free or corruption" pada jalan lain — karena yang
+> rusak heap, bukan sebuah pointer tertentu.
+>
+> Seluruh pemakaian SDK karena itu diserialkan lewat `sim::FbxSdkMutex()` di
+> `Sim/Core/FbxSdkLock.h`, dipegang selama umur `FbxSceneHandle` dan bukan hanya
+> selama `Open()`. **Yang menambahkan pemakai FBX SDK baru wajib memakai kunci
+> yang sama.** Perhatikan juga bahwa `.obj` ikut lewat SDK ini, jadi yang harus
+> diserialkan bukan "dua berkas FBX" melainkan setiap dua pemuatan mesh.
+>
+> Harganya impor mesh menjadi berurutan: suite uji naik dari 133,7 s ke 138,9 s,
+> sekitar 4%. Bake SDF sendiri tetap paralel — ia berjalan sesudah handle-nya
+> dilepas.
+
 ### MaterialX — dicari, dan hanya dua modulnya
 
 `1.39.6`, Apache 2.0, sumbernya dipakai dari `~/SDK/MaterialX` (`SIM_MATERIALX_ROOT`).
