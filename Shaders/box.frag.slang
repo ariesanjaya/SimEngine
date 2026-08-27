@@ -8,7 +8,6 @@
 /// bentuk kotak terbaca tanpa GI, dan ia pula yang harus hilang begitu GI
 /// menyala — dua sumber cahaya tak-langsung yang dijumlahkan berarti adegan
 /// yang selalu terlalu terang.
-static const float kFallbackAmbient = 0.25;
 
 /// Albedo ruas ini, di set material — **nomor set dan binding yang sama persis
 /// dengan yang dihasilkan kompiler graph material.** Ruas tanpa tekstur

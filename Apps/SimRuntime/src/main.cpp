@@ -238,6 +238,10 @@ int main(int argc, char** argv) {
     }
 
     TaskPool tasks;
+    // Panggangan lingkungan tidak boleh menahan frame pemain.
+    if (renderer != nullptr) {
+        renderer->SetTaskPool(&tasks);
+    }
     assets::AssetDatabase assetDatabase;
     assets::AssetDatabase::Config assetConfig;
     assetConfig.root = project.AssetsDirectory();

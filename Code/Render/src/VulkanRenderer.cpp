@@ -5,6 +5,8 @@
 #include "DepthPyramid.h"
 #include "DrawCull.h"
 
+#include <atomic>
+#include <memory>
 #include <format>
 #include "PostProcess.h"
 #include "SkyAtmosphere.h"
@@ -15,12 +17,14 @@
 #include "Sim/Assets/MeshData.h"
 #include "Sim/Core/Assert.h"
 #include "Sim/Core/Log.h"
+#include "Sim/Core/TaskPool.h"
 #include "Sim/RHI/Buffer.h"
 #include "Sim/RHI/Device.h"
 #include "Sim/RHI/GpuProfiler.h"
 #include "Sim/RHI/RenderTarget.h"
 #include "PresentSource.h"
 #include "Sim/RHI/TextureRegistry.h"
+#include "Sim/Render/Ibl.h"
 #include "Sim/Render/FrameGraph.h"
 #include "Sim/Render/DrawRun.h"
 #include "Sim/Render/Frustum.h"
@@ -153,10 +157,22 @@ struct ShadowUniforms {
     /// material di project dikompilasi dua kali — dan sakelar di viewport
     /// menunggu kompilasi itu.
     Vec4 viewParams{0.0f};
+    /// Iradiansi lingkungan panggang, sembilan koefisien SH orde dua (B1).
+    ///
+    /// **rgb dipakai, w padding.** std140 menaikkan tiap anggota larik ke 16
+    /// byte, jadi `Vec3[9]` menempati ruang yang sama dengan `Vec4[9]` —
+    /// menuliskannya sebagai Vec4 membuat tata letaknya terbaca apa adanya
+    /// alih-alih bergantung pada aturan yang harus diingat.
+    ///
+    /// Nol berarti tidak ada lingkungan yang dipanggang, dan permukaan tidak
+    /// menerima cahaya tak-langsung sama sekali. Itu keadaan yang sah — tingkat
+    /// `None` — dan bukan keadaan bawaan: renderer mengisinya dari langit
+    /// adegan.
+    std::array<Vec4, 9> skyIrradianceSh{};
 };
-// 7 mat4 + 23 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
+// 7 mat4 + 32 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
 // memperbarui shader-nya menjadi galat kompilasi, bukan bayangan yang bergeser.
-static_assert(sizeof(ShadowUniforms) == 7 * 64 + 23 * 16,
+static_assert(sizeof(ShadowUniforms) == 7 * 64 + 32 * 16,
               "ShadowUniforms harus cocok dengan blok ShadowParams di shadow_common.slang");
 
 /// Cermin dari `GpuLight` di Shaders/cluster_common.glsl. std430.
@@ -739,6 +755,8 @@ public:
         vkCmdPipelineBarrier2(cmd, &dependency);
         device_.EndOneShot(cmd);
     }
+
+    void SetTaskPool(TaskPool* tasks) override { tasks_ = tasks; }
 
     void Resize(uint32_t width, uint32_t height) override {
         if (width == 0 || height == 0 || !target_.Resize(width, height)) {
@@ -2265,6 +2283,20 @@ private:
             visibleCommandId_ = graph_.Import("visible-commands", Access::IndirectRead);
             drawCullPassId_ = graph_.AddPass("draw-cull");
             graph_.Write(drawCullPassId_, drawCommandId_, Access::ShaderWrite);
+            // **Depth ikut dideklarasikan walaupun fase pertama tidak
+            // membandingkannya.** Kedua fase memakai satu descriptor set, dan
+            // set itu memuat image depth di binding 7 — jadi mengikatnya sudah
+            // menuntut layoutnya benar, persis seperti descriptor lain di
+            // renderer ini yang harus sah bahkan pada pass yang tidak
+            // membacanya.
+            //
+            // Tanpa baris ini, fase pertama berjalan sebelum depth prepass
+            // menyentuh apa pun, dan pada frame pertama image-nya masih
+            // `UNDEFINED`: satu galat validasi per jalan, yang tidak muncul lagi
+            // sesudahnya karena frame berikutnya mewarisi layout dari pembacaan
+            // depth di ujung frame sebelumnya. Cacat yang benar sekali dan
+            // kebetulan benar sesudahnya adalah cacat yang paling lama bertahan.
+            graph_.Read(drawCullPassId_, depthId_, Access::ShaderRead);
         }
 
         shadowPassId_ = graph_.AddPass("shadow-cascades");
@@ -5370,6 +5402,94 @@ private:
         }
     }
 
+    /// Apa yang menentukan iradiansi panggang. Panggangan diulang hanya bila
+    /// salah satunya berubah.
+    struct SkyBakeKey {
+        bool atmosphere = false;
+        float intensity = 0.0f;
+        float cameraHeightKm = 0.0f;
+        Vec3 sunDirection{0.0f, 1.0f, 0.0f};
+
+        /// **Arah matahari dibandingkan dengan toleransi, sisanya persis.**
+        /// Time-of-Day menggerakkan matahari dalam langkah kecil tiap frame;
+        /// membandingkannya bit-per-bit berarti sebuah panggangan baru tiap
+        /// frame, selamanya. Ambangnya kira-kira setengah derajat — di bawah itu
+        /// iradiansi SH tidak bergerak sejauh satu tingkat pun pada 8 bit.
+        bool Matches(const SkyBakeKey& other) const {
+            return atmosphere == other.atmosphere && intensity == other.intensity &&
+                   cameraHeightKm == other.cameraHeightKm &&
+                   glm::dot(sunDirection, other.sunDirection) > 0.99996f;
+        }
+    };
+
+    /// Kotak hasil yang dibagi worker dan main thread.
+    ///
+    /// **Tugasnya tidak menangkap `this` sama sekali** — ia menangkap salinan
+    /// langitnya dan `shared_ptr` ini. Dengan begitu renderer boleh mati kapan
+    /// pun tanpa worker menulis ke memori yang sudah dilepas, dan urutan
+    /// penghancuran antara renderer dan kolam tugas berhenti menjadi sesuatu
+    /// yang harus dijaga siapa pun.
+    struct SkyBakeResult {
+        std::atomic<bool> ready{false};
+        Sh9 irradiance;
+    };
+
+    /// Memanggang ulang iradiansi langit bila langitnya berubah.
+    ///
+    /// **SH saja; prefilter menyusul lebih malas** (B2). Yang membedakan
+    /// keduanya bukan selera melainkan biaya: SH adalah 1024 cuplikan, prefilter
+    /// enam muka dikali lima mip dikali 64 cuplikan — dan hanya yang pertama
+    /// yang murah untuk diulang setiap matahari bergeser.
+    void UpdateSkyIrradiance(const ViewportDesc& desc) {
+        SkyBakeKey key;
+        key.atmosphere = desc.skyEnabled && desc.skySource != SkySource::HdrMap;
+        key.intensity = key.atmosphere ? desc.skyIntensity : 0.0f;
+        key.cameraHeightKm = desc.cameraHeightKm;
+        key.sunDirection = glm::length(sunDirection_) > 1e-6f ? glm::normalize(sunDirection_)
+                                                             : Vec3(0.0f, 1.0f, 0.0f);
+
+        // Hasil yang sudah siap dipungut lebih dulu, supaya panggangan berikutnya
+        // — kalau mataharinya sudah bergerak lagi — bisa langsung berangkat.
+        if (skyBake_ != nullptr && skyBake_->ready.load(std::memory_order_acquire)) {
+            skyIrradiance_ = skyBake_->irradiance;
+            skyBake_.reset();
+        }
+
+        if (!key.atmosphere) {
+            // Langit mati atau HDRI. Yang kedua adalah B3; sampai itu ada, tidak
+            // ada lingkungan yang bisa dipanggang, dan nol adalah jawaban yang
+            // jujur — bukan sebuah konstanta yang berpura-pura menjadi langit.
+            skyIrradiance_ = Sh9{};
+            bakedSkyKey_ = key;
+            return;
+        }
+        if (skyBake_ != nullptr || bakedSkyKey_.Matches(key)) {
+            return;
+        }
+        bakedSkyKey_ = key;
+
+        AtmosphereSky sky;
+        sky.sunDirection = key.sunDirection;
+        sky.cameraHeightKm = key.cameraHeightKm;
+        sky.intensity = key.intensity;
+
+        auto result = std::make_shared<SkyBakeResult>();
+        skyBake_ = result;
+        // Salinan nilai, bukan tangkapan `this`. Lihat catatan di SkyBakeResult.
+        auto bake = [sky = std::move(sky), result]() mutable {
+            sky.Prepare();
+            result->irradiance = ProjectIrradiance(sky, kSkyIrradianceSamples);
+            result->ready.store(true, std::memory_order_release);
+        };
+        if (tasks_ != nullptr) {
+            tasks_->Submit(std::move(bake));
+        } else {
+            // Tanpa kolam, di main thread. Jalur uji dan alat baris perintah,
+            // yang memang tidak punya frame untuk ditahan.
+            bake();
+        }
+    }
+
     void UpdateShadowUniforms(const ViewportDesc& desc, const Mat4& viewProj,
                               InstanceSlot& slot) {
         ShadowUniforms uniforms;
@@ -5481,6 +5601,11 @@ private:
         uniforms.viewParams = Vec4(desc.mode == DrawMode::Unlit ? 1.0f : 0.0f,
                                    desc.mode == DrawMode::Clay ? 1.0f : 0.0f,
                                    sceneTimeSeconds_, 0.0f);
+
+        UpdateSkyIrradiance(desc);
+        for (std::size_t i = 0; i < uniforms.skyIrradianceSh.size(); ++i) {
+            uniforms.skyIrradianceSh[i] = Vec4(skyIrradiance_.coefficients[i], 0.0f);
+        }
         slot.shadowUniform.Write(&uniforms, sizeof(uniforms));
     }
 
@@ -5798,6 +5923,16 @@ private:
     /// Berapa lampu punctual benar-benar ada frame ini, tanpa entri boneka.
     uint32_t punctualLightCount_ = 0;
     Vec3 sunDirection_{0.0f, 1.0f, 0.0f};
+
+    /// Kolam tugas untuk panggangan lingkungan. Null berarti main thread.
+    TaskPool* tasks_ = nullptr;
+    /// Iradiansi yang dipakai frame ini. Nol berarti belum ada panggangan yang
+    /// selesai — frame pertama sesudah level dibuka, dan itu benar: yang belum
+    /// dipanggang belum menyinari apa pun.
+    Sh9 skyIrradiance_;
+    /// Langit yang menghasilkan `skyIrradiance_`, atau yang sedang dipanggang.
+    SkyBakeKey bakedSkyKey_;
+    std::shared_ptr<SkyBakeResult> skyBake_;
     Vec3 sunRadiance_{0.75f};
     bool sunCastsShadows_ = true;
     ClusterGridSettings clusterSettings_;
@@ -5839,6 +5974,14 @@ private:
     /// yang dijawabnya bukan "berapa albedo batu" melainkan "berapa albedo
     /// sesuatu yang tidak diketahui", dan menyetelnya ke satu adegan yang
     /// kebetulan diukur adalah menyetelnya ke adegan yang salah.
+    /// Cuplikan bola untuk proyeksi SH iradiansi langit.
+    ///
+    /// **1024, dan itu diukur.** Iradiansi zenit pada 1024 cuplikan meleset
+    /// 0,2% dari nilai yang sudah konvergen di 16384, sementara biayanya 64 ms
+    /// lawan 1026 ms (Debug). Yang dibeli dengan enam belas kali kerja itu digit
+    /// yang tidak pernah sampai ke sebuah piksel 8-bit.
+    static constexpr uint32_t kSkyIrradianceSamples = 1024;
+
     static constexpr float kBounceAlbedo = 0.5f;
     /// Anggaran langkah lapis screen-space. Rencana GI menyebut 16, dan angka
     /// itulah yang membuat fallback ke SDF bukan kemewahan melainkan keharusan.

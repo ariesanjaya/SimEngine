@@ -44,18 +44,23 @@ float4 main(BoxVarying input) : SV_Target {
     // material menggantikan shader ini.
     float3 punctual =
         accumulateClusteredLights(input.position.xy, input.worldPosition, normal, viewDepth);
-    // **Iradiansi tak-langsung datang dari screen probe, bukan dari angka
-    // tetap.** Sampai M5 suku ini adalah konstanta 0,25 — penambal supaya bentuk
-    // kotaknya terbaca. Konstanta itu juga yang membuat perubahan pencahayaan
-    // hampir tidak menggerakkan gambar, karena ia mendominasi apa pun yang
-    // datang dari lampu; menggantikannya dengan GI adalah seluruh guna M6.
+    // **Iradiansi tak-langsung datang dari langit, bukan dari angka tetap.**
+    // Sampai B1 suku ini adalah konstanta 0,25 — penambal supaya bentuk kotaknya
+    // terbaca — dan konstanta itulah yang membuat menukar seluruh langit tidak
+    // menggerakkan pencahayaan permukaan satu tingkat pun. Sekarang ia SH yang
+    // dipanggang dari langit yang benar-benar tergambar, dan ia ikut bergeser
+    // saat mataharinya bergeser.
     //
-    // Dibagi pi karena `giIrradianceAt` mengembalikan iradiansi E, sedangkan
-    // yang dijumlahkan di sini radiansi keluar permukaan Lambert ber-albedo
+    // Dua sumber, satu pemilik: SH panggang **atau** probe, tidak pernah
+    // keduanya. Menjumlahkannya menghasilkan adegan terang dua kali lipat tanpa
+    // satu pun galat di log — keputusan 2 di docs/PLAN-IBL.md.
+    //
+    // Dibagi pi karena keduanya mengembalikan iradiansi E, sedangkan yang
+    // dijumlahkan di sini radiansi keluar permukaan Lambert ber-albedo
     // `input.color`. Kesalahan pi tidak pernah terlihat salah — ia hanya membuat
     // seluruh adegan terlalu terang sebesar faktor tetap, yang paling mudah
     // dikira masalah eksposur.
-    float3 indirect = float3(kFallbackAmbient);
+    float3 indirect = skyIrradiance(normal) / 3.14159265;
     if (shadowParams.giParams.x > 0.5) {
         indirect = giIrradianceAt(input.position.xy, input.worldPosition, normal,
                                   shadowParams.giParams.y) / 3.14159265;

@@ -405,6 +405,18 @@ int main(int argc, char** argv) {
     }
 
     TaskPool tasks;
+    // **Renderer sengaja TIDAK diberi kolam ini.** Tanpa kolam, panggangan
+    // lingkungan berjalan di thread yang menggambar — dan untuk alat ukur itu
+    // justru yang benar: sebuah panggangan asinkron membuat gambar yang
+    // tertangkap bergantung pada apakah worker sempat selesai, yaitu pada waktu
+    // thread. Dua jalan dari binary yang identik lalu menghasilkan gambar yang
+    // berbeda, persis cacat yang catatan "delta nol" di gelung settle di bawah
+    // ini cegah untuk hal lain.
+    //
+    // Yang dibayar sebuah jeda sekali per perubahan langit, di sebuah program
+    // yang memang tidak punya frame untuk ditahan. Keputusan 6 di
+    // docs/PLAN-IBL.md berbicara tentang editor yang membeku saat orang
+    // mengetik, dan editor memang tetap mendapat kolamnya.
 #if SIM_WITH_LUA
     script::ScriptRuntime scripts;
 #endif

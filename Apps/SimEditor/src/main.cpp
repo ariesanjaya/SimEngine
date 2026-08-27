@@ -280,6 +280,14 @@ int main(int argc, char** argv) {
     // keduanya dihancurkan belakangan: editor menjadwalkan pekerjaan ke kolam
     // dan meminta thumbnail dari cache sepanjang hidupnya.
     TaskPool tasks;
+    // **Sesudah kolamnya ada, bukan saat renderer dibuat.** Urutan deklarasinya
+    // yang membuat ini aman: kolam dihancurkan lebih dulu, jadi `Stop()`
+    // menunggu panggangan lingkungan yang sedang berjalan selesai selagi
+    // renderer masih hidup.
+    renderer->SetTaskPool(&tasks);
+    if (meshPreview != nullptr) {
+        meshPreview->SetTaskPool(&tasks);
+    }
     std::unique_ptr<render::IThumbnailCache> thumbnails = render::CreateThumbnailCache(
         device, imguiLayer.Textures(), tasks, configDir / "ThumbnailCache");
 

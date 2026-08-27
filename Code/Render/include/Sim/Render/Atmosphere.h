@@ -3,6 +3,7 @@
 #include "Sim/Core/Math.h"
 
 #include <cstdint>
+#include <vector>
 
 namespace sim::render {
 
@@ -110,6 +111,50 @@ Vec2 SkyViewParamsToUv(const AtmosphereParameters& atmosphere, const SkyViewPara
                        float viewHeight, bool intersectsGround, const Vec2& dimensions);
 SkyViewParams UvToSkyViewParams(const AtmosphereParameters& atmosphere, const Vec2& uv,
                                 float viewHeight, const Vec2& dimensions);
+
+/// Transmitansi yang sudah dihitung di muka, dibaca per ketinggian dan sudut.
+///
+/// **Ada karena transmitansi adalah gelung terdalam.** Setiap sampel sepanjang
+/// setiap sinar pandang butuh transmitansi dari titik itu ke matahari, dan
+/// menghitungnya sebagai integral bersarang membuat biayanya berlipat: sebuah
+/// proyeksi SH 4096 sampel atas langit atmosferik memakan **1150 ms** (Debug)
+/// dengan integral bersarang, dan 40 ms dengan tabel ini — terukur, bukan
+/// diperkirakan. Selisih itu yang memisahkan "panggang ulang tiap matahari
+/// bergeser" dari "editor yang tersendat setiap Time-of-Day digeser".
+///
+/// Pemetaan uv-nya `TransmittanceParamsToUv`, yaitu pemetaan yang sama persis
+/// yang dipakai LUT GPU — dan itu bukan kebetulan melainkan syarat: dua
+/// pemetaan yang berbeda menghasilkan langit yang dipanggang berbeda dari langit
+/// yang tergambar, tanpa satu pun galat yang menyebutkannya.
+struct TransmittanceLut {
+    uint32_t width = 0;
+    uint32_t height = 0;
+    /// Baris demi baris, satu Vec3 per texel.
+    std::vector<Vec3> texels;
+
+    bool IsValid() const {
+        return width > 0 && height > 0 &&
+               texels.size() >= static_cast<std::size_t>(width) * height;
+    }
+
+    /// Transmitansi dari sebuah titik menuju sebuah arah, keluar atmosfer.
+    ///
+    /// `radius` jarak dari pusat planet (km), `cosZenith` kosinus sudut antara
+    /// arah itu dan arah "atas" setempat. Bilinear, mencerminkan sampler GPU.
+    Vec3 Sample(const AtmosphereParameters& atmosphere, float radius, float cosZenith) const;
+};
+
+/// Membangun tabel transmitansi. Ukuran bawaannya sama dengan LUT GPU.
+///
+/// `sampleCount` adalah langkah integrasi per texel: mahal di sini, gratis
+/// sesudahnya. **64 karena diukur, bukan karena terdengar aman.** Terhadap
+/// tabel 256-langkah, iradiansi zenit yang dihasilkannya meleset 0,01%; 32
+/// meleset 0,05% dan 16 meleset 0,19%. Yang dibayar untuk 0,01% terakhir itu
+/// waktu bangun tabelnya, dan ia naik linear — 122 ms pada 16 langkah, 463 ms
+/// pada 64, 2005 ms pada 256 (Debug, 256x64 texel).
+TransmittanceLut BuildTransmittanceLut(const AtmosphereParameters& atmosphere,
+                                       uint32_t width = 256, uint32_t height = 64,
+                                       uint32_t sampleCount = 64);
 
 // --- Aerial perspective ------------------------------------------------------
 

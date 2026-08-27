@@ -222,6 +222,79 @@ float AerialDistanceToSliceCoord(float distanceKm, uint32_t sliceCount, float ma
     return std::clamp(unit, 0.0f, 1.0f);
 }
 
+TransmittanceLut BuildTransmittanceLut(const AtmosphereParameters& atmosphere, uint32_t width,
+                                       uint32_t height, uint32_t sampleCount) {
+    TransmittanceLut lut;
+    if (width == 0 || height == 0) {
+        return lut;
+    }
+    lut.width = width;
+    lut.height = height;
+    lut.texels.resize(static_cast<std::size_t>(width) * height);
+
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            // Tengah texel dulu menjadi uv 0..1, baru dipetakan ke rentang
+            // penuh. **Keduanya, dan dengan urutan itu** — `SubUvToUnit`
+            // mengharap uv yang sudah ternormalisasi, dan menyerahkan indeks
+            // texel mentah kepadanya tidak menghasilkan galat apa pun, hanya
+            // tabel yang isinya diambil dari ketinggian dan sudut yang sama
+            // sekali lain. Ia menghasilkan iradiansi yang meleset 11% dan tetap
+            // terlihat masuk akal.
+            const float u = (static_cast<float>(x) + 0.5f) / static_cast<float>(width);
+            const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(height);
+            const Vec2 uv(SubUvToUnit(u, static_cast<float>(width)),
+                          SubUvToUnit(v, static_cast<float>(height)));
+            const TransmittanceParams params = UvToTransmittanceParams(atmosphere, uv);
+
+            const Vec3 origin(0.0f, params.radius, 0.0f);
+            const float sinZenith =
+                SafeSqrt(1.0f - params.cosZenith * params.cosZenith);
+            const Vec3 direction(sinZenith, params.cosZenith, 0.0f);
+
+            lut.texels[static_cast<std::size_t>(y) * width + x] =
+                Transmittance(atmosphere, origin, direction, sampleCount);
+        }
+    }
+    return lut;
+}
+
+Vec3 TransmittanceLut::Sample(const AtmosphereParameters& atmosphere, float radius,
+                              float cosZenith) const {
+    if (!IsValid()) {
+        return Vec3(1.0f);
+    }
+    TransmittanceParams params;
+    params.radius = std::clamp(radius, atmosphere.bottomRadius, atmosphere.topRadius);
+    params.cosZenith = std::clamp(cosZenith, -1.0f, 1.0f);
+    const Vec2 uv = TransmittanceParamsToUv(atmosphere, params);
+
+    const float fx = UnitToSubUv(std::clamp(uv.x, 0.0f, 1.0f), static_cast<float>(width)) *
+                         static_cast<float>(width) - 0.5f;
+    const float fy = UnitToSubUv(std::clamp(uv.y, 0.0f, 1.0f), static_cast<float>(height)) *
+                         static_cast<float>(height) - 0.5f;
+
+    const float clampedX = std::clamp(fx, 0.0f, static_cast<float>(width) - 1.0f);
+    const float clampedY = std::clamp(fy, 0.0f, static_cast<float>(height) - 1.0f);
+    const auto x0 = static_cast<uint32_t>(clampedX);
+    const auto y0 = static_cast<uint32_t>(clampedY);
+    const uint32_t x1 = std::min(x0 + 1, width - 1);
+    const uint32_t y1 = std::min(y0 + 1, height - 1);
+    const float tx = clampedX - static_cast<float>(x0);
+    const float ty = clampedY - static_cast<float>(y0);
+
+    // **Dijepit di kedua sumbu, bukan dibungkus.** Keduanya parameter yang
+    // berujung — ketinggian berhenti di puncak atmosfer, sudut di zenit dan
+    // nadir — jadi membungkusnya mengambil transmitansi dari keadaan yang sama
+    // sekali lain.
+    const auto at = [&](uint32_t x, uint32_t y) {
+        return texels[static_cast<std::size_t>(y) * width + x];
+    };
+    const Vec3 top = glm::mix(at(x0, y0), at(x1, y0), tx);
+    const Vec3 bottom = glm::mix(at(x0, y1), at(x1, y1), tx);
+    return glm::mix(top, bottom, ty);
+}
+
 AerialSample IntegrateAerialPerspective(const AtmosphereParameters& atmosphere,
                                         const Vec3& origin, const Vec3& direction,
                                         const Vec3& sunDirection, float distanceKm,

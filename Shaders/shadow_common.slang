@@ -79,9 +79,55 @@ struct ShadowParams {
     // berikutnya, untuk seluruh material sekaligus, tanpa satu pun pipeline
     // dibangun ulang.
     float4 viewParams;
+    // Iradiansi lingkungan panggang, sembilan koefisien SH orde dua (B1).
+    //
+    // **rgb dipakai, w padding.** std140 menaikkan setiap anggota larik ke
+    // 16 byte, jadi float3[9] menempati ruang yang sama dengan float4[9] —
+    // menuliskannya sebagai float4 membuat tata letaknya terbaca apa adanya
+    // alih-alih bergantung pada aturan yang harus diingat.
+    //
+    // **Sembilan angka, bukan cubemap iradiansi.** Kernel lobe kosinus meredam
+    // pita di atas orde dua sampai di bawah satu persen; alasan lengkapnya di
+    // `Sh9` pada `Sim/Render/Ibl.h`.
+    float4 skyIrradianceSh[9];
 };
 
 [[vk::binding(0, 0)]] ConstantBuffer<ShadowParams> shadowParams;
+
+/// Iradiansi E(n) dari SH panggang. **Cerminan `EvaluateIrradiance` di
+/// `Ibl.cpp`**, dan keduanya harus tetap sama: yang di sana yang memanggang,
+/// yang di sini yang membacanya, dan dua rumus yang berselisih menghasilkan
+/// permukaan yang disinari berbeda dari langit yang memanggangnya.
+///
+/// Mengembalikan E, bukan radiansi — pemakainya masih harus membagi pi untuk
+/// mendapat radiansi keluar permukaan Lambert. Kesalahan pi di sini tidak pernah
+/// terlihat salah; ia hanya membuat seluruh adegan terlalu terang sebesar faktor
+/// tetap, yang paling mudah dikira masalah eksposur.
+float3 skyIrradiance(float3 normal) {
+    const float3 n = normalize(normal);
+    // Konvolusi lobe kosinus: Â₀ = π, Â₁ = 2π/3, Â₂ = π/4.
+    const float a0 = 3.141593;
+    const float a1 = 2.094395;
+    const float a2 = 0.785398;
+
+    float3 result = shadowParams.skyIrradianceSh[0].rgb * 0.282095 * a0;
+
+    result += shadowParams.skyIrradianceSh[1].rgb * (0.488603 * n.y) * a1;
+    result += shadowParams.skyIrradianceSh[2].rgb * (0.488603 * n.z) * a1;
+    result += shadowParams.skyIrradianceSh[3].rgb * (0.488603 * n.x) * a1;
+
+    result += shadowParams.skyIrradianceSh[4].rgb * (1.092548 * n.x * n.y) * a2;
+    result += shadowParams.skyIrradianceSh[5].rgb * (1.092548 * n.y * n.z) * a2;
+    result += shadowParams.skyIrradianceSh[6].rgb * (0.315392 * (3.0 * n.z * n.z - 1.0)) * a2;
+    result += shadowParams.skyIrradianceSh[7].rgb * (1.092548 * n.x * n.z) * a2;
+    result += shadowParams.skyIrradianceSh[8].rgb * (0.546274 * (n.x * n.x - n.y * n.y)) * a2;
+
+    // Iradiansi negatif tidak punya arti fisik, dan ia muncul pada lingkungan
+    // berkontras tinggi: orde dua tidak bisa mewakili tepi tajam tanpa melewati
+    // batas. Dijepit di sini juga, bukan hanya di CPU — warna negatif merambat
+    // ke seluruh perhitungan sesudahnya.
+    return max(result, float3(0.0));
+}
 [[vk::binding(1, 0)]] Sampler2DArrayShadow shadowMap;
 
 /// Cascade untuk sebuah kedalaman pandang, beserta bobot campur ke penerusnya.
