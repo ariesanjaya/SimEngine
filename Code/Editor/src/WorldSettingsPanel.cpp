@@ -143,6 +143,22 @@ private:
             return;
         }
 
+        // **Time-of-Day menimpa setiap lampu directional tiap frame** — arah
+        // dan warnanya sekaligus. Menekan tombol ini selagi ia menyala membuat
+        // hasilnya hilang pada frame berikutnya, sementara `extractSun` tetap
+        // menyala: adegannya lalu kehilangan matahari HDRI-nya dan penggantinya
+        // tidak cocok dengan fotonya. Yang gagal diam-diam lebih buruk daripada
+        // tombol yang jujur tidak tersedia.
+        if (context.timeOfDayEnabled) {
+            ImGui::TextColored(ImVec4(0.94f, 0.72f, 0.35f, 1.0f), "%s",
+                               "Time of Day sedang menggerakkan matahari, dan ia menimpa "
+                               "lampu directional tiap frame. Matikan 'Drive the sun' dulu.");
+            ImGui::BeginDisabled();
+            ImGui::Button("Pindahkan matahari ke lampu directional");
+            ImGui::EndDisabled();
+            return;
+        }
+
         if (!ImGui::Button("Pindahkan matahari ke lampu directional")) {
             if (!extractionStatus_.empty()) {
                 ImGui::TextWrapped("%s", extractionStatus_.c_str());

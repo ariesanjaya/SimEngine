@@ -268,14 +268,33 @@ ExtractedSun ExtractSun(EquirectEnvironment& map, const SunExtractionSettings& s
     // kebetulan tinggi terhitung berkali-kali lipat.
     const float dLon = 2.0f * kPi / static_cast<float>(width);
     const float dLat = kPi / static_cast<float>(height);
-    const auto rowSolidAngle = [&](uint32_t y) {
-        const float v = (static_cast<float>(y) + 0.5f) / static_cast<float>(height);
-        const float latitude = (0.5f - v) * kPi;
-        return std::max(std::cos(latitude), 0.0f) * dLon * dLat;
-    };
+    // **Sinus dan kosinusnya dihitung sekali per baris dan per kolom, bukan per
+    // texel.** Arah sebuah texel equirect hanya bergantung pada bujur kolomnya
+    // dan lintang barisnya, jadi tabel selebar `width + height` menggantikan
+    // `width * height` panggilan trigonometri — pada peta 4096x2048 itu 6144
+    // lawan 8,4 juta. Hasilnya bit-per-bit sama; yang berubah cuma berapa kali
+    // `std::sin` dipanggil.
+    std::vector<float> sinLon(width);
+    std::vector<float> cosLon(width);
+    for (uint32_t x = 0; x < width; ++x) {
+        const float longitude =
+            ((static_cast<float>(x) + 0.5f) / static_cast<float>(width) - 0.5f) * 2.0f * kPi;
+        sinLon[x] = std::sin(longitude);
+        cosLon[x] = std::cos(longitude);
+    }
+    std::vector<float> sinLat(height);
+    std::vector<float> cosLat(height);
+    for (uint32_t y = 0; y < height; ++y) {
+        const float latitude =
+            (0.5f - (static_cast<float>(y) + 0.5f) / static_cast<float>(height)) * kPi;
+        sinLat[y] = std::sin(latitude);
+        cosLat[y] = std::cos(latitude);
+    }
     const auto directionAt = [&](uint32_t x, uint32_t y) {
-        return EquirectUvToDirection(Vec2((static_cast<float>(x) + 0.5f) / static_cast<float>(width),
-                                          (static_cast<float>(y) + 0.5f) / static_cast<float>(height)));
+        return Vec3(cosLat[y] * sinLon[x], sinLat[y], -cosLat[y] * cosLon[x]);
+    };
+    const auto rowSolidAngle = [&](uint32_t y) {
+        return std::max(cosLat[y], 0.0f) * dLon * dLat;
     };
 
     // --- texel paling terang, dan apakah ia benar-benar menonjol -------------
@@ -381,7 +400,17 @@ ExtractedSun ExtractSun(EquirectEnvironment& map, const SunExtractionSettings& s
     // pusatnya, dan setengah texel pada peta 4K adalah 0,04° — kecil, tapi
     // gratis untuk diperbaiki.
     sun.direction = glm::normalize(directionTotal / directionWeight);
-    sun.irradiance = excessTotal;
+    // **Dikalikan pengali petanya.** Yang dibaca fungsi ini `pixels` mentah,
+    // sedangkan yang memanggangnya membaca lewat `Sample` yang menerapkan
+    // `intensity` — jadi peta meradiasikan `pixels × intensity`, dan yang harus
+    // dibawa lampunya kelebihan dalam satuan yang sama. Melewatkannya tidak
+    // menghasilkan satu pun galat: hanya adegan yang mataharinya terlalu redup
+    // persis sebanyak pengalinya, dan energi yang hilang dari pembukuan yang
+    // seharusnya tertutup.
+    //
+    // Penggantian texelnya tetap dalam satuan `pixels`, dan itu konsisten: ia
+    // menulis ke `pixels`, yang kemudian ikut dikalikan `Sample`.
+    sun.irradiance = excessTotal * map.intensity;
     sun.solidAngle = solidAngleTotal;
     return sun;
 }

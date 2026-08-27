@@ -541,6 +541,21 @@ dua artefak yang berbeda, dan memakai yang salah menghasilkan matahari yang
 terhitung dua kali atau tidak sama sekali. Diverifikasi: dua level yang bedanya
 hanya bendera itu menghasilkan dua `.simibl` yang berbeda.
 
+**Biaya ekstraksinya 920 ms** pada HDR 4096×2048 (Debug), di atas 1143 ms
+pemuatan dan panggangannya. Dua lintasan penuh atas 8,4 juta texel, dan
+keduanya memang perlu: yang pertama mencari puncak dan rata-ratanya, yang kedua
+mengumpulkan kawasannya. Sinus dan kosinusnya ditabelkan per baris dan per
+kolom — 6144 panggilan trigonometri, bukan 8,4 juta — dan itu memangkasnya dari
+1300 ms tanpa mengubah satu bit pun hasilnya.
+
+> **Tombolnya menolak bekerja selagi Time-of-Day menyala**, dan itu bukan
+> kehati-hatian berlebihan: `ApplyTimeOfDay` menimpa arah **dan** warna setiap
+> lampu directional pada tiap frame. Menekan tombol itu di sana membuat hasilnya
+> hilang pada frame berikutnya sementara `extractSun` tetap menyala — adegannya
+> lalu kehilangan matahari HDRI-nya, dan penggantinya tidak cocok dengan
+> fotonya. Yang gagal diam-diam lebih buruk daripada tombol yang jujur tidak
+> tersedia.
+
 **Yang belum:** ekstraksinya menemukan **satu** kawasan paling terang. Peta
 dengan dua sumber kuat — matahari dan pantulannya di air, atau lampu studio
 berganda — hanya kehilangan yang pertama. Menangani lebih dari satu berarti

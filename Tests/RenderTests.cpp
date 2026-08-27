@@ -2344,6 +2344,42 @@ TEST_CASE("B4: yang dikeluarkan kelebihannya, bukan seluruh radiansinya") {
     CHECK(sun.irradiance.x == doctest::Approx(expected).epsilon(0.05));
 }
 
+TEST_CASE("B4: pengali berkas ikut terhitung saat mataharinya dikeluarkan") {
+    // **Panggangannya membaca lewat `Sample`, yang menerapkan `intensity`.**
+    // Kalau ekstraksinya membaca `pixels` mentah, iradiansi yang dibawa lampunya
+    // meleset sebesar pengali itu — dan tidak ada satu pun galat yang
+    // menyebutkannya, hanya adegan yang mataharinya terlalu redup persis
+    // sebanyak pengalinya.
+    const Vec3 sunDirection = glm::normalize(Vec3(0.2f, 0.9f, 0.1f));
+    render::EquirectEnvironment plain =
+        SkyWithSun(256, 128, sunDirection, Vec3(0.2f), Vec3(250.0f), 0.05f);
+    render::EquirectEnvironment scaled = plain;
+    scaled.intensity = 3.0f;
+
+    const render::ExtractedSun a = render::ExtractSun(plain);
+    const render::ExtractedSun b = render::ExtractSun(scaled);
+    REQUIRE(a.found);
+    REQUIRE(b.found);
+
+    CHECK(b.irradiance.x == doctest::Approx(a.irradiance.x * 3.0f).epsilon(0.01));
+    CHECK(b.irradiance.y == doctest::Approx(a.irradiance.y * 3.0f).epsilon(0.01));
+
+    // Dan kriteria energinya tetap berlaku pada pengali itu.
+    render::EquirectEnvironment full =
+        SkyWithSun(256, 128, sunDirection, Vec3(0.2f), Vec3(250.0f), 0.05f);
+    full.intensity = 3.0f;
+    render::EquirectEnvironment residual = full;
+    const render::ExtractedSun sun = render::ExtractSun(residual);
+    REQUIRE(sun.found);
+
+    const Vec3 normal(0.0f, 1.0f, 0.0f);
+    const Vec3 whole = IntegrateIrradianceDirectly(full, normal, 65536);
+    const Vec3 rest = IntegrateIrradianceDirectly(residual, normal, 65536);
+    const Vec3 recombined =
+        rest + sun.irradiance * std::max(glm::dot(normal, sun.direction), 0.0f);
+    CHECK(recombined.x == doctest::Approx(whole.x).epsilon(0.03));
+}
+
 TEST_CASE("B4: langit mendung tidak dilubangi") {
     // Peta tanpa matahari tidak punya apa pun untuk dikeluarkan, dan
     // mengeluarkan "kawasan paling terang" dari langit yang merata hanya
