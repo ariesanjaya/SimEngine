@@ -2283,6 +2283,20 @@ private:
             visibleCommandId_ = graph_.Import("visible-commands", Access::IndirectRead);
             drawCullPassId_ = graph_.AddPass("draw-cull");
             graph_.Write(drawCullPassId_, drawCommandId_, Access::ShaderWrite);
+            // **Depth ikut dideklarasikan walaupun fase pertama tidak
+            // membandingkannya.** Kedua fase memakai satu descriptor set, dan
+            // set itu memuat image depth di binding 7 — jadi mengikatnya sudah
+            // menuntut layoutnya benar, persis seperti descriptor lain di
+            // renderer ini yang harus sah bahkan pada pass yang tidak
+            // membacanya.
+            //
+            // Tanpa baris ini, fase pertama berjalan sebelum depth prepass
+            // menyentuh apa pun, dan pada frame pertama image-nya masih
+            // `UNDEFINED`: satu galat validasi per jalan, yang tidak muncul lagi
+            // sesudahnya karena frame berikutnya mewarisi layout dari pembacaan
+            // depth di ujung frame sebelumnya. Cacat yang benar sekali dan
+            // kebetulan benar sesudahnya adalah cacat yang paling lama bertahan.
+            graph_.Read(drawCullPassId_, depthId_, Access::ShaderRead);
         }
 
         shadowPassId_ = graph_.AddPass("shadow-cascades");
