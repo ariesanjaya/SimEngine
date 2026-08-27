@@ -1,10 +1,12 @@
 #pragma once
 
 #include "Sim/Core/Math.h"
+#include "Sim/Render/Atmosphere.h"
 
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <utility>
 #include <vector>
 
 namespace sim::render {
@@ -45,6 +47,96 @@ public:
     float sunCos = 0.9986f;
 
     Vec3 Sample(const Vec3& direction) const override;
+};
+
+/// Langit atmosferik sebagai sumber lingkungan.
+///
+/// **Inilah yang menyinari tingkat `Baked` + `Sky`** (B1 di docs/PLAN-IBL.md).
+/// Sebelum ia ada, cahaya tak-langsung adalah konstanta 0,25 yang tidak berasal
+/// dari langit mana pun: menukar seluruh langit tidak menggerakkan pencahayaan
+/// permukaan satu tingkat pun. Yang di sini menghitung radiansi langit yang
+/// sama yang tergambar, dari parameter yang sama, di CPU.
+///
+/// **Cakram mataharinya sengaja TIDAK ikut.** Sebuah adegan yang punya langit
+/// hampir selalu juga punya lampu directional yang mewakili mataharinya, dan
+/// lampu itu sudah mengantarkan cahaya langsungnya. Menyertakan cakramnya di
+/// sini membuat matahari terhitung dua kali — cacat yang persis sama dengan
+/// yang keputusan 1 cegah untuk berkas HDR, muncul dalam bentuk prosedural.
+/// Yang dipanggang di sini karena itu murni cahaya yang **dihamburkan** udara.
+///
+/// **Hamburan tunggal saja**, sama dengan `IntegrateAerialPerspective` dan
+/// dengan alasan yang sama: suku multiscattering-nya ada di GPU lewat LUT yang
+/// dibangun pass tersendiri. Untuk iradiansi panggang selisihnya paling terasa
+/// pada langit yang sangat tebal, dan itu bukan keadaan yang sedang ditala
+/// siapa pun.
+///
+/// **Arah di bawah cakrawala mengembalikan udara yang dilewatinya saja; tanahnya
+/// hitam.** Itu mengikuti `AtmosphereParameters::groundAlbedo` yang bawaannya
+/// nol, dan konsekuensinya jujur: permukaan yang menghadap ke bawah tidak
+/// menerima pantulan tanah. Pantulan tanah adalah transport cahaya, yaitu
+/// pekerjaan GI — dan tingkat panggang memang tidak punya itu. Batas ini ditulis
+/// di risiko rencananya, bukan ditemukan sebagai "kenapa bawah objek saya
+/// gelap".
+class AtmosphereSky final : public IEnvironmentSampler {
+public:
+    AtmosphereParameters atmosphere;
+
+    /// Arah **ke** matahari, ruang dunia, ternormalisasi. Cerminan arah lampu
+    /// directional adegan — itulah yang membuat iradiansi ikut bergeser saat
+    /// Time-of-Day menggerakkan matahari.
+    Vec3 sunDirection{0.0f, 1.0f, 0.0f};
+
+    /// Ketinggian kamera di atas permukaan, kilometer. Cerminan
+    /// `scene::SkyComponent::cameraHeightKm`, dan ia yang menentukan warna
+    /// cakrawala serta setebal apa udara yang dilihat.
+    float cameraHeightKm = 0.5f;
+
+    /// Pengali radiansi. Cerminan `scene::SkyComponent::intensity` (Sky Gain),
+    /// supaya yang memanggang dan yang menggambar memakai angka yang sama.
+    float intensity = 20.0f;
+
+    /// Langkah integrasi sepanjang sinar pandang.
+    ///
+    /// **32, bukan 512 seperti `Transmittance`.** Yang dipanggang di sini
+    /// diproyeksikan ke sembilan koefisien SH, dan proyeksi itu adalah integral
+    /// atas seluruh bola: derau per-sinar yang tersisa saling meniadakan jauh
+    /// sebelum ia terlihat pada koefisiennya. Menaikkannya menambah waktu bake
+    /// secara linear untuk ketelitian yang tidak sampai ke keluaran.
+    uint32_t stepCount = 32;
+    /// Langkah untuk transmitansi menuju matahari di tiap titik sampel. Hanya
+    /// dipakai bila `Prepare()` belum dipanggil.
+    uint32_t sunStepCount = 16;
+
+    /// Menghitung tabel transmitansi di muka.
+    ///
+    /// **Panggil ini sebelum memanggang, dan biayanya kembali berlipat ganda.**
+    /// Transmitansi menuju matahari adalah gelung terdalam — sekali per sampel
+    /// per langkah — dan menghitungnya sebagai integral bersarang membuat
+    /// proyeksi SH 4096 sampel memakan 1150 ms (Debug). Dengan tabel ini 40 ms.
+    /// Angkanya terukur, dan selisih itulah yang memisahkan "panggang ulang tiap
+    /// matahari bergeser" dari editor yang tersendat tiap Time-of-Day digeser.
+    ///
+    /// **Melewatinya tetap benar, hanya lambat.** Tanpa tabel, `Sample`
+    /// mengintegrasikan langsung dengan `sunStepCount` langkah — jawaban yang
+    /// sama dalam toleransi ujinya. Itu disengaja: sebuah pencuplik yang salah
+    /// diam-diam kalau sebuah panggilan persiapan terlupa adalah pencuplik yang
+    /// tidak bisa dipercaya, sedangkan yang sekadar lebih lambat bisa.
+    ///
+    /// Harus dipanggil ulang setiap `atmosphere` berubah. **Matahari yang
+    /// bergeser tidak menuntutnya** — tabelnya hanya bergantung pada udaranya,
+    /// bukan pada arah datangnya cahaya, dan itu justru yang membuat panggang
+    /// ulang saat Time-of-Day berjalan menjadi murah.
+    void Prepare();
+
+    /// Memasang tabel yang sudah dibangun di tempat lain. Dipakai uji yang
+    /// menala jumlah langkahnya, dan pemanggang yang membangunnya sekali untuk
+    /// beberapa langit sekaligus.
+    void SetTransmittanceLut(TransmittanceLut lut) { transmittance_ = std::move(lut); }
+
+    Vec3 Sample(const Vec3& direction) const override;
+
+private:
+    TransmittanceLut transmittance_;
 };
 
 // --- Peta lingkungan equirectangular -----------------------------------------

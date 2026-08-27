@@ -38,6 +38,7 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
 #include <filesystem>
 #include <string>
@@ -1651,6 +1652,169 @@ TEST_CASE("Irradiance lingkungan konstan sama dengan pi kali radiance-nya") {
         CHECK(irradiance.y == doctest::Approx(kPi * 0.25f).epsilon(0.02));
         CHECK(irradiance.z == doctest::Approx(kPi * 1.0f).epsilon(0.02));
     }
+}
+
+TEST_CASE("B1: tabel transmitansi menjawab sama dengan integrasi langsung") {
+    // **Uji yang menangkap bug yang sebenarnya terjadi.** Versi pertama tabel
+    // ini menyerahkan indeks texel mentah ke `SubUvToUnit`, yang mengharap uv
+    // 0..1. Itu tidak menghasilkan satu pun galat — hanya tabel yang isinya
+    // diambil dari ketinggian dan sudut yang sama sekali lain, dan iradiansi
+    // zenit yang meleset 11% sambil tetap terlihat masuk akal. Yang menangkapnya
+    // bukan mata melainkan lawan bicara: fungsi yang sama, dihitung dua cara.
+    const AtmosphereParameters atmosphere;
+    const TransmittanceLut lut = BuildTransmittanceLut(atmosphere, 256, 64, 256);
+    REQUIRE(lut.IsValid());
+
+    for (const float heightKm : {0.0f, 0.5f, 5.0f, 20.0f, 60.0f}) {
+        const float radius = atmosphere.bottomRadius + heightKm;
+        for (const float cosZenith : {1.0f, 0.7f, 0.3f, 0.05f}) {
+            const Vec3 direction(std::sqrt(std::max(0.0f, 1.0f - cosZenith * cosZenith)),
+                                 cosZenith, 0.0f);
+            const Vec3 sampled = lut.Sample(atmosphere, radius, cosZenith);
+            const Vec3 exact =
+                Transmittance(atmosphere, Vec3(0.0f, radius, 0.0f), direction, 512);
+
+            INFO("h=", heightKm, "km cosZenith=", cosZenith);
+            // 3%: yang dibandingkan tabel beresolusi hingga terhadap integral,
+            // dan selisihnya paling besar di dekat cakrawala tempat kurvanya
+            // paling tajam. Yang dijaga bukan digit melainkan bahwa keduanya
+            // menjawab besaran yang sama.
+            CHECK(sampled.x == doctest::Approx(exact.x).epsilon(0.03));
+            CHECK(sampled.y == doctest::Approx(exact.y).epsilon(0.03));
+            CHECK(sampled.z == doctest::Approx(exact.z).epsilon(0.03));
+        }
+    }
+}
+
+TEST_CASE("B1: tabel transmitansi tidak mengubah jawaban, hanya mempercepatnya") {
+    // `Prepare()` adalah optimasi, dan sebuah optimasi yang mengubah jawaban
+    // bukan optimasi. Yang tanpa tabel tetap benar — itu yang membuat lupa
+    // memanggilnya berakibat lambat alih-alih salah.
+    render::AtmosphereSky direct;
+    direct.sunDirection = glm::normalize(Vec3(0.3f, 0.6f, 0.4f));
+
+    render::AtmosphereSky tabled = direct;
+    tabled.Prepare();
+
+    for (const Vec3 view : {Vec3(0.0f, 1.0f, 0.0f), glm::normalize(Vec3(1.0f, 0.2f, 0.0f)),
+                            glm::normalize(Vec3(-0.5f, 0.05f, 0.8f))}) {
+        const Vec3 a = direct.Sample(view);
+        const Vec3 b = tabled.Sample(view);
+        INFO("arah (", view.x, ",", view.y, ",", view.z, ")");
+        CHECK(b.x == doctest::Approx(a.x).epsilon(0.03));
+        CHECK(b.y == doctest::Approx(a.y).epsilon(0.03));
+        CHECK(b.z == doctest::Approx(a.z).epsilon(0.03));
+    }
+}
+
+// --- B1: langit atmosferik sebagai sumber lingkungan ------------------------
+
+namespace {
+
+/// Iradiansi dengan integrasi langsung atas pencuplik: E(n) = ∫ L(ω) max(0, n·ω) dω.
+///
+/// **Sengaja bodoh dan lambat.** Ia lawan bicara `ProjectIrradiance`, dan lawan
+/// bicara yang berbagi satu baris kode pun dengan yang diperiksanya tidak
+/// memeriksa apa-apa. Sampelnya Fibonacci bola — merata di bola, bukan merata di
+/// sudut bola, supaya kutub tidak mendapat bobot berlebih.
+Vec3 IntegrateIrradianceDirectly(const render::IEnvironmentSampler& environment,
+                                 const Vec3& normal, uint32_t sampleCount) {
+    const float golden = kPi * (3.0f - std::sqrt(5.0f));
+    Vec3 total(0.0f);
+    for (uint32_t i = 0; i < sampleCount; ++i) {
+        const float z = 1.0f - 2.0f * (static_cast<float>(i) + 0.5f) /
+                                   static_cast<float>(sampleCount);
+        const float radius = std::sqrt(std::max(0.0f, 1.0f - z * z));
+        const float theta = golden * static_cast<float>(i);
+        const Vec3 direction(radius * std::cos(theta), z, radius * std::sin(theta));
+
+        const float cosine = glm::dot(direction, normal);
+        if (cosine <= 0.0f) {
+            continue;
+        }
+        total += environment.Sample(direction) * cosine;
+    }
+    // Bobot tiap sampel adalah 4π/N: luas bola dibagi jumlah sampel.
+    return total * (4.0f * kPi / static_cast<float>(sampleCount));
+}
+
+}  // namespace
+
+TEST_CASE("B1: iradiansi SH langit atmosferik cocok dengan integrasi langsung") {
+    // **Kriteria terima B1.** Yang diperiksa bukan bahwa atmosfernya benar —
+    // itu urusan uji Atmosphere sendiri — melainkan bahwa jalur yang benar-benar
+    // dipakai renderer, proyeksi ke sembilan koefisien lalu evaluasi ulang,
+    // menjawab hal yang sama dengan mengintegrasikan pencuplik yang sama secara
+    // langsung. Selisih di sini berarti panggangannya berbohong tentang langit
+    // yang dipakainya.
+    render::AtmosphereSky sky;
+    sky.sunDirection = glm::normalize(Vec3(0.3f, 0.6f, 0.4f));
+    sky.intensity = 20.0f;
+
+    const Sh9 sh = ProjectIrradiance(sky, 16384);
+
+    for (const Vec3 normal : {Vec3(0.0f, 1.0f, 0.0f), Vec3(1.0f, 0.0f, 0.0f),
+                              glm::normalize(Vec3(0.3f, 0.6f, 0.4f)),
+                              glm::normalize(Vec3(-1.0f, 0.2f, 0.5f))}) {
+        const Vec3 projected = EvaluateIrradiance(sh, normal);
+        const Vec3 direct = IntegrateIrradianceDirectly(sky, normal, 8192);
+
+        INFO("normal (", normal.x, ",", normal.y, ",", normal.z, ")");
+        // Toleransi 6%: keduanya integral Monte Carlo atas pencuplik yang sama,
+        // dan orde dua tidak bisa mewakili tepi cakrawala dengan tepat. Yang
+        // dijaga di sini bukan digit melainkan bahwa keduanya menjawab langit
+        // yang sama.
+        CHECK(projected.x == doctest::Approx(direct.x).epsilon(0.06));
+        CHECK(projected.y == doctest::Approx(direct.y).epsilon(0.06));
+        CHECK(projected.z == doctest::Approx(direct.z).epsilon(0.06));
+    }
+}
+
+TEST_CASE("B1: iradiansi panggang bergerak saat mataharinya bergerak") {
+    // Kriteria terima kedua B1, diperiksa di tingkat yang bisa diuji tanpa GPU:
+    // adegan yang ambient-nya konstan 0,25 tidak akan pernah lulus uji ini,
+    // karena angka itu sama untuk setiap matahari.
+    const auto irradianceAt = [](const Vec3& sunDirection) {
+        render::AtmosphereSky sky;
+        sky.sunDirection = glm::normalize(sunDirection);
+        return EvaluateIrradiance(ProjectIrradiance(sky, 4096), Vec3(0.0f, 1.0f, 0.0f));
+    };
+
+    const Vec3 noon = irradianceAt(Vec3(0.0f, 1.0f, 0.0f));
+    const Vec3 evening = irradianceAt(Vec3(0.9f, 0.1f, 0.0f));
+    const Vec3 night = irradianceAt(Vec3(0.0f, -1.0f, 0.0f));
+
+    // Siang lebih terang daripada senja, dan senja jauh lebih terang daripada
+    // malam — mataharinya berada di balik bumi, dan bayangan planet di dalam
+    // integralnya yang memadamkannya.
+    CHECK(noon.y > evening.y);
+    CHECK(evening.y > night.y * 4.0f);
+    CHECK(night.y < noon.y * 0.05f);
+
+    // Senja lebih merah daripada siang. Bukan hiasan: jalur udara yang panjang
+    // memakan biru lebih dulu, dan itu sifat yang sama yang membuat matahari
+    // terbenam terlihat seperti matahari terbenam.
+    CHECK(evening.x / std::max(evening.z, 1e-6f) > noon.x / std::max(noon.z, 1e-6f));
+}
+
+TEST_CASE("B1: cakram matahari tidak ikut dipanggang") {
+    // Keputusan 1 dalam bentuk prosedural. Adegan yang punya langit hampir
+    // selalu juga punya lampu directional yang mewakili mataharinya; kalau
+    // cakramnya ikut di sini, mataharinya terhitung dua kali dan tidak ada satu
+    // pun galat yang menyebutkannya.
+    render::AtmosphereSky sky;
+    sky.sunDirection = glm::normalize(Vec3(0.0f, 1.0f, 0.0f));
+
+    const Vec3 atSun = sky.Sample(sky.sunDirection);
+    // Sedikit di samping cakramnya — sekitar 3°, jauh di luar jari-jari
+    // matahari sungguhan yang 0,27°.
+    const Vec3 besideSun = sky.Sample(glm::normalize(Vec3(0.05f, 1.0f, 0.0f)));
+
+    // Kalau cakramnya ikut, yang di tengah akan ribuan kali lebih terang.
+    // Yang ada cuma lingkar Mie yang condong ke depan, dan itu perbedaan
+    // beberapa puluh persen.
+    CHECK(atSun.y < besideSun.y * 3.0f);
+    CHECK(atSun.y > besideSun.y);
 }
 
 TEST_CASE("Irradiance mengikuti arah setengah bola yang terang") {

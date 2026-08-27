@@ -82,6 +82,83 @@ Vec3 GradientSky::Sample(const Vec3& direction) const {
     return radiance;
 }
 
+void AtmosphereSky::Prepare() {
+    transmittance_ = BuildTransmittanceLut(atmosphere);
+}
+
+Vec3 AtmosphereSky::Sample(const Vec3& direction) const {
+    const Vec3 view = glm::normalize(direction);
+    const Vec3 sun = glm::normalize(sunDirection);
+
+    // Titik asal berpusat di planet dan dalam kilometer, konvensi yang sama
+    // dengan seluruh `Atmosphere.h`. Mencampurnya dengan meter tidak
+    // menghasilkan galat apa pun — hanya langit yang seluruhnya hitam atau
+    // seluruhnya putih.
+    const Vec3 origin(0.0f, atmosphere.bottomRadius + std::max(cameraHeightKm, 0.0f), 0.0f);
+
+    // Sinar berhenti di tanah bila ia menembusnya, dan di puncak atmosfer bila
+    // tidak. Yang menembus tanah lalu tetap diintegrasikan sampai puncak
+    // atmosfer akan mengintegrasikan udara di dalam tanah: kerapatannya
+    // eksponensial yang meledak, dan yang terlihat kabut putih menyilaukan di
+    // bawah horizon alih-alih sebuah galat.
+    const float toGround = RaySphereNearest(origin, view, atmosphere.bottomRadius);
+    const float toTop = RaySphereNearest(origin, view, atmosphere.topRadius);
+    const float rayLength = toGround > 0.0f ? toGround : toTop;
+    if (rayLength <= 0.0f || stepCount == 0) {
+        return Vec3(0.0f);
+    }
+
+    const float cosTheta = glm::dot(view, sun);
+    const float rayleighPhaseValue = RayleighPhase(cosTheta);
+    const float miePhaseValue = MiePhase(cosTheta, atmosphere.miePhaseG);
+
+    Vec3 accumulated(0.0f);
+    Vec3 transmittance(1.0f);
+    const float step = rayLength / static_cast<float>(stepCount);
+
+    for (uint32_t i = 0; i < stepCount; ++i) {
+        const Vec3 position = origin + view * ((static_cast<float>(i) + 0.5f) * step);
+        const float radius = glm::length(position);
+        const float height = radius - atmosphere.bottomRadius;
+        const Vec3 up = position / radius;
+
+        const MediumDensity density = SampleDensity(atmosphere, height);
+        const Vec3 rayleigh = atmosphere.rayleighScattering * density.rayleigh;
+        const Vec3 mie(atmosphere.mieScattering * density.mie);
+        const Vec3 extinction = SampleExtinction(atmosphere, height);
+
+        // Bayangan planet. Titik yang mataharinya sudah terbenam tidak
+        // menyumbang hamburan tunggal apa pun; tanpa uji ini, separuh malam
+        // tetap disinari matahari yang berada di balik bumi.
+        const float sunBlocked =
+            RaySphereNearest(position + up * 0.01f, sun, atmosphere.bottomRadius);
+        Vec3 toSun(0.0f);
+        if (sunBlocked < 0.0f) {
+            toSun = transmittance_.IsValid()
+                        ? transmittance_.Sample(atmosphere, radius, glm::dot(up, sun))
+                        : Transmittance(atmosphere, position, sun, sunStepCount);
+        }
+
+        const Vec3 inscatter = toSun * (rayleigh * rayleighPhaseValue + mie * miePhaseValue);
+        const Vec3 stepTransmittance(std::exp(-extinction.x * step),
+                                     std::exp(-extinction.y * step),
+                                     std::exp(-extinction.z * step));
+        // Integrasi analitik di dalam langkahnya, sama dengan pass langit dan
+        // dengan aerial perspective: perkalian sederhana meninggalkan pita-pita
+        // yang terlihat pada jumlah langkah sesedikit ini.
+        const Vec3 integrated =
+            (inscatter - inscatter * stepTransmittance) / glm::max(extinction, Vec3(1e-9f));
+
+        accumulated += transmittance * integrated;
+        transmittance *= stepTransmittance;
+    }
+
+    // `solarIrradiance` di sini, bukan di dalam gelungnya: ia tetap sepanjang
+    // sinar, dan mengalikannya sekali di akhir menghemat tiga perkalian per
+    // langkah tanpa mengubah satu bit pun hasilnya.
+    return accumulated * atmosphere.solarIrradiance * intensity;
+}
+
 Vec2 DirectionToEquirectUv(const Vec3& direction) {
     const Vec3 d = glm::normalize(direction);
     // atan2(x, −z): pada u = 0 arahnya −Z, yaitu arah pandang bawaan kamera.
