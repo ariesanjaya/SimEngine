@@ -477,6 +477,13 @@ membuatnya usang selain berkas lain.
 > isinya bisa dibuang kapan saja, dan tidak ada folder pengguna yang ketambahan
 > berkas yang tidak diminta.
 >
+> Ditulis ke berkas sementara lalu dipindahkan, konvensi yang sama dengan
+> `WriteMeshSdf` — dan dua alasannya nyata di sini: proses yang mati di tengah
+> tulis meninggalkan berkas terpotong yang jalan berikutnya temukan sebagai
+> cache yang sah, dan dua renderer yang memanggang lingkungan yang sama menulis
+> ke nama berkas yang sama, karena kuncinya isi berkas sumbernya dan bukan siapa
+> yang memanggangnya.
+>
 > Kuncinya ukuran dan waktu tulis berkas sumbernya, bukan seluruh isinya —
 > berbeda dari cache SDF mesh, dan sengaja: mesh beberapa ratus kilobyte, HDR 4K
 > 25 MB, dan membacanya seluruhnya hanya untuk memutuskan bahwa kita tidak perlu

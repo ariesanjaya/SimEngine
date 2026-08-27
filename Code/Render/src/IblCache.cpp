@@ -2,6 +2,7 @@
 
 #include "Sim/Core/Log.h"
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <fstream>
@@ -96,9 +97,18 @@ bool WriteIblCache(const std::filesystem::path& file, const IblBakeCpu& baked,
         std::filesystem::create_directories(file.parent_path(), code);
     }
 
-    std::ofstream stream(file, std::ios::binary | std::ios::trunc);
+    // **Ditulis ke berkas sementara lalu dipindahkan**, konvensi yang sama
+    // dengan `WriteMeshSdf`. Dua alasannya nyata di sini: sebuah proses yang
+    // mati di tengah tulis meninggalkan berkas terpotong yang jalan berikutnya
+    // temukan sebagai cache yang sah, dan dua renderer yang memanggang
+    // lingkungan yang sama menulis ke nama berkas yang sama — kuncinya memang
+    // isi berkas sumbernya, bukan siapa yang memanggangnya. Rename pada
+    // filesystem yang sama bersifat atomik, jadi yang terlihat pembaca hanya
+    // berkas utuh atau tidak ada berkas sama sekali.
+    const std::filesystem::path temporary = file.string() + ".tmp";
+    std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
     if (!stream) {
-        error = "cannot open " + file.string() + " for writing";
+        error = "cannot open " + temporary.string() + " for writing";
         return false;
     }
 
@@ -114,12 +124,40 @@ bool WriteIblCache(const std::filesystem::path& file, const IblBakeCpu& baked,
                  static_cast<std::streamsize>(sizeof(Vec3) * baked.irradiance.coefficients.size()));
     stream.write(reinterpret_cast<const char*>(baked.cubeTexels.data()),
                  static_cast<std::streamsize>(sizeof(float) * baked.cubeTexels.size()));
+    stream.close();
     if (!stream) {
-        error = "write failed for " + file.string();
+        error = "write failed for " + temporary.string();
+        std::filesystem::remove(temporary, code);
+        return false;
+    }
+
+    std::filesystem::rename(temporary, file, code);
+    if (code) {
+        error = "cannot move " + temporary.string() + " into place: " + code.message();
+        std::filesystem::remove(temporary, code);
         return false;
     }
     return true;
 }
+
+namespace {
+
+/// Berapa float yang seharusnya dimiliki cubemap sebesar itu.
+///
+/// **Dihitung di sini, bukan diambil dari `rhi::TextureCube`.** Berkas ini
+/// tinggal di sisi yang tidak menyentuh Vulkan sama sekali, dan rumusnya —
+/// enam muka, tiap mip separuh sisinya, empat float per texel — memang milik
+/// tata letak artefaknya, bukan milik API grafisnya.
+uint64_t ExpectedTexelFloats(uint32_t cubeSize, uint32_t mipCount) {
+    uint64_t total = 0;
+    for (uint32_t mip = 0; mip < mipCount; ++mip) {
+        const uint64_t extent = std::max(cubeSize >> mip, 1u);
+        total += 6ull * extent * extent * 4ull;
+    }
+    return total;
+}
+
+}  // namespace
 
 bool ReadIblCache(const std::filesystem::path& file, IblBakeCpu& out, std::string& error) {
     std::ifstream stream(file, std::ios::binary);
@@ -146,6 +184,18 @@ bool ReadIblCache(const std::filesystem::path& file, IblBakeCpu& out, std::strin
     if (header.cubeSize == 0 || header.mipCount == 0 || header.texelCount == 0 ||
         header.texelCount > kMaxTexels) {
         error = "cached environment has an implausible size";
+        return false;
+    }
+    // **Ukuran yang disebut header harus cocok dengan bentuk yang disebutnya.**
+    // `rhi::TextureCube::Create` memang menolak span yang terlalu pendek, jadi
+    // yang lolos dari sini tidak akan membaca melewati ujung buffer — tapi
+    // ditolak di sini berarti pesannya menyebut artefak yang rusak, bukan
+    // "cubemap upload needs N bytes but got M" dari lapisan yang tidak tahu
+    // berkas mana yang menyebabkannya.
+    if (header.texelCount != ExpectedTexelFloats(header.cubeSize, header.mipCount)) {
+        error = "cached environment says " + std::to_string(header.texelCount) +
+                " floats but its cube shape needs " +
+                std::to_string(ExpectedTexelFloats(header.cubeSize, header.mipCount));
         return false;
     }
 

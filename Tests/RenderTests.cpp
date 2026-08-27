@@ -1850,6 +1850,43 @@ TEST_CASE("B3: artefak masak lingkungan bolak-balik tanpa berubah") {
     std::filesystem::remove(file, cleanup);
 }
 
+TEST_CASE("B3: artefak ditulis atomik — tidak ada berkas setengah jadi yang terlihat") {
+    // Konvensi yang sama dengan `WriteMeshSdf`, dan dua alasannya nyata:
+    // sebuah proses yang mati di tengah tulis meninggalkan berkas terpotong yang
+    // jalan berikutnya temukan sebagai cache yang sah, dan dua renderer yang
+    // memanggang lingkungan yang sama menulis ke nama berkas yang sama —
+    // kuncinya isi berkas sumbernya, bukan siapa yang memanggangnya.
+    const render::EquirectEnvironment map = LongitudeStripes(32, 16);
+    render::IblBakeSettings settings;
+    settings.cubeSize = 8;
+    settings.mipCount = 2;
+    settings.irradianceSamples = 64;
+    const render::IblBakeCpu baked = render::BakeIblCpu(map, settings);
+
+    const std::filesystem::path dir =
+        std::filesystem::temp_directory_path() / ("sim-ibl-atomic-" + std::to_string(::getpid()));
+    std::error_code code;
+    std::filesystem::remove_all(dir, code);
+
+    const std::filesystem::path file = dir / "env.simibl";
+    std::string error;
+    REQUIRE_MESSAGE(render::WriteIblCache(file, baked, error), error);
+
+    // Yang tersisa hanya berkas jadinya: berkas sementaranya sudah dipindahkan,
+    // bukan ditinggalkan di sebelahnya.
+    CHECK(std::filesystem::exists(file));
+    CHECK_FALSE(std::filesystem::exists(std::filesystem::path(file.string() + ".tmp")));
+
+    std::size_t entries = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(dir)) {
+        (void)entry;
+        ++entries;
+    }
+    CHECK(entries == 1);
+
+    std::filesystem::remove_all(dir, code);
+}
+
 TEST_CASE("B3: artefak yang rusak ditolak, bukan dipercaya") {
     // **Gagal membaca bukan galat, tapi membaca yang salah adalah.** Artefak
     // masak boleh hilang, usang, dan ditulis versi lain — yang benar lalu
@@ -1884,6 +1921,34 @@ TEST_CASE("B3: artefak yang rusak ditolak, bukan dipercaya") {
     const auto full = std::filesystem::file_size(file);
     std::filesystem::resize_file(file, full / 2);
     CHECK_FALSE(render::ReadIblCache(file, out, error));
+
+    // Header yang berbohong tentang bentuknya: `texelCount` yang tidak cocok
+    // dengan `cubeSize`/`mipCount`. Lapisan RHI memang menolak span yang terlalu
+    // pendek, tapi ditolak di sini berarti pesannya menyebut artefak yang rusak
+    // alih-alih "cubemap upload needs N bytes but got M" dari lapisan yang tidak
+    // tahu berkas mana penyebabnya.
+    {
+        const render::EquirectEnvironment map = LongitudeStripes(32, 16);
+        render::IblBakeSettings settings;
+        settings.cubeSize = 8;
+        settings.mipCount = 2;
+        settings.irradianceSamples = 64;
+        render::IblBakeCpu baked = render::BakeIblCpu(map, settings);
+        REQUIRE(render::WriteIblCache(file, baked, error));
+
+        // Sunting `mipCount` di header menjadi bentuk yang menuntut texel lebih
+        // banyak daripada yang benar-benar ada di berkasnya.
+        std::fstream patch(file, std::ios::binary | std::ios::in | std::ios::out);
+        REQUIRE(patch);
+        patch.seekp(12);  // magic(4) + version(4) + cubeSize(4)
+        const uint32_t lie = 4;
+        patch.write(reinterpret_cast<const char*>(&lie), sizeof(lie));
+        patch.close();
+
+        CHECK_FALSE(render::ReadIblCache(file, out, error));
+        INFO(error);
+        CHECK(error.find("cube shape") != std::string::npos);
+    }
 
     std::error_code cleanup;
     std::filesystem::remove(file, cleanup);
