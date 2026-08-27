@@ -282,7 +282,7 @@ paksaan eksplisit di atasnya.
    akan membuatnya ikut ke setiap `.simprefab`: persis cacat yang keputusan 5
    cegah.
 
-### B1 — Iradiansi panggang dari langit prosedural (`Baked` + `Sky`)
+### B1 — Iradiansi panggang dari langit prosedural (`Baked` + `Sky`) · ✅
 
 - `AtmosphereSky : IEnvironmentSampler` di atas matematika CPU `Atmosphere.h`
 - `BakeIbl` dipanggil dengannya di `TaskPool`; SH9 menggantikan konstanta 0,25
@@ -295,6 +295,64 @@ maupun di codegen material; adegan template dengan GI mati punya ambient yang
 ikut berubah saat Time-of-Day menggerakkan matahari; dan iradiansi SH dari
 `AtmosphereSky` cocok dengan integrasi langsung atas pencuplik yang sama di
 `SimRenderTests`.
+
+#### Keadaannya sesudah B1
+
+**Premis dokumen ini patah, dan itu terukur.** Pengukuran pembuka di atas
+diulang dengan yang berubah hanya Sky Gain — bukan seluruh langit — supaya yang
+tersisa memang cuma pencahayaannya:
+
+| Sky Gain | piksel langit | piksel tanah (EV+4) | piksel tanah (EV0) |
+|---:|---:|---:|---:|
+| 20 | 21,3 | **65,5** | 229,3 |
+| 2 | 0,4 | **57,1** | 224,3 |
+
+Sebelum B1 kedua baris "tanah" itu **56,1 dan 56,1** — sama persis, sampai ke
+digit terakhir. Sekarang keduanya berbeda 15%. Selisihnya sederhana karena tanah
+di adegan ini didominasi matahari langsung; yang teduh bergerak jauh lebih
+banyak.
+
+`AtmosphereSky` menghitung radiansi langit yang sama yang tergambar, di CPU,
+tanpa cakram mataharinya — lampu directional adegan yang mengantarkan cahaya
+langsungnya, dan menyertakan cakramnya membuat matahari terhitung dua kali.
+Hasilnya sembilan koefisien SH di blok uniform per-frame, dibaca `box_shading`
+maupun codegen material lewat `skyIrradiance()` yang sama.
+
+**Konstanta 0,25 yang hilang ternyata dua konstanta.** Ia diperlakukan sebagai
+E/π di `box_shading.slang` dan sebagai E di codegen material — satu angka dengan
+dua arti di dua berkas, dan selisih pi itu ikut lenyap bersamanya.
+
+**Tabel transmitansi di CPU, karena tanpanya panggangannya tidak layak.**
+Sebagai integral bersarang, satu proyeksi SH 1024 sampel memakan 289 ms (Debug);
+dengan tabel 64 ms. Rencana ini mengandaikan panggang ulang tiap matahari
+bergeser itu murah — angka pertama membuatnya tidak. Tabelnya hanya bergantung
+pada udaranya, bukan pada arah cahayanya, jadi matahari yang bergeser tidak
+menyentuhnya sama sekali.
+
+**Panggangannya asinkron di editor dan player, sinkron di `SimHeadless`.** Yang
+kedua bukan kelalaian: sebuah panggangan asinkron membuat gambar yang tertangkap
+bergantung pada apakah worker sempat selesai, yaitu pada waktu thread — dan dua
+jalan dari binary yang identik lalu menghasilkan gambar yang berbeda. Ditemukan
+persis begitu saat mengukur tabel di atas: empat tangkapan pertama seluruhnya
+identik karena bench selesai sebelum panggangannya mendarat.
+
+**Yang diuji:** lima kasus di `SimRenderTests` — SH melawan integrasi langsung
+atas pencuplik yang sama (kriteria ketiga), iradiansi yang bergerak bersama
+mataharinya dan memerah saat senja (kriteria kedua, di tingkat yang bisa diuji
+tanpa GPU), cakram matahari yang tidak ikut, tabel transmitansi melawan
+integral, dan tabel yang tidak mengubah jawaban. 25 dari 25 suite lulus.
+
+**Dua hal yang belum tuntas:**
+
+1. **Langit `HDR Map` tidak menyinari apa pun.** `AtmosphereSky` hanya menjawab
+   langit prosedural; untuk berkas, iradiansinya nol sampai B3 memanggang dari
+   `EquirectEnvironment`. Nol dipilih alih-alih sebuah konstanta pengganti
+   karena konstanta itulah yang baru saja dibuang — sebuah angka yang berpura-
+   pura menjadi langit adalah persis cacat yang B1 akhiri.
+2. **Frame pertama sesudah level dibuka lebih gelap** di editor dan player:
+   panggangannya berjalan di kolam tugas dan butuh beberapa ratus milidetik,
+   dan sebelum ia mendarat tidak ada iradiansi yang bisa dipakai. Menahannya
+   dengan konstanta akan menukar satu kedipan dengan satu kebohongan.
 
 ### B2 — Spekular panggang + DFG di viewport
 

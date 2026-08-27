@@ -546,10 +546,17 @@ std::string AssembleForwardMaterialModule(const std::string& generatedSlang,
         << ", light.direction, light.radiance);\n";
     out << "    }\n\n";
 
-    // Iradiansi tak-langsung dari screen probe, sama sumbernya dengan
+    // Iradiansi tak-langsung dari langit panggang, sama sumbernya dengan
     // `box.frag`. Yang berbeda: ia dimasukkan lewat model shading alih-alih
     // dikalikan albedo langsung, jadi logam tidak ikut menerima difus.
-    out << "    float3 irradiance = float3(0.25);\n";
+    //
+    // **Konstanta 0,25 yang dulu di sini bukan cuma tetap, ia juga tidak
+    // sesatuan dengan cabang di bawahnya.** `giIrradianceAt` mengembalikan
+    // iradiansi E, sedangkan 0,25 diperlakukan sebagai E di sini dan sebagai
+    // E/π di `box_shading.slang` — dua arti untuk satu angka, di dua berkas.
+    // Keduanya sekarang membaca `skyIrradiance`, yang selalu E, dan selisih pi
+    // itu hilang bersama konstantanya.
+    out << "    float3 irradiance = skyIrradiance(frame.normal);\n";
     out << "    if (shadowParams.giParams.x > 0.5) {\n";
     out << "        irradiance = giIrradianceAt(input.position.xy, input.worldPosition,\n";
     out << "                                    frame.normal, shadowParams.giParams.y);\n";

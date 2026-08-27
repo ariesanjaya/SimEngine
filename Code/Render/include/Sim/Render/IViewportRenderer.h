@@ -12,6 +12,10 @@
 #include <span>
 #include <string_view>
 
+namespace sim {
+class TaskPool;
+}
+
 namespace sim::render {
 
 /// Waktu GPU satu pass, milidetik.
@@ -101,6 +105,20 @@ public:
     /// ukuran yang sama — implementasi yang membangun ulang setiap panggilan
     /// akan membuat panel berkedip saat diseret.
     virtual void Resize(uint32_t width, uint32_t height) = 0;
+
+    /// Kolam tugas untuk pekerjaan yang tidak boleh menahan main thread.
+    ///
+    /// **Dipasang, bukan diterima saat dibuat**, dan urutannya yang membuatnya
+    /// aman: kolam dideklarasikan sesudah renderer di composition root, jadi ia
+    /// dihancurkan lebih dulu — `TaskPool::Stop()` menunggu tugas yang sedang
+    /// berjalan selesai selagi renderer masih hidup. Menyerahkannya lewat
+    /// `StubRendererDesc` menuntut kolamnya dibuat lebih dulu, dan itu membalik
+    /// urutan yang tepat ini.
+    ///
+    /// Null berarti pekerjaannya dijalankan di main thread. Itu bukan kegagalan
+    /// melainkan jalur yang dipakai uji dan alat baris perintah, yang memang
+    /// tidak punya frame untuk ditahan.
+    virtual void SetTaskPool(TaskPool* tasks) { (void)tasks; }
 
     /// Memuat geometri sebuah berkas mesh, atau mengembalikan yang sudah dimuat.
     ///
