@@ -14,7 +14,13 @@ const char* ToString(BackendKind kind) {
     return "unknown";
 }
 
-BackendKind SelectedBackend() { return BackendKind::Bvh; }
+BackendKind SelectedBackend() {
+#if SIM_WITH_EMBREE
+    return BackendKind::Embree;
+#else
+    return BackendKind::Bvh;
+#endif
+}
 
 // Konstruktor dan destruktor ada di sini, bukan di header, dan itu syarat:
 // `std::unique_ptr<SceneBackend>` menuntut tipe yang lengkap di tempat

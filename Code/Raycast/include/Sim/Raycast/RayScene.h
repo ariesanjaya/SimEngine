@@ -53,6 +53,13 @@ public:
     /// hancur. Menyalinnya akan menggandakan setiap mesh di adegan — Sponza
     /// sendirian sudah puluhan megabyte — untuk data yang sudah ada di RAM.
     ///
+    /// **Menyalinnya tidak dilarang, tetapi mengubahnya di tempat tidak
+    /// berlaku.** Buffer dibagi supaya tidak ada simpul yang tersimpan dua
+    /// kali; struktur percepatannya tetap dibangun sekali, di sini. Menggeser
+    /// simpul sesudahnya menghasilkan jawaban yang tidak ditentukan sampai
+    /// geometrinya dibangun ulang lewat `Clear()` dan `AddMesh()` lagi —
+    /// `Commit()` hanya menyusun tingkat atas, dan itu memang seluruh gunanya.
+    ///
     /// `stride` memungkinkan posisi dibaca langsung dari struct vertex
     /// interleaved: `assets::MeshVertex` menaruh `position` di offset nol dengan
     /// stride 32, jadi ia diserahkan apa adanya tanpa repack.

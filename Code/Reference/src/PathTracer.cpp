@@ -165,6 +165,7 @@ Image Render(const raycast::RayScene& scene, const SurfaceResolver& resolve,
                 Vec3 throughput(1.0f);
 
                 for (uint32_t depth = 0; depth < settings.maxDepth; ++depth) {
+                    ++image.raysTraced;
                     const raycast::RayHit hit = raycast::Raycast(scene, origin, direction);
                     if (!hit.hit) {
                         radiance += throughput * settings.skyRadiance;
@@ -219,6 +220,7 @@ Image Render(const raycast::RayScene& scene, const SurfaceResolver& resolve,
                     // `f * cos` — model shading itu sudah mengalikan kosinusnya
                     // sendiri, dan mengalikannya lagi di sini akan menggelapkan
                     // seluruh gambar tanpa satu pun galat.
+                    ++image.shadingCalls;
                     const Vec3 fcos =
                         EvaluateDirect(surface.surface, frame, scattered, Vec3(1.0f));
                     throughput *= fcos / pdf;

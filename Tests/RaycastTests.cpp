@@ -153,12 +153,26 @@ TEST_CASE("Posisi dibaca dari buffer interleaved tanpa repack") {
 
     CHECK(Raycast(scene, Vec3(0.25f, 0.25f, -1.0f), Vec3(0.0f, 0.0f, 1.0f)));
 
-    // **Buffer dibagi, bukan disalin.** Menggeser simpulnya di tempat harus
-    // menggeser geometrinya juga — kalau tidak, ada salinan kedua di suatu
-    // tempat, dan adegan sebesar Sponza akan membayarnya dua kali.
+    // **Yang dibagi buffernya, bukan struktur percepatannya.** Menggeser simpul
+    // di tempat tidak terlihat sampai geometrinya dibangun ulang, dan itu
+    // berlaku di kedua backend dengan alasan yang berbeda: BVH sendiri
+    // menyimpan kotak yang menjadi basi, dan Embree menyalin simpulnya ke dalam
+    // daun saat commit. Yang dijanjikan `AddMesh` adalah tidak ada repack ke
+    // `Vec3` — bukan geometri yang ikut hidup.
+    //
+    // Sesudah dibangun ulang, posisi barunya dibaca dari buffer yang sama, pada
+    // stride yang sama, tanpa pemanggil menyentuh apa pun: itulah yang membuat
+    // adegan sebesar Sponza tidak membayar simpulnya dua kali.
     for (Vertex& vertex : vertices) {
         vertex.position.z += 10.0f;
     }
+    scene.Clear();
+    const GeometryId moved =
+        scene.AddMesh(&vertices[0].position, sizeof(Vertex), vertices.size(), indices);
+    REQUIRE(moved != GeometryId::Invalid);
+    scene.AddInstance(moved, Mat4(1.0f));
+    scene.Commit();
+
     CHECK_FALSE(Raycast(scene, Vec3(0.25f, 0.25f, -1.0f), Vec3(0.0f, 0.0f, 1.0f), 5.0f));
     CHECK(Raycast(scene, Vec3(0.25f, 0.25f, -1.0f), Vec3(0.0f, 0.0f, 1.0f), 20.0f));
 }
@@ -314,9 +328,60 @@ TEST_CASE("Titik terdekat menemukan permukaan, bukan pusat bendanya") {
 }
 
 TEST_CASE("Backend yang dipakai build ini bisa disebut namanya") {
+    // **Yang diperiksa di sini bukan backend mana yang menang**, melainkan bahwa
+    // `SelectedBackend()` menjawab yang benar-benar ikut dibangun. Seluruh uji
+    // lain di berkas ini tidak menyebut backend sama sekali, dan itu memang
+    // gunanya: keduanya harus lulus perkara yang sama persis.
+#if SIM_WITH_EMBREE
+    CHECK(SelectedBackend() == BackendKind::Embree);
+#else
     CHECK(SelectedBackend() == BackendKind::Bvh);
+#endif
     CHECK(std::string(ToString(BackendKind::Bvh)) == "BVH");
     CHECK(std::string(ToString(BackendKind::Embree)) == "Embree");
+}
+
+TEST_CASE("Tidak ada satu pun tipe Embree di header publik Sim::Raycast") {
+    // **Kriteria terima R6, ditegakkan alih-alih diingat.** Begitu `RTCScene`
+    // muncul di sebuah header publik, setiap pemanggil yang menyentuh picking
+    // ikut menyertakan `embree4/rtcore.h` — dan R6 berhenti bisa dibatalkan
+    // tanpa membongkar mesinnya. Aturan ini yang membuat backend kedua bisa
+    // masuk dan keluar sebagai keputusan build, bukan sebagai migrasi.
+    //
+    // Yang diperiksa `include/`, bukan `src/`: di sanalah Embree memang tinggal.
+    const std::filesystem::path publicHeaders =
+        std::filesystem::path(SIM_CODE_DIR) / "Raycast" / "include";
+    REQUIRE(std::filesystem::exists(publicHeaders));
+
+    std::vector<std::string> offenders;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(publicHeaders)) {
+        if (!entry.is_regular_file() || entry.path().extension() != ".h") {
+            continue;
+        }
+        // **Komentarnya dibuang lebih dulu, dan itu bukan kelonggaran.**
+        // `Backend.h` menjelaskan aturan ini justru dengan menyebut `RTCScene`
+        // sebagai contoh yang dilarang; sebuah penyaring yang tidak bisa
+        // membedakan penjelasan dari deklarasi memaksa aturannya tidak boleh
+        // dituliskan di tempat ia berlaku.
+        std::ifstream file(entry.path());
+        std::string code;
+        for (std::string line; std::getline(file, line);) {
+            const std::size_t first = line.find_first_not_of(" \t");
+            if (first != std::string::npos && line.compare(first, 2, "//") == 0) {
+                continue;
+            }
+            code += line;
+            code += '\n';
+        }
+
+        // `RTC` menangkap tipe maupun fungsinya; `embree4/` menangkap
+        // include-nya.
+        if (code.find("RTC") != std::string::npos ||
+            code.find("embree4/") != std::string::npos) {
+            offenders.push_back(entry.path().filename().string());
+        }
+    }
+    CHECK(offenders.empty());
 }
 
 TEST_CASE("Möller–Trumbore hanya punya satu salinan di Code/") {

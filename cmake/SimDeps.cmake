@@ -1191,3 +1191,46 @@ endif()
 # Ditambahkan pada milestone berikutnya (lihat docs/DEPENDENCIES.md):
 #   E8   cgltf, meshoptimizer
 # ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Embree — backend ray query CPU alternatif untuk `Sim::Raycast` (R6).
+#
+# **Seluruh opsi di bawah wajib, bukan penyetelan.** Konfigurasi bawaan Embree
+# membangun jauh lebih banyak daripada yang dipakai di sini: puluhan tutorial,
+# kernel untuk setiap ISA sampai AVX-512, dan seluruh tipe geometri. Dengan opsi
+# ini, konfigurasinya 1 detik dan build-nya 143 detik pada 24 inti — terukur,
+# bukan diperkirakan, dan jauh di bawah ambang lima menit yang ditetapkan
+# docs/PLAN-EMBREE.md sebagai risiko.
+#
+# `EMBREE_TASKING_SYSTEM=INTERNAL` menghapus TBB sepenuhnya. Tasking hanya
+# dipakai `rtcCommitScene`; penelusuran ray tidak menyentuhnya sama sekali.
+#
+# Salinan lokal bisa dipakai tanpa jaringan lewat mekanisme baku CMake:
+#   -DFETCHCONTENT_SOURCE_DIR_EMBREE=/jalur/ke/embree-4.4.1
+# ---------------------------------------------------------------------------
+if(SIM_WITH_EMBREE)
+    set(EMBREE_TASKING_SYSTEM        "INTERNAL" CACHE STRING "" FORCE)
+    set(EMBREE_TUTORIALS             OFF CACHE BOOL "" FORCE)
+    set(EMBREE_MAX_ISA               "AVX2" CACHE STRING "" FORCE)
+    set(EMBREE_STATIC_LIB            ON  CACHE BOOL "" FORCE)
+    set(EMBREE_ISPC_SUPPORT          OFF CACHE BOOL "" FORCE)
+    set(EMBREE_GEOMETRY_SUBDIVISION  OFF CACHE BOOL "" FORCE)
+    set(EMBREE_GEOMETRY_CURVE        OFF CACHE BOOL "" FORCE)
+    set(EMBREE_GEOMETRY_POINT        OFF CACHE BOOL "" FORCE)
+    set(EMBREE_GEOMETRY_GRID         OFF CACHE BOOL "" FORCE)
+    set(EMBREE_GEOMETRY_QUAD         OFF CACHE BOOL "" FORCE)
+    set(EMBREE_GEOMETRY_TRIANGLE     ON  CACHE BOOL "" FORCE)
+    set(EMBREE_GEOMETRY_INSTANCE     ON  CACHE BOOL "" FORCE)
+    # User geometry disisakan untuk terrain prosedural, dan filter function
+    # untuk alpha-test dedaunan saat bake — satu-satunya kemampuan yang
+    # benar-benar tidak dimiliki BVH sendiri.
+    set(EMBREE_GEOMETRY_USER         ON  CACHE BOOL "" FORCE)
+    set(EMBREE_RAY_MASK              ON  CACHE BOOL "" FORCE)
+    set(EMBREE_FILTER_FUNCTION       ON  CACHE BOOL "" FORCE)
+
+    FetchContent_Declare(embree
+        GIT_REPOSITORY https://github.com/RenderKit/embree.git
+        GIT_TAG        v4.4.1
+        GIT_SHALLOW    TRUE)
+    FetchContent_MakeAvailable(embree)
+endif()
