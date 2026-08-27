@@ -814,6 +814,100 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# MaterialX — pembaca dokumen `.mtlx` untuk impor material (E8.4)
+#
+# **Dicari, tidak diunduh, dan opsional.** Aturan yang sama dengan OpenUSD dan
+# dengan alasan yang sama: sumbernya sudah ada di mesin yang memakainya, dan
+# membangunnya dari nol pada setiap build bersih adalah biaya yang dibayar juga
+# oleh orang yang cuma mengubah satu panel editor. Yang melewatinya tetap bisa
+# membangun seluruh mesin; yang hilang hanya jalur `.mtlx`, dan berkas FBX dari
+# 3ds Max lalu jatuh ke blok `3dsMax|Parameters` di dalam FBX-nya sendiri.
+#
+# **Hanya Core dan Format.** MaterialX membawa pembangkit shader untuk GLSL,
+# OSL, MDL, MSL, dan Slang beserta modul rendernya sendiri — seluruhnya untuk
+# pekerjaan yang sudah dikerjakan `Sim::Material` di sini, dan tidak satu pun
+# dipanggil importir. Yang dibutuhkan cuma pembaca dokumennya, jadi sisanya
+# dimatikan eksplisit alih-alih dibiarkan memakai bawaannya yang ON.
+#
+# Nilainya bukan "membaca XML" — pugixml sudah ada di mesin ini lewat OIIO.
+# Yang dibeli dengan menautkan pustakanya adalah hal-hal yang salah diam-diam
+# kalau diurus sendiri: pewarisan nodedef, `interfacename` yang menembus
+# nodegraph, upgrade dokumen versi lama ke 1.39, dan satuan. Dokumen yang salah
+# dibaca tidak memunculkan galat — ia memunculkan material yang mirip.
+# ---------------------------------------------------------------------------
+set(SIM_MATERIALX_DEFAULT_ROOT "$ENV{HOME}/SDK/MaterialX")
+if(EXISTS "${SIM_MATERIALX_DEFAULT_ROOT}/source/MaterialXCore/Document.h")
+    set(SIM_MATERIALX_ROOT "${SIM_MATERIALX_DEFAULT_ROOT}" CACHE PATH "Folder sumber MaterialX")
+else()
+    set(SIM_MATERIALX_ROOT "" CACHE PATH "Folder sumber MaterialX")
+endif()
+
+if(SIM_WITH_MATERIALX AND SIM_MATERIALX_ROOT AND
+   EXISTS "${SIM_MATERIALX_ROOT}/source/MaterialXCore/Document.h")
+    # Dimatikan sebagai variabel biasa, bukan lewat cache: CMP0077 membuat
+    # `option()` di dalam MaterialX menghormatinya, dan cache akan ikut
+    # mengubah build tree MaterialX milik orang itu sendiri kalau ia kebetulan
+    # membangunnya di folder yang sama.
+    set(MATERIALX_BUILD_GEN_GLSL   OFF)
+    set(MATERIALX_BUILD_GEN_OSL    OFF)
+    set(MATERIALX_BUILD_GEN_MDL    OFF)
+    set(MATERIALX_BUILD_GEN_MSL    OFF)
+    set(MATERIALX_BUILD_GEN_SLANG  OFF)
+    set(MATERIALX_BUILD_RENDER     OFF)
+    set(MATERIALX_BUILD_TESTS      OFF)
+    set(MATERIALX_BUILD_PYTHON     OFF)
+    set(MATERIALX_BUILD_VIEWER     OFF)
+    set(MATERIALX_BUILD_GRAPH_EDITOR OFF)
+    set(MATERIALX_BUILD_DOCS       OFF)
+    set(MATERIALX_INSTALL_RESOURCES OFF)
+    set(MATERIALX_BUILD_SHARED_LIBS OFF)
+    # ccache dipilih proyek ini di preset-nya, bukan oleh dependensinya.
+    set(MATERIALX_BUILD_USE_CCACHE OFF)
+
+    # EXCLUDE_FROM_ALL: yang dibangun hanya target yang benar-benar ditautkan
+    # seseorang, jadi `MaterialXGenShader` — yang CMakeLists MaterialX
+    # daftarkan tanpa syarat — tidak ikut terbangun tanpa ada yang memakainya.
+    add_subdirectory("${SIM_MATERIALX_ROOT}" "${CMAKE_BINARY_DIR}/materialx" EXCLUDE_FROM_ALL)
+
+    # Peringatan pustaka pihak ketiga bukan urusan kita, dan -Werror proyek ini
+    # akan menggagalkan build karenanya.
+    foreach(mtlxTarget MaterialXCore MaterialXFormat)
+        if(TARGET ${mtlxTarget})
+            target_compile_options(${mtlxTarget} PRIVATE -w)
+            # SYSTEM: headernya milik orang lain dan dipakai modul ber--Werror.
+            get_target_property(mtlxIncludes ${mtlxTarget} INTERFACE_INCLUDE_DIRECTORIES)
+            if(mtlxIncludes)
+                target_include_directories(${mtlxTarget} SYSTEM INTERFACE ${mtlxIncludes})
+            endif()
+        endif()
+    endforeach()
+
+    # **Pustaka standar `.mtlx` sengaja tidak ikut dimuat saat berjalan.**
+    # Ia dipakai untuk mendapat nilai bawaan tiap input dari nodedef-nya — dan
+    # nilai-nilai itu memang harus dipatok di mesin ini apa pun yang terjadi:
+    # `OpenPBRSurface::defaults()` di openpbr.slang, katalog node, dan
+    # `OpenPbrMaterial` sudah menuliskannya, karena material yang dibiarkan apa
+    # adanya harus terlihat sama di shader dan di editor. Membaca dua ratus
+    # berkas untuk menurunkan ulang angka yang tetap harus ditulis di sini tidak
+    # membeli apa pun, dan harganya sebuah jalur folder yang dipanggang ke dalam
+    # biner.
+    add_library(sim_materialx INTERFACE)
+    target_link_libraries(sim_materialx INTERFACE MaterialXCore MaterialXFormat)
+    add_library(MaterialX::MaterialX ALIAS sim_materialx)
+
+    file(STRINGS "${SIM_MATERIALX_ROOT}/CMakeLists.txt" simMtlxVersionLines
+         REGEX "^set\\(MATERIALX_(MAJOR|MINOR|BUILD)_VERSION ")
+    string(REGEX MATCHALL "[0-9]+" simMtlxVersionParts "${simMtlxVersionLines}")
+    list(JOIN simMtlxVersionParts "." SIM_MATERIALX_VERSION)
+    message(STATUS "MaterialX ${SIM_MATERIALX_VERSION} dipakai dari ${SIM_MATERIALX_ROOT} — impor .mtlx aktif")
+elseif(NOT SIM_WITH_MATERIALX)
+    message(STATUS "impor MaterialX dimatikan (-DSIM_WITH_MATERIALX=OFF)")
+else()
+    message(STATUS "sumber MaterialX tidak ada — impor .mtlx dilewati "
+                   "(setel -DSIM_MATERIALX_ROOT=<folder> untuk mengaktifkannya)")
+endif()
+
+# ---------------------------------------------------------------------------
 # OpenUSD — impor .usd/.usda/.usdc/.usdz (E8.4)
 #
 # **Dicari, tidak diunduh.** Semua kebergantungan lain di berkas ini diambil

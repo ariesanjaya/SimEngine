@@ -1,5 +1,7 @@
 #include "Sim/Assets/MeshData.h"
 
+#include "MaxMaterial.h"
+#include "Sim/Assets/MaterialXImport.h"
 #include "Sim/Core/Log.h"
 
 #include <fbxsdk.h>
@@ -300,6 +302,20 @@ bool SkeletonData::IsTopological() const {
         }
     }
     return true;
+}
+
+void ProjectOpenPbrToFlat(const OpenPbrMaterial& source, MeshMaterial& target) {
+    target.baseColor = source.baseColor * source.baseWeight;
+    target.metalness = source.baseMetalness;
+    target.roughness = source.specularRoughness;
+    target.emissive = source.emissive;
+    target.opacity = source.opacity;
+
+    target.baseColorTexture = source.baseColorTexture.path;
+    target.roughnessTexture = source.specularRoughnessTexture.path;
+    target.metalnessTexture = source.baseMetalnessTexture.path;
+    target.emissiveTexture = source.emissiveTexture.path;
+    target.normalTexture = source.normalTexture.path;
 }
 
 MeshData BuildIndexedMesh(const std::vector<MeshVertex>& triangleSoup,
@@ -728,6 +744,52 @@ MeshMaterial ReadMaterial(const FbxSurfaceMaterial& source) {
     return material;
 }
 
+std::vector<std::string> DescribeFbxMaterials(const std::filesystem::path& path,
+                                              std::string& error) {
+    std::vector<std::string> lines;
+    error.clear();
+
+    std::string extension = path.extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (extension != ".fbx") {
+        error = "only FBX carries the custom property blocks this dumps";
+        return lines;
+    }
+
+    FbxSceneHandle handle;
+    if (!handle.Open(path, /*readAnimation=*/false, error)) {
+        return lines;
+    }
+    FbxScene& scene = *handle.Scene();
+
+    // Material panggung, bukan material node: satu material yang dipakai
+    // beberapa node hanya perlu dicetak sekali, dan yang tidak dipakai node mana
+    // pun tetap menarik — ia kerap justru material yang dicari orang.
+    const int count = scene.GetSrcObjectCount<FbxSurfaceMaterial>();
+    for (int i = 0; i < count; ++i) {
+        const FbxSurfaceMaterial* material = scene.GetSrcObject<FbxSurfaceMaterial>(i);
+        if (material == nullptr) {
+            continue;
+        }
+        lines.push_back("=== " + std::string(material->GetName() != nullptr ? material->GetName()
+                                                                           : "(tanpa nama)") +
+                        " [" + std::string(material->ShadingModel.Get().Buffer()) + "] ===");
+        for (std::string& line : DescribeMaterialProperties(*material)) {
+            lines.push_back("  " + line);
+        }
+        std::vector<std::string> documents;
+        CollectMaterialXPaths(*material, documents);
+        for (const std::string& document : documents) {
+            lines.push_back("  -> dokumen MaterialX: " + document);
+        }
+    }
+    if (lines.empty()) {
+        error = "no materials in this file";
+    }
+    return lines;
+}
+
 MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
     MeshData mesh;
     error.clear();
@@ -785,6 +847,10 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
     /// Material scene → indeks di `mesh.materials`, supaya material yang dipakai
     /// dua node tidak tercatat dua kali.
     std::unordered_map<const FbxSurfaceMaterial*, int> materialIndex;
+    /// Dokumen `.mtlx` yang disebut material di dalam berkas ini, kalau ada.
+    /// Dikumpulkan sambil jalan dan dipakai sekali di ujung — mencarinya per
+    /// material berarti membuka dan mengurai dokumen yang sama berkali-kali.
+    std::vector<std::string> materialXPaths;
 
     /// Satu pengaruh bone atas satu titik kendali, sebelum dipotong jadi empat.
     struct ControlWeight {
@@ -912,7 +978,16 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
                 continue;
             }
             const auto index = static_cast<int>(mesh.materials.size());
-            mesh.materials.push_back(ReadMaterial(*sourceMaterial));
+            MeshMaterial converted = ReadMaterial(*sourceMaterial);
+            // **Blok Max dibaca di atas hasil Phong, bukan menggantikannya.**
+            // Jalur teksturnya sudah terisi dari slot FBX baku, dan slot itu
+            // yang dipakai bila blok Max tidak menyebut petanya sendiri —
+            // urutan ini yang membuat cadangan itu ada.
+            if (ReadMaxMaterial(*sourceMaterial, converted) && converted.openPbr) {
+                ProjectOpenPbrToFlat(*converted.openPbr, converted);
+            }
+            CollectMaterialXPaths(*sourceMaterial, materialXPaths);
+            mesh.materials.push_back(std::move(converted));
             materialIndex.emplace(sourceMaterial, index);
             nodeMaterial[static_cast<std::size_t>(m)] = index;
         }
@@ -1097,6 +1172,13 @@ MeshData LoadMesh(const std::filesystem::path& path, std::string& error) {
     if (!everyCornerHasTangent) {
         mesh.ComputeTangents();
     }
+
+    // **Dokumen `.mtlx` dibaca terakhir, dan karena itu ia yang menang.**
+    // Blok `3dsMax|Parameters` di atas adalah daftar angka; dokumen MaterialX
+    // adalah bentuk yang sama yang dipakai Max, Arnold, dan USD, dan ia bisa
+    // menyatakan tekstur yang mengemudikan sebuah input. Keduanya boleh ada
+    // sekaligus di satu berkas, dan saat itu yang lebih lengkap yang berlaku.
+    ApplyMaterialX(mesh, path, materialXPaths);
     return mesh;
 }
 

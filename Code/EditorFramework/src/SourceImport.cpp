@@ -6,6 +6,7 @@
 #include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Assets/MaterialImport.h"
 #include "Sim/Assets/MeshData.h"
+#include "Sim/Assets/TextureSettings.h"
 #include "Sim/Core/Log.h"
 
 #include <algorithm>
@@ -168,7 +169,7 @@ SourceImportResult ImportSource(const std::filesystem::path& source,
     if (options.materials && !mesh.materials.empty()) {
         std::vector<std::string> materials;
         std::string materialError;
-        const Uuid parent = Uuid::Parse(assets::kImportedMaterialGuid);
+        const assets::ImportedMaterialParents parents = assets::DefaultImportedMaterialParents();
 
         // Tekstur disalin ke dalam project, bukan dirujuk di tempat asalnya.
         //
@@ -181,10 +182,17 @@ SourceImportResult ImportSource(const std::filesystem::path& source,
         // pemindaian berikutnya: material yang merujuknya sedang ditulis
         // sekarang.
         std::unordered_map<std::string, Uuid> copied;
-        const auto resolveTexture = [&](std::string_view relativePath) -> Uuid {
+        const auto resolveTexture = [&](std::string_view relativePath,
+                                        assets::TextureUsage usage) -> Uuid {
             const std::string key(relativePath);
             if (const auto found = copied.find(key); found != copied.end()) {
                 // Dua material yang memakai tekstur yang sama menyalinnya sekali.
+                // **Termasuk ketika slot keduanya berbeda**, dan saat itu yang
+                // pertama menang. Satu berkas tekstur adalah satu aset dengan
+                // satu `TextureSettings`, dan menyalinnya dua kali demi dua
+                // usage berarti dua GUID untuk gambar yang sama — sedangkan
+                // yang benar-benar dipakai artis dua kali di slot berbeda
+                // hampir tidak ada.
                 return found->second;
             }
 
@@ -212,12 +220,35 @@ SourceImportResult ImportSource(const std::filesystem::path& source,
                 return Uuid{};
             }
             result.written.push_back(destination.filename().string());
+
+            // **Kegunaannya ditulis dari slot materialnya, bukan ditebak dari
+            // nama berkasnya.** `DefaultTextureSettings` menebak lewat akhiran
+            // nama — `_n`, `_rough` — dan tebakan itu meleset justru pada berkas
+            // dari jalur kerja yang penamaannya rapi menurut aturan lain
+            // (`T_Wall_02`). Yang menulis material tahu persis slot mana yang
+            // diisi berkas ini, dan peta normal yang salah didekode sebagai sRGB
+            // tidak muncul sebagai galat melainkan sebagai permukaan yang
+            // cekung di tempat yang seharusnya cembung.
+            //
+            // Ditulis lewat `SaveTextureSettings`, yang menghapus berkasnya bila
+            // hasilnya sama dengan bawaan berkas itu — jadi tekstur yang
+            // tebakannya memang sudah benar tidak menambah satu berkas pun ke
+            // dalam kontrol versi.
+            assets::TextureSettings settings = assets::DefaultTextureSettings(destination);
+            if (settings.usage != usage) {
+                settings.usage = usage;
+                if (!assets::SaveTextureSettings(settings, destination)) {
+                    SIM_WARN("Editor", "cannot write texture settings for {}",
+                             destination.filename().string());
+                }
+            }
+
             const Uuid guid = assets::EnsureAssetGuid(destination);
             copied.emplace(key, guid);
             return guid;
         };
 
-        if (!assets::WriteMaterialInstances(mesh, destinationFolder, parent, materials,
+        if (!assets::WriteMaterialInstances(mesh, destinationFolder, parents, materials,
                                             materialError, resolveTexture)) {
             result.error = materialError;
             return result;

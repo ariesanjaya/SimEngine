@@ -4,6 +4,7 @@
 #include "Sim/Assets/Cook.h"
 #include "Sim/Assets/Importer.h"
 #include "Sim/Assets/MaterialImport.h"
+#include "Sim/Assets/MaterialXImport.h"
 #include "Sim/Assets/BlockCompress.h"
 #include "Sim/Assets/TextureBake.h"
 #include "Sim/Assets/TextureBakery.h"
@@ -1410,7 +1411,8 @@ TEST_CASE("Material impor menjadi instance dari satu induk bersama") {
     source.emissive = Vec3(0.0f, 0.5f, 0.0f);
     source.opacity = 0.75f;
 
-    const sim::material::MaterialInstance instance = MaterialInstanceFromMesh(source, parent);
+    const sim::material::MaterialInstance instance =
+        MaterialInstanceFromMesh(source, DefaultImportedMaterialParents());
     CHECK(instance.parent == parent);
     // Kelimanya ditimpa apa adanya: nilai itu dibaca dari berkas mesh-nya, jadi
     // ia pernyataan tentang materialnya — bukan medan yang dibiarkan kosong.
@@ -1449,10 +1451,10 @@ TEST_CASE("Tiap material mesh ditulis sebagai satu berkas .simmatinst") {
     c.name = "../../lolos";  // nama dari berkas orang lain, bukan jalur
     mesh.materials = {a, b, c};
 
-    const Uuid parent = Uuid::Parse(kImportedMaterialGuid);
+    const ImportedMaterialParents parents = DefaultImportedMaterialParents();
     std::vector<std::string> written;
     std::string error;
-    REQUIRE(WriteMaterialInstances(mesh, temp.Path(), parent, written, error));
+    REQUIRE(WriteMaterialInstances(mesh, temp.Path(), parents, written, error));
     CHECK(error.empty());
     REQUIRE(written.size() == 3);
 
@@ -1470,7 +1472,7 @@ TEST_CASE("Tiap material mesh ditulis sebagai satu berkas .simmatinst") {
         const sim::material::MaterialIoResult result =
             sim::material::LoadInstanceFromFile(loaded, path);
         REQUIRE(result.ok);
-        CHECK(loaded.parent == parent);
+        CHECK(loaded.parent == parents.flat);
     }
 
     // Isinya benar-benar berbeda, bukan dua salinan berkas yang sama.
@@ -1690,18 +1692,23 @@ TEST_CASE("Rekomendasi 3: material impor menyebut teksturnya lewat parameter ind
     plain.name = "Kaca";
     mesh.materials = {withTexture, plain};
 
-    const Uuid parent = Uuid::Parse(kImportedMaterialGuid);
+    const ImportedMaterialParents parents = DefaultImportedMaterialParents();
     const Uuid image = Uuid::Generate();
 
     std::string asked;
-    const TextureResolver resolver = [&](std::string_view path) {
+    TextureUsage askedUsage = TextureUsage::Hdr;
+    const TextureResolver resolver = [&](std::string_view path, TextureUsage usage) {
         asked = std::string(path);
+        askedUsage = usage;
         return image;
     };
 
     const material::MaterialInstance textured =
-        MaterialInstanceFromMesh(withTexture, parent, resolver);
+        MaterialInstanceFromMesh(withTexture, parents, resolver);
     CHECK(asked == "../tekstur/aspal.png");
+    // Slotnya ikut disebut: warna dasar adalah sRGB, dan yang menyalinnya
+    // menuliskan itu ke `TextureSettings` alih-alih menebaknya dari nama berkas.
+    CHECK(askedUsage == TextureUsage::Color);
     CHECK(textured.Texture(kBaseColorTextureParameter) == image);
     // Parameter skalarnya tetap ikut — tekstur menambah, bukan menggantikan.
     CHECK(textured.overrides.size() == 5);
@@ -1709,18 +1716,19 @@ TEST_CASE("Rekomendasi 3: material impor menyebut teksturnya lewat parameter ind
     // Material tanpa tekstur tidak menulis parameter itu sama sekali: yang
     // kosong berarti "pakai bawaan induk", yaitu putih — dan itu persis
     // perilaku material tanpa tekstur.
-    const material::MaterialInstance untouched = MaterialInstanceFromMesh(plain, parent, resolver);
+    const material::MaterialInstance untouched = MaterialInstanceFromMesh(plain, parents, resolver);
     CHECK(untouched.textures.empty());
 
     // Tanpa resolver sama sekali — jalur yang dipakai pemanggil yang tidak bisa
     // menyalin apa pun — materialnya tetap ditulis, hanya tanpa tekstur.
-    const material::MaterialInstance noResolver = MaterialInstanceFromMesh(withTexture, parent);
+    const material::MaterialInstance noResolver = MaterialInstanceFromMesh(withTexture, parents);
     CHECK(noResolver.textures.empty());
     CHECK(noResolver.overrides.size() == 5);
 
     // Resolver yang gagal menyelesaikan jalurnya juga tidak menulis apa pun.
     const material::MaterialInstance missing =
-        MaterialInstanceFromMesh(withTexture, parent, [](std::string_view) { return Uuid{}; });
+        MaterialInstanceFromMesh(withTexture, parents,
+                                 [](std::string_view, TextureUsage) { return Uuid{}; });
     CHECK(missing.textures.empty());
 
     // Dan berkasnya benar-benar membawanya.
@@ -1728,11 +1736,595 @@ TEST_CASE("Rekomendasi 3: material impor menyebut teksturnya lewat parameter ind
     std::vector<std::string> written;
     std::string error;
     REQUIRE_MESSAGE(
-        WriteMaterialInstances(mesh, temp.Path(), parent, written, error, resolver), error);
+        WriteMaterialInstances(mesh, temp.Path(), parents, written, error, resolver), error);
     REQUIRE(written.size() == 2);
     material::MaterialInstance reloaded;
     REQUIRE(material::LoadInstanceFromFile(reloaded, temp.Path() / written[0]).ok);
     CHECK(reloaded.Texture(kBaseColorTextureParameter) == image);
+}
+
+// --- MaterialX -----------------------------------------------------------------
+
+namespace {
+
+/// Dokumen `.mtlx` yang memuat satu material OpenPBR berlapis.
+///
+/// **Ditulis di sini, bukan diambil dari `resources/` milik MaterialX.**
+/// Menunjuk ke pohon sumber pustaka orang lain membuat uji ini gagal di mesin
+/// yang tidak memasangnya di jalur yang sama — dan yang diperiksa di sini bukan
+/// contoh mereka melainkan pemetaan kita.
+constexpr std::string_view kLayeredDocument = R"(<?xml version="1.0"?>
+<materialx version="1.39" colorspace="lin_rec709">
+  <open_pbr_surface name="shader" type="surfaceshader">
+    <input name="base_color" type="color3" value="0.1, 0.6, 0.9" />
+    <input name="base_weight" type="float" value="0.75" />
+    <input name="base_metalness" type="float" value="1" />
+    <input name="base_diffuse_roughness" type="float" value="0.4" />
+    <input name="specular_ior" type="float" value="1.6" />
+    <input name="specular_roughness" type="float" value="0.25" />
+    <input name="specular_roughness_anisotropy" type="float" value="0.3" />
+    <input name="coat_weight" type="float" value="1" />
+    <input name="coat_roughness" type="float" value="0.02" />
+    <input name="coat_ior" type="float" value="1.65" />
+    <input name="coat_darkening" type="float" value="0.8" />
+    <input name="fuzz_weight" type="float" value="0.5" />
+    <input name="fuzz_roughness" type="float" value="0.9" />
+    <input name="emission_luminance" type="float" value="200" />
+    <input name="emission_color" type="color3" value="1, 0.5, 0.25" />
+    <input name="geometry_opacity" type="float" value="0.6" />
+  </open_pbr_surface>
+  <surfacematerial name="Cat Mobil" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="shader" />
+  </surfacematerial>
+</materialx>
+)";
+
+}  // namespace
+
+TEST_CASE("MaterialX: setiap input open_pbr_surface sampai ke pin yang sama namanya") {
+    using namespace sim::assets;
+    if (!MaterialXAvailable()) {
+        MESSAGE("dibangun tanpa MaterialX (SIM_WITH_MATERIALX=OFF); uji dilewati");
+        return;
+    }
+
+    TempDir temp;
+    const std::filesystem::path document = temp.Path() / "cat.mtlx";
+    WriteFile(document, kLayeredDocument);
+
+    MaterialXDocument read;
+    std::string error;
+    REQUIRE_MESSAGE(LoadMaterialXDocument(document, read, error), error);
+    REQUIRE(read.materials.size() == 1);
+
+    // **Nama materialnya nama `surfacematerial`, bukan nama shader-nya.** Itu
+    // yang dilihat artis di DCC-nya, dan itu yang dipakai memasangkan dokumen
+    // ini dengan material di berkas mesh-nya.
+    const OpenPbrMaterial& material = read.materials.front();
+    CHECK(material.name == "Cat Mobil");
+
+    CHECK(material.baseWeight == doctest::Approx(0.75f));
+    CHECK(material.baseColor.x == doctest::Approx(0.1f));
+    CHECK(material.baseColor.y == doctest::Approx(0.6f));
+    CHECK(material.baseColor.z == doctest::Approx(0.9f));
+    CHECK(material.baseMetalness == doctest::Approx(1.0f));
+    CHECK(material.baseDiffuseRoughness == doctest::Approx(0.4f));
+
+    // **Kekasaran disalin apa adanya, tidak dikuadratkan.** Keduanya perseptual
+    // — MaterialX maupun `openpbr.slang` — dan mengkuadratkannya di sini
+    // membuat setiap permukaan terlalu mengkilap.
+    CHECK(material.specularRoughness == doctest::Approx(0.25f));
+    CHECK(material.specularIor == doctest::Approx(1.6f));
+    CHECK(material.specularRoughnessAnisotropy == doctest::Approx(0.3f));
+
+    CHECK(material.coatWeight == doctest::Approx(1.0f));
+    CHECK(material.coatRoughness == doctest::Approx(0.02f));
+    CHECK(material.coatIor == doctest::Approx(1.65f));
+    CHECK(material.coatDarkening == doctest::Approx(0.8f));
+
+    CHECK(material.fuzzWeight == doctest::Approx(0.5f));
+    CHECK(material.fuzzRoughness == doctest::Approx(0.9f));
+    CHECK(material.UsesLayers());
+
+    // Emisi: luminansi dikali warnanya, sekali, di pembacanya.
+    CHECK(material.emissive.x == doctest::Approx(200.0f));
+    CHECK(material.emissive.y == doctest::Approx(100.0f));
+    CHECK(material.emissive.z == doctest::Approx(50.0f));
+    CHECK(material.opacity == doctest::Approx(0.6f));
+
+    // Input yang **tidak** disebut dokumennya memakai bawaan nodedef-nya, yang
+    // sama persis dengan bawaan pin di `openpbr.slang`.
+    CHECK(material.specularWeight == doctest::Approx(1.0f));
+    CHECK(material.coatColor.x == doctest::Approx(1.0f));
+    CHECK(material.fuzzColor.x == doctest::Approx(1.0f));
+    CHECK_FALSE(material.HasTexture());
+}
+
+TEST_CASE("MaterialX: input yang dikemudikan gambar menjadi tekstur, dan skalarnya identitas") {
+    using namespace sim::assets;
+    if (!MaterialXAvailable()) {
+        return;
+    }
+
+    TempDir temp;
+    const std::filesystem::path document = temp.Path() / "dinding.mtlx";
+    // Pemisah gaya Windows sengaja dipakai di salah satunya: dokumen dari Max
+    // menulis `..\tekstur\x.png`, dan `std::filesystem` di Linux membaca
+    // seluruhnya sebagai satu nama berkas.
+    WriteFile(document, R"(<?xml version="1.0"?>
+<materialx version="1.39">
+  <image name="albedo" type="color3">
+    <input name="file" type="filename" value="tekstur/dinding_basecolor.png" />
+  </image>
+  <image name="kasar" type="float">
+    <input name="file" type="filename" value="..\tekstur\dinding_rough.png" />
+  </image>
+  <image name="nrm" type="vector3">
+    <input name="file" type="filename" value="tekstur/dinding_nrm.png" />
+  </image>
+  <normalmap name="nmap" type="vector3">
+    <input name="in" type="vector3" nodename="nrm" />
+  </normalmap>
+  <noise2d name="berisik" type="float" />
+  <open_pbr_surface name="shader" type="surfaceshader">
+    <input name="base_color" type="color3" nodename="albedo" />
+    <input name="specular_roughness" type="float" nodename="kasar" />
+    <input name="geometry_normal" type="vector3" nodename="nmap" />
+    <input name="base_metalness" type="float" nodename="berisik" />
+    <input name="transmission_weight" type="float" value="0.4" />
+  </open_pbr_surface>
+  <surfacematerial name="Dinding" type="material">
+    <input name="surfaceshader" type="surfaceshader" nodename="shader" />
+  </surfacematerial>
+</materialx>
+)");
+
+    MaterialXDocument read;
+    std::string error;
+    REQUIRE_MESSAGE(LoadMaterialXDocument(document, read, error), error);
+    REQUIRE(read.materials.size() == 1);
+    const OpenPbrMaterial& material = read.materials.front();
+
+    CHECK(material.baseColorTexture.path == "tekstur/dinding_basecolor.png");
+    CHECK(material.specularRoughnessTexture.path == "../tekstur/dinding_rough.png");
+    // Peta normal ditembus lewat node `normalmap`; ia tidak pernah tersambung
+    // langsung di dokumen yang benar.
+    CHECK(material.normalTexture.path == "tekstur/dinding_nrm.png");
+
+    // **Skalarnya menjadi 1, bukan tetap di bawaannya.** Induknya mengalikan
+    // skalar dengan teksturnya; `specular_roughness` yang dibiarkan 0,3 akan
+    // meredam gambar kekasarannya menjadi sepertiganya.
+    CHECK(material.specularRoughness == doctest::Approx(1.0f));
+    CHECK(material.baseColor.x == doctest::Approx(1.0f));
+
+    // Yang dikemudikan node selain gambar tidak dibawa, dan tidak diam-diam:
+    // `base_metalness` tetap bawaannya, dan alasannya tercatat.
+    CHECK(material.baseMetalness == doctest::Approx(0.0f));
+    const auto mentions = [&read](std::string_view needle) {
+        for (const std::string& note : read.notes) {
+            if (note.find(needle) != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+    CHECK(mentions("base_metalness"));
+    CHECK(mentions("noise2d"));
+    // Lapisan yang mesin ini belum punya juga disebut, bukan dibuang diam-diam.
+    CHECK(mentions("transmission_weight"));
+}
+
+TEST_CASE("MaterialX: dokumen pendamping dipasangkan ke material mesh menurut namanya") {
+    using namespace sim::assets;
+    if (!MaterialXAvailable()) {
+        return;
+    }
+
+    TempDir temp;
+    const std::filesystem::path mesh = temp.Path() / "adegan.fbx";
+    WriteFile(mesh, "bukan fbx sungguhan; yang dibaca uji ini hanya jalurnya");
+    // Pendamping bernama sama dengan berkas mesh-nya: jalur kedua di
+    // `ApplyMaterialX`, dan bentuk yang paling sering dipakai.
+    WriteFile(temp.Path() / "adegan.mtlx", kLayeredDocument);
+
+    MeshData data;
+    MeshMaterial matched;
+    matched.name = "cat mobil";  // besar-kecil huruf berbeda: tetap terpasang
+    MeshMaterial other;
+    other.name = "Kaca";
+    data.materials = {matched, other};
+
+    CHECK(ApplyMaterialX(data, mesh) == 1);
+    REQUIRE(data.materials[0].openPbr.has_value());
+    CHECK_FALSE(data.materials[1].openPbr.has_value());
+
+    // **Namanya tetap nama material di berkas mesh.** Itu yang menjadi nama
+    // berkas `.simmatinst`, dan itu yang dicari orang di Asset Browser.
+    CHECK(data.materials[0].openPbr->name == "cat mobil");
+    CHECK(data.materials[0].openPbr->coatWeight == doctest::Approx(1.0f));
+
+    // Medan datarnya ikut diperbarui: panel dan thumbnail membacanya, dan dua
+    // bentuk material yang tidak sepakat adalah panel yang menampilkan warna
+    // yang berbeda dari yang digambar viewport.
+    CHECK(data.materials[0].roughness == doctest::Approx(0.25f));
+    CHECK(data.materials[0].baseColor.x == doctest::Approx(0.1f * 0.75f));
+    // Yang tidak terpasang tidak disentuh sama sekali.
+    CHECK(data.materials[1].roughness == doctest::Approx(0.5f));
+}
+
+TEST_CASE("MaterialX: satu lawan satu dipasangkan walau namanya berbeda; dua lawan dua tidak") {
+    using namespace sim::assets;
+    if (!MaterialXAvailable()) {
+        return;
+    }
+
+    TempDir temp;
+    const std::filesystem::path mesh = temp.Path() / "kursi.fbx";
+    WriteFile(mesh, "bukan fbx sungguhan");
+    WriteFile(temp.Path() / "kursi.mtlx", kLayeredDocument);
+
+    // Satu material di berkas mesh dan satu di dokumennya: tidak ada pasangan
+    // lain yang mungkin, jadi nama yang berbeda tidak menghalangi.
+    MeshData single;
+    MeshMaterial renamed;
+    renamed.name = "Material #25";
+    single.materials = {renamed};
+    CHECK(ApplyMaterialX(single, mesh) == 1);
+    REQUIRE(single.materials[0].openPbr.has_value());
+
+    // Dua lawan satu: menebak berarti separuh kemungkinan memasang yang salah,
+    // jadi yang namanya tidak cocok dibiarkan.
+    MeshData several;
+    MeshMaterial a;
+    a.name = "Material #25";
+    MeshMaterial b;
+    b.name = "Material #26";
+    several.materials = {a, b};
+    CHECK(ApplyMaterialX(several, mesh) == 0);
+}
+
+TEST_CASE("MaterialX: dua dokumen di satu folder tidak ditebak") {
+    using namespace sim::assets;
+    if (!MaterialXAvailable()) {
+        return;
+    }
+
+    TempDir temp;
+    const std::filesystem::path mesh = temp.Path() / "meja.fbx";
+    WriteFile(mesh, "bukan fbx sungguhan");
+    // Tidak ada yang bernama `meja.mtlx`, dan ada dua kandidat. Menebak salah
+    // satunya menghasilkan material yang salah tanpa satu pun tanda.
+    WriteFile(temp.Path() / "satu.mtlx", kLayeredDocument);
+    WriteFile(temp.Path() / "dua.mtlx", kLayeredDocument);
+
+    MeshData data;
+    MeshMaterial only;
+    only.name = "Cat Mobil";
+    data.materials = {only};
+    CHECK(ApplyMaterialX(data, mesh) == 0);
+    CHECK_FALSE(data.materials[0].openPbr.has_value());
+
+    // Yang **disebut berkas mesh-nya sendiri** tetap dipakai, karena itu bukan
+    // tebakan melainkan rujukan.
+    CHECK(ApplyMaterialX(data, mesh, {"dua.mtlx"}) == 1);
+    CHECK(data.materials[0].openPbr.has_value());
+}
+
+TEST_CASE("Material OpenPBR ditulis di atas induk OpenPBR, dengan seluruh pin-nya") {
+    using namespace sim::assets;
+
+    // Induknya ikut di repo, dan GUID-nya tertulis di dua tempat.
+    const std::filesystem::path parentPath =
+        std::filesystem::path(SIM_BUILTIN_DIR) / kImportedOpenPbrMaterialAsset;
+    REQUIRE(std::filesystem::exists(parentPath));
+    std::ifstream metaFile(parentPath.string() + ".meta");
+    REQUIRE(metaFile.good());
+    const std::string meta((std::istreambuf_iterator<char>(metaFile)),
+                           std::istreambuf_iterator<char>());
+    INFO("meta " << meta);
+    CHECK(meta.find(std::string(kImportedOpenPbrMaterialGuid)) != std::string::npos);
+
+    sim::material::MaterialGraph master;
+    const sim::material::MaterialIoResult masterIo =
+        sim::material::LoadMaterialFromFile(master, parentPath);
+    INFO("muat induk: " << masterIo.error);
+    REQUIRE(masterIo.ok);
+    CHECK(sim::material::ValidateMaterial(master).ok);
+
+    OpenPbrMaterial source;
+    source.name = "Beludru";
+    source.baseWeight = 0.9f;
+    source.baseColor = Vec3(0.02f, 0.02f, 0.02f);
+    source.specularRoughness = 0.8f;
+    source.specularIor = 1.45f;
+    source.coatWeight = 0.3f;
+    source.coatIor = 1.65f;
+    source.fuzzWeight = 1.0f;
+    source.fuzzRoughness = 0.4f;
+    source.baseDiffuseRoughness = 0.5f;
+    source.emissive = Vec3(1.0f, 2.0f, 3.0f);
+    source.opacity = 0.25f;
+    source.baseColorTexture.path = "t/albedo.png";
+    source.normalTexture.path = "t/nrm.png";
+
+    MeshMaterial mesh;
+    mesh.name = source.name;
+    mesh.openPbr = source;
+
+    const ImportedMaterialParents parents = DefaultImportedMaterialParents();
+    std::vector<std::pair<std::string, TextureUsage>> asked;
+    const Uuid image = Uuid::Generate();
+    const material::MaterialInstance instance =
+        MaterialInstanceFromMesh(mesh, parents, [&](std::string_view path, TextureUsage usage) {
+            asked.emplace_back(std::string(path), usage);
+            return image;
+        });
+
+    // Induk OpenPBR, bukan induk datar. Ini satu-satunya hal yang membedakan
+    // material yang sampai utuh dari material yang diproyeksikan.
+    CHECK(instance.parent == parents.openPbr);
+    CHECK(instance.parent != parents.flat);
+
+    // **Setiap parameter yang ditimpa instance harus benar-benar ada di
+    // induknya.** Timpaan untuk parameter yang tidak ada tidak menghasilkan
+    // galat — `ResolveParameters` membuangnya diam-diam, dan materialnya memakai
+    // bawaan seolah impornya tidak pernah terjadi.
+    for (const material::ParameterOverride& override : instance.overrides) {
+        INFO("parameter " << override.name);
+        CHECK(master.FindParameter(override.name) != nullptr);
+    }
+    for (const material::TextureOverride& texture : instance.textures) {
+        INFO("tekstur " << texture.parameter);
+        const material::MaterialParameter* declared = master.FindParameter(texture.parameter);
+        REQUIRE(declared != nullptr);
+        CHECK(declared->kind == material::ValueKind::Texture);
+    }
+
+    const auto value = [&instance](std::string_view name) {
+        const material::ParameterOverride* found = instance.Find(name);
+        REQUIRE(found != nullptr);
+        return found->value.components[0];
+    };
+    CHECK(value("baseWeight") == doctest::Approx(0.9f));
+    CHECK(value("specularRoughness") == doctest::Approx(0.8f));
+    CHECK(value("specularIor") == doctest::Approx(1.45f));
+    CHECK(value("coatWeight") == doctest::Approx(0.3f));
+    CHECK(value("coatIor") == doctest::Approx(1.65f));
+    CHECK(value("fuzzWeight") == doctest::Approx(1.0f));
+    CHECK(value("fuzzRoughness") == doctest::Approx(0.4f));
+    CHECK(value("baseDiffuseRoughness") == doctest::Approx(0.5f));
+    CHECK(value("opacity") == doctest::Approx(0.25f));
+
+    // **Yang nol pun ditulis.** `coatRoughness` 0 adalah pernyataan "tanpa
+    // kekasaran coat" yang datang dari berkasnya, bukan medan yang kebetulan
+    // tidak disentuh — dan mengubah bawaan induk tidak boleh diam-diam mengubah
+    // material yang sudah pernah diimpor.
+    CHECK(instance.Find("coatRoughness") != nullptr);
+    CHECK(instance.Find("specularRoughnessAnisotropy") != nullptr);
+
+    // Slot tekstur beserta kegunaannya: warna dasar sRGB, peta normal linear.
+    CHECK(instance.Texture(kOpenPbrBaseColorTexture) == image);
+    CHECK(instance.Texture(kOpenPbrNormalTexture) == image);
+    REQUIRE(asked.size() == 2);
+    CHECK(asked[0].first == "t/albedo.png");
+    CHECK(asked[0].second == TextureUsage::Color);
+    CHECK(asked[1].first == "t/nrm.png");
+    CHECK(asked[1].second == TextureUsage::NormalMap);
+
+    // Sakelar peta normal menyala hanya karena petanya benar-benar terpasang.
+    CHECK(value(kNormalTextureAmountParameter) == doctest::Approx(1.0f));
+
+    // Tanpa resolver, tidak ada satu pun tekstur yang terpasang — dan sakelarnya
+    // karena itu mati. Peta normal yang disebut tapi tidak terpasang membuat
+    // teksturnya terbaca putih, dan sakelar yang terlanjur menyala mengubah
+    // putih itu menjadi normal miring 45° di seluruh permukaan.
+    const material::MaterialInstance bare = MaterialInstanceFromMesh(mesh, parents);
+    CHECK(bare.textures.empty());
+    const material::ParameterOverride* amount = bare.Find(kNormalTextureAmountParameter);
+    REQUIRE(amount != nullptr);
+    CHECK(amount->value.components[0] == doctest::Approx(0.0f));
+}
+
+// --- blok parameter 3ds Max di dalam FBX ---------------------------------------
+
+namespace {
+
+/// Berkas FBX **ASCII** dengan satu segitiga dan satu Physical Material 3ds Max.
+///
+/// **Ditulis tangan, dan itu satu-satunya cara.** Yang diperiksa uji ini adalah
+/// pembacaan blok properti kustom yang hanya ditulis eksportir 3ds Max; tidak
+/// ada berkas semacam itu di repo ini, dan menambahkan satu FBX biner sebagai
+/// fixture berarti sebuah berkas yang tidak bisa dibaca, tidak bisa di-diff, dan
+/// tidak bisa diperbaiki siapa pun yang menemukan uji ini gagal. FBX ASCII 7.5
+/// bisa ketiganya.
+///
+/// Nama dan bentuk bloknya **diambil dari ekspor nyata**, bukan dikarang:
+/// `3dsMax|ORIGINAL_MTL = "PHYSICAL_MTL"`, `base_color` bertipe `ColorAndAlpha`,
+/// `roughness_inv` di sebelah `roughness`. Semuanya terbaca dari
+/// `NewSponza_Main_Yup_003.fbx` lewat `SimHeadless --dump-fbx-material`.
+constexpr std::string_view kMaxPhysicalFbx = R"fbx(; FBX 7.5.0 project file
+FBXHeaderExtension:  {
+	FBXHeaderVersion: 1003
+	FBXVersion: 7500
+	Creator: "uji SimEngine"
+}
+GlobalSettings:  {
+	Version: 1000
+	Properties70:  {
+		P: "UpAxis", "int", "Integer", "",1
+		P: "UpAxisSign", "int", "Integer", "",1
+		P: "FrontAxis", "int", "Integer", "",2
+		P: "FrontAxisSign", "int", "Integer", "",1
+		P: "CoordAxis", "int", "Integer", "",0
+		P: "CoordAxisSign", "int", "Integer", "",1
+		P: "UnitScaleFactor", "double", "Number", "",100
+	}
+}
+Definitions:  {
+	Version: 100
+	Count: 4
+	ObjectType: "Model" {
+		Count: 1
+	}
+	ObjectType: "Geometry" {
+		Count: 1
+	}
+	ObjectType: "Material" {
+		Count: 1
+	}
+}
+Objects:  {
+	Geometry: 1000, "Geometry::segitiga", "Mesh" {
+		Vertices: *9 {
+			a: 0,0,0,100,0,0,0,100,0
+		}
+		PolygonVertexIndex: *3 {
+			a: 0,1,-3
+		}
+		GeometryVersion: 124
+		LayerElementMaterial: 0 {
+			Version: 101
+			Name: ""
+			MappingInformationType: "AllSame"
+			ReferenceInformationType: "IndexToDirect"
+			Materials: *1 {
+				a: 0
+			}
+		}
+		Layer: 0 {
+			Version: 100
+			LayerElement:  {
+				Type: "LayerElementMaterial"
+				TypedIndex: 0
+			}
+		}
+	}
+	Model: 1001, "Model::papan", "Mesh" {
+		Version: 232
+		Properties70:  {
+			P: "DefaultAttributeIndex", "int", "Integer", "",0
+		}
+		Shading: T
+		Culling: "CullingOff"
+	}
+	Material: 1002, "Material::Cat Mobil", "" {
+		Version: 102
+		ShadingModel: "unknown"
+		MultiLayer: 0
+		Properties70:  {
+			P: "ShadingModel", "KString", "", "", "unknown"
+			P: "DiffuseColor", "Color", "", "A",0.5,0.5,0.5
+			P: "3dsMax", "Compound", "", ""
+			P: "3dsMax|ClassIDa", "int", "Integer", "",1030429952
+			P: "3dsMax|ClassIDb", "int", "Integer", "",-559038464
+			P: "3dsMax|SuperClassID", "int", "Integer", "",3072
+			P: "3dsMax|ORIGINAL_MTL", "KString", "", "", "PHYSICAL_MTL"
+			P: "3dsMax|Parameters", "Compound", "", ""
+			P: "3dsMax|Parameters|base_weight", "Float", "", "A",0.75
+			P: "3dsMax|Parameters|base_color", "ColorAndAlpha", "", "A",0.1,0.6,0.9,1
+			P: "3dsMax|Parameters|reflectivity", "Float", "", "A",0.9
+			P: "3dsMax|Parameters|roughness", "Float", "", "A",0.25
+			P: "3dsMax|Parameters|roughness_inv", "Bool", "", "A",0
+			P: "3dsMax|Parameters|metalness", "Float", "", "A",1
+			P: "3dsMax|Parameters|diff_roughness", "Float", "", "A",0.4
+			P: "3dsMax|Parameters|anisotropy", "Float", "", "A",0
+			P: "3dsMax|Parameters|transparency", "Float", "", "A",0.4
+			P: "3dsMax|Parameters|trans_ior", "Float", "", "A",1.6
+			P: "3dsMax|Parameters|emission", "Float", "", "A",1
+			P: "3dsMax|Parameters|emit_color", "ColorAndAlpha", "", "A",1,0.5,0.25,1
+			P: "3dsMax|Parameters|emit_luminance", "Float", "", "A",200
+			P: "3dsMax|Parameters|coating", "Float", "", "A",1
+			P: "3dsMax|Parameters|coat_roughness", "Float", "", "A",0.02
+			P: "3dsMax|Parameters|coat_ior", "Float", "", "A",1.65
+			P: "3dsMax|Parameters|sheen", "Float", "", "A",0.5
+			P: "3dsMax|Parameters|sheen_roughness", "Float", "", "A",0.9
+		}
+	}
+}
+Connections:  {
+	C: "OO",1000,1001
+	C: "OO",1001,0
+	C: "OO",1002,1001
+}
+)fbx";
+
+}  // namespace
+
+TEST_CASE("Blok 3ds Max di dalam FBX menjadi material OpenPBR yang utuh") {
+    using namespace sim::assets;
+
+    TempDir temp;
+    const std::filesystem::path path = temp.Path() / "papan.fbx";
+    WriteFile(path, kMaxPhysicalFbx);
+
+    std::string error;
+    const MeshData mesh = LoadMesh(path, error);
+    INFO("muat: " << error);
+    REQUIRE(mesh.IsValid());
+    REQUIRE(mesh.materials.size() == 1);
+
+    const MeshMaterial& material = mesh.materials.front();
+    CHECK(material.name == "Cat Mobil");
+    REQUIRE(material.openPbr.has_value());
+    const OpenPbrMaterial& pbr = *material.openPbr;
+
+    // Pemetaan nama parameter Physical Material ke pin OpenPBR, satu per satu.
+    CHECK(pbr.baseWeight == doctest::Approx(0.75f));
+    CHECK(pbr.baseColor.x == doctest::Approx(0.1f));
+    CHECK(pbr.baseColor.z == doctest::Approx(0.9f));
+    CHECK(pbr.baseMetalness == doctest::Approx(1.0f));         // metalness
+    CHECK(pbr.baseDiffuseRoughness == doctest::Approx(0.4f));  // diff_roughness
+    CHECK(pbr.specularWeight == doctest::Approx(0.9f));        // reflectivity
+    CHECK(pbr.specularRoughness == doctest::Approx(0.25f));    // roughness
+    CHECK(pbr.specularIor == doctest::Approx(1.6f));           // trans_ior
+    CHECK(pbr.coatWeight == doctest::Approx(1.0f));            // coating
+    CHECK(pbr.coatRoughness == doctest::Approx(0.02f));
+    CHECK(pbr.coatIor == doctest::Approx(1.65f));
+    CHECK(pbr.fuzzWeight == doctest::Approx(0.5f));            // sheen
+    CHECK(pbr.fuzzRoughness == doctest::Approx(0.9f));         // sheen_roughness
+
+    // **Transparansi dibalik menjadi opacity.** Menyalinnya tanpa membalik
+    // menjadikan setiap material buram sepenuhnya tembus pandang.
+    CHECK(pbr.opacity == doctest::Approx(0.6f));
+
+    // **Emisi: bobot × warna × luminansi.** Bobotnya bawaan 1 di ekspor nyata,
+    // jadi memakainya sendirian sebagai emisi menyalakan seluruh adegan.
+    CHECK(pbr.emissive.x == doctest::Approx(200.0f));
+    CHECK(pbr.emissive.y == doctest::Approx(100.0f));
+    CHECK(pbr.emissive.z == doctest::Approx(50.0f));
+
+    // **Anisotropi sengaja tidak dipetakan.** Skalanya tidak bisa disimpulkan
+    // dari berkasnya, dan menebaknya salah arah membuat setiap pantulan di
+    // adegan memanjang. Lihat catatan di `MaxMaterial.cpp`.
+    CHECK(pbr.specularRoughnessAnisotropy == doctest::Approx(0.0f));
+
+    // Medan datarnya ikut diproyeksikan, supaya panel dan thumbnail tidak perlu
+    // membedakan dua bentuk material.
+    CHECK(material.metalness == doctest::Approx(1.0f));
+    CHECK(material.roughness == doctest::Approx(0.25f));
+    CHECK(material.baseColor.x == doctest::Approx(0.1f * 0.75f));
+}
+
+TEST_CASE("FBX tanpa blok 3ds Max tetap lewat jalur Lambert/Phong yang lama") {
+    using namespace sim::assets;
+
+    // shaderBall.fbx dari Maya: Lambert, tanpa satu pun medan PBR. Ia tidak
+    // boleh mendadak membawa material OpenPBR hanya karena jalur itu ada —
+    // material OpenPBR yang dikarang dari Phong adalah lapisan yang tidak
+    // pernah dibuat siapa pun.
+    std::string error;
+    const MeshData mesh = LoadMesh(std::filesystem::path(SIM_MESH_DIR) / "shaderBall.fbx", error);
+    INFO("muat: " << error);
+    REQUIRE(mesh.IsValid());
+    REQUIRE_FALSE(mesh.materials.empty());
+    for (const MeshMaterial& material : mesh.materials) {
+        INFO("material " << material.name);
+        CHECK_FALSE(material.openPbr.has_value());
+    }
+
+    // Dan instance-nya karena itu memakai induk datar, bukan induk OpenPBR.
+    const ImportedMaterialParents parents = DefaultImportedMaterialParents();
+    CHECK(MaterialInstanceFromMesh(mesh.materials.front(), parents).parent == parents.flat);
 }
 
 TEST_CASE("T1: pengaturan tekstur bolak-balik lewat berkas tanpa berubah") {

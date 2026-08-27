@@ -333,5 +333,6 @@ antarmuka `IViewportRenderer`. Rinciannya di
 - [PLAN-AI.md](docs/PLAN-AI.md) — A0..A4, engine sebagai MCP server
 - [PLAN-RENDER.md](docs/PLAN-RENDER.md) — E8..E9
 - [RENDER-OPENPBR.md](docs/RENDER-OPENPBR.md) — lobe OpenPBR yang belum ada (subsurface, transmission, thin film) dan cara menjalankannya real time
+- [PLAN-MATERIALX.md](docs/PLAN-MATERIALX.md) — impor material dari 3ds Max lewat dokumen MaterialX, dan blok parameter Max di dalam FBX sebagai cadangannya
 - [EDITOR-PANELS.md](docs/EDITOR-PANELS.md) — spesifikasi tiap panel
 - [DEPENDENCIES.md](docs/DEPENDENCIES.md) — versi terkunci dan alasannya

@@ -40,6 +40,12 @@ option(SIM_WITH_OIIO        "Backend OpenImageIO bila tersedia"          ON)
 # OpenVDB: bake mesh menjadi SDF untuk clipmap GI, dan nanti impor .vdb.
 # **Pengondisi aset, bukan pustaka runtime** — aturan yang sama dengan OIIO.
 option(SIM_WITH_OPENVDB     "Bake SDF dan impor volume lewat OpenVDB"   ON)
+# MaterialX: membaca dokumen `.mtlx` supaya material dari 3ds Max — yang di
+# sana memang OpenPBR/MaterialX — masuk apa adanya alih-alih diproyeksikan ke
+# lima angka. **Pengondisi aset, bukan pustaka runtime**: yang menggambar tetap
+# `Shaders/openpbr.slang`, dan tidak satu byte pun MaterialX ikut ke dalam game.
+option(SIM_WITH_MATERIALX   "Impor material MaterialX (.mtlx)"          ON)
+
 # Embree: backend ray query CPU alternatif — R6 di docs/PLAN-EMBREE.md.
 #
 # **Bawaannya OFF, dan itu keputusan yang diukur.** Pada adegan 250.646 segitiga
