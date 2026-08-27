@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -419,6 +420,49 @@ struct IblBakeCpu {
 /// Menghitung iradiansi SH dan peta prefilter. Aman dipanggil dari thread mana
 /// pun: ia tidak menyentuh `rhi::Device`.
 IblBakeCpu BakeIblCpu(const IEnvironmentSampler& environment, const IblBakeSettings& settings);
+
+
+/// Artefak masak sebuah lingkungan panggang: `.simibl` (B3).
+///
+/// **Ada supaya membuka level pra-GI tidak memanggang apa pun.** Memanggang
+/// sebuah HDR 4096×2048 menuntut mendekodenya — ratusan milidetik dan seratus
+/// megabyte — lalu 24.576 cuplikan untuk mip 0 dan 8160 texel penyaringan di
+/// atasnya. Semuanya menghasilkan 525 KB yang sama persis setiap kali, untuk
+/// berkas yang tidak berubah. Menyimpannya sekali dan memuatnya kemudian adalah
+/// selisih antara level yang terbuka seketika dan level yang terbuka beberapa
+/// detik kemudian, setiap kali.
+///
+/// **Di folder cache pengguna, bukan di sebelah berkas sumbernya.** Rencananya
+/// menulis "di sebelah `.meta` berkasnya", dan itu tidak diikuti dengan sengaja:
+/// berkas HDR bawaan tinggal di `Resources/` yang read-only, dan menulis ke
+/// folder aset milik orang lain sebagai efek samping dari sekadar *membaca*
+/// adalah persis cacat yang importir FBX di mesin ini sudah menolak sekali
+/// (`IMP_FBX_EXTRACT_EMBEDDED_DATA` dimatikan dengan alasan yang sama). Konvensi
+/// yang diikuti karena itu konvensi `MeshSdfCache`: nama berkasnya hash, isinya
+/// bisa dibuang kapan saja, dan tidak ada satu pun folder pengguna yang
+/// ketambahan berkas yang tidak diminta.
+///
+/// Kuncinya isi berkas sumbernya, pengaturan panggangannya, pengalinya, dan
+/// versi pemanggangnya. Berkas yang berubah menghasilkan kunci lain, dan artefak
+/// lamanya tinggal sebagai sampah yang tidak pernah dibaca — sama seperti cache
+/// SDF mesh.
+uint64_t IblCacheKey(const std::filesystem::path& source, const IblBakeSettings& settings,
+                     float intensity);
+
+std::filesystem::path IblCachePath(const std::filesystem::path& cacheDir, uint64_t key);
+
+/// Menulis artefaknya. Direktorinya dibuat bila belum ada.
+bool WriteIblCache(const std::filesystem::path& file, const IblBakeCpu& baked,
+                   std::string& error);
+
+/// Membaca artefaknya. Mengembalikan false — tanpa menyentuh `out` — bila
+/// berkasnya tidak ada, versinya lain, atau isinya tidak sepanjang yang
+/// dijanjikan headernya.
+///
+/// **Gagal membaca bukan galat.** Artefak masak boleh hilang, boleh usang, dan
+/// boleh ditulis versi lain; yang benar lalu memanggang ulang, bukan menolak
+/// membuka level.
+bool ReadIblCache(const std::filesystem::path& file, IblBakeCpu& out, std::string& error);
 
 
 // --- Sampling GGX ------------------------------------------------------------

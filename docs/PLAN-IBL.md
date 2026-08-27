@@ -423,7 +423,7 @@ antara Sky Gain 20 dan 2 bergerak dari 6,57 ke 6,60 — karena adegan itu tidak
 punya satu pun material seperti cermin. Itu bukan kegagalan B2 melainkan batas
 adegan ujinya; sebuah adegan acuan berbola logam adalah pekerjaan B5.
 
-### B3 — Berkas HDR/EXR sebagai lingkungan (`Baked` + `File`)
+### B3 — Berkas HDR/EXR sebagai lingkungan (`Baked` + `File`) · ✅
 
 - `EquirectEnvironment` → `BakeIbl`; tidak ada satu baris matematika yang
   berubah, persis seperti yang dijanjikan komentar kelasnya di `Ibl.h`
@@ -434,6 +434,58 @@ adegan ujinya; sebuah adegan acuan berbola logam adalah pekerjaan B5.
 dimuat langsung; menggeser rotasi tidak memicu bake; dan berkas `.exr` pada build
 tanpa backend EXR ditolak dengan pesan yang menyebut backend yang kurang, bukan
 "format tidak dikenal" (jalurnya sudah ada di `Ibl.cpp:180`).
+
+#### Keadaannya sesudah B3
+
+**Ketiganya terpenuhi, dan yang pertama terukur.** Panggangan pertama sebuah HDR
+4096×2048 memakan **1132 ms**; jalan berikutnya **0 ms** — 525 KB dibaca dari
+`.simibl` dan selesai, tanpa satu byte HDR pun didekode dan tanpa satu texel pun
+disaring.
+
+`EquirectEnvironment` masuk ke pemanggang tanpa satu baris matematika berubah,
+persis seperti yang dijanjikan komentar kelasnya di `Ibl.h` sejak ia ditulis.
+Yang bertambah hanya `intensity`.
+
+**Rotasi tidak menyentuh panggangannya sama sekali** — bukan diabaikan,
+melainkan tidak punya medannya. Diverifikasi: dua level yang bedanya hanya
+rotasi 90° menghasilkan koefisien SH identik sampai digit terakhir, sementara
+gambarnya berubah. Tandanya diuji terhadap konvensi `sky_hdri.frag.slang`: pass
+langit menambahkan sudutnya ke bujur, jadi membaca peta yang dipanggang tanpa
+putaran harus terjadi pada arah Ry(−θ)·d. Tanda yang terbalik tidak menghasilkan
+galat apa pun — hanya pantulan yang berputar berlawanan dengan langit yang
+memantulkannya.
+
+Pesan penolakannya menyebut apa yang ada, bukan apa yang tidak dikenal:
+
+```
+cannot use .../palsu.xyz as environment: no image backend reads .xyz
+(oiio 2.5.18 + tinyexr 3.2.0 + libtiff 4.5.1 + stb (11 format))
+```
+
+**Satu tugas untuk SH dan prefilter di jalur berkas, bukan dua.** Yang memisahkan
+keduanya di jalur atmosferik adalah matahari yang bergeser; sebuah foto tidak
+punya itu, jadi ia dipanggang sekali per berkas dan tidak ada yang bisa
+membuatnya usang selain berkas lain.
+
+> **Artefaknya di folder cache pengguna, bukan di sebelah berkas sumbernya.**
+> Rencana ini menulis "di sebelah `.meta` berkasnya", dan itu tidak diikuti
+> dengan sengaja: berkas HDR bawaan tinggal di `Resources/` yang read-only, dan
+> menulis ke folder aset milik orang lain sebagai efek samping dari sekadar
+> *membaca* adalah persis cacat yang importir FBX di mesin ini sudah menolak
+> sekali — `IMP_FBX_EXTRACT_EMBEDDED_DATA` dimatikan dengan alasan yang sama.
+> Konvensi yang diikuti karena itu konvensi `MeshSdfCache`: nama berkasnya hash,
+> isinya bisa dibuang kapan saja, dan tidak ada folder pengguna yang ketambahan
+> berkas yang tidak diminta.
+>
+> Kuncinya ukuran dan waktu tulis berkas sumbernya, bukan seluruh isinya —
+> berbeda dari cache SDF mesh, dan sengaja: mesh beberapa ratus kilobyte, HDR 4K
+> 25 MB, dan membacanya seluruhnya hanya untuk memutuskan bahwa kita tidak perlu
+> membacanya menghapus penghematannya sendiri.
+
+**Yang belum:** `environment: File` memakai jalur berkas yang sama dengan yang
+digambar `SkyComponent`, jadi sebuah level tidak bisa disinari satu berkas
+sambil menggambar berkas lain. Tidak ada yang memintanya, dan menambahkannya
+berarti satu jalur lagi di `SkyComponent` yang harus dijelaskan.
 
 ### B4 — Ekstraksi matahari dari HDRI
 

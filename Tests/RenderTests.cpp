@@ -38,6 +38,7 @@
 
 #include <algorithm>
 #include <array>
+#include <unistd.h>
 #include <chrono>
 #include <cmath>
 #include <filesystem>
@@ -1806,6 +1807,86 @@ TEST_CASE("B3: putaran tidak mengubah apa pun yang dipanggang") {
     const render::IblBakeCpu scaled = render::BakeIblCpu(map, settings);
     CHECK(scaled.irradiance.coefficients[0].x ==
           doctest::Approx(baked.irradiance.coefficients[0].x * 2.0f).epsilon(0.01));
+}
+
+TEST_CASE("B3: artefak masak lingkungan bolak-balik tanpa berubah") {
+    // **Kriteria terima B3:** membuka level pra-GI berikutnya tidak memanggang
+    // apa pun. Yang membuatnya sah adalah bahwa yang dibaca kembali sama persis
+    // dengan yang ditulis — sebuah artefak yang isinya "mirip" adalah adegan
+    // yang disinari berbeda antara jalan pertama dan jalan kedua, tanpa satu pun
+    // galat yang menyebutkannya.
+    const render::EquirectEnvironment map = LongitudeStripes(64, 32);
+    render::IblBakeSettings settings;
+    settings.cubeSize = 16;
+    settings.mipCount = 3;
+    settings.irradianceSamples = 256;
+
+    const render::IblBakeCpu baked = render::BakeIblCpu(map, settings);
+    REQUIRE(baked.IsValid());
+
+    const std::filesystem::path file =
+        std::filesystem::temp_directory_path() /
+        ("sim-ibl-" + std::to_string(::getpid()) + ".simibl");
+
+    std::string error;
+    REQUIRE_MESSAGE(render::WriteIblCache(file, baked, error), error);
+
+    render::IblBakeCpu loaded;
+    REQUIRE_MESSAGE(render::ReadIblCache(file, loaded, error), error);
+
+    CHECK(loaded.cubeSize == baked.cubeSize);
+    CHECK(loaded.mipCount == baked.mipCount);
+    REQUIRE(loaded.cubeTexels.size() == baked.cubeTexels.size());
+    // Byte demi byte: ini serialisasi, bukan pendekatan.
+    CHECK(std::equal(loaded.cubeTexels.begin(), loaded.cubeTexels.end(),
+                     baked.cubeTexels.begin()));
+    for (std::size_t i = 0; i < loaded.irradiance.coefficients.size(); ++i) {
+        INFO("koefisien ", i);
+        CHECK(loaded.irradiance.coefficients[i].x ==
+              doctest::Approx(baked.irradiance.coefficients[i].x));
+    }
+
+    std::error_code cleanup;
+    std::filesystem::remove(file, cleanup);
+}
+
+TEST_CASE("B3: artefak yang rusak ditolak, bukan dipercaya") {
+    // **Gagal membaca bukan galat, tapi membaca yang salah adalah.** Artefak
+    // masak boleh hilang, usang, dan ditulis versi lain — yang benar lalu
+    // memanggang ulang. Yang tidak boleh: mempercayai angka dari berkas yang
+    // isinya bukan milik kita, karena `texelCount` di header-nya menentukan
+    // berapa memori yang dialokasikan sebelum satu byte pun isinya dibaca.
+    const std::filesystem::path file =
+        std::filesystem::temp_directory_path() /
+        ("sim-ibl-bad-" + std::to_string(::getpid()) + ".simibl");
+
+    render::IblBakeCpu out;
+    std::string error;
+
+    // Tidak ada berkasnya.
+    CHECK_FALSE(render::ReadIblCache(file, out, error));
+    CHECK_FALSE(error.empty());
+
+    // Ada, tapi bukan milik kita.
+    std::ofstream(file, std::ios::binary) << "ini bukan artefak lingkungan";
+    CHECK_FALSE(render::ReadIblCache(file, out, error));
+
+    // Header kita, tapi isinya lebih pendek daripada yang dijanjikannya.
+    {
+        const render::EquirectEnvironment map = LongitudeStripes(32, 16);
+        render::IblBakeSettings settings;
+        settings.cubeSize = 8;
+        settings.mipCount = 2;
+        settings.irradianceSamples = 64;
+        const render::IblBakeCpu baked = render::BakeIblCpu(map, settings);
+        REQUIRE(render::WriteIblCache(file, baked, error));
+    }
+    const auto full = std::filesystem::file_size(file);
+    std::filesystem::resize_file(file, full / 2);
+    CHECK_FALSE(render::ReadIblCache(file, out, error));
+
+    std::error_code cleanup;
+    std::filesystem::remove(file, cleanup);
 }
 
 // --- B2: spekular panggang -------------------------------------------------

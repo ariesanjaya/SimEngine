@@ -18,6 +18,7 @@
 #include "Sim/Core/Assert.h"
 #include "Sim/Core/Log.h"
 #include "Sim/Core/TaskPool.h"
+#include "Sim/Core/UserPaths.h"
 #include "Sim/RHI/Buffer.h"
 #include "Sim/RHI/Device.h"
 #include "Sim/RHI/GpuProfiler.h"
@@ -25,6 +26,7 @@
 #include "PresentSource.h"
 #include "Sim/RHI/TextureRegistry.h"
 #include "IblBaker.h"
+#include "IblCache.h"
 #include "Sim/Render/Ibl.h"
 #include "Sim/Render/FrameGraph.h"
 #include "Sim/Render/DrawRun.h"
@@ -5680,6 +5682,16 @@ private:
         UpdateSkySpecular(key, sky);
     }
 
+    /// Folder artefak masak lingkungan.
+    ///
+    /// Di bawah folder konfigurasi pengguna, sejajar dengan `MeshSdfCache` —
+    /// bukan di sebelah berkas sumbernya. Alasannya di `IblCache.h`: membaca
+    /// sebuah berkas tidak boleh menulis apa pun ke folder aset milik orang
+    /// lain.
+    static std::filesystem::path EnvironmentCacheDirectory() {
+        return ConfigDirectory() / "EnvironmentCache";
+    }
+
     /// Memanggang lingkungan dari sebuah berkas HDR/EXR (B3).
     ///
     /// **Satu tugas untuk SH dan prefilter sekaligus, bukan dua.** Yang memisah
@@ -5709,12 +5721,44 @@ private:
         // di main thread berarti editor yang membeku tepat saat orang mengetik
         // jalur berkas — yaitu cacat yang keputusan 6 cegah.
         auto bake = [path = key.filePath, intensity = key.fileIntensity, settings,
-                     result]() mutable {
+                     cacheDir = EnvironmentCacheDirectory(), result]() mutable {
+            const std::filesystem::path source(path);
+            const uint64_t cacheKey = IblCacheKey(source, settings, intensity);
+            const std::filesystem::path cached =
+                cacheKey != 0 ? IblCachePath(cacheDir, cacheKey) : std::filesystem::path{};
+
+            const auto started = std::chrono::steady_clock::now();
+            const auto elapsedMs = [started]() {
+                return std::chrono::duration_cast<std::chrono::milliseconds>(
+                           std::chrono::steady_clock::now() - started)
+                    .count();
+            };
+
+            std::string cacheError;
+            if (!cached.empty() && ReadIblCache(cached, result->baked, cacheError)) {
+                // **Inilah kriteria B3.** Membuka level pra-GI berikutnya tidak
+                // mendekode satu byte pun HDR dan tidak menyaring satu texel pun
+                // — 525 KB dibaca dari disk, dan selesai.
+                result->carriesIrradiance = true;
+                SIM_INFO("Render", "environment loaded from cache in {} ms ({})", elapsedMs(),
+                         cached.filename().string());
+                result->ready.store(true, std::memory_order_release);
+                return;
+            }
+
             EquirectEnvironment map = LoadHdrEquirect(path);
             if (map.IsValid()) {
                 map.intensity = intensity;
                 result->baked = BakeIblCpu(map, settings);
                 result->carriesIrradiance = true;
+                if (!cached.empty() && !WriteIblCache(cached, result->baked, cacheError)) {
+                    // Disebutkan, bukan didiamkan: yang gagal menulis cache
+                    // tetap menggambar dengan benar, hanya memanggang ulang
+                    // setiap kali — dan itu terbaca sebagai "membuka level ini
+                    // selalu lambat" tanpa satu pun petunjuk kenapa.
+                    SIM_WARN("Render", "cannot cache the baked environment: {}", cacheError);
+                }
+                SIM_INFO("Render", "environment baked from {} in {} ms", path, elapsedMs());
             }
             // Berkas yang gagal dimuat sudah menjelaskan dirinya di log —
             // `LoadHdrEquirect` menyebut backend yang kurang, bukan "format
