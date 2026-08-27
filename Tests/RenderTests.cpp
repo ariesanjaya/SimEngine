@@ -2235,6 +2235,128 @@ TEST_CASE("B1: cakram matahari tidak ikut dipanggang") {
     CHECK(atSun.y > besideSun.y);
 }
 
+// --- B4: ekstraksi matahari dari HDRI ---------------------------------------
+
+namespace {
+
+/// Langit rata dengan satu cakram terang di arah yang diminta.
+///
+/// Bentuk yang sengaja sederhana: jawaban benarnya bisa dihitung tangan, dan
+/// sebuah ekstraktor yang salah tidak punya tempat untuk bersembunyi di balik
+/// kerumitan petanya.
+render::EquirectEnvironment SkyWithSun(uint32_t width, uint32_t height, const Vec3& sunDirection,
+                                       const Vec3& skyRadiance, const Vec3& sunRadiance,
+                                       float angularRadius) {
+    render::EquirectEnvironment map;
+    map.width = width;
+    map.height = height;
+    map.pixels.assign(static_cast<std::size_t>(width) * height * 3, 0.0f);
+
+    const Vec3 sun = glm::normalize(sunDirection);
+    const float cosRadius = std::cos(angularRadius);
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            const Vec2 uv((static_cast<float>(x) + 0.5f) / static_cast<float>(width),
+                          (static_cast<float>(y) + 0.5f) / static_cast<float>(height));
+            const Vec3 direction = render::EquirectUvToDirection(uv);
+            const Vec3 radiance =
+                glm::dot(direction, sun) >= cosRadius ? sunRadiance : skyRadiance;
+            const std::size_t at = (static_cast<std::size_t>(y) * width + x) * 3;
+            map.pixels[at] = radiance.x;
+            map.pixels[at + 1] = radiance.y;
+            map.pixels[at + 2] = radiance.z;
+        }
+    }
+    return map;
+}
+
+}  // namespace
+
+TEST_CASE("B4: matahari yang dikeluarkan ditemukan di arah yang benar") {
+    const Vec3 expected = glm::normalize(Vec3(0.4f, 0.7f, -0.3f));
+    render::EquirectEnvironment map =
+        SkyWithSun(256, 128, expected, Vec3(0.2f, 0.3f, 0.5f), Vec3(400.0f), 0.05f);
+
+    const render::ExtractedSun sun = render::ExtractSun(map);
+    REQUIRE(sun.found);
+
+    // Satu derajat. Yang dicari pusat massa kelebihannya, dan cakram yang
+    // tercuplik pada peta 256x128 hanya beberapa texel lebarnya.
+    CHECK(glm::dot(sun.direction, expected) > std::cos(1.0f * kPi / 180.0f));
+    CHECK(sun.solidAngle > 0.0f);
+    CHECK(sun.irradiance.x > 0.0f);
+}
+
+TEST_CASE("B4: iradiansi total tidak berubah — tidak hilang, tidak berganda") {
+    // **Kriteria terima B4.** Iradiansi dari (lingkungan tanpa matahari + lampu
+    // hasil ekstraksi) harus sama dengan iradiansi dari peta utuh. Yang gagal di
+    // sini bukan ketelitian melainkan pembukuan: energi yang hilang muncul
+    // sebagai adegan yang tiba-tiba redup saat ekstraksi dinyalakan, dan energi
+    // yang berganda sebagai adegan yang tiba-tiba dua kali terang.
+    const Vec3 sunDirection = glm::normalize(Vec3(0.3f, 0.8f, 0.2f));
+    const render::EquirectEnvironment full =
+        SkyWithSun(512, 256, sunDirection, Vec3(0.15f, 0.25f, 0.45f), Vec3(300.0f, 280.0f, 240.0f),
+                   0.04f);
+
+    render::EquirectEnvironment residual = full;
+    const render::ExtractedSun sun = render::ExtractSun(residual);
+    REQUIRE(sun.found);
+
+    for (const Vec3 normal : {Vec3(0.0f, 1.0f, 0.0f), sunDirection,
+                              glm::normalize(Vec3(1.0f, 0.4f, 0.0f)),
+                              glm::normalize(Vec3(-0.7f, 0.6f, 0.4f))}) {
+        const Vec3 whole = IntegrateIrradianceDirectly(full, normal, 65536);
+        const Vec3 rest = IntegrateIrradianceDirectly(residual, normal, 65536);
+        // Lampu directional menyumbang E · max(0, n·L).
+        const float cosine = std::max(glm::dot(normal, sun.direction), 0.0f);
+        const Vec3 recombined = rest + sun.irradiance * cosine;
+
+        INFO("normal (", normal.x, ",", normal.y, ",", normal.z, ")");
+        // 3%: cakramnya punya lebar, jadi menggantinya dengan satu arah
+        // memindahkan sedikit energi di tepi kawasannya — dan kedua sisi
+        // dihitung Monte Carlo atas peta yang sama.
+        CHECK(recombined.x == doctest::Approx(whole.x).epsilon(0.03));
+        CHECK(recombined.y == doctest::Approx(whole.y).epsilon(0.03));
+        CHECK(recombined.z == doctest::Approx(whole.z).epsilon(0.03));
+    }
+}
+
+TEST_CASE("B4: yang dikeluarkan kelebihannya, bukan seluruh radiansinya") {
+    // Kalau lampunya membawa seluruh radiansi kawasannya, langit di balik
+    // mataharinya terhitung dua kali — dan petanya berlubang di tempat
+    // mataharinya berada. Keduanya diperiksa di sini.
+    const Vec3 sunDirection = glm::normalize(Vec3(0.0f, 1.0f, 0.0f));
+    const Vec3 sky(0.5f, 0.6f, 0.7f);
+    render::EquirectEnvironment map = SkyWithSun(256, 128, sunDirection, sky, Vec3(200.0f), 0.05f);
+
+    const render::ExtractedSun sun = render::ExtractSun(map);
+    REQUIRE(sun.found);
+
+    // Petanya tidak berlubang: arah bekas mataharinya sekarang berisi langit,
+    // bukan nol.
+    const Vec3 patched = map.Sample(sunDirection);
+    CHECK(patched.x == doctest::Approx(sky.x).epsilon(0.05));
+    CHECK(patched.y == doctest::Approx(sky.y).epsilon(0.05));
+
+    // Dan yang dibawa lampunya kelebihannya: (200 − 0,5) × sudut ruangnya,
+    // bukan 200 × sudut ruangnya.
+    const float expected = (200.0f - sky.x) * sun.solidAngle;
+    CHECK(sun.irradiance.x == doctest::Approx(expected).epsilon(0.05));
+}
+
+TEST_CASE("B4: langit mendung tidak dilubangi") {
+    // Peta tanpa matahari tidak punya apa pun untuk dikeluarkan, dan
+    // mengeluarkan "kawasan paling terang" dari langit yang merata hanya
+    // melubanginya — sebuah cacat yang terlihat sebagai bercak, bukan sebagai
+    // galat.
+    render::EquirectEnvironment overcast = LongitudeStripes(128, 64);
+    const render::EquirectEnvironment before = overcast;
+
+    const render::ExtractedSun sun = render::ExtractSun(overcast);
+    CHECK_FALSE(sun.found);
+    CHECK(std::equal(overcast.pixels.begin(), overcast.pixels.end(), before.pixels.begin()));
+}
+
 TEST_CASE("Irradiance mengikuti arah setengah bola yang terang") {
     const HemisphereEnvironment environment(Vec3(0.0f, 1.0f, 0.0f));
     const Sh9 sh = ProjectIrradiance(environment, 16384);

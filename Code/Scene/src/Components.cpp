@@ -209,7 +209,11 @@ void RegisterCoreComponents() {
             .Field<&WorldSettings::exposureCompensation>("exposureCompensation")
             .Label("Compensation")
             .Range(-5.0f, 5.0f)
-            .Tooltip("Stop; berlaku pada kedua mode. Positif berarti lebih terang");
+            .Tooltip("Stop; berlaku pada kedua mode. Positif berarti lebih terang")
+            .Field<&WorldSettings::extractSun>("extractSun")
+            .Label("Extract Sun From File")
+            .Tooltip("Keluarkan matahari dari berkas lingkungan supaya lampu directional "
+                     "yang mengantarkannya — tanpa ini keduanya menyala sekaligus");
 
         types.Type<RigidBodyComponent>("RigidBody")
             .Field<&RigidBodyComponent::kind>("kind")

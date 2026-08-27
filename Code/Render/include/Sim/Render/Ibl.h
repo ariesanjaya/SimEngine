@@ -193,6 +193,59 @@ public:
     Vec3 Sample(const Vec3& direction) const override;
 };
 
+// --- Ekstraksi matahari dari peta lingkungan ---------------------------------
+
+/// Pengaturan pencarian matahari di dalam sebuah peta.
+struct SunExtractionSettings {
+    /// Jari-jari sudut maksimum kawasannya, radian. Bawaannya sekitar 6°: jauh
+    /// lebih lebar daripada matahari sungguhan yang 0,27°, dan itu disengaja —
+    /// peta HDR hampir selalu mengaburkan cakramnya, dan kawasan yang terlalu
+    /// sempit meninggalkan halonya di dalam lingkungan sebagai sumber kedua.
+    float maxAngularRadius = 0.1f;
+    /// Ambang luminansi relatif terhadap texel paling terang. Yang di bawahnya
+    /// bukan bagian mataharinya melainkan langit di sekitarnya.
+    float relativeThreshold = 0.15f;
+    /// Peta yang texel paling terangnya tidak jauh lebih terang daripada
+    /// rata-ratanya tidak punya matahari — ia mendung. Nol berarti terima apa
+    /// pun.
+    float minPeakOverMean = 8.0f;
+};
+
+/// Matahari yang ditemukan di dalam sebuah peta lingkungan, dan dikeluarkan
+/// darinya.
+struct ExtractedSun {
+    bool found = false;
+    /// Arah **ke** matahari, ruang dunia, ternormalisasi.
+    Vec3 direction{0.0f, 1.0f, 0.0f};
+    /// Iradiansi pada permukaan yang menghadap tegak lurus ke arahnya, yaitu
+    /// ∫(L − langit di sekitarnya) dω atas kawasannya.
+    ///
+    /// **Selisihnya, bukan seluruh radiansinya**, dan itu yang membuat
+    /// kriterianya bisa dipenuhi tepat: yang dikeluarkan dari peta adalah
+    /// kelebihan di atas langit di sekitarnya, jadi yang dibawa lampunya harus
+    /// kelebihan yang sama. Membawa seluruh radiansinya berarti langit di balik
+    /// mataharinya ikut terhitung dua kali.
+    Vec3 irradiance{0.0f};
+    /// Sudut ruang kawasannya, steradian. Dilaporkan supaya "seberapa besar
+    /// cakram yang ditemukan" bisa dinilai alih-alih ditebak.
+    float solidAngle = 0.0f;
+};
+
+/// Menemukan kawasan paling terang sebuah peta dan **mengeluarkannya**.
+///
+/// **Berkas HDR sudah berisi mataharinya.** Kalau level juga punya lampu
+/// directional, ada dua — dan tidak ada satu pun galat yang menyebutkannya,
+/// hanya adegan yang bayangannya dua kali lebih tegas daripada yang diharapkan
+/// pengarangnya. Fungsi ini memisahkan keduanya: petanya kehilangan
+/// mataharinya, dan lampunya mendapat mataharinya.
+///
+/// Texel kawasan itu diganti dengan rata-rata langit tepat di sekitarnya, bukan
+/// dengan nol: yang dikeluarkan matahari, bukan lubang. Karena itu yang dibawa
+/// lampunya adalah **selisih** terhadap langit itu, dan penjumlahan keduanya
+/// mengembalikan iradiansi peta utuh — itulah kriteria terima B4 di
+/// docs/PLAN-IBL.md, dan ia diuji.
+ExtractedSun ExtractSun(EquirectEnvironment& map, const SunExtractionSettings& settings = {});
+
 /// Memuat peta lingkungan equirectangular berjangkauan dinamis lebar.
 ///
 /// **Formatnya ditentukan backend `Sim::ImageIO` yang aktif, bukan oleh fungsi

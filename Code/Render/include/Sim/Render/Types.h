@@ -417,6 +417,10 @@ struct ViewportDesc {
     /// `Sim::SceneView`.
     EnvironmentSource environment = EnvironmentSource::Sky;
 
+    /// Keluarkan matahari dari berkas lingkungan sebelum dipanggang (B4).
+    /// Cerminan `scene::WorldSettings::extractSun`.
+    bool extractSunFromEnvironment = false;
+
     /// Pengali radiansi peta HDR.
     ///
     /// **Terpisah dari `skyIntensity`, dan itu bukan duplikasi.** Atmosfer

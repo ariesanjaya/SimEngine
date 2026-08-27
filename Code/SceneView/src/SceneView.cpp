@@ -140,6 +140,7 @@ void ApplyWorldSettings(const scene::World& world, render::ViewportDesc& desc) {
     desc.environment = settings.environment == scene::EnvironmentSource::File
                            ? render::EnvironmentSource::File
                            : render::EnvironmentSource::Sky;
+    desc.extractSunFromEnvironment = settings.extractSun;
 
     desc.post.exposureMode = settings.exposureMode == scene::ExposureModeKind::Manual
                                  ? render::ExposureMode::Manual

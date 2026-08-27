@@ -20,10 +20,18 @@
 #include "Sim/Editor/PropertyGrid.h"
 #include "Sim/Editor/SceneCommands.h"
 #include "Sim/Reflect/TypeRegistry.h"
+#include "Sim/Render/Ibl.h"
+#include "Sim/Render/TimeOfDay.h"
+#include "Sim/SceneView/SceneView.h"
 #include "Sim/Scene/World.h"
+#include "Sim/Scene/ComponentRegistry.h"
+#include "Sim/Scene/Serialization.h"
 #include "Sim/Scene/WorldSettings.h"
 
 #include <imgui.h>
+
+#include <string>
+#include <vector>
 
 namespace sim::editor {
 namespace {
@@ -81,9 +89,147 @@ public:
         }
 
         DrawUnsupportedNotice(context.world->Settings());
+        DrawSunExtraction(context);
     }
 
 private:
+    /// Langit pertama di dunia, atau nullptr.
+    static const scene::SkyComponent* FindSky(const scene::World& world) {
+        for (const auto raw : world.Registry().view<scene::SkyComponent>()) {
+            return world.TryGet<scene::SkyComponent>(static_cast<scene::Entity>(raw));
+        }
+        return nullptr;
+    }
+
+    /// Lampu directional pertama di dunia, atau entity null.
+    static scene::Entity FindDirectionalLight(scene::World& world) {
+        for (const auto raw : world.Registry().view<scene::LightComponent>()) {
+            const auto entity = static_cast<scene::Entity>(raw);
+            const auto* light = world.TryGet<scene::LightComponent>(entity);
+            if (light != nullptr && light->type == scene::LightType::Directional) {
+                return entity;
+            }
+        }
+        return scene::kNullEntity;
+    }
+
+    /// Menawarkan memindahkan matahari dari berkas lingkungan ke lampu
+    /// directional adegan (B4).
+    ///
+    /// **Sebuah tawaran, bukan sesuatu yang terjadi sendiri.** Menyalakan
+    /// ekstraksi tanpa mengisi lampunya menghasilkan adegan yang kehilangan
+    /// mataharinya sama sekali; mengisi lampunya tanpa menyalakan ekstraksi
+    /// menghasilkan dua matahari. Tombol ini mengerjakan keduanya dalam satu
+    /// transaksi, jadi tidak ada keadaan setengah jalan yang bisa ditinggalkan
+    /// siapa pun.
+    void DrawSunExtraction(EditorContext& context) {
+        const scene::WorldSettings settings = context.world->Settings();
+        if (settings.environment != scene::EnvironmentSource::File) {
+            return;
+        }
+        const scene::SkyComponent* sky = FindSky(*context.world);
+        if (sky == nullptr || sky->hdriPath.empty()) {
+            return;
+        }
+
+        ImGui::Separator();
+        ImGui::TextWrapped(
+            "Berkas HDR sudah berisi mataharinya. Kalau level ini juga punya lampu "
+            "directional, ada dua — dan yang terlihat cuma bayangan yang terlalu tegas.");
+
+        const scene::Entity light = FindDirectionalLight(*context.world);
+        if (!scene::IsValid(light)) {
+            ImGui::TextDisabled("Tidak ada lampu directional untuk diisi.");
+            return;
+        }
+
+        if (!ImGui::Button("Pindahkan matahari ke lampu directional")) {
+            if (!extractionStatus_.empty()) {
+                ImGui::TextWrapped("%s", extractionStatus_.c_str());
+            }
+            return;
+        }
+
+        // **Di main thread, dan itu diterima di sini.** Memuat HDR 4K memakan
+        // sekitar sedetik — mahal untuk sebuah frame, murah untuk sebuah klik
+        // yang memang diminta orangnya dan yang hasilnya ia tunggu. Yang tidak
+        // boleh menahan frame adalah panggangan yang berjalan sendiri, dan itu
+        // memang sudah di kolam tugas.
+        const std::string resolved = ResolveHdriPath(sky->hdriPath, context.builtinDir);
+        render::EquirectEnvironment map = render::LoadHdrEquirect(resolved);
+        if (!map.IsValid()) {
+            extractionStatus_ = "Berkas lingkungannya tidak bisa dibaca — lihat Console.";
+            return;
+        }
+        map.intensity = sky->hdriIntensity;
+
+        const render::ExtractedSun sun = render::ExtractSun(map);
+        if (!sun.found) {
+            extractionStatus_ =
+                "Tidak ada matahari yang menonjol di berkas ini. Langit mendung tidak punya "
+                "yang bisa dipindahkan, dan melubanginya hanya menambah bercak.";
+            return;
+        }
+
+        ApplyExtractedSun(context, light, sun);
+        extractionStatus_ = "Matahari dipindahkan ke lampu directional.";
+    }
+
+    /// Menulis hasil ekstraksi ke lampu dan ke World Settings, sekali jalan.
+    static void ApplyExtractedSun(EditorContext& context, scene::Entity light,
+                                  const render::ExtractedSun& sun) {
+        scene::World& world = *context.world;
+        const auto* transform = world.TryGet<scene::TransformComponent>(light);
+        const auto* component = world.TryGet<scene::LightComponent>(light);
+        if (transform == nullptr || component == nullptr) {
+            return;
+        }
+
+        scene::TransformComponent orientedTransform = *transform;
+        // Rotasi yang membuat sumbu −Z entity menunjuk **menjauhi** matahari:
+        // lampu directional memancar ke arah hadapnya, sedangkan arah hasil
+        // ekstraksi menunjuk dari permukaan ke matahari. Aturan yang sama persis
+        // dengan yang dipakai Time-of-Day.
+        orientedTransform.rotation = render::LookRotation(-sun.direction);
+
+        scene::LightComponent litComponent = *component;
+        // Iradiansinya masuk seluruhnya ke warna, dan intensitasnya satu:
+        // renderer memakai `color * intensity` sebagai iradiansi, jadi
+        // menyimpannya dua kali berarti dua angka yang bisa berselisih — aturan
+        // yang sama yang sudah dipegang Time-of-Day.
+        litComponent.color = sun.irradiance;
+        litComponent.intensity = 1.0f;
+
+        scene::WorldSettings settings = context.world->Settings();
+        const scene::WorldSettings before = settings;
+        settings.extractSun = true;
+
+        const scene::ComponentOps* ops = scene::ComponentRegistry::Get().Find("Light");
+        if (ops == nullptr) {
+            return;
+        }
+
+        // Satu transaksi: undo mengembalikan ketiganya sekaligus. Yang terpisah
+        // bisa dibatalkan setengah, dan setengahnya adalah dua matahari atau
+        // tidak satu pun.
+        context.history->CloseMergeGroup();
+        context.history->BeginTransaction("Extract sun from environment");
+        context.history->Execute<SetWorldSettingsCommand>(&world, before, settings);
+        context.history->Execute<SetTransformsCommand>(
+            &world,
+            std::vector<SetTransformsCommand::Item>{
+                {world.GuidOf(light), *transform, orientedTransform}},
+            "Aim sun");
+        context.history->Execute<SetComponentsCommand>(
+            &world, ops,
+            std::vector<SetComponentsCommand::Item>{
+                {world.GuidOf(light), scene::SerializeComponent(*ops->type, component),
+                 scene::SerializeComponent(*ops->type, &litComponent)}});
+        context.history->EndTransaction();
+    }
+
+    std::string extractionStatus_;
+
     /// **Dinyatakan, bukan didiamkan.** `RealTime` + `File` bukan kombinasi yang
     /// sah: probe GI menelusuri langit yang tergambar, dan sebuah foto tidak bisa
     /// menjadi masukannya tanpa matahari terhitung dua kali. Yang menyatakannya
