@@ -1820,6 +1820,64 @@ TEST_CASE("B2: prefilter dari cubemap sepadan dengan prefilter dari lingkunganny
     }
 }
 
+TEST_CASE("B2: cermin kekasaran nol memantulkan langit yang dipanggang, apa adanya") {
+    // **Kriteria terima B2.** Sebuah bola logam kekasaran nol memantulkan
+    // lingkungan tanpa penyaringan sama sekali, dan di jalur panggang itu
+    // berarti mip 0 peta prefilter. Kalau mip 0 bukan langit yang dipanggang,
+    // pantulannya adalah langit yang lain — dan tidak ada satu pun galat yang
+    // menyebutkannya.
+    //
+    // Diperiksa di tingkat data, bukan di tingkat piksel: yang bisa salah di
+    // sini pemetaan muka, urutan mip, dan tata letak texel — dan ketiganya
+    // terlihat sebagai pantulan yang "arahnya aneh", bukan sebagai kesalahan.
+    render::AtmosphereSky sky;
+    sky.sunDirection = glm::normalize(Vec3(0.3f, 0.6f, 0.4f));
+    sky.Prepare();
+
+    render::IblBakeSettings settings;
+    settings.cubeSize = 64;
+    settings.mipCount = 5;
+    settings.irradianceSamples = 0;  // yang diuji spekularnya
+    const render::IblBakeCpu baked = render::BakeIblCpu(sky, settings);
+    REQUIRE(baked.IsValid());
+    REQUIRE(baked.cubeSize == 64);
+    REQUIRE(baked.mipCount == 5);
+
+    // Mip 0 berada di awal blok, enam muka berurutan — tata letak yang sama yang
+    // diminta `TextureCube::Create`.
+    render::CubemapEnvironment mirror;
+    mirror.size = baked.cubeSize;
+    mirror.texels = baked.cubeTexels.data();
+    REQUIRE(mirror.IsValid());
+
+    for (const Vec3 direction : {Vec3(0.0f, 1.0f, 0.0f),
+                                 glm::normalize(Vec3(1.0f, 0.25f, 0.0f)),
+                                 glm::normalize(Vec3(-0.6f, 0.5f, 0.62f)),
+                                 glm::normalize(Vec3(0.3f, 0.6f, 0.4f))}) {
+        const Vec3 drawn = sky.Sample(direction);
+        const Vec3 reflected = mirror.Sample(direction);
+        INFO("arah (", direction.x, ",", direction.y, ",", direction.z, ")");
+        // 3%: yang membedakan keduanya hanya diskretisasi 64² pada gradien
+        // langit yang mulus. Kalau pemetaan mukanya salah, selisihnya bukan
+        // persen melainkan kali lipat.
+        CHECK(reflected.x == doctest::Approx(drawn.x).epsilon(0.03));
+        CHECK(reflected.y == doctest::Approx(drawn.y).epsilon(0.03));
+        CHECK(reflected.z == doctest::Approx(drawn.z).epsilon(0.03));
+    }
+
+    // Dan mip yang lebih kasar memang lebih buram, bukan sekadar berbeda:
+    // radiansi di arah matahari meluruh saat kekasarannya naik, karena lobe-nya
+    // melebar melewati bagian langit yang lebih redup.
+    const std::size_t mip0Texels =
+        static_cast<std::size_t>(kCubeFaceCount) * baked.cubeSize * baked.cubeSize * 4;
+    render::CubemapEnvironment mip1;
+    mip1.size = baked.cubeSize / 2;
+    mip1.texels = baked.cubeTexels.data() + mip0Texels;
+
+    const Vec3 sunward = glm::normalize(Vec3(0.3f, 0.6f, 0.4f));
+    CHECK(mip1.Sample(sunward).y < mirror.Sample(sunward).y * 1.05f);
+}
+
 // --- B1: langit atmosferik sebagai sumber lingkungan ------------------------
 
 namespace {

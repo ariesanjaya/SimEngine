@@ -357,6 +357,57 @@ float RoughnessForMip(uint32_t mip, uint32_t mipCount);
 Vec3 PrefilterSpecular(const IEnvironmentSampler& environment, const Vec3& reflection,
                        float roughness, uint32_t sampleCount = 256);
 
+// --- Panggangan IBL, sisi CPU ------------------------------------------------
+//
+// **Di header publik karena ia matematika, bukan sumber daya GPU.**
+// Menghitung texel prefilter tidak menyentuh satu pun objek Vulkan, dan yang
+// tidak menyentuhnya harus bisa diuji tanpa perangkat grafis. Yang membuat
+// teksturnya — `BakedIbl`, `UploadIbl` — tinggal di header privat modul,
+// bersama tipe RHI yang disebutnya.
+
+struct IblBakeSettings {
+    /// Sisi muka cubemap prefilter pada mip 0.
+    uint32_t cubeSize = 64;
+    /// Banyaknya mip. Mip terakhir mewakili kekasaran 1.
+    uint32_t mipCount = 5;
+    uint32_t dfgSize = 64;
+    /// Sampel GGX per texel prefilter, di luar mip 0 yang cuma satu pengambilan.
+    uint32_t prefilterSamples = 64;
+    uint32_t dfgSamples = 256;
+    /// Cuplikan bola untuk proyeksi SH. **Nol berarti lewati**, dan itu dipakai
+    /// pemanggang yang sudah punya SH-nya sendiri dari panggangan yang lebih
+    /// sering: menghitungnya lagi di sini hanya menghasilkan angka yang sama.
+    uint32_t irradianceSamples = 8192;
+};
+
+/// Panggangan yang belum menyentuh GPU sama sekali.
+///
+/// **Dipisah karena yang mahal dan yang harus di main thread bukan bagian yang
+/// sama.** Menghitung texel prefilter memakan detik dan tidak menyentuh satu
+/// pun objek Vulkan; membuat tekstur dan menyalinnya menyentuh device dan
+/// karena itu harus di thread yang memilikinya. Yang menggabungkan keduanya
+/// memaksa memilih antara membekukan editor dan menyentuh device dari worker.
+///
+/// **LUT DFG sengaja tidak di sini.** Ia tidak bergantung pada lingkungan sama
+/// sekali — hanya pada BRDF-nya — jadi memanggangnya ulang setiap langit
+/// berubah adalah 914 ms (Debug) yang dibuang untuk menghasilkan byte yang sama
+/// persis. Yang memanggangnya memanggilnya sekali, sendiri.
+struct IblBakeCpu {
+    Sh9 irradiance;
+    uint32_t cubeSize = 0;
+    uint32_t mipCount = 0;
+    /// RGBA32F, seluruh mip berurutan, tiap mip enam muka berurutan — tata letak
+    /// yang diminta `TextureCube::Create`.
+    std::vector<float> cubeTexels;
+
+    bool IsValid() const { return cubeSize > 0 && mipCount > 0 && !cubeTexels.empty(); }
+};
+
+/// Menghitung iradiansi SH dan peta prefilter. Aman dipanggil dari thread mana
+/// pun: ia tidak menyentuh `rhi::Device`.
+IblBakeCpu BakeIblCpu(const IEnvironmentSampler& environment, const IblBakeSettings& settings);
+
+
 // --- Sampling GGX ------------------------------------------------------------
 
 /// Titik ke-i dari urutan Hammersley berukuran `count`.

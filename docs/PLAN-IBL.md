@@ -354,7 +354,7 @@ integral, dan tabel yang tidak mengubah jawaban. 25 dari 25 suite lulus.
    dan sebelum ia mendarat tidak ada iradiansi yang bisa dipakai. Menahannya
    dengan konstanta akan menukar satu kedipan dengan satu kebohongan.
 
-### B2 — Spekular panggang + DFG di viewport
+### B2 — Spekular panggang + DFG di viewport · ✅
 
 - Prefilter cubemap dan LUT DFG diikat ke set forward; tiga nol di
   `MaterialShaderModule.cpp:560` diganti
@@ -365,6 +365,54 @@ yang tergambar di belakangnya; dan **uji tungku** lulus di jalur panggang —
 langit seragam 1, albedo 1, tanpa matahari, setiap permukaan berradiansi 1.
 Kriteria itu sudah ada dan sudah bernama (`TraceBackend.h:173`, M4 GI); yang
 ditambahkan di sini hanya menjalankannya pada jalur panggang.
+
+#### Keadaannya sesudah B2
+
+**Uji tungku lulus, dan ketat.** Dijalankan pada jalur panggang lewat
+`openpbr.slang` yang sebenarnya — C++ hasil `slangc -target cpp`, bukan
+tiruannya — dengan suku DFG dari LUT mesin ini sendiri: radiansi tepat 1 dalam
+0,5% pada metalness 0 dan 1, di seluruh kekasaran 0,05 sampai 1,0. Kekasaran 1,0
+ikut, dan justru di sanalah split-sum satu-pantulan sendirian kehilangan 63,9%;
+yang mengembalikannya kompensasi multiscatter.
+
+**Yang ditemukan uji itu, dan bukan bagian dari B2.** Metalness *di antara* dua
+ujungnya kehilangan energi — 0,76 pada kekasaran 0,05 dan 0,63 pada 1,0. Itu
+sifat alur kerja metalness yang menginterpolasi F0 alih-alih kedua BSDF-nya:
+spekularnya sudah memakai F0 campuran yang tinggi sementara difusnya masih
+diskalakan `1 − metalness`. Menuntutnya berjumlah satu berarti menuntut model
+ini menjadi model lain, jadi angkanya **diukur dan dikunci uji** alih-alih
+didiamkan — supaya jelas seberapa besar bila suatu saat seseorang memutuskan
+menginterpolasi lobe-nya.
+
+**Cermin kekasaran nol memantulkan langit yang dipanggang, dalam 3%.** Diperiksa
+di tingkat data: mip 0 peta prefilter dibaca kembali lewat pemetaan mukanya
+sendiri dan dibandingkan dengan pencuplik yang mengisinya. Yang bisa salah di
+sana — pemetaan muka, urutan mip, tata letak texel — terlihat sebagai pantulan
+yang "arahnya aneh", bukan sebagai kesalahan, dan selisihnya bukan persen
+melainkan kali lipat.
+
+**Yang membuat B2 mungkin sama sekali.** Prefilter semula menyaring pencuplik
+analitik, dan untuk langit atmosferik satu cuplikan adalah satu ray march:
+8160 texel × 64 sampel = **33 detik** per peta (Debug). Sekarang mip 0 yang
+menjadi sumber mip sisanya lewat `CubemapEnvironment`, dan angkanya **855 ms**.
+LUT DFG dipanggang sekali seumur proses — ia tidak bergantung pada lingkungan
+sama sekali. Prefilter dipanggang pada ambang lima derajat pergerakan matahari,
+SH tetap setengah derajat.
+
+> **Satu selisih yang belum diukur, dan yang paling mungkin terlihat.** Langit
+> yang **tergambar** memakai LUT multiscattering di GPU
+> (`sky_multiscatter.frag.slang`); `AtmosphereSky` yang **memanggang** hanya
+> hamburan tunggal. Pantulan lingkungan karena itu sistematis lebih redup
+> daripada langit di belakangnya, dan selisihnya paling besar justru di dekat
+> cakrawala. Kriteria "memantulkan langit yang sama" karena itu terverifikasi
+> terhadap langit yang dipanggang, **bukan** terhadap yang tergambar.
+> Mengukurnya adalah pekerjaan B5, yang memang mendatangkan lawan bicara yang
+> bisa menilai keduanya.
+
+**Yang belum:** pengaruhnya di adegan bench nyaris tak terukur — selisih gambar
+antara Sky Gain 20 dan 2 bergerak dari 6,57 ke 6,60 — karena adegan itu tidak
+punya satu pun material seperti cermin. Itu bukan kegagalan B2 melainkan batas
+adegan ujinya; sebuah adegan acuan berbola logam adalah pekerjaan B5.
 
 ### B3 — Berkas HDR/EXR sebagai lingkungan (`Baked` + `File`)
 
