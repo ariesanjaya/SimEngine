@@ -61,6 +61,13 @@ using SurfaceResolver =
 using SkySampler = std::function<Vec3(const Vec3& direction)>;
 
 /// Langit satu warna, untuk adegan yang tidak sedang menguji langitnya.
+///
+/// **Radiansi nol mengembalikan pencuplik kosong, bukan fungsi yang menjawab
+/// nol.** Langit hitam adalah ketiadaan langit, dan sebuah fungsi yang selalu
+/// menjawab nol tetap dipanggil sekali untuk setiap sinar yang lolos dari
+/// adegan — jutaan kali pada adegan tertutup, seluruhnya untuk menambahkan nol.
+/// Yang memeriksa `if (settings.sky)` karena itu akan melihatnya kosong, dan
+/// itu memang arti yang dimaksud.
 SkySampler ConstantSky(const Vec3& radiance);
 
 struct TraceSettings {

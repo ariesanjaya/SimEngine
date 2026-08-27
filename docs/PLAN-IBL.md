@@ -609,6 +609,19 @@ Selisihnya paling besar di kanal paling redup: langit biru membuat merah
 sepertiga dari birunya, jadi selisih absolut yang sama terbaca tiga kali lebih
 besar di sana. Yang mendekati apa yang terlihat adalah angka luminansinya.
 
+**Sepertiga selisihnya datang dari cakrawala, bukan dari mataharinya.** Diukur
+dengan mengisi belahan bawah peta memakai warna cakrawalanya alih-alih hitam:
+selisih SH turun dari **9,66% ke 6,38%**. `AtmosphereSky` mengembalikan udara
+yang dilewati sinarnya saja dan tanahnya hitam, jadi ada loncatan tajam di
+seluruh lingkar cakrawala — dan tepi tajam adalah persis yang tidak bisa
+diwakili orde dua. Sisanya, 6,4%, adalah struktur sudut langitnya sendiri.
+
+Itu menyambung langsung ke batas yang sudah tertulis di B1: permukaan yang
+menghadap ke bawah tidak menerima pantulan tanah, karena pantulan tanah adalah
+transport cahaya dan tingkat panggang memang tidak punya itu. Yang memperbaiki
+angka B5 dan yang memperbaiki bawah objek yang gelap adalah pekerjaan yang
+sama.
+
 **Kedua sisi mencuplik satu peta equirect yang sama**, bukan atmosfer analitik.
 Dua alasannya: kalau acuannya mencuplik satu hal dan panggangannya mencuplik
 hal lain, selisih yang terukur memuat perbedaan pencupliknya — dan yang sedang
