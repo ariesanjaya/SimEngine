@@ -6,6 +6,7 @@
 #include "Sim/Reference/Lights.h"
 #include "Sim/Reference/Scene.h"
 #include "Sim/Reference/PathTracer.h"
+#include "Sim/Render/Ibl.h"
 #include "Sim/Raycast/Query.h"
 #include "Sim/Reference/Shading.h"
 
@@ -200,7 +201,7 @@ TEST_CASE("Tungku putih: permukaan difus putih di dalam langit seragam") {
     settings.width = 8;
     settings.height = 8;
     settings.samplesPerPixel = 400;
-    settings.skyRadiance = Vec3(1.0f);
+    settings.sky = ConstantSky(Vec3(1.0f));
 
     // **Dibuktikan lebih dulu bahwa lantainya benar-benar kena.** Uji ini
     // membandingkan hasilnya dengan 1,0, dan sebuah acuan yang setiap sinarnya
@@ -255,7 +256,7 @@ TEST_CASE("Albedo separuh memantulkan separuh, dan pantulan ganda mengikutinya")
         settings.width = 8;
         settings.height = 8;
         settings.samplesPerPixel = 400;
-        settings.skyRadiance = Vec3(1.0f);
+        settings.sky = ConstantSky(Vec3(1.0f));
 
         const Image image = Render(scene, resolve, LightList{}, camera, settings);
         CAPTURE(albedo);
@@ -327,7 +328,7 @@ TEST_CASE("Lampu bidang menerangi lantai sesuai hukum kosinus") {
     settings.width = 4;
     settings.height = 4;
     settings.samplesPerPixel = 900;
-    settings.skyRadiance = Vec3(0.0f);
+    settings.sky = ConstantSky(Vec3(0.0f));
 
     const Image image = Render(scene, resolve, lights, camera, settings);
 
@@ -371,7 +372,7 @@ TEST_CASE("Stratifikasi menurunkan derau dibanding sampel yang tidak ditata") {
     TraceSettings settings;
     settings.width = 6;
     settings.height = 6;
-    settings.skyRadiance = Vec3(1.0f);
+    settings.sky = ConstantSky(Vec3(1.0f));
 
     settings.samplesPerPixel = 64;
     const Image few = Render(scene, resolve, LightList{}, camera, settings);
@@ -420,7 +421,7 @@ TEST_CASE("Rongga tertutup konvergen ke E/(1-rho)") {
         settings.width = 6;
         settings.height = 6;
         settings.samplesPerPixel = 900;
-        settings.skyRadiance = Vec3(0.0f);  // tertutup: tidak ada langit sama sekali
+        settings.sky = ConstantSky(Vec3(0.0f));  // tertutup: tidak ada langit sama sekali
 
         const Image image = Render(rayScene, scene.Resolver(), scene.Lights(), camera, settings);
         const float expected = emission / (1.0f - albedo);
@@ -453,7 +454,7 @@ TEST_CASE("Menggandakan maxDepth tidak menggeser rata-rata gambar") {
     shallow.width = 6;
     shallow.height = 6;
     shallow.samplesPerPixel = 900;
-    shallow.skyRadiance = Vec3(0.0f);
+    shallow.sky = ConstantSky(Vec3(0.0f));
     shallow.maxDepth = 32;
 
     TraceSettings deep = shallow;
@@ -486,7 +487,7 @@ TEST_CASE("Cornell box: dinding berwarna membocorkan warnanya ke lantai") {
     settings.width = 32;
     settings.height = 32;
     settings.samplesPerPixel = 256;
-    settings.skyRadiance = Vec3(0.0f);
+    settings.sky = ConstantSky(Vec3(0.0f));
 
     const Image image =
         Render(rayScene, box.scene.Resolver(), box.scene.Lights(), box.camera, settings);
@@ -538,10 +539,10 @@ TEST_CASE("Cornell box tertutup tidak menerima cahaya dari luar") {
     dark.width = 16;
     dark.height = 16;
     dark.samplesPerPixel = 100;
-    dark.skyRadiance = Vec3(0.0f);
+    dark.sky = ConstantSky(Vec3(0.0f));
 
     TraceSettings bright = dark;
-    bright.skyRadiance = Vec3(50.0f);
+    bright.sky = ConstantSky(Vec3(50.0f));
 
     const Image a = Render(rayScene, box.scene.Resolver(), box.scene.Lights(), box.camera, dark);
     const Image b =
@@ -600,7 +601,7 @@ TEST_CASE("Gambar acuan keluar sebagai EXR, dan angkanya bertahan") {
     settings.width = 8;
     settings.height = 8;
     settings.samplesPerPixel = 64;
-    settings.skyRadiance = Vec3(0.0f);
+    settings.sky = ConstantSky(Vec3(0.0f));
 
     const Image image =
         Render(rayScene, box.scene.Resolver(), box.scene.Lights(), box.camera, settings);
@@ -802,7 +803,7 @@ TEST_CASE("R6: berapa porsi waktu render acuan yang dihabiskan menelusuri sinar"
     settings.width = size;
     settings.height = size;
     settings.samplesPerPixel = spp;
-    settings.skyRadiance = Vec3(0.0f);
+    settings.sky = ConstantSky(Vec3(0.0f));
 
     SUBCASE("adegan acuan apa adanya — Cornell box, 32 segitiga") {
         const CornellBox box = MakeCornellBox();
@@ -881,4 +882,253 @@ TEST_CASE("R6: berapa porsi waktu render acuan yang dihabiskan menelusuri sinar"
         ReportSplit("padat", split);
         CHECK(split.rays > 0);
     }
+}
+
+// --- B5: tingkat panggang dinilai path tracer acuan --------------------------
+
+namespace {
+
+/// Sebuah kuad tunggal menghadap `normal`, disinari langit saja.
+///
+/// **Cembung dan sendirian, dan itu syarat perbandingannya.** Tingkat panggang
+/// tidak punya oklusi dan tidak punya antar-pantulan; membandingkannya pada
+/// adegan yang punya keduanya mengukur apa yang memang tidak dimilikinya, bukan
+/// apakah panggangannya benar. Sebuah kuad tunggal tidak menghalangi langit dari
+/// dirinya sendiri dan tidak bisa memantul ke dirinya sendiri — jadi jawaban
+/// benarnya tepat `albedo/pi * E(n)`, dan yang tersisa untuk diukur cuma
+/// panggangannya.
+struct SkyLitQuad {
+    reference::Scene scene;
+    raycast::RayScene rays;
+    reference::Camera camera;
+    Vec3 albedo{0.6f, 0.5f, 0.4f};
+};
+
+/// Bingkai ortonormal di sekitar sebuah normal.
+void FrameFor(const Vec3& normal, Vec3& tangent, Vec3& bitangent) {
+    const Vec3 helper =
+        std::abs(normal.y) < 0.9f ? Vec3(0.0f, 1.0f, 0.0f) : Vec3(1.0f, 0.0f, 0.0f);
+    tangent = glm::normalize(glm::cross(helper, normal));
+    bitangent = glm::cross(normal, tangent);
+}
+
+std::unique_ptr<SkyLitQuad> MakeSkyLitQuad(const Vec3& normal, const Vec3& albedo) {
+    auto quad = std::make_unique<SkyLitQuad>();
+    quad->albedo = albedo;
+
+    reference::Surface surface;
+    surface.baseColor = albedo;
+    surface.baseWeight = 1.0f;
+    surface.baseMetalness = 0.0f;
+    surface.baseDiffuseRoughness = 0.0f;
+    // **Spekular dimatikan.** Yang dibandingkan suku difusnya; sorotan
+    // lingkungan punya ujinya sendiri di B2, dan membiarkannya di sini hanya
+    // menambah satu suku yang harus ikut dijelaskan setiap kali angkanya
+    // bergeser.
+    surface.specularWeight = 0.0f;
+    const uint32_t material = quad->scene.AddMaterial(surface);
+
+    Vec3 tangent;
+    Vec3 bitangent;
+    FrameFor(glm::normalize(normal), tangent, bitangent);
+    // Besar, supaya tepinya tidak terlihat dari kamera dan setiap piksel yang
+    // diukur benar-benar mengenai permukaannya.
+    constexpr float kHalf = 40.0f;
+    const Vec3 origin = -tangent * kHalf - bitangent * kHalf;
+    quad->scene.AddQuad(origin, tangent * (2.0f * kHalf), bitangent * (2.0f * kHalf), material);
+    quad->scene.Commit(quad->rays);
+
+    // Kamera tepat di depan permukaannya, menghadap lurus ke sana.
+    quad->camera.position = glm::normalize(normal) * 3.0f;
+    quad->camera.target = Vec3(0.0f);
+    Vec3 right;
+    Vec3 up;
+    FrameFor(-glm::normalize(normal), right, up);
+    quad->camera.up = up;
+    return quad;
+}
+
+/// Radiansi rata-rata di tengah gambar, jauh dari tepinya.
+Vec3 CentreMean(const reference::Image& image) {
+    const uint32_t x0 = image.width / 4;
+    const uint32_t x1 = image.width - image.width / 4;
+    const uint32_t y0 = image.height / 4;
+    const uint32_t y1 = image.height - image.height / 4;
+    Vec3 total(0.0f);
+    uint32_t count = 0;
+    for (uint32_t y = y0; y < y1; ++y) {
+        for (uint32_t x = x0; x < x1; ++x) {
+            total += image.At(x, y);
+            ++count;
+        }
+    }
+    return count > 0 ? total / static_cast<float>(count) : Vec3(0.0f);
+}
+
+}  // namespace
+
+namespace {
+
+/// Iradiansi dengan integrasi langsung, tanpa SH sama sekali.
+Vec3 IntegrateIrradianceOverMap(const render::EquirectEnvironment& map, const Vec3& normal,
+                                uint32_t sampleCount) {
+    const float golden = kPi * (3.0f - std::sqrt(5.0f));
+    const Vec3 n = glm::normalize(normal);
+    Vec3 total(0.0f);
+    for (uint32_t i = 0; i < sampleCount; ++i) {
+        const float z = 1.0f - 2.0f * (static_cast<float>(i) + 0.5f) / static_cast<float>(sampleCount);
+        const float r = std::sqrt(std::max(0.0f, 1.0f - z * z));
+        const float theta = golden * static_cast<float>(i);
+        const Vec3 direction(r * std::cos(theta), z, r * std::sin(theta));
+        const float cosine = glm::dot(direction, n);
+        if (cosine > 0.0f) {
+            total += map.Sample(direction) * cosine;
+        }
+    }
+    return total * (4.0f * kPi / static_cast<float>(sampleCount));
+}
+
+/// Atmosfer yang sudah dicuplik ke sebuah peta equirect.
+///
+/// **Satu peta untuk kedua sisi.** Kalau acuannya mencuplik atmosfer analitik
+/// sementara panggangannya mencuplik sesuatu yang lain, selisih yang terukur
+/// memuat perbedaan pencuplik — dan yang sedang diuji bukan itu. Ia juga yang
+/// membuatnya terjangkau: satu cuplikan atmosfer adalah satu ray march 32
+/// langkah, dan path tracer memanggilnya sekali untuk tiap sinar yang lolos.
+render::EquirectEnvironment BakeAtmosphereToMap(uint32_t width, uint32_t height) {
+    render::AtmosphereSky atmosphere;
+    atmosphere.sunDirection = glm::normalize(Vec3(0.35f, 0.75f, 0.4f));
+    atmosphere.intensity = 20.0f;
+    atmosphere.Prepare();
+
+    render::EquirectEnvironment map;
+    map.width = width;
+    map.height = height;
+    map.pixels.assign(static_cast<std::size_t>(width) * height * 3, 0.0f);
+    for (uint32_t y = 0; y < height; ++y) {
+        for (uint32_t x = 0; x < width; ++x) {
+            const Vec2 uv((static_cast<float>(x) + 0.5f) / static_cast<float>(width),
+                          (static_cast<float>(y) + 0.5f) / static_cast<float>(height));
+            const Vec3 radiance = atmosphere.Sample(render::EquirectUvToDirection(uv));
+            const std::size_t at = (static_cast<std::size_t>(y) * width + x) * 3;
+            map.pixels[at] = radiance.x;
+            map.pixels[at + 1] = radiance.y;
+            map.pixels[at + 2] = radiance.z;
+        }
+    }
+    return map;
+}
+
+const Vec3 kB5Albedo{0.6f, 0.5f, 0.4f};
+
+struct B5Case {
+    const char* name;
+    Vec3 normal;
+};
+const B5Case kB5Cases[] = {
+    {"menghadap ke atas", Vec3(0.0f, 1.0f, 0.0f)},
+    {"menghadap matahari", Vec3(0.35f, 0.75f, 0.4f)},
+    {"menyamping", Vec3(1.0f, 0.15f, 0.0f)},
+    {"membelakangi matahari", Vec3(-0.5f, 0.6f, -0.6f)},
+};
+
+/// Radiansi keluar sebuah kuad Lambert yang disinari peta, menurut acuan.
+Vec3 TraceSkyLitQuad(const render::EquirectEnvironment& map, const Vec3& normal) {
+    const std::unique_ptr<SkyLitQuad> quad = MakeSkyLitQuad(normal, kB5Albedo);
+
+    reference::TraceSettings settings;
+    // 24x24 piksel dengan 256 sampel: yang diukur rata-rata sebuah kawasan,
+    // bukan sebuah piksel, jadi puluhan ribu sampel yang jatuh di dalamnya sudah
+    // jauh melewati titik derau berhenti berarti.
+    settings.width = 24;
+    settings.height = 24;
+    settings.samplesPerPixel = 256;
+    settings.seed = 7u;
+    settings.sky = [&map](const Vec3& direction) { return map.Sample(direction); };
+
+    const reference::Image image = reference::Render(
+        quad->rays, quad->scene.Resolver(), quad->scene.Lights(), quad->camera, settings);
+    return CentreMean(image);
+}
+
+}  // namespace
+
+TEST_CASE("B5: path tracer acuan cocok dengan integrasi langsung langit yang sama") {
+    // **Yang diperiksa di sini acuannya sendiri, bukan panggangannya.** Sebuah
+    // acuan yang belum pernah diadu dengan jawaban yang dihitung cara lain
+    // adalah pendapat, bukan acuan — dan seluruh guna B5 bersandar padanya.
+    //
+    // Kuad tunggal yang cembung dan sendirian punya jawaban tertutup:
+    // `albedo/pi * E(n)`, dengan E integral langsung atas peta yang sama. Yang
+    // diuji karena itu seluruh rantainya sekaligus — kamera, intersektor,
+    // shading, dan pencuplikan langitnya.
+    const render::EquirectEnvironment map = BakeAtmosphereToMap(256, 128);
+
+    for (const B5Case& item : kB5Cases) {
+        const Vec3 traced = TraceSkyLitQuad(map, item.normal);
+        const Vec3 exact =
+            kB5Albedo * IntegrateIrradianceOverMap(map, item.normal, 32768) / kPi;
+
+        INFO(item.name);
+        // 2%: keduanya integral Monte Carlo, dan yang satu lewat 147.456 sinar
+        // kamera sementara yang lain lewat 32.768 arah bola.
+        CHECK(traced.x == doctest::Approx(exact.x).epsilon(0.02));
+        CHECK(traced.y == doctest::Approx(exact.y).epsilon(0.02));
+        CHECK(traced.z == doctest::Approx(exact.z).epsilon(0.02));
+    }
+}
+
+TEST_CASE("B5: tingkat panggang dinilai path tracer acuan") {
+    // **Kriteria terima B5.** Panggangan mengubah langit menjadi sembilan angka;
+    // path tracer acuan tidak mengubahnya menjadi apa pun — ia mencuplik langit
+    // yang sama, sinar demi sinar. Selisih di antara keduanya adalah kesalahan
+    // panggangannya, dan tidak ada tempat lain di mesin ini yang bisa
+    // mengatakannya.
+    //
+    // Uji di atas sudah menunjukkan acuannya cocok dengan integrasi langsung
+    // dalam bawah 2%, jadi yang terukur di sini memang pemotongan SH orde dua —
+    // bukan cacat pada acuannya.
+    const render::EquirectEnvironment map = BakeAtmosphereToMap(256, 128);
+    const render::Sh9 baked = render::ProjectIrradiance(map, 16384);
+
+    float worstChannel = 0.0f;
+    float worstLuminance = 0.0f;
+    const auto luminance = [](const Vec3& c) {
+        return 0.2126f * c.x + 0.7152f * c.y + 0.0722f * c.z;
+    };
+
+    for (const B5Case& item : kB5Cases) {
+        const Vec3 traced = TraceSkyLitQuad(map, item.normal);
+        const Vec3 fromSh =
+            kB5Albedo * render::EvaluateIrradiance(baked, glm::normalize(item.normal)) / kPi;
+
+        for (int channel = 0; channel < 3; ++channel) {
+            worstChannel = std::max(worstChannel, std::abs(traced[channel] - fromSh[channel]) /
+                                                      std::max(traced[channel], 1e-6f));
+        }
+        worstLuminance =
+            std::max(worstLuminance, std::abs(luminance(traced) - luminance(fromSh)) /
+                                         std::max(luminance(traced), 1e-6f));
+
+        INFO(item.name);
+        MESSAGE(item.name << ": acuan (" << traced.x << " " << traced.y << " " << traced.z
+                          << ")  panggang (" << fromSh.x << " " << fromSh.y << " " << fromSh.z
+                          << ")");
+    }
+    MESSAGE("selisih terburuk: " << worstChannel * 100.0f << "% per kanal, "
+                                 << worstLuminance * 100.0f << "% pada luminansinya");
+
+    // **Ambangnya, dan angkanya dicatat di docs/PLAN-IBL.md.** Yang terukur
+    // **9,6% per kanal** dan **6,4% pada luminansinya**; ambangnya 12% dan 8%,
+    // memberi ruang untuk derau dan selisih platform tanpa berhenti menangkap
+    // regresi — sebuah panggangan yang rusak meleset jauh lebih besar daripada
+    // ini.
+    //
+    // **Angka sebesar itu bukan cacat melainkan batas SH orde dua**, dan uji di
+    // atas yang membuktikannya: acuannya sendiri cocok dengan integrasi langsung
+    // dalam bawah 2%, jadi yang tersisa memang pemotongannya. Ia paling besar di
+    // kanal paling redup — langit biru membuat merah sepertiga dari birunya,
+    // jadi selisih absolut yang sama terbaca tiga kali lebih besar di sana.
+    CHECK(worstChannel < 0.12f);
+    CHECK(worstLuminance < 0.08f);
 }

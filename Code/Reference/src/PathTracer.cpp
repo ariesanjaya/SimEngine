@@ -125,6 +125,15 @@ Vec3 Image::Mean() const {
     return total / static_cast<float>(pixels.size());
 }
 
+SkySampler ConstantSky(const Vec3& radiance) {
+    if (radiance == Vec3(0.0f)) {
+        // Langit hitam adalah ketiadaan langit, dan sebuah fungsi yang selalu
+        // mengembalikan nol tetap dipanggil sekali per sinar yang lolos.
+        return {};
+    }
+    return [radiance](const Vec3&) { return radiance; };
+}
+
 Image Render(const raycast::RayScene& scene, const SurfaceResolver& resolve,
              const LightList& lights, const Camera& camera, const TraceSettings& settings) {
     Image image;
@@ -168,7 +177,9 @@ Image Render(const raycast::RayScene& scene, const SurfaceResolver& resolve,
                     ++image.raysTraced;
                     const raycast::RayHit hit = raycast::Raycast(scene, origin, direction);
                     if (!hit.hit) {
-                        radiance += throughput * settings.skyRadiance;
+                        if (settings.sky) {
+                            radiance += throughput * settings.sky(direction);
+                        }
                         break;
                     }
 

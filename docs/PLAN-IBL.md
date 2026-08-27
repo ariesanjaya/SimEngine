@@ -562,7 +562,7 @@ berganda — hanya kehilangan yang pertama. Menangani lebih dari satu berarti
 memutuskan berapa lampu yang boleh dibuat sebuah tombol, dan itu pertanyaan
 pengarangan, bukan pertanyaan energi.
 
-### B5 — Validasi terhadap path tracer acuan
+### B5 — Validasi terhadap path tracer acuan · ✅
 
 `reference::PathTracer` baru punya `Vec3 skyRadiance` — langit satu warna
 (`PathTracer.h:71`). Tanpa lingkungan, tidak ada yang bisa mengatakan
@@ -573,6 +573,65 @@ panggangannya benar.
 
 **Selesai kalau:** selisihnya di bawah ambang yang ditulis di dokumen ini, dan
 angkanya dicatat di sini — bukan di pesan commit.
+
+#### Angkanya
+
+Adegan: sebuah kuad Lambert tunggal, albedo (0,6 0,5 0,4), disinari langit
+atmosferik saja — tanpa lampu. **Cembung dan sendirian, dan itu syarat
+perbandingannya:** tingkat panggang tidak punya oklusi dan tidak punya
+antar-pantulan, jadi membandingkannya pada adegan yang punya keduanya mengukur
+apa yang memang tidak dimilikinya. Sebuah kuad tunggal tidak menghalangi langit
+dari dirinya sendiri dan tidak bisa memantul ke dirinya sendiri, jadi jawaban
+benarnya tepat `albedo/π · E(n)` — dan yang tersisa untuk diukur cuma
+panggangannya.
+
+Radiansi keluar, empat orientasi:
+
+| normal | path tracer acuan | tingkat panggang |
+|---|---|---|
+| menghadap ke atas | 0,1176 0,2369 0,3738 | 0,1289 0,2521 0,3849 |
+| menghadap matahari | 0,1569 0,2939 0,4259 | 0,1549 0,2902 0,4224 |
+| menyamping | 0,1401 0,2504 0,3342 | 0,1425 0,2541 0,3380 |
+| membelakangi matahari | 0,1255 0,2352 0,3280 | 0,1213 0,2291 0,3231 |
+
+**Selisih terburuk: 9,6% per kanal, 6,4% pada luminansinya.** Ambang yang
+ditetapkan **12% per kanal dan 8% pada luminansinya** — ruang untuk derau dan
+selisih platform, tanpa berhenti menangkap regresi: panggangan yang rusak
+meleset jauh lebih besar daripada ini.
+
+**Angka sebesar itu batas SH orde dua, bukan cacat**, dan yang membuktikannya
+uji kedua: path tracer acuan sendiri diadu dengan integrasi langsung atas peta
+yang sama, dan keduanya cocok dalam **0,02%–1,5%**. Acuan yang belum pernah
+diadu dengan jawaban yang dihitung cara lain adalah pendapat, bukan acuan —
+dan seluruh guna B5 bersandar padanya.
+
+Selisihnya paling besar di kanal paling redup: langit biru membuat merah
+sepertiga dari birunya, jadi selisih absolut yang sama terbaca tiga kali lebih
+besar di sana. Yang mendekati apa yang terlihat adalah angka luminansinya.
+
+**Sepertiga selisihnya datang dari cakrawala, bukan dari mataharinya.** Diukur
+dengan mengisi belahan bawah peta memakai warna cakrawalanya alih-alih hitam:
+selisih SH turun dari **9,66% ke 6,38%**. `AtmosphereSky` mengembalikan udara
+yang dilewati sinarnya saja dan tanahnya hitam, jadi ada loncatan tajam di
+seluruh lingkar cakrawala — dan tepi tajam adalah persis yang tidak bisa
+diwakili orde dua. Sisanya, 6,4%, adalah struktur sudut langitnya sendiri.
+
+Itu menyambung langsung ke batas yang sudah tertulis di B1: permukaan yang
+menghadap ke bawah tidak menerima pantulan tanah, karena pantulan tanah adalah
+transport cahaya dan tingkat panggang memang tidak punya itu. Yang memperbaiki
+angka B5 dan yang memperbaiki bawah objek yang gelap adalah pekerjaan yang
+sama.
+
+**Kedua sisi mencuplik satu peta equirect yang sama**, bukan atmosfer analitik.
+Dua alasannya: kalau acuannya mencuplik satu hal dan panggangannya mencuplik
+hal lain, selisih yang terukur memuat perbedaan pencupliknya — dan yang sedang
+diuji bukan itu. Yang kedua biaya: satu cuplikan atmosfer adalah satu ray march
+32 langkah, dan path tracer memanggilnya sekali untuk tiap sinar yang lolos.
+
+`reference::PathTracer` menerima langit sebagai `SkySampler` — sebuah fungsi
+`arah → radiansi` — bukan `render::IEnvironmentSampler`. Antarmuka itu tinggal
+di `Sim::Render`, dan menautkannya dari sana akan menyeret seluruh rantai Vulkan
+ke dalam path tracer yang seluruh gunanya berjalan di CPU.
 
 ### B6 — Kombinasi yang tidak sah dinyatakan
 
@@ -682,7 +741,6 @@ alih-alih menuntut satu yang tidak ikut di repo.
 
 ## Yang masih terbuka
 
-- **Ambang selisih B5** terhadap path tracer acuan: belum ditetapkan angkanya.
 - **Satuan.** Sky Gain dan HDR Gain tidak sesatuan, dan alasannya sudah tertulis
   di `SkyComponent`. Kalibrasi keduanya ke satuan fotometrik adalah pekerjaan
   tersendiri, bersama satuan emisi yang juga belum dikalibrasi
