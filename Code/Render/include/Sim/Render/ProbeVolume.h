@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <filesystem>
+#include <span>
 #include <string>
 #include <vector>
 
@@ -124,6 +125,32 @@ struct ProbeVolume {
     /// itu pula yang paling berarti bagi yang menyetel jaraknya.
     uint64_t GpuBytes() const;
 };
+
+/// Kotak dunia yang ditempati sesuatu — satu instance mesh, biasanya.
+struct ProbeOccupancy {
+    Vec3 minimum{0.0f};
+    Vec3 maximum{0.0f};
+};
+
+/// Tabel slot brick: brick yang dekat salah satu kotak mendapat slot berurutan,
+/// sisanya `kEmptyBrick` (S2, keputusan 9 di docs/PLAN-STATIC-GI.md).
+///
+/// **Kisi beraturan membayar probe untuk ruang kosong dan untuk ruang di dalam
+/// benda pejal.** Pada adegan besar itulah yang menghabiskan anggarannya, dan
+/// pertumbuhannya kubik: memperhalus dua kali lipat membayar delapan kali.
+/// Dengan brick yang dibuang, biayanya mengikuti luas permukaan alih-alih
+/// volume.
+///
+/// **`margin` bukan hiasan.** Sebuah titik di permukaan membaca delapan sudut
+/// selnya, dan sudut yang paling jauh berada satu jarak-antar-probe darinya —
+/// jadi brick yang hanya "menyentuh" geometri tidak cukup. Margin yang terlalu
+/// kecil menghasilkan permukaan yang membaca sudut yang tidak ada, dan
+/// normalisasi bobot menyelamatkan kecerahannya tetapi bukan arahnya.
+///
+/// Kotak kosong berarti seluruh brick dialokasikan — jawaban yang benar untuk
+/// pemanggil yang belum tahu di mana geometrinya.
+std::vector<uint32_t> AssignProbeBricks(const ProbeVolumeLayout& layout,
+                                        std::span<const ProbeOccupancy> volumes, float margin);
 
 /// Menyusun kisi yang menutupi sebuah kotak batas.
 ///

@@ -6003,6 +6003,13 @@ private:
         constexpr uint32_t kSide = ProbeVolumeLayout::kBrickSize;
         const glm::uvec3 bricks = layout.BrickCounts();
         for (uint32_t brick = 0; brick < layout.BrickCount(); ++brick) {
+            // Lewat tabel slotnya, bukan lewat nomor brick-nya: sejak S2 keduanya
+            // berbeda, dan menulis ke nomor brick berarti menulis ke luar larik
+            // yang sudah dipadatkan.
+            const uint32_t slot = probeBrickUpload_[brick];
+            if (slot == kEmptyBrick) {
+                continue;
+            }
             const glm::uvec3 brickAt(brick % bricks.x, (brick / bricks.x) % bricks.y,
                                      brick / (bricks.x * bricks.y));
             for (uint32_t local = 0; local < kSide * kSide * kSide; ++local) {
@@ -6016,7 +6023,7 @@ private:
                 // hilang justru di tempat ia harus terlihat, dan yang terbaca
                 // adalah "kisinya mati" untuk kisi yang bekerja.
                 const bool lit = ((probe.x + probe.z) & 1u) != 0u;
-                const std::size_t at = (static_cast<std::size_t>(brick) * kSide * kSide * kSide +
+                const std::size_t at = (static_cast<std::size_t>(slot) * kSide * kSide * kSide +
                                         local) *
                                        9;
                 probeUpload_[at] = Vec4(lit ? 4.0f : 0.0f, lit ? 4.0f : 0.0f, lit ? 4.0f : 0.0f,
@@ -6054,18 +6061,25 @@ private:
 
         Vec3 minimum(std::numeric_limits<float>::max());
         Vec3 maximum(std::numeric_limits<float>::lowest());
+        probeOccupancy_.clear();
+        probeOccupancy_.reserve(scene.meshes.size());
         for (const MeshInstance& mesh : scene.meshes) {
             // Kedelapan sudutnya, bukan kedua ujungnya: kotak yang diputar tidak
             // lagi sejajar sumbu, dan mentransformasi min/max saja menghasilkan
             // kisi yang berhenti di dalam geometri yang harus dinaunginya.
+            ProbeOccupancy box{Vec3(std::numeric_limits<float>::max()),
+                               Vec3(std::numeric_limits<float>::lowest())};
             for (int corner = 0; corner < 8; ++corner) {
                 const Vec3 local((corner & 1) != 0 ? mesh.boundsMax.x : mesh.boundsMin.x,
                                  (corner & 2) != 0 ? mesh.boundsMax.y : mesh.boundsMin.y,
                                  (corner & 4) != 0 ? mesh.boundsMax.z : mesh.boundsMin.z);
                 const Vec3 world = Vec3(mesh.transform * Vec4(local, 1.0f));
-                minimum = glm::min(minimum, world);
-                maximum = glm::max(maximum, world);
+                box.minimum = glm::min(box.minimum, world);
+                box.maximum = glm::max(box.maximum, world);
             }
+            probeOccupancy_.push_back(box);
+            minimum = glm::min(minimum, box.minimum);
+            maximum = glm::max(maximum, box.maximum);
         }
         if (!(minimum.x <= maximum.x)) {
             uniforms.probeCounts = Vec4(0.0f);
@@ -6100,22 +6114,35 @@ private:
                                                       Vec3(1e-3f)));
         if (!shapeUnchanged) {
             probeLayout_ = layout;
-            probeUpload_.assign(static_cast<std::size_t>(layout.FullProbeCount()) * 9, Vec4(0.0f));
-            // S1 mengisi seluruh brick. Yang mengosongkan brick yang jauh dari
-            // permukaan adalah S2, karena ia satu-satunya yang sudah menelusuri
-            // geometri.
-            probeBrickUpload_.resize(layout.BrickCount());
-            for (uint32_t brick = 0; brick < layout.BrickCount(); ++brick) {
-                probeBrickUpload_[brick] = brick;
+            // **Brick yang jauh dari permukaan dibuang (S2, keputusan 9).**
+            // Marginnya satu jarak-antar-probe: sebuah titik di permukaan
+            // membaca delapan sudut selnya, dan sudut yang paling jauh berada
+            // sejauh itu — brick yang hanya menyentuh geometri tidak cukup.
+            probeBrickUpload_ = AssignProbeBricks(layout, probeOccupancy_, layout.spacing);
+            uint32_t allocated = 0;
+            for (const uint32_t brickSlot : probeBrickUpload_) {
+                if (brickSlot != kEmptyBrick) {
+                    ++allocated;
+                }
             }
+            constexpr uint32_t kProbesPerBrick = ProbeVolumeLayout::kBrickSize *
+                                                 ProbeVolumeLayout::kBrickSize *
+                                                 ProbeVolumeLayout::kBrickSize;
+            probeAllocatedBricks_ = allocated;
+            probeUpload_.assign(
+                static_cast<std::size_t>(allocated) * kProbesPerBrick * 9, Vec4(0.0f));
             // **Disebutkan, karena jalur headless tidak punya panel.** Angka
             // yang sama yang dibaca World Settings sebelum Bake — dan tanpa
             // baris ini sebuah kisi yang diam-diam tidak pernah terbentuk
             // terlihat persis sama dengan kisi yang terbentuk dan menjawab hal
             // yang benar.
-            SIM_INFO("Render", "probe grid {}x{}x{} at {:.2f} m — {} probes in {} bricks",
-                     layout.counts.x, layout.counts.y, layout.counts.z, layout.spacing,
-                     layout.FullProbeCount(), layout.BrickCount());
+            SIM_INFO("Render",
+                     "probe grid {}x{}x{} at {:.2f} m — {} of {} bricks kept ({:.1f}%), {} probes",
+                     layout.counts.x, layout.counts.y, layout.counts.z, layout.spacing, allocated,
+                     layout.BrickCount(),
+                     100.0 * static_cast<double>(allocated) /
+                         static_cast<double>(std::max(layout.BrickCount(), 1u)),
+                     allocated * kProbesPerBrick);
         }
 
         // **Diisi ulang hanya ketika isinya berubah, dan itu diukur.**
@@ -6661,6 +6688,11 @@ private:
     /// seluruhnya.
     std::vector<Vec4> probeUpload_;
     std::vector<uint32_t> probeBrickUpload_;
+    /// Kotak dunia tiap instance mesh frame ini — yang menentukan brick mana
+    /// yang dialokasikan. Anggota, bukan variabel lokal, dengan alasan yang sama
+    /// seperti staging di atas.
+    std::vector<ProbeOccupancy> probeOccupancy_;
+    uint32_t probeAllocatedBricks_ = 0;
     /// SH yang sedang berada di dalam `probeUpload_`. Dibandingkan supaya isian
     /// ulangnya tidak terjadi setiap frame; lihat pengukurannya di sana.
     std::array<Vec3, 9> probeUploadedSh_{};

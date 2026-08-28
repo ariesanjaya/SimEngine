@@ -121,6 +121,69 @@ uint64_t ProbeVolume::GpuBytes() const {
            static_cast<uint64_t>(brickSlots.size()) * sizeof(uint32_t);
 }
 
+std::vector<uint32_t> AssignProbeBricks(const ProbeVolumeLayout& layout,
+                                        std::span<const ProbeOccupancy> volumes, float margin) {
+    std::vector<uint32_t> slots;
+    if (!layout.IsValid()) {
+        return slots;
+    }
+    const uint32_t brickCount = layout.BrickCount();
+    slots.assign(brickCount, kEmptyBrick);
+
+    if (volumes.empty()) {
+        // Pemanggil yang belum tahu di mana geometrinya mendapat kisi penuh.
+        // Itu jawaban yang benar dan bukan penambal: kisi yang dikosongkan
+        // karena daftar kosong adalah adegan yang gelap seluruhnya.
+        for (uint32_t brick = 0; brick < brickCount; ++brick) {
+            slots[brick] = brick;
+        }
+        return slots;
+    }
+
+    const glm::uvec3 bricks = layout.BrickCounts();
+    constexpr uint32_t kSide = ProbeVolumeLayout::kBrickSize;
+    const float brickExtent = static_cast<float>(kSide) * layout.spacing;
+
+    uint32_t next = 0;
+    for (const ProbeOccupancy& volume : volumes) {
+        // Rentang brick yang disentuh kotak ini, dilebarkan `margin` ke segala
+        // arah. Dihitung dari kotaknya, bukan dengan menelusuri seluruh brick
+        // untuk setiap kotak: yang kedua adalah O(brick × instance), dan pada
+        // adegan besar keduanya besar.
+        const Vec3 low = volume.minimum - Vec3(margin) - layout.origin;
+        const Vec3 high = volume.maximum + Vec3(margin) - layout.origin;
+        glm::uvec3 first(0u);
+        glm::uvec3 last(0u);
+        bool outside = false;
+        for (int axis = 0; axis < 3; ++axis) {
+            const float lowBrick = std::floor(low[axis] / brickExtent);
+            const float highBrick = std::floor(high[axis] / brickExtent);
+            if (highBrick < 0.0f || lowBrick >= static_cast<float>(bricks[axis])) {
+                outside = true;
+                break;
+            }
+            first[axis] = static_cast<uint32_t>(std::max(lowBrick, 0.0f));
+            last[axis] = static_cast<uint32_t>(
+                std::min(highBrick, static_cast<float>(bricks[axis]) - 1.0f));
+        }
+        if (outside) {
+            continue;
+        }
+
+        for (uint32_t z = first.z; z <= last.z; ++z) {
+            for (uint32_t y = first.y; y <= last.y; ++y) {
+                for (uint32_t x = first.x; x <= last.x; ++x) {
+                    const uint32_t index = (z * bricks.y + y) * bricks.x + x;
+                    if (slots[index] == kEmptyBrick) {
+                        slots[index] = next++;
+                    }
+                }
+            }
+        }
+    }
+    return slots;
+}
+
 ProbeVolumeLayout MakeProbeLayout(const Vec3& boundsMin, const Vec3& boundsMax, float spacing) {
     ProbeVolumeLayout layout;
     layout.spacing = std::max(spacing, 1e-3f);

@@ -6453,3 +6453,95 @@ TEST_CASE("S1: artefak probe bolak-balik, dan yang rusak ditolak") {
     std::error_code cleanup;
     std::filesystem::remove(file, cleanup);
 }
+
+// --- S2: brick yang jauh dari permukaan dibuang ------------------------------
+
+TEST_CASE("S2: brick jauh dari geometri dibuang, yang dekat tetap ada") {
+    // **Keputusan 9.** Kisi beraturan membayar probe untuk ruang kosong dan
+    // untuk ruang di dalam benda pejal, dan pertumbuhannya kubik. Yang dibuang
+    // di sini ruang kosongnya; yang di dalam benda pejal menunggu S3, karena
+    // membedakan "di dalam dinding" dari "di depan dinding" menuntut tahu ke
+    // mana normalnya menghadap.
+    const render::ProbeVolumeLayout layout =
+        render::MakeProbeLayout(Vec3(-16.0f, -16.0f, -16.0f), Vec3(16.0f), 1.0f);
+    REQUIRE(layout.IsValid());
+
+    // Satu benda kecil di tengah adegan yang besar.
+    const std::array<render::ProbeOccupancy, 1> volumes{
+        render::ProbeOccupancy{Vec3(-1.0f), Vec3(1.0f)}};
+
+    const std::vector<uint32_t> slots =
+        render::AssignProbeBricks(layout, volumes, layout.spacing);
+    REQUIRE(slots.size() == layout.BrickCount());
+
+    const auto allocated = static_cast<uint32_t>(
+        std::count_if(slots.begin(), slots.end(),
+                      [](uint32_t slot) { return slot != render::kEmptyBrick; }));
+    MESSAGE(allocated, " dari ", layout.BrickCount(), " brick dialokasikan (",
+            100.0 * allocated / layout.BrickCount(), "%)");
+    CHECK(allocated > 0);
+    CHECK(allocated < layout.BrickCount() / 4);
+
+    // Slotnya berurutan dan tidak ada yang bertabrakan — kalau dua brick
+    // memakai slot yang sama, yang satu menimpa isi yang lain dan gambarnya
+    // tetap mulus.
+    std::vector<int> seen(allocated, 0);
+    for (const uint32_t slot : slots) {
+        if (slot == render::kEmptyBrick) {
+            continue;
+        }
+        REQUIRE(slot < allocated);
+        CHECK(seen[slot] == 0);
+        seen[slot] = 1;
+    }
+
+    // Brick yang memuat titik asal wajib ada; yang di sudut terjauh wajib tidak.
+    glm::uvec3 base(0u);
+    Vec3 fraction(0.0f);
+    render::ProbeCell(layout, Vec3(0.0f), base, fraction);
+    CHECK(slots[render::ProbeBrickIndex(layout, base)] != render::kEmptyBrick);
+    render::ProbeCell(layout, Vec3(15.5f), base, fraction);
+    CHECK(slots[render::ProbeBrickIndex(layout, base)] == render::kEmptyBrick);
+}
+
+TEST_CASE("S2: daftar kotak kosong berarti kisi penuh, bukan kisi kosong") {
+    // Pemanggil yang belum tahu di mana geometrinya — jalur uji, jalur sebelum
+    // pemuatan mesh selesai — harus mendapat kisi yang lengkap. Kisi yang
+    // dikosongkan karena daftarnya kosong adalah adegan yang gelap seluruhnya,
+    // dan itu terbaca sebagai panggangan yang gagal.
+    const render::ProbeVolumeLayout layout =
+        render::MakeProbeLayout(Vec3(0.0f), Vec3(8.0f), 1.0f);
+    const std::vector<uint32_t> slots = render::AssignProbeBricks(layout, {}, 1.0f);
+    REQUIRE(slots.size() == layout.BrickCount());
+    CHECK(std::none_of(slots.begin(), slots.end(),
+                       [](uint32_t slot) { return slot == render::kEmptyBrick; }));
+}
+
+TEST_CASE("S2: permukaan tetap punya kedelapan sudutnya sesudah brick dibuang") {
+    // **Cacat yang paling mungkin dari keputusan 9, dan ia sunyi.** Sebuah titik
+    // di permukaan membaca delapan sudut selnya; sudut yang paling jauh berada
+    // satu jarak-antar-probe darinya. Brick yang hanya "menyentuh" geometri
+    // karena itu tidak cukup, dan yang kurang tidak menghasilkan galat melainkan
+    // arah cahaya yang meleset di dekat dinding — normalisasi bobot
+    // menyelamatkan kecerahannya, bukan arahnya.
+    const render::ProbeVolumeLayout layout =
+        render::MakeProbeLayout(Vec3(-8.0f), Vec3(8.0f), 1.0f);
+    const std::array<render::ProbeOccupancy, 1> volumes{
+        render::ProbeOccupancy{Vec3(-2.0f, -0.1f, -2.0f), Vec3(2.0f, 0.1f, 2.0f)}};
+    const std::vector<uint32_t> slots =
+        render::AssignProbeBricks(layout, volumes, layout.spacing);
+
+    // Setiap titik di atas lantai itu, termasuk tepinya.
+    for (float x = -2.0f; x <= 2.0f; x += 0.37f) {
+        for (float z = -2.0f; z <= 2.0f; z += 0.41f) {
+            glm::uvec3 base(0u);
+            Vec3 fraction(0.0f);
+            render::ProbeCell(layout, Vec3(x, 0.0f, z), base, fraction);
+            for (uint32_t corner = 0; corner < 8; ++corner) {
+                const glm::uvec3 probe = render::ProbeCorner(layout, base, corner);
+                INFO("titik (", x, ",0,", z, ") sudut ", corner);
+                CHECK(slots[render::ProbeBrickIndex(layout, probe)] != render::kEmptyBrick);
+            }
+        }
+    }
+}
