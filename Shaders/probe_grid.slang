@@ -155,6 +155,20 @@ float3 probeBiasedPosition(float3 position, float3 normal) {
     return position + normalize(normal) * kProbeVisibilityBias;
 }
 
+/// Seberapa jauh jawaban ber-visibilitas boleh dipercaya, dari bagian bobot
+/// trilinear yang bertahan.
+///
+/// Satu berarti hampir tidak ada yang ditolak — pakai jawaban ber-visibilitas
+/// apa adanya. Nol berarti hampir seluruhnya ditolak, dan yang benar lalu adalah
+/// rata-rata trilinear biasa: bocor sedikit lebih baik daripada lorong hitam
+/// yang bentuknya mengikuti kisi.
+float probeConfidence(float weightedTotal, float plainTotal) {
+    if (plainTotal <= 1e-6) {
+        return 0.0;
+    }
+    return smoothstep(0.0, kProbeConfidenceFloor, weightedTotal / plainTotal);
+}
+
 /// Bobot visibilitas sebuah probe untuk titik yang dinaunginya — uji Chebyshev.
 ///
 /// `distance` jarak dari probe ke titik teduh; `mean` dan `meanSquare` dibaca
@@ -165,6 +179,24 @@ float3 probeBiasedPosition(float3 position, float3 normal) {
 /// dalam benda pejal punya `mean` mendekati nol ke segala arah, jadi setiap
 /// titik di luar benda itu berada jauh di baliknya — dan bobotnya jatuh ke nol
 /// tanpa satu pun cabang khusus tentang "di dalam".
+/// Berapa bagian bobot trilinear yang harus bertahan sebelum jawaban
+/// ber-visibilitas dipercaya sepenuhnya.
+///
+/// **Ini menjawab keadaan tempat visibilitas kehabisan pilihan.** Sebuah koridor
+/// yang lebih sempit daripada jarak antar-probe menaruh hampir seluruh sudut
+/// selnya di dalam dinding; yang tersisa sesudah penolakan cuma satu-dua probe
+/// terang di luar, dan menormalkan ke sana berarti menyatakan seluruh bobotnya
+/// milik mereka. Diukur di koridor 0,6 m pada kisi 2 m: jawabannya 0,319
+/// sedangkan acuannya 0,129 — dua setengah kali terlalu terang, dan **empat
+/// setengah kali lebih jauh dari acuan** daripada tanpa visibilitas sama sekali.
+///
+/// **Melantai bobot tiap probe sempat menjadi jawabannya, lalu diukur dan
+/// ditinggalkan.** Lantai yang cukup tinggi untuk menyelamatkan koridor (0,40)
+/// memotong perbaikan riak kisi 1 m dari −34% menjadi −10%: ia melemahkan
+/// penolakan di mana-mana demi keadaan yang jarang. Yang di sini hanya bekerja
+/// ketika informasinya memang habis.
+static const float kProbeConfidenceFloor = 0.05;
+
 float probeVisibilityWeight(float distance, float mean, float meanSquare) {
     if (distance <= mean) {
         return 1.0;
@@ -178,5 +210,6 @@ float probeVisibilityWeight(float distance, float mean, float meanSquare) {
     const float chebyshev = variance / (variance + delta * delta);
     // Dipangkatkan tiga supaya peralihannya tidak terlalu landai; angka yang
     // sama dipakai DDGI, dan yang menggantikannya harus datang dengan gambar.
+    //
     return chebyshev * chebyshev * chebyshev;
 }

@@ -235,10 +235,13 @@ float3 probeIrradiance(float3 worldPosition, float3 normal) {
               base, fraction);
 
     float3 accumulated[9];
+    float3 plain[9];
     for (int i = 0; i < 9; ++i) {
         accumulated[i] = float3(0.0);
+        plain[i] = float3(0.0);
     }
     float total = 0.0;
+    float plainTotal = 0.0;
 
     for (uint corner = 0u; corner < 8u; ++corner) {
         const float weight = probeCornerWeight(corner, fraction);
@@ -284,15 +287,23 @@ float3 probeIrradiance(float3 worldPosition, float3 normal) {
 
         for (int i = 0; i < 9; ++i) {
             accumulated[i] += sh[i] * weighted;
+            plain[i] += sh[i] * weight;
         }
         total += weighted;
+        plainTotal += weight;
     }
 
-    if (total <= 0.0) {
+    if (plainTotal <= 0.0) {
         return float3(0.0);
     }
+    // **Dua jawaban, lalu dicampur menurut berapa banyak yang bertahan.**
+    // Menormalkan hanya ke yang bertahan berarti menyatakan seluruh bobotnya
+    // milik mereka — dan di koridor yang lebih sempit daripada kisinya itu
+    // menghasilkan jawaban dua setengah kali terlalu terang.
+    const float confidence = probeConfidence(total, plainTotal);
     for (int i = 0; i < 9; ++i) {
-        accumulated[i] /= total;
+        const float3 weightedAverage = total > 0.0 ? accumulated[i] / total : float3(0.0);
+        accumulated[i] = lerp(plain[i] / plainTotal, weightedAverage, confidence);
     }
     // **Putaran lingkungan diterapkan hanya bila isinya memang datang dari
     // lingkungan.** Di S1 tiap probe memuat SH langit apa adanya — dipanggang

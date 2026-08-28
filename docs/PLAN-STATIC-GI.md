@@ -700,6 +700,50 @@ Versi artefak naik ke 2, ukuran peta masuk ke header, dan pembacanya menolak
 ukuran yang bukan miliknya — peta 16×16 yang dibaca sebagai 8×8 tidak gagal, ia
 menghasilkan visibilitas yang benar isinya dan salah tempatnya.
 
+##### Yang ditemukan peninjauan: batas yang tidak bisa dibobot
+
+**Koridor yang lebih sempit daripada jarak antar-probe adalah keadaan tempat
+visibilitas kehabisan pilihan.** Diuji pada celah 0,6 m dengan kisi 2 m, diadu
+dengan acuan yang ditelusuri langsung (0,129):
+
+| | jawaban | kesalahan |
+|---|---:|---:|
+| tanpa visibilitas | 0,086 | 0,042 — terlalu gelap |
+| dengan visibilitas | 0,289 | 0,160 — terlalu terang |
+| **kisi 0,5 m, keduanya** | **0,113** | **0,016** |
+
+Sudut selnya hampir seluruhnya berada di dalam dinding, dan yang di dalam
+dipanggang nol. Menolaknya benar — nilainya memang tidak berarti — tetapi yang
+tersisa adalah probe di luar koridor, dan menormalkan ke sana berarti menyatakan
+seluruh bobotnya milik mereka. Nol-nol itu sebelumnya kebetulan menyeimbangkan
+ke arah yang lain.
+
+**Tidak ada pembobotan yang bisa mengarang informasi yang tidak dipanggang.**
+Kisi 2 m tidak punya satu pun probe yang melihat apa yang dilihat lantai
+koridor. Pada kisi 0,5 m kedua jalur menjawab **identik** — tidak ada yang
+terhalang, jadi tidak ada yang perlu ditolak — dan sepuluh kali lebih dekat ke
+acuan. Yang menyelesaikannya kerapatan, dan itu setelan pengarang (keputusan 8),
+bukan bobot.
+
+**Dua penambal dicoba dan ditinggalkan dengan angka.** Melantai bobot tiap probe
+pada 0,40 menyelamatkan koridor (kesalahan 0,028) tetapi memotong perbaikan riak
+kisi 1 m dari −34% menjadi **−10%**: ia melemahkan penolakan di mana-mana demi
+keadaan yang jarang. Mencampur balik menurut bobot yang bertahan, dengan ambang
+0,35, memberi hasil yang sama buruknya (riak 1 m −13%) sambil hampir tidak
+menolong koridornya. Yang tersisa terpasang adalah campuran itu dengan ambang
+**0,05** — ia berperilaku identik dengan tanpa campuran pada seluruh kasus yang
+diukur, dan hanya menyala ketika benar-benar tidak ada sudut yang bertahan.
+
+Sebuah lorong hitam pekat yang bentuknya mengikuti kisi lebih buruk daripada
+cahaya yang salah, dan itulah yang dijaga ambang itu.
+
+##### Satu penyederhanaan yang disebutkan
+
+Peta kedalaman dibaca **texel terdekat**, tanpa interpolasi antar-texel dan
+tanpa texel tepi. 64 arah per probe berarti bobot visibilitasnya bertangga dalam
+arah. Uji kemulusan tidak menangkapnya — langkah terbesarnya 3,1% dari rentang —
+tetapi ia belum diuji pada geometri yang tepinya tajam dan dekat.
+
 ##### Harganya
 
 Peta kedalaman lima kali SH-nya. `bench.simlevel` pada 2 m: 0,88 MB menjadi

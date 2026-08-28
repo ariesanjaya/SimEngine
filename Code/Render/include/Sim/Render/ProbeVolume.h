@@ -231,6 +231,11 @@ float ProbeVisibilityWeight(float distance, float mean, float meanSquare);
 /// `Shaders/probe_grid.slang`**; ujinya mengadu keduanya.
 inline constexpr float kProbeVisibilityBias = 0.15f;
 
+/// Bagian bobot trilinear yang harus bertahan sebelum jawaban ber-visibilitas
+/// dipercaya sepenuhnya. **Harus sama dengan `kProbeConfidenceFloor` di
+/// `Shaders/probe_grid.slang`.**
+inline constexpr float kProbeConfidenceFloor = 0.05f;
+
 /// Iradiansi pada sebuah posisi dunia, dengan bobot visibilitas ikut
 /// diperhitungkan bila kisinya membawanya (S3).
 ///

@@ -1487,6 +1487,94 @@ TEST_CASE("S3: sel yang melintasi dinding menjawab jauh lebih dekat ke acuan") {
     CHECK(std::abs(sealed - reference) * 4.0f < std::abs(leaked - reference));
 }
 
+TEST_CASE("S3: koridor lebih sempit daripada kisinya tidak menjadi hitam pekat") {
+    // **Yang diperiksa di sini keadaan tempat visibilitas kehabisan pilihan.**
+    // Sebuah koridor yang lebih sempit daripada jarak antar-probe menaruh
+    // kedelapan sudut selnya di dalam dinding — dan yang di dalam dipanggang
+    // nol lalu ditolak bobot Chebyshev. Kalau kedelapannya ditolak, tidak ada
+    // yang tersisa untuk dinormalkan, dan permukaannya menerima **nol**.
+    //
+    // Nol di sana lebih buruk daripada bocor: bocor terlihat sebagai cahaya yang
+    // sedikit salah, sedangkan nol adalah lorong hitam pekat yang bentuknya
+    // mengikuti kisi — dan tingkat S2 yang tanpa visibilitas justru tidak
+    // punya cacat itu.
+    using namespace sim::reference;
+    using namespace sim::render;
+
+    const GradientSky sky;
+    TraceSettings trace;
+    trace.sky = [&sky](const Vec3& direction) { return sky.Sample(direction); };
+
+    Scene scene;
+    Surface surface;
+    surface.baseColor = Vec3(0.5f);
+    surface.specularWeight = 0.0f;
+    surface.specularRoughness = 1.0f;
+    const uint32_t material = scene.AddMaterial(surface);
+    scene.AddQuad(Vec3(-12.0f, 0.0f, -12.0f), Vec3(24.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, 24.0f),
+                  material);
+    // Dua balok tebal dengan celah 0,6 m di antaranya — jauh lebih sempit
+    // daripada kisi 2 m di bawah.
+    scene.AddBox(Vec3(-6.0f, 0.0f, -6.0f), Vec3(-0.3f, 4.0f, 6.0f), material);
+    scene.AddBox(Vec3(0.3f, 0.0f, -6.0f), Vec3(6.0f, 4.0f, 6.0f), material);
+
+    raycast::RayScene rayScene;
+    scene.Commit(rayScene);
+
+    const ProbeVolumeLayout layout =
+        MakeProbeLayout(Vec3(-8.0f, 0.0f, -8.0f), Vec3(8.0f, 4.0f, 8.0f), 2.0f);
+    const ProbeVolume volume = BakeWithVisibility(scene, rayScene, layout, trace, 128, 32);
+    REQUIRE(volume.HasVisibility());
+
+    const Vec3 normal(0.0f, 1.0f, 0.0f);
+    const Vec3 inCorridor(0.0f, 0.5f, 0.0f);
+    const float lit = EvaluateIrradiance(SampleProbeVolumeAt(volume, inCorridor, normal), normal).y;
+    const float plain = EvaluateIrradiance(SampleProbeVolume(volume, inCorridor), normal).y;
+    Sh9 truth;
+    truth.coefficients = TraceProbeIrradiance(rayScene, scene.Resolver(), scene.Lights(),
+                                              inCorridor, 4096, trace);
+    const float reference = EvaluateIrradiance(truth, normal).y;
+
+    MESSAGE("kisi 2 m — dengan visibilitas ", lit, ", tanpa ", plain, ", acuan ", reference);
+
+    // Koridor selebar 0,6 m di bawah langit terbuka **tidak** gelap gulita: ia
+    // melihat sepotong langit lurus ke atas. Yang dijamin di sini bukan
+    // ketelitian melainkan bahwa jawabannya tetap hidup — sebuah lorong hitam
+    // pekat yang bentuknya mengikuti kisi lebih buruk daripada cahaya yang
+    // salah, dan itulah yang terjadi kalau seluruh sudut ditolak lalu tidak ada
+    // yang tersisa untuk dinormalkan.
+    REQUIRE(reference > 0.01f);
+    CHECK(lit > 0.0f);
+
+    // **Dan inilah batasnya, dinyatakan sebagai angka alih-alih didiamkan.**
+    // Kisi 2 m tidak punya satu pun probe yang melihat apa yang dilihat lantai
+    // koridor selebar 0,6 m. Tidak ada pembobotan yang bisa mengarang informasi
+    // yang tidak dipanggang: yang tanpa visibilitas meleset ke arah gelap, yang
+    // dengan visibilitas meleset ke arah terang, dan acuannya di antara
+    // keduanya. Yang menyelesaikannya kerapatan kisi, bukan bobot.
+    const ProbeVolumeLayout fine =
+        MakeProbeLayout(Vec3(-8.0f, 0.0f, -8.0f), Vec3(8.0f, 4.0f, 8.0f), 0.5f);
+    const ProbeVolume dense = BakeWithVisibility(scene, rayScene, fine, trace, 128, 32);
+    const float denseLit =
+        EvaluateIrradiance(SampleProbeVolumeAt(dense, inCorridor, normal), normal).y;
+    const float densePlain =
+        EvaluateIrradiance(SampleProbeVolume(dense, inCorridor), normal).y;
+    MESSAGE("kisi 0,5 m — dengan visibilitas ", denseLit, ", tanpa ", densePlain, ", acuan ",
+            reference);
+    MESSAGE("kesalahan 2 m: ", std::abs(lit - reference), " (dengan) lawan ",
+            std::abs(plain - reference), " (tanpa)");
+    MESSAGE("kesalahan 0,5 m: ", std::abs(denseLit - reference), " (dengan) lawan ",
+            std::abs(densePlain - reference), " (tanpa)");
+
+    // **Pada kisi yang cukup rapat, visibilitas tidak mengubah apa pun** — dan
+    // itu jawaban yang benar, bukan fitur yang mati: tidak ada satu pun probe
+    // yang terhalang dari titik itu, jadi tidak ada yang perlu ditolak.
+    CHECK(denseLit == doctest::Approx(densePlain).epsilon(1e-4));
+    // Yang menyelesaikan koridornya kerapatan, dan angkanya sepuluh kali lipat.
+    CHECK(std::abs(denseLit - reference) * 2.0f < std::abs(plain - reference));
+    CHECK(std::abs(denseLit - reference) * 2.0f < std::abs(lit - reference));
+}
+
 TEST_CASE("S3: melintasi tepi meja berubah mulus, tanpa loncatan di batas sel") {
     // **Bagian kedua kriteria terima.** Bobot visibilitas membuang sudut
     // interpolasi secara rutin, bukan sesekali — dan sudut yang hilang tiba-tiba

@@ -361,7 +361,9 @@ Sh9 SampleProbeVolumeAt(const ProbeVolume& volume, const Vec3& position,
     Vec3 fraction(0.0f);
     ProbeCell(layout, position, base, fraction);
 
+    Sh9 plain;
     float totalWeight = 0.0f;
+    float plainWeight = 0.0f;
     for (uint32_t corner = 0; corner < 8; ++corner) {
         const float trilinear = ProbeCornerWeight(corner, fraction);
         if (trilinear <= 0.0f) {
@@ -397,23 +399,32 @@ Sh9 SampleProbeVolumeAt(const ProbeVolume& volume, const Vec3& position,
         }
 
         const float weight = trilinear * visibility;
-        if (weight <= 0.0f) {
-            continue;
-        }
         const Sh9& probeSh = volume.probes[slot];
         for (std::size_t i = 0; i < result.coefficients.size(); ++i) {
             result.coefficients[i] += probeSh.coefficients[i] * weight;
+            plain.coefficients[i] += probeSh.coefficients[i] * trilinear;
         }
         totalWeight += weight;
+        plainWeight += trilinear;
     }
 
     // **Dinormalkan terhadap bobot yang benar-benar terpakai**, alasan yang sama
     // dengan `SampleProbeVolume` — dan di sini ia lebih penting lagi: bobot
     // visibilitas membuang sudut secara rutin, bukan sesekali.
-    if (totalWeight > 1e-6f) {
-        for (Vec3& coefficient : result.coefficients) {
-            coefficient /= totalWeight;
-        }
+    if (plainWeight <= 1e-6f) {
+        return Sh9{};
+    }
+    // **Dua jawaban, lalu dicampur menurut berapa banyak yang bertahan** —
+    // cerminan `probeIrradiance` di shader, dan alasannya di
+    // `kProbeConfidenceFloor`.
+    const float ratio = totalWeight / plainWeight;
+    const float t = std::clamp(ratio / kProbeConfidenceFloor, 0.0f, 1.0f);
+    const float confidence = t * t * (3.0f - 2.0f * t);
+    for (std::size_t i = 0; i < result.coefficients.size(); ++i) {
+        const Vec3 weighted =
+            totalWeight > 1e-6f ? result.coefficients[i] / totalWeight : Vec3(0.0f);
+        result.coefficients[i] =
+            glm::mix(plain.coefficients[i] / plainWeight, weighted, confidence);
     }
     return result;
 }
