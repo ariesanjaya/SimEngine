@@ -15,11 +15,18 @@ enum class IndirectLighting : uint8_t {
     /// Tidak ada cahaya tak-langsung sama sekali. Untuk pengukuran dan untuk
     /// melihat albedo apa adanya.
     None,
-    /// Dipanggang sekali dari lingkungannya: SH9 untuk difus, prefilter untuk
-    /// spekular.
-    Baked,
-    /// Probe GI yang ditelusuri saat berjalan. Satu-satunya tingkat yang punya
-    /// oklusi benar — dan satu-satunya yang membayarnya tiap frame.
+    /// Seluruhnya dipanggang: lingkungan, transport cahaya, dan oklusinya.
+    ///
+    /// **Bernama `Baked` sampai S0, dan namanya berubah karena artinya
+    /// berubah.** Yang lama berarti "lingkungannya dipanggang" — sembilan angka
+    /// untuk seluruh level, tanpa oklusi dan tanpa pantulan. Yang sekarang
+    /// berarti kategori: adegan yang mataharinya diam, sehingga transport
+    /// cahayanya bisa ikut dipanggang. Rinciannya di docs/PLAN-STATIC-GI.md.
+    ///
+    /// Berkas yang menulis `"Baked"` dinaikkan migrasi skema 4 → 5.
+    Precomputed,
+    /// Probe GI yang ditelusuri saat berjalan. Untuk adegan yang mataharinya
+    /// bergerak — dan yang membayarnya tiap frame.
     RealTime,
 };
 
@@ -79,7 +86,7 @@ enum class ExposureModeKind : uint8_t {
 /// menyalakan pass langit. Yang di sini adalah bagaimana adegan *disinari*. Satu
 /// sumber untuk "langit yang mana", satu setelan untuk "menyinari bagaimana".
 struct WorldSettings {
-    IndirectLighting indirect = IndirectLighting::Baked;
+    IndirectLighting indirect = IndirectLighting::Precomputed;
     EnvironmentSource environment = EnvironmentSource::Sky;
     ExposureModeKind exposureMode = ExposureModeKind::Automatic;
     /// Kompensasi dalam stop, berlaku pada kedua mode. Positif berarti lebih
@@ -135,6 +142,22 @@ inline bool IsUnsupported(const WorldSettings& settings) {
 /// hanya bila adegan punya `SkyComponent` bersumber `Atmosphere` yang menyala.
 inline bool RealTimeHasNoSky(const WorldSettings& settings, bool proceduralSky) {
     return settings.indirect == IndirectLighting::RealTime && !proceduralSky;
+}
+
+/// True bila Time-of-Day menggerakkan matahari di adegan yang transportnya
+/// dipanggang (S0).
+///
+/// **Precomputed berdiri di atas satu andaian: mataharinya diam.** Itu bukan
+/// pembatasan yang dipilih melainkan syarat yang membuat transport bisa
+/// dipanggang sama sekali. Menggerakkannya berarti pantulan dan oklusi yang
+/// datang dari matahari di tempat lain — dan tidak ada satu pun galat yang
+/// menyebutkannya, hanya bayangan langsung yang bergerak sementara bayangan
+/// tak-langsungnya diam.
+///
+/// Dinyatakan, bukan didiamkan; pola yang sama dengan `RealTimeHasNoSky` dan
+/// dengan B6.
+inline bool PrecomputedFightsTimeOfDay(const WorldSettings& settings, bool timeOfDayDrivesSun) {
+    return settings.indirect == IndirectLighting::Precomputed && timeOfDayDrivesSun;
 }
 
 }  // namespace sim::scene

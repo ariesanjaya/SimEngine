@@ -195,9 +195,9 @@ void RegisterCoreComponents() {
         types.Type<WorldSettings>("WorldSettings")
             .Field<&WorldSettings::indirect>("indirect")
             .Label("Indirect Lighting")
-            .EnumNames({"None", "Baked", "RealTime"})
-            .Tooltip("None mematikannya; Baked dipanggang sekali dari lingkungan; "
-                     "RealTime menelusuri probe tiap frame — satu-satunya yang punya oklusi")
+            .EnumNames({"None", "Precomputed", "RealTime"})
+            .Tooltip("None mematikannya; Precomputed memanggang seluruhnya dan menuntut "
+                     "matahari yang diam; RealTime menelusurinya tiap frame")
             .Field<&WorldSettings::environment>("environment")
             .Label("Environment")
             .EnumNames({"Sky", "File"})

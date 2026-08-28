@@ -239,7 +239,7 @@ Matahari langsung lewat shadow map di ketiganya.
 
 ## Milestone
 
-### S0 — Dua kategori, dinyatakan
+### S0 — Dua kategori, dinyatakan · ✅
 
 - `IndirectLighting` menjadi `None | Precomputed | RealTime`
 - Migrasi berkas: `"Baked"` dibaca sebagai `Precomputed`
@@ -250,6 +250,35 @@ Matahari langsung lewat shadow map di ketiganya.
 satu pun perubahan rupa; menyalakan Time-of-Day di level `Precomputed` memberi
 notifikasi dengan jalan keluar sekali klik; dan `.simlevel` yang disimpan ulang
 menulis nama baru.
+
+#### Keadaannya sesudah S0
+
+`IndirectLighting::Baked` menjadi `Precomputed`, dan skema level naik ke 5.
+Dua level yang bedanya hanya kata itu — satu versi 4 menulis `"Baked"`, satu
+versi 5 menulis `"Precomputed"` — menghasilkan tangkapan yang **identik byte
+demi byte**.
+
+**Migrasinya ada justru karena tanpanya berkas lama tetap terbaca benar.**
+`"Baked"` tidak ada di daftar nama yang baru, jadi pembacanya membiarkan nilai
+bawaan — dan bawaannya kebetulan `Precomputed`, nilai yang sama. Kebetulan itu
+berhenti berlaku pada hari seseorang mengubah bawaannya, di tempat yang tidak
+ada hubungannya sama sekali. Ujinya karena itu memeriksa dua hal sekaligus:
+`"Baked"` naik menjadi `Precomputed`, dan `"None"` maupun `"RealTime"` **tidak**
+tersentuh — migrasi yang mengubah lebih daripada janjinya menghapus pilihan
+orang tanpa menyebutkannya.
+
+**Time-of-Day dinyatakan bertabrakan**, dengan dua jalan keluar sekali klik:
+menghentikan Time-of-Day, atau pindah ke `RealTime`. Yang pertama tidak lewat
+perintah — `timeOfDayEnabled` setelan editor, bukan isi level, dan yang tidak
+pernah tertulis ke berkas tidak punya tempat di riwayat undo level.
+
+**Panelnya mengatakan apa yang belum dipanggang**, dan itu bukan hiasan:
+`Precomputed` hari ini memanggang lingkungannya dan itu saja. Tingkat yang
+menjanjikan lebih daripada yang diberikannya membuat orang mencari cacat pada
+adegannya alih-alih pada rencananya. Daftarnya menyusut tiap milestone —
+transport di S2, oklusi di S3, lightmap di S5.
+
+Tiga uji baru di `SimSceneTests`, 25 dari 25 suite lulus.
 
 ### S1 — Probe volume: kisi, penempatan, penyimpanan
 

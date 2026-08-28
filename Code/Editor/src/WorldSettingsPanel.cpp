@@ -89,6 +89,8 @@ public:
         }
 
         DrawUnsupportedNotice(context);
+        DrawTimeOfDayConflict(context);
+        DrawBakeStatus(context);
         DrawSunExtraction(context);
     }
 
@@ -111,6 +113,66 @@ private:
             }
         }
         return scene::kNullEntity;
+    }
+
+    /// Menyatakan Time-of-Day yang bertabrakan dengan tingkat Precomputed (S0).
+    ///
+    /// **Precomputed berdiri di atas satu andaian: mataharinya diam.** Itu bukan
+    /// pembatasan yang dipilih melainkan syarat yang membuat transport bisa
+    /// dipanggang sama sekali. Time-of-Day menggerakkannya tiap frame, dan yang
+    /// terlihat kemudian bukan galat melainkan bayangan langsung yang bergerak
+    /// sementara bayangan tak-langsungnya diam — dan itu terbaca sebagai "GI-nya
+    /// rusak", bukan sebagai dua setelan yang tidak boleh menyala bersamaan.
+    static void DrawTimeOfDayConflict(EditorContext& context) {
+        if (!scene::PrecomputedFightsTimeOfDay(context.world->Settings(),
+                                               context.timeOfDayEnabled)) {
+            return;
+        }
+        ImGui::Separator();
+        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.94f, 0.72f, 0.35f, 1.0f));
+        ImGui::TextWrapped(
+            "Time of Day menggerakkan matahari, dan tingkat Precomputed memanggang "
+            "transport cahayanya dengan andaian matahari yang diam. Pantulan dan oklusinya "
+            "akan datang dari matahari di tempat lain.");
+        ImGui::PopStyleColor();
+
+        if (ImGui::Button("Hentikan Time of Day")) {
+            // Bukan lewat perintah: `timeOfDayEnabled` setelan editor, bukan isi
+            // level — ia tidak pernah tertulis ke berkas dan karena itu tidak
+            // punya tempat di riwayat undo level.
+            context.timeOfDayEnabled = false;
+        }
+        ImGui::SameLine();
+        if (ImGui::Button("Pakai tingkat RealTime")) {
+            const scene::WorldSettings before = context.world->Settings();
+            scene::WorldSettings dynamic = before;
+            dynamic.indirect = scene::IndirectLighting::RealTime;
+            context.history->CloseMergeGroup();
+            context.history->Execute<SetWorldSettingsCommand>(context.world, before, dynamic);
+        }
+    }
+
+    /// Mengatakan apa yang sudah dipanggang dan apa yang belum.
+    ///
+    /// **Ada karena `Precomputed` hari ini belum menepati namanya.** Ia
+    /// memanggang lingkungannya — dan itu saja; transport dan oklusinya menyusul
+    /// di S1–S5. Tingkat yang menjanjikan lebih daripada yang diberikannya
+    /// adalah tingkat yang membuat orang mencari cacat pada adegannya alih-alih
+    /// pada rencananya.
+    static void DrawBakeStatus(EditorContext& context) {
+        if (context.world->Settings().indirect != scene::IndirectLighting::Precomputed) {
+            return;
+        }
+        ImGui::Separator();
+        ImGui::TextUnformatted("Sudah dipanggang:");
+        ImGui::BulletText("Lingkungan — iradiansi SH dan prafilter spekular");
+        ImGui::TextDisabled("Belum dipanggang:");
+        ImGui::Indent();
+        ImGui::TextDisabled("• Transport cahaya (pantulan antar-permukaan) — S2");
+        ImGui::TextDisabled("• Oklusi dan AO — S3");
+        ImGui::TextDisabled("• Lightmap permukaan statis — S5");
+        ImGui::Unindent();
+        ImGui::TextDisabled("Sampai itu ada, langit berlaku sama di ruang tertutup.");
     }
 
     /// Menawarkan memindahkan matahari dari berkas lingkungan ke lampu
@@ -295,9 +357,9 @@ private:
         // hanya menyebutkan masalahnya menyerahkan pekerjaannya kembali kepada
         // yang membacanya — dan yang membacanya belum tentu tahu setelan mana
         // yang harus digeser.
-        if (ImGui::Button("Pakai tingkat Baked")) {
+        if (ImGui::Button("Pakai tingkat Precomputed")) {
             scene::WorldSettings baked = settings;
-            baked.indirect = scene::IndirectLighting::Baked;
+            baked.indirect = scene::IndirectLighting::Precomputed;
             context.history->CloseMergeGroup();
             context.history->Execute<SetWorldSettingsCommand>(context.world, settings, baked);
         }

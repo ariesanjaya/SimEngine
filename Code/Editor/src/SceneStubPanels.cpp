@@ -278,11 +278,11 @@ public:
         // tidak sepakat. Yang tersisa di panel ini semuanya alat ukur, dan alat
         // ukur memang tidak disimpan ke mana pun.
         {
-            const char* tier = "Baked";
+            const char* tier = "Precomputed";
             if (context.world != nullptr) {
                 switch (context.world->Settings().indirect) {
                     case scene::IndirectLighting::None: tier = "None"; break;
-                    case scene::IndirectLighting::Baked: tier = "Baked"; break;
+                    case scene::IndirectLighting::Precomputed: tier = "Precomputed"; break;
                     case scene::IndirectLighting::RealTime: tier = "RealTime"; break;
                 }
             }

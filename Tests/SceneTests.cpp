@@ -443,9 +443,80 @@ TEST_CASE("B0: kombinasi RealTime + File dinyatakan tidak sah") {
     CHECK_FALSE(IsUnsupported(settings));
 
     // Berkas menyinari tingkat panggang, dan itu justru skenario yang dituju.
-    settings.indirect = IndirectLighting::Baked;
+    settings.indirect = IndirectLighting::Precomputed;
     settings.environment = EnvironmentSource::File;
     CHECK_FALSE(IsUnsupported(settings));
+}
+
+TEST_CASE("S0: berkas versi 4 yang menulis Baked dinaikkan menjadi Precomputed") {
+    // **Kriteria terima S0.** Nama tingkatnya berubah karena artinya berubah,
+    // dan berkas yang sudah ditulis memuat kata yang tidak ada lagi di daftar
+    // namanya.
+    //
+    // Yang membuat migrasi ini pantas ada justru bahwa tanpanya berkas lama
+    // *tetap* terbaca benar: `"Baked"` gagal dicocokkan, pembacanya membiarkan
+    // nilai bawaan, dan bawaannya kebetulan `Precomputed` — nilai yang sama.
+    // Kebetulan itu berhenti berlaku pada hari seseorang mengubah bawaannya, di
+    // tempat yang tidak ada hubungannya sama sekali.
+    const std::string v4 = R"({
+  "schemaVersion": 4,
+  "world": {
+    "indirect": "Baked",
+    "environment": "File",
+    "exposureMode": "Manual",
+    "exposureCompensation": -1.5
+  },
+  "entities": []
+})";
+
+    World world;
+    const LevelIoResult result = LoadLevelFromString(world, v4);
+    REQUIRE(result.ok);
+    CHECK(result.sourceVersion == 4);
+    CHECK(result.migrated);
+    CHECK(world.Settings().indirect == IndirectLighting::Precomputed);
+
+    // Sisa bloknya tidak ikut tersentuh migrasinya.
+    CHECK(world.Settings().environment == EnvironmentSource::File);
+    CHECK(world.Settings().exposureMode == ExposureModeKind::Manual);
+    CHECK(world.Settings().exposureCompensation == doctest::Approx(-1.5f));
+
+    // Dan menyimpannya ulang menulis nama yang baru, bukan yang lama.
+    const std::string saved = SaveLevelToString(world);
+    CHECK(saved.find("\"Precomputed\"") != std::string::npos);
+    CHECK(saved.find("\"Baked\"") == std::string::npos);
+}
+
+TEST_CASE("S0: migrasi tidak menyentuh tingkat yang bukan Baked") {
+    // Sebuah migrasi yang mengubah lebih daripada yang dijanjikannya adalah
+    // migrasi yang menghapus pilihan orang tanpa menyebutkannya.
+    for (const char* tier : {"None", "RealTime"}) {
+        const std::string text = std::string(R"({"schemaVersion": 4, "world": {"indirect": ")") +
+                                 tier + R"("}, "entities": []})";
+        World world;
+        REQUIRE(LoadLevelFromString(world, text).ok);
+        const std::string saved = SaveLevelToString(world);
+        INFO("tingkat ", tier);
+        CHECK(saved.find(std::string("\"") + tier + "\"") != std::string::npos);
+    }
+}
+
+TEST_CASE("S0: Time-of-Day bertabrakan dengan Precomputed, dan itu dinyatakan") {
+    // Precomputed berdiri di atas satu andaian: mataharinya diam. Itu bukan
+    // pembatasan yang dipilih melainkan syarat yang membuat transport bisa
+    // dipanggang sama sekali.
+    WorldSettings settings;
+    settings.indirect = IndirectLighting::Precomputed;
+
+    CHECK(PrecomputedFightsTimeOfDay(settings, /*timeOfDayDrivesSun=*/true));
+    CHECK_FALSE(PrecomputedFightsTimeOfDay(settings, /*timeOfDayDrivesSun=*/false));
+
+    // RealTime memang untuk matahari yang bergerak — di sana keduanya justru
+    // pasangan yang dimaksudkan.
+    settings.indirect = IndirectLighting::RealTime;
+    CHECK_FALSE(PrecomputedFightsTimeOfDay(settings, true));
+    settings.indirect = IndirectLighting::None;
+    CHECK_FALSE(PrecomputedFightsTimeOfDay(settings, true));
 }
 
 TEST_CASE("B6: RealTime tanpa langit atmosferik dinyatakan, bukan didiamkan") {
@@ -469,7 +540,7 @@ TEST_CASE("B6: RealTime tanpa langit atmosferik dinyatakan, bukan didiamkan") {
 
     // Tingkat panggang tidak menyentuh probe, jadi ia tidak peduli langitnya
     // atmosferik atau bukan — itu justru skenario pra-GI yang B3 layani.
-    settings.indirect = IndirectLighting::Baked;
+    settings.indirect = IndirectLighting::Precomputed;
     CHECK_FALSE(RealTimeHasNoSky(settings, false));
     settings.indirect = IndirectLighting::None;
     CHECK_FALSE(RealTimeHasNoSky(settings, false));

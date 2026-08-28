@@ -16,10 +16,17 @@ namespace sim::scene {
 ///   2 — rotasi disimpan sebagai quaternion [w, x, y, z]
 ///   3 — rujukan mesh/material berupa GUID aset, bukan nama berkas
 ///   4 — blok `"world"`: bagaimana level disinari (docs/PLAN-IBL.md B0)
+///   5 — `indirect: "Baked"` menjadi `"Precomputed"` (docs/PLAN-STATIC-GI.md S0)
 ///
 /// Naikkan setiap kali bentuk data berubah, dan tambahkan langkahnya di
 /// Migrate(). Berkas lama harus tetap bisa dibuka: level adalah hasil kerja
 /// pengguna, bukan artefak build.
+///
+/// **Versi 5 punya langkah migrasi, dan versi 4 tidak — dan keduanya benar.**
+/// Versi 5 mengganti nama sebuah nilai enum, jadi berkas lama memuat kata yang
+/// tidak ada lagi di daftar namanya. Tanpa langkah migrasi ia akan jatuh ke
+/// bawaan — yang kebetulan nilai yang sama, dan "kebetulan benar" adalah cara
+/// paling andal sebuah cacat bertahan sampai bawaannya berubah.
 ///
 /// **Versi 4 tidak punya langkah migrasi, dan itu bukan kelalaian.** Ia hanya
 /// menambah satu blok baru; tidak ada satu pun byte versi 3 yang berubah
@@ -29,7 +36,7 @@ namespace sim::scene {
 /// karena berkas yang **ditulis** sekarang memuat sesuatu yang tidak dipahami
 /// editor lama, dan itulah yang dijawab pemeriksaan "ditulis editor yang lebih
 /// baru" di bawah.
-inline constexpr int kLevelSchemaVersion = 4;
+inline constexpr int kLevelSchemaVersion = 5;
 
 struct LevelIoResult {
     bool ok = false;
