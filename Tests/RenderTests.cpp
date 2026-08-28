@@ -9,6 +9,7 @@
 #include "Sim/Render/DrawRun.h"
 #include "Sim/Render/Frustum.h"
 #include "Sim/Render/Ibl.h"
+#include "Sim/Render/ProbeVolume.h"
 #include "Sim/Render/LightCluster.h"
 #include "Sim/Render/Denoise.h"
 #include "Sim/Render/RadianceCache.h"
@@ -6314,4 +6315,131 @@ TEST_CASE("T3: jalur tekstur material di renderer tidak mendekode gambar sendiri
     // memuat tekstur sama sekali juga lulus.
     CHECK(source.find("ReadKtx2") != std::string::npos);
     CHECK(source.find("CreateFromKtx2") != std::string::npos);
+}
+
+// --- S1: probe volume (docs/PLAN-STATIC-GI.md) ------------------------------
+
+TEST_CASE("S1: kisi menutupi batasnya, dan tepinya tidak jatuh di luar") {
+    // Permukaan yang duduk tepat di batas adegan harus tetap mendapat probe di
+    // kedua sisinya. Kisi yang berhenti persis di batasnya membuat sampel di
+    // sana jatuh ke luar — dan nol di tepi terbaca sebagai garis gelap yang
+    // mengikuti dindingnya, bukan sebagai kisi yang kurang satu baris.
+    const Vec3 minimum(-3.0f, 0.0f, -3.0f);
+    const Vec3 maximum(3.0f, 2.0f, 5.0f);
+    const render::ProbeVolumeLayout layout = render::MakeProbeLayout(minimum, maximum, 1.0f);
+    REQUIRE(layout.IsValid());
+
+    const Vec3 first = layout.ProbePosition(glm::uvec3(0u));
+    const Vec3 last = layout.ProbePosition(layout.counts - glm::uvec3(1u));
+    for (int axis = 0; axis < 3; ++axis) {
+        INFO("sumbu ", axis);
+        CHECK(first[axis] <= minimum[axis] + 1e-4f);
+        CHECK(last[axis] >= maximum[axis] - 1e-4f);
+    }
+
+    // Jarak yang lebih halus berarti lebih banyak probe, dan pertumbuhannya
+    // kubik — itu yang membuat angkanya harus terlihat di editor sebelum ada
+    // yang menekan Bake.
+    const render::ProbeVolumeLayout finer = render::MakeProbeLayout(minimum, maximum, 0.5f);
+    CHECK(finer.FullProbeCount() > layout.FullProbeCount() * 4);
+}
+
+TEST_CASE("S1: tanpa transport, kisi menjawab sama dengan tingkat panggang") {
+    // **Kriteria terima S1.** Tanpa geometri tidak ada yang bisa membedakan satu
+    // titik dari titik lain, jadi setiap probe memuat iradiansi lingkungan yang
+    // sama — dan membacanya lewat interpolasi trilinear harus mengembalikan
+    // angka itu apa adanya, di mana pun di dalam kisinya.
+    //
+    // Yang diuji di sini plumbing-nya. Memisahkannya dari transport berarti
+    // kegagalan di S2 punya satu penyebab, bukan dua.
+    const render::GradientSky sky;
+    const render::ProbeVolumeLayout layout =
+        render::MakeProbeLayout(Vec3(-4.0f, -1.0f, -4.0f), Vec3(4.0f, 3.0f, 4.0f), 1.0f);
+    const render::ProbeVolume volume =
+        render::BakeProbeVolumeFromEnvironment(layout, sky, 4096);
+    REQUIRE(volume.IsValid());
+    CHECK(volume.AllocatedBrickCount() == layout.BrickCount());  // S1 mengisi seluruhnya
+
+    const Sh9 baked = ProjectIrradiance(sky, 4096);
+    const Vec3 normal = glm::normalize(Vec3(0.3f, 0.8f, 0.2f));
+    const Vec3 expected = EvaluateIrradiance(baked, normal);
+
+    for (const Vec3 position : {Vec3(0.0f), Vec3(2.3f, 1.1f, -3.7f), Vec3(-3.9f, 2.9f, 3.9f),
+                                Vec3(0.5f, 0.5f, 0.5f)}) {
+        const Sh9 sampled = render::SampleProbeVolume(volume, position);
+        const Vec3 got = EvaluateIrradiance(sampled, normal);
+        INFO("posisi (", position.x, ",", position.y, ",", position.z, ")");
+        CHECK(got.x == doctest::Approx(expected.x).epsilon(1e-4));
+        CHECK(got.y == doctest::Approx(expected.y).epsilon(1e-4));
+        CHECK(got.z == doctest::Approx(expected.z).epsilon(1e-4));
+    }
+
+    // Di luar kisinya dijepit ke tepi, bukan dijawab nol.
+    const Sh9 outside = render::SampleProbeVolume(volume, Vec3(100.0f, 100.0f, 100.0f));
+    CHECK(EvaluateIrradiance(outside, normal).y == doctest::Approx(expected.y).epsilon(1e-4));
+}
+
+TEST_CASE("S1: brick yang hilang tidak menggelapkan tetangganya") {
+    // **Yang diuji di sini apa yang akan terjadi di S2.** Begitu brick kosong
+    // dibuang, sebagian sudut interpolasi hilang — dan menjumlahkan tujuh dari
+    // delapan sudut tanpa menormalkan bobotnya menggelapkan tepat di dekat brick
+    // yang kosong, yaitu di dekat dinding. Cacatnya muncul di S2, tapi
+    // pencegahnya tinggal di sini.
+    const render::GradientSky sky;
+    const render::ProbeVolumeLayout layout =
+        render::MakeProbeLayout(Vec3(-6.0f), Vec3(6.0f), 1.0f);
+    render::ProbeVolume volume = render::BakeProbeVolumeFromEnvironment(layout, sky, 2048);
+    REQUIRE(volume.IsValid());
+    REQUIRE(volume.brickSlots.size() > 8);
+
+    const Vec3 normal(0.0f, 1.0f, 0.0f);
+    const Vec3 full = EvaluateIrradiance(render::SampleProbeVolume(volume, Vec3(0.0f)), normal);
+
+    // Buang satu brick, lalu baca lagi di tempat yang sama.
+    for (uint32_t& slot : volume.brickSlots) {
+        if (slot != render::kEmptyBrick) {
+            slot = render::kEmptyBrick;
+            break;
+        }
+    }
+    const Vec3 punched = EvaluateIrradiance(render::SampleProbeVolume(volume, Vec3(0.0f)), normal);
+    CHECK(punched.y == doctest::Approx(full.y).epsilon(1e-4));
+}
+
+TEST_CASE("S1: artefak probe bolak-balik, dan yang rusak ditolak") {
+    const render::GradientSky sky;
+    const render::ProbeVolumeLayout layout =
+        render::MakeProbeLayout(Vec3(-2.0f), Vec3(2.0f), 1.0f);
+    const render::ProbeVolume volume = render::BakeProbeVolumeFromEnvironment(layout, sky, 512);
+    REQUIRE(volume.IsValid());
+
+    const std::filesystem::path file =
+        std::filesystem::temp_directory_path() /
+        ("sim-probe-" + std::to_string(::getpid()) + ".simprobe");
+
+    std::string error;
+    REQUIRE_MESSAGE(render::WriteProbeVolume(file, volume, error), error);
+    // Ditulis atomik: tidak ada berkas sementara yang tertinggal.
+    CHECK_FALSE(std::filesystem::exists(std::filesystem::path(file.string() + ".tmp")));
+
+    render::ProbeVolume loaded;
+    REQUIRE_MESSAGE(render::ReadProbeVolume(file, loaded, error), error);
+    CHECK(loaded.layout.spacing == doctest::Approx(volume.layout.spacing));
+    CHECK(loaded.layout.counts == volume.layout.counts);
+    REQUIRE(loaded.probes.size() == volume.probes.size());
+    CHECK(loaded.probes.front().coefficients[0].x ==
+          doctest::Approx(volume.probes.front().coefficients[0].x));
+
+    // Berkas yang bukan milik kita, dan berkas yang lebih pendek daripada
+    // janjinya — keduanya ditolak, bukan dipercaya.
+    std::ofstream(file, std::ios::binary) << "bukan artefak probe";
+    CHECK_FALSE(render::ReadProbeVolume(file, loaded, error));
+
+    REQUIRE(render::WriteProbeVolume(file, volume, error));
+    const auto full = std::filesystem::file_size(file);
+    std::filesystem::resize_file(file, full / 2);
+    CHECK_FALSE(render::ReadProbeVolume(file, loaded, error));
+
+    std::error_code cleanup;
+    std::filesystem::remove(file, cleanup);
 }

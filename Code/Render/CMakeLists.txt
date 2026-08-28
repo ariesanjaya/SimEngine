@@ -8,6 +8,7 @@ sim_add_library(Render
         src/Ibl.cpp
         src/IblBaker.cpp
         src/IblCache.cpp
+        src/ProbeVolume.cpp
         src/LightCluster.cpp
         src/Atmosphere.cpp
         src/Bloom.cpp

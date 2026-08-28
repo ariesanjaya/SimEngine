@@ -209,7 +209,51 @@ Yang tetap di project cuma anggaran bake-nya sendiri — jumlah sampel dan jumla
 thread — karena itu memang berbeda antar-mesin dan tidak mengubah bentuk
 hasilnya.
 
-### 9. Probe lebih dulu, lightmap menyusul
+### 9. Kisi jarang, dan formatnya disiapkan sejak S1
+
+Probe disimpan sebagai **brick**: kisi yang sama, tapi hanya blok yang dekat
+geometri yang dialokasikan.
+
+**Kaskade seperti clipmap SDF sempat menjadi kandidat, dan kodenya sendiri yang
+membatalkannya.** `SdfClipmap.h` berbunyi "beberapa kaskade kubik yang
+**mengikuti kamera**", dan seluruh rancangannya — pengalamatan toroidal,
+pengancingan titik asal, penulisan ulang hanya lempeng tepi — ada karena
+kameranya bergerak. Panggangan tidak punya kamera. Yang tersisa dari analogi itu
+cuma kisi bersarang yang berbagi nama dengan sesuatu yang cara kerjanya lain.
+
+**Yang memaksa brick bukan S1 melainkan pertumbuhan kubiknya.** Memperhalus dua
+kali lipat membayar delapan kali lipat, dan itu terlihat di angkanya (SH9 RGB
+float16, 54 B per probe):
+
+| adegan | 2 m | 1 m | 0,5 m |
+|---|---:|---:|---:|
+| 32×8×32 | 0,1 MB | 0,5 MB | 3,7 MB |
+| 64×16×64 | 0,5 MB | 3,7 MB | 28,3 MB |
+| 128×32×128 | 3,7 MB | 28,3 MB | **221 MB** |
+
+Kisi beraturan membayar probe untuk ruang kosong **dan untuk ruang di dalam
+benda pejal**, dan pada adegan besar itu yang menghabiskan anggarannya. Dengan
+brick, biayanya mengikuti luas permukaan alih-alih volume.
+
+**Formatnya disiapkan sejak S1, tapi sparsity-nya datang di S2**, dan pembagian
+itu disengaja:
+
+- **S1 menulis format brick dan mengisinya penuh** — setiap brick ada. Itu
+  menaruh indireksinya di tempatnya tanpa menuntut S1 memutuskan brick mana yang
+  boleh hilang.
+- **S2 yang membuang brick kosong**, karena ia satu-satunya milestone yang
+  memang sudah menelusuri geometri dan karena itu sudah tahu di mana
+  permukaannya.
+
+Indireksinya tidak bisa ditambahkan belakangan dengan murah: pencarian di
+shader, format artefak, dan cara editor melaporkan ukurannya semuanya
+bergantung padanya, dan ketiganya sudah berdiri saat S5 tiba.
+
+**Volume yang ditempatkan pengarang ditunda, bukan dibuang.** Ia lapisan
+pengarangan di atas brick — halus di ruang tamu, kasar di lapangan — dan
+menambahkannya nanti tidak mengubah format penyimpanannya.
+
+### 10. Probe lebih dulu, lightmap menyusul
 
 Probe tidak menuntut UV apa pun, tidak menuntut dependensi baru, dan tidak
 menyentuh format vertex. Lightmap menuntut ketiganya.
@@ -490,10 +534,6 @@ pertanyaan yang lebih baik dijawab sesudah keduanya berdiri sendiri-sendiri.
 
 ## Yang masih terbuka
 
-- **Penempatan probe.** Kisi beraturan membayar probe untuk ruang kosong;
-  kaskade — seperti clipmap SDF yang sudah ada — atau penempatan adaptif
-  membayar ketelitian di tempat yang membutuhkannya. Diputuskan sebelum S1
-  mendarat, karena ia menentukan format penyimpanannya.
 - **Ambang selisih S2 dan S6** terhadap tingkat panggang dan terhadap path
   tracer acuan: belum ditetapkan angkanya, dan seperti B5 ia sebaiknya diukur
   lebih dulu lalu ditetapkan dari hasilnya.
