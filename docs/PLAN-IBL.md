@@ -676,12 +676,29 @@ Yang kedua itulah cacat yang sesungguhnya: probe GI mencuplik LUT sky-view
 atmosferik, dan langit HDRI tidak punya LUT itu. Keduanya bisa menyala
 bersamaan, dan panel World Settings mengatakan yang mana yang berlaku.
 
-**Dua jalan keluar, keduanya sekali klik**, lewat perintah yang bisa
-dibatalkan: "Pakai tingkat Baked" dan "Pakai langit atmosfer". Sebuah peringatan
-yang hanya menyebutkan masalahnya menyerahkan pekerjaannya kembali kepada yang
-membacanya — dan yang membacanya belum tentu tahu setelan mana yang harus
-digeser. Tombol kedua mati sendiri bila level memang belum punya langit, dan
-panelnya mengatakan apa yang kurang.
+**Dua jalan keluar, keduanya sekali klik** dan lewat perintah yang bisa
+dibatalkan. Sebuah peringatan yang hanya menyebutkan masalahnya menyerahkan
+pekerjaannya kembali kepada yang membacanya — dan yang membacanya belum tentu
+tahu setelan mana yang harus digeser.
+
+Yang pertama selalu "Pakai tingkat Baked". **Yang kedua bergantung pada keadaan
+mana yang berlaku**, dan itu bukan kerapian:
+
+| keadaan | jalan keluar kedua |
+|---|---|
+| probe tidak punya langit atmosferik | "Pakai langit atmosfer" — menukar sumber `SkyComponent` |
+| `RealTime` + `File` di atas langit atmosferik | "Sinari dengan langit" — menyetel `environment: Sky` |
+
+Menawarkan yang pertama pada keadaan kedua adalah tombol mati: langitnya memang
+sudah atmosfer. Dan yang benar-benar dibutuhkan di sana — `environment: Sky`,
+yang menyelesaikannya tanpa melepas GI real-time — tidak akan ditawarkan sama
+sekali.
+
+Predikatnya dinilai dari adegan, bukan dari renderer. Syarat renderer punya satu
+suku lagi yang tidak terlihat dari panel — LUT atmosfernya harus berhasil dibuat
+— jadi pada mesin yang gagal membuatnya, panel mengatakan semuanya baik
+sementara GI-nya nol. Itu kegagalan sumber daya yang sudah punya barisnya
+sendiri di Console, bukan kombinasi yang salah dipilih pengarang.
 
 Diverifikasi: `RealTime` + langit HDR menggambar tanpa satu pun pelanggaran
 validasi, dan `RealTime` + langit atmosfer tetap melaporkan `GI: menyala`.

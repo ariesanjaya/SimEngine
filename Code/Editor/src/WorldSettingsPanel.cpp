@@ -256,7 +256,14 @@ private:
     static void DrawUnsupportedNotice(EditorContext& context) {
         const scene::WorldSettings settings = context.world->Settings();
         const scene::SkyComponent* sky = FindSky(*context.world);
-        const bool proceduralSky = sky != nullptr && sky->source == scene::SkySourceKind::Atmosphere;
+        // **Dinilai dari adegan, bukan dari renderer.** Syarat renderer punya
+        // satu suku lagi yang tidak terlihat dari sini — LUT atmosfernya harus
+        // berhasil dibuat — jadi pada mesin yang gagal membuatnya, panel ini
+        // mengatakan semuanya baik sementara GI-nya nol. Itu kegagalan sumber
+        // daya yang sudah punya barisnya sendiri di Console, bukan kombinasi
+        // yang salah dipilih pengarang.
+        const bool proceduralSky =
+            sky != nullptr && sky->source == scene::SkySourceKind::Atmosphere;
 
         const bool contradictory = scene::IsUnsupported(settings);
         const bool blind = scene::RealTimeHasNoSky(settings, proceduralSky);
@@ -295,14 +302,29 @@ private:
             context.history->Execute<SetWorldSettingsCommand>(context.world, settings, baked);
         }
         ImGui::SameLine();
-        const bool canSwitchSky = sky != nullptr && !proceduralSky;
-        ImGui::BeginDisabled(!canSwitchSky);
-        if (ImGui::Button("Pakai langit atmosfer")) {
-            SwitchSkyToAtmosphere(context);
-        }
-        ImGui::EndDisabled();
-        if (sky == nullptr) {
-            ImGui::TextDisabled("Level ini belum punya langit — tempatkan prefab Sky Dome.");
+        // **Jalan keluar kedua bergantung pada keadaan mana yang berlaku**, dan
+        // itu bukan kerapian: menawarkan "pakai langit atmosfer" pada level yang
+        // langitnya sudah atmosfer adalah tombol mati, dan yang di sana justru
+        // butuh `environment: Sky` — yang tanpa itu tidak ditawarkan sama
+        // sekali.
+        if (blind) {
+            ImGui::BeginDisabled(sky == nullptr);
+            if (ImGui::Button("Pakai langit atmosfer")) {
+                SwitchSkyToAtmosphere(context);
+            }
+            ImGui::EndDisabled();
+            if (sky == nullptr) {
+                ImGui::TextDisabled("Level ini belum punya langit — tempatkan prefab Sky Dome.");
+            }
+        } else {
+            // `RealTime` + `File`: yang bertentangan maksudnya, bukan langitnya.
+            // Menyinari dari langit menyelesaikannya tanpa melepas GI real-time.
+            if (ImGui::Button("Sinari dengan langit")) {
+                scene::WorldSettings lit = settings;
+                lit.environment = scene::EnvironmentSource::Sky;
+                context.history->CloseMergeGroup();
+                context.history->Execute<SetWorldSettingsCommand>(context.world, settings, lit);
+            }
         }
     }
 
