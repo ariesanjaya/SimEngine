@@ -736,6 +736,11 @@ harga latar belakang yang sudah dibayar sebelum rencana ini.
 
 **Ambient panggang tidak punya oklusi.** Lingkungan tetap berlaku pada setiap
 permukaan: langit bocor menembus dinding, ke ruangan tertutup sekalipun.
+
+> Risiko ini yang kemudian melahirkan [PLAN-STATIC-GI.md](PLAN-STATIC-GI.md):
+> kalau mataharinya memang diam — dan itu premis seluruh tingkat panggang —
+> maka transport cahaya dan oklusinya bisa ikut dipanggang, dan risikonya
+> berhenti perlu didokumentasikan karena ia berhenti ada.
 Konstanta 0,25 hari ini punya cacat yang sama, hanya cukup redup untuk tidak
 diperhatikan; menaikkannya ke iradiansi langit sungguhan membuat kebocoran itu
 terlihat. Itu memang batas tingkat pra-GI, dan harus ditulis di dokumentasinya —
