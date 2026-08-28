@@ -142,6 +142,14 @@ void ApplyWorldSettings(const scene::World& world, render::ViewportDesc& desc) {
                            : render::EnvironmentSource::Sky;
     desc.extractSunFromEnvironment = settings.extractSun;
 
+    // **Hanya `Precomputed` yang memanggang kisi probe.** `RealTime` menelusuri
+    // tiap frame dan tidak punya gunanya; `None` memang tidak menerima cahaya
+    // tak-langsung sama sekali. Nol di sini adalah bagaimana keduanya
+    // mengatakannya, bukan jarak yang kebetulan kosong.
+    desc.probeSpacing = settings.indirect == scene::IndirectLighting::Precomputed
+                            ? scene::ProbeSpacingOf(settings)
+                            : 0.0f;
+
     desc.post.exposureMode = settings.exposureMode == scene::ExposureModeKind::Manual
                                  ? render::ExposureMode::Manual
                                  : render::ExposureMode::Automatic;
@@ -188,6 +196,7 @@ void SceneView::Build(scene::World& world, const Selection& selection,
     lines_.clear();
     icons_.clear();
     pickables_.clear();
+    bakeEntries_.clear();
 
     // view<> menghasilkan entt::entity, sedangkan scene::Entity adalah enum
     // tersendiri supaya tipe entity kita tidak otomatis tertukar dengan tipe
@@ -336,6 +345,30 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                 }
             }
             meshes_.push_back(instance);
+
+            // Daftar untuk panggangan cahaya statis (S2): **seluruh geometri
+            // bermesh, termasuk yang dikunci.** Mengunci latar statis adalah cara
+            // orang menjaganya tidak terpilih tak sengaja, dan latar statis
+            // itulah yang menaungi panggangan — alasan yang sama yang membuat
+            // `GeometryBounds` memakai `meshes_` alih-alih `pickables_`.
+            if (!meshKey.empty()) {
+                // Kedelapan sudutnya ditransformasi: kotak yang diputar tidak
+                // lagi sejajar sumbu, dan mentransformasi min/max saja
+                // menghasilkan kotak yang lebih kecil daripada isinya — brick
+                // yang dibuang karenanya adalah brick yang dipakai.
+                Vec3 worldMin(std::numeric_limits<float>::max());
+                Vec3 worldMax(std::numeric_limits<float>::lowest());
+                for (int corner = 0; corner < 8; ++corner) {
+                    const Vec3 local(
+                        (corner & 1) != 0 ? instance.boundsMax.x : instance.boundsMin.x,
+                        (corner & 2) != 0 ? instance.boundsMax.y : instance.boundsMin.y,
+                        (corner & 4) != 0 ? instance.boundsMax.z : instance.boundsMin.z);
+                    const Vec3 atCorner = Vec3(matrix * Vec4(local, 1.0f));
+                    worldMin = glm::min(worldMin, atCorner);
+                    worldMax = glm::max(worldMax, atCorner);
+                }
+                bakeEntries_.push_back(BakeEntry{entity, matrix, meshKey, worldMin, worldMax});
+            }
 
             if (pickable) {
                 pickables_.push_back(Pickable{entity, matrix, instance.boundsMin,
@@ -1346,6 +1379,59 @@ bool SceneView::BoundsOf(const std::vector<scene::Entity>& entities, Vec3& outMi
         }
         outMin = glm::min(outMin, icon.position);
         outMax = glm::max(outMax, icon.position);
+        found = true;
+    }
+    return found;
+}
+
+void SceneView::BakeItems(std::vector<PickItem>& out) const {
+    out.clear();
+    out.reserve(bakeEntries_.size());
+    for (const BakeEntry& entry : bakeEntries_) {
+        PickItem item;
+        item.entity = entry.entity;
+        item.worldMatrix = entry.worldMatrix;
+        // View ke dalam `bakeEntries_`, yang tidak berubah sampai `Build`
+        // berikutnya. Pemanggil karena itu harus memakai daftarnya di dalam
+        // frame yang sama — aturan yang sama seperti `Icons()` dan `Scene()`.
+        item.meshKey = entry.meshKey;
+        item.worldMinimum = entry.worldMinimum;
+        item.worldMaximum = entry.worldMaximum;
+        // Kunci mesh impor **adalah** jalur berkasnya; whitebox memakai GUID,
+        // yang bukan jalur dan karena itu tidak punya sumber untuk dimuat.
+        if (entry.meshKey.find('/') != std::string::npos ||
+            entry.meshKey.find('\\') != std::string::npos) {
+            item.sourcePath = entry.meshKey;
+        }
+        out.push_back(item);
+    }
+}
+
+bool SceneView::GeometryBounds(Vec3& outMin, Vec3& outMax) const {
+    outMin = Vec3(std::numeric_limits<float>::max());
+    outMax = Vec3(std::numeric_limits<float>::lowest());
+    bool found = false;
+
+    // **`meshes_`, bukan `pickables_`, dan itu bukan pilihan gaya.** Entity yang
+    // dikunci tetap digambar tetapi sengaja tidak masuk daftar pickable — dan
+    // geometri yang dikunci justru yang paling mungkin ada di adegan berpanggang,
+    // karena mengunci latar statis adalah cara orang menjaganya tidak terpilih
+    // tak sengaja. Menghitung batas dari `pickables_` berarti panel menampilkan
+    // kisi yang lebih kecil daripada kisi yang benar-benar dibangun renderer,
+    // yang menyusunnya dari daftar yang sama dengan `meshes_` ini.
+    for (const render::MeshInstance& instance : meshes_) {
+        // Kedelapan sudutnya ditransformasi, bukan kedua ujungnya: sebuah kotak
+        // yang diputar tidak lagi sejajar sumbu, dan mentransformasi min/max
+        // saja menghasilkan kotak yang lebih kecil daripada isinya — kisi probe
+        // lalu berhenti di dalam geometri yang harus dinaunginya.
+        for (int i = 0; i < 8; ++i) {
+            const Vec3 local((i & 1) ? instance.boundsMax.x : instance.boundsMin.x,
+                             (i & 2) ? instance.boundsMax.y : instance.boundsMin.y,
+                             (i & 4) ? instance.boundsMax.z : instance.boundsMin.z);
+            const Vec3 world = Vec3(instance.transform * Vec4(local, 1.0f));
+            outMin = glm::min(outMin, world);
+            outMax = glm::max(outMax, world);
+        }
         found = true;
     }
     return found;

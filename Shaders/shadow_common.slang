@@ -17,6 +17,8 @@
 
 static const int kMaxCascades = 4;
 
+#include "probe_grid.slang"
+
 struct ShadowParams {
     float4x4 cascadeViewProj[kMaxCascades];
     float4 cascadeSplitFar;    // batas jauh tiap cascade, ruang pandang
@@ -92,6 +94,11 @@ struct ShadowParams {
     float4 skyIrradianceSh[9];
     // Putaran lingkungan panggang: x kosinus, y sinus, zw cadangan (B3).
     float4 environmentRotation;
+    // Kisi probe iradiansi (S1): xyz titik asal dunia, w jarak antar-probe.
+    float4 probeOrigin;
+    // xyz jumlah probe tiap sumbu, w ruang tempat isinya berada:
+    // 0 tidak ada kisi, 1 ruang lingkungan, 2 ruang dunia.
+    float4 probeCounts;
 };
 
 [[vk::binding(0, 0)]] ConstantBuffer<ShadowParams> shadowParams;
@@ -149,6 +156,121 @@ float3 skyIrradiance(float3 normal) {
     // ke seluruh perhitungan sesudahnya.
     return max(result, float3(0.0));
 }
+
+/// Iradiansi E(n) dari sembilan koefisien SH yang diberikan.
+///
+/// Dipisahkan dari `skyIrradiance` supaya kisi probe dan SH panggang memakai
+/// evaluasi yang sama persis — dua salinan rumus ini akan berselisih di tepinya,
+/// dan selisih itu muncul sebagai kisi yang tidak pernah cocok dengan tingkat
+/// panggang yang seharusnya ia tiru.
+float3 evaluateSh9(float3 sh[9], float3 normal) {
+    const float3 n = normalize(normal);
+    const float a0 = 3.141593;
+    const float a1 = 2.094395;
+    const float a2 = 0.785398;
+
+    float3 result = sh[0] * 0.282095 * a0;
+    result += sh[1] * (0.488603 * n.y) * a1;
+    result += sh[2] * (0.488603 * n.z) * a1;
+    result += sh[3] * (0.488603 * n.x) * a1;
+    result += sh[4] * (1.092548 * n.x * n.y) * a2;
+    result += sh[5] * (1.092548 * n.y * n.z) * a2;
+    result += sh[6] * (0.315392 * (3.0 * n.z * n.z - 1.0)) * a2;
+    result += sh[7] * (1.092548 * n.x * n.z) * a2;
+    result += sh[8] * (0.546274 * (n.x * n.x - n.y * n.y)) * a2;
+    return max(result, float3(0.0));
+}
+
+/// SH sebuah probe, atau nol bila brick yang memuatnya tidak ada.
+///
+/// `found` yang membedakan "probe gelap" dari "probe tidak ada" — dan
+/// perbedaannya bukan kerapian: yang tidak ada harus keluar dari bobot
+/// interpolasi, sedangkan yang gelap harus ikut menariknya ke bawah.
+void probeAt(uint3 coordinate, out float3 sh[9], out bool found) {
+    for (int i = 0; i < 9; ++i) {
+        sh[i] = float3(0.0);
+    }
+    found = false;
+
+    const uint3 counts = uint3(shadowParams.probeCounts.xyz);
+    const uint slot = probeBricks[probeBrickIndex(counts, coordinate)];
+    if (slot == kProbeEmptyBrick) {
+        return;
+    }
+
+    const uint base = probeCoefficientBase(slot, coordinate);
+    for (int i = 0; i < 9; ++i) {
+        sh[i] = probeSh[base + uint(i)].rgb;
+    }
+    found = true;
+}
+
+/// Iradiansi dari kisi probe, interpolasi trilinear.
+///
+/// **Cerminan `SampleProbeVolume` di `ProbeVolume.cpp`**, dan keduanya harus
+/// bergerak bersama: yang di sana dipakai uji dan path tracer acuan, yang di
+/// sini dipakai menggambar. Dua interpolasi yang berselisih menghasilkan gambar
+/// acuan yang tidak bisa menilai apa pun.
+///
+/// **Dinormalkan terhadap bobot yang benar-benar terpakai.** Begitu S2 membuang
+/// brick kosong, sebagian sudut hilang — dan menjumlahkan tujuh dari delapan
+/// tanpa menormalkan menggelapkan tepat di dekat brick yang kosong, yaitu di
+/// dekat dinding. Cacatnya baru muncul di S2; pencegahnya sudah di sini.
+/// Iradiansi dari kisi probe, interpolasi trilinear.
+float3 probeIrradiance(float3 worldPosition, float3 normal) {
+    const uint3 counts = uint3(shadowParams.probeCounts.xyz);
+    uint3 base;
+    float3 fraction;
+    probeCell(worldPosition, shadowParams.probeOrigin.xyz, shadowParams.probeOrigin.w, counts,
+              base, fraction);
+
+    float3 accumulated[9];
+    for (int i = 0; i < 9; ++i) {
+        accumulated[i] = float3(0.0);
+    }
+    float total = 0.0;
+
+    for (uint corner = 0u; corner < 8u; ++corner) {
+        const float weight = probeCornerWeight(corner, fraction);
+        if (weight <= 0.0) {
+            continue;
+        }
+        const uint3 coordinate = probeCorner(base, corner, counts);
+
+        float3 sh[9];
+        bool found;
+        probeAt(coordinate, sh, found);
+        if (!found) {
+            continue;
+        }
+        for (int i = 0; i < 9; ++i) {
+            accumulated[i] += sh[i] * weight;
+        }
+        total += weight;
+    }
+
+    if (total <= 0.0) {
+        return float3(0.0);
+    }
+    for (int i = 0; i < 9; ++i) {
+        accumulated[i] /= total;
+    }
+    // **Putaran lingkungan diterapkan hanya bila isinya memang datang dari
+    // lingkungan.** Di S1 tiap probe memuat SH langit apa adanya — dipanggang
+    // pada orientasi petanya sendiri — jadi ia harus dibaca lewat arah yang
+    // diputar, persis seperti `skyIrradiance`. Tanpa itu, memutar slider HDR
+    // menggeser SH panggang tetapi tidak menggeser kisinya, dan keduanya
+    // berselisih tanpa satu pun galat.
+    //
+    // Begitu S2 mengisi probe dengan penelusuran, isinya sudah berada di ruang
+    // dunia dan putarannya sudah ikut terpanggang di dalamnya — menerapkannya
+    // lagi memutarnya dua kali. Itu sebabnya yang membedakan sebuah angka yang
+    // dikirim renderer, bukan sebuah andaian di dalam shader ini.
+    const float3 direction =
+        shadowParams.probeCounts.w < 1.5 ? environmentDirection(normalize(normal))
+                                         : normalize(normal);
+    return evaluateSh9(accumulated, direction);
+}
 [[vk::binding(1, 0)]] Sampler2DArrayShadow shadowMap;
 
 /// Peta lingkungan terprafilter dan LUT DFG-nya (B2).
@@ -165,6 +287,22 @@ float3 skyIrradiance(float3 normal) {
 /// dua rumus yang suatu saat berselisih.
 [[vk::binding(24, 0)]] SamplerCube prefilteredEnv;
 [[vk::binding(25, 0)]] Sampler2D dfgLut;
+
+/// Kisi probe iradiansi (S1 di docs/PLAN-STATIC-GI.md).
+///
+/// **Dua buffer, bukan satu tekstur 3D**, dan itu akibat langsung dari brick:
+/// yang dibaca bukan kisi padat melainkan tabel slot lalu isinya, dan sebuah
+/// tekstur 3D tidak punya tempat untuk indireksi itu. Ia juga yang membuat S2
+/// bisa membuang brick tanpa satu pun perubahan di sini.
+///
+/// `probeSh` sembilan float4 berurutan per probe — rgb dipakai, w padding, tata
+/// letak yang sama dengan `Sh9` di sisi C++. `probeBricks` satu uint per brick:
+/// slot brick di dalam `probeSh`, atau 0xFFFFFFFF bila brick itu tidak ada.
+[[vk::binding(26, 0)]] StructuredBuffer<float4> probeSh;
+[[vk::binding(27, 0)]] StructuredBuffer<uint> probeBricks;
+
+/// Brick yang tidak dialokasikan. Sama dengan `render::kEmptyBrick`.
+static const uint kProbeEmptyBrick = 0xFFFFFFFFu;
 
 /// Banyaknya mip peta prefilter. Nol berarti belum ada lingkungan yang
 /// dipanggang, dan pemakainya wajib memeriksanya: sebuah pantulan yang datang

@@ -1191,7 +1191,7 @@ TEST_CASE("B0: tingkat pencahayaan sampai ke renderer dari berkas levelnya") {
         // dibedakan: cahaya tak-langsung di jalur itu masih konstanta 0,25 yang
         // tidak berasal dari langit mana pun. Yang membedakannya iradiansi
         // panggang yang menggantikan konstanta itu.
-        for (const char* tier : {"Baked", "None"}) {
+        for (const char* tier : {"Precomputed", "None"}) {
             scene::World world;
             REQUIRE(scene::LoadLevelFromString(world, levelWith(tier, "Automatic")).ok);
 
@@ -1204,7 +1204,7 @@ TEST_CASE("B0: tingkat pencahayaan sampai ke renderer dari berkas levelnya") {
     }
 
     SUBCASE("level lama tanpa blok world disinari seperti sebelum B0 ada") {
-        // Bawaan `Baked` dipilih supaya berkas versi 3 terlihat persis seperti
+        // Bawaan `Precomputed` dipilih supaya berkas versi 3 terlihat persis seperti
         // sebelumnya: GI mati, dan itu memang keadaan setiap level yang sudah
         // ada di repo ini.
         scene::World world;

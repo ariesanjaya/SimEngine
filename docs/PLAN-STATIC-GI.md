@@ -209,7 +209,54 @@ Yang tetap di project cuma anggaran bake-nya sendiri — jumlah sampel dan jumla
 thread — karena itu memang berbeda antar-mesin dan tidak mengubah bentuk
 hasilnya.
 
-### 9. Probe lebih dulu, lightmap menyusul
+### 9. Kisi jarang, dan formatnya disiapkan sejak S1
+
+Probe disimpan sebagai **brick**: kisi yang sama, tapi hanya blok yang dekat
+geometri yang dialokasikan.
+
+**Kaskade seperti clipmap SDF sempat menjadi kandidat, dan kodenya sendiri yang
+membatalkannya.** `SdfClipmap.h` berbunyi "beberapa kaskade kubik yang
+**mengikuti kamera**", dan seluruh rancangannya — pengalamatan toroidal,
+pengancingan titik asal, penulisan ulang hanya lempeng tepi — ada karena
+kameranya bergerak. Panggangan tidak punya kamera. Yang tersisa dari analogi itu
+cuma kisi bersarang yang berbagi nama dengan sesuatu yang cara kerjanya lain.
+
+**Yang memaksa brick bukan S1 melainkan pertumbuhan kubiknya.** Memperhalus dua
+kali lipat membayar delapan kali lipat, dan itu terlihat di angkanya. Angka di
+bawah memakai SH9 RGB float16 — 54 B per probe — yang **tidak pernah jadi
+dipakai**: artefaknya menulis `Sh9` apa adanya (108 B) dan buffer GPU-nya
+menempati 144 B. Bentuk pertumbuhannya tetap benar; kalikan 2 untuk artefak dan
+2,7 untuk GPU.
+
+| adegan | 2 m | 1 m | 0,5 m |
+|---|---:|---:|---:|
+| 32×8×32 | 0,1 MB | 0,5 MB | 3,7 MB |
+| 64×16×64 | 0,5 MB | 3,7 MB | 28,3 MB |
+| 128×32×128 | 3,7 MB | 28,3 MB | **221 MB** |
+
+Kisi beraturan membayar probe untuk ruang kosong **dan untuk ruang di dalam
+benda pejal**, dan pada adegan besar itu yang menghabiskan anggarannya. Dengan
+brick, biayanya mengikuti luas permukaan alih-alih volume.
+
+**Formatnya disiapkan sejak S1, tapi sparsity-nya datang di S2**, dan pembagian
+itu disengaja:
+
+- **S1 menulis format brick dan mengisinya penuh** — setiap brick ada. Itu
+  menaruh indireksinya di tempatnya tanpa menuntut S1 memutuskan brick mana yang
+  boleh hilang.
+- **S2 yang membuang brick kosong**, karena ia satu-satunya milestone yang
+  memang sudah menelusuri geometri dan karena itu sudah tahu di mana
+  permukaannya.
+
+Indireksinya tidak bisa ditambahkan belakangan dengan murah: pencarian di
+shader, format artefak, dan cara editor melaporkan ukurannya semuanya
+bergantung padanya, dan ketiganya sudah berdiri saat S5 tiba.
+
+**Volume yang ditempatkan pengarang ditunda, bukan dibuang.** Ia lapisan
+pengarangan di atas brick — halus di ruang tamu, kasar di lapangan — dan
+menambahkannya nanti tidak mengubah format penyimpanannya.
+
+### 10. Probe lebih dulu, lightmap menyusul
 
 Probe tidak menuntut UV apa pun, tidak menuntut dependensi baru, dan tidak
 menyentuh format vertex. Lightmap menuntut ketiganya.
@@ -239,7 +286,7 @@ Matahari langsung lewat shadow map di ketiganya.
 
 ## Milestone
 
-### S0 — Dua kategori, dinyatakan
+### S0 — Dua kategori, dinyatakan · ✅
 
 - `IndirectLighting` menjadi `None | Precomputed | RealTime`
 - Migrasi berkas: `"Baked"` dibaca sebagai `Precomputed`
@@ -251,7 +298,54 @@ satu pun perubahan rupa; menyalakan Time-of-Day di level `Precomputed` memberi
 notifikasi dengan jalan keluar sekali klik; dan `.simlevel` yang disimpan ulang
 menulis nama baru.
 
-### S1 — Probe volume: kisi, penempatan, penyimpanan
+#### Keadaannya sesudah S0
+
+`IndirectLighting::Baked` menjadi `Precomputed`, dan skema level naik ke 5.
+Dua level yang bedanya hanya kata itu — satu versi 4 menulis `"Baked"`, satu
+versi 5 menulis `"Precomputed"` — menghasilkan tangkapan yang **identik byte
+demi byte**.
+
+**Migrasinya ada justru karena tanpanya berkas lama tetap terbaca benar.**
+`"Baked"` tidak ada di daftar nama yang baru, jadi pembacanya membiarkan nilai
+bawaan — dan bawaannya kebetulan `Precomputed`, nilai yang sama. Kebetulan itu
+berhenti berlaku pada hari seseorang mengubah bawaannya, di tempat yang tidak
+ada hubungannya sama sekali. Ujinya karena itu memeriksa dua hal sekaligus:
+`"Baked"` naik menjadi `Precomputed`, dan `"None"` maupun `"RealTime"` **tidak**
+tersentuh — migrasi yang mengubah lebih daripada janjinya menghapus pilihan
+orang tanpa menyebutkannya.
+
+**Time-of-Day dinyatakan bertabrakan**, dengan dua jalan keluar sekali klik:
+menghentikan Time-of-Day, atau pindah ke `RealTime`. Yang pertama tidak lewat
+perintah — `timeOfDayEnabled` setelan editor, bukan isi level, dan yang tidak
+pernah tertulis ke berkas tidak punya tempat di riwayat undo level.
+
+> **Nadanya netral, dan tinjauan S0 yang memaksanya begitu.** Versi pertama
+> memberi peringatan berwarna dan menyatakan "pantulan dan oklusinya akan datang
+> dari matahari di tempat lain" — kalimat yang **tidak benar hari ini**, karena
+> belum ada pantulan maupun oklusi yang dipanggang. Yang dipanggang
+> `Precomputed` baru lingkungannya, dan iradiansinya dipanggang ulang tiap
+> matahari bergeser: kombinasi itu justru yang dibangun dan diuji B1, dan
+> kriteria terimanya berbunyi "ambient yang ikut berubah saat Time-of-Day
+> menggerakkan matahari".
+>
+> Jadi rencana ini sempat menyuruh editor mengatakan bahwa susunan yang bekerja
+> itu rusak, dan menawarkan pindah ke `RealTime` sebagai perbaikan atas masalah
+> yang belum ada — memindahkan orang dari yang murah ke yang dibayar tiap frame,
+> tanpa alasan.
+>
+> **Tabrakannya nyata, tapi ia datang bersama S2.** Sampai transport dipanggang,
+> yang ditampilkan pemberitahuan bernada biasa yang menyebutkan keduanya masih
+> boleh dan kapan itu berubah. S2 yang menaikkannya menjadi peringatan.
+
+**Panelnya mengatakan apa yang belum dipanggang**, dan itu bukan hiasan:
+`Precomputed` hari ini memanggang lingkungannya dan itu saja. Tingkat yang
+menjanjikan lebih daripada yang diberikannya membuat orang mencari cacat pada
+adegannya alih-alih pada rencananya. Daftarnya menyusut tiap milestone —
+transport di S2, oklusi di S3, lightmap di S5.
+
+Tiga uji baru di `SimSceneTests`, 25 dari 25 suite lulus.
+
+### S1 — Probe volume: kisi, penempatan, penyimpanan · ✅
 
 - Kisi iradiansi beraturan yang menutupi batas geometri statis
 - **Jarak antar-probe disetel di editor**, bawaan per-level di World Settings
@@ -272,7 +366,97 @@ punya satu penyebab, bukan dua.
 Dan: menggeser jarak antar-probe mengubah jumlah probe serta ukuran artefaknya
 sesuai angka yang ditampilkan panel, bukan sesuai angka yang harus ditebak.
 
-### S2 — Transport: probe diisi path tracer acuan
+#### Keadaannya sesudah S1 · ✅
+
+Kisinya hidup dari World Settings sampai ke shader. `bench.simlevel`, 1280×720,
+kamera tetap, eksposur manual **EV4**, Debug:
+
+| Jarak | Kisi | Probe | Brick | GPU | Artefak | `forward-opaque` | `cpu-total` |
+|---|---|---:|---:|---:|---:|---:|---:|
+| — (SH panggang) | — | — | — | — | — | 0,692 ms | 11,08 ms |
+| 4 m | 22×2×22 | 2.304 | 36 | 3,2 MB | 2,4 MB | 0,938 ms | 11,74 ms |
+| 2 m (bawaan) | 42×3×42 | 7.744 | 121 | 10,6 MB | 8,0 MB | 0,939 ms | 11,77 ms |
+| 1 m | 82×4×82 | 28.224 | 441 | 38,8 MB | 29,1 MB | 0,954 ms | 11,68 ms |
+| 0,5 m | 162×7×162 | 215.168 | 3.362 | 295 MB | 222 MB | 0,973 ms | 11,88 ms |
+| 0,05 m | ditolak | 154.368.960 | — | — | — | — | — |
+
+Selisih terhadap tingkat panggang seri B: **1–2 kanal dari 2.764.800, selisih
+maksimum 1 dari 255** — pembulatan float pada bobot trilinear, bukan cahaya yang
+berbeda. Gambar acuannya rata-rata 44,2 dengan 98,2% piksel bukan nol.
+
+**Kontrol positif, dan ia yang membuat angka nol di atas berarti sesuatu.**
+Tanpa transport tiap probe memuat SH yang sama, sehingga gambar lewat kisi
+identik dengan gambar lewat SH panggang *baik ketika kisinya benar maupun ketika
+ia tidak pernah dibaca satu piksel pun*. Satu angka nol menjawab dua keadaan yang
+berlawanan. `--bench-probe-debug` mengisi probe dengan papan catur atas koordinat
+X dan Z: gambarnya lalu berubah pada **60,8% kanal**, dan tiga jarak berbeda
+menghasilkan tiga pola berbeda (66,9% kanal antara 4 m dan 2 m). Kisinya memang
+dibaca, dan yang dibacanya memang bergantung pada posisi dan bentuk kisinya.
+
+Papan caturnya berselang-seling di X dan Z saja. Yang juga berselang-seling di Y
+tidak terlihat sama sekali: sebuah permukaan lazimnya berada di antara dua baris
+probe secara tegak, dan interpolasinya meratakan dua nilai yang berlawanan
+menjadi satu — polanya hilang justru di tempat ia harus terlihat.
+
+**Yang masih belum terbukti, dan disebutkan supaya tidak dikira terbukti:**
+pemetaan indeks di shader belum diadu satu-satu dengan `SampleProbeVolume` di
+CPU. Yang sudah: kisinya dibaca, jawabannya bergantung pada posisi dan jarak, dan
+sisi CPU-nya diuji langsung — termasuk brick yang dilubangi. Yang belum: bahwa
+probe (x,y,z) tertentu di shader adalah probe yang sama dengan di CPU. Itu baru
+bisa diadu ketika probe benar-benar membawa nilai yang berbeda-beda, yaitu di S2
+— dan **kriteria terima S2 harus memuatnya**, bukan mengandaikannya sudah lewat.
+
+##### Empat cacat yang ditemukan peninjauan, semuanya nyata
+
+1. **Jalur material tidak pernah membaca kisinya.** Pembacaan probe dipasang di
+   `box_shading.slang` saja — jalur kotak tanpa material — sedangkan setiap mesh
+   bermaterial digambar lewat shader yang dirakit `MaterialShaderModule.cpp`, dan
+   di sana `skyIrradiance` masih berdiri sendirian. Kisinya mati untuk hampir
+   seluruh adegan, dan yang terlihat adalah gambar yang identik dengan sebelumnya
+   — yaitu persis bentuk "lulus" yang dicari kriteria S1.
+
+2. **Putaran lingkungan hilang di jalur probe.** `skyIrradiance` membaca lewat
+   arah yang diputar (keputusan 4 di PLAN-IBL); `probeIrradiance` tidak. Diukur
+   pada HDRI berputar 2,0 rad: **11,93% kanal berbeda, maksimum 14** antara kedua
+   jalur yang seharusnya menjawab hal yang sama. Sekarang ruang isi probe
+   dikirim sebagai angka (`probeCounts.w`), karena S2 mengisi probe di ruang
+   dunia dan menerapkan putarannya lagi di sana akan memutarnya dua kali.
+
+3. **Panel melaporkan ukuran yang tidak pernah dibayar siapa pun.** Angkanya RGB
+   float16 — 54 byte per probe — sementara artefaknya menulis 108 dan buffer GPU
+   menempati 144. Tiga angka untuk satu hal. Panel sekarang menyebut keduanya
+   yang nyata, GPU lebih dulu, dan sebuah uji menjaga angka artefaknya tetap
+   sama dengan ukuran berkas yang benar-benar ditulis.
+
+4. **Panel dan renderer menghitung batas adegan dari daftar yang berbeda.**
+   Panel memakai `pickables_`, yang sengaja tidak memuat entity terkunci —
+   sedangkan mengunci latar statis justru cara orang menjaganya tidak terpilih
+   tak sengaja, dan latar statis itulah isi adegan berpanggang. Keduanya sekarang
+   memakai `meshes_`, daftar yang sama yang dipakai renderer.
+
+##### Dan satu cacat di cara mengukurnya, yang membatalkan angkanya sendiri
+
+Pengukuran S1 yang pertama dijalankan pada **EV12**, dan pada eksposur itu
+seluruh tangkapannya hitam: rata-rata 0,0 dengan maksimum 1 dari 255. "0 dari
+2.764.800 kanal berbeda" yang tercatat sebelumnya membandingkan dua gambar hitam.
+Seri B memakai EV0; angka di atas EV4.
+
+Pelajarannya bukan "pilih eksposur yang benar" melainkan **sebuah perbandingan
+gambar wajib menyebutkan kecerahan gambar acuannya**, karena tanpa itu "tidak ada
+selisih" dan "tidak ada gambar" adalah kalimat yang sama.
+
+##### Yang belum ada di S1
+
+Artefak `.simprobe` sudah bisa ditulis dan dibaca, tetapi renderer belum
+memakainya — ia menyusun kisinya di memori tiap kali adegan dibuka. Itu benar
+selama isinya sesalin SH langit; ia berhenti benar begitu S2 mengisinya dengan
+penelusuran yang mahal, dan di sanalah cache berkunci-hash itu mulai dipakai.
+
+Bendera ukur yang ditambahkan: `--bench-probe-spacing <m>` (nol mematikan
+kisinya tanpa mengubah tingkat pencahayaan) dan `--bench-probe-debug` (papan
+catur sebagai kontrol positif).
+
+### S2 — Transport: probe diisi path tracer acuan · ✅
 
 - `reference::PathTracer` menelusuri dari tiap probe, multi-pantulan penuh
 - Cahaya matahari langsung **dikecualikan** (keputusan 2)
@@ -282,6 +466,172 @@ sesuai angka yang ditampilkan panel, bukan sesuai angka yang harus ditebak.
 terlihat; uji tungku lulus pada kisi seperti ia lulus pada jalur panggang (B2);
 dan pada adegan terbuka iradiansi probe cocok dengan tingkat panggang seri B
 dalam ambang yang ditulis di dokumen ini.
+
+Dan: **pemetaan indeks shader diadu satu-satu dengan `SampleProbeVolume` di
+CPU** — S1 tidak bisa membuktikannya karena seluruh probenya bernilai sama, dan
+S2 adalah milestone pertama yang probenya benar-benar berbeda-beda. Tanpa itu,
+sebuah selisih di S2 punya dua tersangka: transportnya, dan pembacaannya.
+
+Dan: **pemberitahuan Time-of-Day naik menjadi peringatan di sini.** Sampai
+milestone ini, menggerakkan matahari di level `Precomputed` masih sah — yang
+dipanggang cuma lingkungannya, dan ia mengikuti mataharinya. Sesudahnya tidak
+lagi, dan panelnya harus mengatakan itu dengan nada yang berbeda.
+
+#### Keadaannya sesudah S2 · ✅
+
+Transport ditelusuri `reference::TraceProbeIrradiance` — estimator yang **sama
+persis** dengan gambar acuan. Loop jalurnya dikeluarkan menjadi `TracePath` dan
+dipakai keduanya; dua salinan akan berselisih pada pantulan ke berapa pun yang
+pertama kali disunting salah satunya.
+
+Ketiga kriteria terima, diukur:
+
+| yang diuji | hasil | yang diharapkan |
+|---|---:|---|
+| ruang terbuka lawan `ProjectIrradiance` | dalam 2% pada empat normal | sama |
+| ruang tertutup | **0 lawan 1,3122** | langitnya berhenti masuk |
+| tungku ρ=0,5, E=1 | 6,266 lawan **6,28319** (0,27%) | `πE/(1−ρ)` |
+
+Baris kedua yang menjadi seluruh alasan milestone ini ada: tingkat panggang
+seri B menyinari ruang tertutup **persis seterang ruang terbuka**, karena
+sembilan angka untuk seluruh level tidak pernah memeriksa apakah ada dinding.
+
+**Matahari lewat next-event estimation saja**, dan itu yang menegakkan
+keputusan 2 tanpa cabang khusus: NEE hanya berjalan di permukaan, jadi sinar
+yang berangkat dari titik kosong — sebuah probe — tidak pernah menemuinya. Yang
+terpanggang pantulannya; yang langsung tetap diantarkan lampu terarah yang
+berbayang saat menggambar. Diperiksa dua arah: tanpa geometri, probe menjawab
+nol walaupun matahari menyala sepuluh kali; dengan lantai di bawahnya, ia
+menjawab 7,89.
+
+**Pemetaan indeks shader diadu satu-satu, yang S1 tidak bisa lakukan.**
+Aritmatikanya pindah ke `Shaders/probe_grid.slang`, di-`#include`
+`shadow_common.slang` **dan** dikompilasi ke C++ lewat `slangc -target cpp` —
+pola dan alasan yang sama dengan `openpbr_cpu.slang`. 8.888 pemeriksaan atas
+tiga kisi yang jumlahnya bukan kelipatan ukuran brick, pada titik di dalam
+kisi, di tepinya, dan di luarnya. Menukar x dan z di indeks lokal sisi C++
+menggagalkan 1.466 — ujinya punya gigi.
+
+Panggangan berjalan di `TaskPool` lewat `view::ProbeBakery`, dan hasilnya
+artefak `.simprobe` berkunci hash. Diukur ujung ke ujung di `bench.simlevel`,
+Debug:
+
+Angkanya ada di tabel sesudah daftar cacat di bawah — yang pertama kali
+tercatat di sini salah, dan sebabnya nomor 6 di sana.
+
+Selisihnya kecil karena `bench.simlevel` adalah adegan terbuka: langit memang
+mendominasi di sana, dan yang berubah cuma oklusi tanah beserta pantulannya.
+Angka yang tajam ada di baris "ruang tertutup" di tabel pertama.
+
+**Peringatan Time-of-Day naik nadanya**, dan syaratnya bukan tingkat yang
+dipilih melainkan apa yang benar-benar sudah dipanggang: selama yang ada baru
+kisi lingkungan, ia tetap ikut mataharinya dan nada netralnya benar. Begitu ada
+kisi yang transportnya ditelusuri, ia berwarna.
+
+##### Enam cacat yang ditemukan peninjauan
+
+1. **Artefak `.simprobe` ditulis tetapi tidak pernah dibaca.** Sebuah cache yang
+   tidak pernah menghemat apa pun bukan cache melainkan berkas yang menumpuk.
+   Sekarang dibaca lebih dulu: 11,31 s menjadi **0,00 s**, dengan gambar yang
+   identik byte demi byte.
+
+2. **Dan kuncinya cuma memuat bentuk kisi.** `environmentKey` tidak pernah diisi
+   satu pemanggil pun, jadi menyalakan pembacaan tanpa memperbaikinya akan
+   membaca panggangan matahari sore sebagai panggangan matahari pagi — tanpa
+   satu pun galat, karena berkasnya memang sah. Kunci sekarang memuat langit
+   (sidik jari dari pemanggil, karena langitnya sebuah `std::function` yang tidak
+   bisa di-hash), matahari, albedo, jumlah cuplikan, dan matriks tiap benda.
+   Kontrol negatifnya: menggeser matahari pada kisi yang bentuknya sama persis
+   memaksa panggangan ulang — 11,28 s, bukan 0,00 s — dan gambarnya berbeda pada
+   88,4% kanal.
+
+3. **Tugas latar menangkap `PickScene` milik bakery lewat referensi.** Sebuah
+   level yang ditutup di tengah panggangan membebaskan BVH yang sedang
+   ditembaki, dan yang keluar bukan galat melainkan pembacaan memori bebas.
+   Geometrinya sekarang dipegang tugasnya sendiri lewat `shared_ptr` — aturan
+   "tidak pernah menangkap `this`" berlaku sama untuk referensi ke anggotanya.
+
+4. **Kotak tiap benda ditaksir dari matriksnya**, sebagai titik asal ± skala
+   terbesarnya. Sebuah lantai 80×0,5×80 karena itu menjadi kubus bersisi 160 —
+   aman, tetapi bentuknya salah, dan yang dibayar waktu panggang untuk brick
+   yang tidak perlu. Kotak dunia yang sebenarnya kini ikut dari `SceneView`,
+   yang memang sudah menghitungnya.
+
+5. **Kisi panggang tidak pernah dilepas saat level berganti.** Level berikutnya
+   disinari cahaya tak-langsung adegan sebelumnya: sebuah ruangan yang tidak
+   pernah dipanggang menerima pantulan dari ruangan lain. Viewport sekarang
+   **membandingkan** kisi yang terpasang alih-alih memasangnya sekali di ujung
+   panggangan — kisinya juga bisa hilang, dan pemasangan yang hanya terjadi saat
+   selesai tidak pernah memberitahu renderer tentang itu.
+
+6. **Dan lagi-lagi cacatnya ada di cara mengukurnya.** Jalur `--bench-probe-bake`
+   memanggang dengan matahari tegak lurus ke atas dan tanpa iradiansi, sementara
+   langit yang tergambar memakai matahari adegan. Selisih gambar yang tercatat
+   sebelumnya karena itu sebagian **dua langit yang berbeda**, bukan oklusi.
+   Diukur: panggangan bermatahari salah berbeda 17,5% kanal dari yang benar.
+
+Angka yang benar, `bench.simlevel`, EV4, sesudah keenamnya diperbaiki:
+
+| jarak | probe | spp | panggang | dari cache | GPU | selisih lawan kisi langit |
+|---|---:|---:|---:|---:|---:|---|
+| 4 m | 2.304 | 64 | 11,3 s | 0,00 s | 0,32 MB | — |
+| 2 m | 6.400 | 128 | 67,7 s | 0,00 s | 0,88 MB | 32,5% kanal, maks 22 |
+
+##### Riak di tanah: dilacak sampai sebabnya
+
+Peta selisih S2 memperlihatkan riak samar di bidang tanah. Dugaan pertama —
+"resolusi kisi yang terlihat menembus, hilang dengan jarak lebih rapat" —
+**diukur dan salah**, dan dua dugaan berikutnya juga gugur:
+
+| dugaan | uji | hasil |
+|---|---|---|
+| resolusi kisi | jarak 2 m → 1 m | amplitudo **naik** 2,66×, bukan turun |
+| derau Monte Carlo | 128 → 512 cuplikan | tidak bergerak sama sekali (0,98×) |
+| kuantisasi 8-bit | dibaca ulang di HDR linear | riaknya **lebih kuat**, bukan hilang |
+
+Uji ketiga menuntut `IViewportRenderer::CaptureHdr` — radiance linier sebelum
+eksposur dan pemetaan nada. Itu ditambahkan untuk pertanyaan ini, dan ia
+menutup satu kelas kesalahan pengukuran seluruhnya: dua gambar yang berselisih
+setengah tingkat kuantisasi terbaca sebagai sama, dan peta selisih yang
+dikuatkan mengubah tangga kuantisasi menjadi pola yang tampak seperti temuan.
+
+Sebabnya ditemukan dengan membuka artefak `.simprobe` dan membaca probenya satu
+per satu: **sebagian probe jatuh di dalam benda pejal, dan yang di sana
+dipanggang tepat nol.** Nol itu lalu ikut ke dalam interpolasi permukaan di
+dekatnya.
+
+| jarak | probe nol | amplitudo riak |
+|---|---:|---:|
+| 4 m | 0 dari 2.304 — 0,00% | 1,00× |
+| 2 m | 35 dari 6.400 — 0,55% | 1,39× |
+| 1 m | 246 dari 21.312 — 1,15% | 3,69× |
+
+Kisi yang lebih rapat menaruh **lebih banyak** probe di dalam geometri, jadi
+memperhalus jaraknya memperburuk artefaknya alih-alih memperbaikinya. Itu
+membalik intuisi yang wajar, dan itulah yang membuatnya layak ditulis di sini.
+
+Yang memperbaikinya sudah terjadwal: **S3**, karena membedakan "di dalam
+dinding" dari "di depan dinding" menuntut probe membawa visibilitasnya, bukan
+hanya iradiansinya. Sampai itu ada, jarak probe yang lebih rapat bukan
+peningkatan kualitas yang gratis.
+
+##### Tiga hal yang belum ada, dan disebutkan supaya tidak dikira ada
+
+1. **Albedo satu angka untuk seluruh adegan** — 0,5, angka dan alasan yang sama
+   dengan `kBounceAlbedo` di jalur clipmap SDF. Albedo per-material menuntut
+   menjalankan graph material di CPU untuk tiap segitiga; sampai ada, yang
+   meleset kecerahan pantulannya, bukan keberadaannya.
+
+2. **Kubus bawaan, whitebox, dan terrain tidak menghalangi panggangan.**
+   Ketiganya tidak punya kunci geometri di jalur ray cast mana pun, jadi
+   `PickScene` tidak memuat segitiganya — sebuah ruangan yang dibangun dari
+   kubus bawaan tetap disinari langit seolah di luar ruangan. **Ini disebutkan
+   angkanya, bukan didiamkan:** bakery melaporkan berapa objek yang tidak punya
+   geometri CPU sebelum memanggang. Yang memperbaikinya mengadopsi bentuk
+   bawaan ke `MeshGeometryCache`, dan itu prasyarat S5.
+
+3. **Berkas HDR belum bisa memanggang transport** — jalur panel memakai langit
+   atmosferik atau hitam. Membacanya di sisi CPU adalah pekerjaan tersendiri.
 
 ### S3 — Oklusi arah
 
@@ -438,10 +788,6 @@ pertanyaan yang lebih baik dijawab sesudah keduanya berdiri sendiri-sendiri.
 
 ## Yang masih terbuka
 
-- **Penempatan probe.** Kisi beraturan membayar probe untuk ruang kosong;
-  kaskade — seperti clipmap SDF yang sudah ada — atau penempatan adaptif
-  membayar ketelitian di tempat yang membutuhkannya. Diputuskan sebelum S1
-  mendarat, karena ia menentukan format penyimpanannya.
 - **Ambang selisih S2 dan S6** terhadap tingkat panggang dan terhadap path
   tracer acuan: belum ditetapkan angkanya, dan seperti B5 ia sebaiknya diukur
   lebih dulu lalu ditetapkan dari hasilnya.

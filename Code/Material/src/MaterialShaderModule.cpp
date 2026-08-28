@@ -557,6 +557,16 @@ std::string AssembleForwardMaterialModule(const std::string& generatedSlang,
     // Keduanya sekarang membaca `skyIrradiance`, yang selalu E, dan selisih pi
     // itu hilang bersama konstantanya.
     out << "    float3 irradiance = skyIrradiance(frame.normal);\n";
+    // **Kisi probe menggantikan SH panggang di sini juga, bukan hanya di
+    // `box_shading.slang`.** Jalur inilah yang menggambar setiap mesh
+    // bermaterial — yaitu hampir seluruh adegan — dan menambahkan pembacaan
+    // probe hanya di jalur kotak menghasilkan kisi yang tidak pernah dibaca satu
+    // piksel pun. Yang terlihat kemudian bukan galat melainkan gambar yang
+    // *identik* dengan sebelum kisinya ada, dan itu terbaca sebagai "kisinya
+    // benar" alih-alih sebagai "kisinya mati".
+    out << "    if (shadowParams.probeCounts.w > 0.5) {\n";
+    out << "        irradiance = probeIrradiance(input.worldPosition, frame.normal);\n";
+    out << "    }\n";
     out << "    if (shadowParams.giParams.x > 0.5) {\n";
     out << "        irradiance = giIrradianceAt(input.position.xy, input.worldPosition,\n";
     out << "                                    frame.normal, shadowParams.giParams.y);\n";

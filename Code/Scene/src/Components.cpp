@@ -195,9 +195,9 @@ void RegisterCoreComponents() {
         types.Type<WorldSettings>("WorldSettings")
             .Field<&WorldSettings::indirect>("indirect")
             .Label("Indirect Lighting")
-            .EnumNames({"None", "Baked", "RealTime"})
-            .Tooltip("None mematikannya; Baked dipanggang sekali dari lingkungan; "
-                     "RealTime menelusuri probe tiap frame — satu-satunya yang punya oklusi")
+            .EnumNames({"None", "Precomputed", "RealTime"})
+            .Tooltip("None mematikannya; Precomputed memanggang seluruhnya dan menuntut "
+                     "matahari yang diam; RealTime menelusurinya tiap frame")
             .Field<&WorldSettings::environment>("environment")
             .Label("Environment")
             .EnumNames({"Sky", "File"})
@@ -213,7 +213,12 @@ void RegisterCoreComponents() {
             .Field<&WorldSettings::extractSun>("extractSun")
             .Label("Extract Sun From File")
             .Tooltip("Keluarkan matahari dari berkas lingkungan supaya lampu directional "
-                     "yang mengantarkannya — tanpa ini keduanya menyala sekaligus");
+                     "yang mengantarkannya — tanpa ini keduanya menyala sekaligus")
+            .Field<&WorldSettings::probeSpacing>("probeSpacing")
+            .Label("Probe Spacing (m)")
+            .Range(0.1f, 32.0f)
+            .Tooltip("Jarak antar-probe iradiansi untuk Precomputed. Yang dibayar tumbuh "
+                     "kubik — panel menampilkan jumlah dan ukurannya di bawah");
 
         types.Type<RigidBodyComponent>("RigidBody")
             .Field<&RigidBodyComponent::kind>("kind")

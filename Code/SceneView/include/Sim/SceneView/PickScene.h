@@ -39,6 +39,16 @@ struct PickItem {
     /// Jalur berkas yang dimuat bila kuncinya belum ada di cache. Kosong berarti
     /// geometrinya hanya bisa datang lewat `Adopt` — whitebox dan ubin terrain.
     std::string_view sourcePath;
+
+    /// Kotak dunia benda ini. **Diabaikan picking**, dan ada di sini untuk
+    /// panggangan cahaya statis: ia memutuskan brick mana yang perlu dipanggang,
+    /// dan menaksirnya dari matriksnya saja salah bentuk — sebuah lantai
+    /// 80×0,5×80 menjadi kubus bersisi 160.
+    ///
+    /// Kedua ujungnya sama berarti belum diisi; yang memakainya lalu harus
+    /// memilih jalur konservatif alih-alih membuang brick yang dipakai.
+    Vec3 worldMinimum{0.0f};
+    Vec3 worldMaximum{0.0f};
 };
 
 class PickScene {

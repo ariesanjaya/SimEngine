@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Sim/Render/ProbeVolume.h"
+#include "Sim/SceneView/ProbeBakery.h"
 #include "Sim/SceneView/Selection.h"
 #include "Sim/SceneView/TerrainStore.h"
 #include "Sim/SceneView/WhiteboxStore.h"
@@ -12,6 +14,7 @@
 
 #include <functional>
 #include <memory>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -131,6 +134,17 @@ struct EditorContext {
     /// renderer karena yang membakenya OpenVDB — pengondisi aset yang tidak
     /// pernah ikut ke jalur yang dikirim ke pemain.
     assets::MeshSdfBakery* meshSdfBakery = nullptr;
+    /// Panggangan cahaya statis: transport ditelusuri path tracer acuan ke
+    /// dalam kisi probe (S2 di docs/PLAN-STATIC-GI.md).
+    ///
+    /// **Null bila editor dibangun tanpa slangc** — `Sim::Reference` dilewati di
+    /// sana, dan model shading path tracer-nya dibangkitkan darinya. Panel yang
+    /// memakainya wajib memeriksa, aturan yang sama dengan runtime Lua.
+    view::ProbeBakery* probeBakery = nullptr;
+    /// Kisi yang sudah dipanggang dan sedang dipakai, atau null. Dipegang di
+    /// sini supaya panel bisa melaporkannya dan viewport bisa memasangnya ke
+    /// renderer — keduanya melihat kisi yang sama.
+    std::shared_ptr<const render::ProbeVolume> probeVolume;
     /// Salinan CPU geometri mesh, untuk picking presisi dan query authoring.
     /// Null berarti picking kembali ke jalur kotak batas.
     assets::MeshGeometryCache* meshGeometry = nullptr;
@@ -155,6 +169,11 @@ struct EditorContext {
     /// dibuka, dan menyalinnya ke dalam project adalah pilihan pengguna, bukan
     /// syarat memakainya.
     std::string builtinDir;
+
+    /// Folder setelan pengguna — tempat cache masak tinggal. Dipakai panggangan
+    /// cahaya statis untuk menaruh artefak `.simprobe`-nya, sejajar dengan
+    /// `MeshSdfCache` dan `ShaderCache`.
+    std::filesystem::path configDir;
     /// Pemutar klip animasi untuk mesh ber-rig. Dimiliki EditorApp; panel
     /// Viewport meneruskannya ke `SceneView::Build`. Null berarti mesh ber-rig
     /// digambar pada bind pose-nya.
@@ -278,6 +297,33 @@ struct EditorContext {
         float hdriRotation = 0.0f;
         float hdriIntensity = 1.0f;
     } sky;
+
+    /// Batas geometri adegan, seperti yang diukur viewport frame lalu.
+    ///
+    /// **Diukur di satu tempat dan dibaca di tempat lain, karena yang tahu
+    /// bentuk dunia adalah yang membangunnya.** `SceneView` sudah memegang
+    /// kotak batas tiap mesh beserta matriks dunianya — menghitung ulang di
+    /// panel World Settings berarti memuat geometri kedua kalinya, dan
+    /// jawabannya akan berbeda selama pemuatan latar belum selesai.
+    ///
+    /// `valid` false berarti belum ada viewport yang menggambar, atau adegannya
+    /// tanpa geometri. Yang membacanya wajib memeriksanya — angka probe atas
+    /// kotak kosong adalah angka yang salah, bukan nol.
+    struct SceneBounds {
+        Vec3 minimum{0.0f};
+        Vec3 maximum{0.0f};
+        bool valid = false;
+    } sceneBounds;
+
+    /// Geometri yang menaungi panggangan, seperti yang dikumpulkan viewport
+    /// frame ini (S2).
+    ///
+    /// **String di dalamnya menunjuk ke penyimpanan `SceneView`**, yang sah
+    /// sampai `Build` berikutnya — jadi yang memakainya harus memakainya di
+    /// dalam frame yang sama. Itu cukup: yang memakainya tombol Bake, dan
+    /// `ProbeBakery::Bake` menyalin geometrinya ke `PickScene` sebelum
+    /// mengembalikan kendali.
+    std::vector<view::PickItem> bakeItems;
 
     /// Awan volumetrik. Terpisah dari `sky` karena biayanya berbeda satu orde,
     /// dan karena itu sakelarnya perlu berdiri sendiri.

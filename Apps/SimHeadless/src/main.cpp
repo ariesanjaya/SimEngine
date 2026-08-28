@@ -20,6 +20,7 @@
 #include "Sim/Editor/AiTools.h"
 #include "Sim/Editor/EditorApp.h"
 #include "Sim/Editor/EditorContext.h"
+#include "Sim/SceneView/ProbeBakery.h"
 #include "Sim/SceneView/SceneView.h"
 #include "Sim/SceneView/Selection.h"
 #include "Sim/ImageIO/ImageIO.h"
@@ -109,6 +110,7 @@ void PrintUsage() {
         "  --bench-settle-seconds <n>    batas menunggu material siap, bawaan 300\n"
         "  --bench-camera px,py,pz,tx,ty,tz  kamera tetap, bukan lintasan orbit\n"
         "  --bench-dump-depth <path>     depth buffer mentah (w, h, float per texel)\n"
+        "  --bench-dump-hdr <path>       radiance linier mentah (w, h, RGBA float per texel)\n"
         "  --bench-cull-limit <n>        gambar hanya permukaan bernomor < n\n"
         "  --bench-fixed-exposure        eksposur manual; wajib untuk membandingkan gambar\n"
         "  --bench-gi-debug <view>       off|albedo|normal|irradiance|raycount|steps|layers\n"
@@ -116,6 +118,9 @@ void PrintUsage() {
         "  --bench-ev <ev100>            eksposur manual pada EV100 ini\n"
         "  --bench-no-screen-trace       matikan lapis screen-space; lihat SDF sendirian\n"
         "  --bench-furnace               uji tungku: langit seragam 1, albedo 1, tanpa matahari\n"
+        "  --bench-probe-spacing <m>     paksa jarak kisi probe; 0 mematikan kisinya (S1)\n"
+        "  --bench-probe-debug           isi probe dengan papan catur; kontrol positif (S1)\n"
+        "  --bench-probe-bake <spp>      panggang transport ke kisi probe lalu pakai (S2)\n"
         "  --dump-mesh <file> --dump-out <json>  material dan ruas sebuah berkas mesh\n"
         "  --dump-fbx-material <fbx>     setiap properti tiap material, apa adanya\n"
         "  --dump-uv <bin>               posisi+UV tiap titik, float32 x5\n"
@@ -747,6 +752,33 @@ int main(int argc, char** argv) {
         SIM_INFO("Bench", "depth buffer written to {} ({}x{})", std::string(path), width, height);
     };
 
+    /// Radiance linier apa adanya: dua uint32 ukuran, lalu RGBA float per texel.
+    ///
+    /// **Sebelum eksposur dan sebelum pemetaan nada**, dan itu seluruh gunanya:
+    /// dua gambar 8-bit yang berselisih setengah tingkat kuantisasi terbaca
+    /// sebagai sama, dan peta selisih yang dikuatkan mengubah tangga kuantisasi
+    /// itu sendiri menjadi pola yang tampak seperti temuan.
+    const auto writeHdrDump = [](render::IViewportRenderer& target, std::string_view path) {
+        std::vector<float> pixels;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        std::string dumpError;
+        if (!target.CaptureHdr(pixels, width, height, dumpError)) {
+            SIM_ERROR("Bench", "cannot read the HDR target: {}", dumpError);
+            return;
+        }
+        std::ofstream file{std::filesystem::path(path), std::ios::binary};
+        if (!file) {
+            SIM_ERROR("Bench", "cannot write {}", std::string(path));
+            return;
+        }
+        const uint32_t header[2]{width, height};
+        file.write(reinterpret_cast<const char*>(header), sizeof(header));
+        file.write(reinterpret_cast<const char*>(pixels.data()),
+                   static_cast<std::streamsize>(pixels.size() * sizeof(float)));
+        SIM_INFO("Bench", "linear HDR written to {} ({}x{})", std::string(path), width, height);
+    };
+
     // --- Mode ukur (G0) ------------------------------------------------------
     //
     // **Sebelum server MCP dinyalakan, dan keluar tanpa pernah menyalakannya.**
@@ -833,6 +865,8 @@ int main(int argc, char** argv) {
         // membacanya, dan sesudah tingkat pencahayaan datang dari level, "yang
         // diminta" tidak lagi menjawab pertanyaannya.
         bool giEffective = false;
+        bool probeDebugPattern = false;
+        uint32_t probeBakeSamples = 0;
         for (int at = 1; at < argc; ++at) {
             if (argv[at] == nullptr) {
                 continue;
@@ -852,6 +886,10 @@ int main(int argc, char** argv) {
                 occlusion = true;
             } else if (flag == "--bench-fixed-exposure") {
                 fixedExposure = true;
+            } else if (flag == "--bench-probe-debug") {
+                probeDebugPattern = true;
+            } else if (flag == "--bench-probe-bake") {
+                probeBakeSamples = 128;
             } else if (flag == "--bench-furnace") {
                 // Uji tungku, kriteria selesai M4.
                 //
@@ -880,9 +918,27 @@ int main(int argc, char** argv) {
         // seluruh bayangan ke nol, dan dua adegan yang berbeda seratus kali di
         // sana tetap terlihat sama hitamnya. Menurunkan EV mengangkat bayangan
         // itu ke rentang yang masih punya angka.
+        if (const std::string_view value = FlagValue(argc, argv, "--bench-probe-bake");
+            !value.empty()) {
+            probeBakeSamples = static_cast<uint32_t>(std::strtoul(std::string(value).c_str(),
+                                                                  nullptr, 10));
+        }
+
         if (const std::string_view value = FlagValue(argc, argv, "--bench-ev"); !value.empty()) {
             manualEv = std::strtof(std::string(value).c_str(), nullptr);
             fixedExposure = true;
+        }
+
+        // Jarak kisi probe (S1). **Nol mematikan kisinya, bukan menyetelnya
+        // rapat**, dan itu yang membuat kriteria S1 bisa diperiksa sama sekali:
+        // dua gambar dari level yang sama persis, satu lewat kisi dan satu lewat
+        // SH panggang, tidak bisa dibandingkan kalau satu-satunya cara
+        // mematikan kisinya adalah mengganti tingkat pencahayaan — yang juga
+        // mengubah cahayanya.
+        std::optional<float> probeSpacingOverride;
+        if (const std::string_view value = FlagValue(argc, argv, "--bench-probe-spacing");
+            !value.empty()) {
+            probeSpacingOverride = std::strtof(std::string(value).c_str(), nullptr);
         }
 
         if (const std::string_view value = FlagValue(argc, argv, "--bench-camera");
@@ -1003,6 +1059,7 @@ int main(int argc, char** argv) {
         SampleTable cpu;
         uint64_t lastSerial = 0;
         bool haveBounds = false;
+        bool probeBaked = false;
         Vec3 boundsMin(0.0f);
         Vec3 boundsMax(0.0f);
         uint32_t gpuSamples = 0;
@@ -1119,6 +1176,99 @@ int main(int argc, char** argv) {
                             app.Context().animation, app.Context().builtinAssets,
                             app.Context().whiteboxes);
 
+#if SIM_WITH_PROBE_BAKE
+            // **Panggangan transport dijalankan sekali, sebelum frame pertama
+            // yang diukur.** Ia menelusuri puluhan ribu jalur penuh; menaruhnya
+            // di dalam lintasan berarti mengukur pemanggangnya, bukan
+            // penggambarnya.
+            // **Dicoba tiap frame sampai berhasil, bukan sekali di frame
+            // pertama.** Geometri CPU dimuat asinkron; di frame pertama belum
+            // ada satu pun mesh yang siap, dan panggangan yang menyerah di sana
+            // memanggang dunia kosong — yang keluar bukan galat melainkan kisi
+            // yang menjawab langit dari mana pun.
+            if (probeBakeSamples > 0 && !probeBaked) {
+                Vec3 bakeMin;
+                Vec3 bakeMax;
+                if (sceneView.GeometryBounds(bakeMin, bakeMax)) {
+                    view::ProbeBakery bakery(&tasks);
+                    bakery.SetCache(app.Context().meshGeometry);
+                    view::ProbeBakery::Settings bakeSettings;
+                    bakeSettings.layout = render::MakeProbeLayout(
+                        bakeMin, bakeMax,
+                        probeSpacingOverride.value_or(2.0f) > 0.0f
+                            ? probeSpacingOverride.value_or(2.0f)
+                            : 2.0f);
+                    bakeSettings.samplesPerProbe = probeBakeSamples;
+                    // **Langit dan mataharinya dari adegan, bukan angka yang
+                    // ditulis di sini.** Bentuk pertama memanggang dengan
+                    // matahari tegak lurus ke atas sementara langit yang
+                    // tergambar memakai matahari adegan — dan selisih gambar
+                    // yang keluar lalu bukan oklusi melainkan dua langit yang
+                    // berbeda. Sebuah pengukuran yang membandingkan dua hal yang
+                    // memang berbeda tidak menjawab apa pun.
+                    render::AtmosphereSky atmosphere;
+                    render::ViewportDesc skyDesc;
+                    editor::ApplySceneSky(*app.Context().world, skyDesc);
+                    atmosphere.intensity = skyDesc.skyIntensity;
+                    atmosphere.cameraHeightKm = skyDesc.cameraHeightKm;
+                    Vec3 bakeSunDirection(0.0f, -1.0f, 0.0f);
+                    Vec3 bakeSunIrradiance(0.0f);
+                    for (const render::LightInstance& light : sceneView.Scene().lights) {
+                        if (light.kind != render::LightKind::Directional) {
+                            continue;
+                        }
+                        // `LightInstance::direction` adalah arah **ke** cahaya
+                        // untuk directional; panggangan menuntut arah rambatnya.
+                        bakeSunDirection = -light.direction;
+                        bakeSunIrradiance = light.color * light.intensity;
+                        break;
+                    }
+                    atmosphere.sunDirection = -bakeSunDirection;
+                    atmosphere.Prepare();
+                    bakeSettings.sunDirection = bakeSunDirection;
+                    bakeSettings.sunIrradiance = bakeSunIrradiance;
+                    // Artefaknya ikut ditulis dan dibaca di jalur ukur juga:
+                    // sebuah cache yang hanya aktif di editor adalah cache yang
+                    // jalur ukurnya tidak pernah memeriksa.
+                    bakeSettings.cacheDir = app.Context().configDir / "ProbeCache";
+                    uint64_t skyKey = 1469598103934665603ull;
+                    const auto mixSky = [&skyKey](const void* data, std::size_t length) {
+                        const auto* bytes = static_cast<const uint8_t*>(data);
+                        for (std::size_t i = 0; i < length; ++i) {
+                            skyKey = (skyKey ^ bytes[i]) * 1099511628211ull;
+                        }
+                    };
+                    mixSky(&skyDesc.skySource, sizeof(skyDesc.skySource));
+                    mixSky(&skyDesc.skyIntensity, sizeof(skyDesc.skyIntensity));
+                    mixSky(&skyDesc.cameraHeightKm, sizeof(skyDesc.cameraHeightKm));
+                    mixSky(&bakeSunDirection.x, sizeof(float) * 3);
+                    bakeSettings.skyKey = skyKey;
+                    std::vector<view::PickItem> items;
+                    sceneView.BakeItems(items);
+                    const auto started = std::chrono::steady_clock::now();
+                    if (bakery.Bake(items,
+                                    [atmosphere](const Vec3& direction) {
+                                        return atmosphere.Sample(direction);
+                                    },
+                                    bakeSettings)) {
+                        tasks.WaitIdle();
+                        probeBaked = true;
+                        if (std::shared_ptr<const render::ProbeVolume> volume = bakery.Take()) {
+                            const auto elapsed = std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - started);
+                            SIM_INFO("Bench",
+                                     "probe bake: {} probes at {} spp in {:.2f} s ({:.2f} MB)",
+                                     volume->probes.size(), probeBakeSamples, elapsed.count(),
+                                     static_cast<double>(volume->GpuBytes()) / (1024.0 * 1024.0));
+                            renderer->SetProbeVolume(std::move(volume));
+                        } else {
+                            SIM_WARN("Bench", "probe bake produced nothing");
+                        }
+                    }
+                }
+            }
+#endif
+
             if (!haveBounds) {
                 haveBounds = SceneBounds(sceneView.Scene(), boundsMin, boundsMax);
                 if (!haveBounds) {
@@ -1203,6 +1353,10 @@ int main(int argc, char** argv) {
                 desc.post.exposureMode = render::ExposureMode::Manual;
                 desc.post.manualEv100 = manualEv;
             }
+            if (probeSpacingOverride.has_value()) {
+                desc.probeSpacing = *probeSpacingOverride;
+            }
+            desc.probeDebugPattern = probeDebugPattern;
             giEffective = desc.gi.enabled;
             // Jalur HDR relatif dilengkapi dengan akar `Resources`, alasan
             // yang sama dengan di viewport editor: yang tertulis di level
@@ -1229,6 +1383,10 @@ int main(int argc, char** argv) {
                 if (const std::string_view dump = FlagValue(argc, argv, "--bench-dump-depth");
                     !dump.empty()) {
                     writeDepthDump(*renderer, dump);
+                }
+                if (const std::string_view dump = FlagValue(argc, argv, "--bench-dump-hdr");
+                    !dump.empty()) {
+                    writeHdrDump(*renderer, dump);
                 }
             }
 
@@ -1297,6 +1455,15 @@ int main(int argc, char** argv) {
         if (const std::string_view dump = FlagValue(argc, argv, "--bench-dump-cull");
             !dump.empty() && !captureFrameSet) {
             writeCullDump(*renderer, dump);
+        }
+
+        // Jalur yang sama untuk dump HDR: tanpa `--bench-capture-frame`, yang
+        // ditulis adalah frame terakhir yang digambar. Tanpa baris ini, sebuah
+        // dump yang diminta sendirian tidak pernah ditulis — dan yang terlihat
+        // bukan galat melainkan berkas yang tidak ada.
+        if (const std::string_view dump = FlagValue(argc, argv, "--bench-dump-hdr");
+            !dump.empty() && !captureFrameSet) {
+            writeHdrDump(*renderer, dump);
         }
 
         std::string report = "# Garis dasar G0\n\n";

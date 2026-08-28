@@ -97,6 +97,8 @@ enum class MaterialBindingPreference : uint8_t {
 /// StubRenderer (clear + grid prosedural); setelah E8 diganti VulkanRenderer
 /// tanpa satu baris pun panel berubah. Header ini sengaja tidak meng-include
 /// apa pun dari Vulkan — kalau suatu saat ia perlu, berarti ada seam yang bocor.
+struct ProbeVolume;
+
 class IViewportRenderer {
 public:
     virtual ~IViewportRenderer() = default;
@@ -176,6 +178,23 @@ public:
         (void)mesh;
         (void)grid;
     }
+
+    /// Kisi probe iradiansi hasil panggangan transport (S2 di
+    /// docs/PLAN-STATIC-GI.md).
+    ///
+    /// **Diserahkan jadi, bukan dipanggang di sini.** Panggangannya menelusuri
+    /// sinar dengan path tracer acuan, dan itu menuntut Embree beserta geometri
+    /// CPU — rantai yang sengaja tidak ada di modul yang menggambar. Yang tinggal
+    /// di renderer hanya unggahan dan pembacaannya.
+    ///
+    /// `shared_ptr` dengan alasan yang sama seperti medan jarak mesh: kisinya
+    /// puluhan sampai ratusan megabyte, dan yang memilikinya bakery yang
+    /// menyimpannya untuk seluruh sesi.
+    ///
+    /// Null mengembalikan renderer ke kisi yang diisi lingkungan — tingkat yang
+    /// sama dengan seri B, dan jawaban yang benar untuk adegan yang belum pernah
+    /// dipanggang. Bukan adegan gelap.
+    virtual void SetProbeVolume(std::shared_ptr<const ProbeVolume> volume) { (void)volume; }
 
     /// Tekstur dari berkas, di-cache dan siap diikat sebagai albedo sebuah
     /// ruas.
@@ -337,6 +356,28 @@ public:
         error = "this renderer cannot read its pixels back";
         return false;
     }
+
+    /// Gambar HDR adegan: **radiance linier, sebelum eksposur dan sebelum
+    /// pemetaan nada.** Empat float per texel, urutan RGBA.
+    ///
+    /// **Ada karena tangkapan 8-bit tidak bisa menjawab pertanyaan yang halus.**
+    /// Dua gambar yang berselisih setengah tingkat kuantisasi terbaca sebagai
+    /// sama, dan peta selisih yang dikuatkan mengubah tangga kuantisasi itu
+    /// sendiri menjadi pola yang tampak seperti temuan — persis kesalahan yang
+    /// pernah dibuat saat menilai kisi probe.
+    ///
+    /// Bawaannya menolak: perender tanpa jalur HDR tidak punya apa pun untuk
+    /// diberikan, dan mengembalikan nol berarti menjawab dengan gambar yang
+    /// meyakinkan dan salah.
+    virtual bool CaptureHdr(std::vector<float>& outRgba, uint32_t& outWidth, uint32_t& outHeight,
+                            std::string& error) {
+        (void)outRgba;
+        (void)outWidth;
+        (void)outHeight;
+        error = "this renderer has no linear HDR target";
+        return false;
+    }
+
 
     /// Depth buffer frame terakhir, float per texel. Alat diagnostik; lihat
     /// `rhi::RenderTarget::ReadDepth`.

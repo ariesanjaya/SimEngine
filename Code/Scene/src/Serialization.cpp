@@ -345,6 +345,34 @@ bool ReadEntities(World& world, const Json& array, Entity fallbackParent) {
     return true;
 }
 
+/// Menaikkan berkas versi 4 ke versi 5: tingkat `"Baked"` menjadi
+/// `"Precomputed"`.
+///
+/// **Namanya berubah karena artinya berubah**, bukan karena kata sebelumnya
+/// kurang enak dibaca: yang lama berarti "lingkungannya dipanggang", yang baru
+/// berarti kategori adegan yang mataharinya diam sehingga transport cahayanya
+/// ikut dipanggang (docs/PLAN-STATIC-GI.md S0).
+///
+/// **Migrasinya ada justru karena tanpanya berkas lama tetap terbaca benar.**
+/// `"Baked"` tidak ada di daftar nama yang baru, jadi pembacanya membiarkan
+/// nilai bawaan — dan bawaannya kebetulan `Precomputed`, nilai yang sama.
+/// Mengandalkan kebetulan itu berarti berkas lama diam-diam berhenti terbaca
+/// pada hari seseorang mengubah bawaannya, di tempat yang tidak ada
+/// hubungannya.
+void MigrateV4ToV5(Json& root) {
+    const auto world = root.find("world");
+    if (world == root.end() || !world->is_object()) {
+        return;
+    }
+    const auto indirect = world->find("indirect");
+    if (indirect == world->end() || !indirect->is_string()) {
+        return;
+    }
+    if (indirect->get<std::string>() == "Baked") {
+        *indirect = "Precomputed";
+    }
+}
+
 /// Menaikkan berkas versi 2 ke versi 3: rujukan mesh/material dari nama menjadi
 /// GUID.
 ///
@@ -478,6 +506,9 @@ LevelIoResult LoadLevelFromString(World& world, const std::string& text) {
         }
         if (result.sourceVersion < 3) {
             MigrateV2ToV3(root);
+        }
+        if (result.sourceVersion < 5) {
+            MigrateV4ToV5(root);
         }
         result.migrated = true;
     }

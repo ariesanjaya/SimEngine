@@ -7,6 +7,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <string>
 #include <vector>
 
 namespace sim::render {
@@ -57,6 +58,25 @@ public:
     VkImage SceneImage() const { return sceneImage_; }
     VkImageView SceneView() const { return sceneView_; }
     VkSampler Sampler() const { return sampler_; }
+
+    /// Menyalin gambar HDR adegan ke float RGBA di memori CPU — **radiance
+    /// linier, sebelum eksposur dan sebelum pemetaan nada.**
+    ///
+    /// **Ada karena tangkapan 8-bit tidak bisa menjawab pertanyaan yang halus.**
+    /// Dua gambar yang berselisih setengah tingkat kuantisasi terbaca sebagai
+    /// sama, dan sebuah peta selisih yang dikuatkan mengubah tangga kuantisasi
+    /// itu sendiri menjadi pola yang tampak seperti temuan. Yang keluar dari
+    /// sini tidak punya tangga: ia angka yang sama yang dilihat pass tone
+    /// mapping.
+    ///
+    /// Empat float per texel, `width × height`, urutan RGBA. `currentLayout`
+    /// adalah tata letak gambar itu saat ini — yang melacaknya graph frame,
+    /// bukan kelas ini, dan menebaknya berarti membaca isi yang tak
+    /// terdefinisi. `UNDEFINED` ditolak alih-alih dijawab dengan nol.
+    ///
+    /// **Menunggu GPU diam.** Boleh mahal: yang memanggilnya alat diagnostik.
+    bool ReadScene(std::vector<float>& outRgba, uint32_t width, uint32_t height,
+                   VkImageLayout currentLayout, std::string& error);
 
     /// Membangun rantai bloom dari gambar HDR. Dijalankan sesudah pass adegan
     /// dan sebelum `RecordResolve`.

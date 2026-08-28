@@ -413,3 +413,45 @@ if(TARGET Sim::Reference)
             # Dua nilai karangan hanya menguji aritmatika penjumlahan.
             Sim::Render)
 endif()
+
+# --- Pengalamatan kisi probe dijalankan di CPU (S2) ---------------------------
+#
+# **Yang diuji berkas ini bukan tiruan `probe_grid.slang`, melainkan berkas itu
+# sendiri** — pola dan alasan yang sama dengan `SimOpenPbrCpuTests` di atas.
+#
+# Yang dijaganya satu hal yang salahnya paling sunyi: shader membaca kisi probe,
+# C++ menulisnya, dan indeks yang meleset satu brick tetap mengembalikan angka
+# yang masuk akal. Yang terlihat cuma cahaya tak-langsung yang bergeser beberapa
+# meter — dan di S2 itu akan terbaca sebagai transport yang salah, bukan sebagai
+# pengalamatan yang salah.
+#
+# Codegen-nya di sini, bukan di `Sim::Render`: yang membutuhkan kembaran CPU-nya
+# hanya uji ini, dan menaruh ketergantungan slangc di dalam modul runtime berarti
+# renderer tidak bisa dibangun tanpa generator yang tidak dipakainya saat jalan.
+if(SIM_SLANGC)
+    set(SIM_PROBE_GRID_CPU "${CMAKE_CURRENT_BINARY_DIR}/probe_grid_cpu.cpp")
+    add_custom_command(
+        OUTPUT  "${SIM_PROBE_GRID_CPU}"
+        COMMAND "${SIM_SLANGC}" "${CMAKE_SOURCE_DIR}/Shaders/probe_grid_cpu.slang"
+                -target cpp -o "${SIM_PROBE_GRID_CPU}"
+                -I "${CMAKE_SOURCE_DIR}/Shaders"
+        # `probe_grid.slang` ikut sebagai dependensi eksplisit, alasan yang sama
+        # dengan `openpbr.slang`: tanpanya, mengubah pengalamatan tidak
+        # membangkitkan ulang C++-nya, dan ujinya akan mengadu sisi C++ dengan
+        # shader yang sudah tidak ada lagi.
+        DEPENDS "${CMAKE_SOURCE_DIR}/Shaders/probe_grid_cpu.slang"
+                "${CMAKE_SOURCE_DIR}/Shaders/probe_grid.slang"
+        COMMENT "slangc -target cpp probe_grid_cpu.slang"
+        VERBATIM)
+    set_source_files_properties(ProbeGridCpuTests.cpp
+        PROPERTIES OBJECT_DEPENDS "${SIM_PROBE_GRID_CPU}")
+
+    sim_add_test(SimProbeGridCpuTests
+        SOURCES
+            ProbeGridCpuTests.cpp
+        DEPS
+            Sim::Render)
+    target_include_directories(SimProbeGridCpuTests PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
+    # C++ yang dipancarkan slangc bukan kode kita.
+    target_compile_options(SimProbeGridCpuTests PRIVATE -Wno-error)
+endif()

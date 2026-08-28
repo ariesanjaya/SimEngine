@@ -1,3 +1,4 @@
+#include "Sim/RHI/Buffer.h"
 #include "PostProcess.h"
 
 #include "Sim/Core/Log.h"
@@ -782,6 +783,118 @@ void PostProcess::RecordMeter(VkCommandBuffer cmd, uint32_t viewportWidth,
              exposureSets_[exposureIndex_], &push, sizeof(push));
     Transition(cmd, exposure_[exposureIndex_].image, 0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL,
                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, false);
+}
+
+namespace {
+
+/// float16 → float32. **Ditulis di sini, bukan dipinjam dari pustaka:** yang
+/// dibutuhkan cuma satu arah konversi, dan menariknya dari mana pun berarti
+/// menambah ketergantungan untuk dua belas baris.
+float HalfToFloat(uint16_t bits) {
+    const uint32_t sign = static_cast<uint32_t>(bits >> 15) << 31;
+    uint32_t exponent = (bits >> 10) & 0x1Fu;
+    uint32_t mantissa = bits & 0x3FFu;
+    if (exponent == 0) {
+        if (mantissa == 0) {
+            const uint32_t zero = sign;
+            float out = 0.0f;
+            std::memcpy(&out, &zero, sizeof(out));
+            return out;
+        }
+        // Subnormal: dinormalkan dengan menggeser sampai bit implisitnya muncul.
+        while ((mantissa & 0x400u) == 0) {
+            mantissa <<= 1;
+            --exponent;
+        }
+        ++exponent;
+        mantissa &= 0x3FFu;
+    } else if (exponent == 0x1Fu) {
+        const uint32_t special = sign | 0x7F800000u | (mantissa << 13);
+        float out = 0.0f;
+        std::memcpy(&out, &special, sizeof(out));
+        return out;
+    }
+    const uint32_t bits32 = sign | ((exponent + 112u) << 23) | (mantissa << 13);
+    float out = 0.0f;
+    std::memcpy(&out, &bits32, sizeof(out));
+    return out;
+}
+
+}  // namespace
+
+bool PostProcess::ReadScene(std::vector<float>& outRgba, uint32_t width, uint32_t height,
+                            VkImageLayout currentLayout, std::string& error) {
+    if (!IsValid() || width == 0 || height == 0) {
+        error = "the scene image has nothing in it yet";
+        return false;
+    }
+    if (width > allocatedWidth_ || height > allocatedHeight_) {
+        error = "the requested area is larger than the scene image";
+        return false;
+    }
+    // **`UNDEFINED` berarti isinya memang tidak dijanjikan siapa pun.**
+    // Menyalinnya tetap berhasil dan mengembalikan nol di mana-mana — sebuah
+    // gambar yang meyakinkan dan salah. Menolak lebih baik daripada menjawab.
+    if (currentLayout == VK_IMAGE_LAYOUT_UNDEFINED) {
+        error = "the frame graph has not left the scene image in a readable layout";
+        return false;
+    }
+
+    // Empat kanal float16. Baris di staging rapat karena `imageExtent` yang
+    // diminta persis area terpakai, bukan seluruh alokasi.
+    const VkDeviceSize bytes = VkDeviceSize(width) * height * 4 * sizeof(uint16_t);
+    rhi::DynamicBuffer staging;
+    if (!staging.Create(*device_, VK_BUFFER_USAGE_TRANSFER_DST_BIT, bytes)) {
+        error = "cannot allocate a staging buffer for the HDR capture";
+        return false;
+    }
+    device_->WaitIdle();
+
+    const auto barrier = [this](VkCommandBuffer cmd, VkImageLayout from, VkImageLayout to) {
+        VkImageMemoryBarrier2 memory{};
+        memory.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2;
+        memory.srcStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        memory.srcAccessMask = VK_ACCESS_2_MEMORY_WRITE_BIT;
+        memory.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        memory.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+        memory.oldLayout = from;
+        memory.newLayout = to;
+        memory.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        memory.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        memory.image = sceneImage_;
+        memory.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+
+        VkDependencyInfo dependency{};
+        dependency.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO;
+        dependency.imageMemoryBarrierCount = 1;
+        dependency.pImageMemoryBarriers = &memory;
+        vkCmdPipelineBarrier2(cmd, &dependency);
+    };
+
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {width, height, 1};
+
+    VkCommandBuffer cmd = device_->BeginOneShot();
+    barrier(cmd, currentLayout, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);
+    vkCmdCopyImageToBuffer(cmd, sceneImage_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                           staging.Handle(), 1, &region);
+    // Dikembalikan ke tata letak semula: yang melacaknya graph frame, dan
+    // membiarkannya di TRANSFER_SRC adalah pelanggaran pada draw berikutnya.
+    barrier(cmd, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, currentLayout);
+    device_->EndOneShot(cmd);
+
+    const auto* source = static_cast<const uint16_t*>(staging.Mapped());
+    if (source == nullptr) {
+        error = "the staging buffer is not mapped";
+        return false;
+    }
+    const std::size_t count = static_cast<std::size_t>(width) * height * 4;
+    outRgba.resize(count);
+    for (std::size_t i = 0; i < count; ++i) {
+        outRgba[i] = HalfToFloat(source[i]);
+    }
+    return true;
 }
 
 void PostProcess::RecordResolve(VkCommandBuffer cmd, bool enabled,

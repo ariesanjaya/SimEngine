@@ -372,6 +372,35 @@ public:
         sceneView_.Build(*context.world, *context.selection, context.assets, renderer,
                          context.animation, context.builtinAssets, context.whiteboxes,
                          terrainView);
+
+        // Batas geometrinya dicatat untuk panel lain — World Settings memakainya
+        // menghitung kisi probe. Setelah Build, karena sebelum itu isinya milik
+        // frame sebelumnya.
+        context.sceneBounds.valid =
+            sceneView_.GeometryBounds(context.sceneBounds.minimum, context.sceneBounds.maximum);
+        sceneView_.BakeItems(context.bakeItems);
+
+#if SIM_WITH_PROBE_BAKE
+        // Panggangan yang selesai dipungut di sini dan dipasang ke renderer.
+        // Di viewport, bukan di panel World Settings: yang memegang renderer ini
+        // adalah viewport, dan sebuah panel yang kebetulan tidak terbuka tidak
+        // boleh membuat panggangan menggantung selamanya.
+        if (context.probeBakery != nullptr) {
+            if (std::shared_ptr<const render::ProbeVolume> baked = context.probeBakery->Take()) {
+                context.probeVolume = std::move(baked);
+            }
+        }
+#endif
+        // **Dibandingkan, bukan dipasang saat selesai memanggang.** Kisinya juga
+        // bisa *hilang* — level yang ditutup melepasnya — dan sebuah pemasangan
+        // yang hanya terjadi di ujung panggangan tidak pernah memberitahu
+        // renderer tentang itu. Yang tersisa lalu adalah level baru yang disinari
+        // cahaya tak-langsung level sebelumnya.
+        if (pushedProbes_ != context.probeVolume) {
+            pushedProbes_ = context.probeVolume;
+            renderer->SetProbeVolume(pushedProbes_);
+        }
+
         HandleCameraInput();
 
         render::ViewportDesc desc;
@@ -2628,6 +2657,7 @@ private:
 
     OrbitCamera camera_;
     SceneView sceneView_;
+    std::shared_ptr<const render::ProbeVolume> pushedProbes_;
     render::DrawMode drawMode_ = render::DrawMode::Material;
     GizmoOperation operation_ = GizmoOperation::Translate;
     GizmoSpace space_ = GizmoSpace::World;

@@ -437,7 +437,48 @@ public:
     /// perintah "focus ke seleksi".
     bool BoundsOf(const std::vector<scene::Entity>& entities, Vec3& outMin, Vec3& outMax) const;
 
+    /// AABB dunia yang melingkupi **seluruh geometri** adegan. Dipakai menyusun
+    /// kisi probe (S1 di docs/PLAN-STATIC-GI.md).
+    ///
+    /// **Seluruhnya, bukan yang statis saja, dan itu bukan kelalaian:** hari ini
+    /// tidak ada satu pun penanda yang menyatakan sebuah objek statis untuk
+    /// keperluan panggangan. Menebaknya dari `RigidBody: Static` akan salah di
+    /// dua arah sekaligus — dinding tanpa collider bukan statis, dan pintu
+    /// kinematik justru dianggap begitu. Yang membedakannya adalah bagian dari
+    /// S5; sampai itu ada, kisinya menutupi semuanya, dan itu jawaban yang lebih
+    /// aman daripada kisi yang berhenti sebelum dindingnya.
+    ///
+    /// Ikon tidak ikut — sebuah lampu di seberang peta akan melebarkan kisinya
+    /// melintasi ruang kosong yang tidak ada permukaannya. Yang **ikut** adalah
+    /// geometri yang dikunci: ia tidak pernah masuk daftar pickable, tetapi
+    /// renderer tetap menggambarnya dan tetap menaunginya dengan kisi. Mengembalikan
+    /// false bila adegan tidak punya geometri sama sekali.
+    bool GeometryBounds(Vec3& outMin, Vec3& outMax) const;
+
+    /// Geometri yang menaungi panggangan cahaya statis (S2), dalam bentuk yang
+    /// bisa diberikan ke `PickScene::Sync`.
+    ///
+    /// **Termasuk yang dikunci**, tidak seperti daftar pickable — alasannya di
+    /// `GeometryBounds`. Yang tidak ikut: decal dan terrain, keduanya karena
+    /// mereka memang tidak punya kunci geometri di jalur ray cast mana pun.
+    /// Terrain karena itu **belum menaungi panggangan**, dan itu batas yang
+    /// disebutkan alih-alih ditemukan sebagai bayangan yang hilang.
+    ///
+    /// String-nya dipegang `SceneView` dan sah sampai `Build` berikutnya.
+    void BakeItems(std::vector<PickItem>& out) const;
+
 private:
+    /// Satu benda bermesh untuk panggangan, dengan kunci geometrinya dipegang
+    /// di sini supaya `PickItem` bisa menunjuk ke dalamnya.
+    struct BakeEntry {
+        scene::Entity entity = scene::kNullEntity;
+        Mat4 worldMatrix{1.0f};
+        std::string meshKey;
+        Vec3 worldMinimum{0.0f};
+        Vec3 worldMaximum{0.0f};
+    };
+    std::vector<BakeEntry> bakeEntries_;
+
     /// Diindeks nomor entity. Bertahan lintas frame — itu gunanya.
     std::unordered_map<uint64_t, CachedDecal> decals_;
     uint64_t frame_ = 0;

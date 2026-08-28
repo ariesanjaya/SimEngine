@@ -60,7 +60,20 @@ float4 main(BoxVarying input) : SV_Target {
     // `input.color`. Kesalahan pi tidak pernah terlihat salah — ia hanya membuat
     // seluruh adegan terlalu terang sebesar faktor tetap, yang paling mudah
     // dikira masalah eksposur.
+    // **Tiga sumber, satu pemilik**, dan urutannya bukan selera: kisi probe
+    // adalah tingkat panggang yang tahu di mana permukaannya berada, jadi ia
+    // menggantikan SH panggang di tempat ia berlaku — bukan menambahinya.
+    // Menjumlahkan keduanya menghasilkan adegan terang dua kali lipat tanpa satu
+    // pun galat di log.
+    //
+    // Di S1 keduanya menjawab angka yang sama persis: tiap probe diisi
+    // lingkungan yang sama, tanpa transport. Itu yang membuat milestone ini bisa
+    // diperiksa — kalau gambarnya berubah, yang berubah plumbing-nya, bukan
+    // cahayanya.
     float3 indirect = skyIrradiance(normal) / 3.14159265;
+    if (shadowParams.probeCounts.w > 0.5) {
+        indirect = probeIrradiance(input.worldPosition, normal) / 3.14159265;
+    }
     if (shadowParams.giParams.x > 0.5) {
         indirect = giIrradianceAt(input.position.xy, input.worldPosition, normal,
                                   shadowParams.giParams.y) / 3.14159265;
