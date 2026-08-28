@@ -10,6 +10,7 @@ sim_add_library(Assets
         src/MaterialImport.cpp
         src/MaterialXImport.cpp
         src/MaxMaterial.cpp
+        src/LightmapUv.cpp
         src/MeshImport.cpp
         src/MeshSdfBake.cpp
         src/MeshSdfBakery.cpp

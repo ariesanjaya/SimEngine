@@ -57,6 +57,26 @@ struct MeshVertex {
     /// sementara yang mahal adalah memori GPU, dan di sana strukturnya seragam
     /// untuk seluruh mesh betapapun ia disimpan di sisi ini.
     Vec4 color{1.0f, 1.0f, 1.0f, 1.0f};
+
+    /// UV kedua, khusus lightmap (S4 di docs/PLAN-STATIC-GI.md).
+    ///
+    /// **Terpisah dari `uv`, dan itu keputusan 7.** UV pertama dirancang untuk
+    /// tekstur: ia boleh berulang, boleh bercermin, dan boleh tumpang tindih —
+    /// dua sisi sebuah tiang yang memakai petak UV yang sama adalah cara yang
+    /// benar untuk menghemat tekstur, dan cara yang salah untuk menyimpan
+    /// cahaya. Lightmap menuntut setiap segitiga punya petaknya sendiri.
+    ///
+    /// **Di ujung struct, bukan di sebelah `uv`.** Menaruhnya di sebelahnya
+    /// menggeser offset tangent dan warna, dan setiap offset yang bergeser
+    /// adalah satu tempat lagi yang harus ikut berubah di sisi GPU. Yang
+    /// menjaganya tetap sepakat adalah `static_assert` di `VulkanRenderer.cpp`,
+    /// tetapi menggeser tanpa perlu berarti menguji penjaga itu alih-alih
+    /// memakainya.
+    ///
+    /// Nol berarti belum dibangkitkan — dan nol di seluruh mesh berarti seluruh
+    /// permukaannya membaca satu texel lightmap yang sama. Yang membedakan
+    /// "belum ada" dari "ada dan kebetulan nol" adalah `MeshData::hasLightmapUv`.
+    Vec2 lightmapUv{0.0f};
 };
 
 /// Paling banyak empat bone memengaruhi satu vertex.
@@ -223,6 +243,15 @@ struct MeshData {
     /// AABB dalam ruang lokal mesh.
     Vec3 boundsMin{0.0f};
     Vec3 boundsMax{0.0f};
+
+    /// True bila `MeshVertex::lightmapUv` sudah terisi — dibangkitkan unwrapper,
+    /// atau disalin dari UV pertama karena ia sudah layak (S4).
+    ///
+    /// **Dibutuhkan karena nol adalah UV yang sah.** Tanpa bendera ini, mesh
+    /// yang belum pernah di-unwrap tidak bisa dibedakan dari mesh yang seluruh
+    /// permukaannya memang memetakan ke sudut kiri-bawah — dan yang kedua
+    /// membaca satu texel lightmap untuk seluruh bendanya.
+    bool hasLightmapUv = false;
 
     bool IsValid() const {
         return !vertices.empty() && !indices.empty() && indices.size() % 3 == 0;

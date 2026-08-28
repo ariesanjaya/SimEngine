@@ -293,6 +293,8 @@ struct BoxVertex {
     /// nilai satuannya, jadi mesh yang tidak mengisinya tergambar persis seperti
     /// sebelum atribut ini ada.
     Vec4 color;
+    /// UV lightmap. Lihat `assets::MeshVertex::lightmapUv`.
+    Vec2 lightmapUv;
 };
 
 static_assert(sizeof(BoxVertex) == sizeof(assets::MeshVertex),
@@ -305,6 +307,8 @@ static_assert(offsetof(BoxVertex, uv) == offsetof(assets::MeshVertex, uv),
               "offset uv harus sama");
 static_assert(offsetof(BoxVertex, tangent) == offsetof(assets::MeshVertex, tangent),
               "offset tangent harus sama");
+static_assert(offsetof(BoxVertex, lightmapUv) == offsetof(assets::MeshVertex, lightmapUv),
+              "offset UV lightmap harus sama");
 
 // `assets::SkinInfluence` diunggah apa adanya sebagai buffer skin, dan
 // `VkVertexInputAttributeDescription` di bawah menyebut formatnya secara
@@ -470,12 +474,12 @@ std::vector<BoxVertex> BuildUnitCube() {
         // Tangent kubus sudah diketahui per muka, jadi ia ditulis langsung
         // alih-alih diturunkan dari UV: kubus ini tidak pernah lewat importir.
         const Vec4 tangent(t, 1.0f);
-        vertices.push_back({a0, n, Vec2(0.0f, 0.0f), tangent, kWhite});
-        vertices.push_back({a1, n, Vec2(1.0f, 0.0f), tangent, kWhite});
-        vertices.push_back({a2, n, Vec2(1.0f, 1.0f), tangent, kWhite});
-        vertices.push_back({a0, n, Vec2(0.0f, 0.0f), tangent, kWhite});
-        vertices.push_back({a2, n, Vec2(1.0f, 1.0f), tangent, kWhite});
-        vertices.push_back({a3, n, Vec2(0.0f, 1.0f), tangent, kWhite});
+        vertices.push_back({a0, n, Vec2(0.0f, 0.0f), tangent, kWhite, Vec2(0.0f)});
+        vertices.push_back({a1, n, Vec2(1.0f, 0.0f), tangent, kWhite, Vec2(0.0f)});
+        vertices.push_back({a2, n, Vec2(1.0f, 1.0f), tangent, kWhite, Vec2(0.0f)});
+        vertices.push_back({a0, n, Vec2(0.0f, 0.0f), tangent, kWhite, Vec2(0.0f)});
+        vertices.push_back({a2, n, Vec2(1.0f, 1.0f), tangent, kWhite, Vec2(0.0f)});
+        vertices.push_back({a3, n, Vec2(0.0f, 1.0f), tangent, kWhite, Vec2(0.0f)});
     }
     return vertices;
 }
@@ -3995,7 +3999,7 @@ private:
                 2, skinned ? static_cast<uint32_t>(sizeof(assets::SkinInfluence)) : 0u,
                 VK_VERTEX_INPUT_RATE_VERTEX},
         };
-        const std::array<VkVertexInputAttributeDescription, 12> attributes{
+        const std::array<VkVertexInputAttributeDescription, 13> attributes{
             VkVertexInputAttributeDescription{0, 0, VK_FORMAT_R32G32B32_SFLOAT,
                                               offsetof(BoxVertex, position)},
             VkVertexInputAttributeDescription{1, 0, VK_FORMAT_R32G32B32_SFLOAT,
@@ -4033,6 +4037,12 @@ private:
             // `BoxInstance`.
             VkVertexInputAttributeDescription{14, 1, VK_FORMAT_R32_UINT,
                                               offsetof(BoxInstance, materialSlot)},
+            // UV lightmap, di binding 0 bersama UV pertama — alasan yang sama
+            // dengan warna simpul di atasnya: stride adalah sifat pipeline, dan
+            // binding terpisah untuk mesh yang punya dan yang tidak
+            // melipatgandakan varian pipeline demi memori GPU yang tetap dibayar.
+            VkVertexInputAttributeDescription{16, 0, VK_FORMAT_R32G32_SFLOAT,
+                                              offsetof(BoxVertex, lightmapUv)},
             VkVertexInputAttributeDescription{15, 1, VK_FORMAT_R32_UINT,
                                               offsetof(BoxInstance, textureSlot)},
 };
@@ -4048,7 +4058,7 @@ private:
         // adalah peringatan validasi di setiap pembuatan pipeline. Menyaringnya
         // di sini bukan sekadar meredam peringatan: atribut yang tidak diambil
         // memang tidak perlu diambil.
-        std::array<VkVertexInputAttributeDescription, 12> used{};
+        std::array<VkVertexInputAttributeDescription, 13> used{};
         uint32_t usedCount = 0;
         for (const VkVertexInputAttributeDescription& attribute : attributes) {
             if ((attributeMask & (1u << attribute.location)) != 0u) {
