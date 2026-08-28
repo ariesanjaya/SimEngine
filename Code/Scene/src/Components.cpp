@@ -213,7 +213,12 @@ void RegisterCoreComponents() {
             .Field<&WorldSettings::extractSun>("extractSun")
             .Label("Extract Sun From File")
             .Tooltip("Keluarkan matahari dari berkas lingkungan supaya lampu directional "
-                     "yang mengantarkannya — tanpa ini keduanya menyala sekaligus");
+                     "yang mengantarkannya — tanpa ini keduanya menyala sekaligus")
+            .Field<&WorldSettings::probeSpacing>("probeSpacing")
+            .Label("Probe Spacing (m)")
+            .Range(0.1f, 32.0f)
+            .Tooltip("Jarak antar-probe iradiansi untuk Precomputed. Yang dibayar tumbuh "
+                     "kubik — panel menampilkan jumlah dan ukurannya di bawah");
 
         types.Type<RigidBodyComponent>("RigidBody")
             .Field<&RigidBodyComponent::kind>("kind")

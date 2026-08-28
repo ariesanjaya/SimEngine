@@ -28,6 +28,7 @@
 #include "IblBaker.h"
 #include "IblCache.h"
 #include "Sim/Render/Ibl.h"
+#include "Sim/Render/ProbeVolume.h"
 #include "Sim/Render/FrameGraph.h"
 #include "Sim/Render/DrawRun.h"
 #include "Sim/Render/Frustum.h"
@@ -179,10 +180,20 @@ struct ShadowUniforms {
     /// slider sebuah panggangan baru; memutar arah cuplikannya membuat slidernya
     /// mulus dan panggangannya tidak tersentuh.
     Vec4 environmentRotation{1.0f, 0.0f, 0.0f, 0.0f};
+    /// Kisi probe iradiansi (S1): xyz titik asal dunia, w jarak antar-probe.
+    Vec4 probeOrigin{0.0f};
+    /// x/y/z jumlah probe tiap sumbu, **w 1 kalau kisinya berlaku.**
+    ///
+    /// Benderanya ada di sini, bukan disimpulkan dari jumlah yang bukan nol:
+    /// buffer probe selalu terikat — descriptor kosong adalah pelanggaran pada
+    /// setiap draw, termasuk draw yang tidak membacanya — jadi yang membedakan
+    /// "ada kisi" dari "ada buffer boneka" harus sebuah angka yang dikirim, dan
+    /// bukan bentuk buffernya.
+    Vec4 probeCounts{0.0f};
 };
-// 7 mat4 + 33 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
+// 7 mat4 + 35 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
 // memperbarui shader-nya menjadi galat kompilasi, bukan bayangan yang bergeser.
-static_assert(sizeof(ShadowUniforms) == 7 * 64 + 33 * 16,
+static_assert(sizeof(ShadowUniforms) == 7 * 64 + 35 * 16,
               "ShadowUniforms harus cocok dengan blok ShadowParams di shadow_common.slang");
 
 /// Cermin dari `GpuLight` di Shaders/cluster_common.glsl. std430.
@@ -581,7 +592,15 @@ public:
                 !slot.skinBuffer.Create(device_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                         sizeof(Mat4) * 256) ||
                 !slot.instanceBuffer.Create(device_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                            sizeof(Mat4) * 256)) {
+                                            sizeof(Mat4) * 256) ||
+                // Dibuat walaupun belum ada kisi: descriptor yang dibiarkan
+                // kosong adalah pelanggaran pada setiap draw, termasuk draw yang
+                // tidak membacanya. Yang menjaganya tidak pernah terbaca adalah
+                // `probeCounts.w`, bukan bentuk buffernya.
+                !slot.probeShBuffer.Create(device_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                           sizeof(Vec4) * 9) ||
+                !slot.probeBrickBuffer.Create(device_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                              sizeof(uint32_t))) {
                 return false;
             }
         }
@@ -1177,7 +1196,7 @@ public:
             const CpuScope scope(cpuTimings_, "cpu-clusters");
             UpdateClusters(desc, scene, aspect, slot);
         }
-        UpdateShadowUniforms(desc, viewProj, slot);
+        UpdateShadowUniforms(desc, scene, viewProj, slot);
         BuildGraph(desc);
 
         // Perekaman dan submit dihitung satu lingkup. Memisahkan keduanya
@@ -2211,6 +2230,23 @@ private:
         /// atribut instance. Per slot dengan alasan yang sama seperti palet
         /// kulit.
         rhi::DynamicBuffer instanceBuffer;
+        /// Kisi probe iradiansi frame ini: SH-nya dan tabel slot brick-nya (S1).
+        ///
+        /// **Per slot, walaupun isinya jarang berubah**, dan itu bukan
+        /// kehati-hatian yang berlebihan: kisinya ditulis di tengah perekaman —
+        /// tepat sesudah `UpdateSkyIrradiance` supaya keduanya menjawab langit
+        /// yang sama pada frame yang sama — dan buffer bersama yang ditulis di
+        /// sana masih dibaca frame sebelumnya. Yang keluar bukan galat melainkan
+        /// cahaya tak-langsung yang sesekali melompat satu frame.
+        ///
+        /// Harganya beberapa ratus kilobyte dikali tiga, dan itu jauh lebih
+        /// murah daripada menunda kisinya satu frame di belakang SH yang
+        /// mengisinya.
+        rhi::DynamicBuffer probeShBuffer;
+        rhi::DynamicBuffer probeBrickBuffer;
+        /// Revisi isi kisi yang sudah berada di dalam kedua buffer di atas.
+        /// Nol berarti belum pernah diunggah.
+        uint64_t probeRevision = 0;
         VkDescriptorSet shadowSet = VK_NULL_HANDLE;
         VkDescriptorSet skinSet = VK_NULL_HANDLE;
         uint64_t submitId = 0;
@@ -4183,7 +4219,7 @@ private:
         samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
         SIM_VK_CHECK(vkCreateSampler(device_.Handle(), &samplerInfo, nullptr, &shadow_.sampler));
 
-        const std::array<VkDescriptorSetLayoutBinding, 26> bindings{
+        const std::array<VkDescriptorSetLayoutBinding, 28> bindings{
             VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
@@ -4240,6 +4276,11 @@ private:
             VkDescriptorSetLayoutBinding{kDfgBinding,
                                          VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            // Kisi probe iradiansi: SH-nya, lalu tabel slot brick-nya (S1).
+            VkDescriptorSetLayoutBinding{kProbeShBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{kProbeBrickBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                         1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
         };
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -4254,7 +4295,7 @@ private:
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                                  static_cast<uint32_t>(slots_.size()) * 18},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                 static_cast<uint32_t>(slots_.size()) * 6},
+                                 static_cast<uint32_t>(slots_.size()) * 8},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
                                  static_cast<uint32_t>(slots_.size()) *
                                      SdfClipmapResource::kMaxGrids},
@@ -4792,7 +4833,7 @@ private:
         // `pBufferInfo` menyimpan pointer, jadi vektor yang tumbuh sambil diisi
         // akan membuat entri yang sudah dicatat menunjuk memori yang sudah
         // dibebaskan — kerusakan yang tidak muncul sebagai galat validasi.
-        std::vector<VkDescriptorBufferInfo> buffers(slots_.size() * 5);
+        std::vector<VkDescriptorBufferInfo> buffers(slots_.size() * 7);
         std::vector<VkWriteDescriptorSet> writes;
         writes.reserve(slots_.size() * 18);
         // SHADER_READ_ONLY, bukan DEPTH_READ_ONLY. Keduanya sah untuk mengambil
@@ -4842,7 +4883,7 @@ private:
 
         for (std::size_t i = 0; i < slots_.size(); ++i) {
             slots_[i].shadowSet = sets[i];
-            const std::size_t base = i * 5;
+            const std::size_t base = i * 7;
             buffers[base] = {slots_[i].shadowUniform.Handle(), 0, sizeof(ShadowUniforms)};
             buffers[base + 1] = {slots_[i].lightBuffer.Handle(), 0, VK_WHOLE_SIZE};
             // Jalur GPU menulis ke buffer device-local miliknya sendiri; jalur
@@ -4857,6 +4898,8 @@ private:
                                      : slots_[i].clusterIndexBuffer.Handle(),
                                  0, VK_WHOLE_SIZE};
             buffers[base + 4] = {slots_[i].shadowFaceBuffer.Handle(), 0, VK_WHOLE_SIZE};
+            buffers[base + 5] = {slots_[i].probeShBuffer.Handle(), 0, VK_WHOLE_SIZE};
+            buffers[base + 6] = {slots_[i].probeBrickBuffer.Handle(), 0, VK_WHOLE_SIZE};
 
             VkWriteDescriptorSet uniform{};
             uniform.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -4936,6 +4979,20 @@ private:
             dfg.dstBinding = kDfgBinding;
             dfg.pImageInfo = &dfgImage;
             writes.push_back(dfg);
+
+            // Kisi probe (S1). Sah sejak awal walaupun belum ada kisi: isinya
+            // satu probe boneka, dan yang menjaganya tidak pernah terbaca adalah
+            // `probeCounts.w` yang nol.
+            VkWriteDescriptorSet probeSh = uniform;
+            probeSh.dstBinding = kProbeShBinding;
+            probeSh.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            probeSh.pBufferInfo = &buffers[base + 5];
+            writes.push_back(probeSh);
+
+            VkWriteDescriptorSet probeBricks = probeSh;
+            probeBricks.dstBinding = kProbeBrickBinding;
+            probeBricks.pBufferInfo = &buffers[base + 6];
+            writes.push_back(probeBricks);
         }
         vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
@@ -5897,8 +5954,184 @@ private:
         UpdateEnvironmentDescriptors();
     }
 
-    void UpdateShadowUniforms(const ViewportDesc& desc, const Mat4& viewProj,
-                              InstanceSlot& slot) {
+    /// Menulis ulang binding 26 dan 27 untuk satu slot.
+    ///
+    /// **Generasi, bukan handle.** Buffer yang tumbuh dibuat ulang, dan
+    /// `VkBuffer` baru lazimnya mendapat angka yang sama persis dengan yang
+    /// baru saja dimusnahkan — penjaga yang membandingkan handle tidak melihat
+    /// apa-apa, dan descriptor dibiarkan menunjuk memori yang sudah dibebaskan.
+    ///
+    /// Hanya set slot ini yang ditulis: slot lain punya buffernya sendiri, dan
+    /// bisa saja masih dibaca GPU.
+    void WriteProbeDescriptors(InstanceSlot& slot) {
+        const std::array<VkDescriptorBufferInfo, 2> buffers{
+            VkDescriptorBufferInfo{slot.probeShBuffer.Handle(), 0, VK_WHOLE_SIZE},
+            VkDescriptorBufferInfo{slot.probeBrickBuffer.Handle(), 0, VK_WHOLE_SIZE},
+        };
+        std::array<VkWriteDescriptorSet, 2> writes{};
+        for (std::size_t i = 0; i < writes.size(); ++i) {
+            writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            writes[i].dstSet = slot.shadowSet;
+            writes[i].dstBinding = i == 0 ? kProbeShBinding : kProbeBrickBinding;
+            writes[i].descriptorCount = 1;
+            writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            writes[i].pBufferInfo = &buffers[i];
+        }
+        vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
+                               writes.data(), 0, nullptr);
+    }
+
+    /// Menyusun dan mengunggah kisi probe iradiansi frame ini (S1).
+    ///
+    /// **Tanpa transport sama sekali, dan itu jawaban yang benar untuk S1.**
+    /// Tiap probe memuat iradiansi lingkungan yang sama — tanpa geometri yang
+    /// menghalangi, tidak ada yang bisa membedakan satu titik dari titik lain.
+    /// Yang diuji milestone ini plumbing-nya: kisi, brick, unggahan, dan
+    /// pembacaan trilinear di shader. Memisahkannya dari transport berarti
+    /// kegagalan berikutnya punya satu penyebab, bukan dua.
+    ///
+    /// **Disusun ulang hanya ketika bentuknya berubah**, bukan tiap frame:
+    /// batas adegan digenapkan ke jarak antar-probe sebelum dibandingkan,
+    /// sehingga satu objek yang bergeser sedikit tidak membuat kisinya —
+    /// dan seluruh unggahannya — dibangun ulang setiap frame.
+    void UpdateProbeGrid(const ViewportDesc& desc, const ViewportScene& scene,
+                         InstanceSlot& slot, ShadowUniforms& uniforms) {
+        if (!(desc.probeSpacing > 0.0f) || scene.meshes.empty()) {
+            // Nol berarti tidak ada kisi, dan permukaan kembali memakai SH
+            // panggang yang berlaku sama di seluruh adegan. Buffernya tetap
+            // terikat; yang mematikannya angka ini.
+            uniforms.probeCounts = Vec4(0.0f);
+            uniforms.probeOrigin = Vec4(0.0f);
+            return;
+        }
+
+        Vec3 minimum(std::numeric_limits<float>::max());
+        Vec3 maximum(std::numeric_limits<float>::lowest());
+        for (const MeshInstance& mesh : scene.meshes) {
+            // Kedelapan sudutnya, bukan kedua ujungnya: kotak yang diputar tidak
+            // lagi sejajar sumbu, dan mentransformasi min/max saja menghasilkan
+            // kisi yang berhenti di dalam geometri yang harus dinaunginya.
+            for (int corner = 0; corner < 8; ++corner) {
+                const Vec3 local((corner & 1) != 0 ? mesh.boundsMax.x : mesh.boundsMin.x,
+                                 (corner & 2) != 0 ? mesh.boundsMax.y : mesh.boundsMin.y,
+                                 (corner & 4) != 0 ? mesh.boundsMax.z : mesh.boundsMin.z);
+                const Vec3 world = Vec3(mesh.transform * Vec4(local, 1.0f));
+                minimum = glm::min(minimum, world);
+                maximum = glm::max(maximum, world);
+            }
+        }
+        if (!(minimum.x <= maximum.x)) {
+            uniforms.probeCounts = Vec4(0.0f);
+            uniforms.probeOrigin = Vec4(0.0f);
+            return;
+        }
+
+        const ProbeVolumeLayout layout = MakeProbeLayout(minimum, maximum, desc.probeSpacing);
+        if (!layout.IsValid() || layout.FullProbeCount() > kMaxProbes) {
+            // **Ditolak, dan disebutkan.** Sebuah kisi yang tidak muat lebih
+            // baik tidak ada daripada dipotong diam-diam: yang dipotong terlihat
+            // sebagai adegan yang sebagian disinari dan sebagian tidak, dan itu
+            // dibaca sebagai GI yang rusak alih-alih sebagai jarak yang terlalu
+            // rapat.
+            if (probeLayout_.IsValid() || !probeGridRejected_) {
+                probeGridRejected_ = true;
+                SIM_WARN("Render",
+                         "probe grid at {} m needs {} probes; raise Probe Spacing in World "
+                         "Settings",
+                         desc.probeSpacing, layout.FullProbeCount());
+            }
+            probeLayout_ = ProbeVolumeLayout{};
+            uniforms.probeCounts = Vec4(0.0f);
+            uniforms.probeOrigin = Vec4(0.0f);
+            return;
+        }
+        probeGridRejected_ = false;
+
+        const bool shapeUnchanged = probeLayout_.counts == layout.counts &&
+                               std::abs(probeLayout_.spacing - layout.spacing) < 1e-4f &&
+                               glm::all(glm::lessThan(glm::abs(probeLayout_.origin - layout.origin),
+                                                      Vec3(1e-3f)));
+        if (!shapeUnchanged) {
+            probeLayout_ = layout;
+            probeUpload_.assign(static_cast<std::size_t>(layout.FullProbeCount()) * 9, Vec4(0.0f));
+            // S1 mengisi seluruh brick. Yang mengosongkan brick yang jauh dari
+            // permukaan adalah S2, karena ia satu-satunya yang sudah menelusuri
+            // geometri.
+            probeBrickUpload_.resize(layout.BrickCount());
+            for (uint32_t brick = 0; brick < layout.BrickCount(); ++brick) {
+                probeBrickUpload_[brick] = brick;
+            }
+            // **Disebutkan, karena jalur headless tidak punya panel.** Angka
+            // yang sama yang dibaca World Settings sebelum Bake — dan tanpa
+            // baris ini sebuah kisi yang diam-diam tidak pernah terbentuk
+            // terlihat persis sama dengan kisi yang terbentuk dan menjawab hal
+            // yang benar.
+            SIM_INFO("Render", "probe grid {}x{}x{} at {:.2f} m — {} probes in {} bricks",
+                     layout.counts.x, layout.counts.y, layout.counts.z, layout.spacing,
+                     layout.FullProbeCount(), layout.BrickCount());
+        }
+
+        // **Diisi ulang hanya ketika isinya berubah, dan itu diukur.**
+        // Mengisinya tiap frame tampak murah pada kisi 2 m — 1,1 MB — dan
+        // ternyata 31 MB pada kisi 0,5 m: `cpu-total` naik dari 10,9 ms menjadi
+        // 46,0 ms, hampir seluruhnya menyalin sembilan angka yang sama persis ke
+        // ratusan ribu tempat. Sembilan perbandingan float per frame
+        // menghapusnya seluruhnya.
+        //
+        // Perbandingannya persis, bukan ber-epsilon: yang dibandingkan angka
+        // yang sama yang disalin dari sumber yang sama, jadi "hampir sama"
+        // hanya menambah satu ambang yang bisa salah tanpa menjawab pertanyaan
+        // apa pun.
+        const bool sameContent = shapeUnchanged && probeUploadedSh_ == skyIrradiance_.coefficients;
+        if (!sameContent) {
+            for (std::size_t probe = 0; probe < probeUpload_.size() / 9; ++probe) {
+                for (std::size_t coefficient = 0; coefficient < 9; ++coefficient) {
+                    probeUpload_[probe * 9 + coefficient] =
+                        Vec4(skyIrradiance_.coefficients[coefficient], 0.0f);
+                }
+            }
+            probeUploadedSh_ = skyIrradiance_.coefficients;
+            // Ketiga slot harus melihat isi baru itu, bukan hanya slot frame
+            // ini — dua frame berikutnya memakai buffer yang lain, dan buffer
+            // yang tidak ikut ditulis masih memuat langit yang lama. Yang keluar
+            // bukan galat melainkan cahaya tak-langsung yang berdenyut di antara
+            // dua nilai selama tiga frame setiap kali matahari bergeser.
+            ++probeContentRevision_;
+        }
+        if (slot.probeRevision == probeContentRevision_) {
+            uniforms.probeOrigin = Vec4(layout.origin, layout.spacing);
+            uniforms.probeCounts = Vec4(static_cast<float>(layout.counts.x),
+                                        static_cast<float>(layout.counts.y),
+                                        static_cast<float>(layout.counts.z), 1.0f);
+            return;
+        }
+
+        const VkDeviceSize shBytes = sizeof(Vec4) * probeUpload_.size();
+        const VkDeviceSize brickBytes = sizeof(uint32_t) * probeBrickUpload_.size();
+        const uint64_t beforeSh = slot.probeShBuffer.Generation();
+        const uint64_t beforeBricks = slot.probeBrickBuffer.Generation();
+        if (!slot.probeShBuffer.Reserve(shBytes) || !slot.probeBrickBuffer.Reserve(brickBytes) ||
+            !slot.probeShBuffer.Write(probeUpload_.data(), shBytes) ||
+            !slot.probeBrickBuffer.Write(probeBrickUpload_.data(), brickBytes)) {
+            SIM_WARN("Render", "cannot upload {} probes", probeUpload_.size() / 9);
+            uniforms.probeCounts = Vec4(0.0f);
+            uniforms.probeOrigin = Vec4(0.0f);
+            return;
+        }
+        if (slot.probeShBuffer.Generation() != beforeSh ||
+            slot.probeBrickBuffer.Generation() != beforeBricks) {
+            WriteProbeDescriptors(slot);
+        }
+        slot.probeRevision = probeContentRevision_;
+
+        uniforms.probeOrigin = Vec4(layout.origin, layout.spacing);
+        uniforms.probeCounts = Vec4(static_cast<float>(layout.counts.x),
+                                    static_cast<float>(layout.counts.y),
+                                    static_cast<float>(layout.counts.z), 1.0f);
+    }
+
+    void UpdateShadowUniforms(const ViewportDesc& desc, const ViewportScene& scene,
+                              const Mat4& viewProj, InstanceSlot& slot) {
         ShadowUniforms uniforms;
         for (int i = 0; i < cascades_.count; ++i) {
             const Cascade& cascade = cascades_.cascades[static_cast<size_t>(i)];
@@ -6027,6 +6260,15 @@ private:
                                                                           : 0.0f;
         uniforms.environmentRotation =
             Vec4(std::cos(rotation), std::sin(rotation), 0.0f, 0.0f);
+
+        // **Sesudah `UpdateSkyIrradiance`, di frame yang sama.** Isi kisi S1
+        // adalah `skyIrradiance_` apa adanya, jadi menghitungnya di tempat lain
+        // berarti kisi yang menjawab langit frame kemarin sementara SH di blok
+        // ini menjawab langit frame ini — dan selisih satu frame di antara dua
+        // jalur yang seharusnya identik adalah persis cacat yang kriteria S1
+        // cari.
+        UpdateProbeGrid(desc, scene, slot, uniforms);
+
         slot.shadowUniform.Write(&uniforms, sizeof(uniforms));
     }
 
@@ -6119,6 +6361,8 @@ private:
             slot.lineBuffer.Destroy();
             slot.shadowUniform.Destroy();
             slot.lightBuffer.Destroy();
+            slot.probeShBuffer.Destroy();
+            slot.probeBrickBuffer.Destroy();
             slot.clusterRangeBuffer.Destroy();
             slot.clusterIndexBuffer.Destroy();
             slot.shadowFaceBuffer.Destroy();
@@ -6353,6 +6597,25 @@ private:
     /// selesai — frame pertama sesudah level dibuka, dan itu benar: yang belum
     /// dipanggang belum menyinari apa pun.
     Sh9 skyIrradiance_;
+    /// Bentuk kisi probe yang sedang terpasang (S1). `IsValid()` false berarti
+    /// belum ada, atau yang terakhir diminta ditolak karena terlalu besar.
+    ProbeVolumeLayout probeLayout_;
+    /// Staging kisi: sembilan Vec4 per probe, lalu satu slot per brick.
+    /// Anggotanya, bukan variabel lokal — keduanya beberapa ratus kilobyte, dan
+    /// mengalokasikannya tiap frame adalah alokasi yang bisa dihindari
+    /// seluruhnya.
+    std::vector<Vec4> probeUpload_;
+    std::vector<uint32_t> probeBrickUpload_;
+    /// SH yang sedang berada di dalam `probeUpload_`. Dibandingkan supaya isian
+    /// ulangnya tidak terjadi setiap frame; lihat pengukurannya di sana.
+    std::array<Vec3, 9> probeUploadedSh_{};
+    /// Naik setiap kali `probeUpload_` atau `probeBrickUpload_` berubah. Slot
+    /// yang stempelnya tertinggal mengunggah ulang, yang sudah sama tidak.
+    uint64_t probeContentRevision_ = 1;
+    /// Supaya penolakan kisi disebutkan sekali, bukan tiap frame — 60 baris log
+    /// per detik menenggelamkan pesan yang lain, termasuk pesan yang menjelaskan
+    /// sebabnya.
+    bool probeGridRejected_ = false;
     /// Langit yang menghasilkan `skyIrradiance_`, atau yang sedang dipanggang.
     SkyBakeKey bakedSkyKey_;
     std::shared_ptr<SkyBakeResult> skyBake_;
@@ -6430,6 +6693,17 @@ private:
     /// tertulis di `material_forward` — dua tempat, satu keputusan.
     static constexpr uint32_t kPrefilteredBinding = 24;
     static constexpr uint32_t kDfgBinding = 25;
+    /// Kisi probe iradiansi (S1), dua storage buffer bersebelahan.
+    static constexpr uint32_t kProbeShBinding = 26;
+    static constexpr uint32_t kProbeBrickBinding = 27;
+    /// Batas atas jumlah probe yang boleh diunggah.
+    ///
+    /// **Sebuah batas, bukan sebuah target.** Empat juta probe adalah 576 MB
+    /// pada tata letak Vec4 di sini, dan kisi yang lebih besar dari itu hampir
+    /// pasti datang dari jarak antar-probe yang salah ketik — bukan dari sebuah
+    /// adegan yang benar-benar menuntutnya. Yang di atasnya ditolak dengan
+    /// pesan, bukan dialokasikan lalu membuat device kehabisan memori.
+    static constexpr uint32_t kMaxProbes = 4u * 1024u * 1024u;
 
     static constexpr float kBounceAlbedo = 0.5f;
     /// Anggaran langkah lapis screen-space. Rencana GI menyebut 16, dan angka

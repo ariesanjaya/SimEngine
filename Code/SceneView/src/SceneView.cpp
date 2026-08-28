@@ -142,6 +142,14 @@ void ApplyWorldSettings(const scene::World& world, render::ViewportDesc& desc) {
                            : render::EnvironmentSource::Sky;
     desc.extractSunFromEnvironment = settings.extractSun;
 
+    // **Hanya `Precomputed` yang memanggang kisi probe.** `RealTime` menelusuri
+    // tiap frame dan tidak punya gunanya; `None` memang tidak menerima cahaya
+    // tak-langsung sama sekali. Nol di sini adalah bagaimana keduanya
+    // mengatakannya, bukan jarak yang kebetulan kosong.
+    desc.probeSpacing = settings.indirect == scene::IndirectLighting::Precomputed
+                            ? scene::ProbeSpacingOf(settings)
+                            : 0.0f;
+
     desc.post.exposureMode = settings.exposureMode == scene::ExposureModeKind::Manual
                                  ? render::ExposureMode::Manual
                                  : render::ExposureMode::Automatic;
@@ -1346,6 +1354,29 @@ bool SceneView::BoundsOf(const std::vector<scene::Entity>& entities, Vec3& outMi
         }
         outMin = glm::min(outMin, icon.position);
         outMax = glm::max(outMax, icon.position);
+        found = true;
+    }
+    return found;
+}
+
+bool SceneView::GeometryBounds(Vec3& outMin, Vec3& outMax) const {
+    outMin = Vec3(std::numeric_limits<float>::max());
+    outMax = Vec3(std::numeric_limits<float>::lowest());
+    bool found = false;
+
+    for (const Pickable& pickable : pickables_) {
+        // Kedelapan sudutnya ditransformasi, bukan kedua ujungnya: sebuah kotak
+        // yang diputar tidak lagi sejajar sumbu, dan mentransformasi min/max
+        // saja menghasilkan kotak yang lebih kecil daripada isinya — kisi probe
+        // lalu berhenti di dalam geometri yang harus dinaunginya.
+        for (int i = 0; i < 8; ++i) {
+            const Vec3 local((i & 1) ? pickable.boundsMax.x : pickable.boundsMin.x,
+                             (i & 2) ? pickable.boundsMax.y : pickable.boundsMin.y,
+                             (i & 4) ? pickable.boundsMax.z : pickable.boundsMin.z);
+            const Vec3 world = Vec3(pickable.worldMatrix * Vec4(local, 1.0f));
+            outMin = glm::min(outMin, world);
+            outMax = glm::max(outMax, world);
+        }
         found = true;
     }
     return found;

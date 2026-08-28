@@ -421,6 +421,16 @@ struct ViewportDesc {
     /// Cerminan `scene::WorldSettings::extractSun`.
     bool extractSunFromEnvironment = false;
 
+    /// Jarak antar-probe iradiansi, meter (S1). Cerminan
+    /// `scene::WorldSettings::probeSpacing`.
+    ///
+    /// **Nol berarti tidak ada kisi**, dan itu keadaan yang sah: tingkat `None`
+    /// dan `RealTime` tidak memanggang kisi, dan begitu juga jalur yang
+    /// memanggil renderer tanpa `World` sama sekali — uji, thumbnail, pratinjau
+    /// material. Permukaan lalu memakai SH panggang yang berlaku sama di seluruh
+    /// adegan, persis seperti sebelum S1 ada.
+    float probeSpacing = 0.0f;
+
     /// Pengali radiansi peta HDR.
     ///
     /// **Terpisah dari `skyIntensity`, dan itu bukan duplikasi.** Atmosfer

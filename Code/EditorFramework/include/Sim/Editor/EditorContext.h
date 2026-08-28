@@ -279,6 +279,23 @@ struct EditorContext {
         float hdriIntensity = 1.0f;
     } sky;
 
+    /// Batas geometri adegan, seperti yang diukur viewport frame lalu.
+    ///
+    /// **Diukur di satu tempat dan dibaca di tempat lain, karena yang tahu
+    /// bentuk dunia adalah yang membangunnya.** `SceneView` sudah memegang
+    /// kotak batas tiap mesh beserta matriks dunianya — menghitung ulang di
+    /// panel World Settings berarti memuat geometri kedua kalinya, dan
+    /// jawabannya akan berbeda selama pemuatan latar belum selesai.
+    ///
+    /// `valid` false berarti belum ada viewport yang menggambar, atau adegannya
+    /// tanpa geometri. Yang membacanya wajib memeriksanya — angka probe atas
+    /// kotak kosong adalah angka yang salah, bukan nol.
+    struct SceneBounds {
+        Vec3 minimum{0.0f};
+        Vec3 maximum{0.0f};
+        bool valid = false;
+    } sceneBounds;
+
     /// Awan volumetrik. Terpisah dari `sky` karena biayanya berbeda satu orde,
     /// dan karena itu sakelarnya perlu berdiri sendiri.
     render::CloudSettings clouds;

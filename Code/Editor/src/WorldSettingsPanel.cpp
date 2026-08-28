@@ -21,6 +21,7 @@
 #include "Sim/Editor/SceneCommands.h"
 #include "Sim/Reflect/TypeRegistry.h"
 #include "Sim/Render/Ibl.h"
+#include "Sim/Render/ProbeVolume.h"
 #include "Sim/Render/TimeOfDay.h"
 #include "Sim/SceneView/SceneView.h"
 #include "Sim/Scene/World.h"
@@ -187,6 +188,62 @@ private:
         ImGui::TextDisabled("• Lightmap permukaan statis — S5");
         ImGui::Unindent();
         ImGui::TextDisabled("Sampai itu ada, langit berlaku sama di ruang tertutup.");
+
+        DrawProbeGrid(context);
+    }
+
+    /// Ukuran kisi probe untuk jarak yang sedang disetel — sebelum ada yang
+    /// menekan Bake (S1).
+    ///
+    /// **Angkanya ditampilkan, bukan ditebak, dan itu inti keputusan 8.** Jumlah
+    /// probe tumbuh kubik terhadap jaraknya: memotong jarak jadi separuh
+    /// melipatgandakan biayanya delapan kali. Tanpa angka di layar itu ditemukan
+    /// setelah menunggu panggangan yang tidak muat, dan yang terlihat kemudian
+    /// cuma editor yang diam.
+    static void DrawProbeGrid(EditorContext& context) {
+        ImGui::Separator();
+        if (!context.sceneBounds.valid) {
+            // Bukan nol, dan bukan kisi kosong: yang belum diukur berbeda dari
+            // yang terukur kosong, dan menampilkan "0 probe" untuk keduanya
+            // membuat adegan tanpa geometri terlihat sama seperti viewport yang
+            // belum sempat menggambar.
+            ImGui::TextDisabled("Kisi probe: menunggu viewport mengukur adegan.");
+            return;
+        }
+
+        const float spacing = scene::ProbeSpacingOf(context.world->Settings());
+        const render::ProbeVolumeLayout layout = render::MakeProbeLayout(
+            context.sceneBounds.minimum, context.sceneBounds.maximum, spacing);
+        if (!layout.IsValid()) {
+            ImGui::TextDisabled("Kisi probe: adegan tanpa geometri.");
+            return;
+        }
+
+        const glm::uvec3 bricks = layout.BrickCounts();
+        const uint32_t probes = layout.FullProbeCount();
+        // Sembilan koefisien RGB float16, sama seperti `ProbeVolume::StoredBytes`
+        // — yang di sini kisi penuh, karena S1 belum membuang satu brick pun.
+        const double megabytes = static_cast<double>(probes) * 9.0 * 3.0 * 2.0 / (1024.0 * 1024.0);
+
+        ImGui::Text("Kisi probe: %u × %u × %u", layout.counts.x, layout.counts.y,
+                    layout.counts.z);
+        ImGui::Text("%u probe dalam %u brick — %.1f MB", probes, layout.BrickCount(),
+                    megabytes);
+        ImGui::TextDisabled("Brick %u³, %u × %u × %u", render::ProbeVolumeLayout::kBrickSize,
+                            bricks.x, bricks.y, bricks.z);
+
+        const Vec3 size = context.sceneBounds.maximum - context.sceneBounds.minimum;
+        ImGui::TextDisabled("Adegan %.1f × %.1f × %.1f m, jarak %.2f m", size.x, size.y, size.z,
+                            spacing);
+
+        // **Peringatannya soal apa yang akan terjadi, bukan soal angka yang
+        // besar.** Yang menyakitkan bukan megabyte-nya melainkan waktu
+        // panggangnya di S2, dan itu sebanding dengan jumlah probe.
+        if (probes > 2'000'000u) {
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+                               "Jaraknya rapat untuk adegan sebesar ini.");
+            ImGui::TextDisabled("Menggandakan jaraknya memotong keduanya jadi seperdelapan.");
+        }
     }
 
     /// Menawarkan memindahkan matahari dari berkas lingkungan ke lampu

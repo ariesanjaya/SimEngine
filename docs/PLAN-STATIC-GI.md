@@ -342,7 +342,7 @@ transport di S2, oklusi di S3, lightmap di S5.
 
 Tiga uji baru di `SimSceneTests`, 25 dari 25 suite lulus.
 
-### S1 — Probe volume: kisi, penempatan, penyimpanan
+### S1 — Probe volume: kisi, penempatan, penyimpanan · ✅
 
 - Kisi iradiansi beraturan yang menutupi batas geometri statis
 - **Jarak antar-probe disetel di editor**, bawaan per-level di World Settings
@@ -362,6 +362,51 @@ punya satu penyebab, bukan dua.
 
 Dan: menggeser jarak antar-probe mengubah jumlah probe serta ukuran artefaknya
 sesuai angka yang ditampilkan panel, bukan sesuai angka yang harus ditebak.
+
+#### Keadaannya sesudah S1 · ✅
+
+Kisinya hidup dari World Settings sampai ke shader. `bench.simlevel`, 1280×720,
+kamera tetap, eksposur manual EV12, Debug:
+
+| Jarak | Kisi | Probe | Brick | `forward-opaque` | `cpu-total` |
+|---|---|---:|---:|---:|---:|
+| — (SH panggang) | — | — | — | 0,673 ms | 10,96 ms |
+| 4 m | 22×2×22 | 2.304 | 36 | — | — |
+| 2 m (bawaan) | 42×3×42 | 7.744 | 121 | 0,879 ms | 11,57 ms |
+| 1 m | 82×4×82 | 28.224 | 441 | — | — |
+| 0,5 m | 162×7×162 | 215.168 | 3.362 | 0,977 ms | 11,85 ms |
+| 0,05 m | ditolak | 154.368.960 | — | — | — |
+
+**Kriteria terimanya lulus lebih keras daripada yang ditulis rencana ini.**
+Rencananya mengizinkan sisa selisih "yang bisa dijelaskan sebagai interpolasi
+kisi"; yang terukur nol — 0 dari 2.764.800 kanal berbeda, pada 2 m maupun 0,5 m.
+Sebabnya bukan keberuntungan: tanpa transport setiap probe memuat SH yang sama,
+dan kombinasi konveks dari nilai-nilai yang identik adalah nilai itu sendiri.
+Yang dibuktikan angka nol itu justru plumbing-nya — kalau indeks brick, urutan
+probe, atau bobot trilinearnya salah, hasilnya tidak akan identik.
+
+Kisinya memang hidup, bukan cabang yang tidak pernah dimasuki: bentuknya
+disebutkan di log setiap kali berubah, dan angkanya bergerak sesuai jaraknya.
+
+**Satu pengukuran membatalkan keputusan yang sudah ditulis.** Bentuk pertama
+mengisi ulang seluruh SH tiap frame, dengan alasan "iradiansinya berubah setiap
+matahari bergeser". Pada 2 m itu 1,1 MB dan tidak terasa; pada 0,5 m itu 31 MB,
+dan `cpu-total` naik dari 10,96 ms menjadi **46,0 ms** — hampir seluruhnya
+menyalin sembilan angka yang sama persis ke ratusan ribu tempat. `forward-opaque`
+ikut naik menjadi 2,45 ms, karena menulisi memori host-visible yang sama yang
+dibaca GPU. Sembilan perbandingan float per frame menghapus keduanya. Yang
+tersisa 0,21–0,30 ms di GPU dan 0,6–0,9 ms di CPU, dan yang di CPU itu
+sebagian besar menghitung ulang batas adegan dari 260 instance tiap frame.
+
+Bendera `--bench-probe-spacing <m>` ditambahkan untuk pengukuran ini: nol
+mematikan kisinya tanpa mengubah tingkat pencahayaan, dan tanpa itu kedua gambar
+di atas tidak bisa dibandingkan sama sekali.
+
+**Yang belum ada di S1, dan disebutkan supaya tidak dikira ada:** artefak
+`.simprobe` sudah bisa ditulis dan dibaca, tetapi renderer belum memakainya — ia
+menyusun kisinya di memori tiap kali adegan dibuka. Itu benar selama isinya
+sesalin SH langit; ia berhenti benar begitu S2 mengisinya dengan penelusuran yang
+mahal, dan di sanalah cache berkunci-hash itu mulai dipakai.
 
 ### S2 — Transport: probe diisi path tracer acuan
 

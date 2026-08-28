@@ -1,0 +1,5 @@
+{
+  "version": 1,
+  "guid": "933833c2-2e71-4737-865b-2e2c9761ba2f",
+  "note": "Keep this file next to its asset and commit it. Losing it gives the asset a new identity and breaks every level that references it."
+}

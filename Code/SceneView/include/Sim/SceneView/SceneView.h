@@ -437,6 +437,22 @@ public:
     /// perintah "focus ke seleksi".
     bool BoundsOf(const std::vector<scene::Entity>& entities, Vec3& outMin, Vec3& outMax) const;
 
+    /// AABB dunia yang melingkupi **seluruh geometri** adegan. Dipakai menyusun
+    /// kisi probe (S1 di docs/PLAN-STATIC-GI.md).
+    ///
+    /// **Seluruhnya, bukan yang statis saja, dan itu bukan kelalaian:** hari ini
+    /// tidak ada satu pun penanda yang menyatakan sebuah objek statis untuk
+    /// keperluan panggangan. Menebaknya dari `RigidBody: Static` akan salah di
+    /// dua arah sekaligus — dinding tanpa collider bukan statis, dan pintu
+    /// kinematik justru dianggap begitu. Yang membedakannya adalah bagian dari
+    /// S5; sampai itu ada, kisinya menutupi semuanya, dan itu jawaban yang lebih
+    /// aman daripada kisi yang berhenti sebelum dindingnya.
+    ///
+    /// Ikon tidak ikut — sebuah lampu di seberang peta akan melebarkan kisinya
+    /// melintasi ruang kosong yang tidak ada permukaannya. Mengembalikan false
+    /// bila adegan tidak punya geometri sama sekali.
+    bool GeometryBounds(Vec3& outMin, Vec3& outMax) const;
+
 private:
     /// Diindeks nomor entity. Bertahan lintas frame — itu gunanya.
     std::unordered_map<uint64_t, CachedDecal> decals_;

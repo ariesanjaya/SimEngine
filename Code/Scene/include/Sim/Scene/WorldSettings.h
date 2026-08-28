@@ -110,7 +110,39 @@ struct WorldSettings {
     /// Hanya berlaku untuk `environment: File`; langit prosedural tidak pernah
     /// memanggang cakram mataharinya sejak B1.
     bool extractSun = false;
+
+    /// Jarak antar-probe iradiansi, meter (S1 di docs/PLAN-STATIC-GI.md).
+    ///
+    /// **Ada di level, bukan di project, dan itu keputusan 8.** Sebuah koridor
+    /// sempit dan sebuah lembah terbuka menuntut kerapatan yang berbeda, dan
+    /// keduanya bisa berada di project yang sama — menaruh angkanya di project
+    /// berarti yang satu boros dan yang lain bocor. Ia maksud pengarang atas
+    /// adegan ini, sejenis dengan `indirect`, bukan anggaran perangkat.
+    ///
+    /// **Yang dibayar tumbuh kubik**, dan itu sebabnya panel menampilkan jumlah
+    /// probe serta ukuran artefaknya sebelum ada yang menekan Bake: memotong
+    /// jaraknya jadi separuh melipatgandakan biayanya delapan kali, dan itu
+    /// angka yang harus terlihat alih-alih ditemukan setelah menunggu.
+    ///
+    /// Hanya berlaku untuk `Precomputed`. Nol atau negatif tidak sah; yang
+    /// membacanya menjepitnya lewat `ProbeSpacingOf`.
+    float probeSpacing = 2.0f;
 };
+
+/// Jarak antar-probe yang benar-benar dipakai, dengan yang tidak masuk akal
+/// dijepit.
+///
+/// **Dijepit, bukan ditolak.** Nol datang dari berkas level yang ditulis skema
+/// lama dan dari medan yang dikosongkan pengguna saat mengetik; keduanya
+/// menghasilkan kisi tak-hingga kalau dipercaya apa adanya. Batas atasnya ada
+/// karena jarak sebesar adegan menghasilkan kisi 2×2×2 yang tidak bisa
+/// menjelaskan apa pun.
+inline float ProbeSpacingOf(const WorldSettings& settings) {
+    if (!(settings.probeSpacing > 0.0f)) {  // termasuk NaN
+        return 2.0f;
+    }
+    return settings.probeSpacing < 0.1f ? 0.1f : (settings.probeSpacing > 32.0f ? 32.0f : settings.probeSpacing);
+}
 
 /// True bila kombinasinya tidak sah.
 ///

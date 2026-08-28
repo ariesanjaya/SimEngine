@@ -116,6 +116,7 @@ void PrintUsage() {
         "  --bench-ev <ev100>            eksposur manual pada EV100 ini\n"
         "  --bench-no-screen-trace       matikan lapis screen-space; lihat SDF sendirian\n"
         "  --bench-furnace               uji tungku: langit seragam 1, albedo 1, tanpa matahari\n"
+        "  --bench-probe-spacing <m>     paksa jarak kisi probe; 0 mematikan kisinya (S1)\n"
         "  --dump-mesh <file> --dump-out <json>  material dan ruas sebuah berkas mesh\n"
         "  --dump-fbx-material <fbx>     setiap properti tiap material, apa adanya\n"
         "  --dump-uv <bin>               posisi+UV tiap titik, float32 x5\n"
@@ -885,6 +886,18 @@ int main(int argc, char** argv) {
             fixedExposure = true;
         }
 
+        // Jarak kisi probe (S1). **Nol mematikan kisinya, bukan menyetelnya
+        // rapat**, dan itu yang membuat kriteria S1 bisa diperiksa sama sekali:
+        // dua gambar dari level yang sama persis, satu lewat kisi dan satu lewat
+        // SH panggang, tidak bisa dibandingkan kalau satu-satunya cara
+        // mematikan kisinya adalah mengganti tingkat pencahayaan — yang juga
+        // mengubah cahayanya.
+        std::optional<float> probeSpacingOverride;
+        if (const std::string_view value = FlagValue(argc, argv, "--bench-probe-spacing");
+            !value.empty()) {
+            probeSpacingOverride = std::strtof(std::string(value).c_str(), nullptr);
+        }
+
         if (const std::string_view value = FlagValue(argc, argv, "--bench-camera");
             !value.empty()) {
             std::array<float, 6> numbers{};
@@ -1202,6 +1215,9 @@ int main(int argc, char** argv) {
             if (fixedExposure) {
                 desc.post.exposureMode = render::ExposureMode::Manual;
                 desc.post.manualEv100 = manualEv;
+            }
+            if (probeSpacingOverride.has_value()) {
+                desc.probeSpacing = *probeSpacingOverride;
             }
             giEffective = desc.gi.enabled;
             // Jalur HDR relatif dilengkapi dengan akar `Resources`, alasan

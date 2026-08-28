@@ -372,6 +372,13 @@ public:
         sceneView_.Build(*context.world, *context.selection, context.assets, renderer,
                          context.animation, context.builtinAssets, context.whiteboxes,
                          terrainView);
+
+        // Batas geometrinya dicatat untuk panel lain — World Settings memakainya
+        // menghitung kisi probe. Setelah Build, karena sebelum itu isinya milik
+        // frame sebelumnya.
+        context.sceneBounds.valid =
+            sceneView_.GeometryBounds(context.sceneBounds.minimum, context.sceneBounds.maximum);
+
         HandleCameraInput();
 
         render::ViewportDesc desc;
