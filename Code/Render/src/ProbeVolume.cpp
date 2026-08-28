@@ -290,6 +290,119 @@ Sh9 SampleProbeVolume(const ProbeVolume& volume, const Vec3& position) {
     return result;
 }
 
+Vec2 ProbeOctEncode(const Vec3& direction) {
+    const float norm = std::abs(direction.x) + std::abs(direction.y) + std::abs(direction.z);
+    const Vec3 d = direction / std::max(norm, 1e-20f);
+    Vec2 uv(d.x, d.z);
+    if (d.y < 0.0f) {
+        // Nol diperlakukan sebagai positif: `sign` pada nol menjawab nol, dan
+        // texel di sumbu lalu jatuh ke tempat yang salah.
+        const Vec2 sign(uv.x >= 0.0f ? 1.0f : -1.0f, uv.y >= 0.0f ? 1.0f : -1.0f);
+        uv = Vec2(1.0f - std::abs(d.z), 1.0f - std::abs(d.x)) * sign;
+    }
+    return uv * 0.5f + 0.5f;
+}
+
+Vec3 ProbeOctDecode(const Vec2& uv) {
+    const Vec2 f = uv * 2.0f - 1.0f;
+    Vec3 d(f.x, 1.0f - std::abs(f.x) - std::abs(f.y), f.y);
+    const float t = std::max(-d.y, 0.0f);
+    d.x += d.x >= 0.0f ? -t : t;
+    d.z += d.z >= 0.0f ? -t : t;
+    return glm::normalize(d);
+}
+
+uint32_t ProbeDepthTexel(const Vec3& direction) {
+    constexpr uint32_t kSide = ProbeVolume::kDepthSize;
+    const Vec2 uv = ProbeOctEncode(direction);
+    const auto x = std::min(static_cast<uint32_t>(uv.x * static_cast<float>(kSide)), kSide - 1);
+    const auto y = std::min(static_cast<uint32_t>(uv.y * static_cast<float>(kSide)), kSide - 1);
+    return y * kSide + x;
+}
+
+float ProbeVisibilityWeight(float distance, float mean, float meanSquare) {
+    if (distance <= mean) {
+        return 1.0f;
+    }
+    // Varians dijaga tidak nol; alasannya di `probe_grid.slang`.
+    const float variance = std::max(meanSquare - mean * mean, 1e-4f);
+    const float delta = distance - mean;
+    const float chebyshev = variance / (variance + delta * delta);
+    return chebyshev * chebyshev * chebyshev;
+}
+
+Sh9 SampleProbeVolumeAt(const ProbeVolume& volume, const Vec3& position) {
+    if (!volume.HasVisibility()) {
+        // Kisi tanpa visibilitas menjawab persis seperti sebelum S3. Itu bukan
+        // jalur mundur yang menutupi sesuatu: artefak yang dipanggang sebelum S3
+        // memang tidak memuat jawabannya, dan menebaknya lebih buruk daripada
+        // menjawab apa adanya.
+        return SampleProbeVolume(volume, position);
+    }
+    Sh9 result;
+    const ProbeVolumeLayout& layout = volume.layout;
+    if (!volume.IsValid() || volume.probes.empty()) {
+        return result;
+    }
+
+    glm::uvec3 base(0u);
+    Vec3 fraction(0.0f);
+    ProbeCell(layout, position, base, fraction);
+
+    float totalWeight = 0.0f;
+    for (uint32_t corner = 0; corner < 8; ++corner) {
+        const float trilinear = ProbeCornerWeight(corner, fraction);
+        if (trilinear <= 0.0f) {
+            continue;
+        }
+        const glm::uvec3 probe = ProbeCorner(layout, base, corner);
+        const uint32_t index = ProbeBrickIndex(layout, probe);
+        if (index >= volume.brickSlots.size()) {
+            continue;
+        }
+        const uint32_t brickSlot = volume.brickSlots[index];
+        if (brickSlot == kEmptyBrick) {
+            continue;
+        }
+        const uint32_t slot = ProbeSlotOffset(brickSlot, probe);
+        if (slot >= volume.probes.size()) {
+            continue;
+        }
+
+        // **Arah dari probe ke titiknya, dan jaraknya.** Itulah yang dijawab
+        // peta kedalaman: seberapa jauh geometri terdekat pada arah itu.
+        const Vec3 toPoint = position - layout.ProbePosition(probe);
+        const float distance = glm::length(toPoint);
+        float visibility = 1.0f;
+        if (distance > 1e-5f) {
+            const uint32_t texel = ProbeDepthTexel(toPoint / distance);
+            const std::size_t at =
+                static_cast<std::size_t>(slot) * ProbeVolume::kDepthFloats + texel * 2;
+            visibility = ProbeVisibilityWeight(distance, volume.depth[at], volume.depth[at + 1]);
+        }
+
+        const float weight = trilinear * visibility;
+        if (weight <= 0.0f) {
+            continue;
+        }
+        const Sh9& probeSh = volume.probes[slot];
+        for (std::size_t i = 0; i < result.coefficients.size(); ++i) {
+            result.coefficients[i] += probeSh.coefficients[i] * weight;
+        }
+        totalWeight += weight;
+    }
+
+    // **Dinormalkan terhadap bobot yang benar-benar terpakai**, alasan yang sama
+    // dengan `SampleProbeVolume` — dan di sini ia lebih penting lagi: bobot
+    // visibilitas membuang sudut secara rutin, bukan sesekali.
+    if (totalWeight > 1e-6f) {
+        for (Vec3& coefficient : result.coefficients) {
+            coefficient /= totalWeight;
+        }
+    }
+    return result;
+}
+
 uint64_t ProbeVolumeCacheKey(const ProbeVolumeLayout& layout, uint64_t environmentKey) {
     uint64_t hash = HashInto(kFnvOffset, &environmentKey, sizeof(environmentKey));
     hash = HashInto(hash, &layout.origin.x, sizeof(float) * 3);

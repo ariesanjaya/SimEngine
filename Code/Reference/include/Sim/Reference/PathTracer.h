@@ -181,4 +181,24 @@ std::array<Vec3, 9> TraceProbeIrradiance(const raycast::RayScene& scene,
                                          const Vec3& position, uint32_t sampleCount,
                                          const TraceSettings& settings);
 
+/// Jarak ke geometri terdekat dari sebuah titik, per arah, sebagai peta
+/// oktahedral (S3 di docs/PLAN-STATIC-GI.md).
+///
+/// **Sinar kedalaman, bukan jalur cahaya.** Yang dibutuhkan cuma jarak ke
+/// permukaan pertama — tidak ada shading, tidak ada pantulan, tidak ada langit.
+/// Karena itu ia jauh lebih murah daripada `TraceProbeIrradiance` dan boleh
+/// menembakkan jauh lebih banyak sinar: peta 8×8 punya 64 texel, dan mengisinya
+/// dari cuplikan yang sama dengan iradiansinya berarti dua sinar per texel.
+///
+/// `outMoments` diisi `size * size * 2` float: rata-rata jarak, lalu rata-rata
+/// kuadratnya, per texel. Keduanya yang dituntut uji Chebyshev di sisi pembaca.
+///
+/// **Sinar yang tidak mengenai apa pun dicatat sebagai `maxDistance`, bukan
+/// dibuang.** Arah yang terbuka ke langit memang tidak punya geometri, dan
+/// texel yang kosong akan terbaca sebagai jarak nol — yaitu sebagai dinding
+/// yang menempel di probe, yang justru kebalikannya.
+void TraceProbeVisibility(const raycast::RayScene& scene, const Vec3& position,
+                          uint32_t size, uint32_t samplesPerTexel, float maxDistance,
+                          std::vector<float>& outMoments);
+
 }  // namespace sim::reference

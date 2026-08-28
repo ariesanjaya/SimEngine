@@ -1300,3 +1300,241 @@ TEST_CASE("S2: matahari tidak masuk langsung, tetapi pantulannya masuk") {
     MESSAGE("pantulan matahari dari lantai: ", fromBelow);
     CHECK(fromBelow > 0.5f);
 }
+
+// --- S3: oklusi arah (docs/PLAN-STATIC-GI.md) --------------------------------
+
+namespace {
+
+/// Memanggang kisi lengkap — SH **dan** peta kedalaman — dari sebuah adegan
+/// acuan. Cerminan `view::ProbeBakery` dalam bentuk yang tidak menuntut editor.
+sim::render::ProbeVolume BakeWithVisibility(const sim::reference::Scene& scene,
+                                            const raycast::RayScene& rayScene,
+                                            const sim::render::ProbeVolumeLayout& layout,
+                                            const sim::reference::TraceSettings& trace,
+                                            uint32_t irradianceSamples,
+                                            uint32_t visibilitySamples) {
+    using namespace sim::render;
+    ProbeVolume volume;
+    volume.layout = layout;
+    volume.brickSlots.assign(layout.BrickCount(), 0u);
+    for (uint32_t brick = 0; brick < layout.BrickCount(); ++brick) {
+        volume.brickSlots[brick] = brick;
+    }
+    volume.probes.assign(layout.FullProbeCount(), Sh9{});
+    volume.depth.assign(static_cast<std::size_t>(layout.FullProbeCount()) *
+                            ProbeVolume::kDepthFloats,
+                        0.0f);
+
+    constexpr uint32_t kSide = ProbeVolumeLayout::kBrickSize;
+    constexpr uint32_t kPerBrick = kSide * kSide * kSide;
+    const glm::uvec3 bricks = layout.BrickCounts();
+    std::vector<float> moments;
+
+    for (uint32_t brick = 0; brick < layout.BrickCount(); ++brick) {
+        const glm::uvec3 brickAt(brick % bricks.x, (brick / bricks.x) % bricks.y,
+                                 brick / (bricks.x * bricks.y));
+        for (uint32_t local = 0; local < kPerBrick; ++local) {
+            const glm::uvec3 inside(local % kSide, (local / kSide) % kSide,
+                                    local / (kSide * kSide));
+            const Vec3 position = layout.ProbePosition(brickAt * kSide + inside);
+            const std::size_t slot = static_cast<std::size_t>(brick) * kPerBrick + local;
+
+            volume.probes[slot].coefficients = sim::reference::TraceProbeIrradiance(
+                rayScene, scene.Resolver(), scene.Lights(), position, irradianceSamples, trace);
+            sim::reference::TraceProbeVisibility(rayScene, position, ProbeVolume::kDepthSize,
+                                                 visibilitySamples, 64.0f, moments);
+            std::copy(moments.begin(), moments.end(),
+                      volume.depth.begin() +
+                          static_cast<std::ptrdiff_t>(slot * ProbeVolume::kDepthFloats));
+        }
+    }
+    return volume;
+}
+
+/// Lantai besar dengan sebuah meja di atasnya: pelat mendatar setinggi 2 m yang
+/// membentang [-2,2] di kedua sumbu mendatar.
+sim::reference::Scene MakeTableScene() {
+    using namespace sim::reference;
+    Scene scene;
+    Surface surface;
+    surface.baseColor = Vec3(0.5f);
+    surface.specularWeight = 0.0f;
+    surface.specularRoughness = 1.0f;
+    const uint32_t material = scene.AddMaterial(surface);
+    scene.AddQuad(Vec3(-20.0f, 0.0f, -20.0f), Vec3(40.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, 40.0f),
+                  material);
+    scene.AddBox(Vec3(-2.0f, 1.9f, -2.0f), Vec3(2.0f, 2.1f, 2.0f), material);
+    return scene;
+}
+
+}  // namespace
+
+TEST_CASE("S3: benda di bawah meja lebih gelap daripada benda di sebelahnya") {
+    // **Kriteria terima S3.** Sebelum milestone ini, kisi menjawab pertanyaan
+    // "apa isi kisi di sini" — dan sebuah titik di bawah meja mendapat rata-rata
+    // dari probe di atas meja beserta yang di bawahnya, karena tidak ada yang
+    // memberitahunya bahwa ada pelat di antaranya.
+    using namespace sim::reference;
+    using namespace sim::render;
+
+    const GradientSky sky;
+    TraceSettings trace;
+    trace.sky = [&sky](const Vec3& direction) { return sky.Sample(direction); };
+
+    const Scene scene = MakeTableScene();
+    raycast::RayScene rayScene;
+    scene.Commit(rayScene);
+
+    const ProbeVolumeLayout layout =
+        MakeProbeLayout(Vec3(-8.0f, 0.0f, -8.0f), Vec3(8.0f, 4.0f, 8.0f), 1.0f);
+    REQUIRE(layout.IsValid());
+    const ProbeVolume volume = BakeWithVisibility(scene, rayScene, layout, trace, 256, 32);
+    REQUIRE(volume.IsValid());
+    REQUIRE(volume.HasVisibility());
+
+    const Vec3 normal(0.0f, 1.0f, 0.0f);
+    const Vec3 under(0.0f, 0.5f, 0.0f);   // di bawah meja
+    const Vec3 beside(6.0f, 0.5f, 0.0f);  // di sebelahnya, ketinggian sama
+
+    const float underLit =
+        EvaluateIrradiance(SampleProbeVolumeAt(volume, under), normal).y;
+    const float besideLit =
+        EvaluateIrradiance(SampleProbeVolumeAt(volume, beside), normal).y;
+
+    // Dan tanpa visibilitas — yaitu jawaban S2 — untuk melihat apa yang dibeli.
+    const float underPlain = EvaluateIrradiance(SampleProbeVolume(volume, under), normal).y;
+    const float besidePlain = EvaluateIrradiance(SampleProbeVolume(volume, beside), normal).y;
+
+    MESSAGE("dengan visibilitas : bawah meja ", underLit, ", di sebelahnya ", besideLit,
+            "  (", 100.0f * underLit / besideLit, "% seterang)");
+    MESSAGE("tanpa visibilitas  : bawah meja ", underPlain, ", di sebelahnya ", besidePlain,
+            "  (", 100.0f * underPlain / besidePlain, "% seterang)");
+
+    CHECK(underLit < besideLit);
+    // Bukan sekadar "lebih gelap": mejanya menutupi hampir seluruh belahan atas,
+    // jadi yang di bawahnya harus jelas lebih gelap, bukan sedikit lebih gelap.
+    CHECK(underLit < besideLit * 0.75f);
+}
+
+TEST_CASE("S3: sel yang melintasi dinding menjawab jauh lebih dekat ke acuan") {
+    // **Ini yang benar-benar dibeli S3, dan uji meja di atas tidak mengujinya.**
+    // Di sana kedelapan sudut interpolasi berada di sisi yang sama, jadi
+    // visibilitas tidak punya apa pun untuk ditolak — angkanya sama persis
+    // dengan dan tanpa. Yang membedakan keduanya adalah sel yang **melintasi**
+    // penghalang: sebuah titik di ruang gelap yang salah satu sudut selnya
+    // berada di ruang terang di seberang dinding.
+    //
+    // Dindingnya sengaja lebih tipis daripada satu sel. Dinding yang lebih tebal
+    // menaruh sudutnya di dalam dirinya sendiri, dan yang di sana dipanggang nol
+    // — itu kasus lain, dan yang menyelesaikannya bobot yang sama.
+    using namespace sim::reference;
+    using namespace sim::render;
+
+    const GradientSky sky;
+    TraceSettings trace;
+    trace.sky = [&sky](const Vec3& direction) { return sky.Sample(direction); };
+
+    Scene scene;
+    Surface surface;
+    surface.baseColor = Vec3(0.5f);
+    surface.specularWeight = 0.0f;
+    surface.specularRoughness = 1.0f;
+    const uint32_t material = scene.AddMaterial(surface);
+    // Lantai, dinding tipis di x = 0,5, dan atap yang hanya menutupi sisi kiri.
+    scene.AddQuad(Vec3(-12.0f, 0.0f, -12.0f), Vec3(24.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, 24.0f),
+                  material);
+    scene.AddBox(Vec3(0.45f, 0.0f, -8.0f), Vec3(0.55f, 5.0f, 8.0f), material);
+    scene.AddBox(Vec3(-8.0f, 4.9f, -8.0f), Vec3(0.45f, 5.1f, 8.0f), material);
+    // Dinding belakang supaya sisi kiri benar-benar tertutup, bukan koridor
+    // yang terbuka di ujungnya.
+    scene.AddBox(Vec3(-8.1f, 0.0f, -8.0f), Vec3(-7.9f, 5.0f, 8.0f), material);
+
+    raycast::RayScene rayScene;
+    scene.Commit(rayScene);
+
+    const ProbeVolumeLayout layout =
+        MakeProbeLayout(Vec3(-6.0f, 0.0f, -6.0f), Vec3(6.0f, 5.0f, 6.0f), 1.0f);
+    const ProbeVolume volume = BakeWithVisibility(scene, rayScene, layout, trace, 256, 32);
+    REQUIRE(volume.HasVisibility());
+
+    const Vec3 normal(0.0f, 1.0f, 0.0f);
+    // Di sisi gelap, cukup dekat ke dinding sehingga selnya melintasinya.
+    const Vec3 shaded(0.15f, 1.0f, 0.0f);
+    const float leaked = EvaluateIrradiance(SampleProbeVolume(volume, shaded), normal).y;
+    const float sealed = EvaluateIrradiance(SampleProbeVolumeAt(volume, shaded), normal).y;
+    // Acuannya: apa yang benar-benar diterima titik itu, ditelusuri langsung.
+    Sh9 truth;
+    truth.coefficients = TraceProbeIrradiance(rayScene, scene.Resolver(), scene.Lights(), shaded,
+                                              4096, trace);
+    const float reference = EvaluateIrradiance(truth, normal).y;
+
+    MESSAGE("tanpa visibilitas ", leaked, ", dengan visibilitas ", sealed, ", acuan ", reference);
+    MESSAGE("kesalahan: ", std::abs(leaked - reference), " menjadi ",
+            std::abs(sealed - reference));
+
+    // **Diadu dengan acuan, bukan dengan satu sama lain**, dan itu bukan
+    // kehati-hatian yang berlebihan: dugaan pertama saya adalah bahwa
+    // visibilitas menggelapkan titik ini — cahaya yang bocor menembus dinding.
+    // Yang terukur kebalikannya. Kebocorannya **menggelapkan**, karena sudut sel
+    // yang berada di dalam dinding dipanggang tepat nol dan menarik jawabannya
+    // turun. Visibilitas menolak sudut itu, dan angkanya naik mendekati acuan.
+    //
+    // Sebuah uji yang menuntut "lebih gelap" akan gagal di sini pada kode yang
+    // benar, dan itu sebabnya yang dituntut adalah lebih dekat ke jawaban yang
+    // sebenarnya — bukan bergerak ke arah yang diduga.
+    CHECK(std::abs(sealed - reference) < std::abs(leaked - reference));
+    // Setidaknya empat kali lebih dekat; yang terukur 6,6 kali.
+    CHECK(std::abs(sealed - reference) * 4.0f < std::abs(leaked - reference));
+}
+
+TEST_CASE("S3: melintasi tepi meja berubah mulus, tanpa loncatan di batas sel") {
+    // **Bagian kedua kriteria terima.** Bobot visibilitas membuang sudut
+    // interpolasi secara rutin, bukan sesekali — dan sudut yang hilang tiba-tiba
+    // di satu batas sel adalah tepi keras yang mengikuti kisi, bukan bayangan.
+    // Itulah sebabnya varians dijaga tidak nol di `ProbeVisibilityWeight`.
+    using namespace sim::reference;
+    using namespace sim::render;
+
+    const GradientSky sky;
+    TraceSettings trace;
+    trace.sky = [&sky](const Vec3& direction) { return sky.Sample(direction); };
+
+    const Scene scene = MakeTableScene();
+    raycast::RayScene rayScene;
+    scene.Commit(rayScene);
+
+    const ProbeVolumeLayout layout =
+        MakeProbeLayout(Vec3(-8.0f, 0.0f, -8.0f), Vec3(8.0f, 4.0f, 8.0f), 1.0f);
+    const ProbeVolume volume = BakeWithVisibility(scene, rayScene, layout, trace, 256, 32);
+    REQUIRE(volume.HasVisibility());
+
+    const Vec3 normal(0.0f, 1.0f, 0.0f);
+    // Melintas dari bawah meja ke luar, melewati tepinya di x = 2 dan beberapa
+    // batas sel kisi 1 m.
+    std::vector<float> profile;
+    for (float x = -1.0f; x <= 7.0f; x += 0.05f) {
+        profile.push_back(
+            EvaluateIrradiance(SampleProbeVolumeAt(volume, Vec3(x, 0.5f, 0.0f)), normal).y);
+    }
+    REQUIRE(profile.size() > 20);
+
+    float largestStep = 0.0f;
+    float total = 0.0f;
+    for (std::size_t i = 1; i < profile.size(); ++i) {
+        const float step = std::abs(profile[i] - profile[i - 1]);
+        largestStep = std::max(largestStep, step);
+        total += step;
+    }
+    const float span = *std::max_element(profile.begin(), profile.end()) -
+                       *std::min_element(profile.begin(), profile.end());
+    MESSAGE("rentang ", span, ", langkah terbesar ", largestStep, " (",
+            100.0f * largestStep / span, "% dari rentang), total variasi ", total);
+
+    REQUIRE(span > 0.0f);
+    // Langkah terbesar dibatasi terhadap rentangnya sendiri: sebuah loncatan di
+    // batas sel akan memindahkan sebagian besar rentang dalam satu langkah 5 cm.
+    CHECK(largestStep < span * 0.15f);
+    // Dan lintasannya tidak boleh berayun: total variasi yang jauh lebih besar
+    // daripada rentangnya berarti naik-turun, bukan peralihan.
+    CHECK(total < span * 2.5f);
+}

@@ -105,9 +105,28 @@ struct ProbeVolume {
     /// `kBrickSize³` entri berurutan, urutan x-cepat di dalamnya.
     std::vector<Sh9> probes;
 
+    /// Peta kedalaman oktahedral tiap probe (S3): dua float per texel — rata-rata
+    /// jarak, lalu rata-rata kuadratnya. Sejajar dengan `probes`, dan kosong
+    /// berarti kisi ini dipanggang sebelum S3 ada.
+    ///
+    /// **Ini yang membedakan probe di depan dinding dari probe di dalamnya.**
+    /// Yang di dalam dipanggang tepat nol dan bocor ke permukaan di dekatnya;
+    /// diukur pada `bench.simlevel`, 246 dari 21.312 probe pada jarak 1 m.
+    std::vector<float> depth;
+
+    /// Texel peta kedalaman per sumbu. Harus sama dengan `kProbeDepthSize` di
+    /// `Shaders/probe_grid.slang`; ujinya mengadu keduanya.
+    static constexpr uint32_t kDepthSize = 8;
+    /// Float per probe di dalam `depth`.
+    static constexpr uint32_t kDepthFloats = kDepthSize * kDepthSize * 2;
+
     bool IsValid() const {
-        return layout.IsValid() && brickSlots.size() == layout.BrickCount();
+        return layout.IsValid() && brickSlots.size() == layout.BrickCount() &&
+               (depth.empty() || depth.size() == probes.size() * kDepthFloats);
     }
+
+    /// True bila kisi ini membawa visibilitas arah (S3).
+    bool HasVisibility() const { return !depth.empty(); }
     /// Berapa brick yang benar-benar dialokasikan.
     uint32_t AllocatedBrickCount() const;
     /// Byte yang benar-benar ditempati probe-nya di dalam artefak `.simprobe`.
@@ -184,6 +203,37 @@ ProbeVolume BakeProbeVolumeFromEnvironment(const ProbeVolumeLayout& layout,
 Sh9 SampleProbeVolume(const ProbeVolume& volume, const Vec3& position);
 
 // --- artefak masak ----------------------------------------------------------
+
+// --- visibilitas arah (S3) --------------------------------------------------
+//
+// **Cerminan `Shaders/probe_grid.slang`**, dan keduanya diadu oleh
+// `SimProbeGridCpuTests` lewat sumber yang sama yang dikompilasi dua kali.
+
+/// Arah unit → koordinat oktahedral di [0,1]².
+Vec2 ProbeOctEncode(const Vec3& direction);
+
+/// Koordinat oktahedral → arah unit.
+Vec3 ProbeOctDecode(const Vec2& uv);
+
+/// Indeks texel peta kedalaman untuk sebuah arah, di dalam peta satu probe.
+uint32_t ProbeDepthTexel(const Vec3& direction);
+
+/// Bobot visibilitas sebuah probe untuk titik berjarak `distance` darinya.
+///
+/// Mengembalikan satu ketika titiknya lebih dekat daripada geometri terdekat
+/// pada arah itu, dan turun ketika ia berada di baliknya. Probe di dalam benda
+/// pejal punya `mean` mendekati nol ke segala arah, jadi bobotnya jatuh ke nol
+/// tanpa satu pun cabang khusus tentang "di dalam".
+float ProbeVisibilityWeight(float distance, float mean, float meanSquare);
+
+/// Iradiansi pada sebuah posisi dunia, dengan bobot visibilitas ikut
+/// diperhitungkan bila kisinya membawanya (S3).
+///
+/// **Terpisah dari `SampleProbeVolume`, bukan menggantikannya**, karena keduanya
+/// menjawab pertanyaan yang berbeda: yang lama "apa isi kisi di sini", yang ini
+/// "apa yang diterima permukaan di sini". Yang kedua menuntut tahu di mana
+/// permukaannya, dan itu argumen yang tidak dipunyai yang pertama.
+Sh9 SampleProbeVolumeAt(const ProbeVolume& volume, const Vec3& position);
 
 /// Kunci artefak: bentuk kisinya, lingkungan yang mengisinya, dan versi
 /// pemanggangnya. Pola yang sama dengan `IblCacheKey`.
