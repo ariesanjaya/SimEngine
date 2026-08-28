@@ -50,11 +50,23 @@ public:
         /// tersendiri; sampai ada, yang meleset kecerahan pantulannya, bukan
         /// keberadaannya.
         float albedo = 0.5f;
-        /// Tempat artefak `.simprobe` ditulis. Kosong berarti tidak ditulis.
+        /// Tempat artefak `.simprobe` dibaca dan ditulis. Kosong mematikan
+        /// keduanya — panggangan lalu selalu dikerjakan ulang.
         std::filesystem::path cacheDir;
-        /// Ikut ke dalam kunci artefak: dua lingkungan berbeda tidak boleh
-        /// berbagi berkas.
-        uint64_t environmentKey = 0;
+
+        /// Sidik jari **langit** yang memanggang, dari pemanggil.
+        ///
+        /// **Wajib diisi kalau `cacheDir` diisi, dan alasannya bukan kerapian.**
+        /// Langitnya datang sebagai `std::function`, yang tidak bisa di-hash;
+        /// yang tahu apa yang ada di dalamnya cuma yang menyusunnya. Kunci yang
+        /// tidak memuatnya membuat panggangan matahari sore dibaca kembali
+        /// sebagai panggangan matahari pagi — tanpa satu pun galat, karena
+        /// berkasnya memang sah.
+        ///
+        /// Sisanya — matahari, albedo, jumlah cuplikan, dan geometri adegan —
+        /// dilipat ke dalam kunci oleh bakery sendiri, karena ia memang
+        /// melihatnya.
+        uint64_t skyKey = 0;
     };
 
     explicit ProbeBakery(TaskPool* tasks = nullptr);
@@ -63,7 +75,7 @@ public:
     ProbeBakery(const ProbeBakery&) = delete;
     ProbeBakery& operator=(const ProbeBakery&) = delete;
 
-    void SetCache(assets::MeshGeometryCache* cache) { picks_.SetCache(cache); }
+    void SetCache(assets::MeshGeometryCache* cache) { cache_ = cache; }
 
     /// Memulai panggangan. **Dipanggil di main thread**, dan geometrinya sudah
     /// harus tersalin ke `PickScene` sebelum tugasnya berangkat: `Sync`
@@ -94,7 +106,7 @@ private:
     struct Job;
 
     TaskPool* tasks_ = nullptr;
-    PickScene picks_;
+    assets::MeshGeometryCache* cache_ = nullptr;
     std::shared_ptr<Job> job_;
 };
 

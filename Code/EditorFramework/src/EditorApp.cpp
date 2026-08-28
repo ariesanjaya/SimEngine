@@ -117,6 +117,7 @@ bool EditorApp::Initialize(const Config& config) {
                                                             config.tasks,
                                                             assets::MeshSdfSettings{});
     context_.meshSdfBakery = meshSdfBakery_.get();
+    context_.configDir = configDir_;
 #if SIM_WITH_PROBE_BAKE
     // Ikut `TaskPool` dengan alasan yang sama seperti kedua bakery di atas, dan
     // satu alasan yang lebih tajam: sebuah kisi probe adalah puluhan ribu
@@ -1204,6 +1205,13 @@ bool EditorApp::SaveLevel(const std::filesystem::path& path) {
 }
 
 bool EditorApp::LoadLevel(const std::filesystem::path& path) {
+    // **Kisi panggang milik level yang meninggalkannya.** Membiarkannya berarti
+    // level berikutnya disinari cahaya tak-langsung adegan sebelumnya — sebuah
+    // ruangan yang tidak pernah dipanggang menerima pantulan dari ruangan lain,
+    // tanpa satu pun galat. Viewport memasang perubahan ini ke renderer di frame
+    // berikutnya.
+    context_.probeVolume.reset();
+
     const scene::LevelIoResult result = scene::LoadLevelFromFile(world_, path);
     if (!result.ok) {
         SIM_ERROR("Editor", "Load failed: {}", result.error);

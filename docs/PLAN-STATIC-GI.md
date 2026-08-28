@@ -516,10 +516,8 @@ Panggangan berjalan di `TaskPool` lewat `view::ProbeBakery`, dan hasilnya
 artefak `.simprobe` berkunci hash. Diukur ujung ke ujung di `bench.simlevel`,
 Debug:
 
-| jarak | probe | spp | waktu panggang | GPU | selisih lawan kisi langit |
-|---|---:|---:|---:|---:|---|
-| 4 m | 2.304 | 64 | 11,5 s | 0,32 MB | 17,1% kanal, maks 6 |
-| 2 m | 6.400 | 128 | 59,6 s | 0,88 MB | 28,3% kanal, maks 23 |
+Angkanya ada di tabel sesudah daftar cacat di bawah — yang pertama kali
+tercatat di sini salah, dan sebabnya nomor 6 di sana.
 
 Selisihnya kecil karena `bench.simlevel` adalah adegan terbuka: langit memang
 mendominasi di sana, dan yang berubah cuma oklusi tanah beserta pantulannya.
@@ -529,6 +527,55 @@ Angka yang tajam ada di baris "ruang tertutup" di tabel pertama.
 dipilih melainkan apa yang benar-benar sudah dipanggang: selama yang ada baru
 kisi lingkungan, ia tetap ikut mataharinya dan nada netralnya benar. Begitu ada
 kisi yang transportnya ditelusuri, ia berwarna.
+
+##### Enam cacat yang ditemukan peninjauan
+
+1. **Artefak `.simprobe` ditulis tetapi tidak pernah dibaca.** Sebuah cache yang
+   tidak pernah menghemat apa pun bukan cache melainkan berkas yang menumpuk.
+   Sekarang dibaca lebih dulu: 11,31 s menjadi **0,00 s**, dengan gambar yang
+   identik byte demi byte.
+
+2. **Dan kuncinya cuma memuat bentuk kisi.** `environmentKey` tidak pernah diisi
+   satu pemanggil pun, jadi menyalakan pembacaan tanpa memperbaikinya akan
+   membaca panggangan matahari sore sebagai panggangan matahari pagi — tanpa
+   satu pun galat, karena berkasnya memang sah. Kunci sekarang memuat langit
+   (sidik jari dari pemanggil, karena langitnya sebuah `std::function` yang tidak
+   bisa di-hash), matahari, albedo, jumlah cuplikan, dan matriks tiap benda.
+   Kontrol negatifnya: menggeser matahari pada kisi yang bentuknya sama persis
+   memaksa panggangan ulang — 11,28 s, bukan 0,00 s — dan gambarnya berbeda pada
+   88,4% kanal.
+
+3. **Tugas latar menangkap `PickScene` milik bakery lewat referensi.** Sebuah
+   level yang ditutup di tengah panggangan membebaskan BVH yang sedang
+   ditembaki, dan yang keluar bukan galat melainkan pembacaan memori bebas.
+   Geometrinya sekarang dipegang tugasnya sendiri lewat `shared_ptr` — aturan
+   "tidak pernah menangkap `this`" berlaku sama untuk referensi ke anggotanya.
+
+4. **Kotak tiap benda ditaksir dari matriksnya**, sebagai titik asal ± skala
+   terbesarnya. Sebuah lantai 80×0,5×80 karena itu menjadi kubus bersisi 160 —
+   aman, tetapi bentuknya salah, dan yang dibayar waktu panggang untuk brick
+   yang tidak perlu. Kotak dunia yang sebenarnya kini ikut dari `SceneView`,
+   yang memang sudah menghitungnya.
+
+5. **Kisi panggang tidak pernah dilepas saat level berganti.** Level berikutnya
+   disinari cahaya tak-langsung adegan sebelumnya: sebuah ruangan yang tidak
+   pernah dipanggang menerima pantulan dari ruangan lain. Viewport sekarang
+   **membandingkan** kisi yang terpasang alih-alih memasangnya sekali di ujung
+   panggangan — kisinya juga bisa hilang, dan pemasangan yang hanya terjadi saat
+   selesai tidak pernah memberitahu renderer tentang itu.
+
+6. **Dan lagi-lagi cacatnya ada di cara mengukurnya.** Jalur `--bench-probe-bake`
+   memanggang dengan matahari tegak lurus ke atas dan tanpa iradiansi, sementara
+   langit yang tergambar memakai matahari adegan. Selisih gambar yang tercatat
+   sebelumnya karena itu sebagian **dua langit yang berbeda**, bukan oklusi.
+   Diukur: panggangan bermatahari salah berbeda 17,5% kanal dari yang benar.
+
+Angka yang benar, `bench.simlevel`, EV4, sesudah keenamnya diperbaiki:
+
+| jarak | probe | spp | panggang | dari cache | GPU | selisih lawan kisi langit |
+|---|---:|---:|---:|---:|---:|---|
+| 4 m | 2.304 | 64 | 11,3 s | 0,00 s | 0,32 MB | — |
+| 2 m | 6.400 | 128 | 67,7 s | 0,00 s | 0,88 MB | 32,5% kanal, maks 22 |
 
 ##### Tiga hal yang belum ada, dan disebutkan supaya tidak dikira ada
 

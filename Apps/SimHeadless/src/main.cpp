@@ -1171,13 +1171,50 @@ int main(int argc, char** argv) {
                             ? probeSpacingOverride.value_or(2.0f)
                             : 2.0f);
                     bakeSettings.samplesPerProbe = probeBakeSamples;
+                    // **Langit dan mataharinya dari adegan, bukan angka yang
+                    // ditulis di sini.** Bentuk pertama memanggang dengan
+                    // matahari tegak lurus ke atas sementara langit yang
+                    // tergambar memakai matahari adegan — dan selisih gambar
+                    // yang keluar lalu bukan oklusi melainkan dua langit yang
+                    // berbeda. Sebuah pengukuran yang membandingkan dua hal yang
+                    // memang berbeda tidak menjawab apa pun.
                     render::AtmosphereSky atmosphere;
-                    // Langit adegan dibaca dari komponennya, bukan dari `desc`:
-                    // `desc` baru disusun di bawah, per frame.
-                    atmosphere.intensity = 20.0f;
-                    atmosphere.cameraHeightKm = 0.5f;
-                    atmosphere.sunDirection = Vec3(0.0f, 1.0f, 0.0f);
+                    render::ViewportDesc skyDesc;
+                    editor::ApplySceneSky(*app.Context().world, skyDesc);
+                    atmosphere.intensity = skyDesc.skyIntensity;
+                    atmosphere.cameraHeightKm = skyDesc.cameraHeightKm;
+                    Vec3 bakeSunDirection(0.0f, -1.0f, 0.0f);
+                    Vec3 bakeSunIrradiance(0.0f);
+                    for (const render::LightInstance& light : sceneView.Scene().lights) {
+                        if (light.kind != render::LightKind::Directional) {
+                            continue;
+                        }
+                        // `LightInstance::direction` adalah arah **ke** cahaya
+                        // untuk directional; panggangan menuntut arah rambatnya.
+                        bakeSunDirection = -light.direction;
+                        bakeSunIrradiance = light.color * light.intensity;
+                        break;
+                    }
+                    atmosphere.sunDirection = -bakeSunDirection;
                     atmosphere.Prepare();
+                    bakeSettings.sunDirection = bakeSunDirection;
+                    bakeSettings.sunIrradiance = bakeSunIrradiance;
+                    // Artefaknya ikut ditulis dan dibaca di jalur ukur juga:
+                    // sebuah cache yang hanya aktif di editor adalah cache yang
+                    // jalur ukurnya tidak pernah memeriksa.
+                    bakeSettings.cacheDir = app.Context().configDir / "ProbeCache";
+                    uint64_t skyKey = 1469598103934665603ull;
+                    const auto mixSky = [&skyKey](const void* data, std::size_t length) {
+                        const auto* bytes = static_cast<const uint8_t*>(data);
+                        for (std::size_t i = 0; i < length; ++i) {
+                            skyKey = (skyKey ^ bytes[i]) * 1099511628211ull;
+                        }
+                    };
+                    mixSky(&skyDesc.skySource, sizeof(skyDesc.skySource));
+                    mixSky(&skyDesc.skyIntensity, sizeof(skyDesc.skyIntensity));
+                    mixSky(&skyDesc.cameraHeightKm, sizeof(skyDesc.cameraHeightKm));
+                    mixSky(&bakeSunDirection.x, sizeof(float) * 3);
+                    bakeSettings.skyKey = skyKey;
                     std::vector<view::PickItem> items;
                     sceneView.BakeItems(items);
                     const auto started = std::chrono::steady_clock::now();

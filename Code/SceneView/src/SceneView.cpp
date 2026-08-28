@@ -352,7 +352,22 @@ void SceneView::Build(scene::World& world, const Selection& selection,
             // itulah yang menaungi panggangan — alasan yang sama yang membuat
             // `GeometryBounds` memakai `meshes_` alih-alih `pickables_`.
             if (!meshKey.empty()) {
-                bakeEntries_.push_back(BakeEntry{entity, matrix, meshKey});
+                // Kedelapan sudutnya ditransformasi: kotak yang diputar tidak
+                // lagi sejajar sumbu, dan mentransformasi min/max saja
+                // menghasilkan kotak yang lebih kecil daripada isinya — brick
+                // yang dibuang karenanya adalah brick yang dipakai.
+                Vec3 worldMin(std::numeric_limits<float>::max());
+                Vec3 worldMax(std::numeric_limits<float>::lowest());
+                for (int corner = 0; corner < 8; ++corner) {
+                    const Vec3 local(
+                        (corner & 1) != 0 ? instance.boundsMax.x : instance.boundsMin.x,
+                        (corner & 2) != 0 ? instance.boundsMax.y : instance.boundsMin.y,
+                        (corner & 4) != 0 ? instance.boundsMax.z : instance.boundsMin.z);
+                    const Vec3 atCorner = Vec3(matrix * Vec4(local, 1.0f));
+                    worldMin = glm::min(worldMin, atCorner);
+                    worldMax = glm::max(worldMax, atCorner);
+                }
+                bakeEntries_.push_back(BakeEntry{entity, matrix, meshKey, worldMin, worldMax});
             }
 
             if (pickable) {
@@ -1380,6 +1395,8 @@ void SceneView::BakeItems(std::vector<PickItem>& out) const {
         // berikutnya. Pemanggil karena itu harus memakai daftarnya di dalam
         // frame yang sama — aturan yang sama seperti `Icons()` dan `Scene()`.
         item.meshKey = entry.meshKey;
+        item.worldMinimum = entry.worldMinimum;
+        item.worldMaximum = entry.worldMaximum;
         // Kunci mesh impor **adalah** jalur berkasnya; whitebox memakai GUID,
         // yang bukan jalur dan karena itu tidak punya sumber untuk dimuat.
         if (entry.meshKey.find('/') != std::string::npos ||

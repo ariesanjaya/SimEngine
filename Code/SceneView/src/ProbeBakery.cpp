@@ -26,6 +26,13 @@ struct ProbeBakery::Job {
     std::shared_ptr<render::ProbeVolume> volume;
     std::mutex statusMutex;
     std::string status;
+    /// **Geometrinya dipegang di sini, bukan di bakery.** Tugasnya menelusuri
+    /// sinar ke dalam `PickScene` ini selama puluhan detik; kalau yang
+    /// memilikinya bakery, sebuah level yang ditutup di tengah panggangan
+    /// membebaskan BVH yang sedang ditembaki. Yang keluar bukan galat melainkan
+    /// pembacaan memori bebas. Di sini ia hidup selama masih ada yang memegang
+    /// `shared_ptr`-nya — yaitu tugasnya sendiri.
+    std::shared_ptr<PickScene> picks;
 };
 
 ProbeBakery::ProbeBakery(TaskPool* tasks) : tasks_(tasks) {}
@@ -63,6 +70,41 @@ std::shared_ptr<const render::ProbeVolume> ProbeBakery::Take() {
     return volume;
 }
 
+namespace {
+
+uint64_t HashInto(uint64_t hash, const void* data, std::size_t length) {
+    const auto* bytes = static_cast<const uint8_t*>(data);
+    for (std::size_t i = 0; i < length; ++i) {
+        hash ^= bytes[i];
+        hash *= 1099511628211ull;
+    }
+    return hash;
+}
+
+/// Sidik jari segala sesuatu yang mengubah jawaban panggangan **selain**
+/// langitnya, yang datang dari pemanggil.
+///
+/// **Yang tidak masuk ke sini akan terbaca kembali sebagai panggangan yang
+/// benar.** Sebuah artefak yang kuncinya cuma bentuk kisi akan dipakai ulang
+/// setelah mataharinya digeser, setelah albedonya diubah, dan setelah setengah
+/// adegannya dipindahkan — dan ketiganya menghasilkan berkas yang sah berisi
+/// cahaya yang salah. Itu kegagalan yang paling mahal untuk ditemukan, karena
+/// tidak ada satu pun yang tampak rusak.
+uint64_t BakeInputKey(std::span<const PickItem> items, const ProbeBakery::Settings& settings) {
+    uint64_t hash = HashInto(1469598103934665603ull, &settings.skyKey, sizeof(settings.skyKey));
+    hash = HashInto(hash, &settings.sunIrradiance.x, sizeof(float) * 3);
+    hash = HashInto(hash, &settings.sunDirection.x, sizeof(float) * 3);
+    hash = HashInto(hash, &settings.albedo, sizeof(settings.albedo));
+    hash = HashInto(hash, &settings.samplesPerProbe, sizeof(settings.samplesPerProbe));
+    for (const PickItem& item : items) {
+        hash = HashInto(hash, item.meshKey.data(), item.meshKey.size());
+        hash = HashInto(hash, &item.worldMatrix[0][0], sizeof(float) * 16);
+    }
+    return hash;
+}
+
+}  // namespace
+
 bool ProbeBakery::Bake(std::span<const PickItem> items, std::function<Vec3(const Vec3&)> sky,
                        const Settings& settings) {
     if (Running()) {
@@ -73,11 +115,36 @@ bool ProbeBakery::Bake(std::span<const PickItem> items, std::function<Vec3(const
         return false;
     }
 
+    const render::ProbeVolumeLayout layout = settings.layout;
+    const uint64_t key = render::ProbeVolumeCacheKey(layout, BakeInputKey(items, settings));
+    const std::filesystem::path file =
+        settings.cacheDir.empty() ? std::filesystem::path{}
+                                  : render::ProbeVolumeCachePath(settings.cacheDir, key);
+
+    auto job = std::make_shared<Job>();
+
+    // **Cache dibaca sebelum satu sinar pun ditembakkan.** Sebuah panggangan
+    // adalah puluhan detik sampai menit; artefak yang ditulis tapi tidak pernah
+    // dibaca bukan cache melainkan berkas yang menumpuk.
+    if (!file.empty()) {
+        auto cached = std::make_shared<render::ProbeVolume>();
+        std::string error;
+        if (render::ReadProbeVolume(file, *cached, error) && cached->IsValid() &&
+            cached->layout.counts == layout.counts) {
+            job->volume = std::move(cached);
+            job->status = "probes loaded from " + file.filename().string();
+            job->ready.store(true, std::memory_order_release);
+            job_ = std::move(job);
+            return true;
+        }
+    }
+
     // **Geometrinya disalin sekarang, di main thread.** `Sync` menyentuh cache
     // geometri, yang bukan milik thread mana pun; memanggilnya dari worker
     // berarti dua thread mengurai FBX yang sama ke dalam peta yang sama.
-    picks_.Sync(items);
-    if (picks_.ReadyCount() == 0) {
+    job->picks = std::make_shared<PickScene>(cache_);
+    job->picks->Sync(items);
+    if (job->picks->ReadyCount() == 0) {
         SIM_WARN("Bake",
                  "no mesh geometry is ready out of {} objects; a bake now would see an empty "
                  "world and light every point as if it were outdoors",
@@ -89,10 +156,9 @@ bool ProbeBakery::Bake(std::span<const PickItem> items, std::function<Vec3(const
     // belum diadopsi, dan terrain semuanya begitu — dan panggangan yang
     // melewatkannya menghasilkan ruangan yang tetap disinari langit tanpa satu
     // pun galat. Angka ini yang membuat keadaan itu bisa dilihat.
-    if (picks_.PendingCount() > 0) {
-        SIM_WARN("Bake",
-                 "{} of {} objects have no CPU geometry and will not occlude the bake",
-                 picks_.PendingCount(), items.size());
+    if (job->picks->PendingCount() > 0) {
+        SIM_WARN("Bake", "{} of {} objects have no CPU geometry and will not occlude the bake",
+                 job->picks->PendingCount(), items.size());
     }
 
     // Brick yang jauh dari permukaan dibuang sebelum satu sinar pun ditembakkan
@@ -101,20 +167,17 @@ bool ProbeBakery::Bake(std::span<const PickItem> items, std::function<Vec3(const
     std::vector<render::ProbeOccupancy> occupancy;
     occupancy.reserve(items.size());
     for (const PickItem& item : items) {
-        // Kotak dunia dari geometrinya sendiri belum tersedia di sini tanpa
-        // memuat mesh-nya, jadi yang dipakai kotak yang sama yang dilihat ray
-        // scene: titik asal matriksnya, dilebarkan oleh skalanya. Yang terlalu
-        // lebar cuma menyimpan brick yang tidak perlu; yang terlalu sempit
-        // membuang brick yang dipakai — jadi lebar yang menang.
-        const Vec3 origin(item.worldMatrix[3]);
-        const float scale = std::max({glm::length(Vec3(item.worldMatrix[0])),
-                                      glm::length(Vec3(item.worldMatrix[1])),
-                                      glm::length(Vec3(item.worldMatrix[2]))});
-        occupancy.push_back(render::ProbeOccupancy{origin - Vec3(scale), origin + Vec3(scale)});
+        if (item.worldMinimum == item.worldMaximum) {
+            // Kotak yang belum diisi: jangan menebak bentuknya. Yang paling
+            // aman adalah tidak membuang apa pun untuk benda ini, dan cara
+            // mengatakannya adalah kotak sebesar kisi.
+            occupancy.push_back(render::ProbeOccupancy{
+                layout.origin, layout.origin + Vec3(layout.counts) * layout.spacing});
+            continue;
+        }
+        occupancy.push_back(render::ProbeOccupancy{item.worldMinimum, item.worldMaximum});
     }
 
-    auto job = std::make_shared<Job>();
-    const render::ProbeVolumeLayout layout = settings.layout;
     std::vector<uint32_t> slots =
         render::AssignProbeBricks(layout, occupancy, layout.spacing * 2.0f);
 
@@ -129,20 +192,13 @@ bool ProbeBakery::Bake(std::span<const PickItem> items, std::function<Vec3(const
                                          render::ProbeVolumeLayout::kBrickSize;
     job->total = std::max(allocated * kProbesPerBrick, 1u);
 
-    // Yang ikut ke dalam tugas: `RayScene` milik bakery ini — dipegang lewat
-    // referensi, dan itu sah karena `TaskPool::Stop` dijalankan sebelum
-    // pemiliknya dihancurkan (lihat catatannya di `TaskPool::Stop`).
-    const raycast::RayScene& scene = picks_.Scene();
     const float albedo = settings.albedo;
     const uint32_t samples = std::max(settings.samplesPerProbe, 1u);
     const Vec3 sunIrradiance = settings.sunIrradiance;
     const Vec3 sunDirection = settings.sunDirection;
-    const std::filesystem::path cacheDir = settings.cacheDir;
-    const uint64_t environmentKey = settings.environmentKey;
 
-    auto bake = [job, &scene, layout, slots = std::move(slots), allocated, albedo, samples,
-                 sunIrradiance, sunDirection, sky = std::move(sky), cacheDir,
-                 environmentKey]() mutable {
+    auto bake = [job, layout, slots = std::move(slots), allocated, albedo, samples, sunIrradiance,
+                 sunDirection, sky = std::move(sky), file]() mutable {
         reference::TraceSettings trace;
         trace.sky = [sky](const Vec3& direction) { return sky(direction); };
         trace.sunIrradiance = sunIrradiance;
@@ -167,7 +223,8 @@ bool ProbeBakery::Bake(std::span<const PickItem> items, std::function<Vec3(const
         auto volume = std::make_shared<render::ProbeVolume>();
         volume->layout = layout;
         volume->brickSlots = std::move(slots);
-        volume->probes.assign(static_cast<std::size_t>(allocated) * kProbesPerBrick, render::Sh9{});
+        volume->probes.assign(static_cast<std::size_t>(allocated) * kProbesPerBrick,
+                              render::Sh9{});
 
         const glm::uvec3 bricks = layout.BrickCounts();
         constexpr uint32_t kSide = render::ProbeVolumeLayout::kBrickSize;
@@ -184,7 +241,8 @@ bool ProbeBakery::Bake(std::span<const PickItem> items, std::function<Vec3(const
                 const glm::uvec3 coordinate = brickAt * kSide + inside;
                 const Vec3 position = layout.ProbePosition(coordinate);
                 const std::array<Vec3, 9> coefficients = reference::TraceProbeIrradiance(
-                    scene, resolve, reference::LightList{}, position, samples, trace);
+                    job->picks->Scene(), resolve, reference::LightList{}, position, samples,
+                    trace);
                 volume->probes[static_cast<std::size_t>(slot) * kProbesPerBrick + local]
                     .coefficients = coefficients;
                 job->done.fetch_add(1, std::memory_order_relaxed);
@@ -192,9 +250,7 @@ bool ProbeBakery::Bake(std::span<const PickItem> items, std::function<Vec3(const
         }
 
         std::string message = "probes baked";
-        if (!cacheDir.empty()) {
-            const uint64_t key = render::ProbeVolumeCacheKey(layout, environmentKey);
-            const std::filesystem::path file = render::ProbeVolumeCachePath(cacheDir, key);
+        if (!file.empty()) {
             std::string error;
             if (!render::WriteProbeVolume(file, *volume, error)) {
                 // Gagal menulis bukan gagal memanggang: kisinya sudah ada di

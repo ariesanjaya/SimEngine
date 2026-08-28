@@ -312,6 +312,25 @@ private:
         bake.layout = layout;
         bake.sunIrradiance = sunIrradiance;
         bake.sunDirection = sunDirection;
+        bake.cacheDir = context.configDir / "ProbeCache";
+        // **Sidik jari langitnya, karena bakery tidak bisa melihat ke dalam
+        // lambda.** Yang tidak masuk ke sini akan terbaca kembali sebagai
+        // panggangan yang benar: artefak matahari sore dipakai ulang untuk
+        // matahari pagi, dan berkasnya memang sah.
+        uint64_t skyKey = 1469598103934665603ull;
+        const auto mix = [&skyKey](const void* data, std::size_t length) {
+            const auto* bytes = static_cast<const uint8_t*>(data);
+            for (std::size_t i = 0; i < length; ++i) {
+                skyKey = (skyKey ^ bytes[i]) * 1099511628211ull;
+            }
+        };
+        if (sky != nullptr) {
+            mix(&sky->source, sizeof(sky->source));
+            mix(&sky->intensity, sizeof(sky->intensity));
+            mix(&sky->cameraHeightKm, sizeof(sky->cameraHeightKm));
+        }
+        mix(&sunDirection.x, sizeof(float) * 3);
+        bake.skyKey = skyKey;
         if (!context.probeBakery->Bake(context.bakeItems, std::move(sampler), bake)) {
             SIM_WARN("Editor", "probe bake could not start");
         }

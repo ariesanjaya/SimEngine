@@ -388,10 +388,18 @@ public:
         if (context.probeBakery != nullptr) {
             if (std::shared_ptr<const render::ProbeVolume> baked = context.probeBakery->Take()) {
                 context.probeVolume = std::move(baked);
-                renderer->SetProbeVolume(context.probeVolume);
             }
         }
 #endif
+        // **Dibandingkan, bukan dipasang saat selesai memanggang.** Kisinya juga
+        // bisa *hilang* — level yang ditutup melepasnya — dan sebuah pemasangan
+        // yang hanya terjadi di ujung panggangan tidak pernah memberitahu
+        // renderer tentang itu. Yang tersisa lalu adalah level baru yang disinari
+        // cahaya tak-langsung level sebelumnya.
+        if (pushedProbes_ != context.probeVolume) {
+            pushedProbes_ = context.probeVolume;
+            renderer->SetProbeVolume(pushedProbes_);
+        }
 
         HandleCameraInput();
 
@@ -2649,6 +2657,7 @@ private:
 
     OrbitCamera camera_;
     SceneView sceneView_;
+    std::shared_ptr<const render::ProbeVolume> pushedProbes_;
     render::DrawMode drawMode_ = render::DrawMode::Material;
     GizmoOperation operation_ = GizmoOperation::Translate;
     GizmoSpace space_ = GizmoSpace::World;

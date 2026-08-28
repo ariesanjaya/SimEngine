@@ -474,6 +474,8 @@ private:
         scene::Entity entity = scene::kNullEntity;
         Mat4 worldMatrix{1.0f};
         std::string meshKey;
+        Vec3 worldMinimum{0.0f};
+        Vec3 worldMaximum{0.0f};
     };
     std::vector<BakeEntry> bakeEntries_;
 

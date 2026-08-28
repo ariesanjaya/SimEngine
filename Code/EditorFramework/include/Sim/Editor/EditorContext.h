@@ -14,6 +14,7 @@
 
 #include <functional>
 #include <memory>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -168,6 +169,11 @@ struct EditorContext {
     /// dibuka, dan menyalinnya ke dalam project adalah pilihan pengguna, bukan
     /// syarat memakainya.
     std::string builtinDir;
+
+    /// Folder setelan pengguna — tempat cache masak tinggal. Dipakai panggangan
+    /// cahaya statis untuk menaruh artefak `.simprobe`-nya, sejajar dengan
+    /// `MeshSdfCache` dan `ShaderCache`.
+    std::filesystem::path configDir;
     /// Pemutar klip animasi untuk mesh ber-rig. Dimiliki EditorApp; panel
     /// Viewport meneruskannya ke `SceneView::Build`. Null berarti mesh ber-rig
     /// digambar pada bind pose-nya.
