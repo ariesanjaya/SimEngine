@@ -366,47 +366,92 @@ sesuai angka yang ditampilkan panel, bukan sesuai angka yang harus ditebak.
 #### Keadaannya sesudah S1 · ✅
 
 Kisinya hidup dari World Settings sampai ke shader. `bench.simlevel`, 1280×720,
-kamera tetap, eksposur manual EV12, Debug:
+kamera tetap, eksposur manual **EV4**, Debug:
 
-| Jarak | Kisi | Probe | Brick | `forward-opaque` | `cpu-total` |
-|---|---|---:|---:|---:|---:|
-| — (SH panggang) | — | — | — | 0,673 ms | 10,96 ms |
-| 4 m | 22×2×22 | 2.304 | 36 | — | — |
-| 2 m (bawaan) | 42×3×42 | 7.744 | 121 | 0,879 ms | 11,57 ms |
-| 1 m | 82×4×82 | 28.224 | 441 | — | — |
-| 0,5 m | 162×7×162 | 215.168 | 3.362 | 0,977 ms | 11,85 ms |
-| 0,05 m | ditolak | 154.368.960 | — | — | — |
+| Jarak | Kisi | Probe | Brick | GPU | Artefak | `forward-opaque` | `cpu-total` |
+|---|---|---:|---:|---:|---:|---:|---:|
+| — (SH panggang) | — | — | — | — | — | 0,692 ms | 11,08 ms |
+| 4 m | 22×2×22 | 2.304 | 36 | 3,2 MB | 2,4 MB | 0,938 ms | 11,74 ms |
+| 2 m (bawaan) | 42×3×42 | 7.744 | 121 | 10,6 MB | 8,0 MB | 0,939 ms | 11,77 ms |
+| 1 m | 82×4×82 | 28.224 | 441 | 38,8 MB | 29,1 MB | 0,954 ms | 11,68 ms |
+| 0,5 m | 162×7×162 | 215.168 | 3.362 | 295 MB | 222 MB | 0,973 ms | 11,88 ms |
+| 0,05 m | ditolak | 154.368.960 | — | — | — | — | — |
 
-**Kriteria terimanya lulus lebih keras daripada yang ditulis rencana ini.**
-Rencananya mengizinkan sisa selisih "yang bisa dijelaskan sebagai interpolasi
-kisi"; yang terukur nol — 0 dari 2.764.800 kanal berbeda, pada 2 m maupun 0,5 m.
-Sebabnya bukan keberuntungan: tanpa transport setiap probe memuat SH yang sama,
-dan kombinasi konveks dari nilai-nilai yang identik adalah nilai itu sendiri.
-Yang dibuktikan angka nol itu justru plumbing-nya — kalau indeks brick, urutan
-probe, atau bobot trilinearnya salah, hasilnya tidak akan identik.
+Selisih terhadap tingkat panggang seri B: **1–2 kanal dari 2.764.800, selisih
+maksimum 1 dari 255** — pembulatan float pada bobot trilinear, bukan cahaya yang
+berbeda. Gambar acuannya rata-rata 44,2 dengan 98,2% piksel bukan nol.
 
-Kisinya memang hidup, bukan cabang yang tidak pernah dimasuki: bentuknya
-disebutkan di log setiap kali berubah, dan angkanya bergerak sesuai jaraknya.
+**Kontrol positif, dan ia yang membuat angka nol di atas berarti sesuatu.**
+Tanpa transport tiap probe memuat SH yang sama, sehingga gambar lewat kisi
+identik dengan gambar lewat SH panggang *baik ketika kisinya benar maupun ketika
+ia tidak pernah dibaca satu piksel pun*. Satu angka nol menjawab dua keadaan yang
+berlawanan. `--bench-probe-debug` mengisi probe dengan papan catur atas koordinat
+X dan Z: gambarnya lalu berubah pada **60,8% kanal**, dan tiga jarak berbeda
+menghasilkan tiga pola berbeda (66,9% kanal antara 4 m dan 2 m). Kisinya memang
+dibaca, dan yang dibacanya memang bergantung pada posisi dan bentuk kisinya.
 
-**Satu pengukuran membatalkan keputusan yang sudah ditulis.** Bentuk pertama
-mengisi ulang seluruh SH tiap frame, dengan alasan "iradiansinya berubah setiap
-matahari bergeser". Pada 2 m itu 1,1 MB dan tidak terasa; pada 0,5 m itu 31 MB,
-dan `cpu-total` naik dari 10,96 ms menjadi **46,0 ms** — hampir seluruhnya
-menyalin sembilan angka yang sama persis ke ratusan ribu tempat. `forward-opaque`
-ikut naik menjadi 2,45 ms, karena menulisi memori host-visible yang sama yang
-dibaca GPU. Sembilan perbandingan float per frame menghapus keduanya. Yang
-tersisa 0,21–0,30 ms di GPU dan 0,6–0,9 ms di CPU, dan yang di CPU itu
-sebagian besar menghitung ulang batas adegan dari 260 instance tiap frame.
+Papan caturnya berselang-seling di X dan Z saja. Yang juga berselang-seling di Y
+tidak terlihat sama sekali: sebuah permukaan lazimnya berada di antara dua baris
+probe secara tegak, dan interpolasinya meratakan dua nilai yang berlawanan
+menjadi satu — polanya hilang justru di tempat ia harus terlihat.
 
-Bendera `--bench-probe-spacing <m>` ditambahkan untuk pengukuran ini: nol
-mematikan kisinya tanpa mengubah tingkat pencahayaan, dan tanpa itu kedua gambar
-di atas tidak bisa dibandingkan sama sekali.
+**Yang masih belum terbukti, dan disebutkan supaya tidak dikira terbukti:**
+pemetaan indeks di shader belum diadu satu-satu dengan `SampleProbeVolume` di
+CPU. Yang sudah: kisinya dibaca, jawabannya bergantung pada posisi dan jarak, dan
+sisi CPU-nya diuji langsung — termasuk brick yang dilubangi. Yang belum: bahwa
+probe (x,y,z) tertentu di shader adalah probe yang sama dengan di CPU. Itu baru
+bisa diadu ketika probe benar-benar membawa nilai yang berbeda-beda, yaitu di S2
+— dan **kriteria terima S2 harus memuatnya**, bukan mengandaikannya sudah lewat.
 
-**Yang belum ada di S1, dan disebutkan supaya tidak dikira ada:** artefak
-`.simprobe` sudah bisa ditulis dan dibaca, tetapi renderer belum memakainya — ia
-menyusun kisinya di memori tiap kali adegan dibuka. Itu benar selama isinya
-sesalin SH langit; ia berhenti benar begitu S2 mengisinya dengan penelusuran yang
-mahal, dan di sanalah cache berkunci-hash itu mulai dipakai.
+##### Empat cacat yang ditemukan peninjauan, semuanya nyata
+
+1. **Jalur material tidak pernah membaca kisinya.** Pembacaan probe dipasang di
+   `box_shading.slang` saja — jalur kotak tanpa material — sedangkan setiap mesh
+   bermaterial digambar lewat shader yang dirakit `MaterialShaderModule.cpp`, dan
+   di sana `skyIrradiance` masih berdiri sendirian. Kisinya mati untuk hampir
+   seluruh adegan, dan yang terlihat adalah gambar yang identik dengan sebelumnya
+   — yaitu persis bentuk "lulus" yang dicari kriteria S1.
+
+2. **Putaran lingkungan hilang di jalur probe.** `skyIrradiance` membaca lewat
+   arah yang diputar (keputusan 4 di PLAN-IBL); `probeIrradiance` tidak. Diukur
+   pada HDRI berputar 2,0 rad: **11,93% kanal berbeda, maksimum 14** antara kedua
+   jalur yang seharusnya menjawab hal yang sama. Sekarang ruang isi probe
+   dikirim sebagai angka (`probeCounts.w`), karena S2 mengisi probe di ruang
+   dunia dan menerapkan putarannya lagi di sana akan memutarnya dua kali.
+
+3. **Panel melaporkan ukuran yang tidak pernah dibayar siapa pun.** Angkanya RGB
+   float16 — 54 byte per probe — sementara artefaknya menulis 108 dan buffer GPU
+   menempati 144. Tiga angka untuk satu hal. Panel sekarang menyebut keduanya
+   yang nyata, GPU lebih dulu, dan sebuah uji menjaga angka artefaknya tetap
+   sama dengan ukuran berkas yang benar-benar ditulis.
+
+4. **Panel dan renderer menghitung batas adegan dari daftar yang berbeda.**
+   Panel memakai `pickables_`, yang sengaja tidak memuat entity terkunci —
+   sedangkan mengunci latar statis justru cara orang menjaganya tidak terpilih
+   tak sengaja, dan latar statis itulah isi adegan berpanggang. Keduanya sekarang
+   memakai `meshes_`, daftar yang sama yang dipakai renderer.
+
+##### Dan satu cacat di cara mengukurnya, yang membatalkan angkanya sendiri
+
+Pengukuran S1 yang pertama dijalankan pada **EV12**, dan pada eksposur itu
+seluruh tangkapannya hitam: rata-rata 0,0 dengan maksimum 1 dari 255. "0 dari
+2.764.800 kanal berbeda" yang tercatat sebelumnya membandingkan dua gambar hitam.
+Seri B memakai EV0; angka di atas EV4.
+
+Pelajarannya bukan "pilih eksposur yang benar" melainkan **sebuah perbandingan
+gambar wajib menyebutkan kecerahan gambar acuannya**, karena tanpa itu "tidak ada
+selisih" dan "tidak ada gambar" adalah kalimat yang sama.
+
+##### Yang belum ada di S1
+
+Artefak `.simprobe` sudah bisa ditulis dan dibaca, tetapi renderer belum
+memakainya — ia menyusun kisinya di memori tiap kali adegan dibuka. Itu benar
+selama isinya sesalin SH langit; ia berhenti benar begitu S2 mengisinya dengan
+penelusuran yang mahal, dan di sanalah cache berkunci-hash itu mulai dipakai.
+
+Bendera ukur yang ditambahkan: `--bench-probe-spacing <m>` (nol mematikan
+kisinya tanpa mengubah tingkat pencahayaan) dan `--bench-probe-debug` (papan
+catur sebagai kontrol positif).
 
 ### S2 — Transport: probe diisi path tracer acuan
 
@@ -418,6 +463,11 @@ mahal, dan di sanalah cache berkunci-hash itu mulai dipakai.
 terlihat; uji tungku lulus pada kisi seperti ia lulus pada jalur panggang (B2);
 dan pada adegan terbuka iradiansi probe cocok dengan tingkat panggang seri B
 dalam ambang yang ditulis di dokumen ini.
+
+Dan: **pemetaan indeks shader diadu satu-satu dengan `SampleProbeVolume` di
+CPU** — S1 tidak bisa membuktikannya karena seluruh probenya bernilai sama, dan
+S2 adalah milestone pertama yang probenya benar-benar berbeda-beda. Tanpa itu,
+sebuah selisih di S2 punya dua tersangka: transportnya, dan pembacaannya.
 
 Dan: **pemberitahuan Time-of-Day naik menjadi peringatan di sini.** Sampai
 milestone ini, menggerakkan matahari di level `Precomputed` masih sah — yang

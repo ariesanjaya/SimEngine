@@ -77,9 +77,16 @@ uint32_t ProbeVolume::AllocatedBrickCount() const {
 }
 
 uint64_t ProbeVolume::StoredBytes() const {
-    // Sembilan koefisien RGB float16. Yang disimpan di RAM saat memanggang
-    // float32; yang dilaporkan angka yang akan dikirim.
-    return static_cast<uint64_t>(probes.size()) * 9 * 3 * 2;
+    // Persis yang ditulis `WriteProbeVolume`: `Sh9` apa adanya, ditambah tabel
+    // slot brick-nya. Menuliskannya sebagai rumus tersendiri di sini adalah
+    // rumus kedua yang suatu saat tidak sepakat dengan berkasnya.
+    return static_cast<uint64_t>(probes.size()) * sizeof(Sh9) +
+           static_cast<uint64_t>(brickSlots.size()) * sizeof(uint32_t);
+}
+
+uint64_t ProbeVolume::GpuBytes() const {
+    return static_cast<uint64_t>(probes.size()) * 9 * sizeof(Vec4) +
+           static_cast<uint64_t>(brickSlots.size()) * sizeof(uint32_t);
 }
 
 ProbeVolumeLayout MakeProbeLayout(const Vec3& boundsMin, const Vec3& boundsMax, float spacing) {

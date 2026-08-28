@@ -83,9 +83,20 @@ struct ProbeVolume {
     }
     /// Berapa brick yang benar-benar dialokasikan.
     uint32_t AllocatedBrickCount() const;
-    /// Memori yang ditempati probe-nya bila disimpan RGB float16 — angka yang
-    /// dilaporkan editor sebelum ada yang menekan Bake.
+    /// Byte yang benar-benar ditempati probe-nya di dalam artefak `.simprobe`.
+    ///
+    /// **Angka yang ditulis, bukan angka yang dicita-citakan.** Bentuk pertama
+    /// melaporkan RGB float16 — 54 byte per probe — sedangkan artefaknya menulis
+    /// `Sh9` apa adanya, 108 byte, dan buffer GPU-nya menempati 144. Tiga angka
+    /// untuk satu hal, dan yang ditampilkan panel adalah satu-satunya yang tidak
+    /// pernah dibayar siapa pun.
     uint64_t StoredBytes() const;
+
+    /// Byte yang ditempati kisi ini di dalam buffer GPU: sembilan `Vec4` per
+    /// probe. Lebih besar daripada artefaknya karena std430 menaikkan tiap
+    /// anggota larik ke 16 byte — dan itu angka yang dibayar tiap frame, jadi
+    /// itu pula yang paling berarti bagi yang menyetel jaraknya.
+    uint64_t GpuBytes() const;
 };
 
 /// Menyusun kisi yang menutupi sebuah kotak batas.

@@ -1364,16 +1364,23 @@ bool SceneView::GeometryBounds(Vec3& outMin, Vec3& outMax) const {
     outMax = Vec3(std::numeric_limits<float>::lowest());
     bool found = false;
 
-    for (const Pickable& pickable : pickables_) {
+    // **`meshes_`, bukan `pickables_`, dan itu bukan pilihan gaya.** Entity yang
+    // dikunci tetap digambar tetapi sengaja tidak masuk daftar pickable — dan
+    // geometri yang dikunci justru yang paling mungkin ada di adegan berpanggang,
+    // karena mengunci latar statis adalah cara orang menjaganya tidak terpilih
+    // tak sengaja. Menghitung batas dari `pickables_` berarti panel menampilkan
+    // kisi yang lebih kecil daripada kisi yang benar-benar dibangun renderer,
+    // yang menyusunnya dari daftar yang sama dengan `meshes_` ini.
+    for (const render::MeshInstance& instance : meshes_) {
         // Kedelapan sudutnya ditransformasi, bukan kedua ujungnya: sebuah kotak
         // yang diputar tidak lagi sejajar sumbu, dan mentransformasi min/max
         // saja menghasilkan kotak yang lebih kecil daripada isinya — kisi probe
         // lalu berhenti di dalam geometri yang harus dinaunginya.
         for (int i = 0; i < 8; ++i) {
-            const Vec3 local((i & 1) ? pickable.boundsMax.x : pickable.boundsMin.x,
-                             (i & 2) ? pickable.boundsMax.y : pickable.boundsMin.y,
-                             (i & 4) ? pickable.boundsMax.z : pickable.boundsMin.z);
-            const Vec3 world = Vec3(pickable.worldMatrix * Vec4(local, 1.0f));
+            const Vec3 local((i & 1) ? instance.boundsMax.x : instance.boundsMin.x,
+                             (i & 2) ? instance.boundsMax.y : instance.boundsMin.y,
+                             (i & 4) ? instance.boundsMax.z : instance.boundsMin.z);
+            const Vec3 world = Vec3(instance.transform * Vec4(local, 1.0f));
             outMin = glm::min(outMin, world);
             outMax = glm::max(outMax, world);
         }

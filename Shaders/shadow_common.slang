@@ -94,7 +94,8 @@ struct ShadowParams {
     float4 environmentRotation;
     // Kisi probe iradiansi (S1): xyz titik asal dunia, w jarak antar-probe.
     float4 probeOrigin;
-    // xyz jumlah probe tiap sumbu, w 1 kalau kisinya berlaku.
+    // xyz jumlah probe tiap sumbu, w ruang tempat isinya berada:
+    // 0 tidak ada kisi, 1 ruang lingkungan, 2 ruang dunia.
     float4 probeCounts;
 };
 
@@ -218,6 +219,7 @@ void probeAt(uint3 coordinate, out float3 sh[9], out bool found) {
 /// brick kosong, sebagian sudut hilang — dan menjumlahkan tujuh dari delapan
 /// tanpa menormalkan menggelapkan tepat di dekat brick yang kosong, yaitu di
 /// dekat dinding. Cacatnya baru muncul di S2; pencegahnya sudah di sini.
+/// Iradiansi dari kisi probe, interpolasi trilinear.
 float3 probeIrradiance(float3 worldPosition, float3 normal) {
     const uint3 counts = uint3(shadowParams.probeCounts.xyz);
     const float3 grid = (worldPosition - shadowParams.probeOrigin.xyz) /
@@ -262,7 +264,21 @@ float3 probeIrradiance(float3 worldPosition, float3 normal) {
     for (int i = 0; i < 9; ++i) {
         accumulated[i] /= total;
     }
-    return evaluateSh9(accumulated, normal);
+    // **Putaran lingkungan diterapkan hanya bila isinya memang datang dari
+    // lingkungan.** Di S1 tiap probe memuat SH langit apa adanya — dipanggang
+    // pada orientasi petanya sendiri — jadi ia harus dibaca lewat arah yang
+    // diputar, persis seperti `skyIrradiance`. Tanpa itu, memutar slider HDR
+    // menggeser SH panggang tetapi tidak menggeser kisinya, dan keduanya
+    // berselisih tanpa satu pun galat.
+    //
+    // Begitu S2 mengisi probe dengan penelusuran, isinya sudah berada di ruang
+    // dunia dan putarannya sudah ikut terpanggang di dalamnya — menerapkannya
+    // lagi memutarnya dua kali. Itu sebabnya yang membedakan sebuah angka yang
+    // dikirim renderer, bukan sebuah andaian di dalam shader ini.
+    const float3 direction =
+        shadowParams.probeCounts.w < 1.5 ? environmentDirection(normalize(normal))
+                                         : normalize(normal);
+    return evaluateSh9(accumulated, direction);
 }
 [[vk::binding(1, 0)]] Sampler2DArrayShadow shadowMap;
 

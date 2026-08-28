@@ -221,14 +221,31 @@ private:
 
         const glm::uvec3 bricks = layout.BrickCounts();
         const uint32_t probes = layout.FullProbeCount();
-        // Sembilan koefisien RGB float16, sama seperti `ProbeVolume::StoredBytes`
-        // — yang di sini kisi penuh, karena S1 belum membuang satu brick pun.
-        const double megabytes = static_cast<double>(probes) * 9.0 * 3.0 * 2.0 / (1024.0 * 1024.0);
+
+        // **Ukurannya dihitung `ProbeVolume`, bukan ditulis ulang di sini.** Dua
+        // rumus untuk satu hal adalah dua rumus yang suatu saat tidak sepakat —
+        // dan yang tidak sepakat di panel adalah angka yang menyesatkan justru
+        // orang yang sedang memutuskan berapa jarak yang sanggup ia bayar.
+        //
+        // Kisi penuh, karena S1 belum membuang satu brick pun; S2 yang membuat
+        // angka ini turun.
+        render::ProbeVolume sized;
+        sized.layout = layout;
+        sized.brickSlots.assign(layout.BrickCount(), 0u);
+        sized.probes.resize(probes);
+        constexpr double kMegabyte = 1024.0 * 1024.0;
+        const double gpuMegabytes = static_cast<double>(sized.GpuBytes()) / kMegabyte;
+        const double fileMegabytes = static_cast<double>(sized.StoredBytes()) / kMegabyte;
 
         ImGui::Text("Kisi probe: %u × %u × %u", layout.counts.x, layout.counts.y,
                     layout.counts.z);
-        ImGui::Text("%u probe dalam %u brick — %.1f MB", probes, layout.BrickCount(),
-                    megabytes);
+        // **Angka GPU yang disebut lebih dulu**, karena itulah yang dibayar tiap
+        // frame — dan itulah yang ditanyakan orang yang menyetel jarak demi
+        // performance. Ukuran berkasnya menyusul, dan keduanya memang berbeda:
+        // std430 menaikkan tiap koefisien ke 16 byte.
+        ImGui::Text("%u probe dalam %u brick — %.1f MB di GPU", probes, layout.BrickCount(),
+                    gpuMegabytes);
+        ImGui::TextDisabled("Artefaknya %.1f MB", fileMegabytes);
         ImGui::TextDisabled("Brick %u³, %u × %u × %u", render::ProbeVolumeLayout::kBrickSize,
                             bricks.x, bricks.y, bricks.z);
 

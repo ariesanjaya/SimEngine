@@ -117,6 +117,7 @@ void PrintUsage() {
         "  --bench-no-screen-trace       matikan lapis screen-space; lihat SDF sendirian\n"
         "  --bench-furnace               uji tungku: langit seragam 1, albedo 1, tanpa matahari\n"
         "  --bench-probe-spacing <m>     paksa jarak kisi probe; 0 mematikan kisinya (S1)\n"
+        "  --bench-probe-debug           isi probe dengan papan catur; kontrol positif (S1)\n"
         "  --dump-mesh <file> --dump-out <json>  material dan ruas sebuah berkas mesh\n"
         "  --dump-fbx-material <fbx>     setiap properti tiap material, apa adanya\n"
         "  --dump-uv <bin>               posisi+UV tiap titik, float32 x5\n"
@@ -834,6 +835,7 @@ int main(int argc, char** argv) {
         // membacanya, dan sesudah tingkat pencahayaan datang dari level, "yang
         // diminta" tidak lagi menjawab pertanyaannya.
         bool giEffective = false;
+        bool probeDebugPattern = false;
         for (int at = 1; at < argc; ++at) {
             if (argv[at] == nullptr) {
                 continue;
@@ -853,6 +855,8 @@ int main(int argc, char** argv) {
                 occlusion = true;
             } else if (flag == "--bench-fixed-exposure") {
                 fixedExposure = true;
+            } else if (flag == "--bench-probe-debug") {
+                probeDebugPattern = true;
             } else if (flag == "--bench-furnace") {
                 // Uji tungku, kriteria selesai M4.
                 //
@@ -1219,6 +1223,7 @@ int main(int argc, char** argv) {
             if (probeSpacingOverride.has_value()) {
                 desc.probeSpacing = *probeSpacingOverride;
             }
+            desc.probeDebugPattern = probeDebugPattern;
             giEffective = desc.gi.enabled;
             // Jalur HDR relatif dilengkapi dengan akar `Resources`, alasan
             // yang sama dengan di viewport editor: yang tertulis di level

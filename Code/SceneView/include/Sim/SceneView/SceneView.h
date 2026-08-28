@@ -449,8 +449,10 @@ public:
     /// aman daripada kisi yang berhenti sebelum dindingnya.
     ///
     /// Ikon tidak ikut — sebuah lampu di seberang peta akan melebarkan kisinya
-    /// melintasi ruang kosong yang tidak ada permukaannya. Mengembalikan false
-    /// bila adegan tidak punya geometri sama sekali.
+    /// melintasi ruang kosong yang tidak ada permukaannya. Yang **ikut** adalah
+    /// geometri yang dikunci: ia tidak pernah masuk daftar pickable, tetapi
+    /// renderer tetap menggambarnya dan tetap menaunginya dengan kisi. Mengembalikan
+    /// false bila adegan tidak punya geometri sama sekali.
     bool GeometryBounds(Vec3& outMin, Vec3& outMax) const;
 
 private:

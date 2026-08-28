@@ -182,13 +182,19 @@ struct ShadowUniforms {
     Vec4 environmentRotation{1.0f, 0.0f, 0.0f, 0.0f};
     /// Kisi probe iradiansi (S1): xyz titik asal dunia, w jarak antar-probe.
     Vec4 probeOrigin{0.0f};
-    /// x/y/z jumlah probe tiap sumbu, **w 1 kalau kisinya berlaku.**
+    /// x/y/z jumlah probe tiap sumbu, **w ruang tempat isinya berada.**
     ///
-    /// Benderanya ada di sini, bukan disimpulkan dari jumlah yang bukan nol:
-    /// buffer probe selalu terikat — descriptor kosong adalah pelanggaran pada
-    /// setiap draw, termasuk draw yang tidak membacanya — jadi yang membedakan
-    /// "ada kisi" dari "ada buffer boneka" harus sebuah angka yang dikirim, dan
-    /// bukan bentuk buffernya.
+    /// Nol berarti tidak ada kisi; satu berarti isinya SH lingkungan apa adanya,
+    /// sehingga putaran lingkungan harus diterapkan saat membacanya; dua berarti
+    /// isinya sudah berada di ruang dunia, dan menerapkan putaran lagi akan
+    /// memutarnya dua kali. S1 menulis satu; S2 yang menelusuri per-probe akan
+    /// menulis dua.
+    ///
+    /// Benderanya dikirim, bukan disimpulkan dari jumlah yang bukan nol: buffer
+    /// probe selalu terikat — descriptor kosong adalah pelanggaran pada setiap
+    /// draw, termasuk draw yang tidak membacanya — jadi yang membedakan "ada
+    /// kisi" dari "ada buffer boneka" harus sebuah angka, bukan bentuk
+    /// buffernya.
     Vec4 probeCounts{0.0f};
 };
 // 7 mat4 + 35 vec4. Angkanya ditulis eksplisit supaya menambah medan tanpa
@@ -5981,6 +5987,47 @@ private:
                                writes.data(), 0, nullptr);
     }
 
+    /// Mengganti isi kisi dengan papan catur atas koordinat probe (jalur ukur).
+    ///
+    /// **Yang dijawabnya "apakah kisinya benar-benar dibaca, dan dibaca di
+    /// tempat yang benar".** Isi S1 yang seragam tidak bisa menjawab keduanya:
+    /// gambar yang identik dengan tingkat panggang keluar baik dari kisi yang
+    /// benar maupun dari kisi yang mati. Papan catur membuat jawabannya
+    /// bergantung pada indeks — dan indeks yang salah lalu terlihat sebagai
+    /// garis yang periodenya lain, bukan sebagai gambar yang kebetulan sama.
+    ///
+    /// Hanya `sh[0]` yang diisi: ia suku isotropik, jadi iradiansinya
+    /// `sh[0] * 0,282095 * π` untuk setiap normal — satu angka per probe, tanpa
+    /// arah yang ikut memengaruhinya.
+    void FillProbeDebugPattern(const ProbeVolumeLayout& layout) {
+        constexpr uint32_t kSide = ProbeVolumeLayout::kBrickSize;
+        const glm::uvec3 bricks = layout.BrickCounts();
+        for (uint32_t brick = 0; brick < layout.BrickCount(); ++brick) {
+            const glm::uvec3 brickAt(brick % bricks.x, (brick / bricks.x) % bricks.y,
+                                     brick / (bricks.x * bricks.y));
+            for (uint32_t local = 0; local < kSide * kSide * kSide; ++local) {
+                const glm::uvec3 inside(local % kSide, (local / kSide) % kSide,
+                                        local / (kSide * kSide));
+                const glm::uvec3 probe = brickAt * kSide + inside;
+                // **Berselang-seling di X dan Z saja, bukan di ketiga sumbu.**
+                // Sebuah permukaan lazimnya berada di antara dua baris probe
+                // secara tegak, dan pola yang juga berselang-seling di Y membuat
+                // interpolasi meratakan keduanya menjadi satu angka — polanya
+                // hilang justru di tempat ia harus terlihat, dan yang terbaca
+                // adalah "kisinya mati" untuk kisi yang bekerja.
+                const bool lit = ((probe.x + probe.z) & 1u) != 0u;
+                const std::size_t at = (static_cast<std::size_t>(brick) * kSide * kSide * kSide +
+                                        local) *
+                                       9;
+                probeUpload_[at] = Vec4(lit ? 4.0f : 0.0f, lit ? 4.0f : 0.0f, lit ? 4.0f : 0.0f,
+                                        0.0f);
+                for (std::size_t coefficient = 1; coefficient < 9; ++coefficient) {
+                    probeUpload_[at + coefficient] = Vec4(0.0f);
+                }
+            }
+        }
+    }
+
     /// Menyusun dan mengunggah kisi probe iradiansi frame ini (S1).
     ///
     /// **Tanpa transport sama sekali, dan itu jawaban yang benar untuk S1.**
@@ -6082,7 +6129,9 @@ private:
         // yang sama yang disalin dari sumber yang sama, jadi "hampir sama"
         // hanya menambah satu ambang yang bisa salah tanpa menjawab pertanyaan
         // apa pun.
-        const bool sameContent = shapeUnchanged && probeUploadedSh_ == skyIrradiance_.coefficients;
+        const bool sameContent = shapeUnchanged && !desc.probeDebugPattern &&
+                                 probeDebugFilled_ == desc.probeDebugPattern &&
+                                 probeUploadedSh_ == skyIrradiance_.coefficients;
         if (!sameContent) {
             for (std::size_t probe = 0; probe < probeUpload_.size() / 9; ++probe) {
                 for (std::size_t coefficient = 0; coefficient < 9; ++coefficient) {
@@ -6090,6 +6139,10 @@ private:
                         Vec4(skyIrradiance_.coefficients[coefficient], 0.0f);
                 }
             }
+            if (desc.probeDebugPattern) {
+                FillProbeDebugPattern(layout);
+            }
+            probeDebugFilled_ = desc.probeDebugPattern;
             probeUploadedSh_ = skyIrradiance_.coefficients;
             // Ketiga slot harus melihat isi baru itu, bukan hanya slot frame
             // ini — dua frame berikutnya memakai buffer yang lain, dan buffer
@@ -6102,7 +6155,8 @@ private:
             uniforms.probeOrigin = Vec4(layout.origin, layout.spacing);
             uniforms.probeCounts = Vec4(static_cast<float>(layout.counts.x),
                                         static_cast<float>(layout.counts.y),
-                                        static_cast<float>(layout.counts.z), 1.0f);
+                                        static_cast<float>(layout.counts.z),
+                                        kProbeContentEnvironment);
             return;
         }
 
@@ -6127,7 +6181,8 @@ private:
         uniforms.probeOrigin = Vec4(layout.origin, layout.spacing);
         uniforms.probeCounts = Vec4(static_cast<float>(layout.counts.x),
                                     static_cast<float>(layout.counts.y),
-                                    static_cast<float>(layout.counts.z), 1.0f);
+                                    static_cast<float>(layout.counts.z),
+                                    kProbeContentEnvironment);
     }
 
     void UpdateShadowUniforms(const ViewportDesc& desc, const ViewportScene& scene,
@@ -6612,6 +6667,8 @@ private:
     /// Naik setiap kali `probeUpload_` atau `probeBrickUpload_` berubah. Slot
     /// yang stempelnya tertinggal mengunggah ulang, yang sudah sama tidak.
     uint64_t probeContentRevision_ = 1;
+    /// True bila isi `probeUpload_` adalah papan catur ukur, bukan langit.
+    bool probeDebugFilled_ = false;
     /// Supaya penolakan kisi disebutkan sekali, bukan tiap frame — 60 baris log
     /// per detik menenggelamkan pesan yang lain, termasuk pesan yang menjelaskan
     /// sebabnya.
@@ -6704,6 +6761,9 @@ private:
     /// adegan yang benar-benar menuntutnya. Yang di atasnya ditolak dengan
     /// pesan, bukan dialokasikan lalu membuat device kehabisan memori.
     static constexpr uint32_t kMaxProbes = 4u * 1024u * 1024u;
+    /// Nilai `probeCounts.w` untuk isi yang datang langsung dari lingkungan.
+    /// S2 menggantinya dengan 2 begitu probe diisi penelusuran ruang dunia.
+    static constexpr float kProbeContentEnvironment = 1.0f;
 
     static constexpr float kBounceAlbedo = 0.5f;
     /// Anggaran langkah lapis screen-space. Rencana GI menyebut 16, dan angka

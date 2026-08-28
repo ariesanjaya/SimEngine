@@ -6422,6 +6422,16 @@ TEST_CASE("S1: artefak probe bolak-balik, dan yang rusak ditolak") {
     // Ditulis atomik: tidak ada berkas sementara yang tertinggal.
     CHECK_FALSE(std::filesystem::exists(std::filesystem::path(file.string() + ".tmp")));
 
+    // **Ukuran yang dilaporkan harus ukuran yang ditulis.** Bentuk pertama
+    // melaporkan RGB float16 — 54 byte per probe — sementara berkasnya menulis
+    // `Sh9` apa adanya, 108. Angka itu tampil di panel World Settings sebagai
+    // dasar orang memutuskan jarak yang sanggup ia bayar, jadi angka yang tidak
+    // pernah dibayar siapa pun lebih buruk daripada tidak ada angka.
+    const auto onDisk = std::filesystem::file_size(file);
+    CHECK(volume.StoredBytes() <= onDisk);
+    CHECK(onDisk - volume.StoredBytes() < 256);  // sisanya header
+    CHECK(volume.GpuBytes() > volume.StoredBytes());
+
     render::ProbeVolume loaded;
     REQUIRE_MESSAGE(render::ReadProbeVolume(file, loaded, error), error);
     CHECK(loaded.layout.spacing == doctest::Approx(volume.layout.spacing));
