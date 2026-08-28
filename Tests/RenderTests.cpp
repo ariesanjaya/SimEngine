@@ -6545,3 +6545,44 @@ TEST_CASE("S2: permukaan tetap punya kedelapan sudutnya sesudah brick dibuang") 
         }
     }
 }
+
+TEST_CASE("S3: visibilitas ikut ke dalam artefak, dan tidak hilang diam-diam") {
+    // **Cacat yang benar-benar terjadi, dan yang membongkarnya cuma angka
+    // megabyte di log.** Artefak yang tidak menulis peta kedalaman tetap sah
+    // dan tetap terbaca — yang hilang cuma visibilitasnya, dan bersamanya
+    // seluruh S3, pada jalan kedua. Tidak ada satu pun galat yang menyebutkannya.
+    const render::GradientSky sky;
+    const render::ProbeVolumeLayout layout =
+        render::MakeProbeLayout(Vec3(-2.0f), Vec3(2.0f), 1.0f);
+    render::ProbeVolume volume = render::BakeProbeVolumeFromEnvironment(layout, sky, 256);
+    REQUIRE(volume.IsValid());
+    CHECK_FALSE(volume.HasVisibility());
+
+    // Peta kedalaman buatan: cukup untuk memeriksa ia kembali utuh.
+    volume.depth.resize(volume.probes.size() * render::ProbeVolume::kDepthFloats);
+    for (std::size_t i = 0; i < volume.depth.size(); ++i) {
+        volume.depth[i] = static_cast<float>(i % 97) * 0.25f;
+    }
+    REQUIRE(volume.HasVisibility());
+    REQUIRE(volume.IsValid());
+
+    const std::filesystem::path file =
+        std::filesystem::temp_directory_path() /
+        ("sim-probe-vis-" + std::to_string(::getpid()) + ".simprobe");
+    std::string error;
+    REQUIRE_MESSAGE(render::WriteProbeVolume(file, volume, error), error);
+
+    render::ProbeVolume loaded;
+    REQUIRE_MESSAGE(render::ReadProbeVolume(file, loaded, error), error);
+    REQUIRE(loaded.HasVisibility());
+    REQUIRE(loaded.depth.size() == volume.depth.size());
+    for (std::size_t i = 0; i < volume.depth.size(); i += 37) {
+        CHECK(loaded.depth[i] == doctest::Approx(volume.depth[i]));
+    }
+    // Dan ukurannya ikut naik — angka yang dilaporkan panel harus ikut yang
+    // dibayar, bukan seperlimanya.
+    CHECK(loaded.GpuBytes() > volume.probes.size() * 9 * sizeof(Vec4));
+
+    std::error_code cleanup;
+    std::filesystem::remove(file, cleanup);
+}

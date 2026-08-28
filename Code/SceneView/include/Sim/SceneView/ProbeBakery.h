@@ -50,6 +50,17 @@ public:
         /// tersendiri; sampai ada, yang meleset kecerahan pantulannya, bukan
         /// keberadaannya.
         float albedo = 0.5f;
+        /// Sinar visibilitas per texel peta kedalaman (S3).
+        ///
+        /// **Jauh lebih murah daripada cuplikan iradiansi**: yang dibutuhkan
+        /// cuma jarak ke permukaan pertama — tidak ada shading, tidak ada
+        /// pantulan, tidak ada langit. Nol mematikan visibilitasnya seluruhnya,
+        /// dan kisinya lalu berperilaku persis seperti S2.
+        uint32_t visibilitySamples = 16;
+        /// Jarak yang dicatat untuk sinar yang tidak mengenai apa pun. Terlalu
+        /// kecil membuat langit terbuka terbaca sebagai dinding di kejauhan.
+        float maxVisibilityDistance = 64.0f;
+
         /// Tempat artefak `.simprobe` dibaca dan ditulis. Kosong mematikan
         /// keduanya — panggangan lalu selalu dikerjakan ulang.
         std::filesystem::path cacheDir;

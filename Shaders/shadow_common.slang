@@ -96,8 +96,11 @@ struct ShadowParams {
     float4 environmentRotation;
     // Kisi probe iradiansi (S1): xyz titik asal dunia, w jarak antar-probe.
     float4 probeOrigin;
-    // xyz jumlah probe tiap sumbu, w ruang tempat isinya berada:
-    // 0 tidak ada kisi, 1 ruang lingkungan, 2 ruang dunia.
+    // xyz jumlah probe tiap sumbu, w apa yang dibawa kisinya:
+    //   0 tidak ada kisi
+    //   1 iradiansi di ruang lingkungan  (putaran diterapkan saat membaca)
+    //   2 iradiansi di ruang dunia
+    //   3 iradiansi di ruang dunia **beserta visibilitas arah** (S3)
     float4 probeCounts;
 };
 
@@ -186,11 +189,12 @@ float3 evaluateSh9(float3 sh[9], float3 normal) {
 /// `found` yang membedakan "probe gelap" dari "probe tidak ada" — dan
 /// perbedaannya bukan kerapian: yang tidak ada harus keluar dari bobot
 /// interpolasi, sedangkan yang gelap harus ikut menariknya ke bawah.
-void probeAt(uint3 coordinate, out float3 sh[9], out bool found) {
+void probeAt(uint3 coordinate, out float3 sh[9], out bool found, out uint outSlot) {
     for (int i = 0; i < 9; ++i) {
         sh[i] = float3(0.0);
     }
     found = false;
+    outSlot = 0u;
 
     const uint3 counts = uint3(shadowParams.probeCounts.xyz);
     const uint slot = probeBricks[probeBrickIndex(counts, coordinate)];
@@ -202,7 +206,13 @@ void probeAt(uint3 coordinate, out float3 sh[9], out bool found) {
     for (int i = 0; i < 9; ++i) {
         sh[i] = probeSh[base + uint(i)].rgb;
     }
+    outSlot = slot;
     found = true;
+}
+
+/// Posisi dunia sebuah probe. Cerminan `ProbeVolumeLayout::ProbePosition`.
+float3 probePosition(uint3 coordinate) {
+    return shadowParams.probeOrigin.xyz + float3(coordinate) * shadowParams.probeOrigin.w;
 }
 
 /// Iradiansi dari kisi probe, interpolasi trilinear.
@@ -225,10 +235,13 @@ float3 probeIrradiance(float3 worldPosition, float3 normal) {
               base, fraction);
 
     float3 accumulated[9];
+    float3 plain[9];
     for (int i = 0; i < 9; ++i) {
         accumulated[i] = float3(0.0);
+        plain[i] = float3(0.0);
     }
     float total = 0.0;
+    float plainTotal = 0.0;
 
     for (uint corner = 0u; corner < 8u; ++corner) {
         const float weight = probeCornerWeight(corner, fraction);
@@ -239,21 +252,58 @@ float3 probeIrradiance(float3 worldPosition, float3 normal) {
 
         float3 sh[9];
         bool found;
-        probeAt(coordinate, sh, found);
+        uint slot;
+        probeAt(coordinate, sh, found, slot);
         if (!found) {
             continue;
         }
-        for (int i = 0; i < 9; ++i) {
-            accumulated[i] += sh[i] * weight;
+
+        // **Visibilitas arah (S3).** Sebuah probe yang berada di balik geometri
+        // dari titik ini — atau di dalamnya — tidak boleh menyumbang. Yang di
+        // dalam benda pejal dipanggang tepat nol, dan tanpa bobot ini nol itu
+        // ikut ke dalam jawabannya: pada `bench.simlevel` jarak 1 m, 246 dari
+        // 21.312 probe seperti itu, dan riaknya di layar tumbuh 3,69 kali.
+        float visible = 1.0;
+        if (shadowParams.probeCounts.w > 2.5) {
+            // **Titiknya digeser sepanjang normal sebelum ditanyakan.** Sebuah
+            // permukaan berada tepat di batas geometri yang dilihat probe di
+            // bawahnya, jadi tanpa geseran ini uji Chebyshev berayun di sekitar
+            // ambangnya — dan yang keluar bukan oklusi melainkan struktur baru
+            // yang mengikuti kisi. Diukur: tanpanya, kisi 1 m menjadi 12% lebih
+            // berriak dengan visibilitas dibanding tanpanya.
+            const float3 biased = probeBiasedPosition(worldPosition, normal);
+            const float3 toPoint = biased - probePosition(coordinate);
+            const float distance = length(toPoint);
+            if (distance > 1e-5) {
+                const uint texel = probeDepthTexel(toPoint / distance);
+                const float2 moments = probeDepth[probeDepthBase(slot, coordinate) + texel];
+                visible = probeVisibilityWeight(distance, moments.x, moments.y);
+            }
         }
-        total += weight;
+        const float weighted = weight * visible;
+        if (weighted <= 0.0) {
+            continue;
+        }
+
+        for (int i = 0; i < 9; ++i) {
+            accumulated[i] += sh[i] * weighted;
+            plain[i] += sh[i] * weight;
+        }
+        total += weighted;
+        plainTotal += weight;
     }
 
-    if (total <= 0.0) {
+    if (plainTotal <= 0.0) {
         return float3(0.0);
     }
+    // **Dua jawaban, lalu dicampur menurut berapa banyak yang bertahan.**
+    // Menormalkan hanya ke yang bertahan berarti menyatakan seluruh bobotnya
+    // milik mereka — dan di koridor yang lebih sempit daripada kisinya itu
+    // menghasilkan jawaban dua setengah kali terlalu terang.
+    const float confidence = probeConfidence(total, plainTotal);
     for (int i = 0; i < 9; ++i) {
-        accumulated[i] /= total;
+        const float3 weightedAverage = total > 0.0 ? accumulated[i] / total : float3(0.0);
+        accumulated[i] = lerp(plain[i] / plainTotal, weightedAverage, confidence);
     }
     // **Putaran lingkungan diterapkan hanya bila isinya memang datang dari
     // lingkungan.** Di S1 tiap probe memuat SH langit apa adanya — dipanggang
@@ -300,6 +350,13 @@ float3 probeIrradiance(float3 worldPosition, float3 normal) {
 /// slot brick di dalam `probeSh`, atau 0xFFFFFFFF bila brick itu tidak ada.
 [[vk::binding(26, 0)]] StructuredBuffer<float4> probeSh;
 [[vk::binding(27, 0)]] StructuredBuffer<uint> probeBricks;
+
+/// Peta kedalaman oktahedral tiap probe (S3): satu pasangan (rata-rata jarak,
+/// rata-rata kuadratnya) per texel, `kProbeDepthSize²` texel per probe.
+///
+/// Selalu terikat, seperti kedua buffer di atas; yang menjaganya tidak terbaca
+/// adalah `probeCounts.w` yang kurang dari tiga, bukan bentuk buffernya.
+[[vk::binding(28, 0)]] StructuredBuffer<float2> probeDepth;
 
 /// Brick yang tidak dialokasikan. Sama dengan `render::kEmptyBrick`.
 static const uint kProbeEmptyBrick = 0xFFFFFFFFu;

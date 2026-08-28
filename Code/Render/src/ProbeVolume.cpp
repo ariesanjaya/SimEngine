@@ -16,7 +16,7 @@ constexpr uint64_t kFnvOffset = 1469598103934665603ull;
 /// Dinaikkan setiap kali arti isi berkasnya berubah. Ia bagian dari kunci, jadi
 /// menaikkannya membuat artefak lama tidak pernah terbaca lagi alih-alih
 /// terbaca salah.
-constexpr uint32_t kProbeCacheVersion = 1;
+constexpr uint32_t kProbeCacheVersion = 2;
 
 constexpr char kMagic[4] = {'S', 'P', 'R', 'B'};
 
@@ -33,6 +33,11 @@ struct Header {
     uint32_t brickSize;
     uint64_t brickSlotCount;
     uint64_t probeCount;
+    /// Texel peta kedalaman per sumbu, atau nol bila kisi ini tidak membawa
+    /// visibilitas (S3). Nol adalah keadaan yang sah — artefak yang dipanggang
+    /// sebelum S3 memang tidak punya.
+    uint32_t depthSize;
+    uint32_t reserved;
 };
 
 uint64_t HashInto(uint64_t hash, const void* data, std::size_t length) {
@@ -113,12 +118,18 @@ uint64_t ProbeVolume::StoredBytes() const {
     // slot brick-nya. Menuliskannya sebagai rumus tersendiri di sini adalah
     // rumus kedua yang suatu saat tidak sepakat dengan berkasnya.
     return static_cast<uint64_t>(probes.size()) * sizeof(Sh9) +
-           static_cast<uint64_t>(brickSlots.size()) * sizeof(uint32_t);
+           static_cast<uint64_t>(brickSlots.size()) * sizeof(uint32_t) +
+           static_cast<uint64_t>(depth.size()) * sizeof(float);
 }
 
 uint64_t ProbeVolume::GpuBytes() const {
+    // **Peta kedalaman ikut dihitung sejak S3.** Ia lima kali SH-nya, jadi
+    // melewatkannya berarti panel melaporkan seperlima dari yang dibayar — dan
+    // angka yang salah di panel menyesatkan justru orang yang sedang memutuskan
+    // berapa jarak yang sanggup ia bayar.
     return static_cast<uint64_t>(probes.size()) * 9 * sizeof(Vec4) +
-           static_cast<uint64_t>(brickSlots.size()) * sizeof(uint32_t);
+           static_cast<uint64_t>(brickSlots.size()) * sizeof(uint32_t) +
+           static_cast<uint64_t>(depth.size()) * sizeof(float);
 }
 
 std::vector<uint32_t> AssignProbeBricks(const ProbeVolumeLayout& layout,
@@ -290,6 +301,134 @@ Sh9 SampleProbeVolume(const ProbeVolume& volume, const Vec3& position) {
     return result;
 }
 
+Vec2 ProbeOctEncode(const Vec3& direction) {
+    const float norm = std::abs(direction.x) + std::abs(direction.y) + std::abs(direction.z);
+    const Vec3 d = direction / std::max(norm, 1e-20f);
+    Vec2 uv(d.x, d.z);
+    if (d.y < 0.0f) {
+        // Nol diperlakukan sebagai positif: `sign` pada nol menjawab nol, dan
+        // texel di sumbu lalu jatuh ke tempat yang salah.
+        const Vec2 sign(uv.x >= 0.0f ? 1.0f : -1.0f, uv.y >= 0.0f ? 1.0f : -1.0f);
+        uv = Vec2(1.0f - std::abs(d.z), 1.0f - std::abs(d.x)) * sign;
+    }
+    return uv * 0.5f + 0.5f;
+}
+
+Vec3 ProbeOctDecode(const Vec2& uv) {
+    const Vec2 f = uv * 2.0f - 1.0f;
+    Vec3 d(f.x, 1.0f - std::abs(f.x) - std::abs(f.y), f.y);
+    const float t = std::max(-d.y, 0.0f);
+    d.x += d.x >= 0.0f ? -t : t;
+    d.z += d.z >= 0.0f ? -t : t;
+    return glm::normalize(d);
+}
+
+uint32_t ProbeDepthTexel(const Vec3& direction) {
+    constexpr uint32_t kSide = ProbeVolume::kDepthSize;
+    const Vec2 uv = ProbeOctEncode(direction);
+    const auto x = std::min(static_cast<uint32_t>(uv.x * static_cast<float>(kSide)), kSide - 1);
+    const auto y = std::min(static_cast<uint32_t>(uv.y * static_cast<float>(kSide)), kSide - 1);
+    return y * kSide + x;
+}
+
+float ProbeVisibilityWeight(float distance, float mean, float meanSquare) {
+    if (distance <= mean) {
+        return 1.0f;
+    }
+    // Varians dijaga tidak nol; alasannya di `probe_grid.slang`.
+    const float variance = std::max(meanSquare - mean * mean, 1e-4f);
+    const float delta = distance - mean;
+    const float chebyshev = variance / (variance + delta * delta);
+    return chebyshev * chebyshev * chebyshev;
+}
+
+Sh9 SampleProbeVolumeAt(const ProbeVolume& volume, const Vec3& position,
+                        const Vec3& normal) {
+    if (!volume.HasVisibility()) {
+        // Kisi tanpa visibilitas menjawab persis seperti sebelum S3. Itu bukan
+        // jalur mundur yang menutupi sesuatu: artefak yang dipanggang sebelum S3
+        // memang tidak memuat jawabannya, dan menebaknya lebih buruk daripada
+        // menjawab apa adanya.
+        return SampleProbeVolume(volume, position);
+    }
+    Sh9 result;
+    const ProbeVolumeLayout& layout = volume.layout;
+    if (!volume.IsValid() || volume.probes.empty()) {
+        return result;
+    }
+
+    glm::uvec3 base(0u);
+    Vec3 fraction(0.0f);
+    ProbeCell(layout, position, base, fraction);
+
+    Sh9 plain;
+    float totalWeight = 0.0f;
+    float plainWeight = 0.0f;
+    for (uint32_t corner = 0; corner < 8; ++corner) {
+        const float trilinear = ProbeCornerWeight(corner, fraction);
+        if (trilinear <= 0.0f) {
+            continue;
+        }
+        const glm::uvec3 probe = ProbeCorner(layout, base, corner);
+        const uint32_t index = ProbeBrickIndex(layout, probe);
+        if (index >= volume.brickSlots.size()) {
+            continue;
+        }
+        const uint32_t brickSlot = volume.brickSlots[index];
+        if (brickSlot == kEmptyBrick) {
+            continue;
+        }
+        const uint32_t slot = ProbeSlotOffset(brickSlot, probe);
+        if (slot >= volume.probes.size()) {
+            continue;
+        }
+
+        // **Arah dari probe ke titiknya, dan jaraknya.** Itulah yang dijawab
+        // peta kedalaman: seberapa jauh geometri terdekat pada arah itu.
+        const Vec3 biased = glm::length(normal) > 1e-6f
+                                ? position + glm::normalize(normal) * kProbeVisibilityBias
+                                : position;
+        const Vec3 toPoint = biased - layout.ProbePosition(probe);
+        const float distance = glm::length(toPoint);
+        float visibility = 1.0f;
+        if (distance > 1e-5f) {
+            const uint32_t texel = ProbeDepthTexel(toPoint / distance);
+            const std::size_t at =
+                static_cast<std::size_t>(slot) * ProbeVolume::kDepthFloats + texel * 2;
+            visibility = ProbeVisibilityWeight(distance, volume.depth[at], volume.depth[at + 1]);
+        }
+
+        const float weight = trilinear * visibility;
+        const Sh9& probeSh = volume.probes[slot];
+        for (std::size_t i = 0; i < result.coefficients.size(); ++i) {
+            result.coefficients[i] += probeSh.coefficients[i] * weight;
+            plain.coefficients[i] += probeSh.coefficients[i] * trilinear;
+        }
+        totalWeight += weight;
+        plainWeight += trilinear;
+    }
+
+    // **Dinormalkan terhadap bobot yang benar-benar terpakai**, alasan yang sama
+    // dengan `SampleProbeVolume` — dan di sini ia lebih penting lagi: bobot
+    // visibilitas membuang sudut secara rutin, bukan sesekali.
+    if (plainWeight <= 1e-6f) {
+        return Sh9{};
+    }
+    // **Dua jawaban, lalu dicampur menurut berapa banyak yang bertahan** —
+    // cerminan `probeIrradiance` di shader, dan alasannya di
+    // `kProbeConfidenceFloor`.
+    const float ratio = totalWeight / plainWeight;
+    const float t = std::clamp(ratio / kProbeConfidenceFloor, 0.0f, 1.0f);
+    const float confidence = t * t * (3.0f - 2.0f * t);
+    for (std::size_t i = 0; i < result.coefficients.size(); ++i) {
+        const Vec3 weighted =
+            totalWeight > 1e-6f ? result.coefficients[i] / totalWeight : Vec3(0.0f);
+        result.coefficients[i] =
+            glm::mix(plain.coefficients[i] / plainWeight, weighted, confidence);
+    }
+    return result;
+}
+
 uint64_t ProbeVolumeCacheKey(const ProbeVolumeLayout& layout, uint64_t environmentKey) {
     uint64_t hash = HashInto(kFnvOffset, &environmentKey, sizeof(environmentKey));
     hash = HashInto(hash, &layout.origin.x, sizeof(float) * 3);
@@ -338,12 +477,22 @@ bool WriteProbeVolume(const std::filesystem::path& file, const ProbeVolume& volu
     header.brickSize = ProbeVolumeLayout::kBrickSize;
     header.brickSlotCount = volume.brickSlots.size();
     header.probeCount = volume.probes.size();
+    header.depthSize = volume.HasVisibility() ? ProbeVolume::kDepthSize : 0u;
 
     stream.write(reinterpret_cast<const char*>(&header), sizeof(header));
     stream.write(reinterpret_cast<const char*>(volume.brickSlots.data()),
                  static_cast<std::streamsize>(sizeof(uint32_t) * volume.brickSlots.size()));
     stream.write(reinterpret_cast<const char*>(volume.probes.data()),
                  static_cast<std::streamsize>(sizeof(Sh9) * volume.probes.size()));
+    // **Peta kedalaman ikut ditulis, dan ia sengaja punya medannya sendiri di
+    // header.** Melewatkannya membuat panggangan berikutnya membaca artefak yang
+    // sah tetapi kehilangan visibilitasnya — dan yang terlihat bukan galat
+    // melainkan S3 yang mati diam-diam pada jalan kedua. Itu persis yang terjadi
+    // sebelum baris ini ada, dan yang membongkarnya cuma angka megabyte di log.
+    if (volume.HasVisibility()) {
+        stream.write(reinterpret_cast<const char*>(volume.depth.data()),
+                     static_cast<std::streamsize>(sizeof(float) * volume.depth.size()));
+    }
     stream.close();
     if (!stream) {
         error = "write failed for " + temporary.string();
@@ -413,6 +562,23 @@ bool ReadProbeVolume(const std::filesystem::path& file, ProbeVolume& out, std::s
     volume.probes.resize(static_cast<std::size_t>(header.probeCount));
     stream.read(reinterpret_cast<char*>(volume.probes.data()),
                 static_cast<std::streamsize>(sizeof(Sh9) * volume.probes.size()));
+
+    if (header.depthSize != 0) {
+        // **Ukurannya harus yang dikenal pembacanya, bukan yang disebut
+        // berkasnya.** Sebuah artefak yang dipanggang dengan peta 16×16 punya
+        // tata letak yang lain seluruhnya, dan membacanya sebagai 8×8 tidak
+        // gagal — ia menghasilkan visibilitas yang benar isinya dan salah
+        // tempatnya, yang terlihat sebagai bayangan yang bergeser.
+        if (header.depthSize != ProbeVolume::kDepthSize) {
+            error = "cached probe volume was baked with a different depth map size";
+            return false;
+        }
+        volume.depth.resize(static_cast<std::size_t>(header.probeCount) *
+                            ProbeVolume::kDepthFloats);
+        stream.read(reinterpret_cast<char*>(volume.depth.data()),
+                    static_cast<std::streamsize>(sizeof(float) * volume.depth.size()));
+    }
+
     if (!stream) {
         error = "cached probe volume is shorter than its header promises";
         return false;

@@ -633,7 +633,7 @@ peningkatan kualitas yang gratis.
 3. **Berkas HDR belum bisa memanggang transport** — jalur panel memakai langit
    atmosferik atau hitam. Membacanya di sisi CPU adalah pekerjaan tersendiri.
 
-### S3 — Oklusi arah
+### S3 — Oklusi arah · ✅
 
 - Tiap probe membawa visibilitasnya, bukan hanya iradiansinya
 - Objek dinamis memakainya supaya tidak menerima cahaya dari arah yang
@@ -642,6 +642,114 @@ peningkatan kualitas yang gratis.
 **Selesai kalau:** sebuah benda di bawah meja lebih gelap daripada benda yang
 sama di sebelah meja, dan selisihnya diukur; benda yang bergerak keluar-masuk
 bayangan berubah mulus, tanpa loncatan pada batas sel.
+
+#### Keadaannya sesudah S3 · ✅
+
+Tiap probe membawa peta kedalaman oktahedral 8×8 — rata-rata jarak dan
+kuadratnya per texel — dan uji Chebyshev membobot tiap sudut interpolasi
+menurut apakah titik yang dinaunginya berada di depan atau di balik geometri
+terdekat pada arah itu.
+
+**Kriteria terimanya terukur.** Benda di bawah meja **39,9% seterang** benda
+yang sama di sebelahnya; melintasi tepi meja, langkah terbesar **3,1% dari
+rentangnya** — peralihan, bukan loncatan di batas sel. Dan pada sel yang
+benar-benar melintasi dinding, diadu dengan acuan yang ditelusuri langsung:
+kesalahan **0,120 menjadi 0,018**, enam setengah kali lebih dekat.
+
+Riak yang tertinggal dari S2 ikut turun, dan angkanya menunjukkan bahwa ia
+memang lahir dari probe yang terkubur:
+
+| kisi | S2 | S3 terpasang |
+|---|---:|---:|
+| 2 m | 0,008977 | 0,008199 — **−9%** |
+| 1 m | 0,023916 | 0,015717 — **−34%** |
+
+##### Tiga hal yang ditemukan pengukuran, bukan perancangan
+
+1. **Uji "benda di bawah meja" lulus tanpa menyentuh visibilitas sama sekali.**
+   Kedelapan sudut selnya berada di sisi yang sama, jadi tidak ada apa pun untuk
+   ditolak — angkanya identik dengan dan tanpa. Itu ditulis di ujinya, dan uji
+   dinding tipis ditambahkan untuk menutupi apa yang ia lewatkan.
+
+2. **Dugaan arahnya salah.** Saya menulis uji yang menuntut visibilitas
+   *menggelapkan* titik di dekat dinding — cahaya bocor menembusnya. Yang
+   terukur kebalikannya: kebocorannya **menggelapkan**, karena sudut sel di
+   dalam dinding dipanggang nol. Ujinya sekarang menuntut lebih dekat ke acuan,
+   bukan bergerak ke arah yang diduga.
+
+3. **Tanpa bias permukaan, visibilitas memperburuk kisi rapat.** Sebuah
+   permukaan berada tepat di batas geometri yang dilihat probe di dekatnya, jadi
+   uji Chebyshev berayun di sekitar ambangnya. Diukur pada 1 m: **+12%** tanpa
+   bias, **−34%** dengan bias 0,15 m. Biasnya tetap dalam meter dan bukan
+   pecahan jarak antar-probe, dan itu juga diukur — 0,35 × jarak memberi −4% dan
+   −30%, sementara 0,15 m tetap memberi −9% dan −34%.
+
+   Tegangannya nyata dan ditulis apa adanya: **tanpa bias adalah yang terbaik di
+   2 m** (−23%), dan bencana di 1 m. 0,15 m adalah kompromi yang dipilih dengan
+   angka, bukan yang terbaik di kedua kisi.
+
+##### Dan satu cacat yang hampir lolos
+
+**Artefak `.simprobe` tidak menulis peta kedalamannya.** Berkasnya tetap sah dan
+tetap terbaca; yang hilang cuma visibilitasnya, dan bersamanya seluruh S3 — pada
+jalan kedua, diam-diam. Yang membongkarnya cuma angka megabyte di log: 4,00 MB
+saat dipanggang, 0,88 MB saat dibaca kembali. Ia sempat memakan satu pengukuran
+1 m sebelum ketahuan.
+
+Versi artefak naik ke 2, ukuran peta masuk ke header, dan pembacanya menolak
+ukuran yang bukan miliknya — peta 16×16 yang dibaca sebagai 8×8 tidak gagal, ia
+menghasilkan visibilitas yang benar isinya dan salah tempatnya.
+
+##### Yang ditemukan peninjauan: batas yang tidak bisa dibobot
+
+**Koridor yang lebih sempit daripada jarak antar-probe adalah keadaan tempat
+visibilitas kehabisan pilihan.** Diuji pada celah 0,6 m dengan kisi 2 m, diadu
+dengan acuan yang ditelusuri langsung (0,129):
+
+| | jawaban | kesalahan |
+|---|---:|---:|
+| tanpa visibilitas | 0,086 | 0,042 — terlalu gelap |
+| dengan visibilitas | 0,289 | 0,160 — terlalu terang |
+| **kisi 0,5 m, keduanya** | **0,113** | **0,016** |
+
+Sudut selnya hampir seluruhnya berada di dalam dinding, dan yang di dalam
+dipanggang nol. Menolaknya benar — nilainya memang tidak berarti — tetapi yang
+tersisa adalah probe di luar koridor, dan menormalkan ke sana berarti menyatakan
+seluruh bobotnya milik mereka. Nol-nol itu sebelumnya kebetulan menyeimbangkan
+ke arah yang lain.
+
+**Tidak ada pembobotan yang bisa mengarang informasi yang tidak dipanggang.**
+Kisi 2 m tidak punya satu pun probe yang melihat apa yang dilihat lantai
+koridor. Pada kisi 0,5 m kedua jalur menjawab **identik** — tidak ada yang
+terhalang, jadi tidak ada yang perlu ditolak — dan sepuluh kali lebih dekat ke
+acuan. Yang menyelesaikannya kerapatan, dan itu setelan pengarang (keputusan 8),
+bukan bobot.
+
+**Dua penambal dicoba dan ditinggalkan dengan angka.** Melantai bobot tiap probe
+pada 0,40 menyelamatkan koridor (kesalahan 0,028) tetapi memotong perbaikan riak
+kisi 1 m dari −34% menjadi **−10%**: ia melemahkan penolakan di mana-mana demi
+keadaan yang jarang. Mencampur balik menurut bobot yang bertahan, dengan ambang
+0,35, memberi hasil yang sama buruknya (riak 1 m −13%) sambil hampir tidak
+menolong koridornya. Yang tersisa terpasang adalah campuran itu dengan ambang
+**0,05** — ia berperilaku identik dengan tanpa campuran pada seluruh kasus yang
+diukur, dan hanya menyala ketika benar-benar tidak ada sudut yang bertahan.
+
+Sebuah lorong hitam pekat yang bentuknya mengikuti kisi lebih buruk daripada
+cahaya yang salah, dan itulah yang dijaga ambang itu.
+
+##### Satu penyederhanaan yang disebutkan
+
+Peta kedalaman dibaca **texel terdekat**, tanpa interpolasi antar-texel dan
+tanpa texel tepi. 64 arah per probe berarti bobot visibilitasnya bertangga dalam
+arah. Uji kemulusan tidak menangkapnya — langkah terbesarnya 3,1% dari rentang —
+tetapi ia belum diuji pada geometri yang tepinya tajam dan dekat.
+
+##### Harganya
+
+Peta kedalaman lima kali SH-nya. `bench.simlevel` pada 2 m: 0,88 MB menjadi
+**4,00 MB**; pada 1 m, 2,93 MB menjadi **13,33 MB**. Waktu panggangnya naik 58%
+pada 2 m (60,4 s → 95,3 s) dan 77% pada 1 m (207,9 s → 367,5 s) dengan 16 sinar
+per texel.
 
 ### S4 — UV lightmap: dibangkitkan, diperiksa, dan di-cook
 

@@ -166,3 +166,130 @@ TEST_CASE("S2: tiap probe punya offset koefisien sendiri, dan tidak ada yang ber
         }
     }
 }
+
+// --- S3: pemetaan oktahedral dan uji visibilitasnya ---------------------------
+
+namespace {
+
+ProbeVisibilityResult_0 RunShaderVisibility(const Vec3& direction, float distance, float mean,
+                                            float meanSquare) {
+    ProbeVisibilityQuery_0 query{};
+    query.direction_0 = Vector<float, 3>{direction.x, direction.y, direction.z};
+    query.distance_0 = distance;
+    query.mean_0 = mean;
+    query.meanSquare_0 = meanSquare;
+
+    ProbeVisibilityResult_0 result{};
+    GlobalParams_0 params{};
+    params.gVisibility_0.data = &query;
+    params.gVisibility_0.count = 1;
+    params.gVisibilityResults_0.data = &result;
+    params.gVisibilityResults_0.count = 1;
+
+    ComputeThreadVaryingInput in{};
+    in.groupID = uint3{0, 0, 0};
+    in.groupThreadID = uint3{0, 0, 0};
+    visibilityQueries_Thread(&in, nullptr, &params);
+    return result;
+}
+
+}  // namespace
+
+TEST_CASE("S3: pemetaan oktahedral sama di shader dan di C++") {
+    using namespace sim;
+    using namespace sim::render;
+
+    // Ukurannya harus sama di kedua sisi; kalau tidak, seluruh texel bergeser.
+    CHECK(ProbeVolume::kDepthSize == 8u);
+
+    std::mt19937 rng(20260829u);
+    std::uniform_real_distribution<float> pick(-1.0f, 1.0f);
+
+    std::vector<Vec3> directions{
+        Vec3(1, 0, 0),  Vec3(-1, 0, 0), Vec3(0, 1, 0),  Vec3(0, -1, 0),
+        Vec3(0, 0, 1),  Vec3(0, 0, -1),
+        // Arah tepat di lipatan oktahedronnya — di sinilah dua pemetaan yang
+        // hampir sama mulai berselisih, dan di sinilah `sign(0)` menggigit.
+        glm::normalize(Vec3(1, 0, 1)),  glm::normalize(Vec3(1, 0, -1)),
+        glm::normalize(Vec3(-1, 0, 1)), glm::normalize(Vec3(-1, 0, -1)),
+        glm::normalize(Vec3(1, -1, 0)), glm::normalize(Vec3(0, -1, 1)),
+    };
+    for (int i = 0; i < 256; ++i) {
+        Vec3 d(pick(rng), pick(rng), pick(rng));
+        if (glm::length(d) < 1e-3f) {
+            continue;
+        }
+        directions.push_back(glm::normalize(d));
+    }
+
+    for (const Vec3& direction : directions) {
+        const ProbeVisibilityResult_0 shader = RunShaderVisibility(direction, 1.0f, 1.0f, 1.0f);
+        const Vec2 encoded = ProbeOctEncode(direction);
+        INFO("arah (", direction.x, ",", direction.y, ",", direction.z, ")");
+        CHECK(shader.octEncoded_0.x == doctest::Approx(encoded.x).epsilon(1e-5));
+        CHECK(shader.octEncoded_0.y == doctest::Approx(encoded.y).epsilon(1e-5));
+        CHECK(shader.depthTexel_0 == ProbeDepthTexel(direction));
+        CHECK(shader.depthTexel_0 < ProbeVolume::kDepthSize * ProbeVolume::kDepthSize);
+
+        // Geseran biasnya ikut diadu: sebuah konstanta yang berbeda di kedua
+        // sisi membuat sisi CPU menanyakan titik yang lain daripada yang
+        // ditanyakan shader — dan yang keluar bukan galat melainkan gambar acuan
+        // yang tidak bisa menilai apa pun.
+        CHECK(shader.bias_0 == doctest::Approx(kProbeVisibilityBias));
+        const Vec3 biased = Vec3(1.0f, 2.0f, 3.0f) +
+                            glm::normalize(direction) * kProbeVisibilityBias;
+        CHECK(shader.biased_0.x == doctest::Approx(biased.x).epsilon(1e-5));
+        CHECK(shader.biased_0.y == doctest::Approx(biased.y).epsilon(1e-5));
+        CHECK(shader.biased_0.z == doctest::Approx(biased.z).epsilon(1e-5));
+
+        // Dikodekan lalu didekodekan harus kembali ke arah yang sama. Yang
+        // meleset di sini bukan ketelitian melainkan lipatan yang salah tanda,
+        // dan itu memindahkan separuh bola ke tempat separuh yang lain.
+        const Vec3 back = ProbeOctDecode(encoded);
+        CHECK(glm::dot(back, direction) == doctest::Approx(1.0f).epsilon(1e-3));
+        CHECK(shader.octDecoded_0.x == doctest::Approx(back.x).epsilon(1e-4));
+        CHECK(shader.octDecoded_0.y == doctest::Approx(back.y).epsilon(1e-4));
+        CHECK(shader.octDecoded_0.z == doctest::Approx(back.z).epsilon(1e-4));
+    }
+}
+
+TEST_CASE("S3: uji Chebyshev sama di shader dan di C++, dan menolak probe terkubur") {
+    using namespace sim;
+    using namespace sim::render;
+
+    struct Case {
+        float distance;
+        float mean;
+        float meanSquare;
+        const char* what;
+    };
+    // `meanSquare` >= mean² selalu; varians nol berarti seluruh sampel sepakat.
+    const std::vector<Case> cases{
+        {0.5f, 2.0f, 4.10f, "titik di depan geometri — lolos penuh"},
+        {2.0f, 2.0f, 4.10f, "tepat di permukaannya"},
+        {5.0f, 2.0f, 4.10f, "jauh di balik geometri — ditolak"},
+        {3.0f, 0.02f, 0.0008f, "probe terkubur: jarak nol ke segala arah"},
+        {0.7f, 0.6f, 0.40f, "sedikit di baliknya, varians besar"},
+    };
+
+    for (const Case& c : cases) {
+        const float cpu = ProbeVisibilityWeight(c.distance, c.mean, c.meanSquare);
+        const ProbeVisibilityResult_0 shader =
+            RunShaderVisibility(Vec3(0.0f, 1.0f, 0.0f), c.distance, c.mean, c.meanSquare);
+        INFO(c.what);
+        CHECK(shader.visibility_0 == doctest::Approx(cpu).epsilon(1e-5));
+        CHECK(cpu >= 0.0f);
+        CHECK(cpu <= 1.0f);
+    }
+
+    // **Yang paling penting dari milestone ini**, dinyatakan sebagai angka:
+    // sebuah probe yang terkubur di dalam benda pejal menjawab jarak mendekati
+    // nol ke segala arah, jadi setiap titik di luar benda itu berada jauh di
+    // baliknya — dan bobotnya jatuh hampir ke nol tanpa satu pun cabang khusus
+    // tentang "di dalam".
+    const float buried = ProbeVisibilityWeight(3.0f, 0.02f, 0.0008f);
+    const float open = ProbeVisibilityWeight(3.0f, 8.0f, 66.0f);
+    MESSAGE("probe terkubur: bobot ", buried, " lawan ", open, " untuk probe terbuka");
+    CHECK(buried < 0.01f);
+    CHECK(open == doctest::Approx(1.0f));
+}

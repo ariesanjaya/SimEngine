@@ -606,7 +606,9 @@ public:
                 !slot.probeShBuffer.Create(device_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
                                            sizeof(Vec4) * 9) ||
                 !slot.probeBrickBuffer.Create(device_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
-                                              sizeof(uint32_t))) {
+                                              sizeof(uint32_t)) ||
+                !slot.probeDepthBuffer.Create(device_, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
+                                              sizeof(float) * 2)) {
                 return false;
             }
         }
@@ -2264,6 +2266,8 @@ private:
         /// mengisinya.
         rhi::DynamicBuffer probeShBuffer;
         rhi::DynamicBuffer probeBrickBuffer;
+        /// Peta kedalaman oktahedral tiap probe (S3), sepasang float per texel.
+        rhi::DynamicBuffer probeDepthBuffer;
         /// Revisi isi kisi yang sudah berada di dalam kedua buffer di atas.
         /// Nol berarti belum pernah diunggah.
         uint64_t probeRevision = 0;
@@ -4239,7 +4243,7 @@ private:
         samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
         SIM_VK_CHECK(vkCreateSampler(device_.Handle(), &samplerInfo, nullptr, &shadow_.sampler));
 
-        const std::array<VkDescriptorSetLayoutBinding, 28> bindings{
+        const std::array<VkDescriptorSetLayoutBinding, 29> bindings{
             VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
@@ -4301,6 +4305,8 @@ private:
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{kProbeBrickBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                          1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{kProbeDepthBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                                         1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
         };
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -4315,7 +4321,7 @@ private:
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
                                  static_cast<uint32_t>(slots_.size()) * 18},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                                 static_cast<uint32_t>(slots_.size()) * 8},
+                                 static_cast<uint32_t>(slots_.size()) * 9},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
                                  static_cast<uint32_t>(slots_.size()) *
                                      SdfClipmapResource::kMaxGrids},
@@ -4853,7 +4859,7 @@ private:
         // `pBufferInfo` menyimpan pointer, jadi vektor yang tumbuh sambil diisi
         // akan membuat entri yang sudah dicatat menunjuk memori yang sudah
         // dibebaskan — kerusakan yang tidak muncul sebagai galat validasi.
-        std::vector<VkDescriptorBufferInfo> buffers(slots_.size() * 7);
+        std::vector<VkDescriptorBufferInfo> buffers(slots_.size() * 8);
         std::vector<VkWriteDescriptorSet> writes;
         writes.reserve(slots_.size() * 18);
         // SHADER_READ_ONLY, bukan DEPTH_READ_ONLY. Keduanya sah untuk mengambil
@@ -4903,7 +4909,7 @@ private:
 
         for (std::size_t i = 0; i < slots_.size(); ++i) {
             slots_[i].shadowSet = sets[i];
-            const std::size_t base = i * 7;
+            const std::size_t base = i * 8;
             buffers[base] = {slots_[i].shadowUniform.Handle(), 0, sizeof(ShadowUniforms)};
             buffers[base + 1] = {slots_[i].lightBuffer.Handle(), 0, VK_WHOLE_SIZE};
             // Jalur GPU menulis ke buffer device-local miliknya sendiri; jalur
@@ -4920,6 +4926,7 @@ private:
             buffers[base + 4] = {slots_[i].shadowFaceBuffer.Handle(), 0, VK_WHOLE_SIZE};
             buffers[base + 5] = {slots_[i].probeShBuffer.Handle(), 0, VK_WHOLE_SIZE};
             buffers[base + 6] = {slots_[i].probeBrickBuffer.Handle(), 0, VK_WHOLE_SIZE};
+            buffers[base + 7] = {slots_[i].probeDepthBuffer.Handle(), 0, VK_WHOLE_SIZE};
 
             VkWriteDescriptorSet uniform{};
             uniform.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
@@ -5013,6 +5020,11 @@ private:
             probeBricks.dstBinding = kProbeBrickBinding;
             probeBricks.pBufferInfo = &buffers[base + 6];
             writes.push_back(probeBricks);
+
+            VkWriteDescriptorSet probeDepth = probeSh;
+            probeDepth.dstBinding = kProbeDepthBinding;
+            probeDepth.pBufferInfo = &buffers[base + 7];
+            writes.push_back(probeDepth);
         }
         vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
@@ -5984,15 +5996,18 @@ private:
     /// Hanya set slot ini yang ditulis: slot lain punya buffernya sendiri, dan
     /// bisa saja masih dibaca GPU.
     void WriteProbeDescriptors(InstanceSlot& slot) {
-        const std::array<VkDescriptorBufferInfo, 2> buffers{
+        const std::array<VkDescriptorBufferInfo, 3> buffers{
             VkDescriptorBufferInfo{slot.probeShBuffer.Handle(), 0, VK_WHOLE_SIZE},
             VkDescriptorBufferInfo{slot.probeBrickBuffer.Handle(), 0, VK_WHOLE_SIZE},
+            VkDescriptorBufferInfo{slot.probeDepthBuffer.Handle(), 0, VK_WHOLE_SIZE},
         };
-        std::array<VkWriteDescriptorSet, 2> writes{};
+        static constexpr std::array<uint32_t, 3> kBindings{kProbeShBinding, kProbeBrickBinding,
+                                                           kProbeDepthBinding};
+        std::array<VkWriteDescriptorSet, 3> writes{};
         for (std::size_t i = 0; i < writes.size(); ++i) {
             writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
             writes[i].dstSet = slot.shadowSet;
-            writes[i].dstBinding = i == 0 ? kProbeShBinding : kProbeBrickBinding;
+            writes[i].dstBinding = kBindings[i];
             writes[i].descriptorCount = 1;
             writes[i].descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
             writes[i].pBufferInfo = &buffers[i];
@@ -6115,6 +6130,13 @@ private:
                         Vec4(volume.probes[probe].coefficients[coefficient], 0.0f);
                 }
             }
+            // Peta kedalaman ikut apa adanya bila ada; kalau tidak, satu texel
+            // boneka supaya descriptor-nya tetap sah. Yang menjaganya tidak
+            // terbaca adalah `probeCounts.w`, bukan bentuk buffernya.
+            probeDepthUpload_ = volume.depth;
+            if (probeDepthUpload_.empty()) {
+                probeDepthUpload_.assign(2, 0.0f);
+            }
             probeDebugFilled_ = false;
             ++probeContentRevision_;
         }
@@ -6124,17 +6146,22 @@ private:
             const VkDeviceSize brickBytes = sizeof(uint32_t) * probeBrickUpload_.size();
             const uint64_t beforeSh = slot.probeShBuffer.Generation();
             const uint64_t beforeBricks = slot.probeBrickBuffer.Generation();
+            const VkDeviceSize depthBytes = sizeof(float) * probeDepthUpload_.size();
+            const uint64_t beforeDepth = slot.probeDepthBuffer.Generation();
             if (!slot.probeShBuffer.Reserve(shBytes) ||
                 !slot.probeBrickBuffer.Reserve(brickBytes) ||
+                !slot.probeDepthBuffer.Reserve(depthBytes) ||
                 !slot.probeShBuffer.Write(probeUpload_.data(), shBytes) ||
-                !slot.probeBrickBuffer.Write(probeBrickUpload_.data(), brickBytes)) {
+                !slot.probeBrickBuffer.Write(probeBrickUpload_.data(), brickBytes) ||
+                !slot.probeDepthBuffer.Write(probeDepthUpload_.data(), depthBytes)) {
                 SIM_WARN("Render", "cannot upload {} baked probes", volume.probes.size());
                 uniforms.probeCounts = Vec4(0.0f);
                 uniforms.probeOrigin = Vec4(0.0f);
                 return;
             }
             if (slot.probeShBuffer.Generation() != beforeSh ||
-                slot.probeBrickBuffer.Generation() != beforeBricks) {
+                slot.probeBrickBuffer.Generation() != beforeBricks ||
+                slot.probeDepthBuffer.Generation() != beforeDepth) {
                 WriteProbeDescriptors(slot);
             }
             slot.probeRevision = probeContentRevision_;
@@ -6143,7 +6170,8 @@ private:
         uniforms.probeOrigin = Vec4(layout.origin, layout.spacing);
         uniforms.probeCounts =
             Vec4(static_cast<float>(layout.counts.x), static_cast<float>(layout.counts.y),
-                 static_cast<float>(layout.counts.z), kProbeContentWorld);
+                 static_cast<float>(layout.counts.z),
+                 volume.HasVisibility() ? kProbeContentWorldVisibility : kProbeContentWorld);
     }
 
     void UpdateSkyProbeGrid(const ViewportDesc& desc, const ViewportScene& scene,
@@ -6543,6 +6571,7 @@ private:
             slot.lightBuffer.Destroy();
             slot.probeShBuffer.Destroy();
             slot.probeBrickBuffer.Destroy();
+            slot.probeDepthBuffer.Destroy();
             slot.clusterRangeBuffer.Destroy();
             slot.clusterIndexBuffer.Destroy();
             slot.shadowFaceBuffer.Destroy();
@@ -6786,6 +6815,8 @@ private:
     /// seluruhnya.
     std::vector<Vec4> probeUpload_;
     std::vector<uint32_t> probeBrickUpload_;
+    /// Staging peta kedalaman: dua float per texel, `kDepthSize²` texel per probe.
+    std::vector<float> probeDepthUpload_;
     /// Kotak dunia tiap instance mesh frame ini — yang menentukan brick mana
     /// yang dialokasikan. Anggota, bukan variabel lokal, dengan alasan yang sama
     /// seperti staging di atas.
@@ -6886,6 +6917,8 @@ private:
     /// Kisi probe iradiansi (S1), dua storage buffer bersebelahan.
     static constexpr uint32_t kProbeShBinding = 26;
     static constexpr uint32_t kProbeBrickBinding = 27;
+    /// Peta kedalaman oktahedral tiap probe (S3).
+    static constexpr uint32_t kProbeDepthBinding = 28;
     /// Batas atas jumlah probe yang boleh diunggah.
     ///
     /// **Sebuah batas, bukan sebuah target.** Empat juta probe adalah 576 MB
@@ -6901,6 +6934,10 @@ private:
     /// yang transportnya ditelusuri (S2). Putaran lingkungan tidak diterapkan
     /// lagi saat membacanya; ia sudah ikut terpanggang di dalamnya.
     static constexpr float kProbeContentWorld = 2.0f;
+    /// Dan yang juga membawa visibilitas arah (S3). Terpisah dari yang di atas
+    /// karena artefak yang dipanggang sebelum S3 tidak memuatnya, dan
+    /// membacanya dari buffer boneka berarti setiap probe ditolak.
+    static constexpr float kProbeContentWorldVisibility = 3.0f;
 
     static constexpr float kBounceAlbedo = 0.5f;
     /// Anggaran langkah lapis screen-space. Rencana GI menyebut 16, dan angka

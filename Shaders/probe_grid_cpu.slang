@@ -18,6 +18,29 @@ struct ProbeAddressQuery {
     uint slot;
 };
 
+/// Query kedua: pemetaan oktahedral dan uji Chebyshev-nya (S3).
+struct ProbeVisibilityQuery {
+    float3 direction;
+    float distance;
+    float mean;
+    float meanSquare;
+};
+
+/// **Nama medannya sengaja tidak bertabrakan dengan `ProbeAddressResult`.**
+/// slangc membedakan nama yang sama dengan akhiran angka saat memancarkan C++,
+/// jadi `weight` di sini keluar sebagai `weight_1` sementara yang di sana
+/// `weight_0` — dan sisi C++ berhenti bisa menyebut medannya tanpa tahu urutan
+/// penamaan generatornya. Catatan yang sama ada di `openpbr_cpu.slang`.
+struct ProbeVisibilityResult {
+    float2 octEncoded;
+    float3 octDecoded;
+    uint depthTexel;
+    float visibility;
+    uint depthOffset;
+    float3 biased;
+    float bias;
+};
+
 struct ProbeAddressResult {
     uint3 base;
     float3 fraction;
@@ -29,6 +52,8 @@ struct ProbeAddressResult {
 
 StructuredBuffer<ProbeAddressQuery> gQueries;
 RWStructuredBuffer<ProbeAddressResult> gResults;
+StructuredBuffer<ProbeVisibilityQuery> gVisibility;
+RWStructuredBuffer<ProbeVisibilityResult> gVisibilityResults;
 
 [shader("compute")]
 [numthreads(1, 1, 1)]
@@ -44,4 +69,20 @@ void addressQueries(uint3 tid : SV_DispatchThreadID) {
         r.weight[corner] = probeCornerWeight(corner, r.fraction);
     }
     gResults[tid.x] = r;
+}
+
+[shader("compute")]
+[numthreads(1, 1, 1)]
+void visibilityQueries(uint3 tid : SV_DispatchThreadID) {
+    const ProbeVisibilityQuery q = gVisibility[tid.x];
+
+    ProbeVisibilityResult r;
+    r.octEncoded = probeOctEncode(q.direction);
+    r.octDecoded = probeOctDecode(r.octEncoded);
+    r.depthTexel = probeDepthTexel(q.direction);
+    r.visibility = probeVisibilityWeight(q.distance, q.mean, q.meanSquare);
+    r.depthOffset = probeDepthBase(3u, uint3(5u, 2u, 7u));
+    r.biased = probeBiasedPosition(float3(1.0, 2.0, 3.0), q.direction);
+    r.bias = kProbeVisibilityBias;
+    gVisibilityResults[tid.x] = r;
 }

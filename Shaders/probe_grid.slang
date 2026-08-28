@@ -69,3 +69,147 @@ float probeCornerWeight(uint corner, float3 fraction) {
     const float3 blend = lerp(float3(1.0) - fraction, fraction, offset);
     return blend.x * blend.y * blend.z;
 }
+
+// --- visibilitas arah (S3) ---------------------------------------------------
+//
+// **Tiap probe membawa jaraknya ke geometri, bukan hanya iradiansinya.** Tanpa
+// itu tidak ada cara membedakan probe yang berada *di depan* dinding dari probe
+// yang berada *di dalamnya* — dan yang kedua dipanggang tepat nol lalu bocor ke
+// permukaan di dekatnya. Itu bukan dugaan: pada `bench.simlevel`, 246 dari
+// 21.312 probe jatuh di dalam benda pejal pada jarak 1 m, dan riaknya di layar
+// tumbuh 3,69 kali dibandingkan kisi yang tidak punya satu pun.
+
+/// Sisi peta kedalaman oktahedral tiap probe.
+///
+/// **Delapan, dan itu bukan angka bulat yang kebetulan.** Yang disimpan bukan
+/// bentuk geometri melainkan rata-rata jarak beserta kuadratnya, dan uji
+/// Chebyshev yang membacanya hanya menuntut arah kasar: peta yang lebih halus
+/// menyimpan ketelitian yang tidak pernah terbaca. 8² = 64 texel per probe, dua
+/// float masing-masing — lima kali SH-nya, dan itu harga yang memang dibayar
+/// untuk berhenti membocorkan cahaya menembus dinding.
+static const uint kProbeDepthSize = 8;
+
+/// Arah unit → koordinat oktahedral di [0,1]².
+///
+/// **Oktahedral, bukan kubus.** Enam muka berarti enam tepi yang harus dijepit
+/// terpisah dan enam kali padding; oktahedral memetakan seluruh bola ke satu
+/// petak persegi dengan kerapatan yang hampir merata. Yang dibayar cuma
+/// aritmatika lipatan di bawah ini.
+float2 probeOctEncode(float3 direction) {
+    const float3 d = direction / (abs(direction.x) + abs(direction.y) + abs(direction.z));
+    float2 uv = d.xz;
+    if (d.y < 0.0) {
+        // Belahan bawah dilipat keluar. Tandanya diambil dari uv itu sendiri,
+        // dan `sign` pada nol menjawab nol — yang membuat texel di sumbu jatuh
+        // ke tempat yang salah. Karena itu nol diperlakukan sebagai positif.
+        const float2 s = float2(uv.x >= 0.0 ? 1.0 : -1.0, uv.y >= 0.0 ? 1.0 : -1.0);
+        uv = (float2(1.0, 1.0) - abs(float2(d.z, d.x))) * s;
+    }
+    return uv * 0.5 + 0.5;
+}
+
+/// Koordinat oktahedral → arah unit. Kebalikan persis dari yang di atas; dipakai
+/// pemanggang untuk tahu arah mana yang diwakili tiap texel.
+float3 probeOctDecode(float2 uv) {
+    const float2 f = uv * 2.0 - 1.0;
+    float3 d = float3(f.x, 1.0 - abs(f.x) - abs(f.y), f.y);
+    const float t = max(-d.y, 0.0);
+    d.x += d.x >= 0.0 ? -t : t;
+    d.z += d.z >= 0.0 ? -t : t;
+    return normalize(d);
+}
+
+/// Indeks texel peta kedalaman untuk sebuah arah, di dalam peta satu probe.
+uint probeDepthTexel(float3 direction) {
+    const float2 uv = probeOctEncode(direction);
+    const uint2 texel = min(uint2(uv * float(kProbeDepthSize)), uint2(kProbeDepthSize - 1));
+    return texel.y * kProbeDepthSize + texel.x;
+}
+
+/// Indeks texel **pertama** peta kedalaman sebuah probe. Satu texel membawa
+/// pasangan (rata-rata jarak, rata-rata kuadratnya).
+uint probeDepthBase(uint slot, uint3 coordinate) {
+    const uint3 inside = coordinate % kProbeBrickSize;
+    const uint local = (inside.z * kProbeBrickSize + inside.y) * kProbeBrickSize + inside.x;
+    const uint probe = slot * (kProbeBrickSize * kProbeBrickSize * kProbeBrickSize) + local;
+    return probe * (kProbeDepthSize * kProbeDepthSize);
+}
+
+/// Seberapa jauh titik teduh digeser sepanjang normalnya sebelum visibilitasnya
+/// ditanyakan, meter.
+///
+/// **Tanpa geseran ini uji Chebyshev berayun di sekitar ambangnya**, karena
+/// sebuah permukaan berada tepat di batas geometri yang dilihat probe di
+/// dekatnya. Yang keluar bukan oklusi melainkan struktur baru yang mengikuti
+/// kisi — dan diukur, pada `bench.simlevel` jarak 1 m ia membuat visibilitas
+/// **memperburuk** riaknya 12% alih-alih memperbaikinya.
+///
+/// **Tetap dalam meter, bukan pecahan jarak antar-probe**, dan itu diukur juga:
+/// 0,35 × jarak memberi −4% pada 2 m dan −30% pada 1 m, sedangkan 0,15 m tetap
+/// memberi −9% dan −34%. Yang berskala jarak terlalu besar di kisi renggang,
+/// tempat geserannya sendiri memindahkan pertanyaannya ke tempat lain.
+static const float kProbeVisibilityBias = 0.15;
+
+/// Titik teduh yang sudah digeser, untuk ditanyakan ke peta kedalaman.
+float3 probeBiasedPosition(float3 position, float3 normal) {
+    return position + normalize(normal) * kProbeVisibilityBias;
+}
+
+/// Seberapa jauh jawaban ber-visibilitas boleh dipercaya, dari bagian bobot
+/// trilinear yang bertahan.
+///
+/// Satu berarti hampir tidak ada yang ditolak — pakai jawaban ber-visibilitas
+/// apa adanya. Nol berarti hampir seluruhnya ditolak, dan yang benar lalu adalah
+/// rata-rata trilinear biasa: bocor sedikit lebih baik daripada lorong hitam
+/// yang bentuknya mengikuti kisi.
+float probeConfidence(float weightedTotal, float plainTotal) {
+    if (plainTotal <= 1e-6) {
+        return 0.0;
+    }
+    return smoothstep(0.0, kProbeConfidenceFloor, weightedTotal / plainTotal);
+}
+
+/// Bobot visibilitas sebuah probe untuk titik yang dinaunginya — uji Chebyshev.
+///
+/// `distance` jarak dari probe ke titik teduh; `mean` dan `meanSquare` dibaca
+/// dari peta kedalaman probe itu pada arah yang sama.
+///
+/// **Mengembalikan satu ketika titiknya lebih dekat daripada geometri terdekat
+/// pada arah itu**, dan turun ketika ia berada di baliknya. Sebuah probe di
+/// dalam benda pejal punya `mean` mendekati nol ke segala arah, jadi setiap
+/// titik di luar benda itu berada jauh di baliknya — dan bobotnya jatuh ke nol
+/// tanpa satu pun cabang khusus tentang "di dalam".
+/// Berapa bagian bobot trilinear yang harus bertahan sebelum jawaban
+/// ber-visibilitas dipercaya sepenuhnya.
+///
+/// **Ini menjawab keadaan tempat visibilitas kehabisan pilihan.** Sebuah koridor
+/// yang lebih sempit daripada jarak antar-probe menaruh hampir seluruh sudut
+/// selnya di dalam dinding; yang tersisa sesudah penolakan cuma satu-dua probe
+/// terang di luar, dan menormalkan ke sana berarti menyatakan seluruh bobotnya
+/// milik mereka. Diukur di koridor 0,6 m pada kisi 2 m: jawabannya 0,319
+/// sedangkan acuannya 0,129 — dua setengah kali terlalu terang, dan **empat
+/// setengah kali lebih jauh dari acuan** daripada tanpa visibilitas sama sekali.
+///
+/// **Melantai bobot tiap probe sempat menjadi jawabannya, lalu diukur dan
+/// ditinggalkan.** Lantai yang cukup tinggi untuk menyelamatkan koridor (0,40)
+/// memotong perbaikan riak kisi 1 m dari −34% menjadi −10%: ia melemahkan
+/// penolakan di mana-mana demi keadaan yang jarang. Yang di sini hanya bekerja
+/// ketika informasinya memang habis.
+static const float kProbeConfidenceFloor = 0.05;
+
+float probeVisibilityWeight(float distance, float mean, float meanSquare) {
+    if (distance <= mean) {
+        return 1.0;
+    }
+    // Varians dijaga tidak nol: permukaan datar yang seluruh sampelnya menjawab
+    // jarak yang sama menghasilkan varians nol, dan pembagian di sana melompat
+    // dari satu ke nol pada satu texel — yang terlihat sebagai tepi keras yang
+    // mengikuti kisi, bukan sebagai oklusi.
+    const float variance = max(meanSquare - mean * mean, 1e-4);
+    const float delta = distance - mean;
+    const float chebyshev = variance / (variance + delta * delta);
+    // Dipangkatkan tiga supaya peralihannya tidak terlalu landai; angka yang
+    // sama dipakai DDGI, dan yang menggantikannya harus datang dengan gambar.
+    //
+    return chebyshev * chebyshev * chebyshev;
+}

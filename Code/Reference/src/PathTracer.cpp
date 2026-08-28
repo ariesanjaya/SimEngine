@@ -97,6 +97,20 @@ float RadicalInverse(uint32_t bits) {
     return static_cast<float>(bits) * 2.3283064365386963e-10f;
 }
 
+/// Koordinat oktahedral → arah unit. **Cerminan `probeOctDecode` di
+/// `Shaders/probe_grid.slang`**, dan keduanya harus tetap sama: yang di sana
+/// memutuskan texel mana yang dibaca saat menggambar, yang di sini memutuskan
+/// arah mana yang diisi saat memanggang. Dua pemetaan yang berselisih
+/// menghasilkan peta kedalaman yang benar isinya dan salah tempatnya.
+Vec3 OctDecode(const Vec2& uv) {
+    const Vec2 f = uv * 2.0f - 1.0f;
+    Vec3 d(f.x, 1.0f - std::abs(f.x) - std::abs(f.y), f.y);
+    const float t = std::max(-d.y, 0.0f);
+    d.x += d.x >= 0.0f ? -t : t;
+    d.z += d.z >= 0.0f ? -t : t;
+    return glm::normalize(d);
+}
+
 /// Benih yang ditentukan posisi probe, bukan urutan pengerjaannya.
 uint64_t HashProbeSeed(const Vec3& position, uint32_t sample, uint32_t seed) {
     uint64_t hash = 1469598103934665603ull;
@@ -402,6 +416,42 @@ std::array<Vec3, 9> TraceProbeIrradiance(const raycast::RayScene& scene,
         coefficient *= weight;
     }
     return sh;
+}
+
+void TraceProbeVisibility(const raycast::RayScene& scene, const Vec3& position, uint32_t size,
+                          uint32_t samplesPerTexel, float maxDistance,
+                          std::vector<float>& outMoments) {
+    const uint32_t side = std::max(size, 1u);
+    const uint32_t perTexel = std::max(samplesPerTexel, 1u);
+    outMoments.assign(static_cast<std::size_t>(side) * side * 2, 0.0f);
+
+    for (uint32_t y = 0; y < side; ++y) {
+        for (uint32_t x = 0; x < side; ++x) {
+            double sum = 0.0;
+            double sumSquare = 0.0;
+            for (uint32_t s = 0; s < perTexel; ++s) {
+                // Benih dari texel dan nomor cuplikan, bukan dari penghitung
+                // berjalan — alasan yang sama dengan `TraceProbeIrradiance`.
+                Rng rng(HashProbeSeed(position, (y * side + x) * perTexel + s, 0x5EEDu));
+                // Digoyang di dalam texelnya sendiri: satu arah per texel
+                // menjawab satu garis, bukan kerucut yang diwakilinya, dan
+                // sebuah tepi geometri yang jatuh di antara dua arah lalu
+                // hilang seluruhnya.
+                const float u = (static_cast<float>(x) + rng.Uniform()) / static_cast<float>(side);
+                const float v = (static_cast<float>(y) + rng.Uniform()) / static_cast<float>(side);
+                const Vec3 direction = OctDecode(Vec2(u, v));
+
+                const raycast::RayHit hit = raycast::Raycast(scene, position, direction);
+                const float distance = hit.hit ? std::min(hit.distance, maxDistance) : maxDistance;
+                sum += distance;
+                sumSquare += static_cast<double>(distance) * distance;
+            }
+            const auto count = static_cast<double>(perTexel);
+            const std::size_t at = (static_cast<std::size_t>(y) * side + x) * 2;
+            outMoments[at] = static_cast<float>(sum / count);
+            outMoments[at + 1] = static_cast<float>(sumSquare / count);
+        }
+    }
 }
 
 }  // namespace sim::reference
