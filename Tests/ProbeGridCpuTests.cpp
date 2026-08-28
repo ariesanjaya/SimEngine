@@ -231,6 +231,17 @@ TEST_CASE("S3: pemetaan oktahedral sama di shader dan di C++") {
         CHECK(shader.depthTexel_0 == ProbeDepthTexel(direction));
         CHECK(shader.depthTexel_0 < ProbeVolume::kDepthSize * ProbeVolume::kDepthSize);
 
+        // Geseran biasnya ikut diadu: sebuah konstanta yang berbeda di kedua
+        // sisi membuat sisi CPU menanyakan titik yang lain daripada yang
+        // ditanyakan shader — dan yang keluar bukan galat melainkan gambar acuan
+        // yang tidak bisa menilai apa pun.
+        CHECK(shader.bias_0 == doctest::Approx(kProbeVisibilityBias));
+        const Vec3 biased = Vec3(1.0f, 2.0f, 3.0f) +
+                            glm::normalize(direction) * kProbeVisibilityBias;
+        CHECK(shader.biased_0.x == doctest::Approx(biased.x).epsilon(1e-5));
+        CHECK(shader.biased_0.y == doctest::Approx(biased.y).epsilon(1e-5));
+        CHECK(shader.biased_0.z == doctest::Approx(biased.z).epsilon(1e-5));
+
         // Dikodekan lalu didekodekan harus kembali ke arah yang sama. Yang
         // meleset di sini bukan ketelitian melainkan lipatan yang salah tanda,
         // dan itu memindahkan separuh bola ke tempat separuh yang lain.

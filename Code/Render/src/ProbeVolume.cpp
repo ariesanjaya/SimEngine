@@ -342,7 +342,8 @@ float ProbeVisibilityWeight(float distance, float mean, float meanSquare) {
     return chebyshev * chebyshev * chebyshev;
 }
 
-Sh9 SampleProbeVolumeAt(const ProbeVolume& volume, const Vec3& position) {
+Sh9 SampleProbeVolumeAt(const ProbeVolume& volume, const Vec3& position,
+                        const Vec3& normal) {
     if (!volume.HasVisibility()) {
         // Kisi tanpa visibilitas menjawab persis seperti sebelum S3. Itu bukan
         // jalur mundur yang menutupi sesuatu: artefak yang dipanggang sebelum S3
@@ -382,7 +383,10 @@ Sh9 SampleProbeVolumeAt(const ProbeVolume& volume, const Vec3& position) {
 
         // **Arah dari probe ke titiknya, dan jaraknya.** Itulah yang dijawab
         // peta kedalaman: seberapa jauh geometri terdekat pada arah itu.
-        const Vec3 toPoint = position - layout.ProbePosition(probe);
+        const Vec3 biased = glm::length(normal) > 1e-6f
+                                ? position + glm::normalize(normal) * kProbeVisibilityBias
+                                : position;
+        const Vec3 toPoint = biased - layout.ProbePosition(probe);
         const float distance = glm::length(toPoint);
         float visibility = 1.0f;
         if (distance > 1e-5f) {

@@ -37,6 +37,8 @@ struct ProbeVisibilityResult {
     uint depthTexel;
     float visibility;
     uint depthOffset;
+    float3 biased;
+    float bias;
 };
 
 struct ProbeAddressResult {
@@ -80,5 +82,7 @@ void visibilityQueries(uint3 tid : SV_DispatchThreadID) {
     r.depthTexel = probeDepthTexel(q.direction);
     r.visibility = probeVisibilityWeight(q.distance, q.mean, q.meanSquare);
     r.depthOffset = probeDepthBase(3u, uint3(5u, 2u, 7u));
+    r.biased = probeBiasedPosition(float3(1.0, 2.0, 3.0), q.direction);
+    r.bias = kProbeVisibilityBias;
     gVisibilityResults[tid.x] = r;
 }

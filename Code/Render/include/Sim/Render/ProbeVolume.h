@@ -226,6 +226,11 @@ uint32_t ProbeDepthTexel(const Vec3& direction);
 /// tanpa satu pun cabang khusus tentang "di dalam".
 float ProbeVisibilityWeight(float distance, float mean, float meanSquare);
 
+/// Geseran titik teduh sepanjang normalnya sebelum visibilitasnya ditanyakan,
+/// meter. **Harus sama dengan `kProbeVisibilityBias` di
+/// `Shaders/probe_grid.slang`**; ujinya mengadu keduanya.
+inline constexpr float kProbeVisibilityBias = 0.15f;
+
 /// Iradiansi pada sebuah posisi dunia, dengan bobot visibilitas ikut
 /// diperhitungkan bila kisinya membawanya (S3).
 ///
@@ -233,7 +238,13 @@ float ProbeVisibilityWeight(float distance, float mean, float meanSquare);
 /// menjawab pertanyaan yang berbeda: yang lama "apa isi kisi di sini", yang ini
 /// "apa yang diterima permukaan di sini". Yang kedua menuntut tahu di mana
 /// permukaannya, dan itu argumen yang tidak dipunyai yang pertama.
-Sh9 SampleProbeVolumeAt(const ProbeVolume& volume, const Vec3& position);
+///
+/// `normal` menggeser titik yang ditanyakan ke peta kedalaman sejauh
+/// `kProbeVisibilityBias`; nol berarti tanpa geseran — jalur yang benar untuk
+/// pemanggil yang memang tidak punya permukaan, misalnya sebuah probe yang
+/// menanyai tetangganya.
+Sh9 SampleProbeVolumeAt(const ProbeVolume& volume, const Vec3& position,
+                        const Vec3& normal = Vec3(0.0f));
 
 /// Kunci artefak: bentuk kisinya, lingkungan yang mengisinya, dan versi
 /// pemanggangnya. Pola yang sama dengan `IblCacheKey`.

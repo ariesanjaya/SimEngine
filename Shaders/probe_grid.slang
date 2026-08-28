@@ -135,6 +135,26 @@ uint probeDepthBase(uint slot, uint3 coordinate) {
     return probe * (kProbeDepthSize * kProbeDepthSize);
 }
 
+/// Seberapa jauh titik teduh digeser sepanjang normalnya sebelum visibilitasnya
+/// ditanyakan, meter.
+///
+/// **Tanpa geseran ini uji Chebyshev berayun di sekitar ambangnya**, karena
+/// sebuah permukaan berada tepat di batas geometri yang dilihat probe di
+/// dekatnya. Yang keluar bukan oklusi melainkan struktur baru yang mengikuti
+/// kisi — dan diukur, pada `bench.simlevel` jarak 1 m ia membuat visibilitas
+/// **memperburuk** riaknya 12% alih-alih memperbaikinya.
+///
+/// **Tetap dalam meter, bukan pecahan jarak antar-probe**, dan itu diukur juga:
+/// 0,35 × jarak memberi −4% pada 2 m dan −30% pada 1 m, sedangkan 0,15 m tetap
+/// memberi −9% dan −34%. Yang berskala jarak terlalu besar di kisi renggang,
+/// tempat geserannya sendiri memindahkan pertanyaannya ke tempat lain.
+static const float kProbeVisibilityBias = 0.15;
+
+/// Titik teduh yang sudah digeser, untuk ditanyakan ke peta kedalaman.
+float3 probeBiasedPosition(float3 position, float3 normal) {
+    return position + normalize(normal) * kProbeVisibilityBias;
+}
+
 /// Bobot visibilitas sebuah probe untuk titik yang dinaunginya — uji Chebyshev.
 ///
 /// `distance` jarak dari probe ke titik teduh; `mean` dan `meanSquare` dibaca
