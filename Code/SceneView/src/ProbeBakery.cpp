@@ -96,6 +96,9 @@ uint64_t BakeInputKey(std::span<const PickItem> items, const ProbeBakery::Settin
     hash = HashInto(hash, &settings.sunDirection.x, sizeof(float) * 3);
     hash = HashInto(hash, &settings.albedo, sizeof(settings.albedo));
     hash = HashInto(hash, &settings.samplesPerProbe, sizeof(settings.samplesPerProbe));
+    hash = HashInto(hash, &settings.visibilitySamples, sizeof(settings.visibilitySamples));
+    hash = HashInto(hash, &settings.maxVisibilityDistance,
+                    sizeof(settings.maxVisibilityDistance));
     for (const PickItem& item : items) {
         hash = HashInto(hash, item.meshKey.data(), item.meshKey.size());
         hash = HashInto(hash, &item.worldMatrix[0][0], sizeof(float) * 16);
@@ -194,11 +197,14 @@ bool ProbeBakery::Bake(std::span<const PickItem> items, std::function<Vec3(const
 
     const float albedo = settings.albedo;
     const uint32_t samples = std::max(settings.samplesPerProbe, 1u);
+    const uint32_t visibilitySamples = settings.visibilitySamples;
+    const float maxVisibility = settings.maxVisibilityDistance;
     const Vec3 sunIrradiance = settings.sunIrradiance;
     const Vec3 sunDirection = settings.sunDirection;
 
     auto bake = [job, layout, slots = std::move(slots), allocated, albedo, samples, sunIrradiance,
-                 sunDirection, sky = std::move(sky), file]() mutable {
+                 sunDirection, sky = std::move(sky), file, visibilitySamples,
+                 maxVisibility]() mutable {
         reference::TraceSettings trace;
         trace.sky = [sky](const Vec3& direction) { return sky(direction); };
         trace.sunIrradiance = sunIrradiance;
@@ -225,6 +231,12 @@ bool ProbeBakery::Bake(std::span<const PickItem> items, std::function<Vec3(const
         volume->brickSlots = std::move(slots);
         volume->probes.assign(static_cast<std::size_t>(allocated) * kProbesPerBrick,
                               render::Sh9{});
+        if (visibilitySamples > 0) {
+            volume->depth.assign(static_cast<std::size_t>(allocated) * kProbesPerBrick *
+                                     render::ProbeVolume::kDepthFloats,
+                                 0.0f);
+        }
+        std::vector<float> moments;
 
         const glm::uvec3 bricks = layout.BrickCounts();
         constexpr uint32_t kSide = render::ProbeVolumeLayout::kBrickSize;
@@ -243,8 +255,17 @@ bool ProbeBakery::Bake(std::span<const PickItem> items, std::function<Vec3(const
                 const std::array<Vec3, 9> coefficients = reference::TraceProbeIrradiance(
                     job->picks->Scene(), resolve, reference::LightList{}, position, samples,
                     trace);
-                volume->probes[static_cast<std::size_t>(slot) * kProbesPerBrick + local]
-                    .coefficients = coefficients;
+                const std::size_t at = static_cast<std::size_t>(slot) * kProbesPerBrick + local;
+                volume->probes[at].coefficients = coefficients;
+                if (visibilitySamples > 0) {
+                    reference::TraceProbeVisibility(job->picks->Scene(), position,
+                                                    render::ProbeVolume::kDepthSize,
+                                                    visibilitySamples, maxVisibility, moments);
+                    std::copy(moments.begin(), moments.end(),
+                              volume->depth.begin() +
+                                  static_cast<std::ptrdiff_t>(
+                                      at * render::ProbeVolume::kDepthFloats));
+                }
                 job->done.fetch_add(1, std::memory_order_relaxed);
             }
         }

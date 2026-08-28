@@ -16,7 +16,7 @@ constexpr uint64_t kFnvOffset = 1469598103934665603ull;
 /// Dinaikkan setiap kali arti isi berkasnya berubah. Ia bagian dari kunci, jadi
 /// menaikkannya membuat artefak lama tidak pernah terbaca lagi alih-alih
 /// terbaca salah.
-constexpr uint32_t kProbeCacheVersion = 1;
+constexpr uint32_t kProbeCacheVersion = 2;
 
 constexpr char kMagic[4] = {'S', 'P', 'R', 'B'};
 
@@ -33,6 +33,11 @@ struct Header {
     uint32_t brickSize;
     uint64_t brickSlotCount;
     uint64_t probeCount;
+    /// Texel peta kedalaman per sumbu, atau nol bila kisi ini tidak membawa
+    /// visibilitas (S3). Nol adalah keadaan yang sah — artefak yang dipanggang
+    /// sebelum S3 memang tidak punya.
+    uint32_t depthSize;
+    uint32_t reserved;
 };
 
 uint64_t HashInto(uint64_t hash, const void* data, std::size_t length) {
@@ -113,12 +118,18 @@ uint64_t ProbeVolume::StoredBytes() const {
     // slot brick-nya. Menuliskannya sebagai rumus tersendiri di sini adalah
     // rumus kedua yang suatu saat tidak sepakat dengan berkasnya.
     return static_cast<uint64_t>(probes.size()) * sizeof(Sh9) +
-           static_cast<uint64_t>(brickSlots.size()) * sizeof(uint32_t);
+           static_cast<uint64_t>(brickSlots.size()) * sizeof(uint32_t) +
+           static_cast<uint64_t>(depth.size()) * sizeof(float);
 }
 
 uint64_t ProbeVolume::GpuBytes() const {
+    // **Peta kedalaman ikut dihitung sejak S3.** Ia lima kali SH-nya, jadi
+    // melewatkannya berarti panel melaporkan seperlima dari yang dibayar — dan
+    // angka yang salah di panel menyesatkan justru orang yang sedang memutuskan
+    // berapa jarak yang sanggup ia bayar.
     return static_cast<uint64_t>(probes.size()) * 9 * sizeof(Vec4) +
-           static_cast<uint64_t>(brickSlots.size()) * sizeof(uint32_t);
+           static_cast<uint64_t>(brickSlots.size()) * sizeof(uint32_t) +
+           static_cast<uint64_t>(depth.size()) * sizeof(float);
 }
 
 std::vector<uint32_t> AssignProbeBricks(const ProbeVolumeLayout& layout,
@@ -451,12 +462,22 @@ bool WriteProbeVolume(const std::filesystem::path& file, const ProbeVolume& volu
     header.brickSize = ProbeVolumeLayout::kBrickSize;
     header.brickSlotCount = volume.brickSlots.size();
     header.probeCount = volume.probes.size();
+    header.depthSize = volume.HasVisibility() ? ProbeVolume::kDepthSize : 0u;
 
     stream.write(reinterpret_cast<const char*>(&header), sizeof(header));
     stream.write(reinterpret_cast<const char*>(volume.brickSlots.data()),
                  static_cast<std::streamsize>(sizeof(uint32_t) * volume.brickSlots.size()));
     stream.write(reinterpret_cast<const char*>(volume.probes.data()),
                  static_cast<std::streamsize>(sizeof(Sh9) * volume.probes.size()));
+    // **Peta kedalaman ikut ditulis, dan ia sengaja punya medannya sendiri di
+    // header.** Melewatkannya membuat panggangan berikutnya membaca artefak yang
+    // sah tetapi kehilangan visibilitasnya — dan yang terlihat bukan galat
+    // melainkan S3 yang mati diam-diam pada jalan kedua. Itu persis yang terjadi
+    // sebelum baris ini ada, dan yang membongkarnya cuma angka megabyte di log.
+    if (volume.HasVisibility()) {
+        stream.write(reinterpret_cast<const char*>(volume.depth.data()),
+                     static_cast<std::streamsize>(sizeof(float) * volume.depth.size()));
+    }
     stream.close();
     if (!stream) {
         error = "write failed for " + temporary.string();
@@ -526,6 +547,23 @@ bool ReadProbeVolume(const std::filesystem::path& file, ProbeVolume& out, std::s
     volume.probes.resize(static_cast<std::size_t>(header.probeCount));
     stream.read(reinterpret_cast<char*>(volume.probes.data()),
                 static_cast<std::streamsize>(sizeof(Sh9) * volume.probes.size()));
+
+    if (header.depthSize != 0) {
+        // **Ukurannya harus yang dikenal pembacanya, bukan yang disebut
+        // berkasnya.** Sebuah artefak yang dipanggang dengan peta 16×16 punya
+        // tata letak yang lain seluruhnya, dan membacanya sebagai 8×8 tidak
+        // gagal — ia menghasilkan visibilitas yang benar isinya dan salah
+        // tempatnya, yang terlihat sebagai bayangan yang bergeser.
+        if (header.depthSize != ProbeVolume::kDepthSize) {
+            error = "cached probe volume was baked with a different depth map size";
+            return false;
+        }
+        volume.depth.resize(static_cast<std::size_t>(header.probeCount) *
+                            ProbeVolume::kDepthFloats);
+        stream.read(reinterpret_cast<char*>(volume.depth.data()),
+                    static_cast<std::streamsize>(sizeof(float) * volume.depth.size()));
+    }
+
     if (!stream) {
         error = "cached probe volume is shorter than its header promises";
         return false;

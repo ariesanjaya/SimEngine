@@ -126,13 +126,13 @@ uint probeDepthTexel(float3 direction) {
     return texel.y * kProbeDepthSize + texel.x;
 }
 
-/// Indeks float **pertama** peta kedalaman sebuah probe. Dua float per texel:
-/// rata-rata jarak, lalu rata-rata kuadratnya.
+/// Indeks texel **pertama** peta kedalaman sebuah probe. Satu texel membawa
+/// pasangan (rata-rata jarak, rata-rata kuadratnya).
 uint probeDepthBase(uint slot, uint3 coordinate) {
     const uint3 inside = coordinate % kProbeBrickSize;
     const uint local = (inside.z * kProbeBrickSize + inside.y) * kProbeBrickSize + inside.x;
     const uint probe = slot * (kProbeBrickSize * kProbeBrickSize * kProbeBrickSize) + local;
-    return probe * (kProbeDepthSize * kProbeDepthSize) * 2;
+    return probe * (kProbeDepthSize * kProbeDepthSize);
 }
 
 /// Bobot visibilitas sebuah probe untuk titik yang dinaunginya — uji Chebyshev.
