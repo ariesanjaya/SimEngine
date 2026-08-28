@@ -272,6 +272,24 @@ menghentikan Time-of-Day, atau pindah ke `RealTime`. Yang pertama tidak lewat
 perintah — `timeOfDayEnabled` setelan editor, bukan isi level, dan yang tidak
 pernah tertulis ke berkas tidak punya tempat di riwayat undo level.
 
+> **Nadanya netral, dan tinjauan S0 yang memaksanya begitu.** Versi pertama
+> memberi peringatan berwarna dan menyatakan "pantulan dan oklusinya akan datang
+> dari matahari di tempat lain" — kalimat yang **tidak benar hari ini**, karena
+> belum ada pantulan maupun oklusi yang dipanggang. Yang dipanggang
+> `Precomputed` baru lingkungannya, dan iradiansinya dipanggang ulang tiap
+> matahari bergeser: kombinasi itu justru yang dibangun dan diuji B1, dan
+> kriteria terimanya berbunyi "ambient yang ikut berubah saat Time-of-Day
+> menggerakkan matahari".
+>
+> Jadi rencana ini sempat menyuruh editor mengatakan bahwa susunan yang bekerja
+> itu rusak, dan menawarkan pindah ke `RealTime` sebagai perbaikan atas masalah
+> yang belum ada — memindahkan orang dari yang murah ke yang dibayar tiap frame,
+> tanpa alasan.
+>
+> **Tabrakannya nyata, tapi ia datang bersama S2.** Sampai transport dipanggang,
+> yang ditampilkan pemberitahuan bernada biasa yang menyebutkan keduanya masih
+> boleh dan kapan itu berubah. S2 yang menaikkannya menjadi peringatan.
+
 **Panelnya mengatakan apa yang belum dipanggang**, dan itu bukan hiasan:
 `Precomputed` hari ini memanggang lingkungannya dan itu saja. Tingkat yang
 menjanjikan lebih daripada yang diberikannya membuat orang mencari cacat pada
@@ -311,6 +329,11 @@ sesuai angka yang ditampilkan panel, bukan sesuai angka yang harus ditebak.
 terlihat; uji tungku lulus pada kisi seperti ia lulus pada jalur panggang (B2);
 dan pada adegan terbuka iradiansi probe cocok dengan tingkat panggang seri B
 dalam ambang yang ditulis di dokumen ini.
+
+Dan: **pemberitahuan Time-of-Day naik menjadi peringatan di sini.** Sampai
+milestone ini, menggerakkan matahari di level `Precomputed` masih sah — yang
+dipanggang cuma lingkungannya, dan ia mengikuti mataharinya. Sesudahnya tidak
+lagi, dan panelnya harus mengatakan itu dengan nada yang berbeda.
 
 ### S3 — Oklusi arah
 

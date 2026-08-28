@@ -129,12 +129,23 @@ private:
             return;
         }
         ImGui::Separator();
-        ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.94f, 0.72f, 0.35f, 1.0f));
+        // **Nadanya netral, dan itu disengaja: hari ini tidak ada yang salah.**
+        // Yang dipanggang `Precomputed` baru lingkungannya, dan iradiansinya
+        // dipanggang ulang tiap matahari bergeser — kombinasi ini justru yang
+        // dibangun dan diuji B1. Ia berhenti sah begitu transport cahaya ikut
+        // dipanggang di S2.
+        //
+        // Memberi peringatan berwarna sekarang berarti mengatakan sebuah
+        // susunan yang bekerja itu rusak, dan menawarkan "pindah ke RealTime"
+        // sebagai perbaikan atas masalah yang belum ada — memindahkan orang dari
+        // yang murah ke yang dibayar tiap frame, tanpa alasan.
         ImGui::TextWrapped(
-            "Time of Day menggerakkan matahari, dan tingkat Precomputed memanggang "
-            "transport cahayanya dengan andaian matahari yang diam. Pantulan dan oklusinya "
-            "akan datang dari matahari di tempat lain.");
-        ImGui::PopStyleColor();
+            "Time of Day menggerakkan matahari, dan Precomputed dipanggang dengan andaian "
+            "matahari yang diam.");
+        ImGui::TextDisabled(
+            "Hari ini keduanya masih boleh: yang dipanggang baru lingkungannya, dan ia "
+            "ikut mataharinya. Begitu transport cahaya ikut dipanggang, pantulan dan "
+            "oklusinya akan datang dari matahari di tempat lain.");
 
         if (ImGui::Button("Hentikan Time of Day")) {
             // Bukan lewat perintah: `timeOfDayEnabled` setelan editor, bukan isi
@@ -144,6 +155,9 @@ private:
         }
         ImGui::SameLine();
         if (ImGui::Button("Pakai tingkat RealTime")) {
+            // Untuk yang memang menginginkan matahari yang bergerak: RealTime
+            // memang kategori untuk itu, dan memilihnya sekarang menghindari
+            // memanggang sesuatu yang akan dibuang.
             const scene::WorldSettings before = context.world->Settings();
             scene::WorldSettings dynamic = before;
             dynamic.indirect = scene::IndirectLighting::RealTime;
