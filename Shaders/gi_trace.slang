@@ -448,21 +448,6 @@ TieredHit traceTiered(float3 origin, float3 direction, float tMax) {
     return result;
 }
 
-/// Langit cadangan: gradien analitik.
-///
-/// **Nilainya menyalin nilai bawaan `GradientSky` di `Ibl.h`.** Ia dipakai
-/// hanya ketika tidak ada atmosfer — langit dimatikan, atau sumbernya sebuah
-/// HDRI yang belum terikat ke pass ini. Sampai E8.8 ia satu-satunya langit yang
-/// dikenal GI, dan itulah cacatnya: adegan disinari langit yang bukan langit
-/// yang tergambar di belakangnya.
-float3 giSkyGradient(float3 direction) {
-    const float3 zenith = float3(0.18, 0.32, 0.62);
-    const float3 horizon = float3(0.62, 0.66, 0.72);
-    const float3 ground = float3(0.14, 0.13, 0.12);
-    float t = direction.y;
-    return t >= 0.0 ? lerp(horizon, zenith, sqrt(t)) : lerp(horizon, ground, sqrt(-t));
-}
-
 /// Langit yang menyinari adegan, yaitu **langit yang sama dengan yang
 /// tergambar**: LUT sky-view Bruneton, dicuplik dengan parameterisasi yang
 /// sama persis dengan `sky_draw.frag`.
@@ -476,7 +461,17 @@ float3 giSky(float3 direction) {
     }
     float intensity = shadowParams.skyParams.x;
     if (intensity <= 0.0) {
-        return giSkyGradient(direction);
+        // **Tidak ada langit yang bisa dicuplik, jadi tidak ada cahaya dari
+        // langit** — langitnya mati, atau sumbernya sebuah HDRI yang tidak
+        // terikat ke pass ini (keputusan 1 di docs/PLAN-IBL.md).
+        //
+        // Di sini dulu ada gradien analitik yang menyalin nilai bawaan
+        // `GradientSky`, dan komentarnya sendiri menyebutnya cacat: adegan
+        // disinari langit yang bukan langit yang tergambar di belakangnya, tanpa
+        // satu pun galat yang menyebutkannya. Nol tidak menyembunyikan apa pun —
+        // adegan yang tiba-tiba gelap adalah pertanyaan yang diajukan, dan yang
+        // menjawabnya notifikasi di panel World Settings.
+        return float3(0.0);
     }
 
     // Kerangka planet: +Z ke atas dari pusat planet, sementara sumbu atas

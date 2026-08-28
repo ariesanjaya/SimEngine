@@ -88,7 +88,7 @@ public:
             context.history->CloseMergeGroup();
         }
 
-        DrawUnsupportedNotice(context.world->Settings());
+        DrawUnsupportedNotice(context);
         DrawSunExtraction(context);
     }
 
@@ -253,17 +253,105 @@ private:
     /// menyinari adegan memakai langit yang bukan langit yang tergambar — adalah
     /// B6. Yang di sini baru kalimatnya, supaya kombinasi itu tidak sempat
     /// terlihat seolah didukung selama B1–B5 dikerjakan.
-    static void DrawUnsupportedNotice(const scene::WorldSettings& settings) {
-        if (!scene::IsUnsupported(settings)) {
+    static void DrawUnsupportedNotice(EditorContext& context) {
+        const scene::WorldSettings settings = context.world->Settings();
+        const scene::SkyComponent* sky = FindSky(*context.world);
+        // **Dinilai dari adegan, bukan dari renderer.** Syarat renderer punya
+        // satu suku lagi yang tidak terlihat dari sini — LUT atmosfernya harus
+        // berhasil dibuat — jadi pada mesin yang gagal membuatnya, panel ini
+        // mengatakan semuanya baik sementara GI-nya nol. Itu kegagalan sumber
+        // daya yang sudah punya barisnya sendiri di Console, bukan kombinasi
+        // yang salah dipilih pengarang.
+        const bool proceduralSky =
+            sky != nullptr && sky->source == scene::SkySourceKind::Atmosphere;
+
+        const bool contradictory = scene::IsUnsupported(settings);
+        const bool blind = scene::RealTimeHasNoSky(settings, proceduralSky);
+        if (!contradictory && !blind) {
             return;
         }
+
         ImGui::Separator();
         ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.94f, 0.72f, 0.35f, 1.0f));
-        ImGui::TextWrapped(
-            "RealTime + File bukan kombinasi yang didukung. Berkas HDR adalah satu foto "
-            "yang sudah berisi mataharinya, jadi ia latar — bukan cahaya. Pilih Baked "
-            "untuk disinari berkasnya, atau Sky untuk disinari langit yang tergambar.");
+        if (blind) {
+            // **Yang dikatakan apa yang sedang terjadi, bukan apa yang salah
+            // secara abstrak.** Sampai B6, keadaan ini menyinari adegan dengan
+            // gradien analitik yang tidak ada hubungannya dengan langit yang
+            // tergambar; sekarang ia tidak menyinarinya sama sekali. Adegan yang
+            // tiba-tiba gelap tanpa penjelasan adalah cacat yang sama buruknya
+            // dengan adegan yang diam-diam salah warna.
+            ImGui::TextWrapped(
+                "Probe GI mencuplik langit atmosferik, dan level ini tidak punya satu pun. "
+                "Cahaya tak-langsungnya karena itu nol — berkas HDR adalah latar, bukan "
+                "cahaya (keputusan 1 di docs/PLAN-IBL.md).");
+        } else {
+            ImGui::TextWrapped(
+                "RealTime + File bukan kombinasi yang didukung. Berkas HDR adalah satu foto "
+                "yang sudah berisi mataharinya, jadi ia latar — bukan cahaya.");
+        }
         ImGui::PopStyleColor();
+
+        // **Dua jalan keluar, dan keduanya sekali klik.** Sebuah peringatan yang
+        // hanya menyebutkan masalahnya menyerahkan pekerjaannya kembali kepada
+        // yang membacanya — dan yang membacanya belum tentu tahu setelan mana
+        // yang harus digeser.
+        if (ImGui::Button("Pakai tingkat Baked")) {
+            scene::WorldSettings baked = settings;
+            baked.indirect = scene::IndirectLighting::Baked;
+            context.history->CloseMergeGroup();
+            context.history->Execute<SetWorldSettingsCommand>(context.world, settings, baked);
+        }
+        ImGui::SameLine();
+        // **Jalan keluar kedua bergantung pada keadaan mana yang berlaku**, dan
+        // itu bukan kerapian: menawarkan "pakai langit atmosfer" pada level yang
+        // langitnya sudah atmosfer adalah tombol mati, dan yang di sana justru
+        // butuh `environment: Sky` — yang tanpa itu tidak ditawarkan sama
+        // sekali.
+        if (blind) {
+            ImGui::BeginDisabled(sky == nullptr);
+            if (ImGui::Button("Pakai langit atmosfer")) {
+                SwitchSkyToAtmosphere(context);
+            }
+            ImGui::EndDisabled();
+            if (sky == nullptr) {
+                ImGui::TextDisabled("Level ini belum punya langit — tempatkan prefab Sky Dome.");
+            }
+        } else {
+            // `RealTime` + `File`: yang bertentangan maksudnya, bukan langitnya.
+            // Menyinari dari langit menyelesaikannya tanpa melepas GI real-time.
+            if (ImGui::Button("Sinari dengan langit")) {
+                scene::WorldSettings lit = settings;
+                lit.environment = scene::EnvironmentSource::Sky;
+                context.history->CloseMergeGroup();
+                context.history->Execute<SetWorldSettingsCommand>(context.world, settings, lit);
+            }
+        }
+    }
+
+    /// Menukar sumber langit adegan menjadi atmosfer, lewat perintah.
+    static void SwitchSkyToAtmosphere(EditorContext& context) {
+        scene::World& world = *context.world;
+        for (const auto raw : world.Registry().view<scene::SkyComponent>()) {
+            const auto entity = static_cast<scene::Entity>(raw);
+            const auto* component = world.TryGet<scene::SkyComponent>(entity);
+            if (component == nullptr || component->source == scene::SkySourceKind::Atmosphere) {
+                continue;
+            }
+            const scene::ComponentOps* ops = scene::ComponentRegistry::Get().Find("Sky");
+            if (ops == nullptr) {
+                return;
+            }
+            scene::SkyComponent switched = *component;
+            switched.source = scene::SkySourceKind::Atmosphere;
+
+            context.history->CloseMergeGroup();
+            context.history->Execute<SetComponentsCommand>(
+                &world, ops,
+                std::vector<SetComponentsCommand::Item>{
+                    {world.GuidOf(entity), scene::SerializeComponent(*ops->type, component),
+                     scene::SerializeComponent(*ops->type, &switched)}});
+            return;
+        }
     }
 };
 

@@ -448,6 +448,40 @@ TEST_CASE("B0: kombinasi RealTime + File dinyatakan tidak sah") {
     CHECK_FALSE(IsUnsupported(settings));
 }
 
+TEST_CASE("B6: RealTime tanpa langit atmosferik dinyatakan, bukan didiamkan") {
+    // **Dua keadaan yang berbeda, dan keduanya harus punya namanya sendiri.**
+    // `IsUnsupported` soal maksud yang bertentangan — "disinari berkas" sambil
+    // "disinari probe". `RealTimeHasNoSky` soal apa yang benar-benar terjadi
+    // saat digambar: probe GI mencuplik LUT sky-view atmosferik, dan langit HDRI
+    // tidak punya LUT itu.
+    //
+    // Sampai B6 keadaan kedua menyinari adegan dengan gradien analitik yang
+    // tidak ada hubungannya dengan langit yang tergambar. Sekarang ia nol, dan
+    // yang menjelaskannya notifikasi — bukan sebuah gradien yang berpura-pura
+    // menjadi langit.
+    WorldSettings settings;
+    settings.indirect = IndirectLighting::RealTime;
+
+    // Langit atmosferik: probe punya yang bisa dicupliknya.
+    CHECK_FALSE(RealTimeHasNoSky(settings, /*proceduralSky=*/true));
+    // Langit HDRI, atau tidak ada langit sama sekali: tidak punya.
+    CHECK(RealTimeHasNoSky(settings, /*proceduralSky=*/false));
+
+    // Tingkat panggang tidak menyentuh probe, jadi ia tidak peduli langitnya
+    // atmosferik atau bukan — itu justru skenario pra-GI yang B3 layani.
+    settings.indirect = IndirectLighting::Baked;
+    CHECK_FALSE(RealTimeHasNoSky(settings, false));
+    settings.indirect = IndirectLighting::None;
+    CHECK_FALSE(RealTimeHasNoSky(settings, false));
+
+    // Dan keduanya memang bisa menyala bersamaan: RealTime + File di atas
+    // langit HDRI melanggar kedua-duanya sekaligus.
+    settings.indirect = IndirectLighting::RealTime;
+    settings.environment = EnvironmentSource::File;
+    CHECK(IsUnsupported(settings));
+    CHECK(RealTimeHasNoSky(settings, false));
+}
+
 TEST_CASE("B0: WorldSettings terdaftar sebagai tipe, bukan sebagai komponen") {
     // Keduanya disengaja. TypeRegistry yang membuat PropertyGrid merendernya dan
     // serialisasi menulisnya tanpa satu widget pun ditulis tangan;
