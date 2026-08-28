@@ -106,6 +106,9 @@ public:
     /// mereka.
     std::size_t ReadyCount() const { return readyCount_; }
     std::size_t PendingCount() const { return pendingCount_; }
+    /// Berapa yang **masih dimuat** — bagian dari `PendingCount` yang akan
+    /// berubah kalau ditunggu. Sisanya gagal diurai dan tidak akan pernah siap.
+    std::size_t LoadingCount() const { return loadingCount_; }
     const raycast::RayScene& Scene() const { return scene_; }
 
     /// Melupakan BVH sebuah geometri, sehingga `Sync` berikutnya membangunnya
@@ -138,6 +141,7 @@ private:
     bool synced_ = false;
     std::size_t readyCount_ = 0;
     std::size_t pendingCount_ = 0;
+    std::size_t loadingCount_ = 0;
 };
 
 }  // namespace sim::view

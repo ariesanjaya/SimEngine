@@ -666,6 +666,12 @@ int main(int argc, char** argv) {
     // menyusun Sponza sebagai satu kotak pejal, dan yang terukur adalah
     // adegan yang setiap sinar probenya mengenai dinding di jarak nol.
     sceneView.SetMeshSdfBakery(app.Context().meshSdfBakery);
+    // **Geometri CPU-nya, dan itu bukan kemewahan di jalur ukur.** Bentuk yang
+    // lahir di dalam editor — kubus bawaan, whitebox, ubin terrain — hanya bisa
+    // sampai ke jalur sinar lewat adopsi ke cache ini. Tanpa baris ini
+    // panggangan cahaya tidak dihalangi satu pun dari mereka, dan sebuah ruangan
+    // tertutup tetap disinari langit seolah di luar ruangan.
+    sceneView.SetMeshGeometryCache(app.Context().meshGeometry);
     // **Material sungguhan ikut diukur, bukan hanya jalur mundur.**
     //
     // Sampai G5 sambungan ini hanya dipasang `ViewportPanel`, dan SimHeadless

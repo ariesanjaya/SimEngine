@@ -246,7 +246,10 @@ public:
     ///
     /// Null berarti setiap picking memakai jalur kotak batas — keadaan sebelum
     /// R2, dan keadaan yang benar untuk build tanpa cache.
-    void SetMeshGeometryCache(assets::MeshGeometryCache* cache) { picks_.SetCache(cache); }
+    void SetMeshGeometryCache(assets::MeshGeometryCache* cache) {
+        geometry_ = cache;
+        picks_.SetCache(cache);
+    }
 
     /// Berapa benda yang geometrinya masih dimuat. Nol berarti picking sudah
     /// presisi untuk seluruh isi adegan.
@@ -468,6 +471,12 @@ public:
     void BakeItems(std::vector<PickItem>& out) const;
 
 private:
+    /// Menyalin geometri ke cache CPU sekali per versi. Lihat `geometry_`.
+    void AdoptGeometry(const std::string& key, const assets::MeshData& data, uint64_t version);
+
+public:
+
+private:
     /// Satu benda bermesh untuk panggangan, dengan kunci geometrinya dipegang
     /// di sini supaya `PickItem` bisa menunjuk ke dalamnya.
     struct BakeEntry {
@@ -478,6 +487,22 @@ private:
         Vec3 worldMaximum{0.0f};
     };
     std::vector<BakeEntry> bakeEntries_;
+
+    /// Cache geometri CPU, dipegang juga di sini — bukan hanya diteruskan ke
+    /// `picks_`.
+    ///
+    /// **Yang bentuknya lahir di dalam editor harus diadopsi ke sana, dan sampai
+    /// S3 tidak ada satu pun yang melakukannya.** Whitebox, ubin terrain, dan
+    /// kubus bawaan semuanya tidak punya berkas untuk diurai, jadi `Request`
+    /// tidak bisa menemukannya — dan akibatnya bukan picking yang meleset
+    /// melainkan panggangan cahaya yang **tidak dihalangi apa pun**: sebuah
+    /// ruangan yang dibangun dari kubus bawaan tetap disinari langit seolah di
+    /// luar ruangan, tanpa satu pun galat.
+    assets::MeshGeometryCache* geometry_ = nullptr;
+    /// Versi yang terakhir diadopsi per kunci. Tanpa ini `Adopt` menyalin
+    /// seluruh mesh tiap frame — dan ubin terrain adalah puluhan ribu vertex
+    /// dikali enam puluh empat.
+    std::unordered_map<std::string, uint64_t> adopted_;
 
     /// Diindeks nomor entity. Bertahan lintas frame — itu gunanya.
     std::unordered_map<uint64_t, CachedDecal> decals_;

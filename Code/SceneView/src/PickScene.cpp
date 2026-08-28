@@ -61,6 +61,7 @@ void PickScene::Sync(std::span<const PickItem> items) {
 
     readyCount_ = 0;
     pendingCount_ = 0;
+    loadingCount_ = 0;
     covered_.clear();
 
     // **Instance dibuang, geometri dipertahankan.** BVH sebuah mesh tidak
@@ -85,6 +86,14 @@ void PickScene::Sync(std::span<const PickItem> items) {
                     : cache_->Request(std::filesystem::path(item.sourcePath));
             if (ref.state != assets::MeshGeometryState::Ready || ref.data == nullptr) {
                 ++pendingCount_;
+                // **Yang masih dimuat dibedakan dari yang gagal**, dan itu bukan
+                // kerapian: panggangan cahaya harus menunggu yang pertama dan
+                // tidak boleh menunggu yang kedua. Berkas yang tidak bisa diurai
+                // tidak akan pernah siap, dan menunggunya berarti tombol Bake
+                // yang tidak pernah bisa ditekan.
+                if (ref.state == assets::MeshGeometryState::Pending) {
+                    ++loadingCount_;
+                }
                 continue;
             }
 

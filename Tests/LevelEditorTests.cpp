@@ -3,6 +3,7 @@
 #include "TestProcess.h"
 
 #include "Sim/Assets/AssetDatabase.h"
+#include "Sim/Assets/MeshGeometryCache.h"
 #include "Sim/Editor/Command.h"
 #include "Sim/Editor/EditorApp.h"
 #include "Sim/Editor/EditorContext.h"
@@ -2911,4 +2912,56 @@ TEST_CASE("sinar yang menjatuhkan benda melewatkan benda itu sendiri") {
     REQUIRE(hit);
     CHECK(ToEntity(hit.userData) == static_cast<scene::Entity>(2));
     CHECK(hit.position.y == doctest::Approx(0.1f));
+}
+
+// --- Prasyarat S5: bentuk yang lahir di dalam editor ikut menghalangi cahaya --
+
+TEST_CASE("kubus bawaan masuk daftar panggangan, dengan geometri CPU-nya") {
+    // **Cacat yang ini cegah tidak menghasilkan satu pun galat.** Bentuk yang
+    // tidak punya berkas untuk diurai — kubus bawaan, whitebox, ubin terrain —
+    // hanya bisa sampai ke jalur sinar lewat `MeshGeometryCache::Adopt`. Sampai
+    // S3 tidak ada satu pun yang mengadopsinya, dan akibatnya bukan picking yang
+    // meleset melainkan panggangan cahaya yang tidak dihalangi apa pun: sebuah
+    // ruangan tertutup tetap disinari langit seolah di luar ruangan.
+    //
+    // Diukur sesudah diperbaiki, pada ruangan enam-dinding dari kubus bawaan:
+    // luminansi rata-rata 0,2629 menjadi 0,0003 — sepersepuluh persen.
+    scene::World world;
+    Selection selection;
+    assets::MeshGeometryCache geometry;
+
+    const scene::Entity box = MakeBox(world, "Wall", Vec3(0.0f, 1.0f, 0.0f));
+    auto* transform = world.TryGet<scene::TransformComponent>(box);
+    transform->scale = Vec3(8.0f, 0.5f, 8.0f);
+    world.MarkTransformDirty(box);
+
+    SceneView view;
+    view.SetMeshGeometryCache(&geometry);
+    view.Build(world, selection);
+
+    std::vector<view::PickItem> items;
+    view.BakeItems(items);
+    REQUIRE(items.size() == 1);
+    CHECK_FALSE(items[0].meshKey.empty());
+
+    // Kuncinya harus benar-benar menjawab di cache — kunci yang ada tanpa
+    // geometri di baliknya adalah keadaan yang persis sama buruknya dengan tidak
+    // punya kunci sama sekali, dan ia lebih sulit dilihat.
+    const assets::MeshGeometryRef found = geometry.Find(std::string(items[0].meshKey));
+    REQUIRE(found.state == assets::MeshGeometryState::Ready);
+    REQUIRE(found.data != nullptr);
+    CHECK(found.data->TriangleCount() == 12);
+
+    // Dan kotak dunianya harus mengikuti skala entity-nya, bukan kubus satuan:
+    // matriks yang diserahkan sudah menggabungkan pemetaan kotak batasnya, sama
+    // seperti yang dipakai renderer saat menggambar.
+    const Vec3 size = items[0].worldMaximum - items[0].worldMinimum;
+    CHECK(size.x == doctest::Approx(8.0f).epsilon(0.01));
+    CHECK(size.y == doctest::Approx(0.5f).epsilon(0.01));
+    CHECK(size.z == doctest::Approx(8.0f).epsilon(0.01));
+
+    // Yang paling mudah salah: matriksnya sendiri harus memetakan kubus
+    // [-0,5, 0,5] ke tempat bendanya berdiri.
+    const Vec3 centre = Vec3(items[0].worldMatrix * Vec4(0.0f, 0.0f, 0.0f, 1.0f));
+    CHECK(centre.y == doctest::Approx(1.0f).epsilon(0.01));
 }

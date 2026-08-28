@@ -97,6 +97,50 @@ Vec3 ParseFloat3(std::string_view text, const Vec3& fallback) {
     return count == 3 ? Vec3(parsed[0], parsed[1], parsed[2]) : fallback;
 }
 
+/// Kubus satuan yang membentang [-0,5, 0,5], sebagai geometri CPU.
+///
+/// **Cerminan kubus yang digambar renderer untuk `kUnitCubeMesh`**, dan ia harus
+/// tetap sama: yang di sana menggambar, yang di sini menghalangi cahaya. Kubus
+/// yang berbeda ukuran di kedua sisi menghasilkan bayangan panggang yang tidak
+/// sejajar dengan bendanya.
+const assets::MeshData& UnitCubeGeometry() {
+    static const assets::MeshData cube = [] {
+        assets::MeshData data;
+        // Enam muka, empat vertex masing-masing: normal per muka menuntut vertex
+        // yang tidak dibagi antar-muka.
+        const Vec3 faces[6][4] = {
+            {{-0.5f, -0.5f, 0.5f}, {0.5f, -0.5f, 0.5f}, {0.5f, 0.5f, 0.5f}, {-0.5f, 0.5f, 0.5f}},
+            {{0.5f, -0.5f, -0.5f}, {-0.5f, -0.5f, -0.5f}, {-0.5f, 0.5f, -0.5f}, {0.5f, 0.5f, -0.5f}},
+            {{0.5f, -0.5f, 0.5f}, {0.5f, -0.5f, -0.5f}, {0.5f, 0.5f, -0.5f}, {0.5f, 0.5f, 0.5f}},
+            {{-0.5f, -0.5f, -0.5f}, {-0.5f, -0.5f, 0.5f}, {-0.5f, 0.5f, 0.5f}, {-0.5f, 0.5f, -0.5f}},
+            {{-0.5f, 0.5f, 0.5f}, {0.5f, 0.5f, 0.5f}, {0.5f, 0.5f, -0.5f}, {-0.5f, 0.5f, -0.5f}},
+            {{-0.5f, -0.5f, -0.5f}, {0.5f, -0.5f, -0.5f}, {0.5f, -0.5f, 0.5f}, {-0.5f, -0.5f, 0.5f}},
+        };
+        const Vec3 normals[6] = {{0, 0, 1}, {0, 0, -1}, {1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}};
+        for (int face = 0; face < 6; ++face) {
+            const auto base = static_cast<uint32_t>(data.vertices.size());
+            for (int corner = 0; corner < 4; ++corner) {
+                assets::MeshVertex vertex;
+                vertex.position = faces[face][corner];
+                vertex.normal = normals[face];
+                data.vertices.push_back(vertex);
+            }
+            for (const uint32_t offset : {0u, 1u, 2u, 0u, 2u, 3u}) {
+                data.indices.push_back(base + offset);
+            }
+        }
+        data.boundsMin = Vec3(-0.5f);
+        data.boundsMax = Vec3(0.5f);
+        data.parts.push_back(assets::SubMesh{0, static_cast<uint32_t>(data.indices.size()), -1});
+        return data;
+    }();
+    return cube;
+}
+
+/// Kunci geometri kubus bawaan. Bukan jalur berkas, jadi ia hanya bisa datang
+/// lewat `Adopt` — dan itulah yang dilakukan `Build`.
+const char* const kUnitCubeKey = "builtin:unit-cube";
+
 }  // namespace
 
 bool ApplySceneSky(const scene::World& world, render::ViewportDesc& desc) {
@@ -292,6 +336,11 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                             }
                             fromWhitebox = true;
                             meshKey = guid.ToString();
+                            // Whitebox tidak punya berkas untuk diurai, jadi
+                            // geometrinya hanya bisa sampai ke jalur sinar lewat
+                            // sini. Tanpa baris ini ia tidak menghalangi
+                            // panggangan cahaya sama sekali.
+                            AdoptGeometry(meshKey, *built, whiteboxes->Version(guid));
                         }
                     }
                 }
@@ -351,6 +400,36 @@ void SceneView::Build(scene::World& world, const Selection& selection,
             // orang menjaganya tidak terpilih tak sengaja, dan latar statis
             // itulah yang menaungi panggangan — alasan yang sama yang membuat
             // `GeometryBounds` memakai `meshes_` alih-alih `pickables_`.
+            // **Kubus bawaan ikut menghalangi panggangan.** Ia tidak punya
+            // GUID aset dan karena itu tidak punya jalur berkas, jadi sampai
+            // sini ia tidak pernah masuk jalur sinar — dan sebuah ruangan yang
+            // dibangun darinya tetap disinari langit seolah di luar ruangan.
+            //
+            // Matriksnya digabung di sini, bukan diserahkan apa adanya: geometri
+            // kubusnya membentang [-0,5, 0,5], sedangkan instance-nya diskalakan
+            // ke kotak batasnya. Pemetaan yang sama persis dipakai renderer saat
+            // menggambar; dua pemetaan yang berselisih menghasilkan bayangan
+            // panggang yang tidak sejajar dengan bendanya.
+            if (meshKey.empty() && instance.mesh == render::kUnitCubeMesh) {
+                AdoptGeometry(kUnitCubeKey, UnitCubeGeometry(), 1);
+                const Vec3 centre = (instance.boundsMin + instance.boundsMax) * 0.5f;
+                const Vec3 size = glm::max(instance.boundsMax - instance.boundsMin, Vec3(1e-4f));
+                const Mat4 composed =
+                    glm::scale(glm::translate(matrix, centre), size);
+                Vec3 worldMin(std::numeric_limits<float>::max());
+                Vec3 worldMax(std::numeric_limits<float>::lowest());
+                for (int corner = 0; corner < 8; ++corner) {
+                    const Vec3 local((corner & 1) != 0 ? 0.5f : -0.5f,
+                                     (corner & 2) != 0 ? 0.5f : -0.5f,
+                                     (corner & 4) != 0 ? 0.5f : -0.5f);
+                    const Vec3 atCorner = Vec3(composed * Vec4(local, 1.0f));
+                    worldMin = glm::min(worldMin, atCorner);
+                    worldMax = glm::max(worldMax, atCorner);
+                }
+                bakeEntries_.push_back(
+                    BakeEntry{entity, composed, kUnitCubeKey, worldMin, worldMax});
+            }
+
             if (!meshKey.empty()) {
                 // Kedelapan sudutnya ditransformasi: kotak yang diputar tidak
                 // lagi sejajar sumbu, dan mentransformasi min/max saja
@@ -867,6 +946,12 @@ void SceneView::AppendTerrain(const scene::TerrainComponent& component, scene::E
             // kebetulan terakhir diunggah.
             const std::string key = component.terrain.guid.ToString() + "#" +
                                     std::to_string(tx) + "," + std::to_string(ty);
+            // Ubin terrain juga lahir di dalam editor: tidak ada berkas untuk
+            // diurai, jadi geometrinya hanya bisa sampai ke jalur sinar lewat
+            // sini. Tanpa ini terrain tidak menghalangi panggangan cahaya sama
+            // sekali — sebuah lembah tidak menaungi apa pun.
+            AdoptGeometry(key, *data, view.store->TileUpload(component.terrain.guid, tx, ty));
+
             const render::MeshAsset mesh = renderer->AcquireMeshData(
                 key, *data, view.store->TileUpload(component.terrain.guid, tx, ty));
             if (!mesh.loaded) {
@@ -881,6 +966,24 @@ void SceneView::AppendTerrain(const scene::TerrainComponent& component, scene::E
             instance.color = kTerrainColor;
             instance.selected = selected;
             meshes_.push_back(instance);
+
+            // **Masuk daftar panggangan, walaupun tidak masuk daftar pickable.**
+            // Keduanya menjawab pertanyaan yang berbeda: picking terrain punya
+            // jalur heightmap-nya sendiri yang eksak, sedangkan panggangan
+            // cahaya menuntut segitiganya benar-benar ada di jalur sinar.
+            {
+                Vec3 worldMin(std::numeric_limits<float>::max());
+                Vec3 worldMax(std::numeric_limits<float>::lowest());
+                for (int corner = 0; corner < 8; ++corner) {
+                    const Vec3 local((corner & 1) != 0 ? mesh.boundsMax.x : mesh.boundsMin.x,
+                                     (corner & 2) != 0 ? mesh.boundsMax.y : mesh.boundsMin.y,
+                                     (corner & 4) != 0 ? mesh.boundsMax.z : mesh.boundsMin.z);
+                    const Vec3 atCorner = Vec3(matrix * Vec4(local, 1.0f));
+                    worldMin = glm::min(worldMin, atCorner);
+                    worldMax = glm::max(worldMax, atCorner);
+                }
+                bakeEntries_.push_back(BakeEntry{entity, matrix, key, worldMin, worldMax});
+            }
 
             if (pickable) {
                 // Terrain punya jalur pickingnya sendiri lewat heightmap, yang
@@ -1383,6 +1486,25 @@ bool SceneView::BoundsOf(const std::vector<scene::Entity>& entities, Vec3& outMi
     }
     return found;
 }
+
+/// Menyalin geometri ke cache CPU **sekali per versi**.
+///
+/// Tanpa penjaga versi ini `Adopt` menyalin seluruh mesh tiap frame, dan ubin
+/// terrain adalah puluhan ribu vertex dikali enam puluh empat.
+void SceneView::AdoptGeometry(const std::string& key, const assets::MeshData& data,
+                              uint64_t version) {
+    if (geometry_ == nullptr || !data.IsValid()) {
+        return;
+    }
+    const auto found = adopted_.find(key);
+    if (found != adopted_.end() && found->second == version) {
+        return;
+    }
+    adopted_[key] = version;
+    geometry_->Adopt(key, data);
+}
+
+
 
 void SceneView::BakeItems(std::vector<PickItem>& out) const {
     out.clear();

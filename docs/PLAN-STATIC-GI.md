@@ -622,13 +622,8 @@ peningkatan kualitas yang gratis.
    menjalankan graph material di CPU untuk tiap segitiga; sampai ada, yang
    meleset kecerahan pantulannya, bukan keberadaannya.
 
-2. **Kubus bawaan, whitebox, dan terrain tidak menghalangi panggangan.**
-   Ketiganya tidak punya kunci geometri di jalur ray cast mana pun, jadi
-   `PickScene` tidak memuat segitiganya — sebuah ruangan yang dibangun dari
-   kubus bawaan tetap disinari langit seolah di luar ruangan. **Ini disebutkan
-   angkanya, bukan didiamkan:** bakery melaporkan berapa objek yang tidak punya
-   geometri CPU sebelum memanggang. Yang memperbaikinya mengadopsi bentuk
-   bawaan ke `MeshGeometryCache`, dan itu prasyarat S5.
+2. **Kubus bawaan, whitebox, dan terrain tidak menghalangi panggangan** —
+   *diperbaiki sesudah S3; lihat "Prasyarat S5" di bawah.*
 
 3. **Berkas HDR belum bisa memanggang transport** — jalur panel memakai langit
    atmosferik atau hitam. Membacanya di sisi CPU adalah pekerjaan tersendiri.
@@ -750,6 +745,51 @@ Peta kedalaman lima kali SH-nya. `bench.simlevel` pada 2 m: 0,88 MB menjadi
 **4,00 MB**; pada 1 m, 2,93 MB menjadi **13,33 MB**. Waktu panggangnya naik 58%
 pada 2 m (60,4 s → 95,3 s) dan 77% pada 1 m (207,9 s → 367,5 s) dengan 16 sinar
 per texel.
+
+### Prasyarat S5 — bentuk yang lahir di dalam editor ikut menghalangi · ✅
+
+**Cacatnya tidak menghasilkan satu pun galat.** Bentuk yang tidak punya berkas
+untuk diurai — kubus bawaan, whitebox, ubin terrain — hanya bisa sampai ke jalur
+sinar lewat `MeshGeometryCache::Adopt`, dan **tidak ada satu pun pemanggil
+`Adopt` di seluruh basis kode**. `PickScene` sudah menuliskan bahwa ketiganya
+"hanya bisa datang lewat `Adopt`"; yang tidak pernah ditulis adalah yang
+melakukannya.
+
+Akibatnya bukan picking yang meleset — ketiganya punya jalur picking sendiri —
+melainkan panggangan cahaya yang tidak dihalangi apa pun oleh mereka.
+
+Diukur pada ruangan enam-dinding yang dibangun dari kubus bawaan, kamera di
+dalamnya, luminansi rata-rata seluruh gambar:
+
+| | luminansi |
+|---|---:|
+| kisi langit (tingkat seri B) | 0,2629 |
+| transport dipanggang, sebelum | 0,2629 — **tidak berubah sama sekali** |
+| transport dipanggang, sesudah | **0,0003** — sepersepuluh persen |
+
+Baris tengah itu yang paling menjelaskan: sebuah ruangan tertutup rapat
+menerima cahaya langit yang sama persis seperti sebelum transport dipanggang,
+dan tidak ada satu pun angka di layar yang menyebutkannya.
+
+Kubus bawaannya mendapat geometri CPU-nya sendiri, dan matriksnya digabung
+dengan pemetaan kotak batas yang dipakai renderer saat menggambar — dua
+pemetaan yang berselisih menghasilkan bayangan panggang yang tidak sejajar
+dengan bendanya. Whitebox dan ubin terrain diadopsi dari `MeshData` yang memang
+sudah dipegang, sekali per versi: tanpa penjaga versi, `Adopt` menyalin seluruh
+mesh tiap frame, dan ubin terrain adalah puluhan ribu vertex dikali enam puluh
+empat.
+
+**Dan perbaikannya sendiri melahirkan satu regresi, yang terukur.** Geometri
+kubus yang siap seketika membuat `ReadyCount` bukan nol pada frame pertama,
+sehingga panggangan berangkat sebelum satu pun FBX selesai diurai: **179 dari
+241 objek** di `bench.simlevel` tidak ikut menghalangi. `PickScene` sekarang
+membedakan yang masih dimuat dari yang gagal diurai — yang pertama ditunggu,
+yang kedua disebutkan lalu dilewati, karena berkas yang tidak bisa diurai tidak
+akan pernah siap dan menunggunya berarti tombol Bake yang tidak pernah bisa
+ditekan.
+
+Pada `bench.simlevel` yang terbuka, efeknya kecil dan memang seharusnya kecil:
+1,4045 menjadi 1,4021. Yang tajam ada di ruangan tertutup.
 
 ### S4 — UV lightmap: dibangkitkan, diperiksa, dan di-cook
 

@@ -154,13 +154,20 @@ bool ProbeBakery::Bake(std::span<const PickItem> items, std::function<Vec3(const
                  items.size());
         return false;
     }
-    // **Berapa yang tidak ikut disebutkan, bukan didiamkan.** Yang tidak punya
-    // geometri CPU tidak menghalangi apa pun — kubus bawaan, whitebox yang
-    // belum diadopsi, dan terrain semuanya begitu — dan panggangan yang
-    // melewatkannya menghasilkan ruangan yang tetap disinari langit tanpa satu
-    // pun galat. Angka ini yang membuat keadaan itu bisa dilihat.
+    // **Yang masih dimuat ditunggu, bukan dilewati.** Sebelum ada baris ini,
+    // kubus bawaan yang geometrinya diadopsi seketika membuat `ReadyCount`
+    // bukan nol pada frame pertama — dan panggangan berangkat sebelum satu pun
+    // FBX selesai diurai. Terukur di `bench.simlevel`: 179 dari 241 objek tidak
+    // ikut menghalangi, tanpa satu pun galat.
+    if (job->picks->LoadingCount() > 0) {
+        SIM_INFO("Bake", "waiting for {} of {} objects to finish loading before baking",
+                 job->picks->LoadingCount(), items.size());
+        return false;
+    }
+    // Yang gagal diurai tidak akan pernah siap, jadi menunggunya berarti tombol
+    // Bake yang tidak pernah bisa ditekan. Ia disebutkan lalu dilewati.
     if (job->picks->PendingCount() > 0) {
-        SIM_WARN("Bake", "{} of {} objects have no CPU geometry and will not occlude the bake",
+        SIM_WARN("Bake", "{} of {} objects could not be loaded and will not occlude the bake",
                  job->picks->PendingCount(), items.size());
     }
 
