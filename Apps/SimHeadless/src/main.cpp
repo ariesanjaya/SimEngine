@@ -20,6 +20,7 @@
 #include "Sim/Editor/AiTools.h"
 #include "Sim/Editor/EditorApp.h"
 #include "Sim/Editor/EditorContext.h"
+#include "Sim/SceneView/ProbeBakery.h"
 #include "Sim/SceneView/SceneView.h"
 #include "Sim/SceneView/Selection.h"
 #include "Sim/ImageIO/ImageIO.h"
@@ -118,6 +119,7 @@ void PrintUsage() {
         "  --bench-furnace               uji tungku: langit seragam 1, albedo 1, tanpa matahari\n"
         "  --bench-probe-spacing <m>     paksa jarak kisi probe; 0 mematikan kisinya (S1)\n"
         "  --bench-probe-debug           isi probe dengan papan catur; kontrol positif (S1)\n"
+        "  --bench-probe-bake <spp>      panggang transport ke kisi probe lalu pakai (S2)\n"
         "  --dump-mesh <file> --dump-out <json>  material dan ruas sebuah berkas mesh\n"
         "  --dump-fbx-material <fbx>     setiap properti tiap material, apa adanya\n"
         "  --dump-uv <bin>               posisi+UV tiap titik, float32 x5\n"
@@ -836,6 +838,7 @@ int main(int argc, char** argv) {
         // diminta" tidak lagi menjawab pertanyaannya.
         bool giEffective = false;
         bool probeDebugPattern = false;
+        uint32_t probeBakeSamples = 0;
         for (int at = 1; at < argc; ++at) {
             if (argv[at] == nullptr) {
                 continue;
@@ -857,6 +860,8 @@ int main(int argc, char** argv) {
                 fixedExposure = true;
             } else if (flag == "--bench-probe-debug") {
                 probeDebugPattern = true;
+            } else if (flag == "--bench-probe-bake") {
+                probeBakeSamples = 128;
             } else if (flag == "--bench-furnace") {
                 // Uji tungku, kriteria selesai M4.
                 //
@@ -885,6 +890,12 @@ int main(int argc, char** argv) {
         // seluruh bayangan ke nol, dan dua adegan yang berbeda seratus kali di
         // sana tetap terlihat sama hitamnya. Menurunkan EV mengangkat bayangan
         // itu ke rentang yang masih punya angka.
+        if (const std::string_view value = FlagValue(argc, argv, "--bench-probe-bake");
+            !value.empty()) {
+            probeBakeSamples = static_cast<uint32_t>(std::strtoul(std::string(value).c_str(),
+                                                                  nullptr, 10));
+        }
+
         if (const std::string_view value = FlagValue(argc, argv, "--bench-ev"); !value.empty()) {
             manualEv = std::strtof(std::string(value).c_str(), nullptr);
             fixedExposure = true;
@@ -1020,6 +1031,7 @@ int main(int argc, char** argv) {
         SampleTable cpu;
         uint64_t lastSerial = 0;
         bool haveBounds = false;
+        bool probeBaked = false;
         Vec3 boundsMin(0.0f);
         Vec3 boundsMax(0.0f);
         uint32_t gpuSamples = 0;
@@ -1135,6 +1147,62 @@ int main(int argc, char** argv) {
             sceneView.Build(*app.Context().world, selection, app.Context().assets, renderer.get(),
                             app.Context().animation, app.Context().builtinAssets,
                             app.Context().whiteboxes);
+
+#if SIM_WITH_PROBE_BAKE
+            // **Panggangan transport dijalankan sekali, sebelum frame pertama
+            // yang diukur.** Ia menelusuri puluhan ribu jalur penuh; menaruhnya
+            // di dalam lintasan berarti mengukur pemanggangnya, bukan
+            // penggambarnya.
+            // **Dicoba tiap frame sampai berhasil, bukan sekali di frame
+            // pertama.** Geometri CPU dimuat asinkron; di frame pertama belum
+            // ada satu pun mesh yang siap, dan panggangan yang menyerah di sana
+            // memanggang dunia kosong — yang keluar bukan galat melainkan kisi
+            // yang menjawab langit dari mana pun.
+            if (probeBakeSamples > 0 && !probeBaked) {
+                Vec3 bakeMin;
+                Vec3 bakeMax;
+                if (sceneView.GeometryBounds(bakeMin, bakeMax)) {
+                    view::ProbeBakery bakery(&tasks);
+                    bakery.SetCache(app.Context().meshGeometry);
+                    view::ProbeBakery::Settings bakeSettings;
+                    bakeSettings.layout = render::MakeProbeLayout(
+                        bakeMin, bakeMax,
+                        probeSpacingOverride.value_or(2.0f) > 0.0f
+                            ? probeSpacingOverride.value_or(2.0f)
+                            : 2.0f);
+                    bakeSettings.samplesPerProbe = probeBakeSamples;
+                    render::AtmosphereSky atmosphere;
+                    // Langit adegan dibaca dari komponennya, bukan dari `desc`:
+                    // `desc` baru disusun di bawah, per frame.
+                    atmosphere.intensity = 20.0f;
+                    atmosphere.cameraHeightKm = 0.5f;
+                    atmosphere.sunDirection = Vec3(0.0f, 1.0f, 0.0f);
+                    atmosphere.Prepare();
+                    std::vector<view::PickItem> items;
+                    sceneView.BakeItems(items);
+                    const auto started = std::chrono::steady_clock::now();
+                    if (bakery.Bake(items,
+                                    [atmosphere](const Vec3& direction) {
+                                        return atmosphere.Sample(direction);
+                                    },
+                                    bakeSettings)) {
+                        tasks.WaitIdle();
+                        probeBaked = true;
+                        if (std::shared_ptr<const render::ProbeVolume> volume = bakery.Take()) {
+                            const auto elapsed = std::chrono::duration<double>(
+                                std::chrono::steady_clock::now() - started);
+                            SIM_INFO("Bench",
+                                     "probe bake: {} probes at {} spp in {:.2f} s ({:.2f} MB)",
+                                     volume->probes.size(), probeBakeSamples, elapsed.count(),
+                                     static_cast<double>(volume->GpuBytes()) / (1024.0 * 1024.0));
+                            renderer->SetProbeVolume(std::move(volume));
+                        } else {
+                            SIM_WARN("Bench", "probe bake produced nothing");
+                        }
+                    }
+                }
+            }
+#endif
 
             if (!haveBounds) {
                 haveBounds = SceneBounds(sceneView.Scene(), boundsMin, boundsMax);

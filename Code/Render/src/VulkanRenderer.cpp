@@ -6048,8 +6048,92 @@ private:
     /// batas adegan digenapkan ke jarak antar-probe sebelum dibandingkan,
     /// sehingga satu objek yang bergeser sedikit tidak membuat kisinya —
     /// dan seluruh unggahannya — dibangun ulang setiap frame.
+    void SetProbeVolume(std::shared_ptr<const ProbeVolume> volume) override {
+        if (bakedProbes_ == volume) {
+            return;
+        }
+        bakedProbes_ = std::move(volume);
+        // Bentuknya dipaksa dianggap berubah, supaya isian dan unggahannya
+        // dikerjakan ulang: kisi panggang boleh saja punya tata letak yang sama
+        // persis dengan kisi langit yang sedang terpasang, dan yang berbeda
+        // cuma isinya.
+        probeLayout_ = ProbeVolumeLayout{};
+        if (bakedProbes_ != nullptr && bakedProbes_->IsValid()) {
+            SIM_INFO("Render", "baked probe volume adopted — {} bricks, {:.1f} MB on the GPU",
+                     bakedProbes_->AllocatedBrickCount(),
+                     static_cast<double>(bakedProbes_->GpuBytes()) / (1024.0 * 1024.0));
+        }
+    }
+
     void UpdateProbeGrid(const ViewportDesc& desc, const ViewportScene& scene,
                          InstanceSlot& slot, ShadowUniforms& uniforms) {
+        // **Kisi panggang menang bila ada, dan bentuknya datang dari kisi itu
+        // sendiri.** Menghitung ulang tata letaknya dari batas adegan berarti
+        // membaca artefak yang dipanggang untuk kisi lain — dan yang keluar
+        // bukan galat melainkan cahaya tak-langsung yang bergeser sejauh selisih
+        // kedua titik asalnya.
+        if (bakedProbes_ != nullptr && bakedProbes_->IsValid()) {
+            UploadBakedProbes(*bakedProbes_, slot, uniforms);
+            return;
+        }
+        UpdateSkyProbeGrid(desc, scene, slot, uniforms);
+    }
+
+    /// Mengunggah kisi yang sudah dipanggang apa adanya.
+    ///
+    /// Isinya sudah berada di **ruang dunia** — transportnya ditelusuri di sana —
+    /// jadi putaran lingkungan tidak boleh diterapkan lagi saat membacanya.
+    /// Itulah yang dikatakan `kProbeContentWorld` kepada shader.
+    void UploadBakedProbes(const ProbeVolume& volume, InstanceSlot& slot,
+                           ShadowUniforms& uniforms) {
+        const ProbeVolumeLayout& layout = volume.layout;
+        const bool shapeUnchanged = probeLayout_.counts == layout.counts &&
+                                    std::abs(probeLayout_.spacing - layout.spacing) < 1e-4f &&
+                                    glm::all(glm::lessThan(
+                                        glm::abs(probeLayout_.origin - layout.origin), Vec3(1e-3f)));
+        if (!shapeUnchanged) {
+            probeLayout_ = layout;
+            probeBrickUpload_ = volume.brickSlots;
+            probeUpload_.resize(volume.probes.size() * 9);
+            for (std::size_t probe = 0; probe < volume.probes.size(); ++probe) {
+                for (std::size_t coefficient = 0; coefficient < 9; ++coefficient) {
+                    probeUpload_[probe * 9 + coefficient] =
+                        Vec4(volume.probes[probe].coefficients[coefficient], 0.0f);
+                }
+            }
+            probeDebugFilled_ = false;
+            ++probeContentRevision_;
+        }
+
+        if (slot.probeRevision != probeContentRevision_) {
+            const VkDeviceSize shBytes = sizeof(Vec4) * probeUpload_.size();
+            const VkDeviceSize brickBytes = sizeof(uint32_t) * probeBrickUpload_.size();
+            const uint64_t beforeSh = slot.probeShBuffer.Generation();
+            const uint64_t beforeBricks = slot.probeBrickBuffer.Generation();
+            if (!slot.probeShBuffer.Reserve(shBytes) ||
+                !slot.probeBrickBuffer.Reserve(brickBytes) ||
+                !slot.probeShBuffer.Write(probeUpload_.data(), shBytes) ||
+                !slot.probeBrickBuffer.Write(probeBrickUpload_.data(), brickBytes)) {
+                SIM_WARN("Render", "cannot upload {} baked probes", volume.probes.size());
+                uniforms.probeCounts = Vec4(0.0f);
+                uniforms.probeOrigin = Vec4(0.0f);
+                return;
+            }
+            if (slot.probeShBuffer.Generation() != beforeSh ||
+                slot.probeBrickBuffer.Generation() != beforeBricks) {
+                WriteProbeDescriptors(slot);
+            }
+            slot.probeRevision = probeContentRevision_;
+        }
+
+        uniforms.probeOrigin = Vec4(layout.origin, layout.spacing);
+        uniforms.probeCounts =
+            Vec4(static_cast<float>(layout.counts.x), static_cast<float>(layout.counts.y),
+                 static_cast<float>(layout.counts.z), kProbeContentWorld);
+    }
+
+    void UpdateSkyProbeGrid(const ViewportDesc& desc, const ViewportScene& scene,
+                            InstanceSlot& slot, ShadowUniforms& uniforms) {
         if (!(desc.probeSpacing > 0.0f) || scene.meshes.empty()) {
             // Nol berarti tidak ada kisi, dan permukaan kembali memakai SH
             // panggang yang berlaku sama di seluruh adegan. Buffernya tetap
@@ -6693,6 +6777,9 @@ private:
     /// seperti staging di atas.
     std::vector<ProbeOccupancy> probeOccupancy_;
     uint32_t probeAllocatedBricks_ = 0;
+    /// Kisi hasil panggangan transport, bila ada. Dimiliki bakery di sisi
+    /// editor; renderer hanya membaca.
+    std::shared_ptr<const ProbeVolume> bakedProbes_;
     /// SH yang sedang berada di dalam `probeUpload_`. Dibandingkan supaya isian
     /// ulangnya tidak terjadi setiap frame; lihat pengukurannya di sana.
     std::array<Vec3, 9> probeUploadedSh_{};
@@ -6796,6 +6883,10 @@ private:
     /// Nilai `probeCounts.w` untuk isi yang datang langsung dari lingkungan.
     /// S2 menggantinya dengan 2 begitu probe diisi penelusuran ruang dunia.
     static constexpr float kProbeContentEnvironment = 1.0f;
+    /// Nilai `probeCounts.w` untuk isi yang sudah berada di ruang dunia — kisi
+    /// yang transportnya ditelusuri (S2). Putaran lingkungan tidak diterapkan
+    /// lagi saat membacanya; ia sudah ikut terpanggang di dalamnya.
+    static constexpr float kProbeContentWorld = 2.0f;
 
     static constexpr float kBounceAlbedo = 0.5f;
     /// Anggaran langkah lapis screen-space. Rencana GI menyebut 16, dan angka

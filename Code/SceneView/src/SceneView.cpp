@@ -196,6 +196,7 @@ void SceneView::Build(scene::World& world, const Selection& selection,
     lines_.clear();
     icons_.clear();
     pickables_.clear();
+    bakeEntries_.clear();
 
     // view<> menghasilkan entt::entity, sedangkan scene::Entity adalah enum
     // tersendiri supaya tipe entity kita tidak otomatis tertukar dengan tipe
@@ -344,6 +345,15 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                 }
             }
             meshes_.push_back(instance);
+
+            // Daftar untuk panggangan cahaya statis (S2): **seluruh geometri
+            // bermesh, termasuk yang dikunci.** Mengunci latar statis adalah cara
+            // orang menjaganya tidak terpilih tak sengaja, dan latar statis
+            // itulah yang menaungi panggangan — alasan yang sama yang membuat
+            // `GeometryBounds` memakai `meshes_` alih-alih `pickables_`.
+            if (!meshKey.empty()) {
+                bakeEntries_.push_back(BakeEntry{entity, matrix, meshKey});
+            }
 
             if (pickable) {
                 pickables_.push_back(Pickable{entity, matrix, instance.boundsMin,
@@ -1357,6 +1367,27 @@ bool SceneView::BoundsOf(const std::vector<scene::Entity>& entities, Vec3& outMi
         found = true;
     }
     return found;
+}
+
+void SceneView::BakeItems(std::vector<PickItem>& out) const {
+    out.clear();
+    out.reserve(bakeEntries_.size());
+    for (const BakeEntry& entry : bakeEntries_) {
+        PickItem item;
+        item.entity = entry.entity;
+        item.worldMatrix = entry.worldMatrix;
+        // View ke dalam `bakeEntries_`, yang tidak berubah sampai `Build`
+        // berikutnya. Pemanggil karena itu harus memakai daftarnya di dalam
+        // frame yang sama — aturan yang sama seperti `Icons()` dan `Scene()`.
+        item.meshKey = entry.meshKey;
+        // Kunci mesh impor **adalah** jalur berkasnya; whitebox memakai GUID,
+        // yang bukan jalur dan karena itu tidak punya sumber untuk dimuat.
+        if (entry.meshKey.find('/') != std::string::npos ||
+            entry.meshKey.find('\\') != std::string::npos) {
+            item.sourcePath = entry.meshKey;
+        }
+        out.push_back(item);
+    }
 }
 
 bool SceneView::GeometryBounds(Vec3& outMin, Vec3& outMax) const {

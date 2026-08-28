@@ -1,5 +1,7 @@
 #pragma once
 
+#include "Sim/Render/ProbeVolume.h"
+#include "Sim/SceneView/ProbeBakery.h"
 #include "Sim/SceneView/Selection.h"
 #include "Sim/SceneView/TerrainStore.h"
 #include "Sim/SceneView/WhiteboxStore.h"
@@ -131,6 +133,17 @@ struct EditorContext {
     /// renderer karena yang membakenya OpenVDB — pengondisi aset yang tidak
     /// pernah ikut ke jalur yang dikirim ke pemain.
     assets::MeshSdfBakery* meshSdfBakery = nullptr;
+    /// Panggangan cahaya statis: transport ditelusuri path tracer acuan ke
+    /// dalam kisi probe (S2 di docs/PLAN-STATIC-GI.md).
+    ///
+    /// **Null bila editor dibangun tanpa slangc** — `Sim::Reference` dilewati di
+    /// sana, dan model shading path tracer-nya dibangkitkan darinya. Panel yang
+    /// memakainya wajib memeriksa, aturan yang sama dengan runtime Lua.
+    view::ProbeBakery* probeBakery = nullptr;
+    /// Kisi yang sudah dipanggang dan sedang dipakai, atau null. Dipegang di
+    /// sini supaya panel bisa melaporkannya dan viewport bisa memasangnya ke
+    /// renderer — keduanya melihat kisi yang sama.
+    std::shared_ptr<const render::ProbeVolume> probeVolume;
     /// Salinan CPU geometri mesh, untuk picking presisi dan query authoring.
     /// Null berarti picking kembali ke jalur kotak batas.
     assets::MeshGeometryCache* meshGeometry = nullptr;
@@ -295,6 +308,16 @@ struct EditorContext {
         Vec3 maximum{0.0f};
         bool valid = false;
     } sceneBounds;
+
+    /// Geometri yang menaungi panggangan, seperti yang dikumpulkan viewport
+    /// frame ini (S2).
+    ///
+    /// **String di dalamnya menunjuk ke penyimpanan `SceneView`**, yang sah
+    /// sampai `Build` berikutnya — jadi yang memakainya harus memakainya di
+    /// dalam frame yang sama. Itu cukup: yang memakainya tombol Bake, dan
+    /// `ProbeBakery::Bake` menyalin geometrinya ke `PickScene` sebelum
+    /// mengembalikan kendali.
+    std::vector<view::PickItem> bakeItems;
 
     /// Awan volumetrik. Terpisah dari `sky` karena biayanya berbeda satu orde,
     /// dan karena itu sakelarnya perlu berdiri sendiri.

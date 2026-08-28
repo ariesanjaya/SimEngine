@@ -117,6 +117,14 @@ bool EditorApp::Initialize(const Config& config) {
                                                             config.tasks,
                                                             assets::MeshSdfSettings{});
     context_.meshSdfBakery = meshSdfBakery_.get();
+#if SIM_WITH_PROBE_BAKE
+    // Ikut `TaskPool` dengan alasan yang sama seperti kedua bakery di atas, dan
+    // satu alasan yang lebih tajam: sebuah kisi probe adalah puluhan ribu
+    // penelusuran jalur penuh, dan itu detik sampai menit — bukan sesuatu yang
+    // boleh dikerjakan di antara dua frame.
+    probeBakery_ = std::make_unique<view::ProbeBakery>(config.tasks);
+    context_.probeBakery = probeBakery_.get();
+#endif
     // Ikut `TaskPool`, dengan alasan yang sama seperti bake SDF di atasnya:
     // mengurai satu FBX memakan ratusan milidetik, dan ratusan milidetik di
     // dalam penanganan klik adalah editor yang membeku tepat saat seseorang

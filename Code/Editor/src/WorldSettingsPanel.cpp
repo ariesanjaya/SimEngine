@@ -12,6 +12,7 @@
 // World Settings berarti satu baris di pendaftaran tipe — panel ini tidak perlu
 // disentuh sama sekali.
 
+#include "Sim/Core/Log.h"
 #include "Sim/Editor/Command.h"
 #include "Sim/Editor/Icons.h"
 #include "Sim/Editor/Panel.h"
@@ -22,6 +23,7 @@
 #include "Sim/Reflect/TypeRegistry.h"
 #include "Sim/Render/Ibl.h"
 #include "Sim/Render/ProbeVolume.h"
+#include "Sim/SceneView/ProbeBakery.h"
 #include "Sim/Render/TimeOfDay.h"
 #include "Sim/SceneView/SceneView.h"
 #include "Sim/Scene/World.h"
@@ -31,6 +33,7 @@
 
 #include <imgui.h>
 
+#include <functional>
 #include <string>
 #include <vector>
 
@@ -130,23 +133,35 @@ private:
             return;
         }
         ImGui::Separator();
-        // **Nadanya netral, dan itu disengaja: hari ini tidak ada yang salah.**
-        // Yang dipanggang `Precomputed` baru lingkungannya, dan iradiansinya
-        // dipanggang ulang tiap matahari bergeser — kombinasi ini justru yang
-        // dibangun dan diuji B1. Ia berhenti sah begitu transport cahaya ikut
-        // dipanggang di S2.
+        // **Nadanya bergantung pada apa yang benar-benar sudah dipanggang, bukan
+        // pada tingkat yang dipilih.** Selama yang dipanggang cuma lingkungannya,
+        // iradiansinya ikut bergeser tiap matahari bergerak — kombinasi ini
+        // justru yang dibangun dan diuji B1, dan memberi peringatan berwarna di
+        // sana berarti mengatakan sebuah susunan yang bekerja itu rusak.
         //
-        // Memberi peringatan berwarna sekarang berarti mengatakan sebuah
-        // susunan yang bekerja itu rusak, dan menawarkan "pindah ke RealTime"
-        // sebagai perbaikan atas masalah yang belum ada — memindahkan orang dari
-        // yang murah ke yang dibayar tiap frame, tanpa alasan.
-        ImGui::TextWrapped(
-            "Time of Day menggerakkan matahari, dan Precomputed dipanggang dengan andaian "
-            "matahari yang diam.");
-        ImGui::TextDisabled(
-            "Hari ini keduanya masih boleh: yang dipanggang baru lingkungannya, dan ia "
-            "ikut mataharinya. Begitu transport cahaya ikut dipanggang, pantulan dan "
-            "oklusinya akan datang dari matahari di tempat lain.");
+        // Begitu ada kisi yang transportnya ditelusuri (S2), andaian yang
+        // menopangnya patah: pantulan dan oklusinya terpanggang pada posisi
+        // matahari saat memanggang, dan menggerakkannya membuat bayangan
+        // langsung berjalan sementara bayangan tak-langsungnya diam. Tidak ada
+        // satu pun galat yang menyebutkannya.
+        const bool transportBaked = context.probeVolume != nullptr;
+        if (transportBaked) {
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+                               "Time of Day menggerakkan matahari, dan transport cahaya "
+                               "adegan ini sudah dipanggang.");
+            ImGui::TextWrapped(
+                "Pantulan dan oklusinya terpanggang pada posisi matahari saat memanggang. "
+                "Menggerakkannya membuat bayangan langsung berjalan sementara bayangan "
+                "tak-langsungnya diam — panggang ulang, atau hentikan Time of Day.");
+        } else {
+            ImGui::TextWrapped(
+                "Time of Day menggerakkan matahari, dan Precomputed dipanggang dengan andaian "
+                "matahari yang diam.");
+            ImGui::TextDisabled(
+                "Selama yang dipanggang baru lingkungannya, keduanya masih boleh: ia ikut "
+                "mataharinya. Begitu transport cahaya ikut dipanggang, pantulan dan "
+                "oklusinya akan datang dari matahari di tempat lain.");
+        }
 
         if (ImGui::Button("Hentikan Time of Day")) {
             // Bukan lewat perintah: `timeOfDayEnabled` setelan editor, bukan isi
@@ -190,7 +205,118 @@ private:
         ImGui::TextDisabled("Sampai itu ada, langit berlaku sama di ruang tertutup.");
 
         DrawProbeGrid(context);
+        DrawProbeBake(context);
     }
+
+    /// Tombol memanggang transport cahaya statis, beserta kemajuannya (S2).
+    ///
+    /// **Kemajuannya ditampilkan, dan itu bukan hiasan.** Satu kisi probe adalah
+    /// puluhan ribu penelusuran jalur penuh; panggangan yang memakan puluhan
+    /// detik tanpa satu angka pun terbaca sebagai editor yang menggantung, dan
+    /// yang melihatnya akan menutupnya.
+    static void DrawProbeBake(EditorContext& context) {
+#if SIM_WITH_PROBE_BAKE
+        if (context.world->Settings().indirect != scene::IndirectLighting::Precomputed) {
+            return;
+        }
+        if (context.probeBakery == nullptr) {
+            // Disebutkan, bukan didiamkan: tombol yang hilang tanpa penjelasan
+            // terbaca sebagai fitur yang belum ada, bukan sebagai build yang
+            // dibuat tanpa alatnya.
+            ImGui::TextDisabled("Panggangan tidak tersedia: editor ini dibangun tanpa slangc.");
+            return;
+        }
+
+        ImGui::Separator();
+        if (context.probeBakery->Running()) {
+            ImGui::ProgressBar(context.probeBakery->Progress());
+            ImGui::TextDisabled("%s", context.probeBakery->Status().c_str());
+            return;
+        }
+
+        const bool ready = context.sceneBounds.valid && !context.bakeItems.empty();
+        ImGui::BeginDisabled(!ready);
+        if (ImGui::Button("Panggang Cahaya Statis")) {
+            StartProbeBake(context);
+        }
+        ImGui::EndDisabled();
+        if (!ready) {
+            ImGui::TextDisabled("Menunggu geometri adegan.");
+        } else if (context.probeVolume != nullptr) {
+            ImGui::TextDisabled("Terpasang: %u brick, %.1f MB di GPU",
+                                context.probeVolume->AllocatedBrickCount(),
+                                static_cast<double>(context.probeVolume->GpuBytes()) /
+                                    (1024.0 * 1024.0));
+        } else {
+            ImGui::TextDisabled("Belum dipanggang — langit berlaku sama di ruang tertutup.");
+        }
+        if (!context.probeBakery->Status().empty() && !context.probeBakery->Running()) {
+            ImGui::TextDisabled("%s", context.probeBakery->Status().c_str());
+        }
+#else
+        (void)context;
+#endif
+    }
+
+#if SIM_WITH_PROBE_BAKE
+    /// Menyusun masukan panggangan dari adegan, lalu memulainya.
+    static void StartProbeBake(EditorContext& context) {
+        const scene::WorldSettings& settings = context.world->Settings();
+        const render::ProbeVolumeLayout layout = render::MakeProbeLayout(
+            context.sceneBounds.minimum, context.sceneBounds.maximum,
+            scene::ProbeSpacingOf(settings));
+
+        // **Langitnya disalin ke dalam lambda, bukan dirujuk.** Panggangan
+        // berjalan di `TaskPool` dan bisa hidup lebih lama daripada level yang
+        // memulainya; sebuah lambda yang menangkap pointer ke `SkyComponent`
+        // akan membaca memori yang sudah dibebaskan begitu levelnya ditutup di
+        // tengah panggangan — dan yang keluar bukan galat melainkan kisi berisi
+        // sampah.
+        const scene::SkyComponent* sky = FindSky(*context.world);
+        Vec3 sunDirection(0.0f, -1.0f, 0.0f);
+        Vec3 sunIrradiance(0.0f);
+        const scene::Entity sun = FindDirectionalLight(*context.world);
+        if (sun != scene::kNullEntity) {
+            const auto* light = context.world->TryGet<scene::LightComponent>(sun);
+            const Mat4 matrix = context.world->WorldMatrix(sun);
+            // Lampu directional menyinari sepanjang sumbu -Z lokalnya, konvensi
+            // yang sama dengan renderer.
+            sunDirection = glm::normalize(-Vec3(matrix[2]));
+            if (light != nullptr) {
+                // **Sebelum eksposur.** Yang dikirim renderer ke shader sudah
+                // dikalikan eksposur; sebuah panggangan yang ikut memuatnya akan
+                // berubah setiap slider eksposur digeser, dan itu panggangan yang
+                // artinya bergantung pada cara melihatnya.
+                sunIrradiance = light->color * light->intensity;
+            }
+        }
+
+        std::function<Vec3(const Vec3&)> sampler;
+        if (sky != nullptr && sky->source == scene::SkySourceKind::Atmosphere) {
+            render::AtmosphereSky atmosphere;
+            atmosphere.intensity = sky->intensity;
+            atmosphere.cameraHeightKm = sky->cameraHeightKm;
+            atmosphere.sunDirection = -sunDirection;
+            atmosphere.Prepare();
+            sampler = [atmosphere](const Vec3& direction) { return atmosphere.Sample(direction); };
+        } else {
+            // **Bukan langit atmosferik berarti belum ada langit yang bisa
+            // dipanggang di sini.** Berkas HDR menuntut membacanya di sisi ini
+            // juga, dan itu pekerjaan tersendiri; sampai ada, yang dipanggang
+            // hitam — dan adegan yang tiba-tiba gelap adalah pertanyaan yang
+            // diajukan alih-alih kesalahan yang disembunyikan.
+            sampler = [](const Vec3&) { return Vec3(0.0f); };
+        }
+
+        view::ProbeBakery::Settings bake;
+        bake.layout = layout;
+        bake.sunIrradiance = sunIrradiance;
+        bake.sunDirection = sunDirection;
+        if (!context.probeBakery->Bake(context.bakeItems, std::move(sampler), bake)) {
+            SIM_WARN("Editor", "probe bake could not start");
+        }
+    }
+#endif
 
     /// Ukuran kisi probe untuk jarak yang sedang disetel — sebelum ada yang
     /// menekan Bake (S1).

@@ -40,3 +40,16 @@ sim_add_library(SceneView
         # whitebox-nya, dan keduanya menyebut tipe modulnya di header.
         Sim::Terrain
         Sim::Whitebox)
+
+# Panggangan cahaya statis (S2 di docs/PLAN-STATIC-GI.md).
+#
+# **Ikut gerbang slangc, karena `Sim::Reference` tidak ada tanpanya:** model
+# shading path tracer-nya dibangkitkan `slangc -target cpp`. Yang hilang tanpa
+# slangc bukan seluruh SceneView melainkan satu kemampuan — memanggangnya — dan
+# panel yang memakainya memeriksa null, pola yang sama dengan runtime Lua di
+# `EditorContext`.
+if(TARGET Sim::Reference)
+    target_sources(SimSceneView PRIVATE src/ProbeBakery.cpp)
+    target_link_libraries(SimSceneView PRIVATE Sim::Reference)
+    target_compile_definitions(SimSceneView PUBLIC SIM_WITH_PROBE_BAKE=1)
+endif()

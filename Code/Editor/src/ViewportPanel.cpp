@@ -378,6 +378,20 @@ public:
         // frame sebelumnya.
         context.sceneBounds.valid =
             sceneView_.GeometryBounds(context.sceneBounds.minimum, context.sceneBounds.maximum);
+        sceneView_.BakeItems(context.bakeItems);
+
+#if SIM_WITH_PROBE_BAKE
+        // Panggangan yang selesai dipungut di sini dan dipasang ke renderer.
+        // Di viewport, bukan di panel World Settings: yang memegang renderer ini
+        // adalah viewport, dan sebuah panel yang kebetulan tidak terbuka tidak
+        // boleh membuat panggangan menggantung selamanya.
+        if (context.probeBakery != nullptr) {
+            if (std::shared_ptr<const render::ProbeVolume> baked = context.probeBakery->Take()) {
+                context.probeVolume = std::move(baked);
+                renderer->SetProbeVolume(context.probeVolume);
+            }
+        }
+#endif
 
         HandleCameraInput();
 

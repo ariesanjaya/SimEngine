@@ -455,7 +455,28 @@ public:
     /// false bila adegan tidak punya geometri sama sekali.
     bool GeometryBounds(Vec3& outMin, Vec3& outMax) const;
 
+    /// Geometri yang menaungi panggangan cahaya statis (S2), dalam bentuk yang
+    /// bisa diberikan ke `PickScene::Sync`.
+    ///
+    /// **Termasuk yang dikunci**, tidak seperti daftar pickable — alasannya di
+    /// `GeometryBounds`. Yang tidak ikut: decal dan terrain, keduanya karena
+    /// mereka memang tidak punya kunci geometri di jalur ray cast mana pun.
+    /// Terrain karena itu **belum menaungi panggangan**, dan itu batas yang
+    /// disebutkan alih-alih ditemukan sebagai bayangan yang hilang.
+    ///
+    /// String-nya dipegang `SceneView` dan sah sampai `Build` berikutnya.
+    void BakeItems(std::vector<PickItem>& out) const;
+
 private:
+    /// Satu benda bermesh untuk panggangan, dengan kunci geometrinya dipegang
+    /// di sini supaya `PickItem` bisa menunjuk ke dalamnya.
+    struct BakeEntry {
+        scene::Entity entity = scene::kNullEntity;
+        Mat4 worldMatrix{1.0f};
+        std::string meshKey;
+    };
+    std::vector<BakeEntry> bakeEntries_;
+
     /// Diindeks nomor entity. Bertahan lintas frame — itu gunanya.
     std::unordered_map<uint64_t, CachedDecal> decals_;
     uint64_t frame_ = 0;
