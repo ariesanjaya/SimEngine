@@ -3807,3 +3807,165 @@ TEST_CASE("S4: penyekalaan seragam di kedua sumbu") {
     CHECK((maximum.x - minimum.x) == doctest::Approx(1.0f));
     CHECK((maximum.y - minimum.y) == doctest::Approx(0.25f));
 }
+
+// --- S4: pembangkitan UV lightmap --------------------------------------------
+
+namespace {
+
+/// Kubus satuan dengan UV pertama yang **bertumpuk**: keenam mukanya memetakan
+/// ke petak yang sama. Ini bentuk yang benar untuk tekstur dan salah untuk
+/// lightmap, dan ia yang paling sering ditemui.
+assets::MeshData MakeOverlappingCube() {
+    assets::MeshData mesh;
+    const Vec3 faces[6][4] = {
+        {{-0.5f, -0.5f, 0.5f}, {0.5f, -0.5f, 0.5f}, {0.5f, 0.5f, 0.5f}, {-0.5f, 0.5f, 0.5f}},
+        {{0.5f, -0.5f, -0.5f}, {-0.5f, -0.5f, -0.5f}, {-0.5f, 0.5f, -0.5f}, {0.5f, 0.5f, -0.5f}},
+        {{0.5f, -0.5f, 0.5f}, {0.5f, -0.5f, -0.5f}, {0.5f, 0.5f, -0.5f}, {0.5f, 0.5f, 0.5f}},
+        {{-0.5f, -0.5f, -0.5f}, {-0.5f, -0.5f, 0.5f}, {-0.5f, 0.5f, 0.5f}, {-0.5f, 0.5f, -0.5f}},
+        {{-0.5f, 0.5f, 0.5f}, {0.5f, 0.5f, 0.5f}, {0.5f, 0.5f, -0.5f}, {-0.5f, 0.5f, -0.5f}},
+        {{-0.5f, -0.5f, -0.5f}, {0.5f, -0.5f, -0.5f}, {0.5f, -0.5f, 0.5f}, {-0.5f, -0.5f, 0.5f}},
+    };
+    const Vec3 normals[6] = {{0, 0, 1}, {0, 0, -1}, {1, 0, 0},
+                             {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}};
+    const Vec2 uvs[4] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}};
+    for (int face = 0; face < 6; ++face) {
+        const auto base = static_cast<uint32_t>(mesh.vertices.size());
+        for (int corner = 0; corner < 4; ++corner) {
+            assets::MeshVertex vertex;
+            vertex.position = faces[face][corner];
+            vertex.normal = normals[face];
+            vertex.uv = uvs[corner];
+            mesh.vertices.push_back(vertex);
+        }
+        for (const uint32_t offset : {0u, 1u, 2u, 0u, 2u, 3u}) {
+            mesh.indices.push_back(base + offset);
+        }
+    }
+    mesh.boundsMin = Vec3(-0.5f);
+    mesh.boundsMax = Vec3(0.5f);
+    mesh.parts.push_back(assets::SubMesh{0, static_cast<uint32_t>(mesh.indices.size()), -1});
+    return mesh;
+}
+
+/// Memeriksa UV **lightmap** sebuah mesh dengan pemeriksa yang sama — dengan
+/// menukarnya ke slot UV pertama lebih dulu.
+assets::LightmapUvSuitability CheckLightmapSlot(const assets::MeshData& mesh) {
+    assets::MeshData swapped = mesh;
+    for (assets::MeshVertex& vertex : swapped.vertices) {
+        vertex.uv = vertex.lightmapUv;
+    }
+    return assets::CheckLightmapUv(swapped, 0);
+}
+
+}  // namespace
+
+TEST_CASE("S4: kubus ber-UV bertumpuk keluar dengan chart yang tidak tumpang tindih") {
+    // **Kriteria terima S4, dan ia diperiksa uji bukan mata.** Yang masuk adalah
+    // kubus yang keenam mukanya memakai petak UV yang sama; yang keluar harus
+    // punya petaknya masing-masing.
+    assets::MeshData mesh = MakeOverlappingCube();
+
+    // Yang masuk memang tidak layak — kalau tidak, ujinya tidak menguji apa pun.
+    const assets::LightmapUvSuitability before = assets::CheckLightmapUv(mesh, 0);
+    REQUIRE_FALSE(before.suitable);
+    REQUIRE(before.overlappingPairs > 0);
+
+    if (!assets::HasLightmapUnwrapper()) {
+        // Dibangun tanpa xatlas: yang benar adalah menolak dengan pesan, bukan
+        // diam. Itu diperiksa di uji berikutnya.
+        MESSAGE("dibangun tanpa xatlas; pembangkitan UV lightmap dilewati");
+        return;
+    }
+
+    const assets::LightmapUnwrapResult result = assets::GenerateLightmapUv(mesh);
+    INFO(result.error);
+    REQUIRE(result.ok);
+    REQUIRE(mesh.hasLightmapUv);
+    MESSAGE(result.chartCount, " chart, ", result.vertexCount, " vertex, utilisasi ",
+            result.utilisation);
+
+    // Kubus enam muka menghasilkan lebih dari satu chart — kalau satu, ia
+    // memaksa keenam muka ke satu pulau dan pulau itu pasti melipat.
+    CHECK(result.chartCount >= 2);
+    // Vertexnya bertambah: sudut yang dipakai tiga muka harus dipecah.
+    CHECK(mesh.vertices.size() >= 24);
+
+    const assets::LightmapUvSuitability after = CheckLightmapSlot(mesh);
+    INFO(after.reason);
+    CHECK(after.suitable);
+    CHECK(after.overlappingPairs == 0);
+    CHECK(after.outsideUnitSquare == 0);
+    CHECK(after.triangleCount == 12);
+}
+
+TEST_CASE("S4: primitif ber-UV nol keluar dengan UV yang layak") {
+    // Whitebox dan primitif bawaan lahir tanpa UV sama sekali — nol di seluruh
+    // vertex. Pemeriksanya harus menolaknya (seluruh permukaan memetakan ke satu
+    // texel), dan pembangkitnya harus mengubahnya menjadi UV yang layak.
+    assets::MeshData mesh = MakeOverlappingCube();
+    for (assets::MeshVertex& vertex : mesh.vertices) {
+        vertex.uv = Vec2(0.0f);
+    }
+
+    const assets::LightmapUvSuitability before = assets::CheckLightmapUv(mesh, 0);
+    CHECK_FALSE(before.suitable);
+    // Seluruh segitiganya luas-nol di ruang UV: itu bukan sekadar tumpang
+    // tindih, itu tidak ada pemetaan sama sekali.
+    CHECK(before.degenerateTriangles == 12);
+
+    if (!assets::HasLightmapUnwrapper()) {
+        return;
+    }
+    const assets::LightmapUnwrapResult result = assets::GenerateLightmapUv(mesh);
+    INFO(result.error);
+    REQUIRE(result.ok);
+
+    const assets::LightmapUvSuitability after = CheckLightmapSlot(mesh);
+    INFO(after.reason);
+    CHECK(after.suitable);
+    CHECK(after.degenerateTriangles == 0);
+    CHECK(after.overlappingPairs == 0);
+}
+
+TEST_CASE("S4: tanpa pembangkitnya, yang keluar penolakan yang menyebut sakelarnya") {
+    // **Diam lebih buruk daripada menolak.** Mesh tanpa UV lightmap yang lolos
+    // tanpa pesan terbaca sebagai "mesh ini memang tidak butuh", dan yang
+    // menemukannya adalah orang yang bertanya kenapa lightmap-nya hitam.
+    assets::MeshData mesh = MakeOverlappingCube();
+    const assets::LightmapUnwrapResult result = assets::GenerateLightmapUv(mesh);
+    if (assets::HasLightmapUnwrapper()) {
+        CHECK(result.ok);
+        CHECK(result.error.empty());
+    } else {
+        CHECK_FALSE(result.ok);
+        CHECK(result.error.find("SIM_WITH_XATLAS") != std::string::npos);
+        CHECK_FALSE(mesh.hasLightmapUv);
+    }
+}
+
+TEST_CASE("S4: ruas material tetap menunjuk segitiga yang sama sesudah unwrap") {
+    // **Langkah yang paling mudah dilewatkan.** xatlas mempertahankan urutan
+    // segitiganya tetapi menulis ulang indeksnya; ruas yang tidak ikut diperiksa
+    // menghasilkan mesh yang benar bentuknya dan salah materialnya — dan tidak
+    // ada satu pun galat yang menyertainya.
+    if (!assets::HasLightmapUnwrapper()) {
+        return;
+    }
+    assets::MeshData mesh = MakeOverlappingCube();
+    mesh.parts.clear();
+    mesh.parts.push_back(assets::SubMesh{0, 36, 0});
+    mesh.parts.push_back(assets::SubMesh{36, 36, 1});
+    // Dua ruas atas geometri yang sama, digandakan supaya keduanya punya isi.
+    const std::size_t half = mesh.indices.size();
+    mesh.indices.insert(mesh.indices.end(), mesh.indices.begin(), mesh.indices.begin() + half);
+
+    const std::size_t before = mesh.indices.size();
+    const assets::LightmapUnwrapResult result = assets::GenerateLightmapUv(mesh);
+    INFO(result.error);
+    REQUIRE(result.ok);
+    // Jumlah segitiganya tidak berubah, jadi ruasnya tetap sah apa adanya.
+    CHECK(mesh.indices.size() == before);
+    for (const assets::SubMesh& part : mesh.parts) {
+        CHECK(part.firstIndex + part.indexCount <= mesh.indices.size());
+    }
+}

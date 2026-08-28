@@ -145,6 +145,23 @@ LightmapUvSuitability CheckLightmapUv(const MeshData& mesh, uint32_t maxOverlapP
     result.uvMinimum = uvMinimum;
     result.uvMaximum = uvMaximum;
 
+    // **Segitiga berluas nol menolak mesh-nya, dan itu ditemukan uji.** Sebuah
+    // mesh yang seluruh UV-nya nol — whitebox dan primitif bawaan lahir begitu —
+    // tidak punya satu pun pasangan yang tumpang tindih, karena segitiga tanpa
+    // luas tidak bisa memuat apa pun. Pemeriksa yang hanya melihat tumpang
+    // tindih menyatakannya layak, dan yang keluar adalah seluruh permukaan
+    // membaca satu texel.
+    //
+    // Ambangnya nol, bukan sebagian kecil: segitiga yang tidak punya texel tidak
+    // akan pernah menerima cahaya, dan itu bercak hitam betapapun sedikit
+    // jumlahnya. Unwrap adalah obatnya, dan ia tidak mahal.
+    if (result.degenerateTriangles > 0) {
+        result.reason = std::to_string(result.degenerateTriangles) + " of " +
+                        std::to_string(result.triangleCount) +
+                        " triangles have no area in UV space";
+        return result;
+    }
+
     // Sapuan menurut sumbu Y: segitiga diurutkan menurut tepi bawahnya, dan
     // hanya yang rentang Y-nya bersinggungan yang diadu. Tanpa ini biayanya
     // kuadratik, dan sebuah mesh 68 ribu segitiga adalah 2,3 miliar pasangan.

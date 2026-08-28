@@ -74,4 +74,37 @@ LightmapUvSuitability CheckLightmapUv(const MeshData& mesh, uint32_t maxOverlapP
 /// arah.
 void AdoptFirstUvAsLightmapUv(MeshData& mesh);
 
+/// Hasil pembangkitan UV lightmap (S4).
+struct LightmapUnwrapResult {
+    bool ok = false;
+    /// Berapa chart yang dihasilkan. Satu chart per pulau UV; mesh yang pecah
+    /// menjadi ratusan chart membayar tepi yang jauh lebih banyak, dan tepi
+    /// adalah texel yang tidak bisa diinterpolasi.
+    uint32_t chartCount = 0;
+    /// Berapa vertex sesudahnya. **Bisa lebih banyak daripada sebelumnya**:
+    /// sebuah vertex yang dipakai dua chart harus dipecah, karena ia tidak bisa
+    /// membawa dua UV sekaligus.
+    uint32_t vertexCount = 0;
+    /// Bagian kotak UV yang benar-benar tertutup chart, 0..1. Yang rendah berarti
+    /// sebagian besar texel lightmap tidak akan pernah terbaca.
+    float utilisation = 0.0f;
+    std::string error;
+};
+
+/// Membangkitkan UV lightmap untuk sebuah mesh, **mengubahnya di tempat**.
+///
+/// **Vertexnya bisa bertambah, dan indeksnya ditulis ulang.** Sebuah vertex yang
+/// dipakai dua chart harus dipecah — ia tidak bisa membawa dua UV lightmap
+/// sekaligus — jadi yang keluar bukan mesh yang sama dengan satu atribut
+/// tambahan melainkan mesh dengan topologi yang sama dan daftar vertex yang
+/// lain. Ruas material ikut dipetakan ulang.
+///
+/// **Tidak ikut dibangun tanpa xatlas**, dan yang terjadi lalu bukan diam
+/// melainkan penolakan yang menyebut sakelarnya: mesh tanpa UV lightmap yang
+/// lolos tanpa pesan akan terbaca sebagai "mesh ini memang tidak butuh".
+LightmapUnwrapResult GenerateLightmapUv(MeshData& mesh);
+
+/// True bila pembangkit UV lightmap ikut dibangun.
+bool HasLightmapUnwrapper();
+
 }  // namespace sim::assets
