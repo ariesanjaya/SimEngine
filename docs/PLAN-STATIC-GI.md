@@ -43,6 +43,28 @@ draw call.
 menerima apa pun yang lain. **Keduanya secara harfiah tidak bisa menghitung
 oklusi**, karena mereka tidak pernah tahu ada geometri.
 
+### UV pertama, diukur
+
+Pertanyaan "bisakah lightmap memakai UV yang sudah dibawa importir" dijawab
+dengan mengukur isi yang benar-benar ada di pohon ini, lewat
+`SimHeadless --dump-tri`:
+
+| sumber geometri | UV pertamanya | layak jadi parameterisasi lightmap? |
+|---|---|---|
+| `shaderBall.fbx` (importir FBX) | 19,7% titik di luar `[0,1]`, rentang u[−1,00 … 1,66]; luas UV dibagi luas geometri = 0,144 | tidak — berulang dan jauh dari proporsional |
+| `unitSphere.obj`, `unitCylinder.obj` | seluruhnya `(0,0)` | tidak — seluruh mesh jatuh ke satu texel |
+| Whitebox (`WhiteboxMesh.cpp`) | `uv = (dot(pos, axisU), dot(pos, axisV))` — proyeksi planar world-space | tidak — dua dinding sejajar berjarak sepuluh meter mendapat UV **identik** |
+| Terrain (`TerrainMesh.cpp`) | `uv = (pos.x, pos.z)` | **ya** — unik menurut konstruksi, karena heightfield fungsi dari (x, z) |
+
+**Satu dari empat.** Dan yang paling menentukan bukan `shaderBall` — itu aset
+pratinjau material, dan UV tekstur yang berulang di sana wajar. Yang menentukan
+**whitebox**: ia geometri yang dibangkitkan mesin ini sendiri, ia isi yang paling
+mungkin dipanggang seseorang, dan proyeksi planarnya membuat setiap permukaan
+sejajar berbagi texel yang sama persis. Sebuah ruangan whitebox akan dipanggang
+dengan lantai dan langit-langitnya berbagi cahaya.
+
+Angka itu yang mengunci keputusan 7 di bawah.
+
 ---
 
 ## Yang sudah ada dan tidak perlu ditulis ulang
@@ -68,7 +90,11 @@ alasan lain.
   kedua — dan itu menyentuh importir, tata letak vertex GPU, `static_assert`
   yang mengunci offset-nya, serta setiap shader yang membaca vertex.
 - Tidak ada unwrapper UV di pohon ini sama sekali.
-- Tidak ada penempatan probe, format penyimpanan, maupun pembacaannya di shader.
+- Penempatan probe, format penyimpanannya, dan pembacaannya di shader.
+- Pemeriksa kelayakan UV, yang menentukan mesh mana yang boleh **melewati**
+  unwrap (keputusan 7).
+- Kontrol resolusi di editor, beserta tempatnya di `WorldSettings` dan
+  penimpaan per-objek (keputusan 8).
 
 ---
 
@@ -136,11 +162,66 @@ Menggerakkan matahari di adegan yang transportnya sudah dipanggang berarti
 pantulan yang datang dari matahari di tempat lain. Dinyatakan, bukan didiamkan —
 pola yang sama dengan B6, beserta jalan keluarnya.
 
-### 7. Probe lebih dulu, lightmap menyusul
+### 7. UV lightmap dibangkitkan, dan itu diukur
 
-Probe tidak menuntut satu pun dependensi baru dan tidak menuntut UV kedua.
-Lightmap menuntut keduanya. Mengerjakan yang mahal lebih dulu berarti membayar
-unwrapper sebelum ada satu pun bukti bahwa transportnya benar.
+`assets::MeshVertex` tumbuh satu `Vec2`, dan unwrapper membangkitkannya saat
+mesh di-cook.
+
+**Menyalin UV pertama sempat menjadi keputusan ini, lalu diukur dan dibatalkan.**
+Tabel di bagian "UV pertama, diukur" di atas adalah alasannya: satu dari empat
+sumber geometri di pohon ini punya UV pertama yang layak, dan yang tidak layak
+termasuk geometri yang dibangkitkan mesin ini sendiri.
+
+Yang membuat pengukuran itu menentukan bukan angkanya melainkan siapa yang
+gagal. Aset importir bisa diminta diperbaiki artisnya — tapi itu berarti artis
+tetap mengarang UV kedua, hanya menyimpannya di slot pertama: **beban
+pengarangan yang sama, dikurangi kemampuan mesin membangkitkannya sendiri**.
+Whitebox tidak bisa diminta apa-apa; ia harus diubah kodenya. Dan primitif yang
+UV-nya nol tidak punya siapa pun untuk dimintai.
+
+Harganya sekali dan jelas: satu dependensi, satu `Vec2` di format vertex, satu
+langkah saat cook. Sesudahnya setiap mesh layak **tanpa syarat apa pun pada
+pengarangnya** — dan itu yang tidak bisa dibeli cara lain.
+
+**Pemeriksa kelayakan tetap dibangun**, dan gunanya berbalik: ia bukan penjaga
+gerbang melainkan pelewat. Mesh yang UV pertamanya sudah unik dan tidak tumpang
+tindih — terrain, dan aset yang memang diarang untuk dipanggang — melewati
+unwrap sama sekali, dan waktunya tidak dibayar. Yang tidak layak di-unwrap, dan
+alasannya disebut.
+
+**Unwrap masuk ke artefak cook mesh**, bukan dihitung tiap kali level dibuka —
+pola yang sama dengan `.simibl` dan `MeshSdfCache` yang sudah berdiri.
+
+### 8. Resolusi adalah setelan pengarang, dan ia masuk ke level
+
+Kerapatan texel lightmap dan jarak antar-probe bisa disetel di editor, dengan
+bawaan per-level dan penimpaan per-objek untuk yang menuntut lebih halus.
+
+**Ini tidak melanggar keputusan 3 di [PLAN-IBL.md](PLAN-IBL.md), yang menaruh
+"resolusi probe" di project — ia justru menunjukkan bahwa keduanya bukan hal
+yang sama.** Resolusi probe *real-time* adalah anggaran mesin: ia dibayar tiap
+frame, dan mesin lemah harus boleh menurunkannya. Resolusi *panggangan*
+menentukan artefak yang dikirim: semua orang menerima lightmap yang sama, dan
+mesin lemah tidak bisa memanggang ulang dengan angka lain. Yang menentukan
+artefak adalah pengarangan, dan pengarangan tinggal di level.
+
+Yang tetap di project cuma anggaran bake-nya sendiri — jumlah sampel dan jumlah
+thread — karena itu memang berbeda antar-mesin dan tidak mengubah bentuk
+hasilnya.
+
+### 9. Probe lebih dulu, lightmap menyusul
+
+Probe tidak menuntut UV apa pun, tidak menuntut dependensi baru, dan tidak
+menyentuh format vertex. Lightmap menuntut ketiganya.
+
+Mengerjakan yang mahal lebih dulu berarti membayar unwrapper, perubahan format
+vertex, dan langkah cook baru **sebelum ada satu pun bukti bahwa transportnya
+benar** — dan kalau transportnya ternyata salah, seluruh biaya itu dibayar untuk
+memanggang jawaban yang keliru dengan lebih tajam.
+
+Urutan ini juga yang membuat lightmap punya lawan bicara saat ia mendarat:
+permukaan yang sama harus tampak sama lewat kedua jalur (keputusan 3), dan itu
+hanya bisa diperiksa kalau salah satunya sudah berdiri.
 
 ---
 
@@ -173,6 +254,9 @@ menulis nama baru.
 ### S1 — Probe volume: kisi, penempatan, penyimpanan
 
 - Kisi iradiansi beraturan yang menutupi batas geometri statis
+- **Jarak antar-probe disetel di editor**, bawaan per-level di World Settings
+  (keputusan 8) — dan panelnya menyebutkan berapa probe dan berapa megabyte yang
+  dihasilkan angka itu, sebelum ada yang menekan Bake
 - SH per probe, artefak masak berkunci-hash — pola `.simibl`
 - Shader membaca kisi lewat interpolasi trilinear
 
@@ -184,6 +268,9 @@ tingkat panggang seri B — dan satu-satunya selisih yang tersisa bisa dijelaska
 sebagai interpolasi kisi, dengan angkanya ditulis. Yang diuji di sini
 plumbing-nya, dan memisahkannya dari transport berarti kegagalan berikutnya
 punya satu penyebab, bukan dua.
+
+Dan: menggeser jarak antar-probe mengubah jumlah probe serta ukuran artefaknya
+sesuai angka yang ditampilkan panel, bukan sesuai angka yang harus ditebak.
 
 ### S2 — Transport: probe diisi path tracer acuan
 
@@ -206,27 +293,46 @@ dalam ambang yang ditulis di dokumen ini.
 sama di sebelah meja, dan selisihnya diukur; benda yang bergerak keluar-masuk
 bayangan berubah mulus, tanpa loncatan pada batas sel.
 
-### S4 — Set UV kedua
+### S4 — UV lightmap: dibangkitkan, diperiksa, dan di-cook
 
 - `assets::MeshVertex` tumbuh satu `Vec2`, beserta tata letak vertex GPU,
-  `static_assert` offset-nya, dan importirnya
-- Unwrapper sebagai dependensi opsional — yang membangun tanpanya kehilangan
-  lightmap, bukan seluruh mesin (aturan yang sama dengan MaterialX dan OpenUSD)
-- UV kedua ikut artefak masak mesh, bukan dihitung ulang tiap buka
+  `static_assert` yang mengunci offset-nya, dan importirnya
+- Unwrapper sebagai dependensi **opsional** — yang membangun tanpanya kehilangan
+  lightmap, bukan seluruh mesin. Aturan yang sama dengan MaterialX dan OpenUSD,
+  dan `MaterialXImport.cpp` sudah menjadi contohnya: ia tetap ikut dibangun dan
+  menolak dengan pesan yang menyebut sakelarnya
+- Pemeriksa kelayakan yang mengukur UV pertama sebuah mesh — apakah ia keluar
+  dari `[0,1]`, dan apakah segitiga-segitiganya tumpang tindih di ruang UV.
+  **Yang sudah layak melewati unwrap**, dan waktunya tidak dibayar
+- Keduanya masuk ke artefak cook mesh, bukan dihitung tiap buka
 
-**Selesai kalau:** mesh statis punya UV kedua yang chart-nya tidak tumpang
-tindih — diperiksa uji, bukan mata — dan berkas mesh yang sudah ada tetap
-terbaca tanpa UV kedua.
+**Selesai kalau:** mesh statis punya UV lightmap yang chart-nya tidak tumpang
+tindih — diperiksa uji, bukan mata; berkas mesh yang sudah ada di cache orang
+tetap terbaca tanpa UV kedua, dan di-cook ulang alih-alih ditolak; whitebox dan
+primitif ber-UV nol keduanya keluar dengan UV yang layak; dan terrain, yang UV
+pertamanya sudah unik menurut konstruksi, terdeteksi layak dan melewati
+unwrap-nya.
+
+> Baris terakhir itu yang membuat pemeriksanya berguna alih-alih seremonial:
+> kalau ia tidak bisa mengenali satu-satunya UV yang memang sudah layak di pohon
+> ini, ia tidak bisa dipercaya mengenali yang lain.
 
 ### S5 — Lightmap: bake dan baca
 
-- Iradiansi per-texel untuk permukaan statis, dari transport yang sama dengan S2
+- Iradiansi per-texel untuk permukaan statis, dari transport yang sama dengan S2,
+  diparameterisasi UV pertama mesh-nya (keputusan 7)
+- **Kerapatan texel disetel di editor** — texel per meter, bawaan per-level dan
+  penimpaan per-objek untuk yang menuntut lebih halus (keputusan 8) — dan
+  panelnya menyebutkan ukuran atlas yang dihasilkan angka itu sebelum Bake
+  ditekan
 - Shader membaca lightmap untuk yang statis dan probe untuk yang dinamis
 
 **Selesai kalau:** kontak antar-permukaan dan bayangan halus terbaca pada
-lightmap dan tidak terbaca pada probe — itu seluruh alasan lightmap ada; dan
-sebuah permukaan yang sama tampak sama saat ia berpindah dari satu jalur ke
-jalur lain (keputusan 3), dengan selisihnya diukur.
+lightmap dan tidak terbaca pada probe — itu seluruh alasan lightmap ada; sebuah
+permukaan yang sama tampak sama saat ia berpindah dari satu jalur ke jalur lain
+(keputusan 3), dengan selisihnya diukur; dan menaikkan kerapatan texel
+menajamkan kontaknya sementara menurunkannya mengaburkannya, keduanya sesuai
+ukuran atlas yang diumumkan panel.
 
 ### S6 — Validasi terhadap path tracer acuan
 
@@ -295,7 +401,18 @@ pun galat. Keputusan 5, dan ia harus punya ujinya sendiri di S2.
 
 **UV kedua mengubah tata letak vertex.** `static_assert` yang mengunci offset
 `uv` sudah ada di renderer, dan itu bagus — ia mengubah kelalaian menjadi galat
-kompilasi. Yang tidak dijaganya berkas mesh masak yang sudah ada di cache orang.
+kompilasi. Yang **tidak** dijaganya berkas mesh masak yang sudah ada di cache
+orang: ia ditulis dengan format lama, dan tidak ada satu pun assert yang berjalan
+saat ia dibaca. Versi di kunci artefaknya yang harus menangkap itu — pola yang
+sudah dipakai `IblCache` dan `MeshSdfCache`.
+
+**Unwrap yang berkualitas buruk lebih sulit dilihat daripada unwrap yang gagal.**
+Chart yang pecah-pecah menghasilkan jahitan; chart yang terlalu rapat
+menghasilkan cahaya yang bocor antar-chart pada mip atau saat difilter. Keduanya
+terlihat sebagai "lightmap-nya kotor", bukan sebagai unwrapper yang salah
+disetel — dan keduanya baru muncul sesudah S5, jauh dari tempat sebabnya.
+Padding antar-chart dan ukuran chart minimum karena itu setelan yang harus
+terlihat, bukan konstanta di dalam baker.
 
 ---
 
@@ -328,10 +445,11 @@ pertanyaan yang lebih baik dijawab sesudah keduanya berdiri sendiri-sendiri.
 - **Ambang selisih S2 dan S6** terhadap tingkat panggang dan terhadap path
   tracer acuan: belum ditetapkan angkanya, dan seperti B5 ia sebaiknya diukur
   lebih dulu lalu ditetapkan dari hasilnya.
-- **Unwrapper mana.** xatlas yang paling lazim, tapi belum ada yang memeriksa
-  ukurannya, lisensinya, maupun waktu bangunnya di pohon ini — dan
-  [DEPENDENCIES.md](DEPENDENCIES.md) menuntut ketiganya dijawab sebelum sebuah
-  dependensi masuk.
+- **Unwrapper mana.** xatlas yang paling lazim — MIT, tanpa dependensi lain —
+  tapi belum ada yang mengukur waktu bangunnya maupun waktu unwrap-nya di pohon
+  ini, dan [DEPENDENCIES.md](DEPENDENCIES.md) menuntut keduanya dijawab sebelum
+  sebuah dependensi masuk. Diputuskan sebelum S4 mendarat, dan diukur alih-alih
+  diperkirakan — aturan yang sama yang dipakai MaterialX dan Embree.
 - **Objek statis yang dipindahkan sesudah bake.** Ia membawa lightmap yang
   sudah tidak sesuai. Menyatakannya kotor itu mudah; memutuskan apa yang
   digambar sementara ia kotor tidak.
