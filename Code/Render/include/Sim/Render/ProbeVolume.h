@@ -68,6 +68,32 @@ struct ProbeVolumeLayout {
 /// Brick yang tidak dialokasikan.
 inline constexpr uint32_t kEmptyBrick = 0xFFFFFFFFu;
 
+// --- pengalamatan kisi ------------------------------------------------------
+//
+// **Dipublikkan supaya bisa diadu dengan `Shaders/probe_grid.slang`.** Yang
+// membaca kisi saat menggambar adalah shader; yang menulisnya adalah berkas ini.
+// Dua pengalamatan yang berselisih tidak menghasilkan galat apa pun — hanya
+// cahaya tak-langsung yang bergeser beberapa meter, yang terbaca sebagai
+// transport yang salah alih-alih sebagai indeks yang salah. Ujinya menjalankan
+// versi slang-nya lewat `slangc -target cpp` dan membandingkan keduanya.
+
+/// Indeks linear brick yang memuat sebuah probe, urutan x-cepat.
+uint32_t ProbeBrickIndex(const ProbeVolumeLayout& layout, const glm::uvec3& probe);
+
+/// Indeks probe di dalam `probes` bila brick-nya menempati `slot`.
+uint32_t ProbeSlotOffset(uint32_t slot, const glm::uvec3& probe);
+
+/// Sel kisi yang memuat sebuah titik dunia, beserta pecahannya. Yang di luar
+/// kisi dijepit ke tepinya.
+void ProbeCell(const ProbeVolumeLayout& layout, const Vec3& position, glm::uvec3& outBase,
+               Vec3& outFraction);
+
+/// Koordinat probe sebuah sudut sel, dijepit ke dalam kisi.
+glm::uvec3 ProbeCorner(const ProbeVolumeLayout& layout, const glm::uvec3& base, uint32_t corner);
+
+/// Bobot trilinear sebuah sudut sel.
+float ProbeCornerWeight(uint32_t corner, const Vec3& fraction);
+
 /// Kisi beserta isinya.
 struct ProbeVolume {
     ProbeVolumeLayout layout;

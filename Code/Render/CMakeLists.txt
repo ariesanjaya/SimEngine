@@ -125,6 +125,10 @@ set(SIM_SHADER_SOURCES_COPIED
     box_varyings.slang
     cluster_common.slang
     shadow_common.slang
+    # Di-`#include` `shadow_common.slang`, jadi ia ikut ke setiap modul material
+    # yang dirakit saat jalan. Yang tertinggal di sini bukan shader yang hilang
+    # melainkan kompilasi material yang gagal di mesin pengguna, di jalan.
+    probe_grid.slang
     gi_resolve.slang
     gi_common.slang
     gi_depth.slang)

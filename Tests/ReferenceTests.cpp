@@ -7,6 +7,7 @@
 #include "Sim/Reference/Scene.h"
 #include "Sim/Reference/PathTracer.h"
 #include "Sim/Render/Ibl.h"
+#include "Sim/Render/ProbeVolume.h"
 #include "Sim/Raycast/Query.h"
 #include "Sim/Reference/Shading.h"
 
@@ -1131,4 +1132,171 @@ TEST_CASE("B5: tingkat panggang dinilai path tracer acuan") {
     // jadi selisih absolut yang sama terbaca tiga kali lebih besar di sana.
     CHECK(worstChannel < 0.12f);
     CHECK(worstLuminance < 0.08f);
+}
+
+// --- S2: transport dipanggang ke probe (docs/PLAN-STATIC-GI.md) --------------
+
+namespace {
+
+/// Kotak tertutup ber-albedo `albedo`, tanpa lampu dan tanpa emisi. Gunanya
+/// satu: memeriksa apa yang **tidak** masuk ke dalamnya.
+sim::reference::Scene MakeSealedRoom(float albedo) {
+    using namespace sim::reference;
+    Scene scene;
+    Surface surface;
+    surface.baseColor = Vec3(albedo);
+    surface.specularRoughness = 1.0f;
+    surface.baseMetalness = 0.0f;
+    const uint32_t material = scene.AddMaterial(surface);
+    // Kotak yang normalnya menghadap keluar; probe berada di dalamnya, jadi yang
+    // dikenainya sisi belakang — dan `TracePath` membalik normal menghadap sinar
+    // datang, persis seperti yang dilakukannya untuk gambar acuan.
+    scene.AddBox(Vec3(-1.0f), Vec3(1.0f), material);
+    return scene;
+}
+
+}  // namespace
+
+TEST_CASE("S2: probe di ruang terbuka menjawab sama dengan panggangan lingkungan") {
+    // **Kriteria terima S2, bagian pertama.** Tanpa satu pun penghalang, setiap
+    // sinar dari probe lolos ke langit — jadi transportnya harus mengembalikan
+    // iradiansi lingkungan itu sendiri. Kalau tidak, yang salah bukan
+    // oklusinya melainkan basis SH, bobot Monte Carlo, atau konvensi arahnya —
+    // dan ketiganya akan terbaca sebagai "GI-nya bocor" di adegan berikutnya.
+    using namespace sim::reference;
+    const sim::render::GradientSky sky;
+
+    raycast::RayScene empty;
+    empty.Commit();
+
+    TraceSettings settings;
+    settings.sky = [&sky](const Vec3& direction) { return sky.Sample(direction); };
+
+    const std::array<Vec3, 9> traced = TraceProbeIrradiance(
+        empty, [](const raycast::RayHit&, const Vec3&, const Vec3&) { return SurfaceHit{}; },
+        LightList{}, Vec3(0.0f, 1.0f, 0.0f), 16384, settings);
+
+    const sim::render::Sh9 baked = sim::render::ProjectIrradiance(sky, 16384);
+    sim::render::Sh9 probe;
+    probe.coefficients = traced;
+
+    for (const Vec3 normal : {Vec3(0.0f, 1.0f, 0.0f), Vec3(0.0f, -1.0f, 0.0f),
+                              Vec3(1.0f, 0.0f, 0.0f), glm::normalize(Vec3(1.0f, 1.0f, 1.0f))}) {
+        const Vec3 expected = sim::render::EvaluateIrradiance(baked, normal);
+        const Vec3 got = sim::render::EvaluateIrradiance(probe, normal);
+        INFO("normal (", normal.x, ",", normal.y, ",", normal.z, ")");
+        // Ambangnya 2%: keduanya Monte Carlo dengan urutan sampel yang berbeda,
+        // jadi menuntut kesamaan persis berarti menuntut dua penaksir yang
+        // berbeda menghasilkan derau yang sama.
+        CHECK(got.x == doctest::Approx(expected.x).epsilon(0.02));
+        CHECK(got.y == doctest::Approx(expected.y).epsilon(0.02));
+        CHECK(got.z == doctest::Approx(expected.z).epsilon(0.02));
+    }
+}
+
+TEST_CASE("S2: ruangan tertutup berhenti disinari langit") {
+    // **Kriteria terima S2, bagian kedua — dan inti seluruh milestone ini.**
+    // Tingkat panggang seri B menyinari ruang tertutup persis seterang ruang
+    // terbuka: sembilan angka untuk seluruh level, tanpa satu pun sinar yang
+    // memeriksa apakah ada dinding di antaranya. Yang membuat transport layak
+    // dipanggang adalah bahwa angka ini turun.
+    using namespace sim::reference;
+    const sim::render::GradientSky sky;
+
+    TraceSettings settings;
+    settings.sky = [&sky](const Vec3& direction) { return sky.Sample(direction); };
+
+    const Scene room = MakeSealedRoom(0.5f);
+    raycast::RayScene sealed;
+    room.Commit(sealed);
+
+    const std::array<Vec3, 9> insideSh = TraceProbeIrradiance(
+        sealed, room.Resolver(), room.Lights(), Vec3(0.0f), 4096, settings);
+    sim::render::Sh9 inside;
+    inside.coefficients = insideSh;
+
+    const sim::render::Sh9 open = sim::render::ProjectIrradiance(sky, 4096);
+    const Vec3 normal(0.0f, 1.0f, 0.0f);
+    const float sealedLevel = sim::render::EvaluateIrradiance(inside, normal).y;
+    const float openLevel = sim::render::EvaluateIrradiance(open, normal).y;
+
+    MESSAGE("iradiansi di dalam kotak tertutup: ", sealedLevel, " lawan ", openLevel,
+            " di ruang terbuka (", 100.0f * sealedLevel / openLevel, "%)");
+    // Kotak tanpa emisi dan tanpa lampu: satu-satunya cahaya yang bisa masuk
+    // adalah cahaya yang tidak dihalangi apa-apa, dan tidak ada.
+    CHECK(sealedLevel < openLevel * 0.01f);
+}
+
+TEST_CASE("S2: uji tungku lulus pada probe seperti pada gambar acuan") {
+    // Rongga tertutup ber-albedo ρ yang setiap permukaannya memancarkan
+    // radiansi E berada pada kesetimbangan `E / (1 - ρ)`. Iradiansi pada sebuah
+    // titik di dalamnya karena itu `π · E / (1 - ρ)`.
+    //
+    // **Yang diujinya energi pantulan ke-n, bukan pantulan pertama.** Pada
+    // ρ = 0,8 pantulan kelima masih menyumbang sepertiga jawabannya — jadi
+    // penaksir yang memotong kedalamannya lulus uji ruang terbuka dan gagal di
+    // sini.
+    using namespace sim::reference;
+    constexpr float kAlbedo = 0.5f;
+    constexpr float kEmission = 1.0f;
+    const Scene furnace = MakeEnclosedFurnace(kAlbedo, kEmission);
+    raycast::RayScene rayScene;
+    furnace.Commit(rayScene);
+
+    TraceSettings settings;
+    settings.sky = ConstantSky(Vec3(0.0f));  // rongga tertutup: tidak ada langit
+
+    const std::array<Vec3, 9> coefficients = TraceProbeIrradiance(
+        rayScene, furnace.Resolver(), furnace.Lights(), Vec3(0.0f), 4096, settings);
+    sim::render::Sh9 probe;
+    probe.coefficients = coefficients;
+
+    const float expected = 3.14159265f * kEmission / (1.0f - kAlbedo);
+    const float got = sim::render::EvaluateIrradiance(probe, Vec3(0.0f, 1.0f, 0.0f)).y;
+    MESSAGE("tungku: iradiansi probe ", got, " lawan ", expected, " yang diketahui persis");
+    CHECK(got == doctest::Approx(expected).epsilon(0.05));
+}
+
+TEST_CASE("S2: matahari tidak masuk langsung, tetapi pantulannya masuk") {
+    // **Keputusan 2 diperiksa, bukan diandaikan.** Matahari langsung diantarkan
+    // lampu terarah yang berbayang saat menggambar; panggangan yang ikut
+    // memuatnya menghitungnya dua kali, dan yang terlihat bukan galat melainkan
+    // bayangan yang setengah terisi.
+    using namespace sim::reference;
+    TraceSettings settings;
+    settings.sky = ConstantSky(Vec3(0.0f));
+    settings.sunIrradiance = Vec3(10.0f);
+    settings.sunDirection = Vec3(0.0f, -1.0f, 0.0f);  // tegak lurus ke bawah
+
+    // Tanpa geometri sama sekali: tidak ada permukaan, jadi tidak ada satu pun
+    // tempat NEE bisa berjalan — dan probe menjawab nol walaupun matahari
+    // menyala sepuluh kali.
+    raycast::RayScene empty;
+    empty.Commit();
+    const std::array<Vec3, 9> alone = TraceProbeIrradiance(
+        empty, [](const raycast::RayHit&, const Vec3&, const Vec3&) { return SurfaceHit{}; },
+        LightList{}, Vec3(0.0f), 1024, settings);
+    sim::render::Sh9 direct;
+    direct.coefficients = alone;
+    CHECK(std::abs(sim::render::EvaluateIrradiance(direct, Vec3(0.0f, 1.0f, 0.0f)).y) < 1e-6f);
+
+    // Sekarang sebuah lantai di bawah probe. Mataharinya menyinari lantai itu,
+    // dan lantainya memantulkannya ke probe — itu yang harus terpanggang.
+    Scene floor;
+    Surface surface;
+    surface.baseColor = Vec3(0.8f);
+    surface.specularRoughness = 1.0f;
+    const uint32_t material = floor.AddMaterial(surface);
+    floor.AddQuad(Vec3(-20.0f, 0.0f, -20.0f), Vec3(40.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, 40.0f),
+                  material);
+    raycast::RayScene ground;
+    floor.Commit(ground);
+
+    const std::array<Vec3, 9> bounced = TraceProbeIrradiance(
+        ground, floor.Resolver(), floor.Lights(), Vec3(0.0f, 1.0f, 0.0f), 4096, settings);
+    sim::render::Sh9 indirect;
+    indirect.coefficients = bounced;
+    const float fromBelow = sim::render::EvaluateIrradiance(indirect, Vec3(0.0f, -1.0f, 0.0f)).y;
+    MESSAGE("pantulan matahari dari lantai: ", fromBelow);
+    CHECK(fromBelow > 0.5f);
 }

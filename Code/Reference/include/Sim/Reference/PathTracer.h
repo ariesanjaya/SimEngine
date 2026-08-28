@@ -6,6 +6,7 @@
 #include "Sim/Reference/Lights.h"
 #include "Sim/Reference/Shading.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -95,6 +96,30 @@ struct TraceSettings {
     ///
     /// Kosong berarti langit hitam — keadaan setiap adegan tertutup.
     SkySampler sky;
+
+    /// Matahari terarah, ditangani **hanya** lewat next-event estimation.
+    ///
+    /// **Bukan bagian dari `sky`, dan itu keputusan yang punya dua sebab.**
+    /// Cakram matahari melebar 0,53° — sekitar 6×10⁻⁵ steradian dari 4π — jadi
+    /// sampling kosinus mengenainya sekali dalam sekitar dua ratus ribu sinar.
+    /// Yang keluar bukan konvergensi yang lambat melainkan bintik putih tunggal
+    /// di tengah gambar yang gelap. Dan langit prosedural mesin ini memang tidak
+    /// pernah memanggang cakram mataharinya sejak B1, jadi memisahkan keduanya
+    /// bukan penyimpangan melainkan bentuk yang sudah berlaku.
+    ///
+    /// **Karena hanya lewat NEE, ia hanya ada di permukaan.** Sebuah sinar yang
+    /// berangkat dari titik kosong — probe, misalnya — tidak pernah menemuinya.
+    /// Itu persis yang dituntut keputusan 2 di docs/PLAN-STATIC-GI.md: matahari
+    /// langsung diantarkan lampu terarah yang berbayang saat menggambar, dan
+    /// panggangan yang ikut memuatnya menghitungnya dua kali. Yang tetap ikut
+    /// terpanggang adalah pantulannya, dan itu memang yang dicari.
+    ///
+    /// `sunIrradiance` nol mematikannya seluruhnya, termasuk sinar bayangannya.
+    Vec3 sunIrradiance{0.0f};
+    /// Arah **rambat** cahayanya, ternormalisasi. Menunjuk dari matahari ke
+    /// adegan — tanda yang sama dengan `LightComponent` terarah.
+    Vec3 sunDirection{0.0f, -1.0f, 0.0f};
+
     uint32_t seed = 1u;
 };
 
@@ -131,5 +156,29 @@ struct Image {
 /// ulang tidak menyelesaikan apa pun.
 Image Render(const raycast::RayScene& scene, const SurfaceResolver& resolve,
              const LightList& lights, const Camera& camera, const TraceSettings& settings);
+
+/// Iradiansi yang datang ke sebuah titik di ruang, sebagai sembilan koefisien
+/// SH orde dua (S2 di docs/PLAN-STATIC-GI.md).
+///
+/// **Estimator yang sama persis dengan `Render`**, dan yang berbeda cuma dari
+/// mana sinarnya berangkat: dari sebuah titik ke seluruh bola, bukan dari kamera
+/// lewat sebuah piksel. Itu yang membuat kisi probe bisa diadu dengan gambar
+/// acuan — dua transport yang ditulis terpisah akan berselisih, dan selisih itu
+/// akan terbaca sebagai kisi yang salah alih-alih sebagai dua rumus yang berbeda.
+///
+/// **Seluruh bola, bukan belahan.** Sebuah probe tidak punya normal; yang
+/// membacanya nanti sebuah permukaan yang normalnya belum diketahui saat
+/// memanggang. Itu juga sebabnya yang disimpan SH dan bukan satu angka.
+///
+/// Konvensi basis dan bobotnya sama dengan `render::ProjectIrradiance` —
+/// keduanya harus menghasilkan angka yang sama untuk lingkungan yang sama, dan
+/// itulah yang diuji pada adegan tanpa penghalang.
+///
+/// Mengembalikan koefisien mentah, bukan `render::Sh9`: modul ini tidak boleh
+/// melihat `Sim::Render`, dan tata letaknya memang sudah identik.
+std::array<Vec3, 9> TraceProbeIrradiance(const raycast::RayScene& scene,
+                                         const SurfaceResolver& resolve, const LightList& lights,
+                                         const Vec3& position, uint32_t sampleCount,
+                                         const TraceSettings& settings);
 
 }  // namespace sim::reference

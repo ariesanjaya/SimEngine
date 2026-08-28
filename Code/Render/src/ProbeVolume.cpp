@@ -44,18 +44,10 @@ uint64_t HashInto(uint64_t hash, const void* data, std::size_t length) {
     return hash;
 }
 
-/// Indeks linear sebuah brick, urutan x-cepat.
-uint32_t BrickIndex(const ProbeVolumeLayout& layout, const glm::uvec3& brick) {
-    const glm::uvec3 bricks = layout.BrickCounts();
-    return (brick.z * bricks.y + brick.y) * bricks.x + brick.x;
-}
-
 /// Slot sebuah probe di dalam `probes`, atau `kEmptyBrick` bila bricknya tidak
 /// dialokasikan.
 uint32_t ProbeSlot(const ProbeVolume& volume, const glm::uvec3& probe) {
-    constexpr uint32_t kSide = ProbeVolumeLayout::kBrickSize;
-    const glm::uvec3 brick(probe.x / kSide, probe.y / kSide, probe.z / kSide);
-    const uint32_t index = BrickIndex(volume.layout, brick);
+    const uint32_t index = ProbeBrickIndex(volume.layout, probe);
     if (index >= volume.brickSlots.size()) {
         return kEmptyBrick;
     }
@@ -63,12 +55,52 @@ uint32_t ProbeSlot(const ProbeVolume& volume, const glm::uvec3& probe) {
     if (slot == kEmptyBrick) {
         return kEmptyBrick;
     }
+    return ProbeSlotOffset(slot, probe);
+}
+
+}  // namespace
+
+uint32_t ProbeBrickIndex(const ProbeVolumeLayout& layout, const glm::uvec3& probe) {
+    constexpr uint32_t kSide = ProbeVolumeLayout::kBrickSize;
+    const glm::uvec3 bricks = layout.BrickCounts();
+    const glm::uvec3 brick(probe.x / kSide, probe.y / kSide, probe.z / kSide);
+    return (brick.z * bricks.y + brick.y) * bricks.x + brick.x;
+}
+
+uint32_t ProbeSlotOffset(uint32_t slot, const glm::uvec3& probe) {
+    constexpr uint32_t kSide = ProbeVolumeLayout::kBrickSize;
     const glm::uvec3 local(probe.x % kSide, probe.y % kSide, probe.z % kSide);
     const uint32_t within = (local.z * kSide + local.y) * kSide + local.x;
     return slot * kSide * kSide * kSide + within;
 }
 
-}  // namespace
+void ProbeCell(const ProbeVolumeLayout& layout, const Vec3& position, glm::uvec3& outBase,
+               Vec3& outFraction) {
+    const Vec3 grid = (position - layout.origin) / std::max(layout.spacing, 1e-4f);
+    for (int axis = 0; axis < 3; ++axis) {
+        const auto last = static_cast<float>(layout.counts[axis] - 1);
+        const float clamped = std::clamp(grid[axis], 0.0f, last);
+        const float floored = std::floor(clamped);
+        outBase[axis] = static_cast<uint32_t>(floored);
+        outFraction[axis] = clamped - floored;
+    }
+}
+
+glm::uvec3 ProbeCorner(const ProbeVolumeLayout& layout, const glm::uvec3& base, uint32_t corner) {
+    const glm::uvec3 offset((corner & 1u) != 0u ? 1u : 0u, (corner & 2u) != 0u ? 1u : 0u,
+                            (corner & 4u) != 0u ? 1u : 0u);
+    glm::uvec3 probe = base + offset;
+    for (int axis = 0; axis < 3; ++axis) {
+        probe[axis] = std::min(probe[axis], layout.counts[axis] - 1);
+    }
+    return probe;
+}
+
+float ProbeCornerWeight(uint32_t corner, const Vec3& fraction) {
+    return ((corner & 1u) != 0u ? fraction.x : 1.0f - fraction.x) *
+           ((corner & 2u) != 0u ? fraction.y : 1.0f - fraction.y) *
+           ((corner & 4u) != 0u ? fraction.z : 1.0f - fraction.z);
+}
 
 uint32_t ProbeVolume::AllocatedBrickCount() const {
     return static_cast<uint32_t>(

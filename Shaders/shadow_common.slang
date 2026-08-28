@@ -17,6 +17,8 @@
 
 static const int kMaxCascades = 4;
 
+#include "probe_grid.slang"
+
 struct ShadowParams {
     float4x4 cascadeViewProj[kMaxCascades];
     float4 cascadeSplitFar;    // batas jauh tiap cascade, ruang pandang
@@ -191,17 +193,12 @@ void probeAt(uint3 coordinate, out float3 sh[9], out bool found) {
     found = false;
 
     const uint3 counts = uint3(shadowParams.probeCounts.xyz);
-    const uint3 bricks = (counts + 3u) / 4u;
-    const uint3 brick = coordinate / 4u;
-    const uint brickIndex = (brick.z * bricks.y + brick.y) * bricks.x + brick.x;
-    const uint slot = probeBricks[brickIndex];
-    if (slot == 0xFFFFFFFFu) {
+    const uint slot = probeBricks[probeBrickIndex(counts, coordinate)];
+    if (slot == kProbeEmptyBrick) {
         return;
     }
 
-    const uint3 inside = coordinate - brick * 4u;
-    const uint local = (inside.z * 4u + inside.y) * 4u + inside.x;
-    const uint base = (slot * 64u + local) * 9u;
+    const uint base = probeCoefficientBase(slot, coordinate);
     for (int i = 0; i < 9; ++i) {
         sh[i] = probeSh[base + uint(i)].rgb;
     }
@@ -222,14 +219,10 @@ void probeAt(uint3 coordinate, out float3 sh[9], out bool found) {
 /// Iradiansi dari kisi probe, interpolasi trilinear.
 float3 probeIrradiance(float3 worldPosition, float3 normal) {
     const uint3 counts = uint3(shadowParams.probeCounts.xyz);
-    const float3 grid = (worldPosition - shadowParams.probeOrigin.xyz) /
-                        max(shadowParams.probeOrigin.w, 1e-4);
-    // Dijepit ke tepinya, bukan dijawab nol: permukaan tepat di batas kisi
-    // mengambil sampel di luar, dan nol di tepi terbaca sebagai garis gelap yang
-    // mengikuti dindingnya.
-    const float3 clamped = clamp(grid, float3(0.0), float3(counts) - float3(1.0));
-    const uint3 base = uint3(floor(clamped));
-    const float3 fraction = clamped - float3(base);
+    uint3 base;
+    float3 fraction;
+    probeCell(worldPosition, shadowParams.probeOrigin.xyz, shadowParams.probeOrigin.w, counts,
+              base, fraction);
 
     float3 accumulated[9];
     for (int i = 0; i < 9; ++i) {
@@ -238,13 +231,11 @@ float3 probeIrradiance(float3 worldPosition, float3 normal) {
     float total = 0.0;
 
     for (uint corner = 0u; corner < 8u; ++corner) {
-        const uint3 offset = uint3(corner & 1u, (corner >> 1u) & 1u, (corner >> 2u) & 1u);
-        const uint3 coordinate = min(base + offset, counts - uint3(1u));
-        const float3 blend = lerp(float3(1.0) - fraction, fraction, float3(offset));
-        const float weight = blend.x * blend.y * blend.z;
+        const float weight = probeCornerWeight(corner, fraction);
         if (weight <= 0.0) {
             continue;
         }
+        const uint3 coordinate = probeCorner(base, corner, counts);
 
         float3 sh[9];
         bool found;
@@ -309,6 +300,9 @@ float3 probeIrradiance(float3 worldPosition, float3 normal) {
 /// slot brick di dalam `probeSh`, atau 0xFFFFFFFF bila brick itu tidak ada.
 [[vk::binding(26, 0)]] StructuredBuffer<float4> probeSh;
 [[vk::binding(27, 0)]] StructuredBuffer<uint> probeBricks;
+
+/// Brick yang tidak dialokasikan. Sama dengan `render::kEmptyBrick`.
+static const uint kProbeEmptyBrick = 0xFFFFFFFFu;
 
 /// Banyaknya mip peta prefilter. Nol berarti belum ada lingkungan yang
 /// dipanggang, dan pemakainya wajib memeriksanya: sebuah pantulan yang datang
