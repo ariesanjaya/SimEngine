@@ -110,6 +110,7 @@ void PrintUsage() {
         "  --bench-settle-seconds <n>    batas menunggu material siap, bawaan 300\n"
         "  --bench-camera px,py,pz,tx,ty,tz  kamera tetap, bukan lintasan orbit\n"
         "  --bench-dump-depth <path>     depth buffer mentah (w, h, float per texel)\n"
+        "  --bench-dump-hdr <path>       radiance linier mentah (w, h, RGBA float per texel)\n"
         "  --bench-cull-limit <n>        gambar hanya permukaan bernomor < n\n"
         "  --bench-fixed-exposure        eksposur manual; wajib untuk membandingkan gambar\n"
         "  --bench-gi-debug <view>       off|albedo|normal|irradiance|raycount|steps|layers\n"
@@ -751,6 +752,33 @@ int main(int argc, char** argv) {
         SIM_INFO("Bench", "depth buffer written to {} ({}x{})", std::string(path), width, height);
     };
 
+    /// Radiance linier apa adanya: dua uint32 ukuran, lalu RGBA float per texel.
+    ///
+    /// **Sebelum eksposur dan sebelum pemetaan nada**, dan itu seluruh gunanya:
+    /// dua gambar 8-bit yang berselisih setengah tingkat kuantisasi terbaca
+    /// sebagai sama, dan peta selisih yang dikuatkan mengubah tangga kuantisasi
+    /// itu sendiri menjadi pola yang tampak seperti temuan.
+    const auto writeHdrDump = [](render::IViewportRenderer& target, std::string_view path) {
+        std::vector<float> pixels;
+        uint32_t width = 0;
+        uint32_t height = 0;
+        std::string dumpError;
+        if (!target.CaptureHdr(pixels, width, height, dumpError)) {
+            SIM_ERROR("Bench", "cannot read the HDR target: {}", dumpError);
+            return;
+        }
+        std::ofstream file{std::filesystem::path(path), std::ios::binary};
+        if (!file) {
+            SIM_ERROR("Bench", "cannot write {}", std::string(path));
+            return;
+        }
+        const uint32_t header[2]{width, height};
+        file.write(reinterpret_cast<const char*>(header), sizeof(header));
+        file.write(reinterpret_cast<const char*>(pixels.data()),
+                   static_cast<std::streamsize>(pixels.size() * sizeof(float)));
+        SIM_INFO("Bench", "linear HDR written to {} ({}x{})", std::string(path), width, height);
+    };
+
     // --- Mode ukur (G0) ------------------------------------------------------
     //
     // **Sebelum server MCP dinyalakan, dan keluar tanpa pernah menyalakannya.**
@@ -1356,6 +1384,10 @@ int main(int argc, char** argv) {
                     !dump.empty()) {
                     writeDepthDump(*renderer, dump);
                 }
+                if (const std::string_view dump = FlagValue(argc, argv, "--bench-dump-hdr");
+                    !dump.empty()) {
+                    writeHdrDump(*renderer, dump);
+                }
             }
 
             if (frame < warmup) {
@@ -1423,6 +1455,15 @@ int main(int argc, char** argv) {
         if (const std::string_view dump = FlagValue(argc, argv, "--bench-dump-cull");
             !dump.empty() && !captureFrameSet) {
             writeCullDump(*renderer, dump);
+        }
+
+        // Jalur yang sama untuk dump HDR: tanpa `--bench-capture-frame`, yang
+        // ditulis adalah frame terakhir yang digambar. Tanpa baris ini, sebuah
+        // dump yang diminta sendirian tidak pernah ditulis — dan yang terlihat
+        // bukan galat melainkan berkas yang tidak ada.
+        if (const std::string_view dump = FlagValue(argc, argv, "--bench-dump-hdr");
+            !dump.empty() && !captureFrameSet) {
+            writeHdrDump(*renderer, dump);
         }
 
         std::string report = "# Garis dasar G0\n\n";

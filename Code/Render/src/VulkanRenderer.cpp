@@ -2163,6 +2163,20 @@ public:
         return target_.ReadDepth(out, outWidth, outHeight, executor_.LayoutOf(depthId_), error);
     }
 
+    bool CaptureHdr(std::vector<float>& outRgba, uint32_t& outWidth, uint32_t& outHeight,
+                    std::string& error) override {
+        // Tata letaknya diambil dari graph, bukan ditebak — alasan yang sama
+        // dengan `CaptureDepth`: yang melacaknya graph, dan menebaknya berarti
+        // membaca isi yang tak terdefinisi.
+        if (!post_.ReadScene(outRgba, target_.Width(), target_.Height(),
+                             executor_.LayoutOf(sceneId_), error)) {
+            return false;
+        }
+        outWidth = target_.Width();
+        outHeight = target_.Height();
+        return true;
+    }
+
     bool CaptureCullDebug(std::string& out, std::string& error) override {
         if (!gpuCullActive_ || !drawCull_.IsValid()) {
             error = "GPU culling is off";

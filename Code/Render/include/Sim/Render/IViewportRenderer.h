@@ -357,6 +357,28 @@ public:
         return false;
     }
 
+    /// Gambar HDR adegan: **radiance linier, sebelum eksposur dan sebelum
+    /// pemetaan nada.** Empat float per texel, urutan RGBA.
+    ///
+    /// **Ada karena tangkapan 8-bit tidak bisa menjawab pertanyaan yang halus.**
+    /// Dua gambar yang berselisih setengah tingkat kuantisasi terbaca sebagai
+    /// sama, dan peta selisih yang dikuatkan mengubah tangga kuantisasi itu
+    /// sendiri menjadi pola yang tampak seperti temuan — persis kesalahan yang
+    /// pernah dibuat saat menilai kisi probe.
+    ///
+    /// Bawaannya menolak: perender tanpa jalur HDR tidak punya apa pun untuk
+    /// diberikan, dan mengembalikan nol berarti menjawab dengan gambar yang
+    /// meyakinkan dan salah.
+    virtual bool CaptureHdr(std::vector<float>& outRgba, uint32_t& outWidth, uint32_t& outHeight,
+                            std::string& error) {
+        (void)outRgba;
+        (void)outWidth;
+        (void)outHeight;
+        error = "this renderer has no linear HDR target";
+        return false;
+    }
+
+
     /// Depth buffer frame terakhir, float per texel. Alat diagnostik; lihat
     /// `rhi::RenderTarget::ReadDepth`.
     virtual bool CaptureDepth(std::vector<float>& out, uint32_t& outWidth, uint32_t& outHeight,

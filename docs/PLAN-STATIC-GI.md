@@ -577,6 +577,44 @@ Angka yang benar, `bench.simlevel`, EV4, sesudah keenamnya diperbaiki:
 | 4 m | 2.304 | 64 | 11,3 s | 0,00 s | 0,32 MB | — |
 | 2 m | 6.400 | 128 | 67,7 s | 0,00 s | 0,88 MB | 32,5% kanal, maks 22 |
 
+##### Riak di tanah: dilacak sampai sebabnya
+
+Peta selisih S2 memperlihatkan riak samar di bidang tanah. Dugaan pertama —
+"resolusi kisi yang terlihat menembus, hilang dengan jarak lebih rapat" —
+**diukur dan salah**, dan dua dugaan berikutnya juga gugur:
+
+| dugaan | uji | hasil |
+|---|---|---|
+| resolusi kisi | jarak 2 m → 1 m | amplitudo **naik** 2,66×, bukan turun |
+| derau Monte Carlo | 128 → 512 cuplikan | tidak bergerak sama sekali (0,98×) |
+| kuantisasi 8-bit | dibaca ulang di HDR linear | riaknya **lebih kuat**, bukan hilang |
+
+Uji ketiga menuntut `IViewportRenderer::CaptureHdr` — radiance linier sebelum
+eksposur dan pemetaan nada. Itu ditambahkan untuk pertanyaan ini, dan ia
+menutup satu kelas kesalahan pengukuran seluruhnya: dua gambar yang berselisih
+setengah tingkat kuantisasi terbaca sebagai sama, dan peta selisih yang
+dikuatkan mengubah tangga kuantisasi menjadi pola yang tampak seperti temuan.
+
+Sebabnya ditemukan dengan membuka artefak `.simprobe` dan membaca probenya satu
+per satu: **sebagian probe jatuh di dalam benda pejal, dan yang di sana
+dipanggang tepat nol.** Nol itu lalu ikut ke dalam interpolasi permukaan di
+dekatnya.
+
+| jarak | probe nol | amplitudo riak |
+|---|---:|---:|
+| 4 m | 0 dari 2.304 — 0,00% | 1,00× |
+| 2 m | 35 dari 6.400 — 0,55% | 1,39× |
+| 1 m | 246 dari 21.312 — 1,15% | 3,69× |
+
+Kisi yang lebih rapat menaruh **lebih banyak** probe di dalam geometri, jadi
+memperhalus jaraknya memperburuk artefaknya alih-alih memperbaikinya. Itu
+membalik intuisi yang wajar, dan itulah yang membuatnya layak ditulis di sini.
+
+Yang memperbaikinya sudah terjadwal: **S3**, karena membedakan "di dalam
+dinding" dari "di depan dinding" menuntut probe membawa visibilitasnya, bukan
+hanya iradiansinya. Sampai itu ada, jarak probe yang lebih rapat bukan
+peningkatan kualitas yang gratis.
+
 ##### Tiga hal yang belum ada, dan disebutkan supaya tidak dikira ada
 
 1. **Albedo satu angka untuk seluruh adegan** — 0,5, angka dan alasan yang sama
