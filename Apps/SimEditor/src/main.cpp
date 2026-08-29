@@ -291,6 +291,12 @@ int main(int argc, char** argv) {
     renderer->SetLightmapCacheDir(configDir / "LightmapUvCache");
     if (meshPreview != nullptr) {
         meshPreview->SetTaskPool(&tasks);
+        // **Perender kedua ikut memakai folder yang sama**, walaupun mesh-nya
+        // tidak pernah diadu dengan mesh viewport. Yang dibeli bukan kebenaran
+        // melainkan ketiadaan pengecualian: sebuah aturan yang berlaku untuk
+        // "kebanyakan pemuat" adalah aturan yang harus diingat setiap kali
+        // pemuat baru ditambahkan, dan yang lupa tidak mendapat satu pun galat.
+        meshPreview->SetLightmapCacheDir(configDir / "LightmapUvCache");
     }
     std::unique_ptr<render::IThumbnailCache> thumbnails = render::CreateThumbnailCache(
         device, imguiLayer.Textures(), tasks, configDir / "ThumbnailCache");

@@ -861,6 +861,33 @@ Keduanya ditemukan karena kriteria terima milestone ini menyebut **kasus
 konkret** — "terrain", "primitif ber-UV nol" — alih-alih menyebut sifat. Kriteria
 yang menyebut sifat akan lulus pada pemeriksa yang salah.
 
+##### Yang ditemukan peninjauan: nama sementara yang dibagi
+
+Keempat artefak masak di mesin ini — SDF mesh, IBL, kisi probe, dan UV lightmap —
+menulis ke berkas sementara lalu memindahkannya, dan komentar `WriteIblCache`
+menyebut alasannya dengan tepat: *"dua renderer yang memanggang lingkungan yang
+sama menulis ke nama berkas yang sama — kuncinya memang isi berkas sumbernya,
+bukan siapa yang memanggangnya."*
+
+**Nama sementaranya juga sama, dan itu membatalkan alasan itu.** Rename memang
+atomik, tetapi dua penulis yang berbagi nama sementara membuka aliran ke satu
+berkas: isinya menjadi campuran, dan rename yang atomik justru yang membuat
+campuran itu terlihat sah. UV lightmap membuatnya nyata — jalur geometri CPU dan
+jalur unggah GPU memuat berkas yang sama lewat dua cache yang berbeda, jadi
+keduanya memanggang mesh yang sama pada saat yang sama.
+
+`sim::UniqueTemporaryPath` sekarang menamainya dengan pid dan penghitung, dan
+keempatnya memakainya. Pid, bukan angka acak: sisa berkas dari proses yang mati
+di tengah tulis bisa dikenali pemiliknya.
+
+##### Dan satu pengecualian yang dihapus
+
+`MeshEditorPanel` memuat mesh lewat perender kedua yang folder cache-nya tidak
+pernah dipasang. Mesh-nya tidak pernah diadu dengan mesh viewport, jadi tidak ada
+akibat hari ini — tetapi aturan yang berlaku untuk "kebanyakan pemuat" adalah
+aturan yang harus diingat setiap kali pemuat baru ditambahkan, dan yang lupa
+tidak mendapat satu pun galat. Perender itu sekarang ikut dipasang.
+
 ##### Satu jebakan yang dicegah, bukan ditemukan
 
 Unwrap menyusun ulang daftar vertex, jadi dua pemuat yang tidak sepakat

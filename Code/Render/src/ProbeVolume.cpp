@@ -1,3 +1,4 @@
+#include "Sim/Core/AtomicWrite.h"
 #include "Sim/Render/ProbeVolume.h"
 
 #include "Sim/Core/Log.h"
@@ -457,7 +458,7 @@ bool WriteProbeVolume(const std::filesystem::path& file, const ProbeVolume& volu
         std::filesystem::create_directories(file.parent_path(), code);
     }
 
-    const std::filesystem::path temporary = file.string() + ".tmp";
+    const std::filesystem::path temporary = UniqueTemporaryPath(file);
     std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
     if (!stream) {
         error = "cannot open " + temporary.string() + " for writing";

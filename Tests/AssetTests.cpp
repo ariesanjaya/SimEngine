@@ -4041,7 +4041,13 @@ TEST_CASE("S4: artefak bolak-balik lewat berkas, dan yang rusak ditolak") {
         std::filesystem::temp_directory_path() /
         ("sim-lmuv-" + std::to_string(::getpid()) + ".simlmuv");
     REQUIRE_MESSAGE(assets::WriteLightmapUvArtifact(file, artifact, error), error);
-    CHECK_FALSE(std::filesystem::exists(std::filesystem::path(file.string() + ".tmp")));
+    // Tidak ada berkas sementara yang tertinggal — nama apa pun, bukan hanya
+    // `.tmp` yang lama: namanya sekarang memuat pid dan penghitung, karena dua
+    // pemuat bisa memanggang mesh yang sama pada saat yang sama.
+    for (const auto& entry : std::filesystem::directory_iterator(file.parent_path())) {
+        const std::string name = entry.path().filename().string();
+        CHECK(name.find(file.filename().string() + ".tmp") == std::string::npos);
+    }
 
     assets::LightmapUvArtifact loaded;
     REQUIRE_MESSAGE(assets::ReadLightmapUvArtifact(file, loaded, error), error);

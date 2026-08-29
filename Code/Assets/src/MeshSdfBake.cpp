@@ -1,3 +1,4 @@
+#include "Sim/Core/AtomicWrite.h"
 #include "Sim/Assets/MeshSdfBake.h"
 
 #include "Sim/Assets/MeshData.h"
@@ -271,7 +272,7 @@ bool WriteMeshSdf(const std::filesystem::path& file, const SdfGrid& grid, std::s
     std::error_code code;
     std::filesystem::create_directories(file.parent_path(), code);
 
-    const std::filesystem::path temporary = file.string() + ".tmp";
+    const std::filesystem::path temporary = UniqueTemporaryPath(file);
     {
         std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
         if (!out) {
