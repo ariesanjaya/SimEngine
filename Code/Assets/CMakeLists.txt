@@ -10,6 +10,8 @@ sim_add_library(Assets
         src/MaterialImport.cpp
         src/MaterialXImport.cpp
         src/MaxMaterial.cpp
+        src/LightmapUv.cpp
+        src/LightmapUnwrap.cpp
         src/MeshImport.cpp
         src/MeshSdfBake.cpp
         src/MeshSdfBakery.cpp
@@ -43,6 +45,13 @@ sim_add_library(Assets
         Fbx::Fbx
         Cgltf::Cgltf
         nlohmann_json::nlohmann_json)
+
+# xatlas hanya kalau ada, dengan pola yang sama: `LightmapUnwrap.cpp` tetap ikut
+# dibangun tanpanya dan menolak dengan alasan yang menyebut sakelarnya.
+if(TARGET Xatlas::Xatlas)
+    target_link_libraries(SimAssets PRIVATE Xatlas::Xatlas)
+    target_compile_definitions(SimAssets PRIVATE SIM_WITH_XATLAS=1)
+endif()
 
 # MaterialX hanya kalau ada, dengan pola yang sama seperti USD:
 # MaterialXImport.cpp tetap ikut dibangun tanpanya dan menolak dengan alasan yang

@@ -241,6 +241,11 @@ int main(int argc, char** argv) {
     // Panggangan lingkungan tidak boleh menahan frame pemain.
     if (renderer != nullptr) {
         renderer->SetTaskPool(&tasks);
+        // **Di sebelah binernya, bukan di folder setelan pengguna.** Player
+        // yang dikirim membawa asetnya sendiri, dan cache di folder pengguna
+        // berarti jalan pertama membayar unwrap untuk setiap mesh — di layar
+        // pemuatan, bukan di editor.
+        renderer->SetLightmapCacheDir(exeDir / "LightmapUvCache");
     }
     assets::AssetDatabase assetDatabase;
     assets::AssetDatabase::Config assetConfig;

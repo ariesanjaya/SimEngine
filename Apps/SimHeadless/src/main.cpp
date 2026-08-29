@@ -672,6 +672,10 @@ int main(int argc, char** argv) {
     // panggangan cahaya tidak dihalangi satu pun dari mereka, dan sebuah ruangan
     // tertutup tetap disinari langit seolah di luar ruangan.
     sceneView.SetMeshGeometryCache(app.Context().meshGeometry);
+    // Folder yang sama dengan yang dipasang `EditorApp` ke cache geometri.
+    if (renderer != nullptr) {
+        renderer->SetLightmapCacheDir(app.Context().configDir / "LightmapUvCache");
+    }
     // **Material sungguhan ikut diukur, bukan hanya jalur mundur.**
     //
     // Sampai G5 sambungan ini hanya dipasang `ViewportPanel`, dan SimHeadless

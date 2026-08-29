@@ -1,5 +1,6 @@
 #include "IblCache.h"
 
+#include "Sim/Core/AtomicWrite.h"
 #include "Sim/Core/Log.h"
 
 #include <algorithm>
@@ -105,7 +106,7 @@ bool WriteIblCache(const std::filesystem::path& file, const IblBakeCpu& baked,
     // isi berkas sumbernya, bukan siapa yang memanggangnya. Rename pada
     // filesystem yang sama bersifat atomik, jadi yang terlihat pembaca hanya
     // berkas utuh atau tidak ada berkas sama sekali.
-    const std::filesystem::path temporary = file.string() + ".tmp";
+    const std::filesystem::path temporary = UniqueTemporaryPath(file);
     std::ofstream stream(temporary, std::ios::binary | std::ios::trunc);
     if (!stream) {
         error = "cannot open " + temporary.string() + " for writing";

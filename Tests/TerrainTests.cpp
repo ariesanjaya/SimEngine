@@ -1,5 +1,6 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 
+#include "Sim/Assets/LightmapUv.h"
 #include "Sim/Terrain/Terrain.h"
 #include "Sim/Terrain/TerrainBrush.h"
 #include "Sim/Terrain/TerrainDecal.h"
@@ -2346,4 +2347,72 @@ TEST_CASE("L7: rapatnya mengikuti jarak sampel, dengan batas yang disebutkan") {
     decal.maxSteps = 16;
     const assets::MeshData huge = BuildDecalMesh(terrain, decal);
     CHECK(huge.vertices.size() <= 17 * 17);
+}
+
+// --- S4: terrain adalah satu-satunya UV yang memang sudah layak --------------
+
+TEST_CASE("S4: UV ubin terrain dikenali layak untuk lightmap") {
+    // **Baris ini yang membuat pemeriksa kelayakan berguna alih-alih
+    // seremonial.** UV ubin terrain unik menurut konstruksi: tiap sampel
+    // memetakan sekali ke petaknya sendiri, tanpa berulang dan tanpa bertumpuk.
+    // Kalau pemeriksanya tidak bisa mengenali satu-satunya UV yang memang sudah
+    // layak di pohon ini, ia tidak bisa dipercaya mengenali yang lain — dan
+    // setiap mesh akan membayar unwrap yang tidak dibutuhkannya.
+    Terrain terrain(SmallDesc());
+    for (int y = 0; y < terrain.SamplesY(); ++y) {
+        for (int x = 0; x < terrain.SamplesX(); ++x) {
+            terrain.SetHeightAt(x, y, static_cast<float>((x * 7 + y * 13) % 23));
+        }
+    }
+
+    for (int ty = 0; ty < 2; ++ty) {
+        for (int tx = 0; tx < 2; ++tx) {
+            const assets::MeshData mesh = BuildTileMesh(terrain, tx, ty);
+            REQUIRE(mesh.IsValid());
+            const assets::LightmapUvSuitability check = assets::CheckLightmapUv(mesh, 0);
+            INFO("ubin ", tx, ",", ty, ": ", check.reason);
+            CHECK(check.suitable);
+            CHECK(check.overlappingPairs == 0);
+            CHECK(check.triangleCount == mesh.TriangleCount());
+            // **UV-nya dalam meter, jadi ia di luar kotak satuan** — dan itu
+            // bukan cacat melainkan skala yang belum disetel. Yang dibutuhkannya
+            // satu skala dan satu geseran, bukan parameterisasi baru.
+            CHECK(check.needsRescale);
+            CHECK(check.outsideUnitSquare > 0);
+
+            // Dan sesudah diskalakan ia benar-benar berada di dalam kotaknya.
+            assets::MeshData scaled = mesh;
+            assets::AdoptFirstUvAsLightmapUv(scaled);
+            REQUIRE(scaled.hasLightmapUv);
+            for (const assets::MeshVertex& vertex : scaled.vertices) {
+                CHECK(vertex.lightmapUv.x >= -1e-5f);
+                CHECK(vertex.lightmapUv.x <= 1.0f + 1e-5f);
+                CHECK(vertex.lightmapUv.y >= -1e-5f);
+                CHECK(vertex.lightmapUv.y <= 1.0f + 1e-5f);
+            }
+        }
+    }
+}
+
+TEST_CASE("S4: ubin terrain yang dijahit ke LOD tetangga tetap layak") {
+    // Jahitan LOD mengubah segitiga di tepinya — segitiga panjang yang
+    // menghubungkan dua kerapatan. Ia yang paling mungkin membuat dua segitiga
+    // bertumpuk di ruang UV tanpa disengaja.
+    Terrain terrain(SmallDesc());
+    for (int y = 0; y < terrain.SamplesY(); ++y) {
+        for (int x = 0; x < terrain.SamplesX(); ++x) {
+            terrain.SetHeightAt(x, y, static_cast<float>((x * 3 + y * 5) % 17));
+        }
+    }
+
+    TileNeighborLods neighbors;
+    neighbors.negativeX = 1;
+    neighbors.positiveY = 1;
+    const assets::MeshData mesh = BuildTileMesh(terrain, 1, 1, 0, neighbors);
+    REQUIRE(mesh.IsValid());
+
+    const assets::LightmapUvSuitability check = assets::CheckLightmapUv(mesh, 0);
+    INFO(check.reason);
+    CHECK(check.suitable);
+    CHECK(check.degenerateTriangles == 0);
 }

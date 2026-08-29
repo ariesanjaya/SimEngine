@@ -45,6 +45,7 @@ option(SIM_WITH_OPENVDB     "Bake SDF dan impor volume lewat OpenVDB"   ON)
 # lima angka. **Pengondisi aset, bukan pustaka runtime**: yang menggambar tetap
 # `Shaders/openpbr.slang`, dan tidak satu byte pun MaterialX ikut ke dalam game.
 option(SIM_WITH_MATERIALX   "Impor material MaterialX (.mtlx)"          ON)
+option(SIM_WITH_XATLAS      "Bangkitkan UV lightmap lewat xatlas (S4)"  ON)
 
 # Embree: backend ray query CPU alternatif — R6 di docs/PLAN-EMBREE.md.
 #

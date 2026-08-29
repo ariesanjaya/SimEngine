@@ -114,6 +114,7 @@ Ditambahkan saat dibutuhkan, dicatat di sini supaya keputusannya tidak diulang:
 | **meshoptimizer** | optimisasi vertex cache, generasi LOD, simplifikasi |
 | **OpenUSD** | impor `.usd/.usda/.usdc/.usdz`. **Opsional dan dicari, tidak diunduh** — lihat di bawah |
 | **MaterialX** | membaca dokumen `.mtlx` supaya material OpenPBR dari 3ds Max masuk utuh. **Opsional** (`SIM_WITH_MATERIALX`), dicari di `~/SDK/MaterialX`, dan hanya Core + Format — lihat di bawah |
+| **xatlas** | membangkitkan UV lightmap untuk mesh yang UV pertamanya tidak layak (S4). **Opsional** (`SIM_WITH_XATLAS`); tanpanya `LightmapUnwrap.cpp` tetap dibangun dan menolak dengan pesan yang menyebut sakelarnya |
 | **tinyexr** | impor OpenEXR untuk IBL (I2). **Opsional** (`SIM_WITH_EXR`), satu header lewat FetchContent |
 | **libtiff** | impor/ekspor heightmap TIFF 16/32-bit (I3). **Opsional** (`SIM_WITH_TIFF`), dicari di sistem |
 | **OpenVDB** | bake mesh → SDF untuk clipmap GI (V1), dan nanti impor `.vdb`. **Opsional** (`SIM_WITH_OPENVDB`), dicari, tidak dibangun — lihat di bawah |

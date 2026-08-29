@@ -205,7 +205,11 @@ sim_add_test(SimTerrainTests
         Sim::Terrain
         # Sim::ImageIO adalah dependensi privat Terrain, jadi uji harus
         # memintanya sendiri — sama seperti SimRenderTests.
-        Sim::ImageIO)
+        Sim::ImageIO
+        # S4 memeriksa UV ubin terrain dengan pemeriksa yang sama yang dipakai
+        # importir mesh. Uji yang menulis ulang aturannya hanya menguji
+        # salinannya.
+        Sim::Assets)
 
 # Heightmap TIFF uji, dibaca dari folder sumber dengan alasan yang sama dengan
 # SIM_MESH_DIR. Isinya diterangkan di Tests/ImageIOTests.cpp.

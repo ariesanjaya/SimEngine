@@ -4,6 +4,7 @@ sim_add_library(Core
         src/FileWatcher.cpp
         src/FbxSdkLock.cpp
         src/FrameLimiter.cpp
+        src/AtomicWrite.cpp
         src/Log.cpp
         src/MainThreadQueue.cpp
         src/SdfGrid.cpp

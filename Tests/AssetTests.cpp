@@ -9,6 +9,7 @@
 #include "Sim/Assets/TextureBake.h"
 #include "Sim/Assets/TextureBakery.h"
 #include "Sim/Assets/TextureSettings.h"
+#include "Sim/Assets/LightmapUv.h"
 #include "Sim/Assets/MeshData.h"
 #include "Sim/Assets/MeshGeometryCache.h"
 #include "Sim/Assets/MeshSdfBake.h"
@@ -3658,4 +3659,428 @@ TEST_CASE("Okupansi grid SDF hasil bake — batas atas penghematan brick sparse"
         // jauh lebih sedikit, dan persentasenya bisa bergerak ke dua arah.
         CHECK(o.brick8Percent >= o.inBandPercent);
     }
+}
+
+// --- S4: kelayakan UV pertama untuk lightmap (docs/PLAN-STATIC-GI.md) --------
+
+namespace {
+
+/// Satu kuad di ruang UV yang diberikan, dua segitiga.
+void AddUvQuad(assets::MeshData& mesh, Vec2 origin, Vec2 size) {
+    const auto base = static_cast<uint32_t>(mesh.vertices.size());
+    const Vec2 corners[4] = {origin, origin + Vec2(size.x, 0.0f), origin + size,
+                             origin + Vec2(0.0f, size.y)};
+    for (int i = 0; i < 4; ++i) {
+        assets::MeshVertex vertex;
+        // Posisinya tidak diperiksa pemeriksa UV; yang penting UV-nya.
+        vertex.position = Vec3(corners[i].x, 0.0f, corners[i].y);
+        vertex.uv = corners[i];
+        mesh.vertices.push_back(vertex);
+    }
+    for (const uint32_t offset : {0u, 1u, 2u, 0u, 2u, 3u}) {
+        mesh.indices.push_back(base + offset);
+    }
+}
+
+}  // namespace
+
+TEST_CASE("S4: UV yang unik dan di dalam kotak satuan dinyatakan layak") {
+    assets::MeshData mesh;
+    // Empat petak yang tidak bersinggungan — persis bentuk yang dihasilkan
+    // unwrapper, dan persis bentuk yang tidak perlu di-unwrap lagi.
+    AddUvQuad(mesh, Vec2(0.00f, 0.00f), Vec2(0.45f, 0.45f));
+    AddUvQuad(mesh, Vec2(0.50f, 0.00f), Vec2(0.45f, 0.45f));
+    AddUvQuad(mesh, Vec2(0.00f, 0.50f), Vec2(0.45f, 0.45f));
+    AddUvQuad(mesh, Vec2(0.50f, 0.50f), Vec2(0.45f, 0.45f));
+
+    const assets::LightmapUvSuitability check = assets::CheckLightmapUv(mesh);
+    INFO(check.reason);
+    CHECK(check.suitable);
+    CHECK(check.outsideUnitSquare == 0);
+    CHECK(check.overlappingPairs == 0);
+    CHECK(check.triangleCount == 8);
+}
+
+TEST_CASE("S4: UV di luar kotak satuan tetap layak — ia hanya perlu diskalakan") {
+    // **Kriterianya injektivitas, bukan kotak satuan**, dan pembedaan itu bukan
+    // teori: UV ubin terrain ditulis dalam meter dan sepenuhnya di luar
+    // `[0,1]`. Menolaknya berarti membayar unwrap untuk satu-satunya UV di pohon
+    // ini yang memang sudah layak.
+    assets::MeshData mesh;
+    AddUvQuad(mesh, Vec2(0.0f, 0.0f), Vec2(4.0f, 4.0f));
+
+    const assets::LightmapUvSuitability check = assets::CheckLightmapUv(mesh);
+    INFO(check.reason);
+    CHECK(check.suitable);
+    CHECK(check.needsRescale);
+    CHECK(check.outsideUnitSquare == 2);
+    CHECK(check.overlappingPairs == 0);
+
+    // Dan penyekalaannya benar-benar membawanya ke dalam kotak.
+    assets::AdoptFirstUvAsLightmapUv(mesh);
+    REQUIRE(mesh.hasLightmapUv);
+    for (const assets::MeshVertex& vertex : mesh.vertices) {
+        CHECK(vertex.lightmapUv.x >= 0.0f);
+        CHECK(vertex.lightmapUv.x <= 1.0f);
+        CHECK(vertex.lightmapUv.y >= 0.0f);
+        CHECK(vertex.lightmapUv.y <= 1.0f);
+    }
+}
+
+TEST_CASE("S4: UV yang benar-benar berulang ditolak, karena petaknya bertumpuk") {
+    // **Ini kasus yang paling sering, dan ia yang paling mahal kalau lolos.**
+    // Pengulangan bukan sekadar "keluar kotak": ia menempatkan dua tempat yang
+    // berbeda di permukaan pada petak UV yang sama, jadi cahaya yang dipanggang
+    // di salah satunya muncul di yang lain. Yang menangkapnya uji tumpang
+    // tindih, bukan uji kotak satuan.
+    assets::MeshData mesh;
+    // Empat kuad yang seluruhnya memetakan ke petak yang sama — persis yang
+    // dihasilkan UV berulang pada dinding bata.
+    for (int i = 0; i < 4; ++i) {
+        AddUvQuad(mesh, Vec2(0.0f, 0.0f), Vec2(1.0f, 1.0f));
+    }
+
+    const assets::LightmapUvSuitability check = assets::CheckLightmapUv(mesh);
+    CHECK_FALSE(check.suitable);
+    CHECK(check.overlappingPairs > 0);
+    CHECK_FALSE(check.reason.empty());
+}
+
+TEST_CASE("S4: UV yang tumpang tindih tanpa keluar kotak tetap ditolak") {
+    // Dua sisi sebuah tiang yang memakai petak UV yang sama: cara yang benar
+    // untuk menghemat tekstur, dan cara yang salah untuk menyimpan cahaya. Ia
+    // tidak keluar dari `[0,1]` sama sekali, jadi pemeriksa yang hanya melihat
+    // kotak satuan meloloskannya.
+    assets::MeshData mesh;
+    AddUvQuad(mesh, Vec2(0.1f, 0.1f), Vec2(0.5f, 0.5f));
+    AddUvQuad(mesh, Vec2(0.3f, 0.3f), Vec2(0.5f, 0.5f));
+
+    const assets::LightmapUvSuitability check = assets::CheckLightmapUv(mesh);
+    CHECK_FALSE(check.suitable);
+    CHECK(check.outsideUnitSquare == 0);
+    CHECK(check.overlappingPairs > 0);
+}
+
+TEST_CASE("S4: petak yang berbagi tepi bukan tumpang tindih") {
+    // **Cacat yang paling mudah dibuat pemeriksa ini.** Dua segitiga yang
+    // bersebelahan di dalam satu chart memang berbagi tepinya; menghitungnya
+    // sebagai tumpang tindih membuat setiap mesh gagal, dan unwrap lalu dibayar
+    // untuk semuanya termasuk yang sudah layak.
+    assets::MeshData mesh;
+    AddUvQuad(mesh, Vec2(0.0f, 0.0f), Vec2(0.5f, 1.0f));
+    AddUvQuad(mesh, Vec2(0.5f, 0.0f), Vec2(0.5f, 1.0f));
+
+    const assets::LightmapUvSuitability check = assets::CheckLightmapUv(mesh);
+    INFO(check.reason);
+    CHECK(check.suitable);
+    CHECK(check.overlappingPairs == 0);
+}
+
+TEST_CASE("S4: UV yang sudah di dalam kotak disalin apa adanya") {
+    assets::MeshData mesh;
+    AddUvQuad(mesh, Vec2(0.0f, 0.0f), Vec2(1.0f, 1.0f));
+    CHECK_FALSE(mesh.hasLightmapUv);
+
+    assets::AdoptFirstUvAsLightmapUv(mesh);
+    REQUIRE(mesh.hasLightmapUv);
+    for (const assets::MeshVertex& vertex : mesh.vertices) {
+        CHECK(vertex.lightmapUv.x == doctest::Approx(vertex.uv.x));
+        CHECK(vertex.lightmapUv.y == doctest::Approx(vertex.uv.y));
+    }
+}
+
+TEST_CASE("S4: penyekalaan seragam di kedua sumbu") {
+    // Skala per sumbu meregangkan texel lightmap, sehingga sebuah ubin persegi
+    // panjang mendapat kerapatan cahaya yang berbeda menurut arah — terlihat
+    // sebagai bayangan yang lebih kabur di satu sumbu daripada sumbu lain.
+    assets::MeshData mesh;
+    AddUvQuad(mesh, Vec2(0.0f, 0.0f), Vec2(8.0f, 2.0f));
+    assets::AdoptFirstUvAsLightmapUv(mesh);
+
+    Vec2 minimum(1e9f);
+    Vec2 maximum(-1e9f);
+    for (const assets::MeshVertex& vertex : mesh.vertices) {
+        minimum = glm::min(minimum, vertex.lightmapUv);
+        maximum = glm::max(maximum, vertex.lightmapUv);
+    }
+    // Sisi panjangnya mengisi kotak; sisi pendeknya seperempatnya, bukan penuh.
+    CHECK((maximum.x - minimum.x) == doctest::Approx(1.0f));
+    CHECK((maximum.y - minimum.y) == doctest::Approx(0.25f));
+}
+
+// --- S4: pembangkitan UV lightmap --------------------------------------------
+
+namespace {
+
+/// Kubus satuan dengan UV pertama yang **bertumpuk**: keenam mukanya memetakan
+/// ke petak yang sama. Ini bentuk yang benar untuk tekstur dan salah untuk
+/// lightmap, dan ia yang paling sering ditemui.
+assets::MeshData MakeOverlappingCube() {
+    assets::MeshData mesh;
+    const Vec3 faces[6][4] = {
+        {{-0.5f, -0.5f, 0.5f}, {0.5f, -0.5f, 0.5f}, {0.5f, 0.5f, 0.5f}, {-0.5f, 0.5f, 0.5f}},
+        {{0.5f, -0.5f, -0.5f}, {-0.5f, -0.5f, -0.5f}, {-0.5f, 0.5f, -0.5f}, {0.5f, 0.5f, -0.5f}},
+        {{0.5f, -0.5f, 0.5f}, {0.5f, -0.5f, -0.5f}, {0.5f, 0.5f, -0.5f}, {0.5f, 0.5f, 0.5f}},
+        {{-0.5f, -0.5f, -0.5f}, {-0.5f, -0.5f, 0.5f}, {-0.5f, 0.5f, 0.5f}, {-0.5f, 0.5f, -0.5f}},
+        {{-0.5f, 0.5f, 0.5f}, {0.5f, 0.5f, 0.5f}, {0.5f, 0.5f, -0.5f}, {-0.5f, 0.5f, -0.5f}},
+        {{-0.5f, -0.5f, -0.5f}, {0.5f, -0.5f, -0.5f}, {0.5f, -0.5f, 0.5f}, {-0.5f, -0.5f, 0.5f}},
+    };
+    const Vec3 normals[6] = {{0, 0, 1}, {0, 0, -1}, {1, 0, 0},
+                             {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}};
+    const Vec2 uvs[4] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}};
+    for (int face = 0; face < 6; ++face) {
+        const auto base = static_cast<uint32_t>(mesh.vertices.size());
+        for (int corner = 0; corner < 4; ++corner) {
+            assets::MeshVertex vertex;
+            vertex.position = faces[face][corner];
+            vertex.normal = normals[face];
+            vertex.uv = uvs[corner];
+            mesh.vertices.push_back(vertex);
+        }
+        for (const uint32_t offset : {0u, 1u, 2u, 0u, 2u, 3u}) {
+            mesh.indices.push_back(base + offset);
+        }
+    }
+    mesh.boundsMin = Vec3(-0.5f);
+    mesh.boundsMax = Vec3(0.5f);
+    mesh.parts.push_back(assets::SubMesh{0, static_cast<uint32_t>(mesh.indices.size()), -1});
+    return mesh;
+}
+
+/// Memeriksa UV **lightmap** sebuah mesh dengan pemeriksa yang sama — dengan
+/// menukarnya ke slot UV pertama lebih dulu.
+assets::LightmapUvSuitability CheckLightmapSlot(const assets::MeshData& mesh) {
+    assets::MeshData swapped = mesh;
+    for (assets::MeshVertex& vertex : swapped.vertices) {
+        vertex.uv = vertex.lightmapUv;
+    }
+    return assets::CheckLightmapUv(swapped, 0);
+}
+
+}  // namespace
+
+TEST_CASE("S4: kubus ber-UV bertumpuk keluar dengan chart yang tidak tumpang tindih") {
+    // **Kriteria terima S4, dan ia diperiksa uji bukan mata.** Yang masuk adalah
+    // kubus yang keenam mukanya memakai petak UV yang sama; yang keluar harus
+    // punya petaknya masing-masing.
+    assets::MeshData mesh = MakeOverlappingCube();
+
+    // Yang masuk memang tidak layak — kalau tidak, ujinya tidak menguji apa pun.
+    const assets::LightmapUvSuitability before = assets::CheckLightmapUv(mesh, 0);
+    REQUIRE_FALSE(before.suitable);
+    REQUIRE(before.overlappingPairs > 0);
+
+    if (!assets::HasLightmapUnwrapper()) {
+        // Dibangun tanpa xatlas: yang benar adalah menolak dengan pesan, bukan
+        // diam. Itu diperiksa di uji berikutnya.
+        MESSAGE("dibangun tanpa xatlas; pembangkitan UV lightmap dilewati");
+        return;
+    }
+
+    const assets::LightmapUnwrapResult result = assets::GenerateLightmapUv(mesh);
+    INFO(result.error);
+    REQUIRE(result.ok);
+    REQUIRE(mesh.hasLightmapUv);
+    MESSAGE(result.chartCount, " chart, ", result.vertexCount, " vertex, utilisasi ",
+            result.utilisation);
+
+    // Kubus enam muka menghasilkan lebih dari satu chart — kalau satu, ia
+    // memaksa keenam muka ke satu pulau dan pulau itu pasti melipat.
+    CHECK(result.chartCount >= 2);
+    // Vertexnya bertambah: sudut yang dipakai tiga muka harus dipecah.
+    CHECK(mesh.vertices.size() >= 24);
+
+    const assets::LightmapUvSuitability after = CheckLightmapSlot(mesh);
+    INFO(after.reason);
+    CHECK(after.suitable);
+    CHECK(after.overlappingPairs == 0);
+    CHECK(after.outsideUnitSquare == 0);
+    CHECK(after.triangleCount == 12);
+}
+
+TEST_CASE("S4: primitif ber-UV nol keluar dengan UV yang layak") {
+    // Whitebox dan primitif bawaan lahir tanpa UV sama sekali — nol di seluruh
+    // vertex. Pemeriksanya harus menolaknya (seluruh permukaan memetakan ke satu
+    // texel), dan pembangkitnya harus mengubahnya menjadi UV yang layak.
+    assets::MeshData mesh = MakeOverlappingCube();
+    for (assets::MeshVertex& vertex : mesh.vertices) {
+        vertex.uv = Vec2(0.0f);
+    }
+
+    const assets::LightmapUvSuitability before = assets::CheckLightmapUv(mesh, 0);
+    CHECK_FALSE(before.suitable);
+    // Seluruh segitiganya luas-nol di ruang UV: itu bukan sekadar tumpang
+    // tindih, itu tidak ada pemetaan sama sekali.
+    CHECK(before.degenerateTriangles == 12);
+
+    if (!assets::HasLightmapUnwrapper()) {
+        return;
+    }
+    const assets::LightmapUnwrapResult result = assets::GenerateLightmapUv(mesh);
+    INFO(result.error);
+    REQUIRE(result.ok);
+
+    const assets::LightmapUvSuitability after = CheckLightmapSlot(mesh);
+    INFO(after.reason);
+    CHECK(after.suitable);
+    CHECK(after.degenerateTriangles == 0);
+    CHECK(after.overlappingPairs == 0);
+}
+
+TEST_CASE("S4: tanpa pembangkitnya, yang keluar penolakan yang menyebut sakelarnya") {
+    // **Diam lebih buruk daripada menolak.** Mesh tanpa UV lightmap yang lolos
+    // tanpa pesan terbaca sebagai "mesh ini memang tidak butuh", dan yang
+    // menemukannya adalah orang yang bertanya kenapa lightmap-nya hitam.
+    assets::MeshData mesh = MakeOverlappingCube();
+    const assets::LightmapUnwrapResult result = assets::GenerateLightmapUv(mesh);
+    if (assets::HasLightmapUnwrapper()) {
+        CHECK(result.ok);
+        CHECK(result.error.empty());
+    } else {
+        CHECK_FALSE(result.ok);
+        CHECK(result.error.find("SIM_WITH_XATLAS") != std::string::npos);
+        CHECK_FALSE(mesh.hasLightmapUv);
+    }
+}
+
+TEST_CASE("S4: ruas material tetap menunjuk segitiga yang sama sesudah unwrap") {
+    // **Langkah yang paling mudah dilewatkan.** xatlas mempertahankan urutan
+    // segitiganya tetapi menulis ulang indeksnya; ruas yang tidak ikut diperiksa
+    // menghasilkan mesh yang benar bentuknya dan salah materialnya — dan tidak
+    // ada satu pun galat yang menyertainya.
+    if (!assets::HasLightmapUnwrapper()) {
+        return;
+    }
+    assets::MeshData mesh = MakeOverlappingCube();
+    mesh.parts.clear();
+    mesh.parts.push_back(assets::SubMesh{0, 36, 0});
+    mesh.parts.push_back(assets::SubMesh{36, 36, 1});
+    // Dua ruas atas geometri yang sama, digandakan supaya keduanya punya isi.
+    const std::size_t half = mesh.indices.size();
+    mesh.indices.insert(mesh.indices.end(), mesh.indices.begin(), mesh.indices.begin() + half);
+
+    const std::size_t before = mesh.indices.size();
+    const assets::LightmapUnwrapResult result = assets::GenerateLightmapUv(mesh);
+    INFO(result.error);
+    REQUIRE(result.ok);
+    // Jumlah segitiganya tidak berubah, jadi ruasnya tetap sah apa adanya.
+    CHECK(mesh.indices.size() == before);
+    for (const assets::SubMesh& part : mesh.parts) {
+        CHECK(part.firstIndex + part.indexCount <= mesh.indices.size());
+    }
+}
+
+// --- S4: artefak cook UV lightmap -------------------------------------------
+
+TEST_CASE("S4: cook lalu terapkan menghasilkan mesh yang sama persis") {
+    // **Yang disimpan hanya yang mahal, dan penerapannya harus membangun ulang
+    // hasilnya persis.** Kalau tidak, cache-nya bukan penghematan melainkan
+    // sumber kedua yang diam-diam berbeda dari yang pertama.
+    if (!assets::HasLightmapUnwrapper()) {
+        return;
+    }
+    const assets::MeshData source = MakeOverlappingCube();
+
+    assets::LightmapUvSuitability check;
+    std::string error;
+    const assets::LightmapUvArtifact artifact = assets::CookLightmapUv(source, check, error);
+    INFO(error);
+    REQUIRE(artifact.IsValid());
+    CHECK_FALSE(artifact.fromFirstUv);
+    CHECK(artifact.sourceVertexCount == source.vertices.size());
+
+    // Yang dipanggang langsung, sebagai pembanding.
+    assets::MeshData direct = source;
+    REQUIRE(assets::GenerateLightmapUv(direct).ok);
+
+    assets::MeshData applied = source;
+    REQUIRE_MESSAGE(assets::ApplyLightmapUv(applied, artifact, error), error);
+    REQUIRE(applied.hasLightmapUv);
+    REQUIRE(applied.vertices.size() == direct.vertices.size());
+    REQUIRE(applied.indices == direct.indices);
+    for (std::size_t i = 0; i < applied.vertices.size(); ++i) {
+        CHECK(applied.vertices[i].lightmapUv.x == doctest::Approx(direct.vertices[i].lightmapUv.x));
+        CHECK(applied.vertices[i].lightmapUv.y == doctest::Approx(direct.vertices[i].lightmapUv.y));
+        CHECK(applied.vertices[i].position.x == doctest::Approx(direct.vertices[i].position.x));
+        CHECK(applied.vertices[i].normal.y == doctest::Approx(direct.vertices[i].normal.y));
+    }
+}
+
+TEST_CASE("S4: UV yang sudah layak disimpan tanpa remap sama sekali") {
+    // Ubin terrain dan mesh yang UV-nya memang sudah unik melewati unwrap, dan
+    // artefaknya lalu tidak memuat satu pun indeks — hanya UV-nya.
+    assets::MeshData mesh;
+    AddUvQuad(mesh, Vec2(0.0f, 0.0f), Vec2(4.0f, 4.0f));
+
+    assets::LightmapUvSuitability check;
+    std::string error;
+    const assets::LightmapUvArtifact artifact = assets::CookLightmapUv(mesh, check, error);
+    INFO(error);
+    REQUIRE(artifact.IsValid());
+    CHECK(check.suitable);
+    CHECK(artifact.fromFirstUv);
+    CHECK(artifact.vertexRemap.empty());
+    CHECK(artifact.indices.empty());
+
+    assets::MeshData applied = mesh;
+    REQUIRE(assets::ApplyLightmapUv(applied, artifact, error));
+    CHECK(applied.hasLightmapUv);
+    CHECK(applied.indices == mesh.indices);
+    CHECK(applied.vertices.size() == mesh.vertices.size());
+}
+
+TEST_CASE("S4: artefak bolak-balik lewat berkas, dan yang rusak ditolak") {
+    assets::MeshData mesh;
+    AddUvQuad(mesh, Vec2(0.0f, 0.0f), Vec2(2.0f, 2.0f));
+    assets::LightmapUvSuitability check;
+    std::string error;
+    const assets::LightmapUvArtifact artifact = assets::CookLightmapUv(mesh, check, error);
+    REQUIRE(artifact.IsValid());
+
+    const std::filesystem::path file =
+        std::filesystem::temp_directory_path() /
+        ("sim-lmuv-" + std::to_string(::getpid()) + ".simlmuv");
+    REQUIRE_MESSAGE(assets::WriteLightmapUvArtifact(file, artifact, error), error);
+    // Tidak ada berkas sementara yang tertinggal — nama apa pun, bukan hanya
+    // `.tmp` yang lama: namanya sekarang memuat pid dan penghitung, karena dua
+    // pemuat bisa memanggang mesh yang sama pada saat yang sama.
+    for (const auto& entry : std::filesystem::directory_iterator(file.parent_path())) {
+        const std::string name = entry.path().filename().string();
+        CHECK(name.find(file.filename().string() + ".tmp") == std::string::npos);
+    }
+
+    assets::LightmapUvArtifact loaded;
+    REQUIRE_MESSAGE(assets::ReadLightmapUvArtifact(file, loaded, error), error);
+    CHECK(loaded.fromFirstUv == artifact.fromFirstUv);
+    CHECK(loaded.sourceVertexCount == artifact.sourceVertexCount);
+    REQUIRE(loaded.lightmapUv.size() == artifact.lightmapUv.size());
+    CHECK(loaded.lightmapUv[0].x == doctest::Approx(artifact.lightmapUv[0].x));
+
+    std::ofstream(file, std::ios::binary) << "bukan artefak UV";
+    CHECK_FALSE(assets::ReadLightmapUvArtifact(file, loaded, error));
+
+    REQUIRE(assets::WriteLightmapUvArtifact(file, artifact, error));
+    std::filesystem::resize_file(file, std::filesystem::file_size(file) / 2);
+    CHECK_FALSE(assets::ReadLightmapUvArtifact(file, loaded, error));
+
+    std::error_code cleanup;
+    std::filesystem::remove(file, cleanup);
+}
+
+TEST_CASE("S4: artefak milik mesh lain ditolak, bukan dibaca melewati ujungnya") {
+    // Remap yang menunjuk ke luar daftar vertex adalah pembacaan memori bebas,
+    // bukan gambar yang sedikit salah.
+    assets::MeshData small;
+    AddUvQuad(small, Vec2(0.0f, 0.0f), Vec2(1.0f, 1.0f));
+    assets::LightmapUvSuitability check;
+    std::string error;
+    const assets::LightmapUvArtifact artifact = assets::CookLightmapUv(small, check, error);
+    REQUIRE(artifact.IsValid());
+
+    assets::MeshData other;
+    AddUvQuad(other, Vec2(0.0f, 0.0f), Vec2(1.0f, 1.0f));
+    AddUvQuad(other, Vec2(0.0f, 0.0f), Vec2(1.0f, 1.0f));
+    CHECK_FALSE(assets::ApplyLightmapUv(other, artifact, error));
+    CHECK_FALSE(error.empty());
+    CHECK_FALSE(other.hasLightmapUv);
 }

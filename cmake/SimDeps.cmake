@@ -954,6 +954,37 @@ endif()
 # nodegraph, upgrade dokumen versi lama ke 1.39, dan satuan. Dokumen yang salah
 # dibaca tidak memunculkan galat — ia memunculkan material yang mirip.
 # ---------------------------------------------------------------------------
+# ---------------------------------------------------------------------------
+# xatlas — pembangkit UV lightmap (S4, lihat docs/PLAN-STATIC-GI.md)
+#
+# **Opsional, dengan aturan yang sama seperti MaterialX dan OpenUSD:** yang
+# membangun tanpanya kehilangan pembangkitan UV lightmap, bukan seluruh mesin.
+# `LightmapUnwrap.cpp` tetap ikut dibangun dan menolak dengan pesan yang
+# menyebut sakelarnya — bukan dengan diam, yang akan terbaca sebagai "mesh ini
+# memang tidak butuh UV lightmap".
+#
+# Dua berkas, tanpa CMakeLists sendiri, jadi targetnya dibuat di sini —
+# pola yang sama dengan ImGuizmo di atas.
+if(SIM_WITH_XATLAS)
+    FetchContent_Declare(xatlas
+        GIT_REPOSITORY https://github.com/jpcy/xatlas.git
+        GIT_TAG        f700c7790aaa030e794b52ba7791a05c085faf0c
+        GIT_SHALLOW    FALSE)
+    FetchContent_MakeAvailable(xatlas)
+
+    add_library(xatlas STATIC "${xatlas_SOURCE_DIR}/source/xatlas/xatlas.cpp")
+    target_include_directories(xatlas SYSTEM PUBLIC "${xatlas_SOURCE_DIR}/source/xatlas")
+    # Kode pihak ketiga tidak lolos -Werror milik `sim_target_defaults`, dan
+    # menambalnya berarti menambal pustaka orang lain setiap kali ia diperbarui.
+    target_compile_options(xatlas PRIVATE -w)
+    find_package(Threads REQUIRED)
+    target_link_libraries(xatlas PUBLIC Threads::Threads)
+    add_library(Xatlas::Xatlas ALIAS xatlas)
+    message(STATUS "xatlas: UV lightmap dibangkitkan")
+else()
+    message(STATUS "xatlas dimatikan (-DSIM_WITH_XATLAS=OFF); UV lightmap tidak dibangkitkan")
+endif()
+
 set(SIM_MATERIALX_DEFAULT_ROOT "$ENV{HOME}/SDK/MaterialX")
 if(EXISTS "${SIM_MATERIALX_DEFAULT_ROOT}/source/MaterialXCore/Document.h")
     set(SIM_MATERIALX_ROOT "${SIM_MATERIALX_DEFAULT_ROOT}" CACHE PATH "Folder sumber MaterialX")

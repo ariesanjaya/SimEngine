@@ -7,6 +7,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <filesystem>
 #include <string>
 #include <vector>
 #include <span>
@@ -121,6 +122,17 @@ public:
     /// melainkan jalur yang dipakai uji dan alat baris perintah, yang memang
     /// tidak punya frame untuk ditahan.
     virtual void SetTaskPool(TaskPool* tasks) { (void)tasks; }
+
+    /// Tempat artefak UV lightmap dibaca dan ditulis saat mesh diunggah (S4).
+    ///
+    /// **Harus sama dengan yang dipakai `assets::MeshGeometryCache`.** Unwrap
+    /// menyusun ulang daftar vertex, jadi dua pemuat yang tidak sepakat
+    /// menghasilkan dua mesh yang berbeda untuk berkas yang sama — dan yang
+    /// menemukannya adalah orang yang bertanya kenapa picking mengenai segitiga
+    /// yang lain daripada yang tergambar.
+    ///
+    /// Kosong berarti mesh diunggah tanpa UV lightmap.
+    virtual void SetLightmapCacheDir(std::filesystem::path dir) { (void)dir; }
 
     /// Memuat geometri sebuah berkas mesh, atau mengembalikan yang sudah dimuat.
     ///
