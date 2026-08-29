@@ -131,6 +131,11 @@ bool EditorApp::Initialize(const Config& config) {
     // dalam penanganan klik adalah editor yang membeku tepat saat seseorang
     // menunjuk sesuatu.
     meshGeometry_ = std::make_unique<assets::MeshGeometryCache>(config.tasks);
+    // **Satu folder untuk kedua pemuat.** Unwrap menyusun ulang daftar vertex;
+    // dua pemuat yang tidak sepakat menghasilkan dua mesh yang berbeda untuk
+    // berkas yang sama, dan picking lalu mengenai segitiga yang lain daripada
+    // yang tergambar.
+    meshGeometry_->SetLightmapCacheDir(configDir_ / "LightmapUvCache");
     context_.meshGeometry = meshGeometry_.get();
     // Shader material ikut ke `TaskPool`. Satu panggilan `slangc` adalah detik,
     // dan detik di dalam jalur gambar adalah editor yang membeku tepat pada

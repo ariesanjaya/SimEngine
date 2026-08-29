@@ -61,6 +61,16 @@ public:
     /// `tasks` boleh null: tanpanya pemuatan dikerjakan di tempat, di thread yang
     /// memanggil. Itu jalur uji.
     explicit MeshGeometryCache(TaskPool* tasks = nullptr);
+
+    /// Tempat artefak UV lightmap dibaca dan ditulis (S4). Kosong berarti mesh
+    /// dimuat tanpa UV lightmap sama sekali.
+    ///
+    /// **Harus sama dengan yang dipakai renderer.** Unwrap menyusun ulang daftar
+    /// vertex, jadi dua pemuat yang tidak sepakat menghasilkan dua mesh yang
+    /// berbeda untuk berkas yang sama — dan yang menemukannya adalah orang yang
+    /// bertanya kenapa picking mengenai segitiga yang lain daripada yang
+    /// tergambar.
+    void SetLightmapCacheDir(std::filesystem::path dir) { lightmapCacheDir_ = std::move(dir); }
     ~MeshGeometryCache();
 
     MeshGeometryCache(const MeshGeometryCache&) = delete;
@@ -106,6 +116,7 @@ private:
     mutable std::mutex mutex_;
     std::unordered_map<std::string, Entry> entries_;
     TaskPool* tasks_ = nullptr;
+    std::filesystem::path lightmapCacheDir_;
 };
 
 }  // namespace sim::assets

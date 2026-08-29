@@ -81,12 +81,15 @@ LightmapUnwrapResult GenerateLightmapUv(MeshData& mesh) {
     // sekaligus — jadi yang keluar adalah daftar vertex yang lain dengan
     // `xref` menunjuk asalnya.
     std::vector<MeshVertex> vertices;
+    std::vector<uint32_t> sources;
     vertices.reserve(output.vertexCount);
+    sources.reserve(output.vertexCount);
     for (uint32_t i = 0; i < output.vertexCount; ++i) {
         const xatlas::Vertex& produced = output.vertexArray[i];
         MeshVertex vertex = mesh.vertices[produced.xref];
         vertex.lightmapUv = Vec2(produced.uv[0] / width, produced.uv[1] / height);
         vertices.push_back(vertex);
+        sources.push_back(produced.xref);
     }
 
     std::vector<uint32_t> indices(output.indexArray, output.indexArray + output.indexCount);
@@ -109,6 +112,7 @@ LightmapUnwrapResult GenerateLightmapUv(MeshData& mesh) {
 
     mesh.vertices = std::move(vertices);
     mesh.indices = std::move(indices);
+    mesh.lightmapVertexSource = std::move(sources);
     mesh.hasLightmapUv = true;
     // Pengaruh skin ikut vertexnya. Mesh statis tidak punya, dan mesh ber-skin
     // bukan calon lightmap — tetapi membiarkannya sejajar dengan daftar vertex

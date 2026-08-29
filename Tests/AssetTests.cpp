@@ -3969,3 +3969,112 @@ TEST_CASE("S4: ruas material tetap menunjuk segitiga yang sama sesudah unwrap") 
         CHECK(part.firstIndex + part.indexCount <= mesh.indices.size());
     }
 }
+
+// --- S4: artefak cook UV lightmap -------------------------------------------
+
+TEST_CASE("S4: cook lalu terapkan menghasilkan mesh yang sama persis") {
+    // **Yang disimpan hanya yang mahal, dan penerapannya harus membangun ulang
+    // hasilnya persis.** Kalau tidak, cache-nya bukan penghematan melainkan
+    // sumber kedua yang diam-diam berbeda dari yang pertama.
+    if (!assets::HasLightmapUnwrapper()) {
+        return;
+    }
+    const assets::MeshData source = MakeOverlappingCube();
+
+    assets::LightmapUvSuitability check;
+    std::string error;
+    const assets::LightmapUvArtifact artifact = assets::CookLightmapUv(source, check, error);
+    INFO(error);
+    REQUIRE(artifact.IsValid());
+    CHECK_FALSE(artifact.fromFirstUv);
+    CHECK(artifact.sourceVertexCount == source.vertices.size());
+
+    // Yang dipanggang langsung, sebagai pembanding.
+    assets::MeshData direct = source;
+    REQUIRE(assets::GenerateLightmapUv(direct).ok);
+
+    assets::MeshData applied = source;
+    REQUIRE_MESSAGE(assets::ApplyLightmapUv(applied, artifact, error), error);
+    REQUIRE(applied.hasLightmapUv);
+    REQUIRE(applied.vertices.size() == direct.vertices.size());
+    REQUIRE(applied.indices == direct.indices);
+    for (std::size_t i = 0; i < applied.vertices.size(); ++i) {
+        CHECK(applied.vertices[i].lightmapUv.x == doctest::Approx(direct.vertices[i].lightmapUv.x));
+        CHECK(applied.vertices[i].lightmapUv.y == doctest::Approx(direct.vertices[i].lightmapUv.y));
+        CHECK(applied.vertices[i].position.x == doctest::Approx(direct.vertices[i].position.x));
+        CHECK(applied.vertices[i].normal.y == doctest::Approx(direct.vertices[i].normal.y));
+    }
+}
+
+TEST_CASE("S4: UV yang sudah layak disimpan tanpa remap sama sekali") {
+    // Ubin terrain dan mesh yang UV-nya memang sudah unik melewati unwrap, dan
+    // artefaknya lalu tidak memuat satu pun indeks — hanya UV-nya.
+    assets::MeshData mesh;
+    AddUvQuad(mesh, Vec2(0.0f, 0.0f), Vec2(4.0f, 4.0f));
+
+    assets::LightmapUvSuitability check;
+    std::string error;
+    const assets::LightmapUvArtifact artifact = assets::CookLightmapUv(mesh, check, error);
+    INFO(error);
+    REQUIRE(artifact.IsValid());
+    CHECK(check.suitable);
+    CHECK(artifact.fromFirstUv);
+    CHECK(artifact.vertexRemap.empty());
+    CHECK(artifact.indices.empty());
+
+    assets::MeshData applied = mesh;
+    REQUIRE(assets::ApplyLightmapUv(applied, artifact, error));
+    CHECK(applied.hasLightmapUv);
+    CHECK(applied.indices == mesh.indices);
+    CHECK(applied.vertices.size() == mesh.vertices.size());
+}
+
+TEST_CASE("S4: artefak bolak-balik lewat berkas, dan yang rusak ditolak") {
+    assets::MeshData mesh;
+    AddUvQuad(mesh, Vec2(0.0f, 0.0f), Vec2(2.0f, 2.0f));
+    assets::LightmapUvSuitability check;
+    std::string error;
+    const assets::LightmapUvArtifact artifact = assets::CookLightmapUv(mesh, check, error);
+    REQUIRE(artifact.IsValid());
+
+    const std::filesystem::path file =
+        std::filesystem::temp_directory_path() /
+        ("sim-lmuv-" + std::to_string(::getpid()) + ".simlmuv");
+    REQUIRE_MESSAGE(assets::WriteLightmapUvArtifact(file, artifact, error), error);
+    CHECK_FALSE(std::filesystem::exists(std::filesystem::path(file.string() + ".tmp")));
+
+    assets::LightmapUvArtifact loaded;
+    REQUIRE_MESSAGE(assets::ReadLightmapUvArtifact(file, loaded, error), error);
+    CHECK(loaded.fromFirstUv == artifact.fromFirstUv);
+    CHECK(loaded.sourceVertexCount == artifact.sourceVertexCount);
+    REQUIRE(loaded.lightmapUv.size() == artifact.lightmapUv.size());
+    CHECK(loaded.lightmapUv[0].x == doctest::Approx(artifact.lightmapUv[0].x));
+
+    std::ofstream(file, std::ios::binary) << "bukan artefak UV";
+    CHECK_FALSE(assets::ReadLightmapUvArtifact(file, loaded, error));
+
+    REQUIRE(assets::WriteLightmapUvArtifact(file, artifact, error));
+    std::filesystem::resize_file(file, std::filesystem::file_size(file) / 2);
+    CHECK_FALSE(assets::ReadLightmapUvArtifact(file, loaded, error));
+
+    std::error_code cleanup;
+    std::filesystem::remove(file, cleanup);
+}
+
+TEST_CASE("S4: artefak milik mesh lain ditolak, bukan dibaca melewati ujungnya") {
+    // Remap yang menunjuk ke luar daftar vertex adalah pembacaan memori bebas,
+    // bukan gambar yang sedikit salah.
+    assets::MeshData small;
+    AddUvQuad(small, Vec2(0.0f, 0.0f), Vec2(1.0f, 1.0f));
+    assets::LightmapUvSuitability check;
+    std::string error;
+    const assets::LightmapUvArtifact artifact = assets::CookLightmapUv(small, check, error);
+    REQUIRE(artifact.IsValid());
+
+    assets::MeshData other;
+    AddUvQuad(other, Vec2(0.0f, 0.0f), Vec2(1.0f, 1.0f));
+    AddUvQuad(other, Vec2(0.0f, 0.0f), Vec2(1.0f, 1.0f));
+    CHECK_FALSE(assets::ApplyLightmapUv(other, artifact, error));
+    CHECK_FALSE(error.empty());
+    CHECK_FALSE(other.hasLightmapUv);
+}

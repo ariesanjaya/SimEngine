@@ -253,6 +253,15 @@ struct MeshData {
     /// membaca satu texel lightmap untuk seluruh bendanya.
     bool hasLightmapUv = false;
 
+    /// Untuk tiap vertex, indeks vertex asalnya sebelum unwrap — kosong bila
+    /// daftarnya tidak pernah disusun ulang.
+    ///
+    /// **Diisi pembangkit UV lightmap, dan hanya berarti tepat sesudahnya.** Ia
+    /// yang membuat hasil unwrap bisa disimpan sebagai artefak tanpa menyalin
+    /// seluruh mesh: yang disimpan cuma "vertex ke-i berasal dari yang ke-n",
+    /// dan sisanya dibangun ulang dari berkas sumbernya.
+    std::vector<uint32_t> lightmapVertexSource;
+
     bool IsValid() const {
         return !vertices.empty() && !indices.empty() && indices.size() % 3 == 0;
     }

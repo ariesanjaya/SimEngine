@@ -1,5 +1,7 @@
 #include "Sim/Assets/MeshGeometryCache.h"
 
+#include "Sim/Assets/LightmapUv.h"
+
 #include "Sim/Core/Log.h"
 #include "Sim/Core/TaskPool.h"
 
@@ -30,9 +32,14 @@ MeshGeometryRef MeshGeometryCache::Request(const std::filesystem::path& source) 
         entries_.emplace(key, Entry{});
     }
 
-    const auto load = [this, key]() {
+    // **Disalin ke dalam tugasnya, bukan dibaca dari `this` di sana.** Tugas
+    // latar hidup lebih lama daripada pemanggilnya, dan sebuah `std::string`
+    // yang dibaca dari anggota sementara ia disunting adalah pembacaan memori
+    // yang sedang berubah.
+    const std::filesystem::path cacheDir = lightmapCacheDir_;
+    const auto load = [this, key, cacheDir]() {
         std::string error;
-        MeshData mesh = LoadMesh(std::filesystem::path(key), error);
+        MeshData mesh = LoadMeshWithLightmapUv(std::filesystem::path(key), cacheDir, error);
 
         Entry entry;
         if (mesh.IsValid()) {

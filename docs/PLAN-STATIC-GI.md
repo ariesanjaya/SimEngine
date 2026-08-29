@@ -791,7 +791,7 @@ ditekan.
 Pada `bench.simlevel` yang terbuka, efeknya kecil dan memang seharusnya kecil:
 1,4045 menjadi 1,4021. Yang tajam ada di ruangan tertutup.
 
-### S4 — UV lightmap: dibangkitkan, diperiksa, dan di-cook
+### S4 — UV lightmap: dibangkitkan, diperiksa, dan di-cook · ✅
 
 - `assets::MeshVertex` tumbuh satu `Vec2`, beserta tata letak vertex GPU,
   `static_assert` yang mengunci offset-nya, dan importirnya
@@ -814,6 +814,60 @@ unwrap-nya.
 > Baris terakhir itu yang membuat pemeriksanya berguna alih-alih seremonial:
 > kalau ia tidak bisa mengenali satu-satunya UV yang memang sudah layak di pohon
 > ini, ia tidak bisa dipercaya mengenali yang lain.
+
+#### Keadaannya sesudah S4 · ✅
+
+`assets::MeshVertex` tumbuh satu `Vec2`, dengan `static_assert` yang mengunci
+offsetnya terhadap cerminan GPU-nya. xatlas dipasang sebagai dependensi opsional
+dengan aturan yang sama seperti MaterialX: yang membangun tanpanya kehilangan
+pembangkitan UV lightmap, bukan seluruh mesin, dan `LightmapUnwrap.cpp` menolak
+dengan pesan yang menyebut sakelarnya.
+
+Diukur pada kubus yang keenam mukanya memakai petak UV yang sama: **6 chart, 24
+vertex, utilisasi 90,4%** — dan hasilnya diperiksa dengan pemeriksa yang sama,
+tanpa satu pun pasangan yang tumpang tindih.
+
+Artefaknya menyimpan **hanya yang mahal**: hasil pemeriksaan dan UV-nya, beserta
+remap vertex dan indeks bila ia di-unwrap. Menyalin seluruh `MeshData` sempat
+menjadi rancangannya lalu ditinggalkan — ia memuat material, rangka, dan blok
+OpenPBR yang masing-masing punya string dan `optional`, dan serialisasi
+tangannya adalah satu salinan lagi dari setiap medan yang harus diperbarui
+setiap kali salah satunya tumbuh. Yang meleset di sana tidak menghasilkan galat,
+hanya material yang diam-diam kehilangan satu lapisan.
+
+`bench.simlevel`, tiga mesh: cook dingin **13,8 detik**, jalan kedua nol.
+`shaderBall.fbx` 35.897 vertex menjadi 40.937 — 14% lebih banyak, dari sudut
+yang dipakai lebih dari satu chart dan karena itu harus dipecah. Gambarnya tidak
+berubah sedikit pun: 0 dari 2.764.800 kanal.
+
+##### Dua kali kriteria terima menemukan cacat di pemeriksanya sendiri
+
+1. **Terrain menolak kriteria pertama.** Saya menolak apa pun yang keluar dari
+   `[0,1]`, lalu mengujinya pada ubin terrain — yang UV-nya ditulis dalam
+   **meter**, karena layer terrain menyebut ukuran pengulangannya dalam meter.
+   Ia unik menurut konstruksi dan sepenuhnya di luar kotak satuan. Menolaknya
+   berarti membayar unwrap untuk satu-satunya UV di pohon ini yang memang sudah
+   layak. Yang menentukan ternyata **injektivitas**; yang di luar kotak cukup
+   diskalakan.
+
+2. **Primitif ber-UV nol menolak kriteria kedua.** Whitebox dan primitif bawaan
+   lahir tanpa UV sama sekali, dan mesh seperti itu dinyatakan *layak* — segitiga
+   berluas nol tidak bisa memuat apa pun, jadi ia tidak pernah tumpang tindih.
+   Yang keluar adalah seluruh permukaan membaca satu texel. Segitiga berluas nol
+   sekarang menolak mesh-nya, dengan ambang nol: segitiga tanpa texel tidak akan
+   pernah menerima cahaya, dan itu bercak hitam betapapun sedikit jumlahnya.
+
+Keduanya ditemukan karena kriteria terima milestone ini menyebut **kasus
+konkret** — "terrain", "primitif ber-UV nol" — alih-alih menyebut sifat. Kriteria
+yang menyebut sifat akan lulus pada pemeriksa yang salah.
+
+##### Satu jebakan yang dicegah, bukan ditemukan
+
+Unwrap menyusun ulang daftar vertex, jadi dua pemuat yang tidak sepakat
+menghasilkan dua mesh yang berbeda untuk berkas yang sama — dan yang menemukannya
+adalah orang yang bertanya kenapa picking mengenai segitiga yang lain daripada
+yang tergambar. `MeshGeometryCache` dan renderer karena itu memakai folder cache
+yang sama, dipasang di satu tempat.
 
 ### S5 — Lightmap: bake dan baca
 

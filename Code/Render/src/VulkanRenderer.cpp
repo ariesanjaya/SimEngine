@@ -28,6 +28,7 @@
 #include "IblBaker.h"
 #include "IblCache.h"
 #include "Sim/Render/Ibl.h"
+#include "Sim/Assets/LightmapUv.h"
 #include "Sim/Render/ProbeVolume.h"
 #include "Sim/Render/FrameGraph.h"
 #include "Sim/Render/DrawRun.h"
@@ -2096,7 +2097,8 @@ public:
         }
 
         std::string error;
-        const assets::MeshData data = assets::LoadMesh(std::filesystem::path(key), error);
+        const assets::MeshData data = assets::LoadMeshWithLightmapUv(
+            std::filesystem::path(key), lightmapCacheDir_, error);
         if (!data.IsValid()) {
             SIM_WARN("Render", "cannot load mesh {}: {}", key, error);
             meshByPath_.emplace(key, kUnitCubeMesh);
@@ -6087,6 +6089,10 @@ private:
     /// batas adegan digenapkan ke jarak antar-probe sebelum dibandingkan,
     /// sehingga satu objek yang bergeser sedikit tidak membuat kisinya —
     /// dan seluruh unggahannya — dibangun ulang setiap frame.
+    void SetLightmapCacheDir(std::filesystem::path dir) override {
+        lightmapCacheDir_ = std::move(dir);
+    }
+
     void SetProbeVolume(std::shared_ptr<const ProbeVolume> volume) override {
         if (bakedProbes_ == volume) {
             return;
@@ -6835,6 +6841,8 @@ private:
     /// Kisi hasil panggangan transport, bila ada. Dimiliki bakery di sisi
     /// editor; renderer hanya membaca.
     std::shared_ptr<const ProbeVolume> bakedProbes_;
+    /// Lihat `IViewportRenderer::SetLightmapCacheDir`.
+    std::filesystem::path lightmapCacheDir_;
     /// SH yang sedang berada di dalam `probeUpload_`. Dibandingkan supaya isian
     /// ulangnya tidak terjadi setiap frame; lihat pengukurannya di sana.
     std::array<Vec3, 9> probeUploadedSh_{};

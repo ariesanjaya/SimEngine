@@ -285,6 +285,10 @@ int main(int argc, char** argv) {
     // menunggu panggangan lingkungan yang sedang berjalan selesai selagi
     // renderer masih hidup.
     renderer->SetTaskPool(&tasks);
+    // Folder yang sama dengan `MeshGeometryCache` di `EditorApp`: unwrap
+    // menyusun ulang daftar vertex, dan dua pemuat yang tidak sepakat
+    // menghasilkan dua mesh yang berbeda untuk berkas yang sama.
+    renderer->SetLightmapCacheDir(configDir / "LightmapUvCache");
     if (meshPreview != nullptr) {
         meshPreview->SetTaskPool(&tasks);
     }
