@@ -9,6 +9,7 @@
 #include "Sim/Assets/TextureBake.h"
 #include "Sim/Assets/TextureBakery.h"
 #include "Sim/Assets/TextureSettings.h"
+#include "Sim/Assets/LightmapRaster.h"
 #include "Sim/Assets/LightmapUv.h"
 #include "Sim/Assets/MeshData.h"
 #include "Sim/Assets/MeshGeometryCache.h"
@@ -4083,4 +4084,158 @@ TEST_CASE("S4: artefak milik mesh lain ditolak, bukan dibaca melewati ujungnya")
     CHECK_FALSE(assets::ApplyLightmapUv(other, artifact, error));
     CHECK_FALSE(error.empty());
     CHECK_FALSE(other.hasLightmapUv);
+}
+
+// --- S5: rasterisasi texel lightmap ------------------------------------------
+
+namespace {
+
+/// Kuad mendatar 2×2 m di y=0, ber-UV lightmap penuh.
+assets::MeshData MakeLightmappedQuad(float size = 2.0f) {
+    assets::MeshData mesh;
+    const Vec3 corners[4] = {{-size * 0.5f, 0.0f, -size * 0.5f},
+                             {size * 0.5f, 0.0f, -size * 0.5f},
+                             {size * 0.5f, 0.0f, size * 0.5f},
+                             {-size * 0.5f, 0.0f, size * 0.5f}};
+    const Vec2 uvs[4] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}};
+    for (int i = 0; i < 4; ++i) {
+        assets::MeshVertex vertex;
+        vertex.position = corners[i];
+        vertex.normal = Vec3(0.0f, 1.0f, 0.0f);
+        vertex.uv = uvs[i];
+        vertex.lightmapUv = uvs[i];
+        mesh.vertices.push_back(vertex);
+    }
+    for (const uint32_t index : {0u, 1u, 2u, 0u, 2u, 3u}) {
+        mesh.indices.push_back(index);
+    }
+    mesh.hasLightmapUv = true;
+    mesh.parts.push_back(assets::SubMesh{0, 6, -1});
+    return mesh;
+}
+
+}  // namespace
+
+TEST_CASE("S5: texel lightmap mendarat di permukaan yang diwakilinya") {
+    const assets::MeshData mesh = MakeLightmappedQuad(2.0f);
+    const assets::LightmapRaster raster = assets::RasteriseLightmap(mesh, 16, 16);
+    REQUIRE(raster.IsValid());
+    // Kuad penuh menutupi seluruh petaknya.
+    CHECK(raster.coveredCount == 16 * 16);
+
+    for (uint32_t y = 0; y < raster.height; ++y) {
+        for (uint32_t x = 0; x < raster.width; ++x) {
+            const assets::LightmapTexel& texel = raster.texels[y * raster.width + x];
+            REQUIRE(texel.covered);
+            // Di permukaan: y nol, dan xz di dalam kuadnya.
+            CHECK(texel.position.y == doctest::Approx(0.0f).epsilon(1e-4));
+            CHECK(texel.position.x >= -1.0f - 1e-4f);
+            CHECK(texel.position.x <= 1.0f + 1e-4f);
+            CHECK(texel.position.z >= -1.0f - 1e-4f);
+            CHECK(texel.position.z <= 1.0f + 1e-4f);
+            CHECK(texel.normal.y == doctest::Approx(1.0f).epsilon(1e-4));
+        }
+    }
+
+    // Dan urutannya benar: texel (0,0) mewakili sudut UV (0,0), yaitu sudut
+    // dunia (-1, 0, -1). Peta yang tercermin tetap peta yang sah, dan tidak ada
+    // satu pun galat yang muncul — hanya cahaya yang mendarat di sisi yang salah.
+    const assets::LightmapTexel& first = raster.texels[0];
+    CHECK(first.position.x < 0.0f);
+    CHECK(first.position.z < 0.0f);
+}
+
+TEST_CASE("S5: segitiga lebih kecil daripada satu texel tetap mendapat texel") {
+    // **Tanpa pelebaran setengah texel, ia tidak punya satu pun pusat texel di
+    // dalamnya** — dan yang keluar adalah lubang hitam yang bentuknya mengikuti
+    // geometri tipis: pagar, daun, tepi meja.
+    assets::MeshData mesh;
+    const Vec3 corners[3] = {{0.0f, 0.0f, 0.0f}, {0.02f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.02f}};
+    const Vec2 uvs[3] = {{0.50f, 0.50f}, {0.51f, 0.50f}, {0.50f, 0.51f}};
+    for (int i = 0; i < 3; ++i) {
+        assets::MeshVertex vertex;
+        vertex.position = corners[i];
+        vertex.normal = Vec3(0.0f, 1.0f, 0.0f);
+        vertex.lightmapUv = uvs[i];
+        mesh.vertices.push_back(vertex);
+    }
+    mesh.indices = {0, 1, 2};
+    mesh.hasLightmapUv = true;
+
+    const assets::LightmapRaster raster = assets::RasteriseLightmap(mesh, 8, 8);
+    REQUIRE(raster.IsValid());
+    MESSAGE(raster.coveredCount, " texel tertutup oleh segitiga sub-texel");
+    CHECK(raster.coveredCount >= 1);
+
+    // Dan posisinya tetap di permukaan segitiganya, bukan melayang: barisentrik
+    // yang dijepit mendarat di tepinya, yaitu tempat terdekat yang memang
+    // permukaan.
+    for (const assets::LightmapTexel& texel : raster.texels) {
+        if (!texel.covered) {
+            continue;
+        }
+        CHECK(texel.position.x >= -1e-4f);
+        CHECK(texel.position.x <= 0.02f + 1e-4f);
+        CHECK(texel.position.z >= -1e-4f);
+        CHECK(texel.position.z <= 0.02f + 1e-4f);
+    }
+}
+
+TEST_CASE("S5: perluasan mengisi texel kosong dari tetangganya") {
+    // **Tanpa ini setiap jahitan chart menjadi garis gelap.** Sampling bilinear
+    // membaca texel di luar chart-nya, dan yang tidak pernah diisi adalah nol.
+    assets::MeshData mesh = MakeLightmappedQuad(2.0f);
+    // Dikecilkan ke separuh petak, supaya separuhnya kosong.
+    for (assets::MeshVertex& vertex : mesh.vertices) {
+        vertex.lightmapUv *= 0.5f;
+    }
+    const assets::LightmapRaster raster = assets::RasteriseLightmap(mesh, 16, 16);
+    REQUIRE(raster.IsValid());
+    REQUIRE(raster.coveredCount < 16 * 16);
+
+    std::vector<Vec3> values(raster.texels.size(), Vec3(0.0f));
+    for (std::size_t i = 0; i < raster.texels.size(); ++i) {
+        if (raster.texels[i].covered) {
+            values[i] = Vec3(1.0f, 2.0f, 3.0f);
+        }
+    }
+
+    // Sebuah texel tepat di sebelah tepi chart, di sisi kosongnya.
+    std::size_t justOutside = raster.texels.size();
+    for (uint32_t y = 0; y < raster.height; ++y) {
+        for (uint32_t x = 1; x < raster.width; ++x) {
+            const std::size_t at = y * raster.width + x;
+            if (!raster.texels[at].covered && raster.texels[at - 1].covered) {
+                justOutside = at;
+                break;
+            }
+        }
+        if (justOutside != raster.texels.size()) {
+            break;
+        }
+    }
+    REQUIRE(justOutside != raster.texels.size());
+    REQUIRE(values[justOutside] == Vec3(0.0f));
+
+    assets::DilateLightmap(values, raster, 2);
+    CHECK(values[justOutside].x == doctest::Approx(1.0f));
+    CHECK(values[justOutside].y == doctest::Approx(2.0f));
+    // Yang tertutup tidak boleh berubah: perluasan mengisi yang kosong, bukan
+    // mengaburkan yang sudah ada.
+    for (std::size_t i = 0; i < raster.texels.size(); ++i) {
+        if (raster.texels[i].covered) {
+            CHECK(values[i].x == doctest::Approx(1.0f));
+        }
+    }
+}
+
+TEST_CASE("S5: mesh tanpa UV lightmap tidak dirasterisasi sama sekali") {
+    // Nol adalah UV yang sah, jadi merasterisasi mesh yang belum di-unwrap
+    // menghasilkan seluruh permukaan menumpuk di satu texel — dan itu terbaca
+    // sebagai lightmap yang bekerja.
+    assets::MeshData mesh = MakeLightmappedQuad();
+    mesh.hasLightmapUv = false;
+    const assets::LightmapRaster raster = assets::RasteriseLightmap(mesh, 8, 8);
+    CHECK_FALSE(raster.IsValid());
+    CHECK(raster.coveredCount == 0);
 }

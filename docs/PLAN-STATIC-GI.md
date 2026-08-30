@@ -913,6 +913,64 @@ permukaan yang sama tampak sama saat ia berpindah dari satu jalur ke jalur lain
 menajamkan kontaknya sementara menurunkannya mengaburkannya, keduanya sesuai
 ukuran atlas yang diumumkan panel.
 
+#### Langkah pertama S5, dan satu bias yang ditemukan di sepanjang jalan
+
+`TraceSurfaceIrradiance` mencuplik **belahan** di sekitar normal, bukan seluruh
+bola. Bedanya bukan penghematan: sebuah probe tidak punya normal dan karena itu
+harus menyimpan seluruh bola sebagai SH, sedangkan sebuah texel lightmap *adalah*
+permukaan — normalnya diketahui, dan yang dibutuhkannya satu angka. Itu yang
+membuat lightmap bisa jauh lebih rapat daripada kisi probe pada anggaran memori
+yang sama.
+
+Rasterisasinya mengambil **setiap texel yang tersentuh segitiga**, bukan hanya
+yang pusatnya di dalam: segitiga yang lebih kecil daripada satu texel tidak punya
+satu pun pusat di dalamnya, dan yang menampung hanya pusat menghasilkan lubang
+hitam yang bentuknya mengikuti geometri tipis — pagar, daun, tepi meja. Texel
+yang pusatnya di luar diproyeksikan ke titik terdekat di dalam segitiganya,
+supaya posisinya tetap di permukaan.
+
+##### Kriteria terima pertama, terukur
+
+Lantai dengan sebuah kotak 1 m di atasnya, profil melintasi kontaknya:
+
+| jarak dari pusat kotak | acuan | lightmap | probe 1 m |
+|---:|---:|---:|---:|
+| 0,16 m (di bawah kotak) | 0 | **0** | **0,72** |
+| 0,47 m (di bawah kotak) | 0 | **0** | **0,87** |
+| 0,78 m | 1,036 | 0,999 | 0,990 |
+| 1,41 m | 1,212 | 1,210 | 1,144 |
+| 2,66 m | 1,267 | 1,265 | 1,138 |
+| 6,09 m | 1,277 | 1,276 | 1,198 |
+
+Kesalahan rata-rata terhadap acuan: lightmap **0,0072**, probe **0,318** —
+empat puluh empat kali lipat. Dua baris pertama yang paling menjelaskan: kisi
+probe menyinari lantai **di bawah kotak** seolah sebagian terbuka.
+
+##### Bias yang ditemukan uji, bukan perancangan
+
+Versi pertama profil itu memperlihatkan lightmap konsisten **6–7% lebih terang**
+daripada acuannya di setiap titik terbuka — satu arah, di semua titik. Penaksir
+tak-bias tidak boleh begitu.
+
+Sebabnya: Hammersley adalah deret **kuasi-acak**, dan kesalahannya pada jumlah
+cuplikan rendah bukan derau melainkan penyimpangan sistematis. Diukur pada titik
+tanpa penghalang, dibandingkan dengan `ProjectIrradiance` yang menghitungnya
+lewat jalur yang sama sekali lain: 256 cuplikan menjawab **7,4% di bawah**
+jawaban yang konvergen. Deretnya sama di setiap texel, jadi penyimpangannya
+menumpuk alih-alih saling meniadakan — dan sebuah lightmap yang meleset sebesar
+faktor tetap di seluruh permukaannya paling mudah dikira masalah eksposur.
+
+Putaran Cranley–Patterson — geseran acak per titik, dibungkus kembali ke [0,1) —
+menjaga stratifikasinya utuh sambil membuat arah penyimpangannya berbeda di tiap
+texel. Kesalahan lightmap turun dari 0,051 menjadi **0,0072**.
+
+**Penaksir probe punya struktur yang sama dan ikut diperbaiki.** Membiarkan salah
+satunya berarti dua penaksir kembar yang satu benar dan satu tidak. Angka S1–S3
+diukur dengan penaksir yang lama; seluruhnya perbandingan — panggang lawan
+langit, dengan lawan tanpa visibilitas — jadi penyimpangan yang sama di kedua
+sisi sebagian besar saling menghapus dan kesimpulannya bertahan. Versi artefak
+probe dinaikkan ke 3 supaya yang lama tidak dipakai ulang.
+
 ### S6 — Validasi terhadap path tracer acuan
 
 - Adegan acuan **beroklusi** — bukan kuad cembung sendirian seperti B5
