@@ -20,6 +20,7 @@
 #include "Sim/Editor/AiTools.h"
 #include "Sim/Editor/EditorApp.h"
 #include "Sim/Editor/EditorContext.h"
+#include "Sim/SceneView/LightmapBakery.h"
 #include "Sim/SceneView/ProbeBakery.h"
 #include "Sim/SceneView/SceneView.h"
 #include "Sim/SceneView/Selection.h"
@@ -120,6 +121,7 @@ void PrintUsage() {
         "  --bench-furnace               uji tungku: langit seragam 1, albedo 1, tanpa matahari\n"
         "  --bench-probe-spacing <m>     paksa jarak kisi probe; 0 mematikan kisinya (S1)\n"
         "  --bench-probe-debug           isi probe dengan papan catur; kontrol positif (S1)\n"
+        "  --bench-lightmap <texel/m>    panggang lightmap statis lalu pakai (S5)\n"
         "  --bench-probe-bake <spp>      panggang transport ke kisi probe lalu pakai (S2)\n"
         "  --dump-mesh <file> --dump-out <json>  material dan ruas sebuah berkas mesh\n"
         "  --dump-fbx-material <fbx>     setiap properti tiap material, apa adanya\n"
@@ -877,6 +879,7 @@ int main(int argc, char** argv) {
         bool giEffective = false;
         bool probeDebugPattern = false;
         uint32_t probeBakeSamples = 0;
+        float lightmapTexelsPerMeter = 0.0f;
         for (int at = 1; at < argc; ++at) {
             if (argv[at] == nullptr) {
                 continue;
@@ -928,6 +931,11 @@ int main(int argc, char** argv) {
         // seluruh bayangan ke nol, dan dua adegan yang berbeda seratus kali di
         // sana tetap terlihat sama hitamnya. Menurunkan EV mengangkat bayangan
         // itu ke rentang yang masih punya angka.
+        if (const std::string_view value = FlagValue(argc, argv, "--bench-lightmap");
+            !value.empty()) {
+            lightmapTexelsPerMeter = std::strtof(std::string(value).c_str(), nullptr);
+        }
+
         if (const std::string_view value = FlagValue(argc, argv, "--bench-probe-bake");
             !value.empty()) {
             probeBakeSamples = static_cast<uint32_t>(std::strtoul(std::string(value).c_str(),
@@ -1070,6 +1078,7 @@ int main(int argc, char** argv) {
         uint64_t lastSerial = 0;
         bool haveBounds = false;
         bool probeBaked = false;
+        bool lightmapBaked = false;
         Vec3 boundsMin(0.0f);
         Vec3 boundsMax(0.0f);
         uint32_t gpuSamples = 0;
@@ -1196,6 +1205,73 @@ int main(int argc, char** argv) {
             // ada satu pun mesh yang siap, dan panggangan yang menyerah di sana
             // memanggang dunia kosong — yang keluar bukan galat melainkan kisi
             // yang menjawab langit dari mana pun.
+#if SIM_WITH_PROBE_BAKE
+            // Panggangan lightmap, sekali sebelum frame yang diukur — alasan
+            // yang sama dengan panggangan probe di bawahnya.
+            if (lightmapTexelsPerMeter > 0.0f && !lightmapBaked) {
+                std::vector<view::PickItem> items;
+                sceneView.BakeItems(items);
+
+                view::LightmapBakery bakery(&tasks);
+                bakery.SetCache(app.Context().meshGeometry);
+                view::LightmapBakery::Settings bakeSettings;
+                bakeSettings.texelsPerMeter = lightmapTexelsPerMeter;
+                bakeSettings.samplesPerTexel = 64;
+                bakeSettings.cacheDir = app.Context().configDir / "LightmapCache";
+
+                render::ViewportDesc skyDesc;
+                editor::ApplySceneSky(*app.Context().world, skyDesc);
+                render::AtmosphereSky atmosphere;
+                atmosphere.intensity = skyDesc.skyIntensity;
+                atmosphere.cameraHeightKm = skyDesc.cameraHeightKm;
+                Vec3 lightmapSun(0.0f, -1.0f, 0.0f);
+                for (const render::LightInstance& light : sceneView.Scene().lights) {
+                    if (light.kind != render::LightKind::Directional) {
+                        continue;
+                    }
+                    lightmapSun = -light.direction;
+                    bakeSettings.sunIrradiance = light.color * light.intensity;
+                    break;
+                }
+                bakeSettings.sunDirection = lightmapSun;
+                atmosphere.sunDirection = -lightmapSun;
+                atmosphere.Prepare();
+                uint64_t skyKey = 1469598103934665603ull;
+                const auto mixLightmapSky = [&skyKey](const void* data, std::size_t length) {
+                    const auto* bytes = static_cast<const uint8_t*>(data);
+                    for (std::size_t i = 0; i < length; ++i) {
+                        skyKey = (skyKey ^ bytes[i]) * 1099511628211ull;
+                    }
+                };
+                mixLightmapSky(&skyDesc.skyIntensity, sizeof(skyDesc.skyIntensity));
+                mixLightmapSky(&lightmapSun.x, sizeof(float) * 3);
+                bakeSettings.skyKey = skyKey;
+
+                const auto started = std::chrono::steady_clock::now();
+                if (bakery.Bake(items,
+                                [atmosphere](const Vec3& direction) {
+                                    return atmosphere.Sample(direction);
+                                },
+                                bakeSettings)) {
+                    tasks.WaitIdle();
+                    lightmapBaked = true;
+                    if (std::shared_ptr<const render::Lightmap> atlas = bakery.Take()) {
+                        const auto elapsed = std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - started);
+                        SIM_INFO("Bench",
+                                 "lightmap bake: {}x{} atlas, {} objects, {:.2f} s, {:.1f} MB",
+                                 atlas->width, atlas->height, atlas->placements.size(),
+                                 elapsed.count(),
+                                 static_cast<double>(atlas->GpuBytes()) / (1024.0 * 1024.0));
+                        sceneView.SetLightmap(atlas);
+                        renderer->SetLightmap(std::move(atlas));
+                    } else {
+                        SIM_WARN("Bench", "lightmap bake produced nothing");
+                    }
+                }
+            }
+#endif
+
             if (probeBakeSamples > 0 && !probeBaked) {
                 Vec3 bakeMin;
                 Vec3 bakeMax;

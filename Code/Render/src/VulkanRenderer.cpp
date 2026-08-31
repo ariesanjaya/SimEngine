@@ -29,6 +29,7 @@
 #include "IblCache.h"
 #include "Sim/Render/Ibl.h"
 #include "Sim/Assets/LightmapUv.h"
+#include "Sim/Render/Lightmap.h"
 #include "Sim/Render/ProbeVolume.h"
 #include "Sim/Render/FrameGraph.h"
 #include "Sim/Render/DrawRun.h"
@@ -354,6 +355,9 @@ struct BoxInstance {
     /// "material ruas ini" bukan sebuah nomor melainkan sebuah descriptor set.
     uint32_t materialSlot;
     uint32_t textureSlot;
+    /// Petak instance ini di dalam atlas lightmap: xy skala, zw geseran (S5).
+    /// Skala nol berarti tidak ber-lightmap; lihat `MeshInstance`.
+    Vec4 lightmapScaleOffset;
 };
 
 /// Satu panggilan gambar: sebuah mesh dan ruas instance yang memakainya.
@@ -486,13 +490,15 @@ std::vector<BoxVertex> BuildUnitCube() {
 }
 
 BoxInstance MakeInstance(const Vec4& color, bool receiveShadows, uint32_t skinBase,
-                         uint32_t materialSlot, uint32_t textureSlot) {
+                         uint32_t materialSlot, uint32_t textureSlot,
+                         const Vec4& lightmapScaleOffset = Vec4(0.0f)) {
     BoxInstance instance;
     instance.color = color;
     instance.flags = receiveShadows ? kInstanceReceiveShadows : 0u;
     instance.skinBase = skinBase;
     instance.materialSlot = materialSlot;
     instance.textureSlot = textureSlot;
+    instance.lightmapScaleOffset = lightmapScaleOffset;
     return instance;
 }
 
@@ -876,6 +882,7 @@ public:
         // lingkungan membuat tekstur dan menunggu device diam; melakukannya di
         // tengah perekaman berarti menulisi descriptor set yang sedang dipakai.
         AdoptSkySpecular();
+        AdoptLightmap();
         // **Dinolkan sebelum perekaman, bukan bersama angka yang lain.** Sisa
         // isi `stats_` diisi di ujung `Render`, sesudah frame graph selesai
         // merekam; kedua hitungan ini justru dijumlahkan *selama* perekaman itu,
@@ -2805,7 +2812,8 @@ private:
                         : materials_[static_cast<std::size_t>(material) - 1]->slot;
                 const BoxInstance instance =
                     MakeInstance(color, mesh.receiveShadows, skinned ? mesh.skinFirst : 0u,
-                                 materialSlot, static_cast<uint32_t>(texture));
+                                 materialSlot, static_cast<uint32_t>(texture),
+                                 mesh.lightmapScaleOffset);
 
                 SurfaceEntry entry{mesh.mesh,
                                    static_cast<uint32_t>(partIndex),
@@ -3956,7 +3964,7 @@ private:
                              bool skinned = false, VkPipelineLayout layout = VK_NULL_HANDLE,
                              VkFormat depthFormat = VK_FORMAT_UNDEFINED,
                              VkFormat colorAttachment = VK_FORMAT_UNDEFINED,
-                             uint32_t attributeMask = 0xFFC3u, bool wireframe = false) {
+                             uint32_t attributeMask = 0x3'FFC3u, bool wireframe = false) {
         // `kSkinned`, konstanta spesialisasi 0 di `Shaders/skin_common.slang`.
         // Ukurannya empat byte walaupun tipenya bool: Vulkan menyatakan
         // konstanta spesialisasi boolean berukuran `VkBool32`, dan ukuran yang
@@ -4001,7 +4009,7 @@ private:
                 2, skinned ? static_cast<uint32_t>(sizeof(assets::SkinInfluence)) : 0u,
                 VK_VERTEX_INPUT_RATE_VERTEX},
         };
-        const std::array<VkVertexInputAttributeDescription, 13> attributes{
+        const std::array<VkVertexInputAttributeDescription, 14> attributes{
             VkVertexInputAttributeDescription{0, 0, VK_FORMAT_R32G32B32_SFLOAT,
                                               offsetof(BoxVertex, position)},
             VkVertexInputAttributeDescription{1, 0, VK_FORMAT_R32G32B32_SFLOAT,
@@ -4045,6 +4053,10 @@ private:
             // melipatgandakan varian pipeline demi memori GPU yang tetap dibayar.
             VkVertexInputAttributeDescription{16, 0, VK_FORMAT_R32G32_SFLOAT,
                                               offsetof(BoxVertex, lightmapUv)},
+            // Petak lightmap, di binding 1 bersama warna dan slot material:
+            // ia milik permukaan, bukan milik simpul.
+            VkVertexInputAttributeDescription{17, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
+                                              offsetof(BoxInstance, lightmapScaleOffset)},
             VkVertexInputAttributeDescription{15, 1, VK_FORMAT_R32_UINT,
                                               offsetof(BoxInstance, textureSlot)},
 };
@@ -4060,7 +4072,7 @@ private:
         // adalah peringatan validasi di setiap pembuatan pipeline. Menyaringnya
         // di sini bukan sekadar meredam peringatan: atribut yang tidak diambil
         // memang tidak perlu diambil.
-        std::array<VkVertexInputAttributeDescription, 13> used{};
+        std::array<VkVertexInputAttributeDescription, 14> used{};
         uint32_t usedCount = 0;
         for (const VkVertexInputAttributeDescription& attribute : attributes) {
             if ((attributeMask & (1u << attribute.location)) != 0u) {
@@ -4255,7 +4267,7 @@ private:
         samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
         SIM_VK_CHECK(vkCreateSampler(device_.Handle(), &samplerInfo, nullptr, &shadow_.sampler));
 
-        const std::array<VkDescriptorSetLayoutBinding, 29> bindings{
+        const std::array<VkDescriptorSetLayoutBinding, 30> bindings{
             VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
@@ -4319,6 +4331,9 @@ private:
                                          1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{kProbeDepthBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                          1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{kLightmapBinding,
+                                         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
         };
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -4331,7 +4346,7 @@ private:
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                  static_cast<uint32_t>(slots_.size())},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                 static_cast<uint32_t>(slots_.size()) * 18},
+                                 static_cast<uint32_t>(slots_.size()) * 19},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                  static_cast<uint32_t>(slots_.size()) * 9},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
@@ -4904,6 +4919,7 @@ private:
         VkDescriptorImageInfo prefilteredImage{};
         VkDescriptorImageInfo dfgImage{};
         EnvironmentDescriptorImages(prefilteredImage, dfgImage);
+        const VkDescriptorImageInfo lightmapImage = LightmapDescriptorImage();
         // Cache radiansi dipakai bersama seluruh slot: ia riwayat lintas frame,
         // bukan data per frame. Kalau gagal dibuat, descriptor-nya menunjuk
         // buffer lampu — descriptor yang dibiarkan kosong adalah pelanggaran di
@@ -5037,6 +5053,15 @@ private:
             probeDepth.dstBinding = kProbeDepthBinding;
             probeDepth.pBufferInfo = &buffers[base + 7];
             writes.push_back(probeDepth);
+
+            // Atlas lightmap (S5). Sah sejak awal walaupun belum ada
+            // panggangan: penggantinya piramida HiZ, dan yang menjaganya tidak
+            // pernah terbaca adalah `lightmapScaleOffset` yang nol pada setiap
+            // instance — bukan descriptor ini.
+            VkWriteDescriptorSet lightmap = sampled;
+            lightmap.dstBinding = kLightmapBinding;
+            lightmap.pImageInfo = &lightmapImage;
+            writes.push_back(lightmap);
         }
         vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
@@ -5272,6 +5297,38 @@ private:
     /// Bukan `WriteShadowDescriptors()`: yang itu mengalokasikan set baru dari
     /// pool, dan pool ini dibuat tanpa `FREE_DESCRIPTOR_SET` — memanggilnya tiap
     /// kali lingkungan selesai dipanggang akan menghabiskannya diam-diam.
+    /// Descriptor atlas lightmap, atau penggantinya.
+    ///
+    /// **Descriptor yang dibiarkan kosong adalah pelanggaran pada setiap draw**,
+    /// termasuk draw yang tidak membacanya. Penggantinya piramida HiZ — satu-
+    /// satunya image 2D biasa yang pasti ada — dan yang menjaganya tidak pernah
+    /// terbaca sebagai cahaya adalah `lightmapScaleOffset` yang nol.
+    VkDescriptorImageInfo LightmapDescriptorImage() const {
+        if (lightmapTexture_.IsValid()) {
+            return {lightmapTexture_.Sampler(), lightmapTexture_.View(),
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        }
+        return HizDescriptorImage();
+    }
+
+    void UpdateLightmapDescriptors() {
+        const VkDescriptorImageInfo image = LightmapDescriptorImage();
+        std::vector<VkWriteDescriptorSet> writes;
+        writes.reserve(slots_.size());
+        for (const InstanceSlot& slot : slots_) {
+            VkWriteDescriptorSet write{};
+            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet = slot.shadowSet;
+            write.descriptorCount = 1;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            write.dstBinding = kLightmapBinding;
+            write.pImageInfo = &image;
+            writes.push_back(write);
+        }
+        vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
+                               writes.data(), 0, nullptr);
+    }
+
     void UpdateEnvironmentDescriptors() {
         VkDescriptorImageInfo prefiltered{};
         VkDescriptorImageInfo dfg{};
@@ -5942,6 +5999,44 @@ private:
         }
     }
 
+    /// Mengunggah atlas lightmap yang baru diserahkan. **Awal frame, sesudah
+    /// device diam** — alasan yang sama dengan `AdoptSkySpecular`.
+    void AdoptLightmap() {
+        if (!adoptLightmap_) {
+            return;
+        }
+        adoptLightmap_ = false;
+        device_.WaitIdle();
+        lightmapTexture_.Destroy();
+
+        if (bakedLightmap_ == nullptr || !bakedLightmap_->IsValid()) {
+            UpdateLightmapDescriptors();
+            return;
+        }
+        // RGBA float32: iradiansi linier, dan alpha yang tidak dibaca siapa pun.
+        // **Empat kanal walaupun tiga yang dipakai**, karena format tiga-kanal
+        // tidak dijamin bisa disampel — dan yang gagal di sana adalah pembuatan
+        // tekstur di mesin orang lain, bukan di sini.
+        std::vector<Vec4> texels;
+        texels.reserve(bakedLightmap_->texels.size());
+        for (const Vec3& value : bakedLightmap_->texels) {
+            texels.emplace_back(value, 1.0f);
+        }
+        if (!lightmapTexture_.Create(device_, bakedLightmap_->width, bakedLightmap_->height,
+                                     VK_FORMAT_R32G32B32A32_SFLOAT, sizeof(Vec4),
+                                     texels.data())) {
+            SIM_WARN("Render", "cannot upload the {}x{} lightmap atlas", bakedLightmap_->width,
+                     bakedLightmap_->height);
+            bakedLightmap_.reset();
+        } else {
+            SIM_INFO("Render", "lightmap adopted — {}x{}, {} objects, {:.1f} MB",
+                     bakedLightmap_->width, bakedLightmap_->height,
+                     bakedLightmap_->placements.size(),
+                     static_cast<double>(bakedLightmap_->GpuBytes()) / (1024.0 * 1024.0));
+        }
+        UpdateLightmapDescriptors();
+    }
+
     /// Mengunggah peta yang sudah selesai dipanggang. **Main thread**, dan
     /// karena itu terpisah dari tugasnya: membuat tekstur menyentuh device.
     void AdoptSkySpecular() {
@@ -6091,6 +6186,18 @@ private:
     /// dan seluruh unggahannya — dibangun ulang setiap frame.
     void SetLightmapCacheDir(std::filesystem::path dir) override {
         lightmapCacheDir_ = std::move(dir);
+    }
+
+    void SetLightmap(std::shared_ptr<const Lightmap> lightmap) override {
+        if (bakedLightmap_ == lightmap) {
+            return;
+        }
+        bakedLightmap_ = std::move(lightmap);
+        // **Ditandai, bukan diunggah di sini.** Fungsi ini bisa dipanggil di
+        // tengah frame; membuat tekstur menuntut device diam, dan menghancurkan
+        // yang lama sementara frame yang belum selesai masih membacanya adalah
+        // kerusakan memori. Yang mengunggahnya `AdoptLightmap`, di awal frame.
+        adoptLightmap_ = true;
     }
 
     void SetProbeVolume(std::shared_ptr<const ProbeVolume> volume) override {
@@ -6841,6 +6948,10 @@ private:
     /// Kisi hasil panggangan transport, bila ada. Dimiliki bakery di sisi
     /// editor; renderer hanya membaca.
     std::shared_ptr<const ProbeVolume> bakedProbes_;
+    /// Atlas lightmap yang diserahkan bakery, dan teksturnya di GPU.
+    std::shared_ptr<const Lightmap> bakedLightmap_;
+    rhi::Texture2D lightmapTexture_;
+    bool adoptLightmap_ = false;
     /// Lihat `IViewportRenderer::SetLightmapCacheDir`.
     std::filesystem::path lightmapCacheDir_;
     /// SH yang sedang berada di dalam `probeUpload_`. Dibandingkan supaya isian
@@ -6937,6 +7048,8 @@ private:
     static constexpr uint32_t kProbeBrickBinding = 27;
     /// Peta kedalaman oktahedral tiap probe (S3).
     static constexpr uint32_t kProbeDepthBinding = 28;
+    /// Atlas lightmap (S5).
+    static constexpr uint32_t kLightmapBinding = 29;
     /// Batas atas jumlah probe yang boleh diunggah.
     ///
     /// **Sebuah batas, bukan sebuah target.** Empat juta probe adalah 576 MB

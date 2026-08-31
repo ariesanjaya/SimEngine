@@ -12,6 +12,7 @@
 #include "Sim/Editor/Notifications.h"
 #include "Sim/Editor/PanelManager.h"
 #include "Sim/Editor/ProjectLibrary.h"
+#include "Sim/SceneView/LightmapBakery.h"
 #include "Sim/SceneView/ProbeBakery.h"
 #include "Sim/SceneView/Selection.h"
 #include "Sim/Editor/ToolApproval.h"
@@ -257,6 +258,7 @@ private:
     /// dalamnya.
     std::unique_ptr<assets::MeshSdfBakery> meshSdfBakery_;
     std::unique_ptr<view::ProbeBakery> probeBakery_;
+    std::unique_ptr<view::LightmapBakery> lightmapBakery_;
     /// Geometri CPU untuk picking presisi. Umurnya sepanjang aplikasi, seperti
     /// kedua bakery di atasnya — yang memegangnya adalah BVH yang hidup selama
     /// level terbuka.

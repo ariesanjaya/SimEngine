@@ -125,6 +125,8 @@ bool EditorApp::Initialize(const Config& config) {
     // boleh dikerjakan di antara dua frame.
     probeBakery_ = std::make_unique<view::ProbeBakery>(config.tasks);
     context_.probeBakery = probeBakery_.get();
+    lightmapBakery_ = std::make_unique<view::LightmapBakery>(config.tasks);
+    context_.lightmapBakery = lightmapBakery_.get();
 #endif
     // Ikut `TaskPool`, dengan alasan yang sama seperti bake SDF di atasnya:
     // mengurai satu FBX memakan ratusan milidetik, dan ratusan milidetik di
@@ -1216,6 +1218,7 @@ bool EditorApp::LoadLevel(const std::filesystem::path& path) {
     // tanpa satu pun galat. Viewport memasang perubahan ini ke renderer di frame
     // berikutnya.
     context_.probeVolume.reset();
+    context_.lightmap.reset();
 
     const scene::LevelIoResult result = scene::LoadLevelFromFile(world_, path);
     if (!result.ok) {

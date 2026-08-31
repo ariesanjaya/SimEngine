@@ -1,6 +1,8 @@
 #pragma once
 
 #include "Sim/Render/ProbeVolume.h"
+#include "Sim/Render/Lightmap.h"
+#include "Sim/SceneView/LightmapBakery.h"
 #include "Sim/SceneView/ProbeBakery.h"
 #include "Sim/SceneView/Selection.h"
 #include "Sim/SceneView/TerrainStore.h"
@@ -145,6 +147,12 @@ struct EditorContext {
     /// sini supaya panel bisa melaporkannya dan viewport bisa memasangnya ke
     /// renderer — keduanya melihat kisi yang sama.
     std::shared_ptr<const render::ProbeVolume> probeVolume;
+
+    /// Panggangan lightmap untuk permukaan statis (S5). Null bila editor
+    /// dibangun tanpa slangc, dengan alasan yang sama seperti `probeBakery`.
+    view::LightmapBakery* lightmapBakery = nullptr;
+    /// Atlas yang sedang dipakai, atau null.
+    std::shared_ptr<const render::Lightmap> lightmap;
     /// Salinan CPU geometri mesh, untuk picking presisi dan query authoring.
     /// Null berarti picking kembali ke jalur kotak batas.
     assets::MeshGeometryCache* meshGeometry = nullptr;

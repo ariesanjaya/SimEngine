@@ -608,6 +608,14 @@ struct MeshInstance {
     /// pose satu frame diunggah sekali sebagai satu buffer; satu span per
     /// instance berarti satu penyalinan per karakter per frame, dan renderer
     /// yang menyusun ulang larik yang sudah bersebelahan di memori pemanggilnya.
+    /// Petak instance ini di dalam atlas lightmap: xy skala, zw geseran (S5).
+    ///
+    /// **Skala nol berarti tidak ber-lightmap**, dan itu keadaan yang sah —
+    /// bukan bawaan yang belum diisi: objek dinamis memang tidak punya petak,
+    /// dan yang membacanya jatuh ke kisi probe. Nol dipilih sebagai penanda
+    /// karena petak yang sah selalu punya luas.
+    Vec4 lightmapScaleOffset{0.0f};
+
     uint32_t skinFirst = 0;
     uint32_t skinCount = 0;
 

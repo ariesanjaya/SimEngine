@@ -45,6 +45,12 @@ BoxVarying main(BoxVertex vertex, uint instanceId : SV_InstanceID,
     output.color = vertex.color * vertex.vertexColor;
     output.slots = uint2(vertex.materialSlot, vertex.textureSlot);
     output.uv = vertex.uv;
+    // Petak instance memetakan UV lightmap mesh ke UV atlas. Skala nol berarti
+    // instance ini tidak punya petak — objek dinamis, atau objek yang tidak
+    // kebagian tempat di atlas.
+    output.lightmapUv =
+        vertex.lightmapUv * vertex.lightmapScaleOffset.xy + vertex.lightmapScaleOffset.zw;
+    output.hasLightmap = vertex.lightmapScaleOffset.x > 0.0 ? 1u : 0u;
     // Arah tangen ikut matriks model, sama dengan normal. `w`-nya arah tangan,
     // yang tidak boleh ikut ditransformasikan — ia sebuah tanda, bukan vektor.
     output.worldTangent = float4(mul((float3x3)model, localTangent), vertex.tangent.w);

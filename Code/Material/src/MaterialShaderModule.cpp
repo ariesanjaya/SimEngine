@@ -567,6 +567,15 @@ std::string AssembleForwardMaterialModule(const std::string& generatedSlang,
     out << "    if (shadowParams.probeCounts.w > 0.5) {\n";
     out << "        irradiance = probeIrradiance(input.worldPosition, frame.normal);\n";
     out << "    }\n";
+    // **Lightmap menang untuk permukaan yang punya petak (S5).** Alasannya di
+    // `box_shading.slang`; yang penting di sini adalah ia dipasang di **kedua**
+    // jalur — lupa yang satu berarti fitur yang mati untuk hampir seluruh
+    // adegan, dan gambar yang identik dengan sebelumnya terbaca sebagai
+    // "lightmapnya benar" alih-alih "lightmapnya tidak pernah dibaca". Itu
+    // persis yang terjadi pada kisi probe di S1.
+    out << "    if (input.hasLightmap != 0u) {\n";
+    out << "        irradiance = lightmapIrradiance(input.lightmapUv);\n";
+    out << "    }\n";
     out << "    if (shadowParams.giParams.x > 0.5) {\n";
     out << "        irradiance = giIrradianceAt(input.position.xy, input.worldPosition,\n";
     out << "                                    frame.normal, shadowParams.giParams.y);\n";

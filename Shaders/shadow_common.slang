@@ -358,6 +358,21 @@ float3 probeIrradiance(float3 worldPosition, float3 normal) {
 /// adalah `probeCounts.w` yang kurang dari tiga, bukan bentuk buffernya.
 [[vk::binding(28, 0)]] StructuredBuffer<float2> probeDepth;
 
+/// Atlas lightmap: iradiansi per texel untuk permukaan statis (S5).
+///
+/// Selalu terikat; yang menjaganya tidak terbaca adalah `hasLightmap` yang nol
+/// pada instance-nya, bukan bentuk teksturnya.
+[[vk::binding(29, 0)]] Sampler2D lightmapAtlas;
+
+/// Iradiansi dari atlas lightmap.
+///
+/// **Satu angka, bukan sembilan.** Texelnya dipanggang pada normal permukaannya
+/// sendiri, jadi tidak ada yang perlu dievaluasi ulang di sini — dan itu pula
+/// yang membuatnya tidak bisa dipakai permukaan yang normalnya berubah.
+float3 lightmapIrradiance(float2 uv) {
+    return max(lightmapAtlas.SampleLevel(uv, 0.0).rgb, float3(0.0));
+}
+
 /// Brick yang tidak dialokasikan. Sama dengan `render::kEmptyBrick`.
 static const uint kProbeEmptyBrick = 0xFFFFFFFFu;
 

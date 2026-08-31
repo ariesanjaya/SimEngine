@@ -393,6 +393,14 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                     }
                 }
             }
+            // Petak lightmap instance ini, bila adegan ini sudah dipanggang (S5).
+            // Yang tidak punya membawa nol dan jatuh ke kisi probe — objek
+            // dinamis memang begitu.
+            if (const auto found = lightmapPlacements_.find(static_cast<uint64_t>(entity));
+                found != lightmapPlacements_.end()) {
+                instance.lightmapScaleOffset = found->second;
+            }
+
             meshes_.push_back(instance);
 
             // Daftar untuk panggangan cahaya statis (S2): **seluruh geometri
@@ -1505,6 +1513,17 @@ void SceneView::AdoptGeometry(const std::string& key, const assets::MeshData& da
 }
 
 
+
+void SceneView::SetLightmap(std::shared_ptr<const render::Lightmap> lightmap) {
+    lightmap_ = std::move(lightmap);
+    lightmapPlacements_.clear();
+    if (lightmap_ == nullptr) {
+        return;
+    }
+    for (const render::LightmapPlacement& placement : lightmap_->placements) {
+        lightmapPlacements_[placement.owner] = placement.scaleOffset;
+    }
+}
 
 void SceneView::BakeItems(std::vector<PickItem>& out) const {
     out.clear();

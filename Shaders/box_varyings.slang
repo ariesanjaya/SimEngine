@@ -46,6 +46,15 @@ struct BoxVarying {
     /// dua lokasi terpisah berarti setiap pipeline menyisakan satu keluaran
     /// tanpa pembaca — yaitu peringatan validasi di setiap pembuatan pipeline.
     [[vk::location(6)]] nointerpolation uint2 slots;
+    /// UV atlas lightmap, sudah dipetakan dari petak instance ini (S5).
+    ///
+    /// Dipetakan di tahap vertex, bukan di fragment: skala dan geserannya sama
+    /// untuk seluruh permukaan sebuah instance, jadi menerapkannya per fragmen
+    /// mengerjakan hal yang sama berulang kali.
+    [[vk::location(7)]] float2 lightmapUv;
+    /// Nol berarti instance ini tidak ber-lightmap. `nointerpolation` karena ia
+    /// bendera, bukan besaran.
+    [[vk::location(8)]] nointerpolation uint hasLightmap;
 };
 
 #endif

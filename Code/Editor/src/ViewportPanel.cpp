@@ -390,6 +390,11 @@ public:
                 context.probeVolume = std::move(baked);
             }
         }
+        if (context.lightmapBakery != nullptr) {
+            if (std::shared_ptr<const render::Lightmap> baked = context.lightmapBakery->Take()) {
+                context.lightmap = std::move(baked);
+            }
+        }
 #endif
         // **Dibandingkan, bukan dipasang saat selesai memanggang.** Kisinya juga
         // bisa *hilang* — level yang ditutup melepasnya — dan sebuah pemasangan
@@ -399,6 +404,13 @@ public:
         if (pushedProbes_ != context.probeVolume) {
             pushedProbes_ = context.probeVolume;
             renderer->SetProbeVolume(pushedProbes_);
+        }
+        // Dibandingkan, bukan dipasang saat selesai memanggang — alasan yang
+        // sama: atlasnya juga bisa hilang saat level berganti.
+        if (pushedLightmap_ != context.lightmap) {
+            pushedLightmap_ = context.lightmap;
+            sceneView_.SetLightmap(pushedLightmap_);
+            renderer->SetLightmap(pushedLightmap_);
         }
 
         HandleCameraInput();
@@ -2658,6 +2670,7 @@ private:
     OrbitCamera camera_;
     SceneView sceneView_;
     std::shared_ptr<const render::ProbeVolume> pushedProbes_;
+    std::shared_ptr<const render::Lightmap> pushedLightmap_;
     render::DrawMode drawMode_ = render::DrawMode::Material;
     GizmoOperation operation_ = GizmoOperation::Translate;
     GizmoSpace space_ = GizmoSpace::World;

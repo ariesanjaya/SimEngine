@@ -74,6 +74,14 @@ float4 main(BoxVarying input) : SV_Target {
     if (shadowParams.probeCounts.w > 0.5) {
         indirect = probeIrradiance(input.worldPosition, normal) / 3.14159265;
     }
+    // **Lightmap menang untuk permukaan yang punya petak (S5).** Ia mengambil
+    // sampelnya di permukaan, satu per texel, jadi ia menangkap kontak dan
+    // bayangan halus yang tidak bisa ditangkap kisi probe — diukur, kesalahan
+    // rata-ratanya empat puluh empat kali lebih kecil. Yang tidak punya petak
+    // tetap memakai probe, dan itu memang objek yang bergerak.
+    if (input.hasLightmap != 0u) {
+        indirect = lightmapIrradiance(input.lightmapUv) / 3.14159265;
+    }
     if (shadowParams.giParams.x > 0.5) {
         indirect = giIrradianceAt(input.position.xy, input.worldPosition, normal,
                                   shadowParams.giParams.y) / 3.14159265;

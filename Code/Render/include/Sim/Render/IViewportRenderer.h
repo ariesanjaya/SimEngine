@@ -99,6 +99,7 @@ enum class MaterialBindingPreference : uint8_t {
 /// tanpa satu baris pun panel berubah. Header ini sengaja tidak meng-include
 /// apa pun dari Vulkan — kalau suatu saat ia perlu, berarti ada seam yang bocor.
 struct ProbeVolume;
+struct Lightmap;
 
 class IViewportRenderer {
 public:
@@ -207,6 +208,13 @@ public:
     /// sama dengan seri B, dan jawaban yang benar untuk adegan yang belum pernah
     /// dipanggang. Bukan adegan gelap.
     virtual void SetProbeVolume(std::shared_ptr<const ProbeVolume> volume) { (void)volume; }
+
+    /// Atlas lightmap hasil panggangan (S5).
+    ///
+    /// **Diserahkan jadi, bukan dipanggang di sini** — alasan yang sama dengan
+    /// kisi probe. Null mengembalikan seluruh permukaan ke jalur probe, dan itu
+    /// keadaan yang benar untuk adegan yang belum pernah dipanggang.
+    virtual void SetLightmap(std::shared_ptr<const Lightmap> lightmap) { (void)lightmap; }
 
     /// Tekstur dari berkas, di-cache dan siap diikat sebagai albedo sebuah
     /// ruas.

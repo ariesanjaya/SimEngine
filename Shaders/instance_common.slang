@@ -70,6 +70,16 @@ struct BoxVertex {
     // mesh saja.
     [[vk::location(14)]] uint materialSlot;
     [[vk::location(15)]] uint textureSlot;
+    // UV lightmap per **vertex** (S4), dan petak atlas per **instance** (S5).
+    //
+    // Keduanya dibutuhkan bersama: yang pertama menyatakan di mana sebuah titik
+    // berada di dalam petaknya sendiri, yang kedua di mana petak itu berada di
+    // dalam atlas. Satu tanpa yang lain membaca texel milik objek lain.
+    [[vk::location(16)]] float2 lightmapUv;
+    // xy skala, zw geseran. **Skala nol berarti tidak ber-lightmap**, dan itu
+    // keadaan yang sah: objek dinamis memang tidak punya petak, dan yang
+    // membacanya jatuh ke kisi probe.
+    [[vk::location(17)]] float4 lightmapScaleOffset;
 };
 
 #ifndef INSTANCE_SET
