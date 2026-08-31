@@ -496,6 +496,7 @@ private:
         std::string meshKey;
         Vec3 worldMinimum{0.0f};
         Vec3 worldMaximum{0.0f};
+        float lightmapTexelDensity = 0.0f;
     };
     std::vector<BakeEntry> bakeEntries_;
 

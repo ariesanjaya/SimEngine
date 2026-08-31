@@ -1215,6 +1215,7 @@ int main(int argc, char** argv) {
                 view::LightmapBakery bakery(&tasks);
                 bakery.SetCache(app.Context().meshGeometry);
                 view::LightmapBakery::Settings bakeSettings;
+                // Bendera menimpa levelnya, seperti bendera bench yang lain.
                 bakeSettings.texelsPerMeter = lightmapTexelsPerMeter;
                 bakeSettings.samplesPerTexel = 64;
                 bakeSettings.cacheDir = app.Context().configDir / "LightmapCache";

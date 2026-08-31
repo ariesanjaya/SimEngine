@@ -49,6 +49,17 @@ public:
         Vec3 sunDirection{0.0f, -1.0f, 0.0f};
         float albedo = 0.5f;
 
+        /// **Panggangannya satu tugas untuk seluruh objek, jadi satu inti.**
+        /// Diukur pada `bench.simlevel`: 179 objek pada 2 texel/m memakan 5
+        /// detik, sedangkan 4 texel/m — empat kali texelnya — belum selesai
+        /// dalam lima menit. Yang menaikkannya bukan kerapatan itu sendiri
+        /// melainkan bahwa tidak ada satu pun inti lain yang ikut bekerja.
+        ///
+        /// Membaginya per objek ke `TaskPool` adalah pekerjaan tersendiri:
+        /// tiap tugas menulis ke petaknya sendiri di atlas, jadi tidak ada yang
+        /// bertabrakan — tetapi `PickScene` dan penghitung kemajuannya harus
+        /// ikut aman-thread lebih dulu. Disebutkan di sini supaya angkanya tidak
+        /// dikira sifat lightmap.
         std::filesystem::path cacheDir;
         /// Sidik jari langit dari pemanggil, dengan alasan yang sama seperti
         /// `ProbeBakery::skyKey`: langitnya sebuah `std::function` yang tidak

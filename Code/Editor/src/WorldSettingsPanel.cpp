@@ -23,6 +23,7 @@
 #include "Sim/Reflect/TypeRegistry.h"
 #include "Sim/Render/Ibl.h"
 #include "Sim/Render/ProbeVolume.h"
+#include "Sim/SceneView/LightmapBakery.h"
 #include "Sim/SceneView/ProbeBakery.h"
 #include "Sim/Render/TimeOfDay.h"
 #include "Sim/SceneView/SceneView.h"
@@ -206,7 +207,123 @@ private:
 
         DrawProbeGrid(context);
         DrawProbeBake(context);
+        DrawLightmap(context);
     }
+
+    /// Ukuran atlas lightmap untuk kerapatan yang sedang disetel, dan tombol
+    /// memanggangnya (S5).
+    ///
+    /// **Ukurannya diumumkan sebelum Bake ditekan**, dan itu kriteria terima
+    /// S5 — bukan kenyamanan. Kerapatan texel tumbuh kuadrat: menggandakannya
+    /// melipatkan atlasnya empat kali, dan angka itu ditemukan setelah menunggu
+    /// panggangan yang tidak muat adalah cara paling mahal untuk mengetahuinya.
+    static void DrawLightmap(EditorContext& context) {
+#if SIM_WITH_PROBE_BAKE
+        if (context.world->Settings().indirect != scene::IndirectLighting::Precomputed) {
+            return;
+        }
+        if (context.lightmapBakery == nullptr) {
+            return;  // sudah disebutkan oleh panel probe di atasnya
+        }
+
+        ImGui::Separator();
+        if (context.lightmapBakery->Running()) {
+            ImGui::ProgressBar(context.lightmapBakery->Progress());
+            ImGui::TextDisabled("%s", context.lightmapBakery->Status().c_str());
+            return;
+        }
+
+        view::LightmapBakery::Settings settings = MakeLightmapSettings(context);
+        const assets::LightmapAtlasLayout layout = view::LightmapBakery::PlanAtlas(
+            context.bakeItems, context.meshGeometry, settings);
+
+        if (!layout.IsValid()) {
+            ImGui::TextDisabled("Lightmap: belum ada objek ber-UV lightmap.");
+            return;
+        }
+        ImGui::Text("Atlas lightmap: %u × %u — %.1f MB", layout.width, layout.height,
+                    static_cast<double>(layout.GpuBytes()) / (1024.0 * 1024.0));
+        ImGui::TextDisabled("%zu objek, utilisasi %.0f%%", layout.charts.size(),
+                            100.0 * layout.utilisation);
+        if (layout.dropped > 0) {
+            // **Disebutkan berwarna, bukan didiamkan.** Objek tanpa petak
+            // digambar tanpa lightmap, dan yang melihatnya akan mengira
+            // lightmap-nya rusak alih-alih atlasnya kepenuhan.
+            ImGui::TextColored(ImVec4(1.0f, 0.6f, 0.2f, 1.0f),
+                               "%u objek tidak kebagian tempat.", layout.dropped);
+            ImGui::TextDisabled("Turunkan kerapatan texel, atau naikkan batas atlasnya.");
+        }
+
+        const bool ready = !context.bakeItems.empty();
+        ImGui::BeginDisabled(!ready);
+        if (ImGui::Button("Panggang Lightmap")) {
+            const scene::SkyComponent* sky = FindSky(*context.world);
+            std::function<Vec3(const Vec3&)> sampler = MakeSkySampler(context, settings, sky);
+            if (!context.lightmapBakery->Bake(context.bakeItems, std::move(sampler), settings)) {
+                SIM_WARN("Editor", "lightmap bake could not start");
+            }
+        }
+        ImGui::EndDisabled();
+        if (context.lightmap != nullptr) {
+            ImGui::TextDisabled("Terpasang: %u × %u, %zu objek", context.lightmap->width,
+                                context.lightmap->height, context.lightmap->placements.size());
+        }
+#else
+        (void)context;
+#endif
+    }
+
+#if SIM_WITH_PROBE_BAKE
+    /// Setelan panggangan lightmap dari level, tanpa langitnya.
+    static view::LightmapBakery::Settings MakeLightmapSettings(EditorContext& context) {
+        view::LightmapBakery::Settings settings;
+        settings.texelsPerMeter = scene::LightmapDensityOf(context.world->Settings());
+        settings.cacheDir = context.configDir / "LightmapCache";
+        return settings;
+    }
+
+    /// Langit yang memanggang, **disalin ke dalam lambda**, beserta mataharinya
+    /// dan sidik jarinya. Alasannya sama persis dengan `StartProbeBake`.
+    static std::function<Vec3(const Vec3&)> MakeSkySampler(
+        EditorContext& context, view::LightmapBakery::Settings& settings,
+        const scene::SkyComponent* sky) {
+        Vec3 sunDirection(0.0f, -1.0f, 0.0f);
+        const scene::Entity sun = FindDirectionalLight(*context.world);
+        if (sun != scene::kNullEntity) {
+            const auto* light = context.world->TryGet<scene::LightComponent>(sun);
+            sunDirection = glm::normalize(-Vec3(context.world->WorldMatrix(sun)[2]));
+            if (light != nullptr) {
+                settings.sunIrradiance = light->color * light->intensity;
+            }
+        }
+        settings.sunDirection = sunDirection;
+
+        uint64_t skyKey = 1469598103934665603ull;
+        const auto mix = [&skyKey](const void* data, std::size_t length) {
+            const auto* bytes = static_cast<const uint8_t*>(data);
+            for (std::size_t i = 0; i < length; ++i) {
+                skyKey = (skyKey ^ bytes[i]) * 1099511628211ull;
+            }
+        };
+        if (sky != nullptr) {
+            mix(&sky->source, sizeof(sky->source));
+            mix(&sky->intensity, sizeof(sky->intensity));
+            mix(&sky->cameraHeightKm, sizeof(sky->cameraHeightKm));
+        }
+        mix(&sunDirection.x, sizeof(float) * 3);
+        settings.skyKey = skyKey;
+
+        if (sky != nullptr && sky->source == scene::SkySourceKind::Atmosphere) {
+            render::AtmosphereSky atmosphere;
+            atmosphere.intensity = sky->intensity;
+            atmosphere.cameraHeightKm = sky->cameraHeightKm;
+            atmosphere.sunDirection = -sunDirection;
+            atmosphere.Prepare();
+            return [atmosphere](const Vec3& direction) { return atmosphere.Sample(direction); };
+        }
+        return [](const Vec3&) { return Vec3(0.0f); };
+    }
+#endif
 
     /// Tombol memanggang transport cahaya statis, beserta kemajuannya (S2).
     ///

@@ -77,9 +77,14 @@ std::vector<BakeItem> CollectItems(std::span<const PickItem> items,
         baked.chart = static_cast<uint32_t>(outCharts.size());
 
         assets::LightmapChart chart;
+        // **Penimpaan per objek menang atas setelan level.** Nol berarti ikut
+        // levelnya — sebuah angka, bukan sebuah bendera, karena kerapatan nol
+        // tidak punya arti lain yang masuk akal.
+        const float density = item.lightmapTexelDensity > 0.0f ? item.lightmapTexelDensity
+                                                               : settings.texelsPerMeter;
         chart.side = assets::LightmapChartSide(
-            assets::MeshWorldArea(*ref.data, item.worldMatrix), settings.texelsPerMeter,
-            settings.minChartSide, settings.maxChartSide);
+            assets::MeshWorldArea(*ref.data, item.worldMatrix), density, settings.minChartSide,
+            settings.maxChartSide);
         outCharts.push_back(chart);
         collected.push_back(std::move(baked));
     }

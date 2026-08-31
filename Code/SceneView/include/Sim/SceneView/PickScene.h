@@ -49,6 +49,10 @@ struct PickItem {
     /// memilih jalur konservatif alih-alih membuang brick yang dipakai.
     Vec3 worldMinimum{0.0f};
     Vec3 worldMaximum{0.0f};
+
+    /// Kerapatan lightmap objek ini, texel per meter — **nol berarti ikut
+    /// levelnya** (S5). Diabaikan picking, seperti kotak dunia di atasnya.
+    float lightmapTexelDensity = 0.0f;
 };
 
 class PickScene {

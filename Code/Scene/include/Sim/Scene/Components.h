@@ -98,6 +98,14 @@ struct MeshRendererComponent {
     /// Menggeser pemilihan tingkat detail: negatif memilih mesh yang lebih
     /// rinci lebih lama, positif lebih cepat turun. Dipakai renderer di E8.
     float lodBias = 0.0f;
+    /// Kerapatan lightmap objek ini, texel per meter — **nol berarti ikut
+    /// levelnya** (S5).
+    ///
+    /// Ada karena satu angka untuk seluruh level tidak pernah cukup: sebuah
+    /// lantai yang bayangannya harus tajam dan sebuah atap yang tidak pernah
+    /// dilihat dari dekat menuntut anggaran yang berbeda, dan menaikkan
+    /// kerapatan level demi salah satunya membayar keduanya.
+    float lightmapTexelDensity = 0.0f;
 };
 
 /// Memutar sebuah klip animasi pada mesh ber-rig entity ini.

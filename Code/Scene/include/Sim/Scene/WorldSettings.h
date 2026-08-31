@@ -127,7 +127,33 @@ struct WorldSettings {
     /// Hanya berlaku untuk `Precomputed`. Nol atau negatif tidak sah; yang
     /// membacanya menjepitnya lewat `ProbeSpacingOf`.
     float probeSpacing = 2.0f;
+
+    /// Kerapatan lightmap permukaan statis, texel per meter (S5).
+    ///
+    /// **Per meter, bukan per meter persegi**, dan itu bukan kerapian
+    /// penamaan: yang kedua membuat menggandakan ukuran sebuah benda
+    /// melipatkan kerapatannya empat kali, dan anggaran atlasnya meledak pada
+    /// benda besar.
+    ///
+    /// **Ada di level, bukan di project** — alasan yang sama dengan
+    /// `probeSpacing`: sebuah interior yang kontaknya harus tajam dan sebuah
+    /// lanskap luas menuntut kerapatan yang berbeda, dan keduanya bisa berada di
+    /// project yang sama. Objek yang menuntut lebih halus daripada levelnya
+    /// menimpanya lewat `MeshRendererComponent::lightmapTexelDensity`.
+    float lightmapTexelsPerMeter = 4.0f;
 };
+
+/// Kerapatan lightmap yang benar-benar dipakai, dengan yang tidak masuk akal
+/// dijepit. Alasan penjepitannya sama dengan `ProbeSpacingOf`.
+inline float LightmapDensityOf(const WorldSettings& settings) {
+    if (!(settings.lightmapTexelsPerMeter > 0.0f)) {  // termasuk NaN
+        return 4.0f;
+    }
+    return settings.lightmapTexelsPerMeter < 0.25f
+               ? 0.25f
+               : (settings.lightmapTexelsPerMeter > 64.0f ? 64.0f
+                                                          : settings.lightmapTexelsPerMeter);
+}
 
 /// Jarak antar-probe yang benar-benar dipakai, dengan yang tidak masuk akal
 /// dijepit.

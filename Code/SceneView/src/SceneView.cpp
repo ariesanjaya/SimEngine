@@ -435,7 +435,9 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                     worldMax = glm::max(worldMax, atCorner);
                 }
                 bakeEntries_.push_back(
-                    BakeEntry{entity, composed, kUnitCubeKey, worldMin, worldMax});
+                    BakeEntry{entity, composed, kUnitCubeKey, worldMin, worldMax,
+                              meshRenderer != nullptr ? meshRenderer->lightmapTexelDensity
+                                                      : 0.0f});
             }
 
             if (!meshKey.empty()) {
@@ -454,7 +456,10 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                     worldMin = glm::min(worldMin, atCorner);
                     worldMax = glm::max(worldMax, atCorner);
                 }
-                bakeEntries_.push_back(BakeEntry{entity, matrix, meshKey, worldMin, worldMax});
+                bakeEntries_.push_back(
+                    BakeEntry{entity, matrix, meshKey, worldMin, worldMax,
+                              meshRenderer != nullptr ? meshRenderer->lightmapTexelDensity
+                                                      : 0.0f});
             }
 
             if (pickable) {
@@ -990,7 +995,7 @@ void SceneView::AppendTerrain(const scene::TerrainComponent& component, scene::E
                     worldMin = glm::min(worldMin, atCorner);
                     worldMax = glm::max(worldMax, atCorner);
                 }
-                bakeEntries_.push_back(BakeEntry{entity, matrix, key, worldMin, worldMax});
+                bakeEntries_.push_back(BakeEntry{entity, matrix, key, worldMin, worldMax, 0.0f});
             }
 
             if (pickable) {
@@ -1538,6 +1543,7 @@ void SceneView::BakeItems(std::vector<PickItem>& out) const {
         item.meshKey = entry.meshKey;
         item.worldMinimum = entry.worldMinimum;
         item.worldMaximum = entry.worldMaximum;
+        item.lightmapTexelDensity = entry.lightmapTexelDensity;
         // Kunci mesh impor **adalah** jalur berkasnya; whitebox memakai GUID,
         // yang bukan jalur dan karena itu tidak punya sumber untuk dimuat.
         if (entry.meshKey.find('/') != std::string::npos ||

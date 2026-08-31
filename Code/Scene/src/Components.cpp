@@ -72,6 +72,11 @@ void RegisterCoreComponents() {
             .Label("Cast Shadows")
             .Field<&MeshRendererComponent::receiveShadows>("receiveShadows")
             .Label("Receive Shadows")
+            .Field<&MeshRendererComponent::lightmapTexelDensity>("lightmapTexelDensity")
+            .Label("Lightmap Texels / m")
+            .Range(0.0f, 64.0f)
+            .Tooltip("Nol berarti ikut setelan level. Naikkan hanya untuk permukaan yang "
+                     "kontaknya harus tajam — anggarannya tumbuh kuadrat")
             .Field<&MeshRendererComponent::lodBias>("lodBias")
             .Label("LOD Bias")
             .Range(-4.0f, 4.0f);
@@ -218,7 +223,12 @@ void RegisterCoreComponents() {
             .Label("Probe Spacing (m)")
             .Range(0.1f, 32.0f)
             .Tooltip("Jarak antar-probe iradiansi untuk Precomputed. Yang dibayar tumbuh "
-                     "kubik — panel menampilkan jumlah dan ukurannya di bawah");
+                     "kubik — panel menampilkan jumlah dan ukurannya di bawah")
+            .Field<&WorldSettings::lightmapTexelsPerMeter>("lightmapTexelsPerMeter")
+            .Label("Lightmap Texels / m")
+            .Range(0.25f, 64.0f)
+            .Tooltip("Kerapatan lightmap permukaan statis. Panel menampilkan ukuran atlas "
+                     "yang dihasilkannya di bawah, sebelum Bake ditekan");
 
         types.Type<RigidBodyComponent>("RigidBody")
             .Field<&RigidBodyComponent::kind>("kind")
