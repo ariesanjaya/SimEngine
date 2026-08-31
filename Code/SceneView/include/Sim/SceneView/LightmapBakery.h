@@ -49,17 +49,21 @@ public:
         Vec3 sunDirection{0.0f, -1.0f, 0.0f};
         float albedo = 0.5f;
 
-        /// **Panggangannya satu tugas untuk seluruh objek, jadi satu inti.**
-        /// Diukur pada `bench.simlevel`: 179 objek pada 2 texel/m memakan 5
-        /// detik, sedangkan 4 texel/m — empat kali texelnya — belum selesai
-        /// dalam lima menit. Yang menaikkannya bukan kerapatan itu sendiri
-        /// melainkan bahwa tidak ada satu pun inti lain yang ikut bekerja.
+        /// **Panggangannya satu tugas per objek**, jadi seluruh inti ikut
+        /// bekerja. Yang membuat pembagian itu aman bukan penguncian melainkan
+        /// bahwa tiap tugas hanya menulis ke petaknya sendiri di atlas:
+        /// petak-petaknya sudah dipisah `PackLightmapAtlas` sebelum tugas
+        /// pertama berangkat, jadi dua tugas tidak pernah menyentuh texel yang
+        /// sama. Penelusurannya membaca `RayScene` yang tidak berubah selama
+        /// panggangan, dan tugas yang terakhir selesai — dihitung dengan satu
+        /// pencacah atomik — yang menulis artefaknya.
         ///
-        /// Membaginya per objek ke `TaskPool` adalah pekerjaan tersendiri:
-        /// tiap tugas menulis ke petaknya sendiri di atlas, jadi tidak ada yang
-        /// bertabrakan — tetapi `PickScene` dan penghitung kemajuannya harus
-        /// ikut aman-thread lebih dulu. Disebutkan di sini supaya angkanya tidak
-        /// dikira sifat lightmap.
+        /// Diukur pada `bench.simlevel`, 179 objek, tiap kerapatan dijalankan
+        /// dengan cache kosong: 2 texel/m 24,6 detik, 4 texel/m 72,2 detik,
+        /// 8 texel/m 251,8 detik. Sebelum dibagi, 4 texel/m belum selesai dalam
+        /// lima menit. Angkanya naik kira-kira sebanding dengan jumlah texel,
+        /// bukan lebih cepat dari itu — yang dulu menahannya memang jumlah inti
+        /// yang menganggur.
         std::filesystem::path cacheDir;
         /// Sidik jari langit dari pemanggil, dengan alasan yang sama seperti
         /// `ProbeBakery::skyKey`: langitnya sebuah `std::function` yang tidak
@@ -95,6 +99,14 @@ public:
     float Progress() const;
     std::shared_ptr<const render::Lightmap> Take();
     std::string Status() const;
+
+    /// Benar bila hasil terakhir dibaca dari cache alih-alih dipanggang.
+    /// Ada karena tanpanya pemanggil melaporkan waktu memuat mesh sebagai waktu
+    /// memanggang: pada cache hit `Bake` pulang seketika, jadi selisih waktu di
+    /// sekitarnya mengukur `MeshGeometryCache::Request` — 5 detik untuk 179
+    /// objek — dan angka itu terbaca sebagai panggangan empat belas kali lebih
+    /// cepat yang tidak pernah terjadi.
+    bool LoadedFromCache() const;
 
 private:
     struct Job;

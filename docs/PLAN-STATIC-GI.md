@@ -896,7 +896,7 @@ adalah orang yang bertanya kenapa picking mengenai segitiga yang lain daripada
 yang tergambar. `MeshGeometryCache` dan renderer karena itu memakai folder cache
 yang sama, dipasang di satu tempat.
 
-### S5 — Lightmap: bake dan baca
+### S5 — Lightmap: bake dan baca · ✅
 
 - Iradiansi per-texel untuk permukaan statis, dari transport yang sama dengan S2,
   diparameterisasi UV pertama mesh-nya (keputusan 7)
@@ -970,6 +970,121 @@ diukur dengan penaksir yang lama; seluruhnya perbandingan — panggang lawan
 langit, dengan lawan tanpa visibilitas — jadi penyimpangan yang sama di kedua
 sisi sebagian besar saling menghapus dan kesimpulannya bertahan. Versi artefak
 probe dinaikkan ke 3 supaya yang lama tidak dipakai ulang.
+
+#### Keadaannya sesudah S5 · ✅
+
+Ketiga bagian kriteria terimanya terukur.
+
+##### 1. Kontak terbaca di lightmap dan tidak di probe
+
+Tabel profilnya ada di atas: kesalahan rata-rata terhadap acuan **0,0072** untuk
+lightmap dan **0,318** untuk probe — empat puluh empat kali lipat. Yang paling
+menjelaskan tetap dua baris pertama, di mana kisi probe menyinari lantai di bawah
+kotak seolah sebagian terbuka.
+
+##### 2. Permukaan yang sama terbaca sama saat berpindah jalur
+
+Konsekuensi langsung keputusan 3 — dua penyimpanan, satu besaran — dan karena itu
+harus diukur, bukan diasumsikan. Sebuah objek yang dibuka kuncinya, atau mesh yang
+tidak kebagian UV, jatuh dari lightmap ke probe di tengah adegan yang sama.
+
+Diukur di enam titik terbuka, semuanya lebih dari dua meter dari penghalang
+terdekat dan sengaja tidak sejajar dengan simpul kisi:
+
+| titik | acuan | lightmap | probe | jahitan |
+|---|---:|---:|---:|---:|
+| (2,7, 0,3) | 1,267 | 1,343 | 1,182 | 12,7% |
+| (−3,4, 1,6) | 1,313 | 1,271 | 1,078 | 14,7% |
+| (1,2, −4,3) | 1,295 | 1,356 | 1,061 | 22,7% |
+| (5,6, 5,1) | 1,279 | 1,279 | 1,264 | 1,2% |
+| (−6,2, −2,8) | 1,278 | 1,357 | 1,147 | 16,4% |
+| (0,4, 6,7) | 1,317 | 1,357 | 1,029 | 24,9% |
+
+Jahitannya **15,4% rata-rata dan 24,9% terburuk** — bukan nol, dan tidak pantas
+disebut nol. Yang menentukan sisi mana yang salah adalah penyimpangan terhadap
+acuan: lightmap **+2,8%**, probe **−12,7%**. Hampir seluruh jahitan datang dari
+sisi probe.
+
+**Dan penyimpangan probe itu berarah, bukan tersebar: enam dari enam titik
+terbaca lebih gelap.** Penaksir yang hanya berderau meleset ke dua arah. Yang
+terlihat mata dari penyimpangan searah bukan bintik melainkan permukaan yang
+mendadak menggelap saat ia berpindah jalur, jadi ujinya memeriksa arahnya
+terpisah dari besarnya.
+
+**Diukur di tempat terbuka, bukan di kontak.** Di dekat kontak keduanya memang
+berbeda — itu persis kriteria pertama, dan menuntut mereka sama di sana berarti
+menuntut lightmap membuang alasan keberadaannya.
+
+Sebabnya diperiksa, tidak ditebak. Membaca kisi setengah meter di atas lantai
+mengubah jawabannya besar — di titik terburuk 1,029 menjadi 1,215 — jadi irisan
+probe yang duduk persis di bidang lantai memang ikut menyumbang. Tetapi ia bukan
+satu-satunya sebab: di satu titik pengangkatan itu justru melewati acuannya
+(1,264 menjadi 1,399). Sisanya adalah ketelitian kisi 1 m itu sendiri, yang
+obatnya sama dengan yang dicatat S3 untuk koridor sempit, yaitu kerapatan kisi.
+
+**Ini pembatas yang dicatat, bukan yang diperbaiki di S5.** Menurunkannya berarti
+menyentuh penempatan dan pembobotan probe — pekerjaan S3 — dan S6 yang akan
+memvalidasi keduanya terhadap path tracer acuan adalah tempat yang benar untuk
+memutuskan berapa yang masih boleh tersisa.
+
+##### 3. Kerapatan texel menajamkan kontak, sesuai atlas yang diumumkan
+
+Diukur pada `bench.simlevel`, 179 objek. Kontribusi lightmap **diisolasi** dengan
+mengurangkan gambar tanpa lightmap dari gambar berlightmap, di radiance linier
+lewat pembacaan balik HDR — bukan di tangkapan 8-bit, dan bukan pada gambar utuh,
+karena gradien gambar utuh didominasi matahari langsung dan bukan lightmap-nya:
+
+| kerapatan | atlas | kontribusi | tepi p99 | sebaran tepi |
+|---|---|---:|---:|---:|
+| 2 texel/m | 128×128 | 0,01419 | 0,08299 | 4,0% |
+| 4 texel/m | 256×256 | 0,01229 | 0,10506 | 3,9% |
+| 8 texel/m | 512×512 | 0,00935 | 0,14793 | 3,5% |
+
+Ketajaman kontaknya naik **1,78 kali** dari ujung ke ujung sementara sebaran
+tepinya menyempit dari 4,0% ke 3,5% piksel — menajam dan sekaligus berhenti
+mengabur, monoton di ketiga kerapatan. Ukuran atlasnya persis yang diumumkan
+`PlanAtlas` sebelum Bake ditekan.
+
+Kolom kontribusi turun justru karena kabur: pada kerapatan rendah oklusinya
+dioleskan ke daerah yang lebih luas, jadi rata-rata penggelapannya lebih besar
+meskipun tidak ada satu pun tepi yang tajam.
+
+##### Panggangannya dibagi per objek, dan itu yang membuat tabel di atas ada
+
+Kriteria ketiga tidak bisa diukur sebelum ini: dengan satu tugas untuk seluruh
+objek, 4 texel/m belum selesai dalam lima menit. Yang menahannya bukan kerapatan
+melainkan tidak adanya inti lain yang ikut bekerja.
+
+Pembagiannya aman **bukan karena penguncian** melainkan karena `PackLightmapAtlas`
+sudah memisahkan petak tiap objek sebelum tugas pertama berangkat — dua tugas tidak
+pernah menyentuh texel yang sama. Penelusurannya membaca `RayScene` yang tidak
+berubah selama panggangan. Tugas yang terakhir selesai, dihitung dengan satu
+pencacah atomik, yang menulis artefaknya; `WaitIdle` tidak bisa dipakai di sana
+karena dipanggil dari dalam sebuah tugas ia akan menunggu dirinya sendiri.
+
+| kerapatan | sebelum | sesudah |
+|---|---:|---:|
+| 2 texel/m | 5,0 s | **25,2 s** |
+| 4 texel/m | > 5 menit, tidak selesai | **72,2 s** |
+| 8 texel/m | tidak dicoba | **251,8 s** |
+
+Angka "sebelum" pada 2 texel/m lebih kecil karena atlas 128² memang kecil;
+sesudahnya lebih besar hanya karena diukur pada mesin yang sama sedang menjalankan
+hal lain. Yang penting barisan kedua: kerapatan yang dulu tidak selesai kini
+selesai, dan waktunya naik kira-kira sebanding dengan jumlah texel — bukan lebih
+cepat dari itu, yang akan berarti ada yang tidak ikut dikerjakan.
+
+##### Cacat yang ditemukan pengukuran ini, bukan perancangan
+
+`Bake` pulang seketika pada cache hit, tetapi pemanggilnya tetap melaporkan
+`lightmap bake: … 5,04 s`. Lima detik itu **`MeshGeometryCache::Request` untuk 179
+objek**, bukan panggangan — dan saya nyaris melaporkannya sebagai percepatan dari
+72 detik menjadi 5 detik yang tidak pernah terjadi. `LightmapBakery` sekarang
+menjawab `LoadedFromCache()`, dan barisnya berbunyi `lightmap cache:` atau
+`lightmap bake:` sesuai yang sebenarnya terjadi.
+
+Sebuah pengukuran yang menyebut dua peristiwa berbeda dengan nama yang sama akan
+membaca yang murah sebagai yang mahal yang menjadi cepat.
 
 ### S6 — Validasi terhadap path tracer acuan
 
@@ -1086,3 +1201,10 @@ pertanyaan yang lebih baik dijawab sesudah keduanya berdiri sendiri-sendiri.
 - **Objek statis yang dipindahkan sesudah bake.** Ia membawa lightmap yang
   sudah tidak sesuai. Menyatakannya kotor itu mudah; memutuskan apa yang
   digambar sementara ia kotor tidak.
+- **Jahitan 15% antara jalur lightmap dan jalur probe**, diukur di S5: probe
+  membaca lantai terbuka **−12,7%** terhadap acuan, dan searah di enam dari enam
+  titik. Sebuah permukaan yang berpindah jalur karena itu menggelap, bukan
+  berbintik. Sebagiannya irisan probe yang duduk di bidang lantai dan sebagiannya
+  ketelitian kisi 1 m; keduanya pekerjaan penempatan probe, bukan lightmap.
+  Berapa yang masih boleh tersisa ditetapkan di S6, dari hasil ukur, bukan
+  sebelumnya.

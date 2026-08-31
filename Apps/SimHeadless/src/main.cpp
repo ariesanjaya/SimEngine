@@ -1259,10 +1259,12 @@ int main(int argc, char** argv) {
                     if (std::shared_ptr<const render::Lightmap> atlas = bakery.Take()) {
                         const auto elapsed = std::chrono::duration<double>(
                             std::chrono::steady_clock::now() - started);
-                        SIM_INFO("Bench",
-                                 "lightmap bake: {}x{} atlas, {} objects, {:.2f} s, {:.1f} MB",
-                                 atlas->width, atlas->height, atlas->placements.size(),
-                                 elapsed.count(),
+                        // Dibedakan karena pada cache hit `Bake` pulang
+                        // seketika, jadi waktu di sini mengukur pemuatan mesh
+                        // dan bukan panggangan.
+                        SIM_INFO("Bench", "lightmap {}: {}x{} atlas, {} objects, {:.2f} s, {:.1f} MB",
+                                 bakery.LoadedFromCache() ? "cache" : "bake", atlas->width,
+                                 atlas->height, atlas->placements.size(), elapsed.count(),
                                  static_cast<double>(atlas->GpuBytes()) / (1024.0 * 1024.0));
                         sceneView.SetLightmap(atlas);
                         renderer->SetLightmap(std::move(atlas));

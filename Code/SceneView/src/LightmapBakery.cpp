@@ -96,7 +96,12 @@ std::vector<BakeItem> CollectItems(std::span<const PickItem> items,
 struct LightmapBakery::Job {
     std::atomic<bool> ready{false};
     std::atomic<uint32_t> done{0};
+    /// Berapa objek yang belum selesai. **Yang terakhir menurunkannya ke nol
+    /// yang menulis artefaknya dan menandai selesai** — bukan `WaitIdle`, yang
+    /// dipanggil dari dalam sebuah tugas akan menunggu dirinya sendiri.
+    std::atomic<uint32_t> remaining{0};
     uint32_t total = 1;
+    bool fromCache = false;
     std::shared_ptr<render::Lightmap> lightmap;
     std::mutex statusMutex;
     std::string status;
@@ -133,6 +138,10 @@ float LightmapBakery::Progress() const {
     }
     return static_cast<float>(job_->done.load(std::memory_order_relaxed)) /
            static_cast<float>(std::max(job_->total, 1u));
+}
+
+bool LightmapBakery::LoadedFromCache() const {
+    return job_ != nullptr && job_->fromCache;
 }
 
 std::string LightmapBakery::Status() const {
@@ -222,6 +231,7 @@ bool LightmapBakery::Bake(std::span<const PickItem> items, std::function<Vec3(co
         if (render::ReadLightmap(file, *cached, cacheError) && cached->IsValid() &&
             cached->width == layout.width) {
             job->lightmap = std::move(cached);
+            job->fromCache = true;
             job->status = "lightmap loaded from " + file.filename().string();
             job->ready.store(true, std::memory_order_release);
             job_ = std::move(job);
@@ -254,39 +264,105 @@ bool LightmapBakery::Bake(std::span<const PickItem> items, std::function<Vec3(co
     const Vec3 sunIrradiance = settings.sunIrradiance;
     const Vec3 sunDirection = settings.sunDirection;
 
-    auto bake = [job, layout, albedo, samples, dilate, sunIrradiance, sunDirection,
-                 sky = std::move(sky), file]() mutable {
-        reference::TraceSettings trace;
-        trace.sky = [sky](const Vec3& direction) { return sky(direction); };
-        trace.sunIrradiance = sunIrradiance;
-        trace.sunDirection = sunDirection;
+    auto lightmap = std::make_shared<render::Lightmap>();
+    lightmap->width = layout.width;
+    lightmap->height = layout.height;
+    lightmap->texels.assign(static_cast<std::size_t>(layout.width) * layout.height, Vec3(0.0f));
 
-        reference::Surface surface;
-        surface.baseColor = Vec3(albedo);
-        surface.baseMetalness = 0.0f;
-        surface.specularWeight = 0.0f;
-        surface.specularRoughness = 1.0f;
-        const reference::SurfaceResolver resolve =
-            [surface](const raycast::RayHit& hit, const Vec3& origin,
-                      const Vec3& direction) -> reference::SurfaceHit {
-            reference::SurfaceHit out;
-            out.position = origin + direction * hit.distance;
-            out.normal = hit.normal;
-            out.surface = surface;
-            return out;
-        };
+    // **Penempatannya dihitung di sini, di main thread.** Tugas per objek lalu
+    // hanya menulis texel — dan texel tiap objek berada di petaknya sendiri,
+    // yang menurut definisi tidak beririsan dengan petak objek lain. Tanpa ini
+    // setiap tugas harus menambah `placements`, dan `push_back` bersamaan dari
+    // banyak thread adalah kerusakan memori, bukan urutan yang berubah-ubah.
+    std::vector<uint32_t> baking;
+    for (uint32_t i = 0; i < job->items.size(); ++i) {
+        const assets::LightmapChart& chart = layout.charts[job->items[i].chart];
+        if (!chart.placed) {
+            continue;
+        }
+        render::LightmapPlacement placement;
+        placement.owner = job->items[i].owner;
+        const auto width = static_cast<float>(layout.width);
+        const auto height = static_cast<float>(layout.height);
+        placement.scaleOffset = Vec4(static_cast<float>(chart.side) / width,
+                                     static_cast<float>(chart.side) / height,
+                                     static_cast<float>(chart.x) / width,
+                                     static_cast<float>(chart.y) / height);
+        lightmap->placements.push_back(placement);
+        baking.push_back(i);
+    }
+    job->lightmap = std::move(lightmap);
+    job->remaining.store(static_cast<uint32_t>(std::max<std::size_t>(baking.size(), 1)),
+                         std::memory_order_relaxed);
 
-        auto lightmap = std::make_shared<render::Lightmap>();
-        lightmap->width = layout.width;
-        lightmap->height = layout.height;
-        lightmap->texels.assign(static_cast<std::size_t>(layout.width) * layout.height,
-                                Vec3(0.0f));
+    reference::TraceSettings trace;
+    trace.sky = [sky = std::move(sky)](const Vec3& direction) { return sky(direction); };
+    trace.sunIrradiance = sunIrradiance;
+    trace.sunDirection = sunDirection;
 
-        for (const BakeItem& item : job->items) {
-            const assets::LightmapChart& chart = layout.charts[item.chart];
-            if (!chart.placed) {
-                continue;
+    reference::Surface surface;
+    surface.baseColor = Vec3(albedo);
+    surface.baseMetalness = 0.0f;
+    surface.specularWeight = 0.0f;
+    surface.specularRoughness = 1.0f;
+
+    /// Menyelesaikan panggangan: menulis artefaknya dan menandai selesai.
+    const auto finish = [job, file]() {
+        std::string message = "lightmap baked";
+        if (!file.empty()) {
+            std::string error;
+            if (!render::WriteLightmap(file, *job->lightmap, error)) {
+                message = "lightmap baked, but the artefact could not be written: " + error;
+            } else {
+                message = "lightmap baked to " + file.filename().string();
             }
+        }
+        {
+            std::lock_guard<std::mutex> lock(job->statusMutex);
+            job->status = std::move(message);
+        }
+        job->ready.store(true, std::memory_order_release);
+    };
+
+    if (baking.empty()) {
+        job_ = job;
+        finish();
+        return true;
+    }
+
+    // **Status awal dan `job_` dipasang sebelum satu pun tugas dikirim.** Tugas
+    // yang selesai lebih dulu menulis status akhirnya, dan status awal yang
+    // dipasang sesudahnya akan menimpanya — panggangan yang sudah selesai lalu
+    // terbaca sebagai masih berjalan.
+    job_ = job;
+    {
+        std::lock_guard<std::mutex> lock(job->statusMutex);
+        job->status = "baking " + std::to_string(job->total) + " lightmap texels…";
+    }
+
+    // **Satu tugas per objek, bukan satu tugas untuk seluruhnya.** Sebelum ini
+    // panggangan memakai satu inti: 179 objek pada 2 texel/m memakan 5 detik,
+    // dan 4 texel/m — empat kali texelnya — belum selesai dalam lima menit.
+    //
+    // Yang membuatnya aman: tiap tugas menulis ke petaknya sendiri, dan
+    // `raycast::Raycast` menerima scene-nya sebagai `const` tanpa state yang
+    // berubah, jadi penelusuran bersamaan membaca pohon yang sama tanpa
+    // menyentuhnya.
+    for (const uint32_t index : baking) {
+        auto bakeOne = [job, layout, index, samples, dilate, trace, surface, finish]() {
+            const BakeItem& item = job->items[index];
+            const assets::LightmapChart& chart = layout.charts[item.chart];
+
+            const reference::SurfaceResolver resolve =
+                [surface](const raycast::RayHit& hit, const Vec3& origin,
+                          const Vec3& direction) -> reference::SurfaceHit {
+                reference::SurfaceHit out;
+                out.position = origin + direction * hit.distance;
+                out.normal = hit.normal;
+                out.surface = surface;
+                return out;
+            };
+
             // **Dirasterisasi di ruang dunia**, bukan di ruang lokal lalu
             // ditransformasi: normal yang ditransformasi lewat matriks berskala
             // tidak lagi tegak lurus permukaannya, dan iradiansi pada normal
@@ -300,70 +376,42 @@ bool LightmapBakery::Bake(std::span<const PickItem> items, std::function<Vec3(co
 
             const assets::LightmapRaster raster =
                 assets::RasteriseLightmap(world, chart.side, chart.side);
-            if (!raster.IsValid()) {
-                continue;
-            }
-
-            std::vector<Vec3> values(raster.texels.size(), Vec3(0.0f));
-            for (std::size_t i = 0; i < raster.texels.size(); ++i) {
-                const assets::LightmapTexel& texel = raster.texels[i];
-                if (texel.covered) {
-                    values[i] = reference::TraceSurfaceIrradiance(
-                        job->picks->Scene(), resolve, reference::LightList{}, texel.position,
-                        texel.normal, samples, trace);
+            if (raster.IsValid()) {
+                std::vector<Vec3> values(raster.texels.size(), Vec3(0.0f));
+                for (std::size_t i = 0; i < raster.texels.size(); ++i) {
+                    const assets::LightmapTexel& texel = raster.texels[i];
+                    if (texel.covered) {
+                        values[i] = reference::TraceSurfaceIrradiance(
+                            job->picks->Scene(), resolve, reference::LightList{}, texel.position,
+                            texel.normal, samples, trace);
+                    }
+                    job->done.fetch_add(1, std::memory_order_relaxed);
                 }
-                job->done.fetch_add(1, std::memory_order_relaxed);
-            }
-            // Diperluas **sebelum** disalin ke atlas: memperluas di dalam atlas
-            // akan menarik warna dari petak tetangga, yaitu objek yang lain.
-            assets::DilateLightmap(values, raster, dilate);
+                // Diperluas **sebelum** disalin ke atlas: memperluas di dalam
+                // atlas akan menarik warna dari petak tetangga, yaitu objek lain.
+                assets::DilateLightmap(values, raster, dilate);
 
-            for (uint32_t y = 0; y < chart.side; ++y) {
-                for (uint32_t x = 0; x < chart.side; ++x) {
-                    const std::size_t at =
-                        static_cast<std::size_t>(chart.y + y) * layout.width + chart.x + x;
-                    lightmap->texels[at] = values[static_cast<std::size_t>(y) * chart.side + x];
+                for (uint32_t y = 0; y < chart.side; ++y) {
+                    for (uint32_t x = 0; x < chart.side; ++x) {
+                        const std::size_t at =
+                            static_cast<std::size_t>(chart.y + y) * layout.width + chart.x + x;
+                        job->lightmap->texels[at] =
+                            values[static_cast<std::size_t>(y) * chart.side + x];
+                    }
                 }
             }
 
-            render::LightmapPlacement placement;
-            placement.owner = item.owner;
-            const auto width = static_cast<float>(layout.width);
-            const auto height = static_cast<float>(layout.height);
-            placement.scaleOffset = Vec4(static_cast<float>(chart.side) / width,
-                                         static_cast<float>(chart.side) / height,
-                                         static_cast<float>(chart.x) / width,
-                                         static_cast<float>(chart.y) / height);
-            lightmap->placements.push_back(placement);
-        }
-
-        std::string message = "lightmap baked";
-        if (!file.empty()) {
-            std::string error;
-            if (!render::WriteLightmap(file, *lightmap, error)) {
-                message = "lightmap baked, but the artefact could not be written: " + error;
-            } else {
-                message = "lightmap baked to " + file.filename().string();
+            if (job->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+                finish();
             }
+        };
+        if (tasks_ != nullptr) {
+            tasks_->Submit(std::move(bakeOne));
+        } else {
+            bakeOne();
         }
-        {
-            std::lock_guard<std::mutex> lock(job->statusMutex);
-            job->status = std::move(message);
-        }
-        job->lightmap = std::move(lightmap);
-        job->ready.store(true, std::memory_order_release);
-    };
+    }
 
-    job_ = job;
-    {
-        std::lock_guard<std::mutex> lock(job->statusMutex);
-        job->status = "baking " + std::to_string(job->total) + " lightmap texels…";
-    }
-    if (tasks_ != nullptr) {
-        tasks_->Submit(std::move(bake));
-    } else {
-        bake();
-    }
     return true;
 }
 
