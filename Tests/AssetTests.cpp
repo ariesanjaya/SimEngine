@@ -1,5 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 
+#include <random>
+
 #include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Assets/Cook.h"
 #include "Sim/Assets/Importer.h"
@@ -9,6 +11,7 @@
 #include "Sim/Assets/TextureBake.h"
 #include "Sim/Assets/TextureBakery.h"
 #include "Sim/Assets/TextureSettings.h"
+#include "Sim/Assets/LightmapAtlas.h"
 #include "Sim/Assets/LightmapRaster.h"
 #include "Sim/Assets/LightmapUv.h"
 #include "Sim/Assets/MeshData.h"
@@ -4238,4 +4241,114 @@ TEST_CASE("S5: mesh tanpa UV lightmap tidak dirasterisasi sama sekali") {
     const assets::LightmapRaster raster = assets::RasteriseLightmap(mesh, 8, 8);
     CHECK_FALSE(raster.IsValid());
     CHECK(raster.coveredCount == 0);
+}
+
+// --- S5: atlas lightmap ------------------------------------------------------
+
+TEST_CASE("S5: luas dunia diukur dari segitiganya, bukan dari kotak batasnya") {
+    // **Sebuah pagar dan sebuah kubus bisa punya kotak batas yang sama** sambil
+    // luas permukaannya berbeda puluhan kali. Yang menaksir dari kotaknya
+    // memberi pagar itu texel jauh lebih sedikit daripada yang dibutuhkannya.
+    const assets::MeshData quad = MakeLightmappedQuad(2.0f);
+    CHECK(assets::MeshWorldArea(quad, Mat4(1.0f)) == doctest::Approx(4.0f));
+
+    // Diskalakan tiga kali di kedua sumbu mendatar: luasnya sembilan kali.
+    const Mat4 scaled = glm::scale(Mat4(1.0f), Vec3(3.0f, 1.0f, 3.0f));
+    CHECK(assets::MeshWorldArea(quad, scaled) == doctest::Approx(36.0f));
+}
+
+TEST_CASE("S5: sisi petak mengikuti texel per meter, bukan per meter persegi") {
+    // Yang disetel pengarang adalah texel **per meter**. Kalau ia diperlakukan
+    // sebagai per meter persegi, menggandakan ukuran sebuah benda melipatkan
+    // kerapatannya empat kali — dan anggaran atlasnya meledak pada benda besar.
+    const float area = 16.0f;  // 4 x 4 m
+    CHECK(assets::LightmapChartSide(area, 1.0f) == 4u);
+    CHECK(assets::LightmapChartSide(area, 2.0f) == 8u);
+    CHECK(assets::LightmapChartSide(area, 4.0f) == 16u);
+
+    // Benda empat kali lebih luas mendapat sisi dua kali, bukan empat kali.
+    CHECK(assets::LightmapChartSide(area * 4.0f, 2.0f) == 16u);
+
+    // Dan batasnya dihormati di kedua ujung.
+    CHECK(assets::LightmapChartSide(0.001f, 1.0f) == 4u);
+    CHECK(assets::LightmapChartSide(1e9f, 64.0f, 4u, 256u) == 256u);
+}
+
+TEST_CASE("S5: petak yang dipaket tidak saling tumpang tindih") {
+    // Petak yang bertumpang tindih berarti dua objek berbagi texel: cahaya yang
+    // dipanggang untuk salah satunya muncul di yang lain, dan tidak ada satu pun
+    // galat yang menyertainya.
+    std::vector<assets::LightmapChart> charts;
+    std::mt19937 rng(20260831u);
+    for (int i = 0; i < 40; ++i) {
+        assets::LightmapChart chart;
+        chart.side = 1u << (2 + (rng() % 5));  // 4..64
+        charts.push_back(chart);
+    }
+
+    const assets::LightmapAtlasLayout layout = assets::PackLightmapAtlas(charts, 4096);
+    REQUIRE(layout.IsValid());
+    CHECK(layout.dropped == 0);
+    MESSAGE("atlas ", layout.width, "x", layout.height, ", utilisasi ",
+            100.0f * layout.utilisation, "%, ", layout.GpuBytes() / 1024, " KB");
+
+    for (std::size_t i = 0; i < layout.charts.size(); ++i) {
+        const assets::LightmapChart& a = layout.charts[i];
+        REQUIRE(a.placed);
+        // Di dalam atlasnya.
+        CHECK(a.x + a.side <= layout.width);
+        CHECK(a.y + a.side <= layout.height);
+        for (std::size_t j = i + 1; j < layout.charts.size(); ++j) {
+            const assets::LightmapChart& b = layout.charts[j];
+            const bool disjoint = a.x + a.side <= b.x || b.x + b.side <= a.x ||
+                                  a.y + a.side <= b.y || b.y + b.side <= a.y;
+            INFO("petak ", i, " (", a.x, ",", a.y, ",", a.side, ") lawan ", j, " (", b.x, ",",
+                 b.y, ",", b.side, ")");
+            CHECK(disjoint);
+        }
+    }
+}
+
+TEST_CASE("S5: atlas tumbuh sampai muat, lalu menyebutkan yang tidak kebagian") {
+    // **Objek tanpa petak digambar tanpa lightmap**, dan yang melihatnya akan
+    // mengira lightmap-nya rusak. Jumlahnya karena itu dilaporkan, bukan
+    // didiamkan.
+    std::vector<assets::LightmapChart> charts;
+    for (int i = 0; i < 8; ++i) {
+        assets::LightmapChart chart;
+        chart.side = 256;
+        charts.push_back(chart);
+    }
+
+    // Cukup ruang: atlasnya tumbuh sendiri.
+    const assets::LightmapAtlasLayout roomy = assets::PackLightmapAtlas(charts, 4096);
+    CHECK(roomy.dropped == 0);
+    CHECK(roomy.width >= 512u);
+
+    // Dipaksa terlalu kecil: sebagian tidak kebagian, dan itu disebutkan.
+    const assets::LightmapAtlasLayout tight = assets::PackLightmapAtlas(charts, 256);
+    CHECK(tight.width == 256u);
+    CHECK(tight.dropped == 7u);
+    MESSAGE(tight.dropped, " objek tidak kebagian tempat di atlas 256");
+}
+
+TEST_CASE("S5: petak terbesar ditaruh lebih dulu") {
+    // Rak yang dimulai dengan petak kecil tidak bisa menampung petak besar
+    // sesudahnya, dan tingginya terlanjur terpakai — utilisasinya lalu jatuh.
+    std::vector<assets::LightmapChart> charts;
+    for (const uint32_t side : {4u, 4u, 4u, 128u, 4u, 4u, 128u}) {
+        assets::LightmapChart chart;
+        chart.side = side;
+        charts.push_back(chart);
+    }
+    const assets::LightmapAtlasLayout layout = assets::PackLightmapAtlas(charts, 4096);
+    REQUIRE(layout.IsValid());
+    CHECK(layout.dropped == 0);
+    // Kedua petak besar berada di rak pertama, bukan terdorong ke rak baru oleh
+    // petak kecil yang mendahuluinya.
+    for (const assets::LightmapChart& chart : layout.charts) {
+        if (chart.side == 128) {
+            CHECK(chart.y == 0u);
+        }
+    }
 }
