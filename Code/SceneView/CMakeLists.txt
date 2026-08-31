@@ -49,7 +49,7 @@ sim_add_library(SceneView
 # panel yang memakainya memeriksa null, pola yang sama dengan runtime Lua di
 # `EditorContext`.
 if(TARGET Sim::Reference)
-    target_sources(SimSceneView PRIVATE src/ProbeBakery.cpp)
+    target_sources(SimSceneView PRIVATE src/ProbeBakery.cpp src/LightmapBakery.cpp)
     target_link_libraries(SimSceneView PRIVATE Sim::Reference)
     target_compile_definitions(SimSceneView PUBLIC SIM_WITH_PROBE_BAKE=1)
 endif()

@@ -11,6 +11,7 @@
 #include "Sim/Assets/TextureBake.h"
 #include "Sim/Assets/TextureBakery.h"
 #include "Sim/Assets/TextureSettings.h"
+#include "Sim/Render/Lightmap.h"
 #include "Sim/Assets/LightmapAtlas.h"
 #include "Sim/Assets/LightmapRaster.h"
 #include "Sim/Assets/LightmapUv.h"
@@ -4351,4 +4352,44 @@ TEST_CASE("S5: petak terbesar ditaruh lebih dulu") {
             CHECK(chart.y == 0u);
         }
     }
+}
+
+TEST_CASE("S5: artefak lightmap bolak-balik, dan yang rusak ditolak") {
+    render::Lightmap lightmap;
+    lightmap.width = 8;
+    lightmap.height = 8;
+    lightmap.texels.assign(64, Vec3(0.0f));
+    for (std::size_t i = 0; i < lightmap.texels.size(); ++i) {
+        lightmap.texels[i] = Vec3(static_cast<float>(i) * 0.25f, 1.0f, 2.0f);
+    }
+    lightmap.placements.push_back(render::LightmapPlacement{7u, Vec4(0.5f, 0.5f, 0.0f, 0.5f)});
+    REQUIRE(lightmap.IsValid());
+
+    const std::filesystem::path file =
+        std::filesystem::temp_directory_path() /
+        ("sim-lightmap-" + std::to_string(::getpid()) + ".simlmap");
+    std::string error;
+    REQUIRE_MESSAGE(render::WriteLightmap(file, lightmap, error), error);
+
+    render::Lightmap loaded;
+    REQUIRE_MESSAGE(render::ReadLightmap(file, loaded, error), error);
+    CHECK(loaded.width == lightmap.width);
+    REQUIRE(loaded.texels.size() == lightmap.texels.size());
+    CHECK(loaded.texels[13].x == doctest::Approx(lightmap.texels[13].x));
+    REQUIRE(loaded.placements.size() == 1);
+    CHECK(loaded.placements[0].owner == 7u);
+    CHECK(loaded.Find(7u) != nullptr);
+    CHECK(loaded.Find(8u) == nullptr);
+
+    // Berkas yang bukan milik kita, dan berkas yang lebih pendek daripada
+    // janjinya — keduanya ditolak, bukan dipercaya.
+    std::ofstream(file, std::ios::binary) << "bukan lightmap";
+    CHECK_FALSE(render::ReadLightmap(file, loaded, error));
+
+    REQUIRE(render::WriteLightmap(file, lightmap, error));
+    std::filesystem::resize_file(file, std::filesystem::file_size(file) / 2);
+    CHECK_FALSE(render::ReadLightmap(file, loaded, error));
+
+    std::error_code cleanup;
+    std::filesystem::remove(file, cleanup);
 }
