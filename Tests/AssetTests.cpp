@@ -4310,6 +4310,66 @@ TEST_CASE("S5: petak yang dipaket tidak saling tumpang tindih") {
     }
 }
 
+TEST_CASE("S5: petak dipisah selokan, dan selokannya milik satu petak saja") {
+    // **Atlasnya disampel `VK_FILTER_LINEAR`.** Tanpa selokan, cuplikan di tepi
+    // petak jatuh persis di batas texel dan menjadi campuran separuh-separuh
+    // dengan petak sebelahnya — objek lain. Diukur pada atlas `bench` 256²
+    // sebelum selokan ini ada: 16,5% texel atlas berada di tepi petak, dan
+    // cuplikan di sana meleset rata-rata 0,36, yaitu 30% dari rerata iradiansi
+    // adegan; pada persentil 95, 74%.
+    //
+    // Yang diuji di sini invarian yang membuat obatnya bekerja: cincin selebar
+    // `padding` di sekeliling isi sebuah petak tidak boleh menyentuh isi maupun
+    // cincin petak lain. Kalau ia menyentuhnya, dua tugas menulis texel yang sama
+    // — dan itu bukan urutan yang berubah-ubah melainkan satu objek yang
+    // mewarnai selokan objek lain.
+    std::vector<assets::LightmapChart> charts;
+    std::mt19937 rng(20260901u);
+    for (int i = 0; i < 40; ++i) {
+        assets::LightmapChart chart;
+        chart.side = 1u << (2 + (rng() % 5));  // 4..64
+        charts.push_back(chart);
+    }
+
+    constexpr uint32_t kPadding = 1;
+    const assets::LightmapAtlasLayout layout =
+        assets::PackLightmapAtlas(charts, 4096, kPadding);
+    REQUIRE(layout.IsValid());
+    REQUIRE(layout.padding == kPadding);
+    CHECK(layout.dropped == 0);
+    MESSAGE("atlas ", layout.width, "x", layout.height, ", utilisasi ",
+            100.0f * layout.utilisation, "%");
+
+    for (std::size_t i = 0; i < layout.charts.size(); ++i) {
+        const assets::LightmapChart& a = layout.charts[i];
+        REQUIRE(a.placed);
+        // **Selokannya juga harus muat di dalam atlas**, bukan hanya isinya:
+        // cincin yang menggantung di luar tepi atlas adalah penulisan di luar
+        // batas, bukan sekadar texel yang hilang.
+        CHECK(a.x >= kPadding);
+        CHECK(a.y >= kPadding);
+        CHECK(a.x + a.side + kPadding <= layout.width);
+        CHECK(a.y + a.side + kPadding <= layout.height);
+
+        for (std::size_t j = i + 1; j < layout.charts.size(); ++j) {
+            const assets::LightmapChart& b = layout.charts[j];
+            // Jejak = isi diperlebar selokannya ke segala arah. Dua jejak yang
+            // beririsan berarti dua tugas menulis texel yang sama.
+            const uint32_t ax = a.x - kPadding;
+            const uint32_t ay = a.y - kPadding;
+            const uint32_t aSide = a.side + 2 * kPadding;
+            const uint32_t bx = b.x - kPadding;
+            const uint32_t by = b.y - kPadding;
+            const uint32_t bSide = b.side + 2 * kPadding;
+            const bool disjoint = ax + aSide <= bx || bx + bSide <= ax || ay + aSide <= by ||
+                                  by + bSide <= ay;
+            INFO("jejak ", i, " (", ax, ",", ay, ",", aSide, ") lawan ", j, " (", bx, ",", by,
+                 ",", bSide, ")");
+            CHECK(disjoint);
+        }
+    }
+}
+
 TEST_CASE("S5: atlas tumbuh sampai muat, lalu menyebutkan yang tidak kebagian") {
     // **Objek tanpa petak digambar tanpa lightmap**, dan yang melihatnya akan
     // mengira lightmap-nya rusak. Jumlahnya karena itu dilaporkan, bukan
@@ -4327,10 +4387,21 @@ TEST_CASE("S5: atlas tumbuh sampai muat, lalu menyebutkan yang tidak kebagian") 
     CHECK(roomy.width >= 512u);
 
     // Dipaksa terlalu kecil: sebagian tidak kebagian, dan itu disebutkan.
+    //
+    // **Kedelapan-delapannya, bukan tujuh.** Sebuah petak berisi 256 texel
+    // menuntut 258 begitu selokannya dihitung, dan 258 tidak muat di atlas 256 —
+    // jadi bahkan yang pertama pun tidak. Itu memang tepi yang tajam, dan ia
+    // disebutkan di sini supaya pemanggil yang menyamakan `maxChartSide` dengan
+    // `maxAtlasSide` tahu mengapa atlasnya kosong: yang kurang dua texel, bukan
+    // seluruh kerapatannya.
     const assets::LightmapAtlasLayout tight = assets::PackLightmapAtlas(charts, 256);
     CHECK(tight.width == 256u);
-    CHECK(tight.dropped == 7u);
+    CHECK(tight.dropped == 8u);
     MESSAGE(tight.dropped, " objek tidak kebagian tempat di atlas 256");
+
+    // Dan yang kurang dua texel itu memang cuma dua: atlas 512 memuat satu.
+    const assets::LightmapAtlasLayout barely = assets::PackLightmapAtlas(charts, 258);
+    CHECK(barely.dropped == 7u);
 }
 
 TEST_CASE("S5: petak terbesar ditaruh lebih dulu") {
@@ -4347,9 +4418,12 @@ TEST_CASE("S5: petak terbesar ditaruh lebih dulu") {
     CHECK(layout.dropped == 0);
     // Kedua petak besar berada di rak pertama, bukan terdorong ke rak baru oleh
     // petak kecil yang mendahuluinya.
+    //
+    // Rak pertama dimulai di `padding`, bukan di nol: yang disimpan `chart.y`
+    // letak **isinya**, dan selokannya berada di luar itu.
     for (const assets::LightmapChart& chart : layout.charts) {
         if (chart.side == 128) {
-            CHECK(chart.y == 0u);
+            CHECK(chart.y == layout.padding);
         }
     }
 }

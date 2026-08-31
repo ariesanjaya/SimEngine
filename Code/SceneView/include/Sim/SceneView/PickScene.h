@@ -53,6 +53,18 @@ struct PickItem {
     /// Kerapatan lightmap objek ini, texel per meter — **nol berarti ikut
     /// levelnya** (S5). Diabaikan picking, seperti kotak dunia di atasnya.
     float lightmapTexelDensity = 0.0f;
+
+    /// False berarti objek ini **tidak berhak atas petak lightmap** (S5), dan
+    /// karenanya disinari kisi probe. Diabaikan picking, seperti kotak dunia dan
+    /// kerapatan di atasnya.
+    ///
+    /// Yang memakainya sekarang mesh bertulang: lightmap memanggang geometri CPU
+    /// — pose bind — pada transform saat panggangan, lalu membeku. Sebuah
+    /// karakter yang berjalan membawa cahaya milik pose dan tempat yang bukan
+    /// miliknya lagi, dan shader memilih lightmap di atas probe begitu petaknya
+    /// ada. Ia tetap masuk daftar ini karena daftar yang sama memasok geometri
+    /// penghalang panggangan probe.
+    bool lightmapEligible = true;
 };
 
 class PickScene {

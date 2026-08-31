@@ -59,8 +59,8 @@ public:
         /// pencacah atomik — yang menulis artefaknya.
         ///
         /// Diukur pada `bench.simlevel`, 179 objek, tiap kerapatan dijalankan
-        /// dengan cache kosong: 2 texel/m 24,6 detik, 4 texel/m 72,2 detik,
-        /// 8 texel/m 251,8 detik. Sebelum dibagi, 4 texel/m belum selesai dalam
+        /// dengan cache kosong: 2 texel/m 25,2 detik, 4 texel/m 72,7 detik,
+        /// 8 texel/m 270,1 detik. Sebelum dibagi, 4 texel/m belum selesai dalam
         /// lima menit. Angkanya naik kira-kira sebanding dengan jumlah texel,
         /// bukan lebih cepat dari itu — yang dulu menahannya memang jumlah inti
         /// yang menganggur.

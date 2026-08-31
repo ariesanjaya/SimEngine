@@ -497,6 +497,10 @@ private:
         Vec3 worldMinimum{0.0f};
         Vec3 worldMaximum{0.0f};
         float lightmapTexelDensity = 0.0f;
+        /// False untuk yang tidak berhak atas petak lightmap — mesh bertulang.
+        /// Ia tetap ada di daftar ini karena daftar yang sama memasok geometri
+        /// penghalang panggangan probe.
+        bool lightmapEligible = true;
     };
     std::vector<BakeEntry> bakeEntries_;
 

@@ -7,6 +7,9 @@
 #include "Sim/Reference/PathTracer.h"
 #include "Sim/Reference/Shading.h"
 
+#include <algorithm>
+#include <cstdint>
+#include <memory>
 #include <mutex>
 #include <utility>
 #include <vector>
@@ -65,6 +68,12 @@ std::vector<BakeItem> CollectItems(std::span<const PickItem> items,
         if (ref.state != assets::MeshGeometryState::Ready || ref.data == nullptr) {
             continue;
         }
+        if (!item.lightmapEligible) {
+            // **Bukan dihitung sebagai "tanpa UV".** Yang tidak berhak atas
+            // petak memang tidak boleh punya, dan menghitungnya di sana membuat
+            // peringatan menyebut cacat yang tidak ada.
+            continue;
+        }
         if (!ref.data->hasLightmapUv) {
             ++outMissingUv;
             continue;
@@ -110,6 +119,19 @@ struct LightmapBakery::Job {
     /// boleh membebaskan segitiga yang sedang ditembaki.
     std::shared_ptr<PickScene> picks;
     std::vector<BakeItem> items;
+
+    /// **Dipegang sekali di sini, bukan disalin ke tiap tugas.** `trace.sky`
+    /// memegang `AtmosphereSky` beserta tabel transmitansinya, 256×64 Vec3 =
+    /// 192 KB; menangkapnya by value pada 179 tugas yang dikirim sekaligus
+    /// berarti ~34 MB salinan identik hidup bersamaan sebelum tugas pertama
+    /// jalan, dan ia naik linier dengan jumlah objek. Keduanya hanya-baca
+    /// selama panggangan, jadi satu salinan yang dipegang `job` cukup —
+    /// pola yang sama dengan `picks`.
+    assets::LightmapAtlasLayout layout;
+    reference::TraceSettings trace;
+    reference::Surface surface;
+    uint32_t samples = 1;
+    uint32_t dilate = 0;
 };
 
 LightmapBakery::LightmapBakery(TaskPool* tasks) : tasks_(tasks) {}
@@ -259,10 +281,9 @@ bool LightmapBakery::Bake(std::span<const PickItem> items, std::function<Vec3(co
     job->total = std::max(texels, 1u);
 
     const float albedo = settings.albedo;
-    const uint32_t samples = std::max(settings.samplesPerTexel, 1u);
-    const uint32_t dilate = settings.dilateRadius;
-    const Vec3 sunIrradiance = settings.sunIrradiance;
-    const Vec3 sunDirection = settings.sunDirection;
+    job->layout = layout;
+    job->samples = std::max(settings.samplesPerTexel, 1u);
+    job->dilate = settings.dilateRadius;
 
     auto lightmap = std::make_shared<render::Lightmap>();
     lightmap->width = layout.width;
@@ -295,16 +316,14 @@ bool LightmapBakery::Bake(std::span<const PickItem> items, std::function<Vec3(co
     job->remaining.store(static_cast<uint32_t>(std::max<std::size_t>(baking.size(), 1)),
                          std::memory_order_relaxed);
 
-    reference::TraceSettings trace;
-    trace.sky = [sky = std::move(sky)](const Vec3& direction) { return sky(direction); };
-    trace.sunIrradiance = sunIrradiance;
-    trace.sunDirection = sunDirection;
+    job->trace.sky = [sky = std::move(sky)](const Vec3& direction) { return sky(direction); };
+    job->trace.sunIrradiance = settings.sunIrradiance;
+    job->trace.sunDirection = settings.sunDirection;
 
-    reference::Surface surface;
-    surface.baseColor = Vec3(albedo);
-    surface.baseMetalness = 0.0f;
-    surface.specularWeight = 0.0f;
-    surface.specularRoughness = 1.0f;
+    job->surface.baseColor = Vec3(albedo);
+    job->surface.baseMetalness = 0.0f;
+    job->surface.specularWeight = 0.0f;
+    job->surface.specularRoughness = 1.0f;
 
     /// Menyelesaikan panggangan: menulis artefaknya dan menandai selesai.
     const auto finish = [job, file]() {
@@ -349,13 +368,17 @@ bool LightmapBakery::Bake(std::span<const PickItem> items, std::function<Vec3(co
     // berubah, jadi penelusuran bersamaan membaca pohon yang sama tanpa
     // menyentuhnya.
     for (const uint32_t index : baking) {
-        auto bakeOne = [job, layout, index, samples, dilate, trace, surface, finish]() {
+        auto bakeOne = [job, index, finish]() {
             const BakeItem& item = job->items[index];
+            const assets::LightmapAtlasLayout& layout = job->layout;
             const assets::LightmapChart& chart = layout.charts[item.chart];
+            const uint32_t samples = job->samples;
+            const uint32_t dilate = job->dilate;
+            const reference::TraceSettings& trace = job->trace;
 
             const reference::SurfaceResolver resolve =
-                [surface](const raycast::RayHit& hit, const Vec3& origin,
-                          const Vec3& direction) -> reference::SurfaceHit {
+                [&surface = job->surface](const raycast::RayHit& hit, const Vec3& origin,
+                                          const Vec3& direction) -> reference::SurfaceHit {
                 reference::SurfaceHit out;
                 out.position = origin + direction * hit.distance;
                 out.normal = hit.normal;
@@ -376,7 +399,13 @@ bool LightmapBakery::Bake(std::span<const PickItem> items, std::function<Vec3(co
 
             const assets::LightmapRaster raster =
                 assets::RasteriseLightmap(world, chart.side, chart.side);
-            if (raster.IsValid()) {
+            if (!raster.IsValid()) {
+                // **Texel-nya tetap dihitung selesai.** `job->total` sudah
+                // memuatnya, dan kemajuan yang tidak pernah mencapai seratus
+                // persen terbaca sebagai panggangan yang menggantung — bukan
+                // sebagai satu objek yang tidak bisa dirasterisasi.
+                job->done.fetch_add(chart.side * chart.side, std::memory_order_relaxed);
+            } else {
                 std::vector<Vec3> values(raster.texels.size(), Vec3(0.0f));
                 for (std::size_t i = 0; i < raster.texels.size(); ++i) {
                     const assets::LightmapTexel& texel = raster.texels[i];
@@ -397,6 +426,42 @@ bool LightmapBakery::Bake(std::span<const PickItem> items, std::function<Vec3(co
                             static_cast<std::size_t>(chart.y + y) * layout.width + chart.x + x;
                         job->lightmap->texels[at] =
                             values[static_cast<std::size_t>(y) * chart.side + x];
+                    }
+                }
+
+                // **Selokannya diisi replika texel tepi petak ini sendiri.**
+                // Atlasnya disampel `VK_FILTER_LINEAR`, jadi cuplikan di tepi
+                // petak menjangkau setengah texel ke luar isinya. Tanpa cincin
+                // ini yang dijangkaunya petak sebelahnya — objek lain — dan
+                // diukur pada atlas `bench` sebelum cincin ini ada, cuplikan
+                // tepi meleset rata-rata 30% dari rerata iradiansi adegan.
+                //
+                // Cincin sebuah petak tidak beririsan dengan petak mana pun:
+                // pemaketnya memesan `side + 2 * padding` untuk tiap petak.
+                // Karena itu ia tetap boleh ditulis dari tugas per objek.
+                for (uint32_t ring = 0; ring < layout.padding; ++ring) {
+                    const auto clampToChart = [&chart](int32_t v) {
+                        return static_cast<uint32_t>(
+                            std::clamp<int32_t>(v, 0, static_cast<int32_t>(chart.side) - 1));
+                    };
+                    const auto atlasAt = [&](int32_t x, int32_t y) -> std::size_t {
+                        return static_cast<std::size_t>(static_cast<int32_t>(chart.y) + y) *
+                                   layout.width +
+                               static_cast<std::size_t>(static_cast<int32_t>(chart.x) + x);
+                    };
+                    const auto content = [&](int32_t x, int32_t y) {
+                        return values[static_cast<std::size_t>(clampToChart(y)) * chart.side +
+                                      clampToChart(x)];
+                    };
+                    const auto low = -static_cast<int32_t>(ring) - 1;
+                    const auto high = static_cast<int32_t>(chart.side) + static_cast<int32_t>(ring);
+                    for (int32_t x = low; x <= high; ++x) {
+                        job->lightmap->texels[atlasAt(x, low)] = content(x, low);
+                        job->lightmap->texels[atlasAt(x, high)] = content(x, high);
+                    }
+                    for (int32_t y = low + 1; y < high; ++y) {
+                        job->lightmap->texels[atlasAt(low, y)] = content(low, y);
+                        job->lightmap->texels[atlasAt(high, y)] = content(high, y);
                     }
                 }
             }

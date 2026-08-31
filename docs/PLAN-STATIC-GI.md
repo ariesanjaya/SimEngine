@@ -1036,14 +1036,20 @@ karena gradien gambar utuh didominasi matahari langsung dan bukan lightmap-nya:
 
 | kerapatan | atlas | kontribusi | tepi p99 | sebaran tepi |
 |---|---|---:|---:|---:|
-| 2 texel/m | 128×128 | 0,01419 | 0,08299 | 4,0% |
-| 4 texel/m | 256×256 | 0,01229 | 0,10506 | 3,9% |
-| 8 texel/m | 512×512 | 0,00935 | 0,14793 | 3,5% |
+| 2 texel/m | 256×256 | 0,01424 | 0,08147 | 4,0% |
+| 4 texel/m | 512×512 | 0,01233 | 0,10519 | 3,8% |
+| 8 texel/m | 1024×1024 | 0,00936 | 0,14881 | 3,5% |
 
-Ketajaman kontaknya naik **1,78 kali** dari ujung ke ujung sementara sebaran
+Ketajaman kontaknya naik **1,83 kali** dari ujung ke ujung sementara sebaran
 tepinya menyempit dari 4,0% ke 3,5% piksel — menajam dan sekaligus berhenti
 mengabur, monoton di ketiga kerapatan. Ukuran atlasnya persis yang diumumkan
 `PlanAtlas` sebelum Bake ditekan.
+
+Tabel ini **diukur ulang sesudah selokan petak dipasang** (di bawah). Angka
+sebelumnya diukur pada atlas yang masih bocor antar-petak dan ukurannya satu
+tingkat lebih kecil: 1,78 kali, 128²/256²/512². Kesimpulannya tidak berubah, dan
+memang tidak seharusnya — daerah yang diukur bagian dalam petak lantai, bukan
+tepinya.
 
 Kolom kontribusi turun justru karena kabur: pada kerapatan rendah oklusinya
 dioleskan ke daerah yang lebih luas, jadi rata-rata penggelapannya lebih besar
@@ -1073,6 +1079,94 @@ sesudahnya lebih besar hanya karena diukur pada mesin yang sama sedang menjalank
 hal lain. Yang penting barisan kedua: kerapatan yang dulu tidak selesai kini
 selesai, dan waktunya naik kira-kira sebanding dengan jumlah texel — bukan lebih
 cepat dari itu, yang akan berarti ada yang tidak ikut dikerjakan.
+
+##### Tinjauan S5, dan tiga cacat yang ditemukannya
+
+**1. Petak atlas dipaket rapat sementara samplernya linier — bocor antar-objek.**
+`PackLightmapAtlas` menaruh petak bersentuhan (`penX += chart.side`), `Texture2D`
+memasang `VK_FILTER_LINEAR`, dan pemetaan UV-nya tanpa sisipan. UV mesh mencapai 0
+dan 1, jadi cuplikan di tepi petak jatuh persis di batas texel dan menjadi
+campuran separuh-separuh dengan **petak objek lain**. `CLAMP_TO_EDGE` tidak
+menolong: ia menjepit di tepi atlas, bukan di tepi petak.
+
+Diukur pada atlas `bench` 256² yang terpanggang, 179 petak dengan sisi
+min 8 / median 16 / maks 32:
+
+| | sebelum | sesudah |
+|---|---:|---:|
+| texel tepi petak | 16,5% atlas | — |
+| kesalahan cuplikan tepi, rata-rata | **0,360** = 30% rerata adegan | **0,000** |
+| p95 | 0,882 = 74% rerata adegan | **0,000** |
+| tepi yang melesetnya >25% | 50,5% | **0** dari 10.016 |
+
+Obatnya selokan selebar satu texel di sekeliling tiap petak, diisi **replika texel
+tepi petak itu sendiri** — setara `CLAMP_TO_EDGE` per petak, yang tidak bisa
+diminta dari sampler. Satu texel cukup: tanpa mip, cuplikan bilinear menjangkau
+paling jauh setengah texel ke luar. Pemaketnya memesan `side + 2 · padding` per
+petak, jadi cincin sebuah petak tidak pernah beririsan dengan petak lain — yang
+membuatnya tetap aman ditulis satu tugas per objek.
+
+**Harganya nyata dan bukan 27%.** Jejak petak naik dari 16² ke 18², yaitu +27%
+luas — tetapi sisi petak dibulatkan ke pangkat dua, jadi kenaikan itu justru
+melewati ambang atlas dan menaikkannya satu tingkat penuh di setiap kerapatan:
+
+| kerapatan | atlas sebelum | sesudah | GPU |
+|---|---|---|---:|
+| 2 texel/m | 128² | 256² | 0,1 → 0,5 MB |
+| 4 texel/m | 256² | 512² | 0,5 → 2,0 MB |
+| 8 texel/m | 512² | 1024² | 2,0 → 8,0 MB |
+
+Waktu panggangnya tidak berubah (4 texel/m: 72,19 → 72,72 detik) karena jumlah
+texel isinya sama. Yang boros sebenarnya bukan selokannya melainkan pembulatan
+sisi petak ke pangkat dua; menghapusnya pekerjaan tersendiri. Anggaran di atas
+menyebut atlas 1024² sebagai skala yang diantisipasi, jadi ini masih di dalamnya.
+
+Satu tepi tajam ikut muncul dan disebutkan di ujinya: petak berisi 256 texel
+menuntut 258, jadi pemanggil yang menyamakan `maxChartSide` dengan `maxAtlasSide`
+mendapat atlas kosong, bukan satu petak seperti sebelumnya.
+
+**2. Tidak ada penyaring statis/dinamis — mesh bertulang ikut dapat petak.**
+`bakeEntries_` diisi setiap instance bermesh, dan `CollectItems` hanya menyaring
+`hasLightmapUv`. Sebuah karakter beranimasi karena itu dipanggang dari geometri
+CPU — **pose bind** — pada transform saat panggangan, lalu membeku; dan shader
+memilih lightmap di atas probe begitu petaknya ada. Komentar di `SceneView.cpp`
+menyatakan sebaliknya (*"objek dinamis memang begitu"*), yaitu niat yang kodenya
+tidak jalankan.
+
+Laten, bukan terukur: `bench.simlevel` berisi 241 MeshRenderer tanpa satu pun
+animator. Ditemukan dengan membaca.
+
+Mesh bertulang sekarang tidak berhak atas petak. **Ia tetap masuk
+`bakeEntries_`**, karena daftar yang sama memasok geometri penghalang panggangan
+probe — mencabutnya dari sana berarti karakter berhenti menaungi apa pun, yaitu
+mengubah hasil S2 dan S3 tanpa satu pun pengukuran yang menuntutnya. Yang
+membedakan sebuah bendera, `PickItem::lightmapEligible`.
+
+Tulang bukan definisi "dinamis", ia hanya penanda yang kebetulan tersedia; sisanya
+dicatat di "yang masih terbuka".
+
+**3. LUT langit disalin sekali per tugas.** `bakeOne` menangkap `trace` dan
+`layout` by value. `trace.sky` memegang `AtmosphereSky` beserta tabel
+transmitansinya, 256×64 Vec3 = 192 KB, dan 179 tugas dikirim sekaligus — ~34 MB
+salinan identik hidup bersamaan sebelum tugas pertama jalan, naik linier dengan
+jumlah objek. Keduanya hanya-baca selama panggangan; keduanya pindah ke `job`,
+pola yang sama dengan `picks`.
+
+Kecil: `job->done` hanya bertambah di dalam `if (raster.IsValid())` sementara
+`job->total` menghitung setiap petak yang ditempatkan, jadi satu raster gagal
+membuat bilah kemajuan mentok di bawah seratus persen.
+
+##### Yang diperiksa tinjauan dan ternyata benar
+
+Matahari langsung tidak ikut terpanggang — `TracePath` berangkat dari
+permukaannya, jadi NEE-nya hanya kena di titik pantul dan tidak ada hitung ganda
+dengan matahari dinamis. Pembagi π berbeda antara `box_shading` dan
+`MaterialShaderModule` tetapi konsisten di dalam masing-masing. Kedua jalur
+shading terpasang, dan pembersihan saat ganti level dibandingkan alih-alih
+dipasang sekali — pelajaran S1 dan S2 bertahan. Petak yang lebih besar dari
+atlas dibuang, bukan dijepit, jadi tugas tidak bisa menulis di luar batas.
+Validasi header artefak menyeluruh. Sampler langit ditangkap by value, jadi
+`Sample` bersamaan tidak berbagi keadaan.
 
 ##### Cacat yang ditemukan pengukuran ini, bukan perancangan
 
@@ -1201,6 +1295,11 @@ pertanyaan yang lebih baik dijawab sesudah keduanya berdiri sendiri-sendiri.
 - **Objek statis yang dipindahkan sesudah bake.** Ia membawa lightmap yang
   sudah tidak sesuai. Menyatakannya kotor itu mudah; memutuskan apa yang
   digambar sementara ia kotor tidak.
+- **Objek statis yang berpindah karena skrip atau fisika**, yang tidak punya
+  tulang dan karena itu tetap berhak atas petak. Mesh bertulang sudah dikecualikan
+  di S5 — ia dipanggang pada pose bind dan membeku — tetapi tulang bukan definisi
+  "dinamis", ia hanya penanda yang kebetulan tersedia. Yang benar sebuah penanda
+  statis yang diarang, dan itu keputusan pengarangan, bukan perbaikan.
 - **Jahitan 15% antara jalur lightmap dan jalur probe**, diukur di S5: probe
   membaca lantai terbuka **−12,7%** terhadap acuan, dan searah di enam dari enam
   titik. Sebuah permukaan yang berpindah jalur karena itu menggelap, bukan

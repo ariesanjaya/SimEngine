@@ -45,18 +45,26 @@ uint32_t LightmapChartSide(float worldArea, float texelsPerMeter, uint32_t minSi
     return std::clamp(RoundUpPowerOfTwo(std::max(texels, 1u)), minSide, maxSide);
 }
 
-LightmapAtlasLayout PackLightmapAtlas(std::vector<LightmapChart> charts, uint32_t maxSide) {
+LightmapAtlasLayout PackLightmapAtlas(std::vector<LightmapChart> charts, uint32_t maxSide,
+                                      uint32_t padding) {
     LightmapAtlasLayout layout;
     layout.charts = std::move(charts);
+    layout.padding = padding;
     if (layout.charts.empty()) {
         return layout;
     }
 
+    // Jejak sebuah petak adalah isinya **beserta selokannya**. Yang dipaket
+    // jejak itu, sedangkan `chart.x`/`chart.y` yang disimpan tetap menunjuk
+    // isinya — pemanggil menulis texel isi, bukan texel jejak.
+    const auto footprint = [padding](uint32_t side) { return side + 2 * padding; };
+
     uint64_t area = 0;
     uint32_t largest = 1;
     for (const LightmapChart& chart : layout.charts) {
-        area += static_cast<uint64_t>(chart.side) * chart.side;
-        largest = std::max(largest, chart.side);
+        const uint32_t slot = footprint(chart.side);
+        area += static_cast<uint64_t>(slot) * slot;
+        largest = std::max(largest, slot);
     }
 
     // Tebakan awal: atlas persegi yang luasnya cukup, dinaikkan ke pangkat dua,
@@ -93,20 +101,22 @@ LightmapAtlasLayout PackLightmapAtlas(std::vector<LightmapChart> charts, uint32_
                 ++dropped;
                 continue;
             }
-            if (penX + chart.side > side) {
+            const uint32_t slot = footprint(chart.side);
+            if (penX + slot > side) {
                 penX = 0;
                 penY += shelfHeight;
                 shelfHeight = 0;
             }
-            if (penY + chart.side > side) {
+            if (penY + slot > side) {
                 ++dropped;
                 continue;
             }
-            chart.x = penX;
-            chart.y = penY;
+            // Yang disimpan letak isinya, digeser masuk sebesar selokannya.
+            chart.x = penX + padding;
+            chart.y = penY + padding;
             chart.placed = true;
-            penX += chart.side;
-            shelfHeight = std::max(shelfHeight, chart.side);
+            penX += slot;
+            shelfHeight = std::max(shelfHeight, slot);
         }
 
         if (dropped == 0 || side >= maxSide) {
@@ -118,10 +128,14 @@ LightmapAtlasLayout PackLightmapAtlas(std::vector<LightmapChart> charts, uint32_
         side <<= 1;
     }
 
+    // **Jejak, bukan isi.** Selokannya menempati atlas sungguhan; utilisasi yang
+    // menghitung isi saja melaporkan atlas lebih lapang daripada keadaannya, dan
+    // yang membaca angka itu akan menaikkan kerapatan sampai petaknya berjatuhan.
     layout.usedTexels = 0;
     for (const LightmapChart& chart : layout.charts) {
         if (chart.placed) {
-            layout.usedTexels += static_cast<uint64_t>(chart.side) * chart.side;
+            const uint32_t slot = footprint(chart.side);
+            layout.usedTexels += static_cast<uint64_t>(slot) * slot;
         }
     }
     const auto total = static_cast<double>(layout.width) * layout.height;

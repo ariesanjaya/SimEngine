@@ -16,7 +16,9 @@ namespace sim::assets {
 /// keputusan itu.
 struct LightmapChart {
     uint32_t side = 0;
-    /// Tempatnya di dalam atlas, sah sesudah dipaket.
+    /// Tempat **isinya** di dalam atlas, sah sesudah dipaket. Selokannya berada
+    /// di luar kotak ini: isinya menempati [x, x+side), dan cincin selebar
+    /// `LightmapAtlasLayout::padding` di sekelilingnya dimiliki petak yang sama.
     uint32_t x = 0;
     uint32_t y = 0;
     /// True bila ia benar-benar mendapat tempat.
@@ -35,6 +37,21 @@ struct LightmapAtlasLayout {
     /// harus disebutkan**, bukan didiamkan: objek tanpa petak digambar tanpa
     /// lightmap, dan yang melihatnya akan mengira lightmap-nya rusak.
     uint32_t dropped = 0;
+    /// Lebar selokan di sekeliling tiap petak, texel.
+    ///
+    /// **Ia ada karena atlasnya disampel linier.** Tanpa selokan, cuplikan di
+    /// tepi petak jatuh persis di batas texel dan menjadi campuran separuh-separuh
+    /// dengan petak sebelahnya, yaitu objek lain. Diukur pada atlas `bench` 256²
+    /// sebelum selokan ini ada: 16,5% texel atlas berada di tepi petak, dan
+    /// cuplikan di sana meleset rata-rata 0,36 — 30% dari rerata iradiansi
+    /// adegan, dan 74% pada persentil 95.
+    ///
+    /// Satu texel cukup untuk penyaringan bilinear tanpa mip: cuplikan di tepi
+    /// menjangkau paling jauh setengah texel ke luar. Isinya replika texel tepi
+    /// petaknya sendiri, jadi campurannya menjawab nilai petak itu juga —
+    /// setara `CLAMP_TO_EDGE` per petak, yang tidak bisa diminta dari sampler
+    /// karena samplernya menjepit di tepi atlas, bukan di tepi petak.
+    uint32_t padding = 0;
 
     bool IsValid() const { return width > 0 && height > 0; }
     /// Byte yang ditempatinya di GPU sebagai RGBA float16.
@@ -68,6 +85,14 @@ uint32_t LightmapChartSide(float worldArea, float texelsPerMeter, uint32_t minSi
 ///
 /// `maxSide` membatasi atlasnya; yang tidak muat ditandai `placed == false` dan
 /// dihitung di `dropped`.
-LightmapAtlasLayout PackLightmapAtlas(std::vector<LightmapChart> charts, uint32_t maxSide = 4096);
+///
+/// `padding` adalah selokan di sekeliling tiap petak — alasannya di
+/// `LightmapAtlasLayout::padding`. Tiap petak karena itu memesan
+/// `side + 2 * padding` texel per sisi meskipun `chart.x`/`chart.y` tetap
+/// menunjuk isinya, sehingga cincin selokan sebuah petak tidak pernah beririsan
+/// dengan cincin maupun isi petak lain — yang membuatnya tetap aman ditulis satu
+/// tugas per objek.
+LightmapAtlasLayout PackLightmapAtlas(std::vector<LightmapChart> charts, uint32_t maxSide = 4096,
+                                      uint32_t padding = 1);
 
 }  // namespace sim::assets
