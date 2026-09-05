@@ -1578,6 +1578,18 @@ int main(int argc, char** argv) {
                           renderer->UsesBindlessMaterials() ? "bindless" : "set per ruas",
                           stats.descriptorSetBinds, stats.drawCalls);
             report += line;
+            // **Dari mana draw call itu datang, di baris berikutnya.** Alasan
+            // yang sama dengan baris di atas: sebuah total yang tidak bisa
+            // dipecah adalah total yang harus diukur ulang setiap kali
+            // seseorang bertanya pass mana yang membayarnya. Muka bayangan
+            // yang mengalikannya — pass atlas merekam ulang seluruh daftar
+            // ruas untuk tiap muka — tidak terlihat sama sekali dari totalnya.
+            std::snprintf(line, sizeof(line),
+                          "- Permukaan: %u instance buram, %u tergambar, %u caster, "
+                          "%u muka bayangan (%u lampu tak kebagian)\n",
+                          stats.opaqueInstances, stats.opaqueDrawn, stats.shadowCasters,
+                          stats.shadowFaces, stats.shadowLightsDropped);
+            report += line;
             std::snprintf(line, sizeof(line), "- Jalan selesai dalam %.2f s\n\n", wallSeconds);
             report += line;
         }
