@@ -712,7 +712,7 @@ validasi, dan `RealTime` + langit atmosfer tetap melaporkan `GI: menyala`.
 
 | Alokasi | Ukuran | Catatan |
 |---|---:|---|
-| Prefilter cube 64², 5 mip, RGBA16F | 0,25 MB | bawaan `IblBakeSettings` |
+| Prefilter cube 256², 5 mip, RGBA32F | 8,0 MiB | bawaan `IblBakeSettings` |
 | LUT DFG 64² RG16F | 16 KB | satu untuk seluruh material |
 | SH9 iradiansi | 108 B | |
 | **Tambahan tingkat panggang** | **< 0,3 MB** | |
@@ -760,11 +760,6 @@ lingkungan.
 
 ## Yang sengaja tidak dikerjakan
 
-**Bake IBL di GPU.** `IblBaker.h` sudah menyebut syaratnya: ia menjadi menarik
-begitu lingkungan bisa berganti saat berjalan. B1 memenuhi syarat itu (matahari
-bergerak), tapi hanya untuk SH — dan SH cukup murah untuk tetap di CPU. Prefilter
-GPU menunggu sebuah pengukuran, bukan sebuah dugaan.
-
 **HDRI menyinari probe GI.** Keputusan 1. Kalau suatu saat dibatalkan, yang
 harus dijawab lebih dulu: matahari ganda, dan firefly dari piksel yang ribuan
 kali lebih terang daripada tetangganya.
@@ -775,6 +770,38 @@ kali lebih terang daripada tetangganya.
 ---
 
 ## Yang sudah diputuskan sejak rencana ini ditulis
+
+**Prefilter IBL pindah ke compute, dan `cubeSize` naik 64 → 256.** Bagian ini
+dulu ada di "sengaja tidak dikerjakan" dengan alasan bahwa prefilter GPU
+"menunggu sebuah pengukuran, bukan sebuah dugaan". Pengukurannya:
+
+| | cube | mip 0 | mip 1..4 | total panggangan |
+|---|---|---:|---:|---:|
+| Sebelum | 64², 64 sampel | 24.576 cuplikan | 8.160 texel | — |
+| CPU pada ukuran baru | 256², 256 sampel | 393.216 cuplikan | 33,4 juta cuplikan | **57.545 ms** |
+| Dengan `IblPrefilter` | 256², 256 sampel | 393.216 cuplikan (CPU) | **49 ms** (GPU) | **972 ms** |
+
+Debug, HDRI 4096×2048, `bench.simlevel`, 640×360. Selisih 59×, dan itu yang
+membuat 256² terjangkau sama sekali.
+
+**Yang menuntut kenaikannya bukan kerapian melainkan mip 0.** Ia mewakili
+kekasaran nol, jadi setiap krom, logam poles, dan permukaan glossy memantulkan
+lingkungan 64 piksel yang diperbesar — "pantulan kurang detail" yang tidak punya
+satu pun petunjuk ke angka ini.
+
+**Mip 0 tetap di CPU.** Ia mencuplik `IEnvironmentSampler`, dan tidak satu pun
+implementasinya ada di GPU saat panggangan berjalan: langit atmosferik adalah
+ray march di CPU, HDRI adalah gambar yang baru didekode ke memori host.
+Memindahkannya menuntut implementasi atmosfer kedua — persis yang
+`IEnvironmentSampler` ada untuk mencegahnya.
+
+**Jalur CPU tetap ada dan tetap bisa dijalankan**, lewat
+`SIM_IBL_CPU_PREFILTER=1`, dengan alasan yang sama dengan `--no-bindless`. Ia
+acuan kebenarannya: dua gambar yang harus sama. Terukur pada HDRI 4K — median
+selisih relatif per kanal **0,0000**, p99 **0,0000**, maksimum **0,0416**, dan
+selisih rata-rata **0,0001%**. Kontrolnya menukar lingkungan, yang menggeser
+gambar yang sama **12,4%**: selisih yang tersisa karena itu penyaringan kubus
+perangkat keras yang mulus melintasi batas muka, bukan matematikanya.
 
 **Bawaan prefab `Sky Dome` adalah `Atmosphere`.** Sempat `source: "HDR Map"`
 dengan `hdriPath: "Environment/golden_gate_hills_4k.hdr"`; sekarang kembali ke

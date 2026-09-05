@@ -8,6 +8,7 @@ sim_add_library(Render
         src/Ibl.cpp
         src/IblBaker.cpp
         src/IblCache.cpp
+        src/IblPrefilter.cpp
         src/ProbeVolume.cpp
         src/Lightmap.cpp
         src/LightCluster.cpp
@@ -100,7 +101,11 @@ sim_compile_shaders(SimShadersGrid
         ${CMAKE_SOURCE_DIR}/Shaders/debug_gradient.comp.slang
         ${CMAKE_SOURCE_DIR}/Shaders/cluster_assign.comp.slang
         ${CMAKE_SOURCE_DIR}/Shaders/draw_cull.comp.slang
-        ${CMAKE_SOURCE_DIR}/Shaders/sdf_fill.comp.slang)
+        ${CMAKE_SOURCE_DIR}/Shaders/sdf_fill.comp.slang
+        # Prefilter GGX peta lingkungan. Acuan CPU-nya `PrefilterSpecular` di
+        # Code/Render/src/Ibl.cpp, dan keduanya harus menghitung integral yang
+        # sama — lihat catatan di kepala shader-nya.
+        ${CMAKE_SOURCE_DIR}/Shaders/ibl_prefilter.comp.slang)
 # openpbr.slang sengaja tidak ada di daftar ini. Ia modul pustaka tanpa entry
 # point — yang mengompilasinya adalah `AssembleMaterialModule`, yang menanamnya
 # ke dalam modul material lalu menyerahkannya ke ShaderCache. Menambahkannya di

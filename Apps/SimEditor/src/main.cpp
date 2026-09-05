@@ -265,7 +265,8 @@ int main(int argc, char** argv) {
     // Null bukan kegagalan fatal — menyunting graph material tidak menuntut
     // preview, dan panel menampilkan alasannya alih-alih menolak dibuka.
     std::unique_ptr<render::IMaterialPreview> materialPreview =
-        render::CreateMaterialPreview(device, imguiLayer.Textures());
+        render::CreateMaterialPreview(device, imguiLayer.Textures(),
+                                      rendererDesc.shaderDirectory);
     if (materialPreview == nullptr) {
         SIM_WARN("Editor", "Material preview unavailable; the Material Editor will say so");
     }
@@ -274,7 +275,8 @@ int main(int argc, char** argv) {
     // kotak di dalam sebuah node, dan target sebesar pratinjau besar berarti
     // membayar 27 kali piksel yang tidak pernah sampai ke layar.
     std::unique_ptr<render::IMaterialPreview> materialNodePreview =
-        render::CreateMaterialPreview(device, imguiLayer.Textures(), 128, 128);
+        render::CreateMaterialPreview(device, imguiLayer.Textures(),
+                                      rendererDesc.shaderDirectory, 128, 128);
 
     // Kolam dan cache dideklarasikan di sini, sebelum EditorApp, supaya
     // keduanya dihancurkan belakangan: editor menjadwalkan pekerjaan ke kolam

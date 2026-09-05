@@ -1810,6 +1810,121 @@ TEST_CASE("B3: putaran tidak mengubah apa pun yang dipanggang") {
           doctest::Approx(baked.irradiance.coefficients[0].x * 2.0f).epsilon(0.01));
 }
 
+TEST_CASE("prefilter GPU: mip yang ditangguhkan ditinggalkan nol, mip 0 tidak berubah") {
+    // **Yang diuji di sini pembagian kerjanya, bukan integralnya.** Integral
+    // GGX-nya sudah punya ujinya sendiri di atas; yang baru adalah bahwa
+    // `firstGpuMip` memindahkan pekerjaan tanpa menggeser satu texel pun dari
+    // mip yang tetap tinggal — dan bahwa yang dipindahkan benar-benar
+    // ditinggalkan nol, bukan diisi separuh.
+    //
+    // Nol itu yang membuat dispatch yang tidak berjalan terlihat: pantulan
+    // hitam pada material kasar adalah gejala yang bisa dikenali, sementara
+    // memori yang belum ditulis siapa pun adalah pantulan berkilat-kilat yang
+    // terlihat seperti masalah yang sama sekali lain.
+    const render::EquirectEnvironment map = LongitudeStripes(64, 32);
+    render::IblBakeSettings settings;
+    settings.cubeSize = 16;
+    settings.mipCount = 4;
+    settings.irradianceSamples = 0;
+    settings.prefilterSamples = 16;
+
+    const render::IblBakeCpu whole = render::BakeIblCpu(map, settings);
+    REQUIRE(whole.IsValid());
+    CHECK(whole.firstGpuMip == 0);
+
+    settings.firstGpuMip = 1;
+    const render::IblBakeCpu split = render::BakeIblCpu(map, settings);
+    REQUIRE(split.IsValid());
+    CHECK(split.firstGpuMip == 1);
+
+    // Rantainya sama panjangnya: yang ditangguhkan tetap dialokasikan, karena
+    // unggahannya menuntut rantai utuh.
+    REQUIRE(split.cubeTexels.size() == whole.cubeTexels.size());
+
+    const std::size_t mip0Floats =
+        static_cast<std::size_t>(settings.cubeSize) * settings.cubeSize * 6 * 4;
+    REQUIRE(whole.cubeTexels.size() > mip0Floats);
+
+    // Mip 0 identik byte demi byte — ia dihitung jalur yang sama persis.
+    CHECK(std::equal(split.cubeTexels.begin(), split.cubeTexels.begin() + mip0Floats,
+                     whole.cubeTexels.begin()));
+    // Dan mip 0 memang berisi sesuatu; kalau tidak, uji di bawahnya lulus
+    // dengan alasan yang salah.
+    CHECK(std::any_of(split.cubeTexels.begin(), split.cubeTexels.begin() + mip0Floats,
+                      [](float value) { return value > 0.0f; }));
+
+    // Sisanya nol, dan jalur CPU-nya tidak.
+    CHECK(std::all_of(split.cubeTexels.begin() + mip0Floats, split.cubeTexels.end(),
+                      [](float value) { return value == 0.0f; }));
+    CHECK(std::any_of(whole.cubeTexels.begin() + mip0Floats, whole.cubeTexels.end(),
+                      [](float value) { return value > 0.0f; }));
+}
+
+TEST_CASE("prefilter GPU: penangguhan di luar rantai jatuh kembali ke CPU") {
+    // Meminta mip yang tidak ada bukan galat melainkan permintaan yang tidak
+    // menyisakan apa pun untuk GPU — dan jawabannya seluruhnya di CPU, bukan
+    // rantai yang sebagian kosong tanpa ada yang akan mengisinya.
+    const render::EquirectEnvironment map = LongitudeStripes(32, 16);
+    render::IblBakeSettings settings;
+    settings.cubeSize = 8;
+    settings.mipCount = 3;
+    settings.irradianceSamples = 0;
+    settings.prefilterSamples = 8;
+    settings.firstGpuMip = 3;
+
+    const render::IblBakeCpu baked = render::BakeIblCpu(map, settings);
+    REQUIRE(baked.IsValid());
+    CHECK(baked.firstGpuMip == 0);
+    CHECK(std::any_of(baked.cubeTexels.begin(), baked.cubeTexels.end(),
+                      [](float value) { return value > 0.0f; }));
+}
+
+TEST_CASE("prefilter GPU: artefak masak membawa mip yang masih berutang") {
+    // Sebuah `.simibl` yang mipnya nol karena diserahkan ke GPU dan sebuah
+    // `.simibl` yang mipnya nol karena lingkungannya hitam tidak bisa dibedakan
+    // dari texelnya. Yang membedakannya angka di header — dan yang kehilangan
+    // angka itu memuat lingkungan gelap yang tidak pernah dipanggang ulang.
+    const render::EquirectEnvironment map = LongitudeStripes(32, 16);
+    render::IblBakeSettings settings;
+    settings.cubeSize = 8;
+    settings.mipCount = 3;
+    settings.irradianceSamples = 0;
+    settings.firstGpuMip = 1;
+
+    const render::IblBakeCpu baked = render::BakeIblCpu(map, settings);
+    REQUIRE(baked.IsValid());
+    REQUIRE(baked.firstGpuMip == 1);
+
+    const std::filesystem::path file =
+        std::filesystem::temp_directory_path() /
+        ("sim-ibl-gpu-" + std::to_string(::getpid()) + ".simibl");
+
+    std::string error;
+    REQUIRE_MESSAGE(render::WriteIblCache(file, baked, error), error);
+
+    render::IblBakeCpu loaded;
+    REQUIRE_MESSAGE(render::ReadIblCache(file, loaded, error), error);
+    CHECK(loaded.firstGpuMip == 1);
+    CHECK(loaded.cubeSize == baked.cubeSize);
+    CHECK(loaded.mipCount == baked.mipCount);
+    REQUIRE(loaded.cubeTexels.size() == baked.cubeTexels.size());
+    CHECK(std::equal(loaded.cubeTexels.begin(), loaded.cubeTexels.end(),
+                     baked.cubeTexels.begin()));
+
+    // Kuncinya ikut berpindah: dua panggangan yang hanya berbeda pembagian
+    // kerjanya menghasilkan berkas yang berbeda isinya, jadi keduanya tidak
+    // boleh berbagi satu nama.
+    render::IblBakeSettings cpuOnly = settings;
+    cpuOnly.firstGpuMip = 0;
+    const uint64_t gpuKey = render::IblCacheKey(file, settings, 1.0f);
+    const uint64_t cpuKey = render::IblCacheKey(file, cpuOnly, 1.0f);
+    REQUIRE(gpuKey != 0);
+    CHECK(gpuKey != cpuKey);
+
+    std::error_code cleanup;
+    std::filesystem::remove(file, cleanup);
+}
+
 TEST_CASE("B3: artefak masak lingkungan bolak-balik tanpa berubah") {
     // **Kriteria terima B3:** membuka level pra-GI berikutnya tidak memanggang
     // apa pun. Yang membuatnya sah adalah bahwa yang dibaca kembali sama persis

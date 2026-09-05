@@ -10,6 +10,7 @@
 #include "Sim/RHI/Ktx2.h"
 #include "Sim/RHI/TextureRegistry.h"
 #include "IblBaker.h"
+#include "IblPrefilter.h"
 #include "Sim/Render/Frustum.h"
 #include "Sim/Render/IMaterialPreview.h"
 #include "Sim/Render/RendererFactory.h"
@@ -83,7 +84,8 @@ public:
 
     ~VulkanMaterialPreview() override { Shutdown(); }
 
-    bool Initialize(uint32_t width, uint32_t height) {
+    bool Initialize(const std::filesystem::path& shaderDirectory, uint32_t width,
+                    uint32_t height) {
         if (!device_.SupportsVulkan13()) {
             SIM_WARN("Render", "material preview needs Vulkan 1.3");
             return false;
@@ -100,7 +102,22 @@ public:
         // membuat material pertama terasa membeku setengah detik, dan orang
         // menyalahkan kompilasi shader-nya.
         const GradientSky sky;
-        if (!BakeIbl(device_, sky, IblBakeSettings{}, ibl_)) {
+        // **Prefilter di compute, dan kalau tidak bisa maka peta yang lebih
+        // kecil.** Panggangan ini berjalan di main thread saat panel dibuka —
+        // catatan di atas menyebut kenapa ia tidak boleh malas — dan `cubeSize`
+        // bawaan yang disaring seluruhnya di CPU adalah belasan detik editor
+        // yang membeku, yaitu persis cacat yang dihindari dengan tidak
+        // memalaskannya.
+        IblBakeSettings settings;
+        if (iblPrefilter_.Create(device_, shaderDirectory)) {
+            settings.firstGpuMip = 1;
+        } else {
+            SIM_WARN("Render",
+                     "GPU environment prefilter unavailable; the preview bakes a smaller map");
+            settings.cubeSize = 64;
+            settings.prefilterSamples = 64;
+        }
+        if (!BakeIbl(device_, sky, settings, ibl_, &iblPrefilter_)) {
             SIM_WARN("Render", "IBL bake failed; the preview will have no environment");
         }
         AdoptTargetLayout();
@@ -889,6 +906,12 @@ private:
     static constexpr uint32_t kMaxTextures = 8;
 
     BakedIbl ibl_;
+    /// Penyaring mip peta lingkungan. Dipegang seumur preview walau hanya
+    /// dipakai sekali: ia memiliki pipeline dan descriptor pool-nya, dan
+    /// keduanya harus hidup sampai `Shutdown` — sebuah objek lokal di
+    /// `Initialize` memusnahkan `VkPipeline` yang command buffer panggangannya
+    /// baru saja selesai memakainya.
+    IblPrefilter iblPrefilter_;
 
     rhi::Device& device_;
     rhi::ITextureRegistry& textures_;
@@ -932,9 +955,10 @@ private:
 
 std::unique_ptr<IMaterialPreview> CreateMaterialPreview(rhi::Device& device,
                                                         rhi::ITextureRegistry& textures,
+                                                        const std::filesystem::path& shaderDirectory,
                                                         uint32_t width, uint32_t height) {
     auto preview = std::make_unique<VulkanMaterialPreview>(device, textures);
-    if (!preview->Initialize(width, height)) {
+    if (!preview->Initialize(shaderDirectory, width, height)) {
         return nullptr;
     }
     return preview;

@@ -6,6 +6,8 @@
 
 namespace sim::render {
 
+class IblPrefilter;
+
 /// Hasil pembakaran IBL, siap diikat ke descriptor.
 struct BakedIbl {
     Sh9 irradiance;
@@ -28,10 +30,17 @@ bool UploadIbl(rhi::Device& device, const IblBakeCpu& baked, const DfgLut& dfg, 
 /// sama persis dengan yang sudah teruji di `Tests/RenderTests.cpp`, tanpa
 /// implementasi kedua.
 ///
-/// Begitu peta lingkungan sungguhan bisa dimuat dan bisa berganti saat berjalan,
-/// pembakaran GPU menjadi menarik — dan `IEnvironmentSampler` yang sama tetap
-/// menjadi acuan kebenarannya.
+/// **Prefilter mip di atas nol sudah pindah ke GPU** — syarat yang disebut
+/// paragraf ini terpenuhi sejak B3, dan `IblPrefilter` yang mengerjakannya.
+/// Yang tersisa di CPU adalah mip 0, karena hanya di sinilah
+/// `IEnvironmentSampler` bisa dicuplik; ia sekaligus tetap menjadi acuan
+/// kebenaran jalur compute, lewat `IblBakeSettings::firstGpuMip` yang nol.
+///
+/// `prefilter` null — atau belum dibuat — berarti seluruh rantai disaring CPU.
+/// Itu benar, hanya lambat: pada `cubeSize` bawaan ia belasan detik, jadi yang
+/// memanggilnya dari main thread harus menyerahkan pemanggangnya.
 bool BakeIbl(rhi::Device& device, const IEnvironmentSampler& environment,
-             const IblBakeSettings& settings, BakedIbl& out);
+             const IblBakeSettings& settings, BakedIbl& out,
+             IblPrefilter* prefilter = nullptr);
 
 }  // namespace sim::render

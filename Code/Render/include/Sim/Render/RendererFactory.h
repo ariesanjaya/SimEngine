@@ -54,8 +54,14 @@ std::unique_ptr<IViewportRenderer> CreateVulkanRenderer(rhi::Device& device,
 /// Mengembalikan nullptr bila perangkatnya tidak memenuhi syarat. Panel yang
 /// menerimanya menampilkan pesan, bukan menolak dibuka: menyunting graph
 /// material tidak menuntut preview.
+///
+/// `shaderDirectory` adalah folder `.spv` yang sama dengan yang diberikan ke
+/// renderer viewport: preview memanggang peta lingkungannya sendiri, dan
+/// penyaringnya sebuah pass compute. Folder yang salah bukan kegagalan — yang
+/// terjadi peta yang lebih kecil beserta satu baris peringatan.
 std::unique_ptr<IMaterialPreview> CreateMaterialPreview(rhi::Device& device,
                                                         rhi::ITextureRegistry& textures,
+                                                        const std::filesystem::path& shaderDirectory,
                                                         uint32_t width = 512,
                                                         uint32_t height = 512);
 

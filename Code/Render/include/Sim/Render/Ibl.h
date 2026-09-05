@@ -115,7 +115,9 @@ public:
     /// Terukur (Debug): proyeksi SH 1024 cuplikan memakan 418 ms tanpa tabel dan
     /// **779 ms dengan** — di bawah titik impas, dan memanggilnya di sana justru
     /// memperlambat. Membangun mip 0 sebuah cubemap 64², yaitu 24.576 cuplikan,
-    /// memakan 7164 ms tanpa tabel dan **2016 ms dengan**.
+    /// memakan 7164 ms tanpa tabel dan **2016 ms dengan**. Mip 0 bawaannya
+    /// sekarang 256², yaitu enam belas kali cuplikan itu — jauh di atas titik
+    /// impas, dan yang melewatkan panggilan ini membayarnya penuh.
     ///
     /// Aturannya karena itu: panggil untuk yang mencuplik puluhan ribu kali,
     /// lewati untuk yang mencuplik seribu.
@@ -261,11 +263,11 @@ EquirectEnvironment LoadHdrEquirect(const std::filesystem::path& path);
 /// Cubemap yang sudah jadi, dibaca per arah.
 ///
 /// **Ada karena prefilter tidak boleh mencuplik pencuplik analitik.** Menyaring
-/// satu texel prefilter menuntut puluhan cuplikan lingkungan, dan untuk langit
-/// atmosferik satu cuplikan adalah satu ray march: menyaring 8160 texel dengan
-/// 64 sampel berarti 16 juta ray march, yang terukur **33 detik** (Debug). Dari
-/// cubemap, ia pencarian tekstur — dan mip 0 memang sudah berisi lingkungan yang
-/// sama, dicuplik sekali per texel.
+/// satu texel prefilter menuntut ratusan cuplikan lingkungan, dan untuk langit
+/// atmosferik satu cuplikan adalah satu ray march: menyaring 130.560 texel
+/// dengan 256 sampel berarti 33 juta ray march. Dari cubemap, ia pencarian
+/// tekstur — dan mip 0 memang sudah berisi lingkungan yang sama, dicuplik
+/// sekali per texel.
 ///
 /// **Bukan pengganti pencuplik aslinya, melainkan cuplikan sekalinya.** Yang
 /// hilang ketelitian di bawah satu texel muka; yang didapat prefilter yang biaya
@@ -434,17 +436,51 @@ Vec3 PrefilterSpecular(const IEnvironmentSampler& environment, const Vec3& refle
 
 struct IblBakeSettings {
     /// Sisi muka cubemap prefilter pada mip 0.
-    uint32_t cubeSize = 64;
+    ///
+    /// **Ini resolusi pantulan cermin, bukan sekadar ukuran cache.** Mip 0
+    /// mewakili kekasaran nol, dan setiap krom, logam poles, serta permukaan
+    /// glossy memantulkannya apa adanya — pada 64 texel per muka yang terlihat
+    /// adalah lingkungan 64 piksel yang diperbesar, dan yang mengeluhkannya
+    /// menyebutnya "pantulan kurang detail" tanpa satu pun petunjuk ke angka
+    /// ini. 256 memindahkan biayanya ke tempat yang sanggup membayarnya: mip 0
+    /// tetap di CPU, sisanya ke `IblPrefilter`.
+    uint32_t cubeSize = 256;
     /// Banyaknya mip. Mip terakhir mewakili kekasaran 1.
     uint32_t mipCount = 5;
     uint32_t dfgSize = 64;
     /// Sampel GGX per texel prefilter, di luar mip 0 yang cuma satu pengambilan.
-    uint32_t prefilterSamples = 64;
+    ///
+    /// Naik bersama `cubeSize` karena yang membayarnya berganti: 256 sampel atas
+    /// 130.560 texel adalah 33 juta cuplikan, yaitu belasan detik di CPU dan
+    /// beberapa milidetik di compute. Yang tetap memakai jalur CPU — test, dan
+    /// pemanggang tanpa perangkat grafis — menurunkannya sendiri.
+    uint32_t prefilterSamples = 256;
     uint32_t dfgSamples = 256;
     /// Cuplikan bola untuk proyeksi SH. **Nol berarti lewati**, dan itu dipakai
     /// pemanggang yang sudah punya SH-nya sendiri dari panggangan yang lebih
     /// sering: menghitungnya lagi di sini hanya menghasilkan angka yang sama.
     uint32_t irradianceSamples = 8192;
+
+    /// Mip pertama yang diserahkan ke pemanggang GPU.
+    ///
+    /// **Nol berarti tidak ada** — seluruh rantai disaring CPU, dan itulah
+    /// jalur acuan: ia tidak menyentuh satu pun objek Vulkan, jadi ia bisa
+    /// diuji tanpa perangkat grafis dan tetap menjadi pembanding kebenaran
+    /// jalur compute.
+    ///
+    /// **Tidak pernah boleh nol-tapi-bukan-nol, yaitu tidak pernah boleh 0
+    /// sebagai "mulai dari mip 0".** Mip 0 mencuplik `IEnvironmentSampler`
+    /// langsung — langit atmosferik yang satu cuplikannya satu ray march, atau
+    /// sebuah HDR yang baru didekode ke memori host — dan tidak satu pun dari
+    /// keduanya ada di GPU saat panggangan berjalan. Yang menyerahkannya ke
+    /// compute karena itu menyetel `1`: mip 0 di CPU, integral GGX di atasnya
+    /// di GPU.
+    ///
+    /// Texel mip yang diserahkan tetap dialokasikan dan tetap nol di
+    /// `IblBakeCpu::cubeTexels` — unggahannya butuh rantai utuh, dan nol yang
+    /// terlihat sebagai pantulan hitam jauh lebih mudah dikenali sebagai
+    /// dispatch yang gagal daripada memori yang belum ditulis siapa pun.
+    uint32_t firstGpuMip = 0;
 };
 
 /// Panggangan yang belum menyentuh GPU sama sekali.
@@ -463,6 +499,13 @@ struct IblBakeCpu {
     Sh9 irradiance;
     uint32_t cubeSize = 0;
     uint32_t mipCount = 0;
+    /// Mip pertama yang **belum** terisi dan menunggu pemanggang GPU. Nol
+    /// berarti seluruh rantai sudah disaring di sini.
+    ///
+    /// Ikut ke dalam artefak masak, dan memang harus: sebuah `.simibl` yang
+    /// dimuat kembali membawa mip yang sama kosongnya, dan yang memuatnya
+    /// harus tahu bahwa ia masih berutang satu dispatch.
+    uint32_t firstGpuMip = 0;
     /// RGBA32F, seluruh mip berurutan, tiap mip enam muka berurutan — tata letak
     /// yang diminta `TextureCube::Create`.
     std::vector<float> cubeTexels;
@@ -479,11 +522,16 @@ IblBakeCpu BakeIblCpu(const IEnvironmentSampler& environment, const IblBakeSetti
 ///
 /// **Ada supaya membuka level pra-GI tidak memanggang apa pun.** Memanggang
 /// sebuah HDR 4096×2048 menuntut mendekodenya — ratusan milidetik dan seratus
-/// megabyte — lalu 24.576 cuplikan untuk mip 0 dan 8160 texel penyaringan di
-/// atasnya. Semuanya menghasilkan 525 KB yang sama persis setiap kali, untuk
-/// berkas yang tidak berubah. Menyimpannya sekali dan memuatnya kemudian adalah
-/// selisih antara level yang terbuka seketika dan level yang terbuka beberapa
-/// detik kemudian, setiap kali.
+/// megabyte — lalu 393.216 cuplikan untuk mip 0. Semuanya menghasilkan 8,0 MiB
+/// yang sama persis setiap kali, untuk berkas yang tidak berubah. Menyimpannya
+/// sekali dan memuatnya kemudian adalah selisih antara level yang terbuka
+/// seketika dan level yang terbuka sedetik kemudian, setiap kali.
+///
+/// **Mip yang diserahkan GPU ikut tersimpan sebagai nol**, dan itu bukan
+/// pemborosan yang terlewat: dispatch yang mengisinya 49 ms, sementara
+/// menyimpannya berarti artefak yang isinya bergantung pada perangkat yang
+/// memanggangnya. `firstGpuMip` di header-nya yang memberi tahu pemuat bahwa ia
+/// masih berutang dispatch itu.
 ///
 /// **Di folder cache pengguna, bukan di sebelah berkas sumbernya.** Rencananya
 /// menulis "di sebelah `.meta` berkasnya", dan itu tidak diikuti dengan sengaja:

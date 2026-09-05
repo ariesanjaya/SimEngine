@@ -6,8 +6,10 @@
 #include "DrawCull.h"
 
 #include <atomic>
+#include <cstdlib>
 #include <memory>
 #include <format>
+#include <string_view>
 #include "PostProcess.h"
 #include "SkyAtmosphere.h"
 #include "VolumePass.h"
@@ -26,6 +28,7 @@
 #include "PresentSource.h"
 #include "Sim/RHI/TextureRegistry.h"
 #include "IblBaker.h"
+#include "IblPrefilter.h"
 #include "IblCache.h"
 #include "Sim/Render/Ibl.h"
 #include "Sim/Assets/LightmapUv.h"
@@ -682,6 +685,17 @@ public:
             hiz_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(), target_.DepthView(),
                        target_.Sampler());
             hiz_.AdoptLayouts();
+        }
+        // Prefilter lingkungan di compute. **Gagal membuatnya bukan kegagalan
+        // renderer**, alasan yang sama dengan komposit clipmap: jalur CPU-nya
+        // masih ada dan masih benar, hanya jauh lebih mahal — dan yang membayar
+        // biaya itu adalah panggangan sekali per lingkungan, bukan tiap frame.
+        // Yang tidak bisa membuatnya menurunkan `cubeSize`-nya sendiri di
+        // `EnvironmentBakeSettings()` supaya CPU tetap sanggup.
+        if (!iblPrefilter_.Create(device_, shaderDirectory_)) {
+            SIM_WARN("Render",
+                     "GPU environment prefilter unavailable; environments bake on the CPU at a "
+                     "smaller size");
         }
         // Post-process dibuat sebelum pipeline adegan mana pun dipakai: seluruh
         // pass adegan sekarang menggambar ke gambar HDR miliknya, bukan ke target
@@ -5755,6 +5769,15 @@ private:
         /// tidak punya alasan memisahkan keduanya karena tidak ada matahari yang
         /// bergeser di sana.
         bool carriesIrradiance = false;
+        /// Sampel GGX yang harus dipakai dispatch prefilter, kalau
+        /// `baked.firstGpuMip` bukan nol.
+        ///
+        /// **Ikut hasilnya, bukan dibaca ulang saat mengadopsi.** Angka ini
+        /// masuk ke kunci cache lingkungan; membacanya kembali dari setelan
+        /// yang berlaku saat adopsi berarti sebuah artefak yang dipanggang
+        /// dengan satu angka bisa disaring dengan angka lain, dan yang
+        /// tersimpan di cache lalu bukan yang namanya menjanjikan.
+        uint32_t prefilterSamples = 0;
     };
 
     /// Memanggang ulang iradiansi langit bila langitnya berubah.
@@ -5830,8 +5853,8 @@ private:
             // kecepatan per cuplikan dengan ~460 ms di muka, jadi ia baru
             // menguntungkan di atas titik impas beberapa ribu cuplikan. Proyeksi
             // SH ini 1024 cuplikan — di bawahnya: 418 ms tanpa tabel, 779 ms
-            // dengan. Panggangan prefilter di sebelah, yang 24.576 cuplikan,
-            // berada jauh di atasnya dan memakainya.
+            // dengan. Panggangan prefilter di sebelah, yang 393.216 cuplikan
+            // untuk mip 0-nya saja, berada jauh di atasnya dan memakainya.
             auto bake = [sky, result]() mutable {
                 result->irradiance = ProjectIrradiance(sky, kSkyIrradianceSamples);
                 result->ready.store(true, std::memory_order_release);
@@ -5858,6 +5881,50 @@ private:
         return ConfigDirectory() / "EnvironmentCache";
     }
 
+    /// Setelan panggangan lingkungan, sesuai dengan yang sanggup dijalankan
+    /// perangkat ini.
+    ///
+    /// **Satu tempat, dipakai kedua jalur panggangan.** Berkas HDR dan langit
+    /// atmosferik memanggang dengan pemicu yang berbeda tetapi bentuk peta yang
+    /// sama, dan dua daftar setelan yang harus berpindah bersama adalah dua
+    /// daftar yang suatu saat tinggal satu — yang muncul sebagai pantulan yang
+    /// ketajamannya berubah saat orang berganti dari HDRI ke langit prosedural.
+    ///
+    /// **`cubeSize` turun ke 64 tanpa pemanggang GPU, dan itu bukan kompromi
+    /// yang disembunyikan.** Mip 0 mencuplik lingkungan 393.216 kali pada 256²;
+    /// untuk langit atmosferik satu cuplikan adalah satu ray march, dan yang
+    /// menjalankannya di CPU menunggu belasan detik untuk peta yang dipanggang
+    /// ulang tiap kali matahari bergeser lima derajat. Perangkat yang tidak
+    /// bisa menjalankan compute karena itu mendapat peta yang lebih kecil,
+    /// bukan editor yang berhenti merespons.
+    IblBakeSettings EnvironmentBakeSettings() const {
+        IblBakeSettings settings;
+        // **Jalur CPU harus bisa dijalankan tanpa membangun ulang**, alasan yang
+        // sama persis dengan `--no-bindless` dan `SIM_ENABLE_VIEWPORTS`: sebuah
+        // jalur mundur yang tidak pernah dijalankan siapa pun adalah jalur yang
+        // diam-diam berhenti benar, dan yang menemukannya adalah perangkat yang
+        // tidak bisa menjalankan compute. Ia sekaligus satu-satunya cara
+        // membandingkan dua gambar yang harus sama — bentuk petanya tidak ikut
+        // berubah di sini, jadi selisih yang muncul memang selisih penyaringnya.
+        //
+        // Lambat, dan memang: pada `cubeSize` bawaan ia belasan detik per
+        // panggangan. Ia alat ukur, bukan setelan.
+        const char* cpuOnly = std::getenv("SIM_IBL_CPU_PREFILTER");
+        if (cpuOnly != nullptr && std::string_view(cpuOnly) == "1") {
+            return settings;
+        }
+        if (iblPrefilter_.IsValid()) {
+            // Mip 0 tetap di CPU: hanya di sana `IEnvironmentSampler` bisa
+            // dicuplik. Sisanya integral GGX atas mip 0 — pekerjaan yang
+            // bentuknya persis compute.
+            settings.firstGpuMip = 1;
+        } else {
+            settings.cubeSize = 64;
+            settings.prefilterSamples = 64;
+        }
+        return settings;
+    }
+
     /// Memanggang lingkungan dari sebuah berkas HDR/EXR (B3).
     ///
     /// **Satu tugas untuk SH dan prefilter sekaligus, bukan dua.** Yang memisah
@@ -5877,10 +5944,11 @@ private:
         bakedSkyKey_ = key;
         bakedSpecularKey_ = key;
 
-        IblBakeSettings settings;
+        IblBakeSettings settings = EnvironmentBakeSettings();
         settings.irradianceSamples = kSkyIrradianceSamples;
 
         auto result = std::make_shared<SkySpecularResult>();
+        result->prefilterSamples = settings.prefilterSamples;
         skySpecularBake_ = result;
         // **Pemuatan berkasnya ikut di dalam tugas.** Mendekode HDR 4096x2048
         // memakan sekitar seratus megabyte dan ratusan milidetik; melakukannya
@@ -5909,8 +5977,9 @@ private:
             std::string cacheError;
             if (!cached.empty() && ReadIblCache(cached, result->baked, cacheError)) {
                 // **Inilah kriteria B3.** Membuka level pra-GI berikutnya tidak
-                // mendekode satu byte pun HDR dan tidak menyaring satu texel pun
-                // — 525 KB dibaca dari disk, dan selesai.
+                // mendekode satu byte pun HDR dan tidak mencuplik satu arah pun
+                // — 8,0 MiB dibaca dari disk, lalu satu dispatch prefilter, dan
+                // selesai.
                 result->carriesIrradiance = true;
                 SIM_INFO("Render", "environment loaded from cache in {} ms ({})", elapsedMs(),
                          cached.filename().string());
@@ -5965,27 +6034,32 @@ private:
     /// Memanggang ulang peta prefilter, **jauh lebih malas daripada SH**.
     ///
     /// Selisih biayanya yang memaksa: SH adalah 1024 cuplikan, 64 ms; peta
-    /// prefilter adalah 24576 cuplikan lingkungan untuk mip 0 ditambah 8160
-    /// texel penyaringan di atasnya, 2,4 detik (Debug). Memanggangnya pada
-    /// ambang yang sama dengan SH berarti sebuah antrean panggangan setiap kali
-    /// seseorang menggeser Time-of-Day.
+    /// prefilter adalah 393.216 ray march untuk mip 0-nya saja. Memanggangnya
+    /// pada ambang yang sama dengan SH berarti sebuah antrean panggangan setiap
+    /// kali seseorang menggeser Time-of-Day.
+    ///
+    /// **Penyaringan di atas mip 0 sudah pindah ke `IblPrefilter`** — 49 ms,
+    /// dan itu bukan lagi bagian yang mahal. Yang tersisa mahal justru mip 0,
+    /// yang harus tetap di CPU karena hanya di sana langitnya bisa dicuplik;
+    /// kemalasan ini karena itu tetap dibutuhkan, hanya alasannya berpindah.
     ///
     /// Ambangnya kira-kira lima derajat. Yang bergeser di bawah itu adalah
-    /// pantulan yang mataharinya berada beberapa piksel dari tempatnya di peta
-    /// 64² — dan peta itu sendiri sudah menyaring puluhan arah per texel.
+    /// pantulan yang mataharinya berada satu texel dari tempatnya di peta 256²
+    /// — dan peta itu sendiri sudah menyaring ratusan arah per texel.
     void UpdateSkySpecular(const SkyBakeKey& key, AtmosphereSky sky) {
         if (skySpecularBake_ != nullptr || bakedSpecularKey_.MatchesCoarse(key)) {
             return;
         }
         bakedSpecularKey_ = key;
 
-        IblBakeSettings settings;
+        IblBakeSettings settings = EnvironmentBakeSettings();
         // SH sudah datang dari panggangan yang lebih sering; menghitungnya lagi
         // di sini hanya menghasilkan angka yang sama, beberapa ratus milidetik
         // kemudian.
         settings.irradianceSamples = 0;
 
         auto result = std::make_shared<SkySpecularResult>();
+        result->prefilterSamples = settings.prefilterSamples;
         skySpecularBake_ = result;
         auto bake = [sky, settings, result]() mutable {
             sky.Prepare();
@@ -6056,6 +6130,7 @@ private:
         }
         const IblBakeCpu baked = std::move(skySpecularBake_->baked);
         const bool carriesIrradiance = skySpecularBake_->carriesIrradiance;
+        const uint32_t prefilterSamples = skySpecularBake_->prefilterSamples;
         skySpecularBake_.reset();
         if (!baked.IsValid()) {
             // Panggangan yang gagal — berkas yang tidak bisa dibaca — melepas
@@ -6089,6 +6164,16 @@ private:
             // descriptor yang menunjuk pengganti, dan `prefilteredMips` nol yang
             // menjaganya tidak pernah dipakai sebagai pantulan.
             SIM_WARN("Render", "environment upload failed; reflections fall back to none");
+        } else if (baked.firstGpuMip > 0 &&
+                   !iblPrefilter_.Run(skyIbl_.prefiltered, baked.firstGpuMip,
+                                      prefilterSamples)) {
+            // **Dilepas, bukan dibiarkan.** Mip di atas `firstGpuMip` masih nol,
+            // dan cubemap yang mip kasarnya hitam sementara mip cerminnya benar
+            // adalah gambar yang salah dengan cara yang paling lama tidak
+            // dikenali: yang licin terlihat benar, yang kasar terlihat gelap,
+            // dan tidak ada satu pun pesan yang menghubungkan keduanya.
+            SIM_WARN("Render", "environment prefilter failed; reflections fall back to none");
+            skyIbl_.Destroy();
         }
         UpdateEnvironmentDescriptors();
     }
@@ -6980,6 +7065,10 @@ private:
     /// pantulan lingkungan belum ada — dan descriptor-nya memakai pengganti,
     /// bukan dibiarkan kosong.
     BakedIbl skyIbl_;
+    /// Penyaring mip peta lingkungan di GPU. Tidak sah berarti panggangan
+    /// jatuh ke jalur CPU beserta `cubeSize` yang lebih kecil — lihat
+    /// `EnvironmentBakeSettings`.
+    IblPrefilter iblPrefilter_;
     /// LUT DFG sisi CPU, dipanggang sekali. Disimpan supaya panggangan
     /// lingkungan berikutnya tidak mengulang 914 ms untuk byte yang sama.
     DfgLut dfgLut_;
