@@ -858,6 +858,62 @@ TEST_CASE("Kotak yang diputar diuji lewat kotak dunia yang memuatnya") {
     CHECK(world.max.x == doctest::Approx(0.1f).epsilon(0.001));
 }
 
+TEST_CASE("Jarak gambar: nol berarti tak terbatas") {
+    // **Bawaan harus menggambar segalanya.** Nol yang diperlakukan harfiah
+    // sebagai "jarak nol" membuat setiap objek yang belum pernah disentuh
+    // pengarang menghilang — kegagalan yang terlihat sebagai level kosong, bukan
+    // sebagai setelan yang belum diisi.
+    const render::Aabb box{Vec3(-0.5f), Vec3(0.5f)};
+    const Vec3 faraway(0.0f, 0.0f, 100000.0f);
+    CHECK(render::WithinDrawDistance(0.0f, faraway, box));
+    // Negatif ikut, dan dengan alasan yang sama: ia satu-satunya nilai lain yang
+    // bisa datang dari berkas level yang disunting tangan.
+    CHECK(render::WithinDrawDistance(-10.0f, faraway, box));
+}
+
+TEST_CASE("Jarak gambar diukur ke kotaknya, bukan ke titik asalnya") {
+    // **Inilah yang membuat lantai besar tidak berkedip.** Sebuah lantai
+    // 80x80 meter yang titik asalnya di satu sudut tetap harus tergambar selagi
+    // kamera berdiri di atasnya, walau titik asalnya puluhan meter jauhnya.
+    const render::Aabb floor{Vec3(0.0f, -0.1f, 0.0f), Vec3(80.0f, 0.0f, 80.0f)};
+    const Vec3 standingOnIt(40.0f, 1.7f, 40.0f);
+
+    // Jarak ke kotaknya cuma tinggi mata; jarak ke titik asalnya ~57 m.
+    CHECK(render::DistanceToAabb(standingOnIt, floor) == doctest::Approx(1.7f));
+    CHECK(render::WithinDrawDistance(10.0f, standingOnIt, floor));
+
+    // Titik di dalam kotak berjarak nol, tanpa cabang tersendiri.
+    CHECK(render::DistanceToAabb(Vec3(40.0f, -0.05f, 40.0f), floor) == doctest::Approx(0.0f));
+}
+
+TEST_CASE("Jarak gambar membuang yang di luar dan menahan yang persis di batas") {
+    const render::Aabb box{Vec3(-1.0f), Vec3(1.0f)};
+    // Kotak membentang sampai z = 1, jadi mata di z = 11 berjarak 10 tepat.
+    const Vec3 eye(0.0f, 0.0f, 11.0f);
+    CHECK(render::DistanceToAabb(eye, box) == doctest::Approx(10.0f));
+
+    // Batasnya inklusif: yang persis di jarak itu masih digambar. Eksklusif
+    // akan membuat objek berkedip tepat di ambangnya saat kamera diam.
+    CHECK(render::WithinDrawDistance(10.0f, eye, box));
+    CHECK(render::WithinDrawDistance(10.5f, eye, box));
+    CHECK_FALSE(render::WithinDrawDistance(9.5f, eye, box));
+}
+
+TEST_CASE("Jarak gambar tidak peduli arah, hanya jarak") {
+    // Frustum yang mengurus arah; ini hanya jarak. Yang di belakang kamera dan
+    // masih dekat tetap lolos di sini — dan itu benar, karena ia masih bisa
+    // menjatuhkan bayangan ke dalam pandangan.
+    const render::Aabb box{Vec3(-0.5f), Vec3(0.5f)};
+    const Vec3 eye(0.0f, 0.0f, 0.0f);
+    for (const Vec3& offset : {Vec3(5.0f, 0.0f, 0.0f), Vec3(-5.0f, 0.0f, 0.0f),
+                               Vec3(0.0f, 0.0f, -5.0f), Vec3(0.0f, 5.0f, 0.0f)}) {
+        const render::Aabb moved{box.min + offset, box.max + offset};
+        INFO("offset ", offset.x, " ", offset.y, " ", offset.z);
+        CHECK(render::WithinDrawDistance(10.0f, eye, moved));
+        CHECK_FALSE(render::WithinDrawDistance(2.0f, eye, moved));
+    }
+}
+
 TEST_CASE("Menyaring kotak mengembalikan indeks yang lolos saja") {
     const Mat4 view = LookAt(Vec3(0.0f), Vec3(0.0f, 0.0f, -1.0f));
     const Frustum frustum(PerspectiveReversedZ(60.0f * kDegToRad, 1.0f, 0.1f, 100.0f) * view);

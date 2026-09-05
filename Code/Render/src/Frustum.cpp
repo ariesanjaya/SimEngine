@@ -28,6 +28,26 @@ Aabb TransformAabb(const Aabb& local, const Mat4& transform) {
     return result;
 }
 
+float DistanceToAabb(const Vec3& point, const Aabb& box) {
+    // Selisih ke luar kotak pada tiap sumbu; nol pada sumbu tempat titiknya
+    // berada di antara kedua sisinya. Menjumlahkan kuadratnya lalu mengakarkan
+    // memberi jarak Euklides ke permukaan terdekat — dan pada titik yang berada
+    // di dalam kotak ketiganya nol, jadi jaraknya nol tanpa cabang tersendiri.
+    const Vec3 gap = glm::max(glm::max(box.min - point, point - box.max), Vec3(0.0f));
+    return glm::length(gap);
+}
+
+bool WithinDrawDistance(float maxDrawDistance, const Vec3& eye, const Aabb& worldBounds) {
+    // Nol dan negatif sama-sama berarti tak terbatas. Negatif ikut karena ia
+    // satu-satunya nilai lain yang bisa datang dari berkas level yang disunting
+    // tangan, dan sebuah jarak negatif yang diperlakukan harfiah membuang
+    // seluruh adegan.
+    if (maxDrawDistance <= 0.0f) {
+        return true;
+    }
+    return DistanceToAabb(eye, worldBounds) <= maxDrawDistance;
+}
+
 void Frustum::Extract(const Mat4& m) {
     // Baris matriks, bukan kolomnya: glm menyimpan kolom-mayor, jadi `m[i]`
     // adalah kolom ke-i. Yang dibutuhkan rumus Gribb–Hartmann adalah barisnya.

@@ -629,6 +629,22 @@ struct MeshInstance {
 
     Vec4 color{0.72f, 0.74f, 0.78f, 1.0f};
     bool selected = false;
+
+    /// Jarak terjauh dari kamera tempat instance ini masih dirasterisasi, meter.
+    /// **Nol berarti tak terbatas**, dan itu bawaannya.
+    ///
+    /// **Rasterisasi saja, bukan pencahayaan.** Clipmap SDF membaca
+    /// `ViewportScene::meshes` langsung, bukan daftar yang sudah disaring, jadi
+    /// objek yang berhenti digambar tetap menyumbang cahaya tak-langsung dan
+    /// tetap menghalangi sinar GI. Kalau tidak, berjalan menjauh dari sebuah
+    /// dinding akan menyalakan ruangan di baliknya.
+    ///
+    /// **Bayangannya ikut berhenti**, sama seperti di Unreal: yang tidak
+    /// digambar tidak menjatuhkan bayangan. Itu yang membuat setelan ini
+    /// menyentuh pass yang paling mahal — bayangan 47% frame GPU pada adegan
+    /// padat — dan sekaligus yang membuatnya salah dipakai pada benda besar.
+    float maxDrawDistance = 0.0f;
+
     /// Ikut pass bayangan. Yang tidak menjatuhkan bayangan tetap digambar
     /// seperti biasa — ia hanya tidak muncul di peta bayangan.
     bool castShadows = true;

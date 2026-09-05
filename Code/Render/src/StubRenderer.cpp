@@ -6,6 +6,7 @@
 #include "Sim/RHI/Device.h"
 #include "Sim/RHI/RenderTarget.h"
 #include "Sim/RHI/TextureRegistry.h"
+#include "Sim/Render/Frustum.h"
 
 #include <array>
 #include <cmath>
@@ -145,7 +146,7 @@ public:
         const float aspect =
             static_cast<float>(target_.Width()) / static_cast<float>(target_.Height());
         const Mat4 viewProj = desc.camera.Projection(aspect) * desc.camera.View();
-        BuildLineGeometry(scene);
+        BuildLineGeometry(scene, desc.camera.position);
 
         // Slot yang akan ditulis frame ini mungkin masih dibaca GPU dari frame
         // sebelumnya. Penungguannya harus di sini — sebelum BeginTransient —
@@ -251,10 +252,21 @@ private:
     ///
     /// Mesh jadi wireframe AABB. Renderer E8 akan menggambar mesh sungguhan
     /// dari MeshInstance yang sama dan hanya menyisakan garis bantu di sini.
-    void BuildLineGeometry(const ViewportScene& scene) {
+    void BuildLineGeometry(const ViewportScene& scene, const Vec3& eye) {
         lineVertices_.clear();
 
         for (const MeshInstance& mesh : scene.meshes) {
+            // **Satu-satunya culling yang dikenal perender ini, dan ia ada di
+            // sini justru karena itu.** Sebuah setelan yang bekerja di
+            // VulkanRenderer tetapi diam-diam tidak berpengaruh di perender
+            // mundur adalah antarmuka yang berbohong kepada pengarang yang
+            // kebetulan menjalankan mesin lama — dan yang terlihat bukan galat
+            // melainkan angka yang tidak melakukan apa-apa.
+            const Aabb world =
+                TransformAabb(Aabb{mesh.boundsMin, mesh.boundsMax}, mesh.transform);
+            if (!WithinDrawDistance(mesh.maxDrawDistance, eye, world)) {
+                continue;
+            }
             const Vec4 color = mesh.selected ? kSelectedColor : mesh.color;
             AppendBoxEdges(lineVertices_, mesh.transform, mesh.boundsMin, mesh.boundsMax, color);
         }

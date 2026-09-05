@@ -26,6 +26,28 @@ struct Aabb {
 /// perlunya — dan itu selalu arah yang aman.
 Aabb TransformAabb(const Aabb& local, const Mat4& transform);
 
+/// Jarak terdekat dari sebuah titik ke sebuah kotak dunia. Nol bila titiknya di
+/// dalam kotak.
+float DistanceToAabb(const Vec3& point, const Aabb& box);
+
+/// Objek dengan kotak dunia ini masih berada di dalam jarak gambarnya?
+///
+/// **Uji culling yang paling murah, dan karena itu yang pertama** — urutan yang
+/// sama dengan yang dipakai Unreal: jarak, lalu frustum, lalu occlusion. Ia
+/// sebuah pengurangan dan sebuah perbandingan, sementara frustum enam bidang
+/// dan occlusion sebuah pass compute beserta piramida depth-nya.
+///
+/// **`maxDrawDistance` nol berarti tak terbatas**, dan itu bawaannya. Nol
+/// sebagai "jangan pernah gambar" akan membuat setiap objek yang belum pernah
+/// disentuh pengarang menghilang, yaitu kegagalan yang terlihat sebagai level
+/// kosong alih-alih sebagai setelan yang belum diisi.
+///
+/// **Diukur ke kotaknya, bukan ke titik asalnya.** Sebuah lantai 80×80 meter
+/// yang titik asalnya di satu sudut akan lenyap selagi kamera berdiri di
+/// atasnya kalau yang diukur titik asal — dan yang terlihat bukan objek yang
+/// di-cull melainkan lantai yang berkedip saat orang berjalan.
+bool WithinDrawDistance(float maxDrawDistance, const Vec3& eye, const Aabb& worldBounds);
+
 /// Enam bidang pembatas sebuah frustum, dalam ruang dunia.
 ///
 /// **Diturunkan dari matriks view-proj apa adanya**, jadi ia tidak perlu tahu

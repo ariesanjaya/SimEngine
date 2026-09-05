@@ -79,7 +79,13 @@ void RegisterCoreComponents() {
                      "kontaknya harus tajam — anggarannya tumbuh kuadrat")
             .Field<&MeshRendererComponent::lodBias>("lodBias")
             .Label("LOD Bias")
-            .Range(-4.0f, 4.0f);
+            .Range(-4.0f, 4.0f)
+            .Field<&MeshRendererComponent::maxDrawDistance>("maxDrawDistance")
+            .Label("Max Draw Distance")
+            .Range(0.0f, 10000.0f)
+            .Tooltip("Nol berarti selalu digambar. Yang gugur tidak dirasterisasi sama "
+                     "sekali, termasuk ke peta bayangan — pakai untuk benda kecil, bukan "
+                     "untuk siluet besar");
         components.Register<MeshRendererComponent>();
 
         // Didaftarkan supaya vektornya di ScriptComponent bisa diserialisasi dan

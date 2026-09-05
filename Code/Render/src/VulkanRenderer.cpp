@@ -2701,6 +2701,20 @@ private:
         for (const MeshInstance& mesh : scene.meshes) {
             const Aabb local{mesh.boundsMin, mesh.boundsMax};
             const Aabb world = TransformAabb(local, mesh.transform);
+            // **Jarak lebih dulu, frustum sesudahnya.** Urutan yang sama dengan
+            // yang dipakai Unreal, dan alasannya biaya: ini sebuah pengurangan
+            // dan sebuah perbandingan, sementara frustum enam bidang dan
+            // occlusion sebuah pass compute.
+            //
+            // **Dan ia membuang tanpa syarat, tidak seperti frustum di
+            // bawahnya.** Yang di luar pandangan tetap tinggal bila ia
+            // menjatuhkan bayangan; yang di luar jarak gambarnya tidak — objek
+            // yang terlalu jauh untuk digambar juga terlalu jauh untuk
+            // bayangannya berarti, dan membiarkannya di daftar caster berarti
+            // setelan ini tidak menyentuh pass yang paling mahal sama sekali.
+            if (!WithinDrawDistance(mesh.maxDrawDistance, eye, world)) {
+                continue;
+            }
             const bool cameraVisible = frustum.Intersects(world);
             // **Yang di luar pandangan tetap masuk daftar bila ia menjatuhkan
             // bayangan.** Membuangnya di sini — yang berlaku sejak E8.1 —

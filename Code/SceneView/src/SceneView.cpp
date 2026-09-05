@@ -314,6 +314,10 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                 if (meshRenderer != nullptr) {
                     instance.castShadows = meshRenderer->castShadows;
                     instance.receiveShadows = meshRenderer->receiveShadows;
+                    // Diserahkan apa adanya; yang mengujinya renderer, karena di
+                    // sanalah kamera berada dan di sanalah seluruh keputusan
+                    // culling lain sudah tinggal.
+                    instance.maxDrawDistance = meshRenderer->maxDrawDistance;
                 }
 
                 // GUID → jalur → geometri. **Renderer yang menyimpan cache-nya**,
