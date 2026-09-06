@@ -195,6 +195,12 @@ const char* ShadingIcon(render::DrawMode mode) {
         case render::DrawMode::Clay: return icons::kShadingClay;
         case render::DrawMode::MaterialWireframe: return icons::kShadingMaterialWireframe;
         case render::DrawMode::Wireframe: return icons::kShadingWireframe;
+        case render::DrawMode::DetailLighting: return icons::kShadingDetailLighting;
+        case render::DrawMode::Reflections: return icons::kShadingReflections;
+        case render::DrawMode::BaseColor: return icons::kShadingBaseColor;
+        case render::DrawMode::Normal: return icons::kShadingNormal;
+        case render::DrawMode::Roughness: return icons::kShadingRoughness;
+        case render::DrawMode::Metallic: return icons::kShadingMetallic;
         case render::DrawMode::Material: break;
     }
     return icons::kShadingMaterial;
@@ -206,6 +212,12 @@ const char* ShadingLabel(render::DrawMode mode) {
         case render::DrawMode::Clay: return "Clay (lighting only)";
         case render::DrawMode::MaterialWireframe: return "Material + wireframe";
         case render::DrawMode::Wireframe: return "Wireframe";
+        case render::DrawMode::DetailLighting: return "Detail lighting";
+        case render::DrawMode::Reflections: return "Reflections";
+        case render::DrawMode::BaseColor: return "Base color";
+        case render::DrawMode::Normal: return "Normal";
+        case render::DrawMode::Roughness: return "Roughness";
+        case render::DrawMode::Metallic: return "Metallic";
         case render::DrawMode::Material: break;
     }
     return "Material";
@@ -230,6 +242,17 @@ render::DrawMode NextDrawMode(render::DrawMode mode) {
         case render::DrawMode::Unlit: return render::DrawMode::Clay;
         case render::DrawMode::Clay: return render::DrawMode::MaterialWireframe;
         case render::DrawMode::MaterialWireframe: return render::DrawMode::Wireframe;
+        // **Mode diagnostik tidak ikut diputari, ia keluar.** Yang berputar
+        // dipakai bolak-balik antara mode yang setara selagi bekerja; enam mode
+        // diagnostik di dalam putaran yang sama berarti sebelas tekan untuk
+        // kembali ke Material — dan yang menekannya sedang menuju ke sana,
+        // bukan sedang menjelajah.
+        case render::DrawMode::DetailLighting:
+        case render::DrawMode::Reflections:
+        case render::DrawMode::BaseColor:
+        case render::DrawMode::Normal:
+        case render::DrawMode::Roughness:
+        case render::DrawMode::Metallic:
         case render::DrawMode::Wireframe: break;
     }
     return render::DrawMode::Material;
@@ -2782,13 +2805,34 @@ private:
         // Klik kanannya tidak lagi ikut menyalakan mode terbang — lihat
         // `UpdateOverlayPointerClaims`.
         if (ImGui::BeginPopupContextItem(kShadingPopupId)) {
-            render::DrawMode mode = render::DrawMode::Material;
-            do {
-                if (ImGui::MenuItem(ShadingLabel(mode), nullptr, drawMode_ == mode)) {
+            const auto item = [this](render::DrawMode mode) {
+                char label[64];
+                std::snprintf(label, sizeof(label), "%s  %s", ShadingIcon(mode),
+                              ShadingLabel(mode));
+                if (ImGui::MenuItem(label, nullptr, drawMode_ == mode)) {
                     drawMode_ = mode;
                 }
-                mode = NextDrawMode(mode);
-            } while (mode != render::DrawMode::Material);
+            };
+            // **Dua kelompok, dan pembatasnya bukan selera.** Yang di atas
+            // menggambar adegan — semuanya masih memperlihatkan cahaya, bentuk,
+            // dan bayangan, dan semuanya masuk akal dipandangi selagi menyusun
+            // level. Yang di bawah mengembalikan satu angka permukaan apa
+            // adanya; ia bukan gambar adegan melainkan pembacaan alat ukur, dan
+            // mencampurnya ke dalam satu daftar rata membuat keduanya terbaca
+            // sebagai pilihan yang setara.
+            ImGui::SeparatorText("View mode");
+            item(render::DrawMode::Material);
+            item(render::DrawMode::Unlit);
+            item(render::DrawMode::Clay);
+            item(render::DrawMode::DetailLighting);
+            item(render::DrawMode::Reflections);
+            item(render::DrawMode::MaterialWireframe);
+            item(render::DrawMode::Wireframe);
+            ImGui::SeparatorText("Surface channel");
+            item(render::DrawMode::BaseColor);
+            item(render::DrawMode::Normal);
+            item(render::DrawMode::Roughness);
+            item(render::DrawMode::Metallic);
             ImGui::EndPopup();
         }
         // Selama menunya terbuka, overlay tetap dianggap memegang pointer:

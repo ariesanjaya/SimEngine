@@ -115,7 +115,9 @@ void PrintUsage() {
         "  --bench-cull-limit <n>        gambar hanya permukaan bernomor < n\n"
         "  --bench-fixed-exposure        eksposur manual; wajib untuk membandingkan gambar\n"
         "  --bench-gi-debug <view>       off|albedo|normal|irradiance|raycount|steps|layers\n"
-        "  --bench-draw-mode <mode>      material|unlit|clay|material+wireframe|wireframe\n"
+        "  --bench-draw-mode <mode>      material|unlit|clay|material+wireframe|wireframe|\n"
+        "                                detail-lighting|reflections|base-color|normal|\n"
+        "                                roughness|metallic\n"
         "  --bench-ev <ev100>            eksposur manual pada EV100 ini\n"
         "  --bench-no-screen-trace       matikan lapis screen-space; lihat SDF sendirian\n"
         "  --bench-furnace               uji tungku: langit seragam 1, albedo 1, tanpa matahari\n"
@@ -1044,12 +1046,23 @@ int main(int argc, char** argv) {
         render::DrawMode drawMode = render::DrawMode::Material;
         if (const std::string_view value = FlagValue(argc, argv, "--bench-draw-mode");
             !value.empty()) {
-            static constexpr std::array<std::pair<std::string_view, render::DrawMode>, 5> kModes{
+            // **Seluruh mode ada di sini, termasuk yang diagnostik.** Alat
+            // ukur yang hanya bisa menjalankan sebagian mode adalah alat yang
+            // tidak bisa membandingkan gambar mode yang lain — dan mode
+            // diagnostik justru yang paling butuh perbandingan, karena tidak
+            // ada yang memandanginya cukup sering untuk menyadari ia berubah.
+            static constexpr std::array<std::pair<std::string_view, render::DrawMode>, 11> kModes{
                 {{"material", render::DrawMode::Material},
                  {"unlit", render::DrawMode::Unlit},
                  {"clay", render::DrawMode::Clay},
                  {"material+wireframe", render::DrawMode::MaterialWireframe},
-                 {"wireframe", render::DrawMode::Wireframe}}};
+                 {"wireframe", render::DrawMode::Wireframe},
+                 {"detail-lighting", render::DrawMode::DetailLighting},
+                 {"reflections", render::DrawMode::Reflections},
+                 {"base-color", render::DrawMode::BaseColor},
+                 {"normal", render::DrawMode::Normal},
+                 {"roughness", render::DrawMode::Roughness},
+                 {"metallic", render::DrawMode::Metallic}}};
             bool found = false;
             for (const auto& [name, mode] : kModes) {
                 if (value == name) {

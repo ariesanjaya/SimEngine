@@ -143,6 +143,58 @@ enum class DrawMode : uint8_t {
     /// ikut terlihat. Tanpa itu, sebuah kotak menjadi dua belas garis yang
     /// saling menembus dan bentuknya tidak lagi terbaca.
     Wireframe,
+
+    // --- Mode diagnostik -----------------------------------------------------
+    //
+    // **Ditambahkan di ekor, dan itu bukan kerapian.** Nomornya diserahkan ke
+    // shader sebagai indeks di `viewParams.x`, dan menyisipkan satu nilai di
+    // tengah menggeser arti seluruh mode sesudahnya — termasuk yang tersimpan
+    // di layout editor seseorang. Yang baru selalu di bawah.
+
+    /// Clay yang **mempertahankan peta normal**.
+    ///
+    /// Pertanyaannya berbeda dari clay: bukan "bayangan ini jatuh di mana",
+    /// melainkan "lekuk yang saya lihat ini datang dari geometri atau dari peta
+    /// normal". Keduanya tidak bisa dipisahkan pada material penuh — tekstur
+    /// albedo menyembunyikan keduanya — dan clay biasa menjawabnya dengan
+    /// membuang justru bukti yang dicari.
+    ///
+    /// Pada ruas tanpa material ia sama persis dengan `Clay`: jalur mundur
+    /// `box.frag` tidak punya peta normal untuk dipertahankan.
+    DetailLighting,
+    /// Seluruh permukaan menjadi cermin: logam mulus, tanpa warna dasar.
+    ///
+    /// **Satu-satunya mode yang membuat lingkungan terlihat sendirian.** Peta
+    /// prefilter yang salah orientasi, kubus yang belum dipanggang, dan kisi
+    /// probe yang kosong semuanya menghasilkan gambar yang nyaris benar pada
+    /// material biasa — dan tidak bisa disalahartikan di sini.
+    ///
+    /// Ruas tanpa material tergambar hitam, dan itu jujur: `box.frag` tidak
+    /// punya spekular sama sekali, jadi ia memang tidak memantulkan apa pun.
+    Reflections,
+
+    // Empat di bawah ini mengembalikan satu kanal permukaan apa adanya, tanpa
+    // penyinaran — padanan "buffer visualization" pada perender deferred.
+    // **Di sini justru lebih murah daripada di sana:** shader forward memegang
+    // nilainya di tangan saat itu juga, jadi tidak ada G-buffer yang harus ada
+    // lebih dulu.
+    //
+    // Semuanya bernomor di atas `Reflections`, dan `channelView()` di
+    // `cluster_common.slang` mengandalkan itu.
+
+    /// Warna dasar dikali bobotnya, tanpa cahaya dan tanpa emissive.
+    ///
+    /// Berbeda dari `Unlit`, yang masih menambahkan emissive dan masih
+    /// mengalikan warna instance — dua hal yang membuat albedo sebuah material
+    /// tidak bisa dibaca angkanya.
+    BaseColor,
+    /// Normal permukaan sesudah peta normal, ruang dunia, dipetakan ke 0..1.
+    Normal,
+    /// Kekasaran spekular sebagai abu-abu. Hitam mulus, putih kasar.
+    Roughness,
+    /// Metalness sebagai abu-abu. Ruas tanpa material selalu hitam — ia memang
+    /// bukan logam.
+    Metallic,
 };
 
 enum class ExposureMode : uint8_t {

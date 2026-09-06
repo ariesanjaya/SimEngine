@@ -152,8 +152,8 @@ struct ShadowUniforms {
     /// Penutup rekursi untuk permukaan yang belum dikenal cache radiansi:
     /// xyz albedo yang ditebak, w 1 kalau tebakan itu dipakai.
     Vec4 giBounce{0.0f};
-    /// Keadaan tampilan per-frame: x 1 kalau `DrawMode::Unlit`, y 1 kalau
-    /// `DrawMode::Clay`, z detik sejak adegan dibuka.
+    /// Keadaan tampilan per-frame: x indeks `DrawMode`, y belum dipakai,
+    /// z detik sejak adegan dibuka.
     ///
     /// **Dua bendera, bukan satu nomor mode.** Keduanya dibaca di tempat yang
     /// berbeda di dalam shader — yang satu memilih cabang di ujung, yang lain
@@ -6673,8 +6673,18 @@ private:
         // sebuah Vec4 baru untuk satu float berarti dua belas byte padding.
         // Nol yang menjaga descriptor pengganti tidak pernah terbaca sebagai
         // pantulan — bukan sebuah cabang di dalam shader.
-        uniforms.viewParams = Vec4(desc.mode == DrawMode::Unlit ? 1.0f : 0.0f,
-                                   desc.mode == DrawMode::Clay ? 1.0f : 0.0f,
+        // **Indeks mode apa adanya, bukan sepasang bendera.** `viewMode()` di
+        // `cluster_common.slang` membacanya kembali dengan pembulatan, dan
+        // urutan `DrawMode` di sanalah yang menjadi kontraknya — nomor yang
+        // bergeser di satu sisi saja mengubah arti seluruh sakelar viewport
+        // tanpa satu pun galat kompilasi.
+        //
+        // Komponen y tinggal kosong. Ia dulu bendera clay; membiarkannya
+        // bernilai lama akan membuat pembaca yang belum diperbarui tetap
+        // menyala di mode yang salah, dan nol adalah satu-satunya nilai yang
+        // tidak berarti apa-apa bagi siapa pun.
+        uniforms.viewParams = Vec4(static_cast<float>(static_cast<uint8_t>(desc.mode)),
+                                   0.0f,
                                    sceneTimeSeconds_,
                                    skyIbl_.IsValid()
                                        ? static_cast<float>(skyIbl_.prefiltered.MipCount())

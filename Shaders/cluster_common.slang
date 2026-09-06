@@ -155,7 +155,63 @@ bool anyLightInScene() {
 /// jalur, jadi material bertopeng tetap berlubang di tempat yang sama —
 /// tampilan tanpa cahaya yang mengubah siluet benda bukan lagi tampilan benda
 /// yang sama.
-bool unlitView() { return shadowParams.viewParams.x > 0.5; }
+/// Mode tampilan viewport, sebagai indeks. Cerminan `render::DrawMode`.
+///
+/// **Satu indeks, bukan satu bendera per mode.** `viewParams` punya empat
+/// komponen dan keempatnya sudah terpakai — z waktu adegan, w jumlah mip
+/// prefilter — jadi mode kesembilan tidak punya tempat kalau tiap mode menuntut
+/// bendera sendiri. Indeks juga yang membuat dua mode tidak pernah bisa menyala
+/// bersamaan, keadaan yang tidak punya arti dan yang tetap harus diurus setiap
+/// pembaca kalau bendera yang dipakai.
+///
+/// Nomornya harus sama persis dengan urutan `DrawMode` di
+/// `Code/Render/include/Sim/Render/Types.h`. Yang menggeser salah satunya
+/// menggeser arti seluruh sakelar viewport tanpa satu pun galat kompilasi.
+static const uint kViewMaterial = 0;
+static const uint kViewUnlit = 1;
+static const uint kViewClay = 2;
+static const uint kViewMaterialWireframe = 3;
+static const uint kViewWireframe = 4;
+static const uint kViewDetailLighting = 5;
+static const uint kViewReflections = 6;
+static const uint kViewBaseColor = 7;
+static const uint kViewNormal = 8;
+static const uint kViewRoughness = 9;
+static const uint kViewMetallic = 10;
+
+uint viewMode() { return uint(shadowParams.viewParams.x + 0.5); }
+
+bool unlitView() { return viewMode() == kViewUnlit; }
+
+/// Permukaan seragam dengan cahaya utuh — "clay" maupun "detail lighting".
+///
+/// **Keduanya lewat cabang yang sama karena keduanya memang satu hal**, dan
+/// yang membedakannya cuma satu baris: detail lighting mempertahankan peta
+/// normal. Menulisnya sebagai dua cabang berarti dua definisi "buang
+/// materialnya" yang suatu saat berselisih.
+bool clayLikeView() {
+    const uint mode = viewMode();
+    return mode == kViewClay || mode == kViewDetailLighting;
+}
+
+/// Peta normal dipertahankan walau materialnya dibuang.
+///
+/// Pertanyaan yang dijawabnya berbeda dari clay: bukan "bayangan ini jatuh di
+/// mana", melainkan "lekuk yang terlihat ini datang dari geometri atau dari peta
+/// normal". Clay yang membuang peta normal tidak bisa menjawabnya sama sekali.
+bool detailLightingView() { return viewMode() == kViewDetailLighting; }
+
+/// Cermin sempurna: seluruh permukaan menjadi logam mulus.
+///
+/// Yang dijawabnya: lingkungan yang dipantulkan adegan ini benar atau tidak —
+/// peta prefilter yang salah orientasi, kubus yang belum dipanggang, dan probe
+/// yang kosong semuanya terlihat di sini dan hampir tidak terlihat di mana pun
+/// yang lain.
+bool reflectionsView() { return viewMode() == kViewReflections; }
+
+/// Mode yang mengembalikan satu kanal permukaan apa adanya, bukan hasil
+/// penyinaran. Semuanya bernomor di atas `kViewReflections`.
+bool channelView() { return viewMode() >= kViewBaseColor; }
 
 /// Apakah viewport sedang meminta permukaan seragam — "clay".
 ///
@@ -166,7 +222,7 @@ bool unlitView() { return shadowParams.viewParams.x > 0.5; }
 /// tekstur adalah persis hal yang membuat pertanyaan kedua tidak bisa dijawab,
 /// karena mata tidak bisa memisahkan bercak gelap sebuah peta albedo dari
 /// bercak gelap sebuah bayangan.
-bool clayView() { return shadowParams.viewParams.y > 0.5; }
+bool clayView() { return clayLikeView(); }
 
 /// Detik sejak adegan dibuka.
 ///
