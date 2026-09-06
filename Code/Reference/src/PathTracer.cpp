@@ -376,6 +376,10 @@ std::array<Vec3, 9> TraceProbeIrradiance(const raycast::RayScene& scene,
     std::array<Vec3, 9> sh{};
     const uint32_t count = std::max(sampleCount, 1u);
 
+    Rng rotation(HashProbeSeed(position, 0xC0FFEEu, settings.seed));
+    const float offsetHeight = rotation.Uniform();
+    const float offsetAngle = rotation.Uniform();
+
     std::size_t rays = 0;
     std::size_t shadingCalls = 0;
     std::array<float, 9> basis{};
@@ -391,13 +395,18 @@ std::array<Vec3, 9> TraceProbeIrradiance(const raycast::RayScene& scene,
         // memilih normal saat memanggang, yaitu keputusan yang baru diambil
         // permukaan yang membacanya.
         //
-        // Stratifikasinya lewat Hammersley, sama dengan `ProjectIrradiance`:
-        // dua urutan sampel yang berbeda akan berselisih pada jumlah sampel
-        // rendah, dan selisih itu akan terbaca sebagai transport yang salah.
-        const float u1 = (static_cast<float>(i) + 0.5f) / static_cast<float>(count);
+        // **Deretnya diputar sekali per probe**, dengan alasan yang sama seperti
+        // `TraceSurfaceIrradiance`: Hammersley adalah deret kuasi-acak, dan
+        // kesalahannya pada jumlah cuplikan rendah bukan derau melainkan
+        // penyimpangan sistematis yang searah — sama di setiap probe, jadi ia
+        // menggeser seluruh kisi alih-alih saling meniadakan.
+        float u1 = (static_cast<float>(i) + 0.5f) / static_cast<float>(count) + offsetHeight;
+        u1 -= std::floor(u1);
+        float u2 = RadicalInverse(i) + offsetAngle;
+        u2 -= std::floor(u2);
         const float z = 1.0f - 2.0f * u1;
         const float r = std::sqrt(std::max(1.0f - z * z, 0.0f));
-        const float phi = 2.0f * kPi * RadicalInverse(i);
+        const float phi = 2.0f * kPi * u2;
         const Vec3 direction(r * std::cos(phi), r * std::sin(phi), z);
 
         const Vec3 radiance = TracePath(scene, resolve, lights, position, direction, settings, rng,
@@ -452,6 +461,51 @@ void TraceProbeVisibility(const raycast::RayScene& scene, const Vec3& position, 
             outMoments[at + 1] = static_cast<float>(sumSquare / count);
         }
     }
+}
+
+Vec3 TraceSurfaceIrradiance(const raycast::RayScene& scene, const SurfaceResolver& resolve,
+                            const LightList& lights, const Vec3& position, const Vec3& normal,
+                            uint32_t sampleCount, const TraceSettings& settings) {
+    const uint32_t count = std::max(sampleCount, 1u);
+    const Vec3 n = glm::normalize(normal);
+
+    // **Titik asalnya digeser sepanjang normal.** Sebuah texel duduk tepat di
+    // permukaannya, dan sinar yang berangkat dari sana mengenai permukaan itu
+    // sendiri pada jarak nol — seluruh lightmap lalu hitam, tanpa satu pun galat.
+    // Geserannya sama dengan yang dipakai `TracePath` saat memantul.
+    const Vec3 origin = position + n * 1e-4f;
+
+    // **Deretnya diputar sekali per titik, dan itu bukan hiasan.** Hammersley
+    // adalah deret kuasi-acak: kesalahannya pada jumlah cuplikan rendah bukan
+    // derau melainkan **penyimpangan sistematis yang searah** — diukur, 256
+    // cuplikan menjawab 7,4% di bawah jawaban yang konvergen, di setiap titik.
+    // Sebuah lightmap yang dipanggang begitu meleset sebesar faktor tetap di
+    // seluruh permukaannya, dan itu paling mudah dikira masalah eksposur.
+    //
+    // Putaran Cranley–Patterson: geseran acak per titik, dibungkus kembali ke
+    // [0,1). Stratifikasinya utuh — jarak antar-sampel tidak berubah — tetapi
+    // arah penyimpangannya berbeda di tiap texel, jadi yang tersisa derau yang
+    // saling meniadakan alih-alih pergeseran yang menumpuk.
+    Rng rotation(HashProbeSeed(position, 0xC0FFEEu, settings.seed));
+    const float offsetRadius = rotation.Uniform();
+    const float offsetAngle = rotation.Uniform();
+
+    std::size_t rays = 0;
+    std::size_t shadingCalls = 0;
+    Vec3 sum(0.0f);
+    for (uint32_t i = 0; i < count; ++i) {
+        Rng rng(HashProbeSeed(position, i, settings.seed));
+        float u1 = (static_cast<float>(i) + 0.5f) / static_cast<float>(count) + offsetRadius;
+        u1 -= std::floor(u1);
+        float u2 = RadicalInverse(i) + offsetAngle;
+        u2 -= std::floor(u2);
+        const Vec3 direction = SampleCosineHemisphere(n, u1, u2);
+        sum += TracePath(scene, resolve, lights, origin, direction, settings, rng, rays,
+                         shadingCalls);
+    }
+
+    // Cuplikan berbobot kosinus: pdf = cos/π, jadi E = π × rata-rata radiansi.
+    return sum * (kPi / static_cast<float>(count));
 }
 
 }  // namespace sim::reference

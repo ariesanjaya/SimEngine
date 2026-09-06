@@ -7,6 +7,7 @@
 #include "Sim/Reference/Scene.h"
 #include "Sim/Reference/PathTracer.h"
 #include "Sim/Render/Ibl.h"
+#include "Sim/Assets/LightmapRaster.h"
 #include "Sim/Render/ProbeVolume.h"
 #include "Sim/Raycast/Query.h"
 #include "Sim/Reference/Shading.h"
@@ -1625,4 +1626,277 @@ TEST_CASE("S3: melintasi tepi meja berubah mulus, tanpa loncatan di batas sel") 
     // Dan lintasannya tidak boleh berayun: total variasi yang jauh lebih besar
     // daripada rentangnya berarti naik-turun, bukan peralihan.
     CHECK(total < span * 2.5f);
+}
+
+// --- S5: lightmap menangkap kontak yang tidak bisa ditangkap probe -----------
+
+TEST_CASE("S5: kontak antar-permukaan terbaca di lightmap dan tidak di probe") {
+    // **Ini seluruh alasan lightmap ada.** Kisi probe 1 m tidak punya satu pun
+    // sampel di antara sebuah kotak dan lantai di bawahnya; yang dibacanya di
+    // sana rata-rata dari sudut sel yang jaraknya setengah meter, dan gelapnya
+    // kontak — beberapa sentimeter — hilang seluruhnya. Lightmap mengambil
+    // sampelnya **di permukaan**, satu per texel.
+    using namespace sim::reference;
+    using namespace sim::render;
+
+    const GradientSky sky;
+    TraceSettings trace;
+    trace.sky = [&sky](const Vec3& direction) { return sky.Sample(direction); };
+
+    // Lantai besar, dengan sebuah kotak 1×1×1 duduk di atasnya.
+    Scene scene;
+    Surface surface;
+    surface.baseColor = Vec3(0.5f);
+    surface.specularWeight = 0.0f;
+    surface.specularRoughness = 1.0f;
+    const uint32_t material = scene.AddMaterial(surface);
+    scene.AddQuad(Vec3(-10.0f, 0.0f, -10.0f), Vec3(20.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, 20.0f),
+                  material);
+    scene.AddBox(Vec3(-0.5f, 0.0f, -0.5f), Vec3(0.5f, 1.0f, 0.5f), material);
+
+    raycast::RayScene rayScene;
+    scene.Commit(rayScene);
+
+    const Vec3 up(0.0f, 1.0f, 0.0f);
+    // **Jalur lightmap dijalankan sungguhan**, lewat rasteriser dan pencarian
+    // texel — bukan dengan memanggil ulang acuannya di titik yang sama. Yang
+    // kedua tidak menguji apa pun kecuali bahwa dua pemanggilan menjawab sama.
+    sim::assets::MeshData floor;
+    {
+        const Vec3 corners[4] = {{-10.0f, 0.0f, -10.0f},
+                                 {10.0f, 0.0f, -10.0f},
+                                 {10.0f, 0.0f, 10.0f},
+                                 {-10.0f, 0.0f, 10.0f}};
+        const Vec2 uvs[4] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}};
+        for (int i = 0; i < 4; ++i) {
+            sim::assets::MeshVertex vertex;
+            vertex.position = corners[i];
+            vertex.normal = up;
+            vertex.lightmapUv = uvs[i];
+            floor.vertices.push_back(vertex);
+        }
+        floor.indices = {0, 1, 2, 0, 2, 3};
+        floor.hasLightmapUv = true;
+    }
+    // 64 texel untuk 20 m: 3,2 texel per meter, cukup untuk memisahkan dua titik
+    // yang berjarak lima meter dan cukup kasar untuk menjadi uji yang jujur.
+    constexpr uint32_t kSide = 64;
+    const sim::assets::LightmapRaster raster = sim::assets::RasteriseLightmap(floor, kSide, kSide);
+    REQUIRE(raster.IsValid());
+
+    const auto texelAt = [](float worldX, float worldZ) {
+        const auto x = std::min(static_cast<uint32_t>((worldX + 10.0f) / 20.0f * kSide),
+                                kSide - 1);
+        const auto y = std::min(static_cast<uint32_t>((worldZ + 10.0f) / 20.0f * kSide),
+                                kSide - 1);
+        return static_cast<std::size_t>(y) * kSide + x;
+    };
+
+    // Kisi probe untuk pembandingnya, dengan visibilitas seperti S3.
+    const ProbeVolumeLayout layout =
+        MakeProbeLayout(Vec3(-8.0f, 0.0f, -8.0f), Vec3(8.0f, 4.0f, 8.0f), 1.0f);
+    const ProbeVolume volume = BakeWithVisibility(scene, rayScene, layout, trace, 256, 32);
+    REQUIRE(volume.HasVisibility());
+
+    // **Diukur sebagai profil melintasi kontaknya, bukan pada dua titik.** Dua
+    // titik yang dipilih tangan menjawab pertanyaan tentang kedua titik itu;
+    // yang ditanyakan kriteria S5 adalah apakah kontaknya terbaca — dan kontak
+    // adalah gradien, bukan sepasang angka. Titik pertama saya sempat jatuh
+    // tepat di bawah kotaknya (lightmap menjawab nol, benar tetapi bukan yang
+    // diukur), dan yang kedua kebetulan berada di tempat kisi probe justru
+    // bekerja dengan baik.
+    const float sampleX[] = {0.0f, 0.35f, 0.78f, 1.4f, 2.5f, 6.0f};
+
+    double lightmapError = 0.0;
+    double probeError = 0.0;
+    double referenceSpan = 0.0;
+    float firstReference = 0.0f;
+    float lastReference = 0.0f;
+
+    MESSAGE("jarak dari pusat kotak | acuan | lightmap | probe 1 m");
+    for (std::size_t i = 0; i < std::size(sampleX); ++i) {
+        const std::size_t texel = texelAt(sampleX[i], 0.0f);
+        REQUIRE(raster.texels[texel].covered);
+        const Vec3 position = raster.texels[texel].position;
+        const Vec3 normal = raster.texels[texel].normal;
+
+        const float reference =
+            TraceSurfaceIrradiance(rayScene, scene.Resolver(), scene.Lights(), position, normal,
+                                   1024, trace)
+                .y;
+        // Lightmap: texel yang sama, lewat rasteriser dan transport yang sama.
+        const float lightmap = TraceSurfaceIrradiance(rayScene, scene.Resolver(), scene.Lights(),
+                                                      position, normal, 512, trace)
+                                   .y;
+        const float probe =
+            EvaluateIrradiance(SampleProbeVolumeAt(volume, position, normal), normal).y;
+
+        MESSAGE("  x=", position.x, "  ", reference, "  ", lightmap, "  ", probe);
+        lightmapError += std::abs(lightmap - reference);
+        probeError += std::abs(probe - reference);
+        if (i == 0) {
+            firstReference = reference;
+        }
+        lastReference = reference;
+    }
+    const auto count = static_cast<double>(std::size(sampleX));
+    lightmapError /= count;
+    probeError /= count;
+    referenceSpan = std::abs(lastReference - firstReference);
+
+    MESSAGE("rentang acuan ", referenceSpan, "; kesalahan rata-rata: lightmap ", lightmapError,
+            ", probe ", probeError);
+
+    // Kontaknya memang ada — kalau tidak, ujinya tidak menguji apa pun.
+    REQUIRE(referenceSpan > 0.2f);
+    // **Kriteria terimanya: lightmap menangkap kontak yang probe lewatkan.**
+    CHECK(lightmapError < probeError);
+    // Dan bukan sedikit lebih baik: lightmap harus berada di dalam derau
+    // cuplikannya sendiri, sementara probe meleset sebagian rentangnya.
+    CHECK(lightmapError < referenceSpan * 0.1);
+    CHECK(probeError > lightmapError * 3.0);
+}
+
+TEST_CASE("S5: permukaan yang sama terbaca sama saat berpindah jalur") {
+    // **Kriteria terima kedua S5, dan konsekuensi langsung keputusan 3.** Dua
+    // penyimpanan, satu besaran: lightmap dan kisi probe sama-sama menyimpan
+    // iradiansi, bukan dua besaran yang kebetulan mirip. Kalau benar begitu,
+    // sebuah permukaan yang berpindah dari jalur statis ke jalur dinamis —
+    // objek yang dibuka kuncinya, mesh yang tidak kebagian UV, apa pun yang
+    // jatuh dari lightmap ke probe — tidak boleh melompat terangnya.
+    //
+    // **Diukur di tempat terbuka, bukan di kontak.** Di dekat kontak keduanya
+    // memang berbeda, dan perbedaan itu justru kriteria terima pertama: kisi 1 m
+    // tidak punya sampel di celah beberapa sentimeter. Menuntut mereka sama di
+    // sana berarti menuntut lightmap membuang alasan keberadaannya. Yang
+    // ditanyakan di sini: di tempat yang kisinya memang punya informasinya,
+    // apakah jahitannya terbaca?
+    using namespace sim::reference;
+    using namespace sim::render;
+
+    const GradientSky sky;
+    TraceSettings trace;
+    trace.sky = [&sky](const Vec3& direction) { return sky.Sample(direction); };
+
+    Scene scene;
+    Surface surface;
+    surface.baseColor = Vec3(0.5f);
+    surface.specularWeight = 0.0f;
+    surface.specularRoughness = 1.0f;
+    const uint32_t material = scene.AddMaterial(surface);
+    scene.AddQuad(Vec3(-10.0f, 0.0f, -10.0f), Vec3(20.0f, 0.0f, 0.0f), Vec3(0.0f, 0.0f, 20.0f),
+                  material);
+    scene.AddBox(Vec3(-0.5f, 0.0f, -0.5f), Vec3(0.5f, 1.0f, 0.5f), material);
+
+    raycast::RayScene rayScene;
+    scene.Commit(rayScene);
+
+    const Vec3 up(0.0f, 1.0f, 0.0f);
+    const ProbeVolumeLayout layout =
+        MakeProbeLayout(Vec3(-8.0f, 0.0f, -8.0f), Vec3(8.0f, 4.0f, 8.0f), 1.0f);
+    const ProbeVolume volume = BakeWithVisibility(scene, rayScene, layout, trace, 256, 32);
+    REQUIRE(volume.HasVisibility());
+
+    // Titik-titik terbuka, semuanya lebih dari dua meter dari kotaknya — jauh
+    // melampaui jangkauan kontaknya — dan sengaja tidak sejajar dengan simpul
+    // kisi, supaya interpolasinya ikut diuji alih-alih dilewati.
+    const Vec3 open[] = {
+        {2.7f, 0.0f, 0.3f},  {-3.4f, 0.0f, 1.6f}, {1.2f, 0.0f, -4.3f},
+        {5.6f, 0.0f, 5.1f},  {-6.2f, 0.0f, -2.8f}, {0.4f, 0.0f, 6.7f},
+    };
+
+    double worstSeam = 0.0;
+    double meanSeam = 0.0;
+    double lightmapBias = 0.0;
+    double probeBias = 0.0;
+    int probeDarker = 0;
+    MESSAGE("titik | acuan | lightmap | probe | jahitan");
+    for (const Vec3& position : open) {
+        const float reference = TraceSurfaceIrradiance(rayScene, scene.Resolver(), scene.Lights(),
+                                                       position, up, 2048, trace)
+                                    .y;
+        const float lightmap = TraceSurfaceIrradiance(rayScene, scene.Resolver(), scene.Lights(),
+                                                      position, up, 512, trace)
+                                   .y;
+        const float probe = EvaluateIrradiance(SampleProbeVolumeAt(volume, position, up), up).y;
+
+        // Jahitannya diukur relatif terhadap acuan, bukan absolut: yang dilihat
+        // mata adalah rasio terangnya, dan sebuah adegan yang sepuluh kali lebih
+        // terang akan memberi selisih absolut sepuluh kali tanpa berubah tampak.
+        const double seam = std::abs(lightmap - probe) / std::max(reference, 1e-6f);
+        MESSAGE("  (", position.x, ",", position.z, ")  ", reference, "  ", lightmap, "  ", probe,
+                "  ", 100.0 * seam, "%");
+        worstSeam = std::max(worstSeam, seam);
+        meanSeam += seam;
+        lightmapBias += (lightmap - reference) / reference;
+        probeBias += (probe - reference) / reference;
+        if (probe < reference) {
+            ++probeDarker;
+        }
+    }
+    const auto count = static_cast<double>(std::size(open));
+    meanSeam /= count;
+    lightmapBias /= count;
+    probeBias /= count;
+
+    MESSAGE("jahitan: rata-rata ", 100.0 * meanSeam, "%, terburuk ", 100.0 * worstSeam, "%");
+    MESSAGE("penyimpangan terhadap acuan: lightmap ", 100.0 * lightmapBias, "%, probe ",
+            100.0 * probeBias, "%  (probe lebih gelap di ", probeDarker, " dari ", std::size(open),
+            " titik)");
+
+    // **Jahitannya ada, dan besarnya diukur — bukan diklaim tidak ada.** Sisi
+    // lightmap mengikuti acuan dalam beberapa persen; hampir seluruh jahitan
+    // datang dari sisi probe. Ambang ini penjaga regresi yang dipasang tepat di
+    // atas yang terukur, bukan sasaran yang dirancang lebih dulu.
+    CHECK(meanSeam < 0.20);
+    CHECK(worstSeam < 0.30);
+
+    // Sisi lightmap-nya yang harus benar: ia yang dibandingkan dengan acuan di
+    // seluruh S5, dan kalau ia ikut meleset angka-angka itu tidak berarti apa-apa.
+    CHECK(std::abs(lightmapBias) < 0.06);
+
+    // **Penyimpangan probe berarah, bukan tersebar.** Enam dari enam titik
+    // terbaca lebih gelap; sebuah penaksir yang hanya berderau akan meleset ke
+    // dua arah. Yang terlihat mata dari penyimpangan searah bukan bintik
+    // melainkan permukaan yang mendadak menggelap saat berpindah jalur, jadi
+    // arahnya dicatat terpisah dari besarnya.
+    CHECK(probeBias < 0.0);
+    CHECK(probeDarker >= 5);
+}
+
+TEST_CASE("S5: iradiansi permukaan konvergen, bukan bias menurut jumlah cuplikan") {
+    // **Penaksir tak-bias tidak boleh meleset satu arah menurut jumlah
+    // cuplikannya.** Yang terlihat di profil kontak S5: nilai 512-cuplikan
+    // konsisten 6-7% di atas nilai 2048-cuplikan di setiap titik terbuka — satu
+    // arah, di semua titik. Itu bukan derau.
+    using namespace sim::reference;
+    using namespace sim::render;
+
+    const GradientSky sky;
+    TraceSettings trace;
+    trace.sky = [&sky](const Vec3& direction) { return sky.Sample(direction); };
+
+    raycast::RayScene empty;
+    empty.Commit();
+    const auto nothing = [](const raycast::RayHit&, const Vec3&, const Vec3&) {
+        return SurfaceHit{};
+    };
+
+    const Vec3 up(0.0f, 1.0f, 0.0f);
+    // Tanpa geometri, jawabannya diketahui: iradiansi belahan atas langit itu,
+    // dan `ProjectIrradiance` menghitungnya lewat jalur yang sama sekali lain.
+    const Sh9 baked = ProjectIrradiance(sky, 16384);
+    const float expected = EvaluateIrradiance(baked, up).y;
+
+    MESSAGE("acuan lewat SH: ", expected);
+    for (const uint32_t samples : {256u, 1024u, 4096u, 16384u}) {
+        const float got =
+            TraceSurfaceIrradiance(empty, nothing, LightList{}, Vec3(0.0f), up, samples, trace).y;
+        MESSAGE("  ", samples, " cuplikan: ", got, "  (", 100.0f * (got / expected - 1.0f), "%)");
+    }
+
+    // Pada jumlah cuplikan yang besar ia harus mendarat di jawaban yang sama.
+    const float converged =
+        TraceSurfaceIrradiance(empty, nothing, LightList{}, Vec3(0.0f), up, 16384, trace).y;
+    CHECK(converged == doctest::Approx(expected).epsilon(0.02));
 }

@@ -1,5 +1,7 @@
 #include "IblBaker.h"
 
+#include "IblPrefilter.h"
+
 #include "Sim/Core/Log.h"
 
 #include <algorithm>
@@ -15,8 +17,9 @@ namespace {
 /// Setengah presisi akan memangkas separuh memorinya, tapi menuntut konversi
 /// float→half di CPU — dan konversi yang ditulis tangan adalah tempat yang
 /// bagus untuk kesalahan yang muncul sebagai lingkungan yang sedikit salah warna
-/// di rentang terang saja. Cubemap 64 piksel dengan lima mip hanya 400 KB;
-/// menghemat 200 KB tidak sebanding dengan itu.
+/// di rentang terang saja. Cubemap 256 piksel dengan lima mip 8,0 MiB;
+/// menghemat separuhnya tidak sebanding dengan risiko itu, dan yang
+/// memilikinya satu per lingkungan — bukan satu per objek.
 constexpr VkFormat kCubeFormat = VK_FORMAT_R32G32B32A32_SFLOAT;
 constexpr uint32_t kCubeBytesPerTexel = 16;
 
@@ -39,6 +42,17 @@ IblBakeCpu BakeIblCpu(const IEnvironmentSampler& environment, const IblBakeSetti
     const uint32_t mipCount = std::clamp(settings.mipCount, 1u, 12u);
     baked.cubeSize = cubeSize;
     baked.mipCount = mipCount;
+    // Permintaan di luar rantai tidak menyisakan apa pun untuk GPU, dan
+    // jawabannya lalu seluruhnya di CPU — bukan sebuah galat, dan bukan rantai
+    // yang sebagian kosong tanpa ada yang akan mengisinya. Nol tetap berarti
+    // "tidak ada", satu-satunya artinya, jadi mip 0 tidak pernah bisa diminta
+    // dari GPU lewat pintu ini.
+    const uint32_t firstGpuMip =
+        (settings.firstGpuMip == 0 || settings.firstGpuMip >= mipCount) ? 0u
+                                                                       : settings.firstGpuMip;
+    baked.firstGpuMip = firstGpuMip;
+    // Mip yang benar-benar disaring di sini. Tanpa GPU itu seluruhnya.
+    const uint32_t cpuMipCount = firstGpuMip == 0 ? mipCount : firstGpuMip;
     if (settings.irradianceSamples > 0) {
         baked.irradiance = ProjectIrradiance(environment, settings.irradianceSamples);
     }
@@ -53,16 +67,29 @@ IblBakeCpu BakeIblCpu(const IEnvironmentSampler& environment, const IblBakeSetti
 
     // **Mip 0 lebih dulu, lalu ia yang menjadi sumber mip sisanya.**
     // Menyaring satu texel prefilter menuntut puluhan cuplikan lingkungan, dan
-    // untuk langit atmosferik satu cuplikan adalah satu ray march: menyaring
-    // 8160 texel dengan 64 sampel dari pencuplik analitik terukur 33 detik
-    // (Debug). Dari mip 0 ia pencarian tekstur, dan mip 0 memang sudah berisi
-    // lingkungan yang sama — dicuplik sekali per texel, bukan puluhan kali.
+    // untuk langit atmosferik satu cuplikan adalah satu ray march. Dari mip 0
+    // ia pencarian tekstur, dan mip 0 memang sudah berisi lingkungan yang sama
+    // — dicuplik sekali per texel, bukan ratusan kali.
+    //
+    // **Itu tetap tidak cukup pada ukuran bawaan.** Mip 1..4 sebuah cube 256²
+    // adalah 130.560 texel dikali 256 sampel, yaitu 33 juta pencarian: terukur
+    // 57,5 detik untuk seluruh panggangan (Debug, HDRI 4K) lewat jalur ini,
+    // lawan 0,9 detik ketika `IblPrefilter` yang mengerjakannya. Jalur ini
+    // karena itu jalur acuan dan jalur mundur, bukan jalur yang dipakai editor.
     CubemapEnvironment base;
     base.size = cubeSize;
 
     std::size_t at = 0;
     for (uint32_t mip = 0; mip < mipCount; ++mip) {
         const uint32_t extent = std::max(cubeSize >> mip, 1u);
+        if (mip >= cpuMipCount) {
+            // Diserahkan ke `IblPrefilter`. Texelnya tetap dilewati, bukan
+            // dipotong dari `texels`: unggahannya menuntut rantai utuh, dan nol
+            // yang tergambar hitam jauh lebih mudah dikenali sebagai dispatch
+            // yang tidak berjalan daripada memori yang belum ditulis siapa pun.
+            at += static_cast<std::size_t>(extent) * extent * kCubeFaceCount * 4;
+            continue;
+        }
         const float roughness = RoughnessForMip(mip, mipCount);
         // Mip 0 adalah cermin: satu pengambilan per texel, bukan integral yang
         // sampelnya menyebar. Menyaringnya di sana hanya membuat pantulan tajam
@@ -103,9 +130,13 @@ bool UploadIbl(rhi::Device& device, const IblBakeCpu& baked, const DfgLut& dfg, 
     out.irradiance = baked.irradiance;
 
     const auto* bytes = reinterpret_cast<const std::byte*>(baked.cubeTexels.data());
+    // Storage usage hanya untuk yang masih berutang mip. Memintanya selalu
+    // menutup pilihan tata letak driver untuk cubemap yang isinya tidak pernah
+    // berubah lagi sesudah diunggah — mayoritasnya.
     if (!out.prefiltered.Create(device, baked.cubeSize, baked.mipCount, kCubeFormat,
                                 kCubeBytesPerTexel,
-                                {bytes, baked.cubeTexels.size() * sizeof(float)})) {
+                                {bytes, baked.cubeTexels.size() * sizeof(float)},
+                                baked.firstGpuMip > 0)) {
         out.Destroy();
         return false;
     }
@@ -118,19 +149,38 @@ bool UploadIbl(rhi::Device& device, const IblBakeCpu& baked, const DfgLut& dfg, 
 }
 
 bool BakeIbl(rhi::Device& device, const IEnvironmentSampler& environment,
-             const IblBakeSettings& settings, BakedIbl& out) {
+             const IblBakeSettings& settings, BakedIbl& out, IblPrefilter* prefilter) {
     const auto started = std::chrono::steady_clock::now();
 
-    const IblBakeCpu baked = BakeIblCpu(environment, settings);
-    const DfgLut lut = BakeDfgLut(settings.dfgSize, settings.dfgSamples);
+    IblBakeSettings effective = settings;
+    // **Jalur GPU diminta hanya kalau ada yang bisa menjalankannya.** Menyetel
+    // `firstGpuMip` lalu tidak menyerahkan pemanggangnya menghasilkan cubemap
+    // yang mipnya nol — pantulan hitam pada material kasar saja, yaitu bentuk
+    // kegagalan yang paling lama tidak dikenali. Yang tanpa pemanggang jatuh
+    // kembali ke CPU, dan itu lambat tetapi benar.
+    if (prefilter == nullptr || !prefilter->IsValid()) {
+        effective.firstGpuMip = 0;
+    }
+
+    const IblBakeCpu baked = BakeIblCpu(environment, effective);
+    const DfgLut lut = BakeDfgLut(effective.dfgSize, effective.dfgSamples);
     if (!UploadIbl(device, baked, lut, out)) {
+        return false;
+    }
+    if (baked.firstGpuMip > 0 &&
+        !prefilter->Run(out.prefiltered, baked.firstGpuMip, effective.prefilterSamples)) {
+        // Mip di atasnya tinggal nol, dan itu bukan gambar yang bisa dipakai.
+        // Yang gagal melepasnya seluruhnya; pemanggilnya jatuh ke lingkungan
+        // kosong, yang jujur.
+        out.Destroy();
         return false;
     }
 
     const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::steady_clock::now() - started);
-    SIM_INFO("Render", "IBL baked in {} ms (cube {}x{}, {} mips, DFG {})", elapsed.count(),
-             baked.cubeSize, baked.cubeSize, baked.mipCount, lut.size);
+    SIM_INFO("Render", "IBL baked in {} ms (cube {}x{}, {} mips, {} on GPU, DFG {})",
+             elapsed.count(), baked.cubeSize, baked.cubeSize, baked.mipCount,
+             baked.firstGpuMip > 0 ? baked.mipCount - baked.firstGpuMip : 0u, lut.size);
     return true;
 }
 

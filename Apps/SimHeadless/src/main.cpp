@@ -20,6 +20,7 @@
 #include "Sim/Editor/AiTools.h"
 #include "Sim/Editor/EditorApp.h"
 #include "Sim/Editor/EditorContext.h"
+#include "Sim/SceneView/LightmapBakery.h"
 #include "Sim/SceneView/ProbeBakery.h"
 #include "Sim/SceneView/SceneView.h"
 #include "Sim/SceneView/Selection.h"
@@ -114,12 +115,15 @@ void PrintUsage() {
         "  --bench-cull-limit <n>        gambar hanya permukaan bernomor < n\n"
         "  --bench-fixed-exposure        eksposur manual; wajib untuk membandingkan gambar\n"
         "  --bench-gi-debug <view>       off|albedo|normal|irradiance|raycount|steps|layers\n"
-        "  --bench-draw-mode <mode>      material|unlit|clay|material+wireframe|wireframe\n"
+        "  --bench-draw-mode <mode>      material|unlit|clay|material+wireframe|wireframe|\n"
+        "                                detail-lighting|reflections|base-color|normal|\n"
+        "                                roughness|metallic\n"
         "  --bench-ev <ev100>            eksposur manual pada EV100 ini\n"
         "  --bench-no-screen-trace       matikan lapis screen-space; lihat SDF sendirian\n"
         "  --bench-furnace               uji tungku: langit seragam 1, albedo 1, tanpa matahari\n"
         "  --bench-probe-spacing <m>     paksa jarak kisi probe; 0 mematikan kisinya (S1)\n"
         "  --bench-probe-debug           isi probe dengan papan catur; kontrol positif (S1)\n"
+        "  --bench-lightmap <texel/m>    panggang lightmap statis lalu pakai (S5)\n"
         "  --bench-probe-bake <spp>      panggang transport ke kisi probe lalu pakai (S2)\n"
         "  --dump-mesh <file> --dump-out <json>  material dan ruas sebuah berkas mesh\n"
         "  --dump-fbx-material <fbx>     setiap properti tiap material, apa adanya\n"
@@ -877,6 +881,7 @@ int main(int argc, char** argv) {
         bool giEffective = false;
         bool probeDebugPattern = false;
         uint32_t probeBakeSamples = 0;
+        float lightmapTexelsPerMeter = 0.0f;
         for (int at = 1; at < argc; ++at) {
             if (argv[at] == nullptr) {
                 continue;
@@ -928,6 +933,11 @@ int main(int argc, char** argv) {
         // seluruh bayangan ke nol, dan dua adegan yang berbeda seratus kali di
         // sana tetap terlihat sama hitamnya. Menurunkan EV mengangkat bayangan
         // itu ke rentang yang masih punya angka.
+        if (const std::string_view value = FlagValue(argc, argv, "--bench-lightmap");
+            !value.empty()) {
+            lightmapTexelsPerMeter = std::strtof(std::string(value).c_str(), nullptr);
+        }
+
         if (const std::string_view value = FlagValue(argc, argv, "--bench-probe-bake");
             !value.empty()) {
             probeBakeSamples = static_cast<uint32_t>(std::strtoul(std::string(value).c_str(),
@@ -1036,12 +1046,23 @@ int main(int argc, char** argv) {
         render::DrawMode drawMode = render::DrawMode::Material;
         if (const std::string_view value = FlagValue(argc, argv, "--bench-draw-mode");
             !value.empty()) {
-            static constexpr std::array<std::pair<std::string_view, render::DrawMode>, 5> kModes{
+            // **Seluruh mode ada di sini, termasuk yang diagnostik.** Alat
+            // ukur yang hanya bisa menjalankan sebagian mode adalah alat yang
+            // tidak bisa membandingkan gambar mode yang lain — dan mode
+            // diagnostik justru yang paling butuh perbandingan, karena tidak
+            // ada yang memandanginya cukup sering untuk menyadari ia berubah.
+            static constexpr std::array<std::pair<std::string_view, render::DrawMode>, 11> kModes{
                 {{"material", render::DrawMode::Material},
                  {"unlit", render::DrawMode::Unlit},
                  {"clay", render::DrawMode::Clay},
                  {"material+wireframe", render::DrawMode::MaterialWireframe},
-                 {"wireframe", render::DrawMode::Wireframe}}};
+                 {"wireframe", render::DrawMode::Wireframe},
+                 {"detail-lighting", render::DrawMode::DetailLighting},
+                 {"reflections", render::DrawMode::Reflections},
+                 {"base-color", render::DrawMode::BaseColor},
+                 {"normal", render::DrawMode::Normal},
+                 {"roughness", render::DrawMode::Roughness},
+                 {"metallic", render::DrawMode::Metallic}}};
             bool found = false;
             for (const auto& [name, mode] : kModes) {
                 if (value == name) {
@@ -1070,6 +1091,7 @@ int main(int argc, char** argv) {
         uint64_t lastSerial = 0;
         bool haveBounds = false;
         bool probeBaked = false;
+        bool lightmapBaked = false;
         Vec3 boundsMin(0.0f);
         Vec3 boundsMax(0.0f);
         uint32_t gpuSamples = 0;
@@ -1196,6 +1218,76 @@ int main(int argc, char** argv) {
             // ada satu pun mesh yang siap, dan panggangan yang menyerah di sana
             // memanggang dunia kosong — yang keluar bukan galat melainkan kisi
             // yang menjawab langit dari mana pun.
+#if SIM_WITH_PROBE_BAKE
+            // Panggangan lightmap, sekali sebelum frame yang diukur — alasan
+            // yang sama dengan panggangan probe di bawahnya.
+            if (lightmapTexelsPerMeter > 0.0f && !lightmapBaked) {
+                std::vector<view::PickItem> items;
+                sceneView.BakeItems(items);
+
+                view::LightmapBakery bakery(&tasks);
+                bakery.SetCache(app.Context().meshGeometry);
+                view::LightmapBakery::Settings bakeSettings;
+                // Bendera menimpa levelnya, seperti bendera bench yang lain.
+                bakeSettings.texelsPerMeter = lightmapTexelsPerMeter;
+                bakeSettings.samplesPerTexel = 64;
+                bakeSettings.cacheDir = app.Context().configDir / "LightmapCache";
+
+                render::ViewportDesc skyDesc;
+                editor::ApplySceneSky(*app.Context().world, skyDesc);
+                render::AtmosphereSky atmosphere;
+                atmosphere.intensity = skyDesc.skyIntensity;
+                atmosphere.cameraHeightKm = skyDesc.cameraHeightKm;
+                Vec3 lightmapSun(0.0f, -1.0f, 0.0f);
+                for (const render::LightInstance& light : sceneView.Scene().lights) {
+                    if (light.kind != render::LightKind::Directional) {
+                        continue;
+                    }
+                    lightmapSun = -light.direction;
+                    bakeSettings.sunIrradiance = light.color * light.intensity;
+                    break;
+                }
+                bakeSettings.sunDirection = lightmapSun;
+                atmosphere.sunDirection = -lightmapSun;
+                atmosphere.Prepare();
+                uint64_t skyKey = 1469598103934665603ull;
+                const auto mixLightmapSky = [&skyKey](const void* data, std::size_t length) {
+                    const auto* bytes = static_cast<const uint8_t*>(data);
+                    for (std::size_t i = 0; i < length; ++i) {
+                        skyKey = (skyKey ^ bytes[i]) * 1099511628211ull;
+                    }
+                };
+                mixLightmapSky(&skyDesc.skyIntensity, sizeof(skyDesc.skyIntensity));
+                mixLightmapSky(&lightmapSun.x, sizeof(float) * 3);
+                bakeSettings.skyKey = skyKey;
+
+                const auto started = std::chrono::steady_clock::now();
+                if (bakery.Bake(items,
+                                [atmosphere](const Vec3& direction) {
+                                    return atmosphere.Sample(direction);
+                                },
+                                bakeSettings)) {
+                    tasks.WaitIdle();
+                    lightmapBaked = true;
+                    if (std::shared_ptr<const render::Lightmap> atlas = bakery.Take()) {
+                        const auto elapsed = std::chrono::duration<double>(
+                            std::chrono::steady_clock::now() - started);
+                        // Dibedakan karena pada cache hit `Bake` pulang
+                        // seketika, jadi waktu di sini mengukur pemuatan mesh
+                        // dan bukan panggangan.
+                        SIM_INFO("Bench", "lightmap {}: {}x{} atlas, {} objects, {:.2f} s, {:.1f} MB",
+                                 bakery.LoadedFromCache() ? "cache" : "bake", atlas->width,
+                                 atlas->height, atlas->placements.size(), elapsed.count(),
+                                 static_cast<double>(atlas->GpuBytes()) / (1024.0 * 1024.0));
+                        sceneView.SetLightmap(atlas);
+                        renderer->SetLightmap(std::move(atlas));
+                    } else {
+                        SIM_WARN("Bench", "lightmap bake produced nothing");
+                    }
+                }
+            }
+#endif
+
             if (probeBakeSamples > 0 && !probeBaked) {
                 Vec3 bakeMin;
                 Vec3 bakeMax;
@@ -1498,6 +1590,18 @@ int main(int argc, char** argv) {
                           "- Material: %s — %u ikatan descriptor, %u draw per frame\n",
                           renderer->UsesBindlessMaterials() ? "bindless" : "set per ruas",
                           stats.descriptorSetBinds, stats.drawCalls);
+            report += line;
+            // **Dari mana draw call itu datang, di baris berikutnya.** Alasan
+            // yang sama dengan baris di atas: sebuah total yang tidak bisa
+            // dipecah adalah total yang harus diukur ulang setiap kali
+            // seseorang bertanya pass mana yang membayarnya. Muka bayangan
+            // yang mengalikannya — pass atlas merekam ulang seluruh daftar
+            // ruas untuk tiap muka — tidak terlihat sama sekali dari totalnya.
+            std::snprintf(line, sizeof(line),
+                          "- Permukaan: %u instance buram, %u tergambar, %u caster, "
+                          "%u muka bayangan (%u lampu tak kebagian)\n",
+                          stats.opaqueInstances, stats.opaqueDrawn, stats.shadowCasters,
+                          stats.shadowFaces, stats.shadowLightsDropped);
             report += line;
             std::snprintf(line, sizeof(line), "- Jalan selesai dalam %.2f s\n\n", wallSeconds);
             report += line;

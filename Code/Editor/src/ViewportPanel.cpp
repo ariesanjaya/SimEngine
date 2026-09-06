@@ -116,12 +116,91 @@ constexpr Vec4 kSelectionColor{1.0f, 0.62f, 0.20f, 1.0f};
 // bukan "kalau kutekan jadi apa". Tombol perspektif/ortografi di sebelahnya
 // sudah memakai kesepakatan yang sama.
 
+/// Dari mana viewport memandang.
+///
+/// **Sebuah konsep editor, bukan konsep renderer.** Yang diterima
+/// `ViewportDesc` tetap sebuah `render::Camera` biasa; yang di sini hanya
+/// memutuskan bagaimana kamera itu disusun. Renderer tidak pernah tahu bahwa
+/// ada yang namanya "tampak Depan".
+enum class Viewpoint : uint8_t {
+    /// Orbit bebas, proyeksi perspektif. Bawaannya.
+    Perspective,
+    Front,
+    Back,
+    Left,
+    Right,
+    Top,
+    Bottom,
+    /// Memandang lewat sebuah entity berkamera di dalam adegan.
+    SceneCamera,
+};
+
+/// Tampak terkunci sumbu: ortografik, dan rotasinya tidak bisa diseret.
+///
+/// `SceneCamera` sengaja tidak termasuk — ia bukan tampak sumbu, dan
+/// proyeksinya ditentukan `CameraComponent` miliknya sendiri.
+bool IsAxisView(Viewpoint viewpoint) {
+    return viewpoint != Viewpoint::Perspective && viewpoint != Viewpoint::SceneCamera;
+}
+
+const char* ViewpointLabel(Viewpoint viewpoint) {
+    switch (viewpoint) {
+        case Viewpoint::Front: return "Front";
+        case Viewpoint::Back: return "Back";
+        case Viewpoint::Left: return "Left";
+        case Viewpoint::Right: return "Right";
+        case Viewpoint::Top: return "Top";
+        case Viewpoint::Bottom: return "Bottom";
+        case Viewpoint::SceneCamera: return "Camera";
+        case Viewpoint::Perspective: break;
+    }
+    return "Perspective";
+}
+
+const char* ViewpointIcon(Viewpoint viewpoint) {
+    switch (viewpoint) {
+        case Viewpoint::SceneCamera: return icons::kCamera;
+        case Viewpoint::Perspective: return icons::kPerspective;
+        default: break;
+    }
+    return icons::kOrthographic;
+}
+
+/// Yaw dan pitch yang menempatkan kamera pada sumbu sebuah tampak terkunci.
+///
+/// **Diturunkan dari `OrbitCamera::Offset()`, yang mengembalikan arah dari titik
+/// fokus *menuju* kamera** — bukan arah pandang. Membalik keduanya menghasilkan
+/// tampak Depan yang sebenarnya Belakang, dan tidak ada satu pun galat yang
+/// menyertainya: adegan simetris terlihat benar sampai seseorang memindahkan
+/// satu benda.
+///
+/// Pitch tampak Atas/Bawah tepat ±90°, bukan dijepit seperti navigasi bebas.
+/// Itu yang menuntut sumbu atas yang aman di `ApplyTo`.
+void AxisViewAngles(Viewpoint viewpoint, float& yaw, float& pitch) {
+    pitch = 0.0f;
+    switch (viewpoint) {
+        case Viewpoint::Front: yaw = 0.0f; return;                  // kamera di +Z
+        case Viewpoint::Back: yaw = kPi; return;                    // kamera di -Z
+        case Viewpoint::Right: yaw = -kHalfPi; return;              // kamera di +X
+        case Viewpoint::Left: yaw = kHalfPi; return;                // kamera di -X
+        case Viewpoint::Top: yaw = 0.0f; pitch = kHalfPi; return;   // kamera di +Y
+        case Viewpoint::Bottom: yaw = 0.0f; pitch = -kHalfPi; return;
+        default: yaw = 0.0f; return;
+    }
+}
+
 const char* ShadingIcon(render::DrawMode mode) {
     switch (mode) {
         case render::DrawMode::Unlit: return icons::kShadingUnlit;
         case render::DrawMode::Clay: return icons::kShadingClay;
         case render::DrawMode::MaterialWireframe: return icons::kShadingMaterialWireframe;
         case render::DrawMode::Wireframe: return icons::kShadingWireframe;
+        case render::DrawMode::DetailLighting: return icons::kShadingDetailLighting;
+        case render::DrawMode::Reflections: return icons::kShadingReflections;
+        case render::DrawMode::BaseColor: return icons::kShadingBaseColor;
+        case render::DrawMode::Normal: return icons::kShadingNormal;
+        case render::DrawMode::Roughness: return icons::kShadingRoughness;
+        case render::DrawMode::Metallic: return icons::kShadingMetallic;
         case render::DrawMode::Material: break;
     }
     return icons::kShadingMaterial;
@@ -133,6 +212,12 @@ const char* ShadingLabel(render::DrawMode mode) {
         case render::DrawMode::Clay: return "Clay (lighting only)";
         case render::DrawMode::MaterialWireframe: return "Material + wireframe";
         case render::DrawMode::Wireframe: return "Wireframe";
+        case render::DrawMode::DetailLighting: return "Detail lighting";
+        case render::DrawMode::Reflections: return "Reflections";
+        case render::DrawMode::BaseColor: return "Base color";
+        case render::DrawMode::Normal: return "Normal";
+        case render::DrawMode::Roughness: return "Roughness";
+        case render::DrawMode::Metallic: return "Metallic";
         case render::DrawMode::Material: break;
     }
     return "Material";
@@ -157,6 +242,17 @@ render::DrawMode NextDrawMode(render::DrawMode mode) {
         case render::DrawMode::Unlit: return render::DrawMode::Clay;
         case render::DrawMode::Clay: return render::DrawMode::MaterialWireframe;
         case render::DrawMode::MaterialWireframe: return render::DrawMode::Wireframe;
+        // **Mode diagnostik tidak ikut diputari, ia keluar.** Yang berputar
+        // dipakai bolak-balik antara mode yang setara selagi bekerja; enam mode
+        // diagnostik di dalam putaran yang sama berarti sebelas tekan untuk
+        // kembali ke Material — dan yang menekannya sedang menuju ke sana,
+        // bukan sedang menjelajah.
+        case render::DrawMode::DetailLighting:
+        case render::DrawMode::Reflections:
+        case render::DrawMode::BaseColor:
+        case render::DrawMode::Normal:
+        case render::DrawMode::Roughness:
+        case render::DrawMode::Metallic:
         case render::DrawMode::Wireframe: break;
     }
     return render::DrawMode::Material;
@@ -283,7 +379,20 @@ struct OrbitCamera {
 
     void ApplyTo(render::Camera& camera) const {
         camera.position = focus + Offset() * distance;
-        camera.rotation = glm::quatLookAt(Forward(), kUp);
+        const Vec3 forward = Forward();
+        // **Sumbu atas dipilih, bukan selalu `kUp`.** `quatLookAt` tidak
+        // terdefinisi ketika arah pandang sejajar sumbu atasnya, dan tampak
+        // Atas/Bawah adalah persis arah itu — pitch tepat ±90°, yang tidak
+        // pernah dihasilkan navigasi bebas karena `Look` menjepitnya sedikit di
+        // bawah. Yang muncul tanpa cabang ini bukan gambar yang miring
+        // melainkan quaternion NaN, dan viewport yang kosong.
+        //
+        // −Z dipilih sebagai atas layar saat memandang lurus ke bawah: itu yang
+        // membuat tampak Atas terbaca seperti denah — +X ke kanan, +Z ke bawah.
+        const Vec3 up = std::abs(forward.y) > 0.999f
+                            ? Vec3(0.0f, 0.0f, forward.y > 0.0f ? 1.0f : -1.0f)
+                            : kUp;
+        camera.rotation = glm::quatLookAt(forward, up);
     }
 
     /// deltaPitch positif berarti kamera naik dan pandangan menunduk.
@@ -390,6 +499,11 @@ public:
                 context.probeVolume = std::move(baked);
             }
         }
+        if (context.lightmapBakery != nullptr) {
+            if (std::shared_ptr<const render::Lightmap> baked = context.lightmapBakery->Take()) {
+                context.lightmap = std::move(baked);
+            }
+        }
 #endif
         // **Dibandingkan, bukan dipasang saat selesai memanggang.** Kisinya juga
         // bisa *hilang* — level yang ditutup melepasnya — dan sebuah pemasangan
@@ -399,6 +513,13 @@ public:
         if (pushedProbes_ != context.probeVolume) {
             pushedProbes_ = context.probeVolume;
             renderer->SetProbeVolume(pushedProbes_);
+        }
+        // Dibandingkan, bukan dipasang saat selesai memanggang — alasan yang
+        // sama: atlasnya juga bisa hilang saat level berganti.
+        if (pushedLightmap_ != context.lightmap) {
+            pushedLightmap_ = context.lightmap;
+            sceneView_.SetLightmap(pushedLightmap_);
+            renderer->SetLightmap(pushedLightmap_);
         }
 
         HandleCameraInput();
@@ -487,8 +608,27 @@ public:
             context.cameraRequest.pending = false;
         }
 
-        desc.camera.orthographic = orthographic_;
+        // **Tampak terkunci menyetel sudutnya tiap frame, bukan sekali saat
+        // dipilih.** Perintah kamera dari luar panel — `viewport.capture` milik
+        // track AI — menulis yaw dan pitch tepat di atas sini, dan tampak yang
+        // hanya disetel sekali akan diam-diam berputar begitu perintah itu
+        // datang. Yang terlihat bukan galat melainkan tampak Depan yang bukan
+        // depan lagi.
+        if (IsAxisView(viewpoint_)) {
+            AxisViewAngles(viewpoint_, camera_.yaw, camera_.pitch);
+            camera_.ApplyTo(desc.camera);
+        }
+
+        desc.camera.orthographic = orthographic_ || IsAxisView(viewpoint_);
         desc.camera.orthoHeight = camera_.distance;
+
+        // Memandang lewat kamera adegan menggantikan seluruh kameranya, bukan
+        // sebagian: posisi, rotasi, dan proyeksinya datang dari entity itu.
+        // Mencampurnya dengan `camera_` berarti bidang dekat editor dipakai
+        // menggambar apa yang seharusnya dilihat kamera adegan.
+        if (viewpoint_ == Viewpoint::SceneCamera) {
+            ApplySceneCamera(context, desc.camera);
+        }
 
         renderer->Render(desc, sceneView_.Scene());
 
@@ -705,6 +845,12 @@ private:
         if (!ImGui::IsMouseDown(ImGuiMouseButton_Right)) {
             flying_ = false;
         }
+        // Terbang mengubah yaw dan pitch, yaitu persis dua angka yang dikunci
+        // tampak sumbu — dan pada kamera adegan ia menerbangkan kamera editor
+        // yang sedang tidak dipakai menggambar apa pun.
+        if (viewpoint_ != Viewpoint::Perspective) {
+            flying_ = false;
+        }
 
         if (flying_) {
             const ImVec2 delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Right);
@@ -738,7 +884,12 @@ private:
         if (io.MouseWheel != 0.0f) {
             camera_.Zoom(io.MouseWheel);
         }
-        if (io.KeyAlt && !OverlayOwns(ImGuiMouseButton_Left) &&
+        // **Rotasi mati pada tampak terkunci; geser dan zoom tidak.** Sebuah
+        // tampak Atas yang bisa diputar bukan tampak Atas lagi, dan yang
+        // memutarnya tidak punya cara menemukan kembali sudut tepatnya. Yang
+        // tetap hidup justru dua yang dipakai bekerja di tampak ortografik:
+        // menggeser bidangnya dan mengubah cakupannya.
+        if (io.KeyAlt && !IsAxisView(viewpoint_) && !OverlayOwns(ImGuiMouseButton_Left) &&
             ImGui::IsMouseDragging(ImGuiMouseButton_Left)) {
             const ImVec2 delta = ImGui::GetMouseDragDelta(ImGuiMouseButton_Left);
             ImGui::ResetMouseDragDelta(ImGuiMouseButton_Left);
@@ -749,6 +900,133 @@ private:
             ImGui::ResetMouseDragDelta(ImGuiMouseButton_Middle);
             camera_.Pan(delta.x, delta.y);
         }
+    }
+
+    /// Pemilih titik pandang. Mengembalikan true selama ia memegang pointer.
+    bool DrawViewpointCombo(EditorContext& context) {
+        scene::World* world = context.world;
+        const bool namedCamera = viewpoint_ == Viewpoint::SceneCamera && world != nullptr &&
+                                 world->IsAlive(viewpointCamera_);
+        char label[160];
+        std::snprintf(label, sizeof(label), "%s  %s",
+                      namedCamera ? icons::kCamera : ViewpointIcon(viewpoint_),
+                      namedCamera ? world->NameOf(viewpointCamera_).c_str()
+                                  : ViewpointLabel(viewpoint_));
+
+        const auto entry = [this](Viewpoint kind) {
+            char item[64];
+            std::snprintf(item, sizeof(item), "%s  %s", ViewpointIcon(kind),
+                          ViewpointLabel(kind));
+            if (ImGui::Selectable(item, viewpoint_ == kind)) {
+                viewpoint_ = kind;
+                viewpointCamera_ = scene::kNullEntity;
+            }
+        };
+
+        bool open = false;
+        if (ImGui::BeginCombo("##viewpoint", label)) {
+            open = true;
+            entry(Viewpoint::Perspective);
+            ImGui::Separator();
+            entry(Viewpoint::Front);
+            entry(Viewpoint::Back);
+            entry(Viewpoint::Left);
+            entry(Viewpoint::Right);
+            entry(Viewpoint::Top);
+            entry(Viewpoint::Bottom);
+            ImGui::Separator();
+            // **Kamera adegan didaftar walau kosong.** Sebuah bagian yang
+            // menghilang ketika tidak ada isinya membuat orang mengira fiturnya
+            // tidak ada; sebuah baris yang menyebutkan ketiadaannya membuat
+            // mereka tahu apa yang harus dibuat.
+            const std::vector<scene::Entity> cameras =
+                world != nullptr ? SceneCameras(*world) : std::vector<scene::Entity>{};
+            if (cameras.empty()) {
+                ImGui::BeginDisabled();
+                ImGui::TextUnformatted("No cameras in scene");
+                ImGui::EndDisabled();
+            }
+            for (const scene::Entity camera : cameras) {
+                char item[160];
+                std::snprintf(item, sizeof(item), "%s  %s", icons::kCamera,
+                              world->NameOf(camera).c_str());
+                ImGui::PushID(static_cast<int>(static_cast<uint32_t>(camera)));
+                if (ImGui::Selectable(item, viewpoint_ == Viewpoint::SceneCamera &&
+                                                viewpointCamera_ == camera)) {
+                    viewpoint_ = Viewpoint::SceneCamera;
+                    viewpointCamera_ = camera;
+                }
+                ImGui::PopID();
+            }
+            ImGui::EndCombo();
+        }
+        return open || ImGui::IsItemHovered() || ImGui::IsItemActive();
+    }
+
+    /// Mengumpulkan entity berkamera, urut sesuai hierarki.
+    ///
+    /// **Disusun ulang tiap kali menunya dibuka, bukan disimpan.** Kamera bisa
+    /// ditambah, dihapus, dan diganti nama kapan saja; sebuah daftar yang
+    /// di-cache adalah daftar yang suatu saat menawarkan kamera yang tidak ada
+    /// lagi. Adegan seukuran apa pun yang muat di editor punya kamera dalam
+    /// hitungan belasan, jadi jalan-jalannya tidak berarti apa-apa dibanding
+    /// frame yang sedang digambar di belakang menunya.
+    static void CollectCameras(scene::World& world, scene::Entity entity,
+                               std::vector<scene::Entity>& out) {
+        if (world.TryGet<scene::CameraComponent>(entity) != nullptr) {
+            out.push_back(entity);
+        }
+        for (const scene::Entity child : world.ChildrenOf(entity)) {
+            CollectCameras(world, child, out);
+        }
+    }
+
+    static std::vector<scene::Entity> SceneCameras(scene::World& world) {
+        std::vector<scene::Entity> cameras;
+        for (const scene::Entity root : world.Roots()) {
+            CollectCameras(world, root, cameras);
+        }
+        return cameras;
+    }
+
+    /// Menyusun kamera viewport dari sebuah entity berkamera.
+    ///
+    /// Entity yang sudah mati — atau yang komponennya dicabut — mengembalikan
+    /// viewport ke perspektif. **Dikembalikan, bukan dibiarkan membeku pada
+    /// matriks terakhirnya:** viewport yang berhenti menanggapi navigasi tanpa
+    /// satu pun petunjuk kenapa adalah viewport yang terbaca rusak.
+    void ApplySceneCamera(EditorContext& context, render::Camera& camera) {
+        scene::World* world = context.world;
+        const scene::CameraComponent* component =
+            world != nullptr && world->IsAlive(viewpointCamera_)
+                ? world->TryGet<scene::CameraComponent>(viewpointCamera_)
+                : nullptr;
+        if (component == nullptr) {
+            viewpoint_ = Viewpoint::Perspective;
+            viewpointCamera_ = scene::kNullEntity;
+            camera_.ApplyTo(camera);
+            camera.orthographic = orthographic_;
+            return;
+        }
+
+        const Mat4 matrix = world->WorldMatrix(viewpointCamera_);
+        camera.position = Vec3(matrix[3]);
+        // **Basisnya dinormalkan lebih dulu.** `quat_cast` menuntut matriks
+        // rotasi ortonormal, dan sebuah kamera yang kebetulan berada di bawah
+        // parent berskala membawa skala itu di basisnya — yang keluar bukan
+        // rotasi yang sedikit meleset melainkan quaternion tak sah.
+        Mat3 basis(matrix);
+        for (int axis = 0; axis < 3; ++axis) {
+            const float length = glm::length(basis[axis]);
+            basis[axis] = length > 1e-6f ? basis[axis] / length : Vec3(axis == 0, axis == 1,
+                                                                      axis == 2);
+        }
+        camera.rotation = glm::normalize(glm::quat_cast(basis));
+        camera.fovYRadians = component->fovYRadians;
+        camera.nearZ = component->nearZ;
+        camera.farZ = component->farZ;
+        camera.orthographic = component->orthographic;
+        camera.orthoHeight = component->orthoHeight;
     }
 
     void ApplyFlyMovement(float deltaSeconds) {
@@ -2496,14 +2774,23 @@ private:
             hovered = DrawSculptControls(context, imagePos, size) || hovered;
         }
 
-        // (D2) mode tampilan di kanan-atas.
-        ImGui::SetCursorScreenPos(ImVec2(imagePos.x + size.x - button - pad, imagePos.y + pad));
+        // (D2a) pemilih titik pandang, di atas kolom ikon.
+        //
+        // **Sebuah combo, bukan tombol berputar seperti tetangganya di bawah.**
+        // Tetangga itu berputar di antara lima mode yang semuanya setara; yang
+        // di sini punya tiga belas entri lebih atau kurang — enam sumbu, satu
+        // perspektif, dan sebanyak apa pun kamera yang ada di adegan — dan
+        // memutarinya berarti tidak satu pun bisa dituju langsung.
+        const float viewpointWidth = button * 5.5f;
+        ImGui::SetCursorScreenPos(
+            ImVec2(imagePos.x + size.x - viewpointWidth - pad, imagePos.y + pad));
+        ImGui::SetNextItemWidth(viewpointWidth);
+        hovered = DrawViewpointCombo(context) || hovered;
+
+        // (D2) mode tampilan di kanan-atas, tepat di bawahnya.
+        ImGui::SetCursorScreenPos(
+            ImVec2(imagePos.x + size.x - button - pad, imagePos.y + pad + button + pad));
         ImGui::BeginGroup();
-        if (widgets::ViewportButton(orthographic_ ? icons::kOrthographic : icons::kPerspective,
-                                    orthographic_ ? "Orthographic" : "Perspective")) {
-            orthographic_ = !orthographic_;
-        }
-        track();
         if (widgets::ViewportButton(ShadingIcon(drawMode_), ShadingLabel(drawMode_),
                                     drawMode_ != render::DrawMode::Material)) {
             drawMode_ = NextDrawMode(drawMode_);
@@ -2518,13 +2805,34 @@ private:
         // Klik kanannya tidak lagi ikut menyalakan mode terbang — lihat
         // `UpdateOverlayPointerClaims`.
         if (ImGui::BeginPopupContextItem(kShadingPopupId)) {
-            render::DrawMode mode = render::DrawMode::Material;
-            do {
-                if (ImGui::MenuItem(ShadingLabel(mode), nullptr, drawMode_ == mode)) {
+            const auto item = [this](render::DrawMode mode) {
+                char label[64];
+                std::snprintf(label, sizeof(label), "%s  %s", ShadingIcon(mode),
+                              ShadingLabel(mode));
+                if (ImGui::MenuItem(label, nullptr, drawMode_ == mode)) {
                     drawMode_ = mode;
                 }
-                mode = NextDrawMode(mode);
-            } while (mode != render::DrawMode::Material);
+            };
+            // **Dua kelompok, dan pembatasnya bukan selera.** Yang di atas
+            // menggambar adegan — semuanya masih memperlihatkan cahaya, bentuk,
+            // dan bayangan, dan semuanya masuk akal dipandangi selagi menyusun
+            // level. Yang di bawah mengembalikan satu angka permukaan apa
+            // adanya; ia bukan gambar adegan melainkan pembacaan alat ukur, dan
+            // mencampurnya ke dalam satu daftar rata membuat keduanya terbaca
+            // sebagai pilihan yang setara.
+            ImGui::SeparatorText("View mode");
+            item(render::DrawMode::Material);
+            item(render::DrawMode::Unlit);
+            item(render::DrawMode::Clay);
+            item(render::DrawMode::DetailLighting);
+            item(render::DrawMode::Reflections);
+            item(render::DrawMode::MaterialWireframe);
+            item(render::DrawMode::Wireframe);
+            ImGui::SeparatorText("Surface channel");
+            item(render::DrawMode::BaseColor);
+            item(render::DrawMode::Normal);
+            item(render::DrawMode::Roughness);
+            item(render::DrawMode::Metallic);
             ImGui::EndPopup();
         }
         // Selama menunya terbuka, overlay tetap dianggap memegang pointer:
@@ -2658,6 +2966,7 @@ private:
     OrbitCamera camera_;
     SceneView sceneView_;
     std::shared_ptr<const render::ProbeVolume> pushedProbes_;
+    std::shared_ptr<const render::Lightmap> pushedLightmap_;
     render::DrawMode drawMode_ = render::DrawMode::Material;
     GizmoOperation operation_ = GizmoOperation::Translate;
     GizmoSpace space_ = GizmoSpace::World;
@@ -2684,6 +2993,18 @@ private:
     /// Lihat `UpdateOverlayPointerClaims`.
     std::array<bool, ImGuiMouseButton_COUNT> overlayOwnsButton_{};
     bool orthographic_ = false;
+    /// Dari mana viewport memandang. Menentukan `orthographic_` pada tampak
+    /// sumbu, dan menggantikan seluruh kamera pada tampak `SceneCamera`.
+    Viewpoint viewpoint_ = Viewpoint::Perspective;
+    /// Entity berkamera yang sedang dipandangi. Hanya berarti bila
+    /// `viewpoint_` adalah `SceneCamera`.
+    ///
+    /// **Entity, bukan indeks.** Daftar kamera disusun ulang setiap kali menunya
+    /// dibuka, dan sebuah indeks menunjuk kamera yang berbeda begitu seseorang
+    /// menghapus entity di atasnya — yaitu viewport yang diam-diam berpindah
+    /// tempat. Entity yang mati terdeteksi `IsAlive`, dan viewport kembali ke
+    /// perspektif alih-alih memandang dari matriks milik entity lain.
+    scene::Entity viewpointCamera_ = scene::kNullEntity;
     bool showGrid_ = true;
     /// Klik memilih sisi, bukan entity. Menempel pada viewport, bukan pada
     /// whitebox-nya: ini alat yang sedang dipegang pengguna.

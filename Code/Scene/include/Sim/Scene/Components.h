@@ -98,6 +98,30 @@ struct MeshRendererComponent {
     /// Menggeser pemilihan tingkat detail: negatif memilih mesh yang lebih
     /// rinci lebih lama, positif lebih cepat turun. Dipakai renderer di E8.
     float lodBias = 0.0f;
+    /// Jarak terjauh dari kamera tempat objek ini masih digambar, meter.
+    /// **Nol berarti selalu digambar**, dan itu bawaannya.
+    ///
+    /// Uji culling yang paling murah yang dimiliki mesin ini, dan karena itu
+    /// yang pertama dijalankan — urutan yang sama dengan Unreal: jarak, frustum,
+    /// occlusion. Yang gugur di sini tidak dirasterisasi sama sekali, termasuk
+    /// ke peta bayangan.
+    ///
+    /// **Untuk benda kecil, bukan benda besar.** Sebuah gedung yang menghilang
+    /// pada jarak tertentu membawa bayangannya pergi juga, dan yang terlihat
+    /// adalah bayangan yang berkedip alih-alih objek yang di-cull. Yang tepat
+    /// untuk siluet besar adalah LOD, bukan setelan ini.
+    ///
+    /// Pencahayaan tak-langsung tidak ikut berhenti: clipmap GI membaca seluruh
+    /// adegan, bukan daftar yang sudah disaring.
+    float maxDrawDistance = 0.0f;
+    /// Kerapatan lightmap objek ini, texel per meter — **nol berarti ikut
+    /// levelnya** (S5).
+    ///
+    /// Ada karena satu angka untuk seluruh level tidak pernah cukup: sebuah
+    /// lantai yang bayangannya harus tajam dan sebuah atap yang tidak pernah
+    /// dilihat dari dekat menuntut anggaran yang berbeda, dan menaikkan
+    /// kerapatan level demi salah satunya membayar keduanya.
+    float lightmapTexelDensity = 0.0f;
 };
 
 /// Memutar sebuah klip animasi pada mesh ber-rig entity ini.

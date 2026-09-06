@@ -6,8 +6,10 @@
 #include "DrawCull.h"
 
 #include <atomic>
+#include <cstdlib>
 #include <memory>
 #include <format>
+#include <string_view>
 #include "PostProcess.h"
 #include "SkyAtmosphere.h"
 #include "VolumePass.h"
@@ -26,9 +28,11 @@
 #include "PresentSource.h"
 #include "Sim/RHI/TextureRegistry.h"
 #include "IblBaker.h"
+#include "IblPrefilter.h"
 #include "IblCache.h"
 #include "Sim/Render/Ibl.h"
 #include "Sim/Assets/LightmapUv.h"
+#include "Sim/Render/Lightmap.h"
 #include "Sim/Render/ProbeVolume.h"
 #include "Sim/Render/FrameGraph.h"
 #include "Sim/Render/DrawRun.h"
@@ -148,8 +152,8 @@ struct ShadowUniforms {
     /// Penutup rekursi untuk permukaan yang belum dikenal cache radiansi:
     /// xyz albedo yang ditebak, w 1 kalau tebakan itu dipakai.
     Vec4 giBounce{0.0f};
-    /// Keadaan tampilan per-frame: x 1 kalau `DrawMode::Unlit`, y 1 kalau
-    /// `DrawMode::Clay`, z detik sejak adegan dibuka.
+    /// Keadaan tampilan per-frame: x indeks `DrawMode`, y belum dipakai,
+    /// z detik sejak adegan dibuka.
     ///
     /// **Dua bendera, bukan satu nomor mode.** Keduanya dibaca di tempat yang
     /// berbeda di dalam shader — yang satu memilih cabang di ujung, yang lain
@@ -354,6 +358,9 @@ struct BoxInstance {
     /// "material ruas ini" bukan sebuah nomor melainkan sebuah descriptor set.
     uint32_t materialSlot;
     uint32_t textureSlot;
+    /// Petak instance ini di dalam atlas lightmap: xy skala, zw geseran (S5).
+    /// Skala nol berarti tidak ber-lightmap; lihat `MeshInstance`.
+    Vec4 lightmapScaleOffset;
 };
 
 /// Satu panggilan gambar: sebuah mesh dan ruas instance yang memakainya.
@@ -486,13 +493,15 @@ std::vector<BoxVertex> BuildUnitCube() {
 }
 
 BoxInstance MakeInstance(const Vec4& color, bool receiveShadows, uint32_t skinBase,
-                         uint32_t materialSlot, uint32_t textureSlot) {
+                         uint32_t materialSlot, uint32_t textureSlot,
+                         const Vec4& lightmapScaleOffset = Vec4(0.0f)) {
     BoxInstance instance;
     instance.color = color;
     instance.flags = receiveShadows ? kInstanceReceiveShadows : 0u;
     instance.skinBase = skinBase;
     instance.materialSlot = materialSlot;
     instance.textureSlot = textureSlot;
+    instance.lightmapScaleOffset = lightmapScaleOffset;
     return instance;
 }
 
@@ -676,6 +685,17 @@ public:
             hiz_.Adopt(target_.AllocatedWidth(), target_.AllocatedHeight(), target_.DepthView(),
                        target_.Sampler());
             hiz_.AdoptLayouts();
+        }
+        // Prefilter lingkungan di compute. **Gagal membuatnya bukan kegagalan
+        // renderer**, alasan yang sama dengan komposit clipmap: jalur CPU-nya
+        // masih ada dan masih benar, hanya jauh lebih mahal — dan yang membayar
+        // biaya itu adalah panggangan sekali per lingkungan, bukan tiap frame.
+        // Yang tidak bisa membuatnya menurunkan `cubeSize`-nya sendiri di
+        // `EnvironmentBakeSettings()` supaya CPU tetap sanggup.
+        if (!iblPrefilter_.Create(device_, shaderDirectory_)) {
+            SIM_WARN("Render",
+                     "GPU environment prefilter unavailable; environments bake on the CPU at a "
+                     "smaller size");
         }
         // Post-process dibuat sebelum pipeline adegan mana pun dipakai: seluruh
         // pass adegan sekarang menggambar ke gambar HDR miliknya, bukan ke target
@@ -876,6 +896,7 @@ public:
         // lingkungan membuat tekstur dan menunggu device diam; melakukannya di
         // tengah perekaman berarti menulisi descriptor set yang sedang dipakai.
         AdoptSkySpecular();
+        AdoptLightmap();
         // **Dinolkan sebelum perekaman, bukan bersama angka yang lain.** Sisa
         // isi `stats_` diisi di ujung `Render`, sesudah frame graph selesai
         // merekam; kedua hitungan ini justru dijumlahkan *selama* perekaman itu,
@@ -2680,6 +2701,20 @@ private:
         for (const MeshInstance& mesh : scene.meshes) {
             const Aabb local{mesh.boundsMin, mesh.boundsMax};
             const Aabb world = TransformAabb(local, mesh.transform);
+            // **Jarak lebih dulu, frustum sesudahnya.** Urutan yang sama dengan
+            // yang dipakai Unreal, dan alasannya biaya: ini sebuah pengurangan
+            // dan sebuah perbandingan, sementara frustum enam bidang dan
+            // occlusion sebuah pass compute.
+            //
+            // **Dan ia membuang tanpa syarat, tidak seperti frustum di
+            // bawahnya.** Yang di luar pandangan tetap tinggal bila ia
+            // menjatuhkan bayangan; yang di luar jarak gambarnya tidak — objek
+            // yang terlalu jauh untuk digambar juga terlalu jauh untuk
+            // bayangannya berarti, dan membiarkannya di daftar caster berarti
+            // setelan ini tidak menyentuh pass yang paling mahal sama sekali.
+            if (!WithinDrawDistance(mesh.maxDrawDistance, eye, world)) {
+                continue;
+            }
             const bool cameraVisible = frustum.Intersects(world);
             // **Yang di luar pandangan tetap masuk daftar bila ia menjatuhkan
             // bayangan.** Membuangnya di sini — yang berlaku sejak E8.1 —
@@ -2805,7 +2840,8 @@ private:
                         : materials_[static_cast<std::size_t>(material) - 1]->slot;
                 const BoxInstance instance =
                     MakeInstance(color, mesh.receiveShadows, skinned ? mesh.skinFirst : 0u,
-                                 materialSlot, static_cast<uint32_t>(texture));
+                                 materialSlot, static_cast<uint32_t>(texture),
+                                 mesh.lightmapScaleOffset);
 
                 SurfaceEntry entry{mesh.mesh,
                                    static_cast<uint32_t>(partIndex),
@@ -3956,7 +3992,7 @@ private:
                              bool skinned = false, VkPipelineLayout layout = VK_NULL_HANDLE,
                              VkFormat depthFormat = VK_FORMAT_UNDEFINED,
                              VkFormat colorAttachment = VK_FORMAT_UNDEFINED,
-                             uint32_t attributeMask = 0xFFC3u, bool wireframe = false) {
+                             uint32_t attributeMask = 0x3'FFC3u, bool wireframe = false) {
         // `kSkinned`, konstanta spesialisasi 0 di `Shaders/skin_common.slang`.
         // Ukurannya empat byte walaupun tipenya bool: Vulkan menyatakan
         // konstanta spesialisasi boolean berukuran `VkBool32`, dan ukuran yang
@@ -4001,7 +4037,7 @@ private:
                 2, skinned ? static_cast<uint32_t>(sizeof(assets::SkinInfluence)) : 0u,
                 VK_VERTEX_INPUT_RATE_VERTEX},
         };
-        const std::array<VkVertexInputAttributeDescription, 13> attributes{
+        const std::array<VkVertexInputAttributeDescription, 14> attributes{
             VkVertexInputAttributeDescription{0, 0, VK_FORMAT_R32G32B32_SFLOAT,
                                               offsetof(BoxVertex, position)},
             VkVertexInputAttributeDescription{1, 0, VK_FORMAT_R32G32B32_SFLOAT,
@@ -4045,6 +4081,10 @@ private:
             // melipatgandakan varian pipeline demi memori GPU yang tetap dibayar.
             VkVertexInputAttributeDescription{16, 0, VK_FORMAT_R32G32_SFLOAT,
                                               offsetof(BoxVertex, lightmapUv)},
+            // Petak lightmap, di binding 1 bersama warna dan slot material:
+            // ia milik permukaan, bukan milik simpul.
+            VkVertexInputAttributeDescription{17, 1, VK_FORMAT_R32G32B32A32_SFLOAT,
+                                              offsetof(BoxInstance, lightmapScaleOffset)},
             VkVertexInputAttributeDescription{15, 1, VK_FORMAT_R32_UINT,
                                               offsetof(BoxInstance, textureSlot)},
 };
@@ -4060,7 +4100,7 @@ private:
         // adalah peringatan validasi di setiap pembuatan pipeline. Menyaringnya
         // di sini bukan sekadar meredam peringatan: atribut yang tidak diambil
         // memang tidak perlu diambil.
-        std::array<VkVertexInputAttributeDescription, 13> used{};
+        std::array<VkVertexInputAttributeDescription, 14> used{};
         uint32_t usedCount = 0;
         for (const VkVertexInputAttributeDescription& attribute : attributes) {
             if ((attributeMask & (1u << attribute.location)) != 0u) {
@@ -4255,7 +4295,7 @@ private:
         samplerInfo.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE;
         SIM_VK_CHECK(vkCreateSampler(device_.Handle(), &samplerInfo, nullptr, &shadow_.sampler));
 
-        const std::array<VkDescriptorSetLayoutBinding, 29> bindings{
+        const std::array<VkDescriptorSetLayoutBinding, 30> bindings{
             VkDescriptorSetLayoutBinding{0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1,
                                          VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
@@ -4319,6 +4359,9 @@ private:
                                          1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
             VkDescriptorSetLayoutBinding{kProbeDepthBinding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                          1, VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
+            VkDescriptorSetLayoutBinding{kLightmapBinding,
+                                         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+                                         VK_SHADER_STAGE_FRAGMENT_BIT, nullptr},
         };
         VkDescriptorSetLayoutCreateInfo layoutInfo{};
         layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
@@ -4331,7 +4374,7 @@ private:
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
                                  static_cast<uint32_t>(slots_.size())},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER,
-                                 static_cast<uint32_t>(slots_.size()) * 18},
+                                 static_cast<uint32_t>(slots_.size()) * 19},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
                                  static_cast<uint32_t>(slots_.size()) * 9},
             VkDescriptorPoolSize{VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE,
@@ -4904,6 +4947,7 @@ private:
         VkDescriptorImageInfo prefilteredImage{};
         VkDescriptorImageInfo dfgImage{};
         EnvironmentDescriptorImages(prefilteredImage, dfgImage);
+        const VkDescriptorImageInfo lightmapImage = LightmapDescriptorImage();
         // Cache radiansi dipakai bersama seluruh slot: ia riwayat lintas frame,
         // bukan data per frame. Kalau gagal dibuat, descriptor-nya menunjuk
         // buffer lampu — descriptor yang dibiarkan kosong adalah pelanggaran di
@@ -5037,6 +5081,15 @@ private:
             probeDepth.dstBinding = kProbeDepthBinding;
             probeDepth.pBufferInfo = &buffers[base + 7];
             writes.push_back(probeDepth);
+
+            // Atlas lightmap (S5). Sah sejak awal walaupun belum ada
+            // panggangan: penggantinya piramida HiZ, dan yang menjaganya tidak
+            // pernah terbaca adalah `lightmapScaleOffset` yang nol pada setiap
+            // instance — bukan descriptor ini.
+            VkWriteDescriptorSet lightmap = sampled;
+            lightmap.dstBinding = kLightmapBinding;
+            lightmap.pImageInfo = &lightmapImage;
+            writes.push_back(lightmap);
         }
         vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
                                writes.data(), 0, nullptr);
@@ -5272,6 +5325,38 @@ private:
     /// Bukan `WriteShadowDescriptors()`: yang itu mengalokasikan set baru dari
     /// pool, dan pool ini dibuat tanpa `FREE_DESCRIPTOR_SET` — memanggilnya tiap
     /// kali lingkungan selesai dipanggang akan menghabiskannya diam-diam.
+    /// Descriptor atlas lightmap, atau penggantinya.
+    ///
+    /// **Descriptor yang dibiarkan kosong adalah pelanggaran pada setiap draw**,
+    /// termasuk draw yang tidak membacanya. Penggantinya piramida HiZ — satu-
+    /// satunya image 2D biasa yang pasti ada — dan yang menjaganya tidak pernah
+    /// terbaca sebagai cahaya adalah `lightmapScaleOffset` yang nol.
+    VkDescriptorImageInfo LightmapDescriptorImage() const {
+        if (lightmapTexture_.IsValid()) {
+            return {lightmapTexture_.Sampler(), lightmapTexture_.View(),
+                    VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+        }
+        return HizDescriptorImage();
+    }
+
+    void UpdateLightmapDescriptors() {
+        const VkDescriptorImageInfo image = LightmapDescriptorImage();
+        std::vector<VkWriteDescriptorSet> writes;
+        writes.reserve(slots_.size());
+        for (const InstanceSlot& slot : slots_) {
+            VkWriteDescriptorSet write{};
+            write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+            write.dstSet = slot.shadowSet;
+            write.descriptorCount = 1;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            write.dstBinding = kLightmapBinding;
+            write.pImageInfo = &image;
+            writes.push_back(write);
+        }
+        vkUpdateDescriptorSets(device_.Handle(), static_cast<uint32_t>(writes.size()),
+                               writes.data(), 0, nullptr);
+    }
+
     void UpdateEnvironmentDescriptors() {
         VkDescriptorImageInfo prefiltered{};
         VkDescriptorImageInfo dfg{};
@@ -5698,6 +5783,15 @@ private:
         /// tidak punya alasan memisahkan keduanya karena tidak ada matahari yang
         /// bergeser di sana.
         bool carriesIrradiance = false;
+        /// Sampel GGX yang harus dipakai dispatch prefilter, kalau
+        /// `baked.firstGpuMip` bukan nol.
+        ///
+        /// **Ikut hasilnya, bukan dibaca ulang saat mengadopsi.** Angka ini
+        /// masuk ke kunci cache lingkungan; membacanya kembali dari setelan
+        /// yang berlaku saat adopsi berarti sebuah artefak yang dipanggang
+        /// dengan satu angka bisa disaring dengan angka lain, dan yang
+        /// tersimpan di cache lalu bukan yang namanya menjanjikan.
+        uint32_t prefilterSamples = 0;
     };
 
     /// Memanggang ulang iradiansi langit bila langitnya berubah.
@@ -5773,8 +5867,8 @@ private:
             // kecepatan per cuplikan dengan ~460 ms di muka, jadi ia baru
             // menguntungkan di atas titik impas beberapa ribu cuplikan. Proyeksi
             // SH ini 1024 cuplikan — di bawahnya: 418 ms tanpa tabel, 779 ms
-            // dengan. Panggangan prefilter di sebelah, yang 24.576 cuplikan,
-            // berada jauh di atasnya dan memakainya.
+            // dengan. Panggangan prefilter di sebelah, yang 393.216 cuplikan
+            // untuk mip 0-nya saja, berada jauh di atasnya dan memakainya.
             auto bake = [sky, result]() mutable {
                 result->irradiance = ProjectIrradiance(sky, kSkyIrradianceSamples);
                 result->ready.store(true, std::memory_order_release);
@@ -5801,6 +5895,50 @@ private:
         return ConfigDirectory() / "EnvironmentCache";
     }
 
+    /// Setelan panggangan lingkungan, sesuai dengan yang sanggup dijalankan
+    /// perangkat ini.
+    ///
+    /// **Satu tempat, dipakai kedua jalur panggangan.** Berkas HDR dan langit
+    /// atmosferik memanggang dengan pemicu yang berbeda tetapi bentuk peta yang
+    /// sama, dan dua daftar setelan yang harus berpindah bersama adalah dua
+    /// daftar yang suatu saat tinggal satu — yang muncul sebagai pantulan yang
+    /// ketajamannya berubah saat orang berganti dari HDRI ke langit prosedural.
+    ///
+    /// **`cubeSize` turun ke 64 tanpa pemanggang GPU, dan itu bukan kompromi
+    /// yang disembunyikan.** Mip 0 mencuplik lingkungan 393.216 kali pada 256²;
+    /// untuk langit atmosferik satu cuplikan adalah satu ray march, dan yang
+    /// menjalankannya di CPU menunggu belasan detik untuk peta yang dipanggang
+    /// ulang tiap kali matahari bergeser lima derajat. Perangkat yang tidak
+    /// bisa menjalankan compute karena itu mendapat peta yang lebih kecil,
+    /// bukan editor yang berhenti merespons.
+    IblBakeSettings EnvironmentBakeSettings() const {
+        IblBakeSettings settings;
+        // **Jalur CPU harus bisa dijalankan tanpa membangun ulang**, alasan yang
+        // sama persis dengan `--no-bindless` dan `SIM_ENABLE_VIEWPORTS`: sebuah
+        // jalur mundur yang tidak pernah dijalankan siapa pun adalah jalur yang
+        // diam-diam berhenti benar, dan yang menemukannya adalah perangkat yang
+        // tidak bisa menjalankan compute. Ia sekaligus satu-satunya cara
+        // membandingkan dua gambar yang harus sama — bentuk petanya tidak ikut
+        // berubah di sini, jadi selisih yang muncul memang selisih penyaringnya.
+        //
+        // Lambat, dan memang: pada `cubeSize` bawaan ia belasan detik per
+        // panggangan. Ia alat ukur, bukan setelan.
+        const char* cpuOnly = std::getenv("SIM_IBL_CPU_PREFILTER");
+        if (cpuOnly != nullptr && std::string_view(cpuOnly) == "1") {
+            return settings;
+        }
+        if (iblPrefilter_.IsValid()) {
+            // Mip 0 tetap di CPU: hanya di sana `IEnvironmentSampler` bisa
+            // dicuplik. Sisanya integral GGX atas mip 0 — pekerjaan yang
+            // bentuknya persis compute.
+            settings.firstGpuMip = 1;
+        } else {
+            settings.cubeSize = 64;
+            settings.prefilterSamples = 64;
+        }
+        return settings;
+    }
+
     /// Memanggang lingkungan dari sebuah berkas HDR/EXR (B3).
     ///
     /// **Satu tugas untuk SH dan prefilter sekaligus, bukan dua.** Yang memisah
@@ -5820,10 +5958,11 @@ private:
         bakedSkyKey_ = key;
         bakedSpecularKey_ = key;
 
-        IblBakeSettings settings;
+        IblBakeSettings settings = EnvironmentBakeSettings();
         settings.irradianceSamples = kSkyIrradianceSamples;
 
         auto result = std::make_shared<SkySpecularResult>();
+        result->prefilterSamples = settings.prefilterSamples;
         skySpecularBake_ = result;
         // **Pemuatan berkasnya ikut di dalam tugas.** Mendekode HDR 4096x2048
         // memakan sekitar seratus megabyte dan ratusan milidetik; melakukannya
@@ -5852,8 +5991,9 @@ private:
             std::string cacheError;
             if (!cached.empty() && ReadIblCache(cached, result->baked, cacheError)) {
                 // **Inilah kriteria B3.** Membuka level pra-GI berikutnya tidak
-                // mendekode satu byte pun HDR dan tidak menyaring satu texel pun
-                // — 525 KB dibaca dari disk, dan selesai.
+                // mendekode satu byte pun HDR dan tidak mencuplik satu arah pun
+                // — 8,0 MiB dibaca dari disk, lalu satu dispatch prefilter, dan
+                // selesai.
                 result->carriesIrradiance = true;
                 SIM_INFO("Render", "environment loaded from cache in {} ms ({})", elapsedMs(),
                          cached.filename().string());
@@ -5908,27 +6048,32 @@ private:
     /// Memanggang ulang peta prefilter, **jauh lebih malas daripada SH**.
     ///
     /// Selisih biayanya yang memaksa: SH adalah 1024 cuplikan, 64 ms; peta
-    /// prefilter adalah 24576 cuplikan lingkungan untuk mip 0 ditambah 8160
-    /// texel penyaringan di atasnya, 2,4 detik (Debug). Memanggangnya pada
-    /// ambang yang sama dengan SH berarti sebuah antrean panggangan setiap kali
-    /// seseorang menggeser Time-of-Day.
+    /// prefilter adalah 393.216 ray march untuk mip 0-nya saja. Memanggangnya
+    /// pada ambang yang sama dengan SH berarti sebuah antrean panggangan setiap
+    /// kali seseorang menggeser Time-of-Day.
+    ///
+    /// **Penyaringan di atas mip 0 sudah pindah ke `IblPrefilter`** — 49 ms,
+    /// dan itu bukan lagi bagian yang mahal. Yang tersisa mahal justru mip 0,
+    /// yang harus tetap di CPU karena hanya di sana langitnya bisa dicuplik;
+    /// kemalasan ini karena itu tetap dibutuhkan, hanya alasannya berpindah.
     ///
     /// Ambangnya kira-kira lima derajat. Yang bergeser di bawah itu adalah
-    /// pantulan yang mataharinya berada beberapa piksel dari tempatnya di peta
-    /// 64² — dan peta itu sendiri sudah menyaring puluhan arah per texel.
+    /// pantulan yang mataharinya berada satu texel dari tempatnya di peta 256²
+    /// — dan peta itu sendiri sudah menyaring ratusan arah per texel.
     void UpdateSkySpecular(const SkyBakeKey& key, AtmosphereSky sky) {
         if (skySpecularBake_ != nullptr || bakedSpecularKey_.MatchesCoarse(key)) {
             return;
         }
         bakedSpecularKey_ = key;
 
-        IblBakeSettings settings;
+        IblBakeSettings settings = EnvironmentBakeSettings();
         // SH sudah datang dari panggangan yang lebih sering; menghitungnya lagi
         // di sini hanya menghasilkan angka yang sama, beberapa ratus milidetik
         // kemudian.
         settings.irradianceSamples = 0;
 
         auto result = std::make_shared<SkySpecularResult>();
+        result->prefilterSamples = settings.prefilterSamples;
         skySpecularBake_ = result;
         auto bake = [sky, settings, result]() mutable {
             sky.Prepare();
@@ -5940,6 +6085,44 @@ private:
         } else {
             bake();
         }
+    }
+
+    /// Mengunggah atlas lightmap yang baru diserahkan. **Awal frame, sesudah
+    /// device diam** — alasan yang sama dengan `AdoptSkySpecular`.
+    void AdoptLightmap() {
+        if (!adoptLightmap_) {
+            return;
+        }
+        adoptLightmap_ = false;
+        device_.WaitIdle();
+        lightmapTexture_.Destroy();
+
+        if (bakedLightmap_ == nullptr || !bakedLightmap_->IsValid()) {
+            UpdateLightmapDescriptors();
+            return;
+        }
+        // RGBA float32: iradiansi linier, dan alpha yang tidak dibaca siapa pun.
+        // **Empat kanal walaupun tiga yang dipakai**, karena format tiga-kanal
+        // tidak dijamin bisa disampel — dan yang gagal di sana adalah pembuatan
+        // tekstur di mesin orang lain, bukan di sini.
+        std::vector<Vec4> texels;
+        texels.reserve(bakedLightmap_->texels.size());
+        for (const Vec3& value : bakedLightmap_->texels) {
+            texels.emplace_back(value, 1.0f);
+        }
+        if (!lightmapTexture_.Create(device_, bakedLightmap_->width, bakedLightmap_->height,
+                                     VK_FORMAT_R32G32B32A32_SFLOAT, sizeof(Vec4),
+                                     texels.data())) {
+            SIM_WARN("Render", "cannot upload the {}x{} lightmap atlas", bakedLightmap_->width,
+                     bakedLightmap_->height);
+            bakedLightmap_.reset();
+        } else {
+            SIM_INFO("Render", "lightmap adopted — {}x{}, {} objects, {:.1f} MB",
+                     bakedLightmap_->width, bakedLightmap_->height,
+                     bakedLightmap_->placements.size(),
+                     static_cast<double>(bakedLightmap_->GpuBytes()) / (1024.0 * 1024.0));
+        }
+        UpdateLightmapDescriptors();
     }
 
     /// Mengunggah peta yang sudah selesai dipanggang. **Main thread**, dan
@@ -5961,6 +6144,7 @@ private:
         }
         const IblBakeCpu baked = std::move(skySpecularBake_->baked);
         const bool carriesIrradiance = skySpecularBake_->carriesIrradiance;
+        const uint32_t prefilterSamples = skySpecularBake_->prefilterSamples;
         skySpecularBake_.reset();
         if (!baked.IsValid()) {
             // Panggangan yang gagal — berkas yang tidak bisa dibaca — melepas
@@ -5994,6 +6178,16 @@ private:
             // descriptor yang menunjuk pengganti, dan `prefilteredMips` nol yang
             // menjaganya tidak pernah dipakai sebagai pantulan.
             SIM_WARN("Render", "environment upload failed; reflections fall back to none");
+        } else if (baked.firstGpuMip > 0 &&
+                   !iblPrefilter_.Run(skyIbl_.prefiltered, baked.firstGpuMip,
+                                      prefilterSamples)) {
+            // **Dilepas, bukan dibiarkan.** Mip di atas `firstGpuMip` masih nol,
+            // dan cubemap yang mip kasarnya hitam sementara mip cerminnya benar
+            // adalah gambar yang salah dengan cara yang paling lama tidak
+            // dikenali: yang licin terlihat benar, yang kasar terlihat gelap,
+            // dan tidak ada satu pun pesan yang menghubungkan keduanya.
+            SIM_WARN("Render", "environment prefilter failed; reflections fall back to none");
+            skyIbl_.Destroy();
         }
         UpdateEnvironmentDescriptors();
     }
@@ -6091,6 +6285,18 @@ private:
     /// dan seluruh unggahannya — dibangun ulang setiap frame.
     void SetLightmapCacheDir(std::filesystem::path dir) override {
         lightmapCacheDir_ = std::move(dir);
+    }
+
+    void SetLightmap(std::shared_ptr<const Lightmap> lightmap) override {
+        if (bakedLightmap_ == lightmap) {
+            return;
+        }
+        bakedLightmap_ = std::move(lightmap);
+        // **Ditandai, bukan diunggah di sini.** Fungsi ini bisa dipanggil di
+        // tengah frame; membuat tekstur menuntut device diam, dan menghancurkan
+        // yang lama sementara frame yang belum selesai masih membacanya adalah
+        // kerusakan memori. Yang mengunggahnya `AdoptLightmap`, di awal frame.
+        adoptLightmap_ = true;
     }
 
     void SetProbeVolume(std::shared_ptr<const ProbeVolume> volume) override {
@@ -6467,8 +6673,18 @@ private:
         // sebuah Vec4 baru untuk satu float berarti dua belas byte padding.
         // Nol yang menjaga descriptor pengganti tidak pernah terbaca sebagai
         // pantulan — bukan sebuah cabang di dalam shader.
-        uniforms.viewParams = Vec4(desc.mode == DrawMode::Unlit ? 1.0f : 0.0f,
-                                   desc.mode == DrawMode::Clay ? 1.0f : 0.0f,
+        // **Indeks mode apa adanya, bukan sepasang bendera.** `viewMode()` di
+        // `cluster_common.slang` membacanya kembali dengan pembulatan, dan
+        // urutan `DrawMode` di sanalah yang menjadi kontraknya — nomor yang
+        // bergeser di satu sisi saja mengubah arti seluruh sakelar viewport
+        // tanpa satu pun galat kompilasi.
+        //
+        // Komponen y tinggal kosong. Ia dulu bendera clay; membiarkannya
+        // bernilai lama akan membuat pembaca yang belum diperbarui tetap
+        // menyala di mode yang salah, dan nol adalah satu-satunya nilai yang
+        // tidak berarti apa-apa bagi siapa pun.
+        uniforms.viewParams = Vec4(static_cast<float>(static_cast<uint8_t>(desc.mode)),
+                                   0.0f,
                                    sceneTimeSeconds_,
                                    skyIbl_.IsValid()
                                        ? static_cast<float>(skyIbl_.prefiltered.MipCount())
@@ -6841,6 +7057,10 @@ private:
     /// Kisi hasil panggangan transport, bila ada. Dimiliki bakery di sisi
     /// editor; renderer hanya membaca.
     std::shared_ptr<const ProbeVolume> bakedProbes_;
+    /// Atlas lightmap yang diserahkan bakery, dan teksturnya di GPU.
+    std::shared_ptr<const Lightmap> bakedLightmap_;
+    rhi::Texture2D lightmapTexture_;
+    bool adoptLightmap_ = false;
     /// Lihat `IViewportRenderer::SetLightmapCacheDir`.
     std::filesystem::path lightmapCacheDir_;
     /// SH yang sedang berada di dalam `probeUpload_`. Dibandingkan supaya isian
@@ -6869,6 +7089,10 @@ private:
     /// pantulan lingkungan belum ada — dan descriptor-nya memakai pengganti,
     /// bukan dibiarkan kosong.
     BakedIbl skyIbl_;
+    /// Penyaring mip peta lingkungan di GPU. Tidak sah berarti panggangan
+    /// jatuh ke jalur CPU beserta `cubeSize` yang lebih kecil — lihat
+    /// `EnvironmentBakeSettings`.
+    IblPrefilter iblPrefilter_;
     /// LUT DFG sisi CPU, dipanggang sekali. Disimpan supaya panggangan
     /// lingkungan berikutnya tidak mengulang 914 ms untuk byte yang sama.
     DfgLut dfgLut_;
@@ -6937,6 +7161,8 @@ private:
     static constexpr uint32_t kProbeBrickBinding = 27;
     /// Peta kedalaman oktahedral tiap probe (S3).
     static constexpr uint32_t kProbeDepthBinding = 28;
+    /// Atlas lightmap (S5).
+    static constexpr uint32_t kLightmapBinding = 29;
     /// Batas atas jumlah probe yang boleh diunggah.
     ///
     /// **Sebuah batas, bukan sebuah target.** Empat juta probe adalah 576 MB

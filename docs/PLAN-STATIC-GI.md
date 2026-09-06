@@ -896,7 +896,7 @@ adalah orang yang bertanya kenapa picking mengenai segitiga yang lain daripada
 yang tergambar. `MeshGeometryCache` dan renderer karena itu memakai folder cache
 yang sama, dipasang di satu tempat.
 
-### S5 — Lightmap: bake dan baca
+### S5 — Lightmap: bake dan baca · ✅
 
 - Iradiansi per-texel untuk permukaan statis, dari transport yang sama dengan S2,
   diparameterisasi UV pertama mesh-nya (keputusan 7)
@@ -912,6 +912,273 @@ permukaan yang sama tampak sama saat ia berpindah dari satu jalur ke jalur lain
 (keputusan 3), dengan selisihnya diukur; dan menaikkan kerapatan texel
 menajamkan kontaknya sementara menurunkannya mengaburkannya, keduanya sesuai
 ukuran atlas yang diumumkan panel.
+
+#### Langkah pertama S5, dan satu bias yang ditemukan di sepanjang jalan
+
+`TraceSurfaceIrradiance` mencuplik **belahan** di sekitar normal, bukan seluruh
+bola. Bedanya bukan penghematan: sebuah probe tidak punya normal dan karena itu
+harus menyimpan seluruh bola sebagai SH, sedangkan sebuah texel lightmap *adalah*
+permukaan — normalnya diketahui, dan yang dibutuhkannya satu angka. Itu yang
+membuat lightmap bisa jauh lebih rapat daripada kisi probe pada anggaran memori
+yang sama.
+
+Rasterisasinya mengambil **setiap texel yang tersentuh segitiga**, bukan hanya
+yang pusatnya di dalam: segitiga yang lebih kecil daripada satu texel tidak punya
+satu pun pusat di dalamnya, dan yang menampung hanya pusat menghasilkan lubang
+hitam yang bentuknya mengikuti geometri tipis — pagar, daun, tepi meja. Texel
+yang pusatnya di luar diproyeksikan ke titik terdekat di dalam segitiganya,
+supaya posisinya tetap di permukaan.
+
+##### Kriteria terima pertama, terukur
+
+Lantai dengan sebuah kotak 1 m di atasnya, profil melintasi kontaknya:
+
+| jarak dari pusat kotak | acuan | lightmap | probe 1 m |
+|---:|---:|---:|---:|
+| 0,16 m (di bawah kotak) | 0 | **0** | **0,72** |
+| 0,47 m (di bawah kotak) | 0 | **0** | **0,87** |
+| 0,78 m | 1,036 | 0,999 | 0,990 |
+| 1,41 m | 1,212 | 1,210 | 1,144 |
+| 2,66 m | 1,267 | 1,265 | 1,138 |
+| 6,09 m | 1,277 | 1,276 | 1,198 |
+
+Kesalahan rata-rata terhadap acuan: lightmap **0,0072**, probe **0,318** —
+empat puluh empat kali lipat. Dua baris pertama yang paling menjelaskan: kisi
+probe menyinari lantai **di bawah kotak** seolah sebagian terbuka.
+
+##### Bias yang ditemukan uji, bukan perancangan
+
+Versi pertama profil itu memperlihatkan lightmap konsisten **6–7% lebih terang**
+daripada acuannya di setiap titik terbuka — satu arah, di semua titik. Penaksir
+tak-bias tidak boleh begitu.
+
+Sebabnya: Hammersley adalah deret **kuasi-acak**, dan kesalahannya pada jumlah
+cuplikan rendah bukan derau melainkan penyimpangan sistematis. Diukur pada titik
+tanpa penghalang, dibandingkan dengan `ProjectIrradiance` yang menghitungnya
+lewat jalur yang sama sekali lain: 256 cuplikan menjawab **7,4% di bawah**
+jawaban yang konvergen. Deretnya sama di setiap texel, jadi penyimpangannya
+menumpuk alih-alih saling meniadakan — dan sebuah lightmap yang meleset sebesar
+faktor tetap di seluruh permukaannya paling mudah dikira masalah eksposur.
+
+Putaran Cranley–Patterson — geseran acak per titik, dibungkus kembali ke [0,1) —
+menjaga stratifikasinya utuh sambil membuat arah penyimpangannya berbeda di tiap
+texel. Kesalahan lightmap turun dari 0,051 menjadi **0,0072**.
+
+**Penaksir probe punya struktur yang sama dan ikut diperbaiki.** Membiarkan salah
+satunya berarti dua penaksir kembar yang satu benar dan satu tidak. Angka S1–S3
+diukur dengan penaksir yang lama; seluruhnya perbandingan — panggang lawan
+langit, dengan lawan tanpa visibilitas — jadi penyimpangan yang sama di kedua
+sisi sebagian besar saling menghapus dan kesimpulannya bertahan. Versi artefak
+probe dinaikkan ke 3 supaya yang lama tidak dipakai ulang.
+
+#### Keadaannya sesudah S5 · ✅
+
+Ketiga bagian kriteria terimanya terukur.
+
+##### 1. Kontak terbaca di lightmap dan tidak di probe
+
+Tabel profilnya ada di atas: kesalahan rata-rata terhadap acuan **0,0072** untuk
+lightmap dan **0,318** untuk probe — empat puluh empat kali lipat. Yang paling
+menjelaskan tetap dua baris pertama, di mana kisi probe menyinari lantai di bawah
+kotak seolah sebagian terbuka.
+
+##### 2. Permukaan yang sama terbaca sama saat berpindah jalur
+
+Konsekuensi langsung keputusan 3 — dua penyimpanan, satu besaran — dan karena itu
+harus diukur, bukan diasumsikan. Sebuah objek yang dibuka kuncinya, atau mesh yang
+tidak kebagian UV, jatuh dari lightmap ke probe di tengah adegan yang sama.
+
+Diukur di enam titik terbuka, semuanya lebih dari dua meter dari penghalang
+terdekat dan sengaja tidak sejajar dengan simpul kisi:
+
+| titik | acuan | lightmap | probe | jahitan |
+|---|---:|---:|---:|---:|
+| (2,7, 0,3) | 1,267 | 1,343 | 1,182 | 12,7% |
+| (−3,4, 1,6) | 1,313 | 1,271 | 1,078 | 14,7% |
+| (1,2, −4,3) | 1,295 | 1,356 | 1,061 | 22,7% |
+| (5,6, 5,1) | 1,279 | 1,279 | 1,264 | 1,2% |
+| (−6,2, −2,8) | 1,278 | 1,357 | 1,147 | 16,4% |
+| (0,4, 6,7) | 1,317 | 1,357 | 1,029 | 24,9% |
+
+Jahitannya **15,4% rata-rata dan 24,9% terburuk** — bukan nol, dan tidak pantas
+disebut nol. Yang menentukan sisi mana yang salah adalah penyimpangan terhadap
+acuan: lightmap **+2,8%**, probe **−12,7%**. Hampir seluruh jahitan datang dari
+sisi probe.
+
+**Dan penyimpangan probe itu berarah, bukan tersebar: enam dari enam titik
+terbaca lebih gelap.** Penaksir yang hanya berderau meleset ke dua arah. Yang
+terlihat mata dari penyimpangan searah bukan bintik melainkan permukaan yang
+mendadak menggelap saat ia berpindah jalur, jadi ujinya memeriksa arahnya
+terpisah dari besarnya.
+
+**Diukur di tempat terbuka, bukan di kontak.** Di dekat kontak keduanya memang
+berbeda — itu persis kriteria pertama, dan menuntut mereka sama di sana berarti
+menuntut lightmap membuang alasan keberadaannya.
+
+Sebabnya diperiksa, tidak ditebak. Membaca kisi setengah meter di atas lantai
+mengubah jawabannya besar — di titik terburuk 1,029 menjadi 1,215 — jadi irisan
+probe yang duduk persis di bidang lantai memang ikut menyumbang. Tetapi ia bukan
+satu-satunya sebab: di satu titik pengangkatan itu justru melewati acuannya
+(1,264 menjadi 1,399). Sisanya adalah ketelitian kisi 1 m itu sendiri, yang
+obatnya sama dengan yang dicatat S3 untuk koridor sempit, yaitu kerapatan kisi.
+
+**Ini pembatas yang dicatat, bukan yang diperbaiki di S5.** Menurunkannya berarti
+menyentuh penempatan dan pembobotan probe — pekerjaan S3 — dan S6 yang akan
+memvalidasi keduanya terhadap path tracer acuan adalah tempat yang benar untuk
+memutuskan berapa yang masih boleh tersisa.
+
+##### 3. Kerapatan texel menajamkan kontak, sesuai atlas yang diumumkan
+
+Diukur pada `bench.simlevel`, 179 objek. Kontribusi lightmap **diisolasi** dengan
+mengurangkan gambar tanpa lightmap dari gambar berlightmap, di radiance linier
+lewat pembacaan balik HDR — bukan di tangkapan 8-bit, dan bukan pada gambar utuh,
+karena gradien gambar utuh didominasi matahari langsung dan bukan lightmap-nya:
+
+| kerapatan | atlas | kontribusi | tepi p99 | sebaran tepi |
+|---|---|---:|---:|---:|
+| 2 texel/m | 256×256 | 0,01424 | 0,08147 | 4,0% |
+| 4 texel/m | 512×512 | 0,01233 | 0,10519 | 3,8% |
+| 8 texel/m | 1024×1024 | 0,00936 | 0,14881 | 3,5% |
+
+Ketajaman kontaknya naik **1,83 kali** dari ujung ke ujung sementara sebaran
+tepinya menyempit dari 4,0% ke 3,5% piksel — menajam dan sekaligus berhenti
+mengabur, monoton di ketiga kerapatan. Ukuran atlasnya persis yang diumumkan
+`PlanAtlas` sebelum Bake ditekan.
+
+Tabel ini **diukur ulang sesudah selokan petak dipasang** (di bawah). Angka
+sebelumnya diukur pada atlas yang masih bocor antar-petak dan ukurannya satu
+tingkat lebih kecil: 1,78 kali, 128²/256²/512². Kesimpulannya tidak berubah, dan
+memang tidak seharusnya — daerah yang diukur bagian dalam petak lantai, bukan
+tepinya.
+
+Kolom kontribusi turun justru karena kabur: pada kerapatan rendah oklusinya
+dioleskan ke daerah yang lebih luas, jadi rata-rata penggelapannya lebih besar
+meskipun tidak ada satu pun tepi yang tajam.
+
+##### Panggangannya dibagi per objek, dan itu yang membuat tabel di atas ada
+
+Kriteria ketiga tidak bisa diukur sebelum ini: dengan satu tugas untuk seluruh
+objek, 4 texel/m belum selesai dalam lima menit. Yang menahannya bukan kerapatan
+melainkan tidak adanya inti lain yang ikut bekerja.
+
+Pembagiannya aman **bukan karena penguncian** melainkan karena `PackLightmapAtlas`
+sudah memisahkan petak tiap objek sebelum tugas pertama berangkat — dua tugas tidak
+pernah menyentuh texel yang sama. Penelusurannya membaca `RayScene` yang tidak
+berubah selama panggangan. Tugas yang terakhir selesai, dihitung dengan satu
+pencacah atomik, yang menulis artefaknya; `WaitIdle` tidak bisa dipakai di sana
+karena dipanggil dari dalam sebuah tugas ia akan menunggu dirinya sendiri.
+
+| kerapatan | sebelum | sesudah |
+|---|---:|---:|
+| 2 texel/m | 5,0 s | **25,2 s** |
+| 4 texel/m | > 5 menit, tidak selesai | **72,2 s** |
+| 8 texel/m | tidak dicoba | **251,8 s** |
+
+Angka "sebelum" pada 2 texel/m lebih kecil karena atlas 128² memang kecil;
+sesudahnya lebih besar hanya karena diukur pada mesin yang sama sedang menjalankan
+hal lain. Yang penting barisan kedua: kerapatan yang dulu tidak selesai kini
+selesai, dan waktunya naik kira-kira sebanding dengan jumlah texel — bukan lebih
+cepat dari itu, yang akan berarti ada yang tidak ikut dikerjakan.
+
+##### Tinjauan S5, dan tiga cacat yang ditemukannya
+
+**1. Petak atlas dipaket rapat sementara samplernya linier — bocor antar-objek.**
+`PackLightmapAtlas` menaruh petak bersentuhan (`penX += chart.side`), `Texture2D`
+memasang `VK_FILTER_LINEAR`, dan pemetaan UV-nya tanpa sisipan. UV mesh mencapai 0
+dan 1, jadi cuplikan di tepi petak jatuh persis di batas texel dan menjadi
+campuran separuh-separuh dengan **petak objek lain**. `CLAMP_TO_EDGE` tidak
+menolong: ia menjepit di tepi atlas, bukan di tepi petak.
+
+Diukur pada atlas `bench` 256² yang terpanggang, 179 petak dengan sisi
+min 8 / median 16 / maks 32:
+
+| | sebelum | sesudah |
+|---|---:|---:|
+| texel tepi petak | 16,5% atlas | — |
+| kesalahan cuplikan tepi, rata-rata | **0,360** = 30% rerata adegan | **0,000** |
+| p95 | 0,882 = 74% rerata adegan | **0,000** |
+| tepi yang melesetnya >25% | 50,5% | **0** dari 10.016 |
+
+Obatnya selokan selebar satu texel di sekeliling tiap petak, diisi **replika texel
+tepi petak itu sendiri** — setara `CLAMP_TO_EDGE` per petak, yang tidak bisa
+diminta dari sampler. Satu texel cukup: tanpa mip, cuplikan bilinear menjangkau
+paling jauh setengah texel ke luar. Pemaketnya memesan `side + 2 · padding` per
+petak, jadi cincin sebuah petak tidak pernah beririsan dengan petak lain — yang
+membuatnya tetap aman ditulis satu tugas per objek.
+
+**Harganya nyata dan bukan 27%.** Jejak petak naik dari 16² ke 18², yaitu +27%
+luas — tetapi sisi petak dibulatkan ke pangkat dua, jadi kenaikan itu justru
+melewati ambang atlas dan menaikkannya satu tingkat penuh di setiap kerapatan:
+
+| kerapatan | atlas sebelum | sesudah | GPU |
+|---|---|---|---:|
+| 2 texel/m | 128² | 256² | 0,1 → 0,5 MB |
+| 4 texel/m | 256² | 512² | 0,5 → 2,0 MB |
+| 8 texel/m | 512² | 1024² | 2,0 → 8,0 MB |
+
+Waktu panggangnya tidak berubah (4 texel/m: 72,19 → 72,72 detik) karena jumlah
+texel isinya sama. Yang boros sebenarnya bukan selokannya melainkan pembulatan
+sisi petak ke pangkat dua; menghapusnya pekerjaan tersendiri. Anggaran di atas
+menyebut atlas 1024² sebagai skala yang diantisipasi, jadi ini masih di dalamnya.
+
+Satu tepi tajam ikut muncul dan disebutkan di ujinya: petak berisi 256 texel
+menuntut 258, jadi pemanggil yang menyamakan `maxChartSide` dengan `maxAtlasSide`
+mendapat atlas kosong, bukan satu petak seperti sebelumnya.
+
+**2. Tidak ada penyaring statis/dinamis — mesh bertulang ikut dapat petak.**
+`bakeEntries_` diisi setiap instance bermesh, dan `CollectItems` hanya menyaring
+`hasLightmapUv`. Sebuah karakter beranimasi karena itu dipanggang dari geometri
+CPU — **pose bind** — pada transform saat panggangan, lalu membeku; dan shader
+memilih lightmap di atas probe begitu petaknya ada. Komentar di `SceneView.cpp`
+menyatakan sebaliknya (*"objek dinamis memang begitu"*), yaitu niat yang kodenya
+tidak jalankan.
+
+Laten, bukan terukur: `bench.simlevel` berisi 241 MeshRenderer tanpa satu pun
+animator. Ditemukan dengan membaca.
+
+Mesh bertulang sekarang tidak berhak atas petak. **Ia tetap masuk
+`bakeEntries_`**, karena daftar yang sama memasok geometri penghalang panggangan
+probe — mencabutnya dari sana berarti karakter berhenti menaungi apa pun, yaitu
+mengubah hasil S2 dan S3 tanpa satu pun pengukuran yang menuntutnya. Yang
+membedakan sebuah bendera, `PickItem::lightmapEligible`.
+
+Tulang bukan definisi "dinamis", ia hanya penanda yang kebetulan tersedia; sisanya
+dicatat di "yang masih terbuka".
+
+**3. LUT langit disalin sekali per tugas.** `bakeOne` menangkap `trace` dan
+`layout` by value. `trace.sky` memegang `AtmosphereSky` beserta tabel
+transmitansinya, 256×64 Vec3 = 192 KB, dan 179 tugas dikirim sekaligus — ~34 MB
+salinan identik hidup bersamaan sebelum tugas pertama jalan, naik linier dengan
+jumlah objek. Keduanya hanya-baca selama panggangan; keduanya pindah ke `job`,
+pola yang sama dengan `picks`.
+
+Kecil: `job->done` hanya bertambah di dalam `if (raster.IsValid())` sementara
+`job->total` menghitung setiap petak yang ditempatkan, jadi satu raster gagal
+membuat bilah kemajuan mentok di bawah seratus persen.
+
+##### Yang diperiksa tinjauan dan ternyata benar
+
+Matahari langsung tidak ikut terpanggang — `TracePath` berangkat dari
+permukaannya, jadi NEE-nya hanya kena di titik pantul dan tidak ada hitung ganda
+dengan matahari dinamis. Pembagi π berbeda antara `box_shading` dan
+`MaterialShaderModule` tetapi konsisten di dalam masing-masing. Kedua jalur
+shading terpasang, dan pembersihan saat ganti level dibandingkan alih-alih
+dipasang sekali — pelajaran S1 dan S2 bertahan. Petak yang lebih besar dari
+atlas dibuang, bukan dijepit, jadi tugas tidak bisa menulis di luar batas.
+Validasi header artefak menyeluruh. Sampler langit ditangkap by value, jadi
+`Sample` bersamaan tidak berbagi keadaan.
+
+##### Cacat yang ditemukan pengukuran ini, bukan perancangan
+
+`Bake` pulang seketika pada cache hit, tetapi pemanggilnya tetap melaporkan
+`lightmap bake: … 5,04 s`. Lima detik itu **`MeshGeometryCache::Request` untuk 179
+objek**, bukan panggangan — dan saya nyaris melaporkannya sebagai percepatan dari
+72 detik menjadi 5 detik yang tidak pernah terjadi. `LightmapBakery` sekarang
+menjawab `LoadedFromCache()`, dan barisnya berbunyi `lightmap cache:` atau
+`lightmap bake:` sesuai yang sebenarnya terjadi.
+
+Sebuah pengukuran yang menyebut dua peristiwa berbeda dengan nama yang sama akan
+membaca yang murah sebagai yang mahal yang menjadi cepat.
 
 ### S6 — Validasi terhadap path tracer acuan
 
@@ -1028,3 +1295,15 @@ pertanyaan yang lebih baik dijawab sesudah keduanya berdiri sendiri-sendiri.
 - **Objek statis yang dipindahkan sesudah bake.** Ia membawa lightmap yang
   sudah tidak sesuai. Menyatakannya kotor itu mudah; memutuskan apa yang
   digambar sementara ia kotor tidak.
+- **Objek statis yang berpindah karena skrip atau fisika**, yang tidak punya
+  tulang dan karena itu tetap berhak atas petak. Mesh bertulang sudah dikecualikan
+  di S5 — ia dipanggang pada pose bind dan membeku — tetapi tulang bukan definisi
+  "dinamis", ia hanya penanda yang kebetulan tersedia. Yang benar sebuah penanda
+  statis yang diarang, dan itu keputusan pengarangan, bukan perbaikan.
+- **Jahitan 15% antara jalur lightmap dan jalur probe**, diukur di S5: probe
+  membaca lantai terbuka **−12,7%** terhadap acuan, dan searah di enam dari enam
+  titik. Sebuah permukaan yang berpindah jalur karena itu menggelap, bukan
+  berbintik. Sebagiannya irisan probe yang duduk di bidang lantai dan sebagiannya
+  ketelitian kisi 1 m; keduanya pekerjaan penempatan probe, bukan lightmap.
+  Berapa yang masih boleh tersisa ditetapkan di S6, dari hasil ukur, bukan
+  sebelumnya.

@@ -10,6 +10,8 @@ sim_add_library(Assets
         src/MaterialImport.cpp
         src/MaterialXImport.cpp
         src/MaxMaterial.cpp
+        src/LightmapAtlas.cpp
+        src/LightmapRaster.cpp
         src/LightmapUv.cpp
         src/LightmapUnwrap.cpp
         src/MeshImport.cpp

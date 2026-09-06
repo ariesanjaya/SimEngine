@@ -74,6 +74,14 @@ float4 main(BoxVarying input) : SV_Target {
     if (shadowParams.probeCounts.w > 0.5) {
         indirect = probeIrradiance(input.worldPosition, normal) / 3.14159265;
     }
+    // **Lightmap menang untuk permukaan yang punya petak (S5).** Ia mengambil
+    // sampelnya di permukaan, satu per texel, jadi ia menangkap kontak dan
+    // bayangan halus yang tidak bisa ditangkap kisi probe — diukur, kesalahan
+    // rata-ratanya empat puluh empat kali lebih kecil. Yang tidak punya petak
+    // tetap memakai probe, dan itu memang objek yang bergerak.
+    if (input.hasLightmap != 0u) {
+        indirect = lightmapIrradiance(input.lightmapUv) / 3.14159265;
+    }
     if (shadowParams.giParams.x > 0.5) {
         indirect = giIrradianceAt(input.position.xy, input.worldPosition, normal,
                                   shadowParams.giParams.y) / 3.14159265;
@@ -94,6 +102,33 @@ float4 main(BoxVarying input) : SV_Target {
     // beda warna yang bisa dikira beda pencahayaan.
     if (clayView()) {
         surface = kClayAlbedo;
+    }
+
+    // **Kanal permukaan apa adanya, tanpa penyinaran.** Jalur mundur ini tidak
+    // punya material, jadi tiga dari empat jawabannya adalah tetapan — dan
+    // tetapan itu bukan karangan: sebuah ruas tanpa material memang matte
+    // (kekasaran satu) dan memang bukan logam (metalness nol). Yang salah
+    // justru mengosongkan layar, karena itu terbaca seperti kanal yang tidak
+    // terisi alih-alih permukaan yang memang begitu.
+    switch (viewMode()) {
+        case kViewBaseColor:
+            return float4(input.color.rgb * albedo.rgb, input.color.a * albedo.a);
+        case kViewNormal:
+            return float4(normal * 0.5 + 0.5, 1.0);
+        case kViewRoughness:
+            return float4(float3(1.0), 1.0);
+        case kViewMetallic:
+            return float4(float3(0.0), 1.0);
+        default:
+            break;
+    }
+
+    // Mode pantulan tidak punya apa pun untuk ditampilkan di sini: `box.frag`
+    // tidak menghitung spekular sama sekali. Hitam adalah jawaban yang jujur —
+    // permukaan ini memang tidak memantulkan lingkungan — dan sekaligus yang
+    // membuat ruas tanpa material langsung terlihat di antara yang bermaterial.
+    if (reflectionsView()) {
+        return float4(float3(0.0), input.color.a * albedo.a);
     }
 
     // **Adegan tanpa lampu digambar diffuse-nya apa adanya.**

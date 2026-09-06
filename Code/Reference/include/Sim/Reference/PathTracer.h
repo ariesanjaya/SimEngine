@@ -201,4 +201,25 @@ void TraceProbeVisibility(const raycast::RayScene& scene, const Vec3& position,
                           uint32_t size, uint32_t samplesPerTexel, float maxDistance,
                           std::vector<float>& outMoments);
 
+/// Iradiansi yang diterima sebuah **permukaan** — belahan di sekitar normalnya,
+/// bukan seluruh bola (S5 di docs/PLAN-STATIC-GI.md).
+///
+/// **Berbeda dari `TraceProbeIrradiance`, dan bedanya bukan penghematan.** Sebuah
+/// probe tidak punya normal: yang membacanya nanti permukaan yang arahnya belum
+/// diketahui saat memanggang, jadi ia harus menyimpan seluruh bola sebagai SH.
+/// Sebuah texel lightmap **adalah** permukaan; normalnya diketahui, dan yang
+/// dibutuhkannya satu angka. Itu yang membuat lightmap bisa jauh lebih rapat
+/// daripada kisi probe pada anggaran memori yang sama.
+///
+/// Dicuplik berbobot kosinus, jadi penaksirnya `π × rata-rata radiansi` — bukan
+/// jumlah berbobot kosinus dibagi jumlah sampel. Salah di sini tidak pernah
+/// terlihat salah: ia hanya membuat seluruh lightmap terlalu terang atau terlalu
+/// gelap sebesar faktor tetap, yang paling mudah dikira masalah eksposur.
+///
+/// `sunIrradiance` berlaku sama seperti pada probe: lewat NEE di permukaan, jadi
+/// yang terpanggang pantulannya dan bukan mataharinya sendiri (keputusan 2).
+Vec3 TraceSurfaceIrradiance(const raycast::RayScene& scene, const SurfaceResolver& resolve,
+                            const LightList& lights, const Vec3& position, const Vec3& normal,
+                            uint32_t sampleCount, const TraceSettings& settings);
+
 }  // namespace sim::reference

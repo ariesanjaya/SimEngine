@@ -45,6 +45,16 @@ inline constexpr const char* kShadingClay = ICON_LC_CONTRAST;
 /// yang dilakukan mode ini.
 inline constexpr const char* kShadingMaterialWireframe = ICON_LC_BLEND;
 inline constexpr const char* kShadingWireframe = ICON_LC_COMPONENT;
+/// Clay yang mempertahankan peta normal — lekuknya yang jadi pokok, jadi ikon
+/// yang bergelombang.
+inline constexpr const char* kShadingDetailLighting = ICON_LC_MOUNTAIN;
+/// Cermin sempurna.
+inline constexpr const char* kShadingReflections = ICON_LC_ECLIPSE;
+/// Empat di bawah ini kanal permukaan apa adanya, bukan hasil penyinaran.
+inline constexpr const char* kShadingBaseColor = ICON_LC_PAINT_BUCKET;
+inline constexpr const char* kShadingNormal = ICON_LC_MOVE_3D;
+inline constexpr const char* kShadingRoughness = ICON_LC_DROPLET;
+inline constexpr const char* kShadingMetallic = ICON_LC_GEM;
 inline constexpr const char* kGrid = ICON_LC_GRID_3X3;
 inline constexpr const char* kFocus = ICON_LC_TARGET;
 

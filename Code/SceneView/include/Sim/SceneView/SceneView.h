@@ -8,6 +8,7 @@
 #include "Sim/Terrain/TerrainDecal.h"
 #include "Sim/SceneView/WhiteboxStore.h"
 #include "Sim/SceneView/MaterialPrograms.h"
+#include "Sim/Render/Lightmap.h"
 #include "Sim/SceneView/PickScene.h"
 #include "Sim/Scene/World.h"
 
@@ -470,6 +471,16 @@ public:
     /// String-nya dipegang `SceneView` dan sah sampai `Build` berikutnya.
     void BakeItems(std::vector<PickItem>& out) const;
 
+    /// Atlas lightmap yang sedang dipakai (S5). Instance yang punya petak di
+    /// dalamnya membawa skala dan geserannya; sisanya membawa nol dan jatuh ke
+    /// kisi probe.
+    ///
+    /// **Petaknya dipetakan ke sebuah tabel sekali di sini**, bukan dicari ulang
+    /// per instance per frame: pencarian linear atas dua ratus penempatan dikali
+    /// dua ratus instance adalah empat puluh ribu perbandingan tiap frame untuk
+    /// jawaban yang tidak berubah.
+    void SetLightmap(std::shared_ptr<const render::Lightmap> lightmap);
+
 private:
     /// Menyalin geometri ke cache CPU sekali per versi. Lihat `geometry_`.
     void AdoptGeometry(const std::string& key, const assets::MeshData& data, uint64_t version);
@@ -485,6 +496,11 @@ private:
         std::string meshKey;
         Vec3 worldMinimum{0.0f};
         Vec3 worldMaximum{0.0f};
+        float lightmapTexelDensity = 0.0f;
+        /// False untuk yang tidak berhak atas petak lightmap — mesh bertulang.
+        /// Ia tetap ada di daftar ini karena daftar yang sama memasok geometri
+        /// penghalang panggangan probe.
+        bool lightmapEligible = true;
     };
     std::vector<BakeEntry> bakeEntries_;
 
@@ -498,6 +514,10 @@ private:
     /// melainkan panggangan cahaya yang **tidak dihalangi apa pun**: sebuah
     /// ruangan yang dibangun dari kubus bawaan tetap disinari langit seolah di
     /// luar ruangan, tanpa satu pun galat.
+    std::shared_ptr<const render::Lightmap> lightmap_;
+    /// Diindeks nomor entity → petaknya di atlas.
+    std::unordered_map<uint64_t, Vec4> lightmapPlacements_;
+
     assets::MeshGeometryCache* geometry_ = nullptr;
     /// Versi yang terakhir diadopsi per kunci. Tanpa ini `Adopt` menyalin
     /// seluruh mesh tiap frame — dan ubin terrain adalah puluhan ribu vertex

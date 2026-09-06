@@ -22,7 +22,8 @@ TextureCube::~TextureCube() {
 }
 
 bool TextureCube::Create(Device& device, uint32_t size, uint32_t mipCount, VkFormat format,
-                         uint32_t bytesPerTexel, std::span<const std::byte> texels) {
+                         uint32_t bytesPerTexel, std::span<const std::byte> texels,
+                         bool storage) {
     if (size == 0 || mipCount == 0 || bytesPerTexel == 0) {
         return false;
     }
@@ -40,6 +41,8 @@ bool TextureCube::Create(Device& device, uint32_t size, uint32_t mipCount, VkFor
     device_ = &device;
     size_ = size;
     mipCount_ = mipCount;
+    format_ = format;
+    storage_ = storage;
 
     DynamicBuffer staging;
     if (!staging.Create(device, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, needed) ||
@@ -63,6 +66,9 @@ bool TextureCube::Create(Device& device, uint32_t size, uint32_t mipCount, VkFor
     imageInfo.samples = VK_SAMPLE_COUNT_1_BIT;
     imageInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
     imageInfo.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    if (storage) {
+        imageInfo.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
+    }
     imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     VmaAllocationCreateInfo allocationInfo{};
@@ -174,8 +180,10 @@ void TextureCube::Destroy() {
         image_ = VK_NULL_HANDLE;
         allocation_ = VK_NULL_HANDLE;
     }
+    format_ = VK_FORMAT_UNDEFINED;
     size_ = 0;
     mipCount_ = 0;
+    storage_ = false;
 }
 
 }  // namespace sim::rhi

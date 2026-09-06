@@ -17,7 +17,7 @@ constexpr uint64_t kFnvOffset = 1469598103934665603ull;
 /// Dinaikkan setiap kali arti isi berkasnya berubah. Ia bagian dari kunci, jadi
 /// menaikkannya membuat artefak lama tidak pernah terbaca lagi alih-alih
 /// terbaca salah.
-constexpr uint32_t kProbeCacheVersion = 2;
+constexpr uint32_t kProbeCacheVersion = 3;
 
 constexpr char kMagic[4] = {'S', 'P', 'R', 'B'};
 

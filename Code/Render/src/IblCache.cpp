@@ -18,7 +18,7 @@ constexpr uint64_t kFnvOffset = 1469598103934665603ull;
 /// mip, atau matematika yang menghasilkannya. Ia bagian dari kunci, jadi
 /// menaikkannya membuat seluruh artefak lama tidak pernah terbaca lagi alih-alih
 /// terbaca salah.
-constexpr uint32_t kCacheVersion = 1;
+constexpr uint32_t kCacheVersion = 2;
 
 /// Empat byte pertama berkasnya. Berkas yang bukan milik kita ditolak di sini,
 /// sebelum satu pun angka di dalamnya dipercaya.
@@ -29,6 +29,15 @@ struct Header {
     uint32_t version;
     uint32_t cubeSize;
     uint32_t mipCount;
+    /// Mip pertama yang tidak ikut disaring CPU — nol berarti seluruhnya ikut.
+    ///
+    /// **Disimpan, bukan disimpulkan dari isinya.** Sebuah artefak yang
+    /// mipnya nol karena diserahkan ke GPU dan sebuah artefak yang mipnya nol
+    /// karena lingkungannya memang hitam tidak bisa dibedakan dari texelnya —
+    /// dan yang salah menebak menghasilkan lingkungan gelap yang tidak pernah
+    /// dipanggang ulang, atau satu dispatch sia-sia setiap kali level dibuka.
+    uint32_t firstGpuMip;
+    uint32_t pad;
     uint64_t texelCount;
 };
 
@@ -76,6 +85,10 @@ uint64_t IblCacheKey(const std::filesystem::path& source, const IblBakeSettings&
     hash = HashInto(hash, &settings.mipCount, sizeof(settings.mipCount));
     hash = HashInto(hash, &settings.prefilterSamples, sizeof(settings.prefilterSamples));
     hash = HashInto(hash, &settings.irradianceSamples, sizeof(settings.irradianceSamples));
+    // Ikut kuncinya karena ia mengubah isi berkasnya: yang dipanggang dengan
+    // jalur GPU menyimpan mip di atasnya sebagai nol, dan memberikannya kepada
+    // pemuat yang tidak akan menjalankan dispatch berarti pantulan hitam.
+    hash = HashInto(hash, &settings.firstGpuMip, sizeof(settings.firstGpuMip));
     hash = HashInto(hash, &intensity, sizeof(intensity));
     hash = HashInto(hash, &kCacheVersion, sizeof(kCacheVersion));
     return hash;
@@ -118,6 +131,8 @@ bool WriteIblCache(const std::filesystem::path& file, const IblBakeCpu& baked,
     header.version = kCacheVersion;
     header.cubeSize = baked.cubeSize;
     header.mipCount = baked.mipCount;
+    header.firstGpuMip = baked.firstGpuMip;
+    header.pad = 0;
     header.texelCount = baked.cubeTexels.size();
 
     stream.write(reinterpret_cast<const char*>(&header), sizeof(header));
@@ -187,6 +202,15 @@ bool ReadIblCache(const std::filesystem::path& file, IblBakeCpu& out, std::strin
         error = "cached environment has an implausible size";
         return false;
     }
+    // Mip yang ditangguhkan harus ada di dalam rantainya. Yang menangguhkan
+    // seluruh rantai menangguhkan mip 0 juga — dan mip 0 mencuplik lingkungan,
+    // yang tidak ada di GPU. Menerimanya berarti mip 0 yang tidak pernah
+    // terisi, yaitu pantulan hitam pada permukaan yang paling licin.
+    if (header.firstGpuMip != 0 && header.firstGpuMip >= header.mipCount) {
+        error = "cached environment defers mip " + std::to_string(header.firstGpuMip) +
+                " of only " + std::to_string(header.mipCount);
+        return false;
+    }
     // **Ukuran yang disebut header harus cocok dengan bentuk yang disebutnya.**
     // `rhi::TextureCube::Create` memang menolak span yang terlalu pendek, jadi
     // yang lolos dari sini tidak akan membaca melewati ujung buffer — tapi
@@ -203,6 +227,7 @@ bool ReadIblCache(const std::filesystem::path& file, IblBakeCpu& out, std::strin
     IblBakeCpu baked;
     baked.cubeSize = header.cubeSize;
     baked.mipCount = header.mipCount;
+    baked.firstGpuMip = header.firstGpuMip;
 
     stream.read(reinterpret_cast<char*>(baked.irradiance.coefficients.data()),
                 static_cast<std::streamsize>(sizeof(Vec3) * baked.irradiance.coefficients.size()));

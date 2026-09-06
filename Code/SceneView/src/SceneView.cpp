@@ -299,6 +299,14 @@ void SceneView::Build(scene::World& world, const Selection& selection,
             // bentuk yang berbeda. **Di luar blok di bawah**, karena yang
             // membacanya adalah daftar pickable di ujung.
             std::string meshKey;
+            // **Mesh bertulang tidak boleh dapat petak lightmap (S5).** Lightmap
+            // memanggang geometri CPU, yaitu pose bind — bukan pose yang sedang
+            // digambar — pada transform saat panggangan. Sesudah itu ia beku:
+            // karakter yang berjalan membawa cahaya tak-langsung milik pose dan
+            // tempat yang bukan miliknya lagi, dan shader memilih lightmap di
+            // atas probe begitu petaknya ada. Yang benar untuknya kisi probe,
+            // yang memang dibaca di posisinya sekarang.
+            bool skinned = false;
             {
                 // Warna mundur untuk ruas yang tidak punya material di mana pun:
                 // material bawaan editor.
@@ -306,6 +314,10 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                 if (meshRenderer != nullptr) {
                     instance.castShadows = meshRenderer->castShadows;
                     instance.receiveShadows = meshRenderer->receiveShadows;
+                    // Diserahkan apa adanya; yang mengujinya renderer, karena di
+                    // sanalah kamera berada dan di sanalah seluruh keputusan
+                    // culling lain sudah tinggal.
+                    instance.maxDrawDistance = meshRenderer->maxDrawDistance;
                 }
 
                 // GUID → jalur → geometri. **Renderer yang menyimpan cache-nya**,
@@ -389,10 +401,21 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                                                   ? animation->PaletteFor(entity)
                                                   : std::span<const Mat4>{},
                                               instance);
+                            skinned = mesh.boneCount > 0;
                         }
                     }
                 }
             }
+            // Petak lightmap instance ini, bila adegan ini sudah dipanggang (S5).
+            // Yang tidak punya membawa nol dan jatuh ke kisi probe — objek
+            // dinamis memang begitu.
+            if (!skinned) {
+                if (const auto found = lightmapPlacements_.find(static_cast<uint64_t>(entity));
+                    found != lightmapPlacements_.end()) {
+                    instance.lightmapScaleOffset = found->second;
+                }
+            }
+
             meshes_.push_back(instance);
 
             // Daftar untuk panggangan cahaya statis (S2): **seluruh geometri
@@ -427,7 +450,9 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                     worldMax = glm::max(worldMax, atCorner);
                 }
                 bakeEntries_.push_back(
-                    BakeEntry{entity, composed, kUnitCubeKey, worldMin, worldMax});
+                    BakeEntry{entity, composed, kUnitCubeKey, worldMin, worldMax,
+                              meshRenderer != nullptr ? meshRenderer->lightmapTexelDensity : 0.0f,
+                              true});
             }
 
             if (!meshKey.empty()) {
@@ -446,7 +471,15 @@ void SceneView::Build(scene::World& world, const Selection& selection,
                     worldMin = glm::min(worldMin, atCorner);
                     worldMax = glm::max(worldMax, atCorner);
                 }
-                bakeEntries_.push_back(BakeEntry{entity, matrix, meshKey, worldMin, worldMax});
+                // **Tetap masuk daftar, hanya tidak berhak atas petak.** Daftar
+                // ini juga yang memasok geometri penghalang panggangan probe;
+                // mencabutnya dari sini berarti karakter berhenti menaungi
+                // apa pun, yaitu mengubah hasil S2 dan S3 tanpa satu pun
+                // pengukuran yang menuntutnya.
+                bakeEntries_.push_back(
+                    BakeEntry{entity, matrix, meshKey, worldMin, worldMax,
+                              meshRenderer != nullptr ? meshRenderer->lightmapTexelDensity : 0.0f,
+                              !skinned});
             }
 
             if (pickable) {
@@ -982,7 +1015,8 @@ void SceneView::AppendTerrain(const scene::TerrainComponent& component, scene::E
                     worldMin = glm::min(worldMin, atCorner);
                     worldMax = glm::max(worldMax, atCorner);
                 }
-                bakeEntries_.push_back(BakeEntry{entity, matrix, key, worldMin, worldMax});
+                bakeEntries_.push_back(
+                    BakeEntry{entity, matrix, key, worldMin, worldMax, 0.0f, true});
             }
 
             if (pickable) {
@@ -1506,6 +1540,17 @@ void SceneView::AdoptGeometry(const std::string& key, const assets::MeshData& da
 
 
 
+void SceneView::SetLightmap(std::shared_ptr<const render::Lightmap> lightmap) {
+    lightmap_ = std::move(lightmap);
+    lightmapPlacements_.clear();
+    if (lightmap_ == nullptr) {
+        return;
+    }
+    for (const render::LightmapPlacement& placement : lightmap_->placements) {
+        lightmapPlacements_[placement.owner] = placement.scaleOffset;
+    }
+}
+
 void SceneView::BakeItems(std::vector<PickItem>& out) const {
     out.clear();
     out.reserve(bakeEntries_.size());
@@ -1519,6 +1564,8 @@ void SceneView::BakeItems(std::vector<PickItem>& out) const {
         item.meshKey = entry.meshKey;
         item.worldMinimum = entry.worldMinimum;
         item.worldMaximum = entry.worldMaximum;
+        item.lightmapTexelDensity = entry.lightmapTexelDensity;
+        item.lightmapEligible = entry.lightmapEligible;
         // Kunci mesh impor **adalah** jalur berkasnya; whitebox memakai GUID,
         // yang bukan jalur dan karena itu tidak punya sumber untuk dimuat.
         if (entry.meshKey.find('/') != std::string::npos ||

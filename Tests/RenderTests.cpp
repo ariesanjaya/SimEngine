@@ -858,6 +858,62 @@ TEST_CASE("Kotak yang diputar diuji lewat kotak dunia yang memuatnya") {
     CHECK(world.max.x == doctest::Approx(0.1f).epsilon(0.001));
 }
 
+TEST_CASE("Jarak gambar: nol berarti tak terbatas") {
+    // **Bawaan harus menggambar segalanya.** Nol yang diperlakukan harfiah
+    // sebagai "jarak nol" membuat setiap objek yang belum pernah disentuh
+    // pengarang menghilang — kegagalan yang terlihat sebagai level kosong, bukan
+    // sebagai setelan yang belum diisi.
+    const render::Aabb box{Vec3(-0.5f), Vec3(0.5f)};
+    const Vec3 faraway(0.0f, 0.0f, 100000.0f);
+    CHECK(render::WithinDrawDistance(0.0f, faraway, box));
+    // Negatif ikut, dan dengan alasan yang sama: ia satu-satunya nilai lain yang
+    // bisa datang dari berkas level yang disunting tangan.
+    CHECK(render::WithinDrawDistance(-10.0f, faraway, box));
+}
+
+TEST_CASE("Jarak gambar diukur ke kotaknya, bukan ke titik asalnya") {
+    // **Inilah yang membuat lantai besar tidak berkedip.** Sebuah lantai
+    // 80x80 meter yang titik asalnya di satu sudut tetap harus tergambar selagi
+    // kamera berdiri di atasnya, walau titik asalnya puluhan meter jauhnya.
+    const render::Aabb floor{Vec3(0.0f, -0.1f, 0.0f), Vec3(80.0f, 0.0f, 80.0f)};
+    const Vec3 standingOnIt(40.0f, 1.7f, 40.0f);
+
+    // Jarak ke kotaknya cuma tinggi mata; jarak ke titik asalnya ~57 m.
+    CHECK(render::DistanceToAabb(standingOnIt, floor) == doctest::Approx(1.7f));
+    CHECK(render::WithinDrawDistance(10.0f, standingOnIt, floor));
+
+    // Titik di dalam kotak berjarak nol, tanpa cabang tersendiri.
+    CHECK(render::DistanceToAabb(Vec3(40.0f, -0.05f, 40.0f), floor) == doctest::Approx(0.0f));
+}
+
+TEST_CASE("Jarak gambar membuang yang di luar dan menahan yang persis di batas") {
+    const render::Aabb box{Vec3(-1.0f), Vec3(1.0f)};
+    // Kotak membentang sampai z = 1, jadi mata di z = 11 berjarak 10 tepat.
+    const Vec3 eye(0.0f, 0.0f, 11.0f);
+    CHECK(render::DistanceToAabb(eye, box) == doctest::Approx(10.0f));
+
+    // Batasnya inklusif: yang persis di jarak itu masih digambar. Eksklusif
+    // akan membuat objek berkedip tepat di ambangnya saat kamera diam.
+    CHECK(render::WithinDrawDistance(10.0f, eye, box));
+    CHECK(render::WithinDrawDistance(10.5f, eye, box));
+    CHECK_FALSE(render::WithinDrawDistance(9.5f, eye, box));
+}
+
+TEST_CASE("Jarak gambar tidak peduli arah, hanya jarak") {
+    // Frustum yang mengurus arah; ini hanya jarak. Yang di belakang kamera dan
+    // masih dekat tetap lolos di sini — dan itu benar, karena ia masih bisa
+    // menjatuhkan bayangan ke dalam pandangan.
+    const render::Aabb box{Vec3(-0.5f), Vec3(0.5f)};
+    const Vec3 eye(0.0f, 0.0f, 0.0f);
+    for (const Vec3& offset : {Vec3(5.0f, 0.0f, 0.0f), Vec3(-5.0f, 0.0f, 0.0f),
+                               Vec3(0.0f, 0.0f, -5.0f), Vec3(0.0f, 5.0f, 0.0f)}) {
+        const render::Aabb moved{box.min + offset, box.max + offset};
+        INFO("offset ", offset.x, " ", offset.y, " ", offset.z);
+        CHECK(render::WithinDrawDistance(10.0f, eye, moved));
+        CHECK_FALSE(render::WithinDrawDistance(2.0f, eye, moved));
+    }
+}
+
 TEST_CASE("Menyaring kotak mengembalikan indeks yang lolos saja") {
     const Mat4 view = LookAt(Vec3(0.0f), Vec3(0.0f, 0.0f, -1.0f));
     const Frustum frustum(PerspectiveReversedZ(60.0f * kDegToRad, 1.0f, 0.1f, 100.0f) * view);
@@ -1808,6 +1864,121 @@ TEST_CASE("B3: putaran tidak mengubah apa pun yang dipanggang") {
     const render::IblBakeCpu scaled = render::BakeIblCpu(map, settings);
     CHECK(scaled.irradiance.coefficients[0].x ==
           doctest::Approx(baked.irradiance.coefficients[0].x * 2.0f).epsilon(0.01));
+}
+
+TEST_CASE("prefilter GPU: mip yang ditangguhkan ditinggalkan nol, mip 0 tidak berubah") {
+    // **Yang diuji di sini pembagian kerjanya, bukan integralnya.** Integral
+    // GGX-nya sudah punya ujinya sendiri di atas; yang baru adalah bahwa
+    // `firstGpuMip` memindahkan pekerjaan tanpa menggeser satu texel pun dari
+    // mip yang tetap tinggal — dan bahwa yang dipindahkan benar-benar
+    // ditinggalkan nol, bukan diisi separuh.
+    //
+    // Nol itu yang membuat dispatch yang tidak berjalan terlihat: pantulan
+    // hitam pada material kasar adalah gejala yang bisa dikenali, sementara
+    // memori yang belum ditulis siapa pun adalah pantulan berkilat-kilat yang
+    // terlihat seperti masalah yang sama sekali lain.
+    const render::EquirectEnvironment map = LongitudeStripes(64, 32);
+    render::IblBakeSettings settings;
+    settings.cubeSize = 16;
+    settings.mipCount = 4;
+    settings.irradianceSamples = 0;
+    settings.prefilterSamples = 16;
+
+    const render::IblBakeCpu whole = render::BakeIblCpu(map, settings);
+    REQUIRE(whole.IsValid());
+    CHECK(whole.firstGpuMip == 0);
+
+    settings.firstGpuMip = 1;
+    const render::IblBakeCpu split = render::BakeIblCpu(map, settings);
+    REQUIRE(split.IsValid());
+    CHECK(split.firstGpuMip == 1);
+
+    // Rantainya sama panjangnya: yang ditangguhkan tetap dialokasikan, karena
+    // unggahannya menuntut rantai utuh.
+    REQUIRE(split.cubeTexels.size() == whole.cubeTexels.size());
+
+    const std::size_t mip0Floats =
+        static_cast<std::size_t>(settings.cubeSize) * settings.cubeSize * 6 * 4;
+    REQUIRE(whole.cubeTexels.size() > mip0Floats);
+
+    // Mip 0 identik byte demi byte — ia dihitung jalur yang sama persis.
+    CHECK(std::equal(split.cubeTexels.begin(), split.cubeTexels.begin() + mip0Floats,
+                     whole.cubeTexels.begin()));
+    // Dan mip 0 memang berisi sesuatu; kalau tidak, uji di bawahnya lulus
+    // dengan alasan yang salah.
+    CHECK(std::any_of(split.cubeTexels.begin(), split.cubeTexels.begin() + mip0Floats,
+                      [](float value) { return value > 0.0f; }));
+
+    // Sisanya nol, dan jalur CPU-nya tidak.
+    CHECK(std::all_of(split.cubeTexels.begin() + mip0Floats, split.cubeTexels.end(),
+                      [](float value) { return value == 0.0f; }));
+    CHECK(std::any_of(whole.cubeTexels.begin() + mip0Floats, whole.cubeTexels.end(),
+                      [](float value) { return value > 0.0f; }));
+}
+
+TEST_CASE("prefilter GPU: penangguhan di luar rantai jatuh kembali ke CPU") {
+    // Meminta mip yang tidak ada bukan galat melainkan permintaan yang tidak
+    // menyisakan apa pun untuk GPU — dan jawabannya seluruhnya di CPU, bukan
+    // rantai yang sebagian kosong tanpa ada yang akan mengisinya.
+    const render::EquirectEnvironment map = LongitudeStripes(32, 16);
+    render::IblBakeSettings settings;
+    settings.cubeSize = 8;
+    settings.mipCount = 3;
+    settings.irradianceSamples = 0;
+    settings.prefilterSamples = 8;
+    settings.firstGpuMip = 3;
+
+    const render::IblBakeCpu baked = render::BakeIblCpu(map, settings);
+    REQUIRE(baked.IsValid());
+    CHECK(baked.firstGpuMip == 0);
+    CHECK(std::any_of(baked.cubeTexels.begin(), baked.cubeTexels.end(),
+                      [](float value) { return value > 0.0f; }));
+}
+
+TEST_CASE("prefilter GPU: artefak masak membawa mip yang masih berutang") {
+    // Sebuah `.simibl` yang mipnya nol karena diserahkan ke GPU dan sebuah
+    // `.simibl` yang mipnya nol karena lingkungannya hitam tidak bisa dibedakan
+    // dari texelnya. Yang membedakannya angka di header — dan yang kehilangan
+    // angka itu memuat lingkungan gelap yang tidak pernah dipanggang ulang.
+    const render::EquirectEnvironment map = LongitudeStripes(32, 16);
+    render::IblBakeSettings settings;
+    settings.cubeSize = 8;
+    settings.mipCount = 3;
+    settings.irradianceSamples = 0;
+    settings.firstGpuMip = 1;
+
+    const render::IblBakeCpu baked = render::BakeIblCpu(map, settings);
+    REQUIRE(baked.IsValid());
+    REQUIRE(baked.firstGpuMip == 1);
+
+    const std::filesystem::path file =
+        std::filesystem::temp_directory_path() /
+        ("sim-ibl-gpu-" + std::to_string(::getpid()) + ".simibl");
+
+    std::string error;
+    REQUIRE_MESSAGE(render::WriteIblCache(file, baked, error), error);
+
+    render::IblBakeCpu loaded;
+    REQUIRE_MESSAGE(render::ReadIblCache(file, loaded, error), error);
+    CHECK(loaded.firstGpuMip == 1);
+    CHECK(loaded.cubeSize == baked.cubeSize);
+    CHECK(loaded.mipCount == baked.mipCount);
+    REQUIRE(loaded.cubeTexels.size() == baked.cubeTexels.size());
+    CHECK(std::equal(loaded.cubeTexels.begin(), loaded.cubeTexels.end(),
+                     baked.cubeTexels.begin()));
+
+    // Kuncinya ikut berpindah: dua panggangan yang hanya berbeda pembagian
+    // kerjanya menghasilkan berkas yang berbeda isinya, jadi keduanya tidak
+    // boleh berbagi satu nama.
+    render::IblBakeSettings cpuOnly = settings;
+    cpuOnly.firstGpuMip = 0;
+    const uint64_t gpuKey = render::IblCacheKey(file, settings, 1.0f);
+    const uint64_t cpuKey = render::IblCacheKey(file, cpuOnly, 1.0f);
+    REQUIRE(gpuKey != 0);
+    CHECK(gpuKey != cpuKey);
+
+    std::error_code cleanup;
+    std::filesystem::remove(file, cleanup);
 }
 
 TEST_CASE("B3: artefak masak lingkungan bolak-balik tanpa berubah") {

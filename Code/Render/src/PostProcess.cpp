@@ -295,7 +295,7 @@ bool PostProcess::Adopt(uint32_t allocatedWidth, uint32_t allocatedHeight) {
     allocatedHeight_ = allocatedHeight;
 
     const auto make = [&](Image& target, VkFormat format, uint32_t width, uint32_t height,
-                          uint32_t mips, bool clearable = false) {
+                          uint32_t mips, bool clearable = false, bool readable = false) {
         VkImageCreateInfo imageInfo{};
         imageInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
         imageInfo.imageType = VK_IMAGE_TYPE_2D;
@@ -311,6 +311,15 @@ bool PostProcess::Adopt(uint32_t allocatedWidth, uint32_t allocatedHeight) {
         // bukan saat perintahnya direkam.
         if (clearable) {
             imageInfo.usage |= VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        }
+        // **`ReadScene` menyalin gambar ini ke buffer, dan Vulkan menuntut
+        // penandanya disebutkan saat gambar dibuat — bukan saat perintahnya
+        // direkam.** Tanpa baris ini pembacaan balik HDR berjalan di sebagian
+        // driver dan melanggar spek di semuanya; yang membongkarnya cuma
+        // validation layer, dan jalur itu memang belum pernah dijalankan
+        // dengannya sampai S5.
+        if (readable) {
+            imageInfo.usage |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
         }
         imageInfo.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
@@ -333,7 +342,8 @@ bool PostProcess::Adopt(uint32_t allocatedWidth, uint32_t allocatedHeight) {
                VK_SUCCESS;
     };
 
-    if (!make(scene_, kSceneFormat, allocatedWidth_, allocatedHeight_, 1)) {
+    if (!make(scene_, kSceneFormat, allocatedWidth_, allocatedHeight_, 1,
+              /*clearable=*/false, /*readable=*/true)) {
         SIM_ERROR("Render", "cannot allocate the HDR scene colour target");
         return false;
     }

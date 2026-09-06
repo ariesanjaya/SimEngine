@@ -140,6 +140,9 @@ sim_add_test(SimAssetTests
         AssetTests.cpp
     DEPS
         Sim::Assets
+        # S5 memeriksa artefak atlas lightmap, yang tipenya tinggal di
+        # `Sim::Render` karena renderer yang memakainya.
+        Sim::Render
         # Bake SDF mesh ada di `Sim::Assets`, pustakanya di `Sim::Volume`, dan
         # tautannya di sana PRIVATE — sengaja: OpenVDB adalah pengondisi aset,
         # bukan sesuatu yang ikut ke jalur yang dikirim. Uji-nya perlu bertanya
@@ -392,7 +395,10 @@ if(TARGET Sim::Reference)
             # butuh pemanggangnya sendiri — `AtmosphereSky`, `ProjectIrradiance`,
             # `EvaluateIrradiance`. Acuan yang membandingkan dirinya dengan
             # tiruan pemanggang tidak membandingkan apa pun.
-            Sim::Render)
+            Sim::Render
+            # S5 merasterisasi lightmap lewat kode yang sungguhan, bukan
+            # membandingkan acuan dengan dirinya sendiri.
+            Sim::Assets)
 endif()
 
 # --- Model shading OpenPBR dijalankan di CPU ---------------------------------

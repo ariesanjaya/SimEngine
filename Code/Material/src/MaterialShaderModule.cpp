@@ -461,8 +461,17 @@ std::string AssembleForwardMaterialModule(const std::string& generatedSlang,
     out << "        m.surface.specularWeight = 0.0;\n";
     // Nol berarti "pakai normal geometri" — sentinel yang sama yang dipakai
     // cabang normal map di bawah.
-    out << "        m.normal = float3(0.0);\n";
-    out << "        m.tangent = float3(1.0, 0.0, 0.0);\n";
+    //
+    // **Detail lighting justru mempertahankannya, dan di situlah seluruh
+    // bedanya dari clay.** Clay membuang peta normal karena lekuk palsu
+    // mengaburkan bentuk bayangan; detail lighting membuang segalanya *kecuali*
+    // peta normal, karena yang ditanyakannya persis lekuk itu — datang dari
+    // geometri atau dari tekstur. Dua cabang untuk satu pertanyaan yang
+    // berlawanan, dengan satu baris yang membedakannya.
+    out << "        if (!detailLightingView()) {\n";
+    out << "            m.normal = float3(0.0);\n";
+    out << "            m.tangent = float3(1.0, 0.0, 0.0);\n";
+    out << "        }\n";
     out << "        m.coatNormal = float3(0.0, 0.0, 1.0);\n";
     out << "        m.coatTangent = float3(1.0, 0.0, 0.0);\n";
     out << "        m.emissive = float3(0.0);\n";
@@ -517,6 +526,39 @@ std::string AssembleForwardMaterialModule(const std::string& generatedSlang,
     // **Mode Unlit masuk lewat cabang yang sama**, dan itu pula yang membuatnya
     // tidak menuntut varian pipeline kedua per material. Lihat `unlitView()` di
     // `cluster_common.slang`.
+    // **Sesudah bingkai dibangun, bukan sebelum.** Keduanya membaca
+    // `frame.normal`, yaitu normal yang sudah melewati peta normal — dan mode
+    // Normal yang menampilkan normal geometri adalah mode yang menjawab
+    // pertanyaan yang tidak diajukan siapa pun.
+    //
+    // Cermin sempurna: logam mulus tanpa warna dasar, dengan peta normalnya
+    // dipertahankan. Peta normal justru yang membuat mode ini berguna — ia yang
+    // menunjukkan lingkungan tergeser di tempat permukaannya berlekuk.
+    out << "    if (reflectionsView()) {\n";
+    out << "        m.surface = OpenPBRSurface::defaults();\n";
+    out << "        m.surface.baseColor = float3(1.0);\n";
+    out << "        m.surface.baseMetalness = 1.0;\n";
+    out << "        m.surface.specularRoughness = 0.0;\n";
+    out << "        m.emissive = float3(0.0);\n";
+    out << "    }\n\n";
+
+    // Kanal permukaan apa adanya. Pada perender deferred ini menuntut G-buffer
+    // lebih dulu; di sini nilainya sedang berada di tangan, jadi yang dibutuhkan
+    // hanya keluar lebih awal.
+    out << "    switch (viewMode()) {\n";
+    out << "        case kViewBaseColor:\n";
+    out << "            return float4(m.surface.baseColor * m.surface.baseWeight,\n";
+    out << "                          m.opacity * input.color.a);\n";
+    out << "        case kViewNormal:\n";
+    out << "            return float4(frame.normal * 0.5 + 0.5, 1.0);\n";
+    out << "        case kViewRoughness:\n";
+    out << "            return float4(float3(m.surface.specularRoughness), 1.0);\n";
+    out << "        case kViewMetallic:\n";
+    out << "            return float4(float3(m.surface.baseMetalness), 1.0);\n";
+    out << "        default:\n";
+    out << "            break;\n";
+    out << "    }\n\n";
+
     out << "    if (unlitView() || !anyLightInScene()) {\n";
     out << "        return float4(m.surface.baseColor * m.surface.baseWeight + m.emissive,\n";
     out << "                      m.opacity * input.color.a);\n";
@@ -566,6 +608,15 @@ std::string AssembleForwardMaterialModule(const std::string& generatedSlang,
     // benar" alih-alih sebagai "kisinya mati".
     out << "    if (shadowParams.probeCounts.w > 0.5) {\n";
     out << "        irradiance = probeIrradiance(input.worldPosition, frame.normal);\n";
+    out << "    }\n";
+    // **Lightmap menang untuk permukaan yang punya petak (S5).** Alasannya di
+    // `box_shading.slang`; yang penting di sini adalah ia dipasang di **kedua**
+    // jalur — lupa yang satu berarti fitur yang mati untuk hampir seluruh
+    // adegan, dan gambar yang identik dengan sebelumnya terbaca sebagai
+    // "lightmapnya benar" alih-alih "lightmapnya tidak pernah dibaca". Itu
+    // persis yang terjadi pada kisi probe di S1.
+    out << "    if (input.hasLightmap != 0u) {\n";
+    out << "        irradiance = lightmapIrradiance(input.lightmapUv);\n";
     out << "    }\n";
     out << "    if (shadowParams.giParams.x > 0.5) {\n";
     out << "        irradiance = giIrradianceAt(input.position.xy, input.worldPosition,\n";

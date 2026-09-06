@@ -1222,6 +1222,73 @@ TEST_CASE("Modul yang dirakit menanam prelude, bukan meng-import-nya") {
     CHECK(module.find("vk::constant_id(2)") != std::string::npos);
 }
 
+/// Modul pass forward untuk sebuah graph minimal, apa adanya.
+///
+/// **Yang diuji dua kasus di bawah adalah teksnya, bukan gambarnya.** Mode clay
+/// dan detail lighting tergambar identik pada setiap material yang tidak punya
+/// peta normal — yaitu hampir seluruh material uji — jadi perbandingan gambar
+/// tidak bisa membedakan "keduanya memang sama di sini" dari "cabangnya tidak
+/// pernah jalan".
+std::string ForwardModuleForMinimalGraph() {
+    MaterialGraph graph;
+    MaterialNode output;
+    output.guid = Uuid::Generate();
+    output.type = std::string(kSurfaceOutputType);
+    graph.nodes.push_back(output);
+
+    MaterialCompileOptions options;
+    options.moduleName = "uji.simmat";
+
+    ForwardMaterialOptions moduleOptions;
+    moduleOptions.prelude = LoadOpenPbrPrelude(SIM_SHADER_DIR);
+    moduleOptions.frameDeclarations = InlineShaderIncludes(
+        SIM_SHADER_DIR, {"box_varyings.slang", "cluster_common.slang", "gi_resolve.slang"});
+
+    const MaterialCompileResult compiled = CompileMaterial(graph, options);
+    if (!compiled.ok) {
+        return {};
+    }
+    moduleOptions.lobes = compiled.lobes;
+    return AssembleForwardMaterialModule(compiled.slang, moduleOptions);
+}
+
+TEST_CASE("Detail lighting mempertahankan peta normal, clay tidak") {
+    const std::string module = ForwardModuleForMinimalGraph();
+    REQUIRE(!module.empty());
+
+    const std::size_t clay = module.find("if (clayView()) {");
+    REQUIRE(clay != std::string::npos);
+    const std::size_t guard = module.find("if (!detailLightingView()) {", clay);
+    REQUIRE(guard != std::string::npos);
+    const std::size_t reset = module.find("m.normal = float3(0.0);", clay);
+    REQUIRE(reset != std::string::npos);
+    // Pembuangan normal berada **di dalam** syaratnya, bukan sesudahnya.
+    CHECK(guard < reset);
+}
+
+TEST_CASE("Kanal permukaan keluar sebelum penyinaran dijalankan") {
+    // Mode kanal mengembalikan satu angka permukaan apa adanya. Kalau cabangnya
+    // berada sesudah penyinaran, yang keluar bukan angka itu melainkan angka itu
+    // setelah dikalikan cahaya — gambar yang meyakinkan dan salah.
+    const std::string module = ForwardModuleForMinimalGraph();
+    REQUIRE(!module.empty());
+
+    const std::size_t channels = module.find("case kViewBaseColor:");
+    const std::size_t unlit = module.find("if (unlitView() || !anyLightInScene()) {");
+    const std::size_t lit = module.find("evaluateOpenPBR(m.surface");
+    REQUIRE(channels != std::string::npos);
+    REQUIRE(unlit != std::string::npos);
+    REQUIRE(lit != std::string::npos);
+    CHECK(channels < unlit);
+    CHECK(channels < lit);
+
+    // Pantulan menyetel permukaannya lalu **membiarkan penyinaran berjalan** —
+    // ia mode yang menampilkan lingkungan, jadi ia justru menuntut cahaya.
+    const std::size_t reflections = module.find("if (reflectionsView()) {");
+    REQUIRE(reflections != std::string::npos);
+    CHECK(reflections < lit);
+}
+
 TEST_CASE("Prelude yang berubah membatalkan cache material") {
     TempCacheDir dir("prelude");
     CountingCompiler compiler;

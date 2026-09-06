@@ -1,5 +1,7 @@
 #define DOCTEST_CONFIG_IMPLEMENT_WITH_MAIN
 
+#include <random>
+
 #include "Sim/Assets/AssetDatabase.h"
 #include "Sim/Assets/Cook.h"
 #include "Sim/Assets/Importer.h"
@@ -9,6 +11,9 @@
 #include "Sim/Assets/TextureBake.h"
 #include "Sim/Assets/TextureBakery.h"
 #include "Sim/Assets/TextureSettings.h"
+#include "Sim/Render/Lightmap.h"
+#include "Sim/Assets/LightmapAtlas.h"
+#include "Sim/Assets/LightmapRaster.h"
 #include "Sim/Assets/LightmapUv.h"
 #include "Sim/Assets/MeshData.h"
 #include "Sim/Assets/MeshGeometryCache.h"
@@ -4083,4 +4088,382 @@ TEST_CASE("S4: artefak milik mesh lain ditolak, bukan dibaca melewati ujungnya")
     CHECK_FALSE(assets::ApplyLightmapUv(other, artifact, error));
     CHECK_FALSE(error.empty());
     CHECK_FALSE(other.hasLightmapUv);
+}
+
+// --- S5: rasterisasi texel lightmap ------------------------------------------
+
+namespace {
+
+/// Kuad mendatar 2×2 m di y=0, ber-UV lightmap penuh.
+assets::MeshData MakeLightmappedQuad(float size = 2.0f) {
+    assets::MeshData mesh;
+    const Vec3 corners[4] = {{-size * 0.5f, 0.0f, -size * 0.5f},
+                             {size * 0.5f, 0.0f, -size * 0.5f},
+                             {size * 0.5f, 0.0f, size * 0.5f},
+                             {-size * 0.5f, 0.0f, size * 0.5f}};
+    const Vec2 uvs[4] = {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}};
+    for (int i = 0; i < 4; ++i) {
+        assets::MeshVertex vertex;
+        vertex.position = corners[i];
+        vertex.normal = Vec3(0.0f, 1.0f, 0.0f);
+        vertex.uv = uvs[i];
+        vertex.lightmapUv = uvs[i];
+        mesh.vertices.push_back(vertex);
+    }
+    for (const uint32_t index : {0u, 1u, 2u, 0u, 2u, 3u}) {
+        mesh.indices.push_back(index);
+    }
+    mesh.hasLightmapUv = true;
+    mesh.parts.push_back(assets::SubMesh{0, 6, -1});
+    return mesh;
+}
+
+}  // namespace
+
+TEST_CASE("S5: texel lightmap mendarat di permukaan yang diwakilinya") {
+    const assets::MeshData mesh = MakeLightmappedQuad(2.0f);
+    const assets::LightmapRaster raster = assets::RasteriseLightmap(mesh, 16, 16);
+    REQUIRE(raster.IsValid());
+    // Kuad penuh menutupi seluruh petaknya.
+    CHECK(raster.coveredCount == 16 * 16);
+
+    for (uint32_t y = 0; y < raster.height; ++y) {
+        for (uint32_t x = 0; x < raster.width; ++x) {
+            const assets::LightmapTexel& texel = raster.texels[y * raster.width + x];
+            REQUIRE(texel.covered);
+            // Di permukaan: y nol, dan xz di dalam kuadnya.
+            CHECK(texel.position.y == doctest::Approx(0.0f).epsilon(1e-4));
+            CHECK(texel.position.x >= -1.0f - 1e-4f);
+            CHECK(texel.position.x <= 1.0f + 1e-4f);
+            CHECK(texel.position.z >= -1.0f - 1e-4f);
+            CHECK(texel.position.z <= 1.0f + 1e-4f);
+            CHECK(texel.normal.y == doctest::Approx(1.0f).epsilon(1e-4));
+        }
+    }
+
+    // Dan urutannya benar: texel (0,0) mewakili sudut UV (0,0), yaitu sudut
+    // dunia (-1, 0, -1). Peta yang tercermin tetap peta yang sah, dan tidak ada
+    // satu pun galat yang muncul — hanya cahaya yang mendarat di sisi yang salah.
+    const assets::LightmapTexel& first = raster.texels[0];
+    CHECK(first.position.x < 0.0f);
+    CHECK(first.position.z < 0.0f);
+}
+
+TEST_CASE("S5: segitiga lebih kecil daripada satu texel tetap mendapat texel") {
+    // **Tanpa pelebaran setengah texel, ia tidak punya satu pun pusat texel di
+    // dalamnya** — dan yang keluar adalah lubang hitam yang bentuknya mengikuti
+    // geometri tipis: pagar, daun, tepi meja.
+    assets::MeshData mesh;
+    const Vec3 corners[3] = {{0.0f, 0.0f, 0.0f}, {0.02f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.02f}};
+    const Vec2 uvs[3] = {{0.50f, 0.50f}, {0.51f, 0.50f}, {0.50f, 0.51f}};
+    for (int i = 0; i < 3; ++i) {
+        assets::MeshVertex vertex;
+        vertex.position = corners[i];
+        vertex.normal = Vec3(0.0f, 1.0f, 0.0f);
+        vertex.lightmapUv = uvs[i];
+        mesh.vertices.push_back(vertex);
+    }
+    mesh.indices = {0, 1, 2};
+    mesh.hasLightmapUv = true;
+
+    const assets::LightmapRaster raster = assets::RasteriseLightmap(mesh, 8, 8);
+    REQUIRE(raster.IsValid());
+    MESSAGE(raster.coveredCount, " texel tertutup oleh segitiga sub-texel");
+    CHECK(raster.coveredCount >= 1);
+
+    // Dan posisinya tetap di permukaan segitiganya, bukan melayang: barisentrik
+    // yang dijepit mendarat di tepinya, yaitu tempat terdekat yang memang
+    // permukaan.
+    for (const assets::LightmapTexel& texel : raster.texels) {
+        if (!texel.covered) {
+            continue;
+        }
+        CHECK(texel.position.x >= -1e-4f);
+        CHECK(texel.position.x <= 0.02f + 1e-4f);
+        CHECK(texel.position.z >= -1e-4f);
+        CHECK(texel.position.z <= 0.02f + 1e-4f);
+    }
+}
+
+TEST_CASE("S5: perluasan mengisi texel kosong dari tetangganya") {
+    // **Tanpa ini setiap jahitan chart menjadi garis gelap.** Sampling bilinear
+    // membaca texel di luar chart-nya, dan yang tidak pernah diisi adalah nol.
+    assets::MeshData mesh = MakeLightmappedQuad(2.0f);
+    // Dikecilkan ke separuh petak, supaya separuhnya kosong.
+    for (assets::MeshVertex& vertex : mesh.vertices) {
+        vertex.lightmapUv *= 0.5f;
+    }
+    const assets::LightmapRaster raster = assets::RasteriseLightmap(mesh, 16, 16);
+    REQUIRE(raster.IsValid());
+    REQUIRE(raster.coveredCount < 16 * 16);
+
+    std::vector<Vec3> values(raster.texels.size(), Vec3(0.0f));
+    for (std::size_t i = 0; i < raster.texels.size(); ++i) {
+        if (raster.texels[i].covered) {
+            values[i] = Vec3(1.0f, 2.0f, 3.0f);
+        }
+    }
+
+    // Sebuah texel tepat di sebelah tepi chart, di sisi kosongnya.
+    std::size_t justOutside = raster.texels.size();
+    for (uint32_t y = 0; y < raster.height; ++y) {
+        for (uint32_t x = 1; x < raster.width; ++x) {
+            const std::size_t at = y * raster.width + x;
+            if (!raster.texels[at].covered && raster.texels[at - 1].covered) {
+                justOutside = at;
+                break;
+            }
+        }
+        if (justOutside != raster.texels.size()) {
+            break;
+        }
+    }
+    REQUIRE(justOutside != raster.texels.size());
+    REQUIRE(values[justOutside] == Vec3(0.0f));
+
+    assets::DilateLightmap(values, raster, 2);
+    CHECK(values[justOutside].x == doctest::Approx(1.0f));
+    CHECK(values[justOutside].y == doctest::Approx(2.0f));
+    // Yang tertutup tidak boleh berubah: perluasan mengisi yang kosong, bukan
+    // mengaburkan yang sudah ada.
+    for (std::size_t i = 0; i < raster.texels.size(); ++i) {
+        if (raster.texels[i].covered) {
+            CHECK(values[i].x == doctest::Approx(1.0f));
+        }
+    }
+}
+
+TEST_CASE("S5: mesh tanpa UV lightmap tidak dirasterisasi sama sekali") {
+    // Nol adalah UV yang sah, jadi merasterisasi mesh yang belum di-unwrap
+    // menghasilkan seluruh permukaan menumpuk di satu texel — dan itu terbaca
+    // sebagai lightmap yang bekerja.
+    assets::MeshData mesh = MakeLightmappedQuad();
+    mesh.hasLightmapUv = false;
+    const assets::LightmapRaster raster = assets::RasteriseLightmap(mesh, 8, 8);
+    CHECK_FALSE(raster.IsValid());
+    CHECK(raster.coveredCount == 0);
+}
+
+// --- S5: atlas lightmap ------------------------------------------------------
+
+TEST_CASE("S5: luas dunia diukur dari segitiganya, bukan dari kotak batasnya") {
+    // **Sebuah pagar dan sebuah kubus bisa punya kotak batas yang sama** sambil
+    // luas permukaannya berbeda puluhan kali. Yang menaksir dari kotaknya
+    // memberi pagar itu texel jauh lebih sedikit daripada yang dibutuhkannya.
+    const assets::MeshData quad = MakeLightmappedQuad(2.0f);
+    CHECK(assets::MeshWorldArea(quad, Mat4(1.0f)) == doctest::Approx(4.0f));
+
+    // Diskalakan tiga kali di kedua sumbu mendatar: luasnya sembilan kali.
+    const Mat4 scaled = glm::scale(Mat4(1.0f), Vec3(3.0f, 1.0f, 3.0f));
+    CHECK(assets::MeshWorldArea(quad, scaled) == doctest::Approx(36.0f));
+}
+
+TEST_CASE("S5: sisi petak mengikuti texel per meter, bukan per meter persegi") {
+    // Yang disetel pengarang adalah texel **per meter**. Kalau ia diperlakukan
+    // sebagai per meter persegi, menggandakan ukuran sebuah benda melipatkan
+    // kerapatannya empat kali — dan anggaran atlasnya meledak pada benda besar.
+    const float area = 16.0f;  // 4 x 4 m
+    CHECK(assets::LightmapChartSide(area, 1.0f) == 4u);
+    CHECK(assets::LightmapChartSide(area, 2.0f) == 8u);
+    CHECK(assets::LightmapChartSide(area, 4.0f) == 16u);
+
+    // Benda empat kali lebih luas mendapat sisi dua kali, bukan empat kali.
+    CHECK(assets::LightmapChartSide(area * 4.0f, 2.0f) == 16u);
+
+    // Dan batasnya dihormati di kedua ujung.
+    CHECK(assets::LightmapChartSide(0.001f, 1.0f) == 4u);
+    CHECK(assets::LightmapChartSide(1e9f, 64.0f, 4u, 256u) == 256u);
+}
+
+TEST_CASE("S5: petak yang dipaket tidak saling tumpang tindih") {
+    // Petak yang bertumpang tindih berarti dua objek berbagi texel: cahaya yang
+    // dipanggang untuk salah satunya muncul di yang lain, dan tidak ada satu pun
+    // galat yang menyertainya.
+    std::vector<assets::LightmapChart> charts;
+    std::mt19937 rng(20260831u);
+    for (int i = 0; i < 40; ++i) {
+        assets::LightmapChart chart;
+        chart.side = 1u << (2 + (rng() % 5));  // 4..64
+        charts.push_back(chart);
+    }
+
+    const assets::LightmapAtlasLayout layout = assets::PackLightmapAtlas(charts, 4096);
+    REQUIRE(layout.IsValid());
+    CHECK(layout.dropped == 0);
+    MESSAGE("atlas ", layout.width, "x", layout.height, ", utilisasi ",
+            100.0f * layout.utilisation, "%, ", layout.GpuBytes() / 1024, " KB");
+
+    for (std::size_t i = 0; i < layout.charts.size(); ++i) {
+        const assets::LightmapChart& a = layout.charts[i];
+        REQUIRE(a.placed);
+        // Di dalam atlasnya.
+        CHECK(a.x + a.side <= layout.width);
+        CHECK(a.y + a.side <= layout.height);
+        for (std::size_t j = i + 1; j < layout.charts.size(); ++j) {
+            const assets::LightmapChart& b = layout.charts[j];
+            const bool disjoint = a.x + a.side <= b.x || b.x + b.side <= a.x ||
+                                  a.y + a.side <= b.y || b.y + b.side <= a.y;
+            INFO("petak ", i, " (", a.x, ",", a.y, ",", a.side, ") lawan ", j, " (", b.x, ",",
+                 b.y, ",", b.side, ")");
+            CHECK(disjoint);
+        }
+    }
+}
+
+TEST_CASE("S5: petak dipisah selokan, dan selokannya milik satu petak saja") {
+    // **Atlasnya disampel `VK_FILTER_LINEAR`.** Tanpa selokan, cuplikan di tepi
+    // petak jatuh persis di batas texel dan menjadi campuran separuh-separuh
+    // dengan petak sebelahnya — objek lain. Diukur pada atlas `bench` 256²
+    // sebelum selokan ini ada: 16,5% texel atlas berada di tepi petak, dan
+    // cuplikan di sana meleset rata-rata 0,36, yaitu 30% dari rerata iradiansi
+    // adegan; pada persentil 95, 74%.
+    //
+    // Yang diuji di sini invarian yang membuat obatnya bekerja: cincin selebar
+    // `padding` di sekeliling isi sebuah petak tidak boleh menyentuh isi maupun
+    // cincin petak lain. Kalau ia menyentuhnya, dua tugas menulis texel yang sama
+    // — dan itu bukan urutan yang berubah-ubah melainkan satu objek yang
+    // mewarnai selokan objek lain.
+    std::vector<assets::LightmapChart> charts;
+    std::mt19937 rng(20260901u);
+    for (int i = 0; i < 40; ++i) {
+        assets::LightmapChart chart;
+        chart.side = 1u << (2 + (rng() % 5));  // 4..64
+        charts.push_back(chart);
+    }
+
+    constexpr uint32_t kPadding = 1;
+    const assets::LightmapAtlasLayout layout =
+        assets::PackLightmapAtlas(charts, 4096, kPadding);
+    REQUIRE(layout.IsValid());
+    REQUIRE(layout.padding == kPadding);
+    CHECK(layout.dropped == 0);
+    MESSAGE("atlas ", layout.width, "x", layout.height, ", utilisasi ",
+            100.0f * layout.utilisation, "%");
+
+    for (std::size_t i = 0; i < layout.charts.size(); ++i) {
+        const assets::LightmapChart& a = layout.charts[i];
+        REQUIRE(a.placed);
+        // **Selokannya juga harus muat di dalam atlas**, bukan hanya isinya:
+        // cincin yang menggantung di luar tepi atlas adalah penulisan di luar
+        // batas, bukan sekadar texel yang hilang.
+        CHECK(a.x >= kPadding);
+        CHECK(a.y >= kPadding);
+        CHECK(a.x + a.side + kPadding <= layout.width);
+        CHECK(a.y + a.side + kPadding <= layout.height);
+
+        for (std::size_t j = i + 1; j < layout.charts.size(); ++j) {
+            const assets::LightmapChart& b = layout.charts[j];
+            // Jejak = isi diperlebar selokannya ke segala arah. Dua jejak yang
+            // beririsan berarti dua tugas menulis texel yang sama.
+            const uint32_t ax = a.x - kPadding;
+            const uint32_t ay = a.y - kPadding;
+            const uint32_t aSide = a.side + 2 * kPadding;
+            const uint32_t bx = b.x - kPadding;
+            const uint32_t by = b.y - kPadding;
+            const uint32_t bSide = b.side + 2 * kPadding;
+            const bool disjoint = ax + aSide <= bx || bx + bSide <= ax || ay + aSide <= by ||
+                                  by + bSide <= ay;
+            INFO("jejak ", i, " (", ax, ",", ay, ",", aSide, ") lawan ", j, " (", bx, ",", by,
+                 ",", bSide, ")");
+            CHECK(disjoint);
+        }
+    }
+}
+
+TEST_CASE("S5: atlas tumbuh sampai muat, lalu menyebutkan yang tidak kebagian") {
+    // **Objek tanpa petak digambar tanpa lightmap**, dan yang melihatnya akan
+    // mengira lightmap-nya rusak. Jumlahnya karena itu dilaporkan, bukan
+    // didiamkan.
+    std::vector<assets::LightmapChart> charts;
+    for (int i = 0; i < 8; ++i) {
+        assets::LightmapChart chart;
+        chart.side = 256;
+        charts.push_back(chart);
+    }
+
+    // Cukup ruang: atlasnya tumbuh sendiri.
+    const assets::LightmapAtlasLayout roomy = assets::PackLightmapAtlas(charts, 4096);
+    CHECK(roomy.dropped == 0);
+    CHECK(roomy.width >= 512u);
+
+    // Dipaksa terlalu kecil: sebagian tidak kebagian, dan itu disebutkan.
+    //
+    // **Kedelapan-delapannya, bukan tujuh.** Sebuah petak berisi 256 texel
+    // menuntut 258 begitu selokannya dihitung, dan 258 tidak muat di atlas 256 —
+    // jadi bahkan yang pertama pun tidak. Itu memang tepi yang tajam, dan ia
+    // disebutkan di sini supaya pemanggil yang menyamakan `maxChartSide` dengan
+    // `maxAtlasSide` tahu mengapa atlasnya kosong: yang kurang dua texel, bukan
+    // seluruh kerapatannya.
+    const assets::LightmapAtlasLayout tight = assets::PackLightmapAtlas(charts, 256);
+    CHECK(tight.width == 256u);
+    CHECK(tight.dropped == 8u);
+    MESSAGE(tight.dropped, " objek tidak kebagian tempat di atlas 256");
+
+    // Dan yang kurang dua texel itu memang cuma dua: atlas 512 memuat satu.
+    const assets::LightmapAtlasLayout barely = assets::PackLightmapAtlas(charts, 258);
+    CHECK(barely.dropped == 7u);
+}
+
+TEST_CASE("S5: petak terbesar ditaruh lebih dulu") {
+    // Rak yang dimulai dengan petak kecil tidak bisa menampung petak besar
+    // sesudahnya, dan tingginya terlanjur terpakai — utilisasinya lalu jatuh.
+    std::vector<assets::LightmapChart> charts;
+    for (const uint32_t side : {4u, 4u, 4u, 128u, 4u, 4u, 128u}) {
+        assets::LightmapChart chart;
+        chart.side = side;
+        charts.push_back(chart);
+    }
+    const assets::LightmapAtlasLayout layout = assets::PackLightmapAtlas(charts, 4096);
+    REQUIRE(layout.IsValid());
+    CHECK(layout.dropped == 0);
+    // Kedua petak besar berada di rak pertama, bukan terdorong ke rak baru oleh
+    // petak kecil yang mendahuluinya.
+    //
+    // Rak pertama dimulai di `padding`, bukan di nol: yang disimpan `chart.y`
+    // letak **isinya**, dan selokannya berada di luar itu.
+    for (const assets::LightmapChart& chart : layout.charts) {
+        if (chart.side == 128) {
+            CHECK(chart.y == layout.padding);
+        }
+    }
+}
+
+TEST_CASE("S5: artefak lightmap bolak-balik, dan yang rusak ditolak") {
+    render::Lightmap lightmap;
+    lightmap.width = 8;
+    lightmap.height = 8;
+    lightmap.texels.assign(64, Vec3(0.0f));
+    for (std::size_t i = 0; i < lightmap.texels.size(); ++i) {
+        lightmap.texels[i] = Vec3(static_cast<float>(i) * 0.25f, 1.0f, 2.0f);
+    }
+    lightmap.placements.push_back(render::LightmapPlacement{7u, Vec4(0.5f, 0.5f, 0.0f, 0.5f)});
+    REQUIRE(lightmap.IsValid());
+
+    const std::filesystem::path file =
+        std::filesystem::temp_directory_path() /
+        ("sim-lightmap-" + std::to_string(::getpid()) + ".simlmap");
+    std::string error;
+    REQUIRE_MESSAGE(render::WriteLightmap(file, lightmap, error), error);
+
+    render::Lightmap loaded;
+    REQUIRE_MESSAGE(render::ReadLightmap(file, loaded, error), error);
+    CHECK(loaded.width == lightmap.width);
+    REQUIRE(loaded.texels.size() == lightmap.texels.size());
+    CHECK(loaded.texels[13].x == doctest::Approx(lightmap.texels[13].x));
+    REQUIRE(loaded.placements.size() == 1);
+    CHECK(loaded.placements[0].owner == 7u);
+    CHECK(loaded.Find(7u) != nullptr);
+    CHECK(loaded.Find(8u) == nullptr);
+
+    // Berkas yang bukan milik kita, dan berkas yang lebih pendek daripada
+    // janjinya — keduanya ditolak, bukan dipercaya.
+    std::ofstream(file, std::ios::binary) << "bukan lightmap";
+    CHECK_FALSE(render::ReadLightmap(file, loaded, error));
+
+    REQUIRE(render::WriteLightmap(file, lightmap, error));
+    std::filesystem::resize_file(file, std::filesystem::file_size(file) / 2);
+    CHECK_FALSE(render::ReadLightmap(file, loaded, error));
+
+    std::error_code cleanup;
+    std::filesystem::remove(file, cleanup);
 }
